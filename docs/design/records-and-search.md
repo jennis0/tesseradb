@@ -929,8 +929,8 @@ ordinals are meaningful only against **that extent's own** dictionary — resolv
 other layer's is a recolouring with no symptom. The reader rule is absolute; the record shape is
 what makes a layer's files swap atomically at coalesce.
 
-**Coalesce.** ⊘ *Built for text (2026-08-14); a keyword column still waits for the fold, index §5.2
-saying why the two differ.* Attribute extents remain the entity-space pass's fourth axis (index
+**Coalesce.** *Built for text (2026-08-14) and keyword (2026-09-07); index §5.2 says how each
+installs its merged dictionary.* Attribute extents remain the entity-space pass's fourth axis (index
 §5.2 — built for the shipped families), and record-blob extents join it as a fifth under the same per-column policy
 (the pseudo-column `record`), merging by concatenation — entity-ascending across extents by I9,
 the pass's non-interleaving guard making that sound — with small blocks repacked toward the

@@ -727,15 +727,21 @@ a *file-count* axis rather than a query axis, and the system already has the pas
 merge is `tessera_filter_write::coalesce_attr_extents`, the replace is `FilterColumns::with_coalesced`,
 and everything below is what runs.
 
-⊘ **A `text` column joined it as a sixth axis (2026-08-14); a `keyword` column has not, and the
-difference is where a merged dictionary can be installed.** Both families renumber, so both need
-the guard this section describes. A text layer's dictionary, postings and presence are one manifest
-record, composed together and replaced together, so its new ordinals arrive with the dictionary that
-minted them and nothing outside the three files ever held one — `tessera_filter_write::coalesce_text_extents`,
-selected over `text_extents` on this section's per-column policy. A coalesced `AttrExtent` is
-composed as *values alone*, so a keyword column's renumbered ordinals would resolve against the
-dictionaries of the extents they replaced: the merge exists (`coalesce_keyword_extents`) and the
-seam does not, and such a column waits for the fold.
+**Built for `text` (2026-08-14) and for `keyword` (2026-09-07, issue 141).** Both families
+renumber: the merge joins the window's dictionaries into one sorted key set and rewrites every
+ordinal against it, under the content guard records §7 describes. What keeps the renumbering inside
+the layer is that the dictionary never travels apart from the values it numbers. A text layer's
+dictionary, postings and presence are one manifest record
+(`tessera_filter_write::coalesce_text_extents`). A keyword coalesce writes the merged dictionary as
+the third file of the one coalesced `AttrExtent` (`coalesce_keyword_extents`), the completed pass
+carries it opened beside the values, and `FilterColumns::with_coalesced` installs the two as one
+layer in one push or refuses the window. A keyword layer without a dictionary, or a dictionary on
+a layer of any other family, is refused at composition, for a flush's extent and a coalesce's
+replacement alike — the invariant is that no ordinal is ever resolved against a dictionary other
+than the one that minted it, and a `Layer` is the only thing a reader takes a dictionary from. The
+selection is the per-column policy above, with a layer's dictionary counted toward the input cap.
+Measured on the conformance corpus: a keyword column's extents sawtooth between 2 and 8 across 350
+flushes, as every other column's do.
 
 The engine's entity-space coalesce (write-path §7; `tessera-engine`'s `coalesce` module) already
 bounds three per-flush, entity-space, accumulating axes — delta postings tiers, dictionary extents,

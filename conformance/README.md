@@ -147,17 +147,14 @@ cost. `reference/tests` still uses that corpus and is a separate question.
   Not tested in this suite. Note this is a *different* property from the durability ordering
   `test_restart_replay.py` now covers: that one asks what survives when unsynced bytes are lost,
   this one asks what the engine does when the sync itself fails.
-- **A coalesced keyword extent is not reachable from here**, so records §10's "an entity whose only
-  value arrived in a coalesced extent" has no test in this suite. The entity-space coalesce
-  deliberately declines a column whose extents carry a dictionary: a coalesced extent would sit in
-  the live composition beside the dictionaries of the extents it replaced, its ordinals renumbered
-  against a dictionary no reader holds. Such a column waits for the fold. The rule and its reason
-  are in `tessera_engine::coalesce::plan_coalesce`, pinned by
-  `a_column_with_per_layer_dictionaries_waits_for_the_fold`; the merge itself
-  (`tessera_filter_write::coalesce_keyword_extents`) has its own differential in that module,
-  `a_coalesced_keyword_extent_reads_back_every_entitys_own_key`. There is
-  therefore no HTTP-reachable state to test, and `test_keyword_layers.py` covers the **fold** — the
-  route such a column actually takes — rather than hand-writing an artefact to fake the other.
+- **A coalesced keyword extent is reachable since 2026-09-07** (issue 141): the entity-space
+  coalesce takes a keyword column's window and installs the merged dictionary beside the
+  renumbered values as one layer (`tessera_engine::filter::check_dictionary_pairing`). The
+  engine's differentials are `a_keyword_windows_extents_become_one_and_every_entity_keeps_its_key`
+  and `a_coalesced_keyword_extent_survives_a_restart_and_a_fold` (`crates/tessera-engine/tests/filtering.rs`),
+  the server's is `crates/tessera-server/tests/keyword_coalesce.rs`, and `test_endurance.py`
+  holds every column, keyword included, to the flat per-column ceiling. `test_keyword_layers.py`
+  still covers the fold.
 - ~~**A session does not see a flush that promoted a descriptor it had already named.**~~ **Fixed
   2026-08-14** (#112). Two callers paired a session's `satisfied` — frozen at authorise — with the
   *live* generation's dictionary length, which is the one pairing `FragmentCache::get_or_build`'s
