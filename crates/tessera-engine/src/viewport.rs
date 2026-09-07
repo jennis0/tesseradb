@@ -2107,6 +2107,18 @@ impl Engine {
                 continue;
             };
             let d = &manifest.declared_scalars[declared_index];
+            // **Absence is the presence bitmap beside the column, never a zero in it** (decision
+            // 0064), on `flushed_row_scalar`'s rule: a row whose slot the writer marked absent
+            // holds the type's zero as a placeholder and carries no value. A category needs no
+            // bitmap: its absence is the reserved code, which `row_field_out` reads as none.
+            if d.vocabulary.is_none()
+                && !segment
+                    .columns
+                    .presence(&d.name)
+                    .contains(u32::try_from(local).expect("a segment holds fewer than 2^32 rows"))
+            {
+                continue;
+            }
             values[declared_index] = row_field_out(view, local, d, &generation.vocabularies);
         }
 
@@ -2905,10 +2917,8 @@ impl Engine {
         // **Then this view's scoped render columns, and only this view's** (`views.md` §5). A
         // group-scoped attribute declaring `render` occupies a slot in the row tail of every view
         // of its group — and of any group sharing those views — and in no other, so the list is
-        // per view where the bundle-wide half above is not. Appended rather than interleaved: the
-        // suffix is what `gather_tile_columns` reads to know which columns a segment may lawfully
-        // not hold (a view created since the build, or any segment a flush wrote).
-        let entity_scoped = render_scalars.len();
+        // per view where the bundle-wide half above is not. Appended rather than interleaved,
+        // which is the order the build and every flush write the lanes in.
         render_scalars.extend(scoped_render_scalars(
             &generation.bundle.manifest,
             view,
@@ -3343,7 +3353,6 @@ impl Engine {
         // `"full"` does rather than serving a column of nulls.
         let highlight_only = point_rows == PointRows::Highlight && mask.has_highlight();
         let render_scalars: &[DeclaredScalar] = if highlight_only { &[] } else { render_scalars };
-        let entity_scoped = if highlight_only { 0 } else { entity_scoped };
 
         // The head, delivered before the sweep: everything the response headers derive from is
         // known here — the region verdict last, settled by the decomposition above and never by a
@@ -3559,7 +3568,7 @@ impl Engine {
             let mut stats = TileProbe::new();
             let parts = SelectionParts::new(&ts.parts);
             let mut tile_points =
-                gather_tile_columns(&parts, &ts.rows, render_scalars, entity_scoped)?;
+                gather_tile_columns(&parts, &ts.rows, render_scalars)?;
             if let Some(membership) = &membership {
                 tile_points.membership = membership.columns_for(&ts.rows);
             }
@@ -4462,7 +4471,8 @@ fn as_f64(s: Scalar) -> f64 {
 /// of those rows carry one.
 struct ScannedSegment<'a> {
     row_base: u32,
-    values: HotSlice<'a>,
+    /// `None` for a segment whose schema does not hold the column: none of its rows matches.
+    values: Option<HotSlice<'a>>,
     /// The rows that carry a value, **in view row space** — the presence bitmap shifted by
     /// `row_base` once, here, rather than per run. `None` where every row does.
     present: Option<croaring::Bitmap>,
@@ -4471,9 +4481,11 @@ struct ScannedSegment<'a> {
 /// Test every row of `domain` against `column`'s hot values — the render-column scan, parallel
 /// over the domain on the caller's installed pool, chunked exactly as the per-tile crossing is.
 ///
-/// A segment that does not hold the column at a fixed width is a **malformed bundle**, refused
-/// like the gather's equivalent: serving it as "matches nothing" would be an answer about values
-/// that were never read.
+/// A segment that holds the column at a type other than a fixed width is a **malformed bundle**,
+/// refused like the gather's equivalent. **A segment whose schema does not hold the column
+/// matches nothing** (`ingest.md` §6.3): it was written before the column was declared at a
+/// running service, so none of its rows carries a value, which is the answer for a range and for
+/// a negation's presence half alike. Answered from the schema, never from a blob read.
 fn scan_rows(
     segments: &[(&SegmentData, u32)],
     domain: &[Range<u32>],
@@ -4486,25 +4498,27 @@ fn scan_rows(
         .iter()
         .map(|&(segment, row_base)| {
             let values = match segment.columns.scalar(column) {
-                Some(ScalarSlice::Bool(a)) => HotSlice::Bool(a),
-                Some(ScalarSlice::U8(s)) => HotSlice::U8(s),
-                Some(ScalarSlice::U16(s)) => HotSlice::U16(s),
-                Some(ScalarSlice::U32(s)) => HotSlice::U32(s),
-                Some(ScalarSlice::U64(s)) => HotSlice::U64(s),
-                Some(ScalarSlice::I8(s)) => HotSlice::I8(s),
-                Some(ScalarSlice::I16(s)) => HotSlice::I16(s),
-                Some(ScalarSlice::I32(s)) => HotSlice::I32(s),
-                Some(ScalarSlice::I64(s)) => HotSlice::I64(s),
-                Some(ScalarSlice::F32(s)) => HotSlice::F32(s),
-                Some(ScalarSlice::F64(s)) => HotSlice::F64(s),
-                Some(ScalarSlice::TimestampUs(s)) => HotSlice::TimestampUs(s),
-                // `utf8` and a column the tail does not hold alike: the schema refuses `render` on
-                // a string, so either way the segment and the manifest disagree about the tail.
-                _ => {
+                Some(ScalarSlice::Bool(a)) => Some(HotSlice::Bool(a)),
+                Some(ScalarSlice::U8(s)) => Some(HotSlice::U8(s)),
+                Some(ScalarSlice::U16(s)) => Some(HotSlice::U16(s)),
+                Some(ScalarSlice::U32(s)) => Some(HotSlice::U32(s)),
+                Some(ScalarSlice::U64(s)) => Some(HotSlice::U64(s)),
+                Some(ScalarSlice::I8(s)) => Some(HotSlice::I8(s)),
+                Some(ScalarSlice::I16(s)) => Some(HotSlice::I16(s)),
+                Some(ScalarSlice::I32(s)) => Some(HotSlice::I32(s)),
+                Some(ScalarSlice::I64(s)) => Some(HotSlice::I64(s)),
+                Some(ScalarSlice::F32(s)) => Some(HotSlice::F32(s)),
+                Some(ScalarSlice::F64(s)) => Some(HotSlice::F64(s)),
+                Some(ScalarSlice::TimestampUs(s)) => Some(HotSlice::TimestampUs(s)),
+                // The segment predates the column's declaration: no row of it carries a value.
+                None => None,
+                // `utf8`: the schema refuses `render` on a string, so the segment and the
+                // manifest disagree about the tail.
+                Some(_) => {
                     return Err(EngineError::Malformed(format!(
-                        "a segment of this view has no rendered column '{column}' at a fixed \
-                         width, which the routed filter requires; the manifest and the segment \
-                         disagree about the tail"
+                        "a segment of this view holds rendered column '{column}' at a type other \
+                         than a fixed width, which the routed filter requires; the manifest and \
+                         the segment disagree about the tail"
                     )))
                 }
             };
@@ -4543,15 +4557,17 @@ fn scan_rows(
                     .get(seg + 1)
                     .map_or(chunk.end, |next| next.row_base.min(chunk.end));
                 let segment = &slices[seg];
-                scan_run(
-                    &segment.values,
-                    segment.row_base,
-                    row..seg_end,
-                    &predicate,
-                    segment.present.as_ref(),
-                    &mut rows,
-                    &mut buf,
-                );
+                if let Some(values) = &segment.values {
+                    scan_run(
+                        values,
+                        segment.row_base,
+                        row..seg_end,
+                        &predicate,
+                        segment.present.as_ref(),
+                        &mut rows,
+                        &mut buf,
+                    );
+                }
                 row = seg_end;
             }
             rows
@@ -7460,11 +7476,10 @@ fn resolve_scalars<'a>(
 ) -> ResolvedScalars<'a> {
     declared
         .iter()
-        // A declared scalar absent from this segment's schema resolves to `None` rather than
-        // being an error — nothing here is authorisation-relevant, and the fail-closed check is at
-        // the write end: `gather_scalars` refuses a segment missing a declared column, so a merge
-        // or fold cannot propagate one. What reaches here is a read of a segment already
-        // published.
+        // A declared scalar absent from this segment's schema resolves to `None`, which every
+        // reader takes as the column's absence for every row of the segment (`ingest.md` §6.3):
+        // a segment written before the column was declared carries no lane for it, and the
+        // answer is the schema's, never a blob read's. Nothing here is authorisation-relevant.
         .map(|d| segment.columns.scalar(&d.name))
         .collect()
 }
@@ -7480,25 +7495,21 @@ fn resolve_scalars<'a>(
 /// The column set comes from `declared` and is always its length, so a request cannot end up with
 /// a column set derived from whichever tile happened to be first.
 ///
-/// A declared column a segment does not hold, or holds at another type, is a **malformed bundle**
-/// rather than a silently skipped column. That cannot arise from a bundle this codebase wrote —
-/// `gather_scalars` refuses it at the write end for every producer — and the alternative is to
-/// append a short or wrongly-typed buffer under a name that does not describe it.
+/// A declared column a segment holds at another type is a **malformed bundle** rather than a
+/// silently skipped column: the alternative is to append a wrongly-typed buffer under a name that
+/// does not describe it.
 ///
-/// **`scoped_from` is the one exception, and it is absence rather than malformation**
-/// (`views.md` §5). From that index on, the columns are a group-scoped family's
-/// ([`scoped_render_scalars`]), and only the *build* writes one: a segment a flush produced
-/// carries the bundle-wide tail and nothing per family, because a batch's scalars are positional
-/// against `declared_scalars` and a family has no slot there. Such a segment's rows take the
-/// column's placeholder — the type's zero, exactly what the build writes into the slot of an
-/// entity that has no value, decision 0064's absence for the tail. A
-/// *wrong type* under the name is still malformed, scoped or not: that is a segment disagreeing
-/// with the manifest, not a segment that predates the family.
+/// **A column a segment's schema does not hold is absent for every row of that segment**
+/// (`ingest.md` §6.3), answered from the schema and never from a blob read. Two states produce
+/// it and a segment cannot tell them apart: a group-scoped family's lane that a segment of the
+/// view was written without (`views.md` §5), and an entity-scoped column declared at a running
+/// service after the segment was written, which a fold gives every segment (decision 0136, R10).
+/// Such a segment's rows take the column's placeholder, the type's zero, exactly what the build
+/// writes into the slot of an entity that has no value, decision 0064's absence for the tail.
 fn gather_tile_columns(
     parts: &SelectionParts<'_>,
     rows: &[u32],
     declared: &[DeclaredScalar],
-    scoped_from: usize,
 ) -> Result<PointColumns> {
     let placed: Vec<(u32, u32)> = rows
         .iter()
@@ -7527,9 +7538,8 @@ fn gather_tile_columns(
 
     let malformed = |d: &DeclaredScalar| {
         EngineError::Malformed(format!(
-            "a segment of this view has no scalar column '{}' at the declared type {}, which \
-             the manifest's render declaration requires; serving it would put values under \
-             another column's name",
+            "a segment of this view holds scalar column '{}' at a type other than the declared \
+             {}; serving it would put values under another column's name",
             d.name,
             d.arrow_type.arrow_type_name()
         ))
@@ -7540,8 +7550,6 @@ fn gather_tile_columns(
         // The typed slice per part is resolved BEFORE the row loop, so the loop below carries no
         // `match` at all — that hoist is the whole reason this shape is cheaper than the
         // row-major one it replaced.
-        // A segment that may lawfully not hold this column — see `scoped_from` on this function.
-        let absent_is_ok = ci >= scoped_from;
         macro_rules! build {
             ($(($v:ident, $t:ty)),* $(,)?) => {
                 match d.arrow_type {
@@ -7550,7 +7558,7 @@ fn gather_tile_columns(
                         for r in &resolved {
                             match r[ci] {
                                 Some(ScalarSlice::$v(s)) => per_part.push(Some(s)),
-                                None if absent_is_ok => per_part.push(None),
+                                None => per_part.push(None),
                                 _ => return Err(malformed(d)),
                             }
                         }
@@ -7568,7 +7576,7 @@ fn gather_tile_columns(
                         for r in &resolved {
                             match r[ci] {
                                 Some(ScalarSlice::Bool(a)) => per_part.push(Some(a)),
-                                None if absent_is_ok => per_part.push(None),
+                                None => per_part.push(None),
                                 _ => return Err(malformed(d)),
                             }
                         }
@@ -7589,7 +7597,7 @@ fn gather_tile_columns(
                         for r in &resolved {
                             match r[ci] {
                                 Some(ScalarSlice::Utf8(a)) => per_part.push(Some(a)),
-                                None if absent_is_ok => per_part.push(None),
+                                None => per_part.push(None),
                                 _ => return Err(malformed(d)),
                             }
                         }

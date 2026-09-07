@@ -324,6 +324,7 @@ fn fixture() -> Fixture {
         &opened.partitions[&phash].manifest.artifact_record_extents,
         &[],
         &opened.partitions[&phash].manifest.text_extents,
+        &[],
         // Mapped, which is what the engine does at session open — so the round-trip these tests
         // assert is the one a served request actually takes.
         true,
@@ -1120,6 +1121,7 @@ fn an_extent_file_the_manifest_names_but_that_is_absent_refuses_to_open() {
             &[],
             &[],
             &[],
+            &[],
             true,
         )
     };
@@ -1226,18 +1228,47 @@ fn an_extent_overlapping_an_earlier_layer_is_refused() {
         .is_err());
 }
 
-/// **A row carrying the wrong number of scalars is refused, not a panic.**
+/// **A row longer than the schema is refused, not a panic; a shorter one is padded.**
 ///
 /// The commit window indexes `row.scalars` positionally against `declared_scalars` to find a
-/// category key's vocabulary, so a short row indexed out of bounds — panicking inside the write
-/// executor and reaching the caller as a lost receipt, which reads as an infrastructure fault
-/// rather than the malformed request it is.
+/// category key's vocabulary. A row longer than the schema would pair values with columns that
+/// do not exist and is refused before the submit. A shorter row is a batch decoded against the
+/// schema before a column was declared at a running service, or one that omits a column at the
+/// tail (`ingest.md` §7.1): it is accepted, and the close pads it with each missing column's
+/// absence, so indexing by declared position never reaches past the row.
 #[test]
-fn a_row_with_the_wrong_scalar_count_is_refused_rather_than_panicking() {
+fn a_row_longer_than_the_schema_is_refused_and_a_shorter_one_is_padded() {
     let fx = fixture();
     let cache = fx._dir.path().join("cache-arity");
     let wal = fx._dir.path().join("wal-arity");
     let engine = open_engine_publishing(&fx.bundle, &cache, &wal);
+
+    let long = UnallocatedRow {
+        external_id: Some(b"long".to_vec()),
+        view: "s0".to_string(),
+        join: None,
+        descriptors: vec![b"0".to_vec()],
+        x: 5.0,
+        y: 5.0,
+        // The schema declares five columns.
+        scalars: vec![
+            WalScalar::Utf8("eng".to_string()),
+            WalScalar::Utf8("xx".to_string()),
+            WalScalar::Utf8("paper-97".to_string()),
+            WalScalar::I32(43),
+            WalScalar::Null,
+            WalScalar::I32(1),
+        ],
+        terms: engine.resolve_terms(&[b"0".to_vec()]),
+        scoped: Vec::new(),
+    };
+    let err = engine
+        .accept_ingest(vec![long], "batch-long".to_string(), [1u8; 32])
+        .expect_err("a long row is refused");
+    assert!(
+        format!("{err}").contains("carries 6 scalars, but the schema declares 5"),
+        "{err}"
+    );
 
     let short = UnallocatedRow {
         external_id: Some(b"short".to_vec()),
@@ -1246,17 +1277,15 @@ fn a_row_with_the_wrong_scalar_count_is_refused_rather_than_panicking() {
         descriptors: vec![b"0".to_vec()],
         x: 5.0,
         y: 5.0,
-        // The schema declares five columns.
         scalars: vec![WalScalar::Utf8("eng".to_string())],
         terms: engine.resolve_terms(&[b"0".to_vec()]),
         scoped: Vec::new(),
     };
-    let err = engine
-        .accept_ingest(vec![short], "batch-short".to_string(), [1u8; 32])
-        .expect_err("a short row is refused");
     assert!(
-        format!("{err}").contains("carries 1 scalars, but the schema declares 5"),
-        "{err}"
+        engine
+            .accept_ingest(vec![short], "batch-short".to_string(), [3u8; 32])
+            .is_ok(),
+        "a short row is padded at the close, never indexed past its end"
     );
 
     // The engine is still usable — a refusal before the submit acks nothing, burns no entity id
@@ -2307,6 +2336,7 @@ fn reopen(fx: &Fixture) -> std::io::Result<FilterColumns> {
         &|_view: &str| None,
         &fx.vocabularies,
         &fx.extents,
+        &[],
         &[],
         &[],
         &[],

@@ -265,6 +265,15 @@ pub enum Command {
         key: String,
         delete_dangling: bool,
     },
+    /// Declare an attribute column while the service runs (`PUT /control/attributes`,
+    /// `ingest.md` §1.3, §6.3).
+    ///
+    /// **The request travels unvalidated**, on [`Command::RegisterLayer`]'s rule: whether the name
+    /// is free, whether a column of that name already carries this identity, and which width a
+    /// vocabulary no column named before takes, all read the served schema and the live bindings,
+    /// which only the executor may move between a check and an apply. Boxed for the reason the
+    /// layer declaration is.
+    DeclareAttribute { request: Box<AttributeRequest> },
     /// Publish a batch of artifacts into one level of one layer.
     ///
     /// **Members are entities already.** The handler inverts the caller's `tessera_id`s once, at
@@ -482,6 +491,10 @@ pub enum Ack {
     /// A view was created. Nothing to return: the caller named the group and the key, and the
     /// key is the view's only address (decision 0113).
     ViewCreated,
+    /// An attribute column was declared, or an identical declaration met the column that already
+    /// carries it (`existing`). Nothing else to return: the name is the column's only address, on
+    /// every surface that names one.
+    AttributeDeclared { existing: bool },
     /// A view was dropped. `deleted` is how many entities `delete_dangling` submitted for
     /// deletion — **reported because the operation is not undoable**, on the same rule
     /// [`Ack::Ingested`]'s `minted` is reported by, and `0` for a drop that did not ask for it.
@@ -512,6 +525,32 @@ pub struct MembershipGrown {
     /// How many of the joining members were not already in the membership. Zero where the join
     /// named the artifact and added nothing to it, which is accepted rather than refused.
     pub joined: u64,
+}
+
+/// `PUT /control/attributes`' body as the executor resolves it: the `[[attribute]]` block minus
+/// its acquisition keys (`configuration.md` §6), with the two spellings a category has.
+///
+/// **Not the WAL record.** [`crate::wal::AttributeDeclaration`] stores a category at its width,
+/// because the width is what a row stores and what the manifest records; a caller declares
+/// `type = "category"` and names the vocabulary, as the build's block does, and the width is the
+/// vocabulary's. A vocabulary is one code space whichever columns draw on it, so where a column
+/// already names it the width is that column's and `width` here must agree or be absent; where
+/// none does, `width` is required, because the manifest does not carry a width for a vocabulary
+/// no column names (`Vocabularies::seed`). The executor resolves the spelling to the record.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AttributeRequest {
+    pub name: String,
+    pub title: Option<String>,
+    /// The declared type by its `configuration.md` §6 name: a storage type, or `category`.
+    pub ty: String,
+    pub vocabulary: Option<String>,
+    /// A category's code width where the vocabulary is named by no column yet: `u8`, `u16` or
+    /// `u32`.
+    pub width: Option<String>,
+    pub analyser: Option<String>,
+    pub index: bool,
+    pub render: bool,
+    pub scope: tessera_types::layer::LayerScope,
 }
 
 /// Why an accepted command failed while executing. See [`SubmitError`] for the "never started"
@@ -619,6 +658,18 @@ pub enum ExecError {
     /// names no entity id, no external id, no group the caller did not spell, and no value on
     /// either side (**I10**).
     JoinRefused { detail: String },
+    /// An attribute declaration measured against the deployment's rules and refused → HTTP
+    /// **422**, no effect: a reserved or malformed name, a type outside the declarable set, a
+    /// vocabulary or group the deployment does not carry, or a flag combination the schema
+    /// refuses (`configuration.md` §6). The text is the caller's own declaration measured against
+    /// the published schema and names nothing else, on [`Self::LayerRefused`]'s standing.
+    AttributeRefused { detail: String },
+    /// A column of this name exists with a different identity → HTTP **409**, no effect
+    /// (`ingest.md` §1.1: a part present and different). Separate from [`Self::AttributeRefused`]
+    /// because the remedy differs: a refused declaration is corrected and resent, and a held name
+    /// is one the caller cannot have under another identity, since a column's width and
+    /// placement are baked into every row (`per-point-attributes.md` §2.2).
+    AttributeConflict { detail: String },
 }
 
 impl std::fmt::Display for ExecError {
@@ -639,6 +690,8 @@ impl std::fmt::Display for ExecError {
             ExecError::LayerRefused { detail } => write!(f, "{detail}"),
             ExecError::ViewRefused { detail }
             | ExecError::ViewConflict { detail }
+            | ExecError::AttributeRefused { detail }
+            | ExecError::AttributeConflict { detail }
             | ExecError::ViewUnknown { detail }
             | ExecError::JoinRefused { detail } => write!(f, "{detail}"),
         }

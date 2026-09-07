@@ -477,6 +477,7 @@ fn open_columns(out: &Path) -> tessera_engine::filter::FilterColumns {
         &[],
         &[],
         &[],
+        &[],
         false,
     )
     .expect("the text column opens")

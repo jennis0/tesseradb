@@ -576,6 +576,17 @@ pub fn map_accept_error(e: tessera_engine::AcceptError) -> ApiError {
         // refused — which is the point, the two sites having been collapsed into one. It names a
         // row index, a column and a view key, and nothing else.
         AcceptError::Exec(ExecError::JoinRefused { detail }) => ApiError::Conflict(detail.clone()),
+        // **A declaration's two answers, told apart because the caller's remedy differs**
+        // (`ingest.md` §1.1). A refused declaration is one to correct and resend, and names the
+        // caller's own request measured against the published schema; a held name under another
+        // identity is one the caller cannot have, a column's width and placement being baked
+        // into every row. Both are decided before the append, so neither has an effect.
+        AcceptError::Exec(ExecError::AttributeRefused { detail }) => {
+            ApiError::Contract(detail.clone())
+        }
+        AcceptError::Exec(ExecError::AttributeConflict { detail }) => {
+            ApiError::Conflict(detail.clone())
+        }
         // Both are the caller's row, malformed in a way the engine refused before anything was
         // acked or WAL-durable — a contract answer, not a fault.
         // 404 and not 422, because that is what an unknown view id is on both planes
@@ -781,6 +792,9 @@ fn exec_failure_may_be_in_force(
         // and false is honest: every arm runs before the WAL append, so a refused batch has no
         // record and nothing in force (decision 0116).
         ExecError::JoinRefused { .. } => false,
+        // Not reachable from a `/control/changes` item — a declaration is its own endpoint — and
+        // false is honest: both are decided before the append.
+        ExecError::AttributeRefused { .. } | ExecError::AttributeConflict { .. } => false,
         ExecError::Alloc(_) => false,
     }
 }

@@ -176,7 +176,7 @@ in the next, and only viewers wait for the tick.
 | **Plain view** ⊘ | the `[[view]]` block minus source | `PUT /control/views/{name}` | its own append and fsync | one request | as above |
 | **Vocabulary** ⊘ | the `[[vocabulary]]` block minus source; values inline where they fit | `PUT /control/vocabularies/{name}` | its own append and fsync | the declaration, then pages of values | as above |
 | **Vocabulary values** ⊘ | a page of `{key, code?, title?, …}` | `PATCH /control/vocabularies/{name}/values` | one `VocabularyMint` per value, one fsync per page | `max_values_per_request` ⊘; `max_body_bytes` | append-only; an identical value is a no-op; a different property on a held key is an upsert of properties, never of key or code |
-| **Attribute column** ⊘ | the `[[attribute]]` block minus acquisition keys | `PUT /control/attributes` | its own append and fsync | one request | as above |
+| **Attribute column** (built 2026-09-07, T4) | the `[[attribute]]` block minus acquisition keys | `PUT /control/attributes` | its own append and fsync | one request | as above |
 | **Suppress, delete, unsuppress** | `{id, op}` | `POST /control/changes` | the deny window | about 10⁴ per request; `max_body_bytes` | each op idempotent |
 
 A discovered category value is not a kind: it is minted at the window close of the batch that
@@ -683,11 +683,18 @@ Entity-space extents are written per flush over the flushed entities' presence, 
 lands as an extent whose presence covers the filled entities, disjoint from every other extent for
 that column because the fill rule leaves one claimant per cell. The record blob gains a layer, and a column is
 read from the one layer that claims it (spec §1.4). The row tail is in the segments, in row space, and a segment
-written before the declaration does not carry the column: ⊘ **absence for a runtime column is
+written before the declaration does not carry the column: **absence for a runtime column is
 answered from the segment's schema**, the reader taking null for a `render` column the schema lacks
 and never opening a blob to find out, and the fold, which rewrites every segment, writes it. Until
 the fold a back-filled `render` value is filterable where `index` was declared and not drawn
 (spec §10, R10); `/v1/meta` says which state the column is in.
+
+**Built 2026-09-07 (T4).** The declaration route, the manifest home and its replay, the tail
+append with padding at the window close and the flush, the schema-answered absence on the render
+tail, the row-route filter, the drill-down and the categories vocabulary, and the fold's
+materialisation of the column's base. The record blob's per-column claimant read (spec §1.4) is
+T3's and is not built: a runtime column's blob-resident value is read from the extent that holds
+the entity's row, which before T3 is the row that created the entity.
 
 ## 7. Migration and contracts
 

@@ -35,6 +35,10 @@ pub struct RecordExtentPaths {
 /// never reused, so no two layers hold the same row and the search order below is a formality.
 pub struct RecordStack {
     layers: Vec<std::sync::Arc<RecordBlob>>,
+    /// How many rows [`Self::fields_of`] has decoded from a layer, over this stack's life.
+    /// Operator- and test-facing: a reader that must answer a column's absence from the schema
+    /// and never from a block (`ingest.md` §6.3) is checked against it.
+    reads: std::sync::atomic::AtomicU64,
 }
 
 impl RecordStack {
@@ -60,7 +64,10 @@ impl RecordStack {
                 access,
             )?));
         }
-        Ok(Self { layers })
+        Ok(Self {
+            layers,
+            reads: std::sync::atomic::AtomicU64::new(0),
+        })
     }
 
     /// This stack with `extents` appended — the successor generation's, after a flush.
@@ -87,7 +94,20 @@ impl RecordStack {
                 access,
             )?));
         }
-        Ok(Self { layers })
+        Ok(Self {
+            layers,
+            // The count carries across a publication, so a caller watching it over a flush sees
+            // one series.
+            reads: std::sync::atomic::AtomicU64::new(
+                self.reads.load(std::sync::atomic::Ordering::Relaxed),
+            ),
+        })
+    }
+
+    /// How many rows [`Self::fields_of`] has decoded from a layer since this stack (or the stack
+    /// it was extended from) was opened.
+    pub fn reads(&self) -> u64 {
+        self.reads.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// How many layers this stack holds — the base, where the schema had a blob-resident column,
@@ -103,6 +123,8 @@ impl RecordStack {
     pub fn fields_of(&self, entity: u32) -> Result<Option<Vec<RecordField>>, RecordError> {
         for layer in &self.layers {
             if layer.has_row(entity) {
+                self.reads
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 return layer.fields_of(entity);
             }
         }

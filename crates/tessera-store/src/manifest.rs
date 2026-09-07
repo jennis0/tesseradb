@@ -31,7 +31,7 @@ pub struct FileDigest {
 }
 
 /// `declared_scalars` entry: one caller-declared per-item column.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DeclaredScalar {
     pub name: String,
     /// The column's storage type. See [`scalar_type_name`] for the JSON spelling, and for why an
@@ -549,7 +549,7 @@ pub struct GroupDescriptor {
 /// group instead of one for the corpus. Evaluation stays in entity space, which is what keeps a
 /// scoped attribute inside I2's argument: every value is indexed by entity, a predicate answers a
 /// bitmap in entity space, and the mask meets it there before any permutation is applied.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ScopedScalar {
     /// The column's name, as a filter leaf spells it before any pin — unique bundle-wide across
     /// the entity-scoped columns and the scoped families alike, so a leaf naming it is never
@@ -1073,6 +1073,47 @@ impl Manifest {
     /// on disc under the same path a key created again would use, and adding it to the family's
     /// list would serve the predecessor's values as the new view's. The pair is checked against
     /// this manifest's own incarnation, which is the live one by construction.
+    /// This manifest with the attribute columns declared at a running service appended
+    /// (`ingest.md` §1.3, §6.3): each entity-scoped column at the tail of `declared_scalars`, in
+    /// declaration order, and each group-scoped family at the tail of its group's
+    /// `scoped_scalars`.
+    ///
+    /// **One list to every reader.** The served schema is the build's columns followed by the
+    /// runtime ones, and nothing downstream can tell the two apart: a buffered row's scalars, a
+    /// record blob's field tags and a flush's writer schema are all positional against this list,
+    /// which is why a runtime column appends and never inserts. A name the list already holds is
+    /// skipped, not compared: the door refuses a differing redeclaration, so a repeat here is the
+    /// same column, seen twice because a fold moved it into `MANIFEST.json` while the log or the
+    /// side manifest still names it. A family naming a group this manifest does not declare is
+    /// dropped, on [`Self::with_scoped_columns`]' rule.
+    pub fn with_attributes(
+        &self,
+        attributes: &[DeclaredScalar],
+        scoped_attributes: &[ScopedScalar],
+    ) -> Manifest {
+        let mut manifest = self.clone();
+        for attribute in attributes {
+            if manifest
+                .declared_scalars
+                .iter()
+                .any(|d| d.name == attribute.name)
+            {
+                continue;
+            }
+            manifest.declared_scalars.push(attribute.clone());
+        }
+        for family in scoped_attributes {
+            let Some(group) = manifest.groups.iter_mut().find(|g| g.name == family.group) else {
+                continue;
+            };
+            if group.scoped_scalars.iter().any(|f| f.name == family.name) {
+                continue;
+            }
+            group.scoped_scalars.push(family.clone());
+        }
+        manifest
+    }
+
     pub fn with_scoped_columns(&self, columns: &[(String, String, ViewIncarnation)]) -> Manifest {
         let mut manifest = self.clone();
         for (column, view, incarnation) in columns {
@@ -1718,8 +1759,14 @@ pub struct SegmentsManifest {
     /// argument: rotation reclaims the `AttributeDeclare` record, and a column whose declaration
     /// lived only there comes back from a restart as one no reader knows exists. The columns a
     /// build declared are in `MANIFEST.json` and are not restated here; the served schema is the
-    /// two together, and the fold writes the union into the next `MANIFEST.json`. Not built yet:
-    /// every writer publishes an empty list and no reader consults it; T4 writes and reads it.
+    /// two together ([`Manifest::with_attributes`]), and the fold writes the union into the next
+    /// `MANIFEST.json` and leaves here only the declarations made after it planned.
+    ///
+    /// **The list is also the set of columns whose base artefacts do not exist yet.** A column
+    /// declared at a running service has no base value column, no base postings and no slot in
+    /// any segment written before it; a fold writes all of those and moves the column into
+    /// `MANIFEST.json` in the same publication, so a name here is one the opener must not demand
+    /// a base for (`FilterColumns::open`) and the fold must not read one from.
     ///
     /// No `serde(default)`, on `layers`' argument: a manifest omitting it is malformed, not
     /// declaration-free, and the two are indistinguishable under a default while only one is safe
@@ -1727,7 +1774,9 @@ pub struct SegmentsManifest {
     pub attributes: Vec<DeclaredScalar>,
     /// Every group-scoped attribute family declared while the service runs, on
     /// [`Self::attributes`]' argument. Separate from it because a family has no slot in the flat
-    /// list ([`GroupDescriptor::scoped_scalars`]). Not built yet: empty from every writer; T4.
+    /// list ([`GroupDescriptor::scoped_scalars`]). A family's `views` list here is what the
+    /// flushes since the declaration have given a column (`with_scoped_columns` extends it), and
+    /// the fold writes the family into the next `MANIFEST.json` with that list.
     pub scoped_attributes: Vec<ScopedScalar>,
     /// Every vocabulary declared while the service runs (`ingest.md` §1.3), complete current state
     /// with its values as last published, on [`Self::attributes`]' argument. A value minted into

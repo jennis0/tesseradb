@@ -467,6 +467,16 @@ pub(crate) fn plan_flush(
     if items.is_empty() {
         return Err(NoFlush::NothingToFlush);
     }
+    // **The arity is this generation's, and a row buffered under an earlier one is padded here**
+    // (`ingest.md` §7.1). A column declared at a running service appends at the tail of
+    // `declared_scalars`, so a row the log carried at the shorter arity, replayed into the
+    // buffer, holds nothing for it; every read of `item.scalars` by declared position below this
+    // plan (the render indices, the filter, text and record schemas) is against the padded row,
+    // so one flush writes one schema.
+    let declared = &generation.bundle.manifest.declared_scalars;
+    for (_, item) in &mut items {
+        crate::attributes::pad_to_schema(&mut item.scalars, declared);
+    }
     // The buffer is a hash map, so order is arbitrary until sorted. Ascending by entity id is what
     // `write_flush_segment` requires and what makes the extent dense.
     items.sort_unstable_by_key(|(entity, _)| entity.raw());

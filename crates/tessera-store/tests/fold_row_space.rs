@@ -73,7 +73,6 @@ fn fold(
             identity_key: &key(),
             shard_id: 0,
             scalar_schema: &[],
-            scoped_from: usize::MAX,
             tombstones,
             permutation_bound: bound,
         },

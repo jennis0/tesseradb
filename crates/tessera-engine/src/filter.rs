@@ -1639,6 +1639,50 @@ fn request_access(mmap: bool) -> tessera_filter::Access {
 /// A record-blob open failure, in the `io::Result` this opener speaks. Fail-closed either way:
 /// a missing, short or malformed layer refuses the whole open (records §3), never "those
 /// entities have no record".
+/// The stack a column declared at a running service opens with before any fold: no base, no
+/// postings, the extents composed later (`ingest.md` §6.3). `None` for a column with no
+/// entity-space home, which holds no stack at all.
+fn runtime_layers(
+    scalar: &tessera_store::manifest::DeclaredScalar,
+    declared_index: usize,
+    vocabularies: &[tessera_store::manifest::ManifestVocabulary],
+) -> std::io::Result<Option<Layers>> {
+    let family = Family::of(scalar);
+    if family == Family::Text {
+        if !scalar.index {
+            return Ok(None);
+        }
+        let analyser = Some(resolve_analyser(&scalar.name, scalar.analyser.as_deref())?);
+        return Ok(Some(Layers {
+            declared_index,
+            layers: Vec::new(),
+            covered: Bitmap::new(),
+            filterable: true,
+            postings: None,
+            analyser,
+            text: Vec::new(),
+            route: Route::Postings,
+            family,
+        }));
+    }
+    if !owes_value_column(scalar, vocabularies) {
+        return Ok(None);
+    }
+    let row = scalar.render && family.reaches_hot_column();
+    Ok(Some(Layers {
+        declared_index,
+        layers: Vec::new(),
+        covered: Bitmap::new(),
+        filterable: scalar.index || row,
+        postings: None,
+        analyser: None,
+        text: Vec::new(),
+        // Every operand is a scan until the fold rebuilds the postings from the folded column.
+        route: Route::Scan,
+        family,
+    }))
+}
+
 fn record_open_error(e: tessera_filter::RecordError) -> std::io::Error {
     match e {
         tessera_filter::RecordError::Io(io) => io,
@@ -1731,6 +1775,11 @@ impl FilterColumns {
         artifact_record_extents: &[tessera_store::manifest::RecordExtent],
         entity_terms_extents: &[tessera_store::manifest::EntityTermsExtent],
         text_extents: &[tessera_store::manifest::TextExtent],
+        // The entity-scoped columns declared at a running service that no fold has written a
+        // base for: the side manifest's `attributes`, by name (`ingest.md` §6.3). Each opens as
+        // an empty stack the extents compose onto; every other declared column's base is
+        // demanded.
+        unfolded: &[String],
         mmap: bool,
     ) -> std::io::Result<Self> {
         let partition_dir = prefix_dir.join("partitions").join(partition);
@@ -1762,6 +1811,16 @@ impl FilterColumns {
                         family,
                     },
                 );
+            }
+            // **A column declared at a running service and not yet folded has no base**
+            // (`ingest.md` §6.3): its stack starts empty and the extents the flushes since the
+            // declaration published compose onto it below. A base is demanded from the fold
+            // onward, when the side manifest no longer names the column.
+            if unfolded.iter().any(|name| name == &scalar.name) {
+                if let Some(layers) = runtime_layers(scalar, declared_index, vocabularies)? {
+                    columns.insert(scalar.name.clone(), layers);
+                }
+                continue;
             }
             // **Text opens before the value-column gate, because it owes none.** Its entity-space
             // artefacts are a token dictionary and postings over it; the prose is a blob row. Both
@@ -1920,7 +1979,11 @@ impl FilterColumns {
         // column — one with no other home ([`blob_resident`], records §3). Derived from the schema
         // rather than probed for on disk, so a missing base is a refusal at open, never "those
         // entities have no record".
-        let blob_resident = declared.iter().any(|d| blob_resident(d, vocabularies));
+        // A column declared at a running service has extents alone until a fold writes the
+        // base, so only a column the build or a fold declared makes the base owed.
+        let blob_resident = declared.iter().any(|d| {
+            !unfolded.iter().any(|name| name == &d.name) && blob_resident(d, vocabularies)
+        });
         let record_dir = partition_dir.join("attrs").join("record");
         // **Both lists, one stack.** Artifact content extents hold the same format and the same
         // reader as a point's; they are listed separately because their *ownership* differs (see
@@ -2017,6 +2080,13 @@ impl FilterColumns {
     /// *shrunk* the live stack rather than merely the manifest.
     pub fn record_layers(&self) -> usize {
         self.records.layer_count()
+    }
+
+    /// How many record-blob rows drill-down and the join rule have decoded through this
+    /// generation's stack — [`RecordStack::reads`]. Test-facing: the reader that answers a
+    /// column's absence from the segment schema is asserted never to move it (`ingest.md` §6.3).
+    pub fn record_reads(&self) -> u64 {
+        self.records.reads()
     }
 
     /// The route affordances of one filterable column, or `None` where the column is not
@@ -2152,6 +2222,46 @@ impl FilterColumns {
             dict,
         });
         Ok(())
+    }
+
+    /// This generation's columns with an attribute column declared at a running service added,
+    /// at its position in the served schema (`ingest.md` §1.3, §6.3): an empty stack the next
+    /// flush's extent composes onto, and the placement its flags afford. A column with no
+    /// entity-space home (rendered or blob-resident and not indexed) takes a placement or nothing.
+    pub(crate) fn with_runtime_column(
+        &self,
+        scalar: &tessera_store::manifest::DeclaredScalar,
+        declared_index: usize,
+        vocabularies: &[tessera_store::manifest::ManifestVocabulary],
+    ) -> std::io::Result<FilterColumns> {
+        let mut next = FilterColumns {
+            columns: self.columns.clone(),
+            placements: self.placements.clone(),
+            access: self.access,
+            records: Arc::clone(&self.records),
+            entity_terms: Arc::clone(&self.entity_terms),
+        };
+        let family = Family::of(scalar);
+        let row = scalar.render && family.reaches_hot_column();
+        let entity = if family == Family::Text {
+            scalar.index
+        } else {
+            owes_value_column(scalar, vocabularies) && (scalar.index || row)
+        };
+        if row || entity {
+            next.placements.insert(
+                scalar.name.clone(),
+                Placement {
+                    entity,
+                    row,
+                    family,
+                },
+            );
+        }
+        if let Some(layers) = runtime_layers(scalar, declared_index, vocabularies)? {
+            next.columns.insert(scalar.name.clone(), layers);
+        }
+        Ok(next)
     }
 
     /// This generation's columns with a **newly based** group-scoped column opened onto them —
@@ -2662,10 +2772,14 @@ impl FilterColumns {
             .columns
             .get(column)
             .ok_or_else(|| FilterError::UndeclaredColumn(column.to_string()))?;
-        let postings = layers
-            .postings
-            .as_ref()
-            .ok_or_else(|| FilterError::MembershipUnavailable(column.to_string()))?;
+        // A column declared at a running service has no base and no postings until the fold
+        // (`ingest.md` §6.3); its members are in the extents alone, which the sweep below covers.
+        // A column with a base and no postings is one whose member sets cannot be read.
+        let postings: Option<&ColumnPostings> = match layers.postings.as_deref() {
+            Some(postings) => Some(postings),
+            None if layers.layers.iter().all(|l| l.values_rel.is_some()) => None,
+            None => return Err(FilterError::MembershipUnavailable(column.to_string())),
+        };
 
         // **A count per code, not a set of codes.** The sweep is the same one pass over the same
         // entities either way, and counting in it is what lets `?counts=true` be exact without a
@@ -2687,7 +2801,7 @@ impl FilterColumns {
         // would need the materialising route. None does today — a flush writes extents for a
         // category, never postings (decision 0063) — and this is where that stops being an
         // assumption. `carries` is unaffected either way, existence *does* distribute.
-        let postings_are_single_source = !postings.has_tiers();
+        let postings_are_single_source = postings.is_none_or(|p| !p.has_tiers());
         Ok(CategoryMembership {
             column: column.to_string(),
             postings,
@@ -3065,7 +3179,9 @@ impl FilterColumns {
 /// front and the postings probed per value.
 pub struct CategoryMembership<'a> {
     column: String,
-    postings: &'a ColumnPostings,
+    /// The base build's postings, or `None` for a column that has no base yet: one declared at a
+    /// running service and not yet folded, whose every member is in `from_extents`.
+    postings: Option<&'a ColumnPostings>,
     candidate: &'a Bitmap,
     /// The codes the candidate's *post-build* entities carry, **and how many of them carry each** —
     /// the half no posting covers. Disjoint from the postings' half in entity space, which is what
@@ -3100,7 +3216,10 @@ impl CategoryMembership<'_> {
         // corpus-wide — every entity carrying it, hidden ones included — and the question is one
         // bit, asked once per value walked. `ColumnPostings::intersects` short-circuits at the
         // first container the two sets share and allocates nothing.
-        self.postings
+        let Some(postings) = self.postings else {
+            return Ok(false);
+        };
+        postings
             .intersects(AttrLocalId::new(code), self.candidate)
             .map_err(|e| FilterError::PostingsUnreadable {
                 column: self.column.clone(),
@@ -3127,13 +3246,15 @@ impl CategoryMembership<'_> {
             return Err(FilterError::MembershipUnavailable(self.column.clone()));
         }
         let extents = self.from_extents.get(&code).copied().unwrap_or(0);
-        let base = self
-            .postings
-            .intersection_cardinality(AttrLocalId::new(code), self.candidate)
-            .map_err(|e| FilterError::PostingsUnreadable {
-                column: self.column.clone(),
-                detail: e.to_string(),
-            })?;
+        let base = match self.postings {
+            None => 0,
+            Some(postings) => postings
+                .intersection_cardinality(AttrLocalId::new(code), self.candidate)
+                .map_err(|e| FilterError::PostingsUnreadable {
+                    column: self.column.clone(),
+                    detail: e.to_string(),
+                })?,
+        };
         Ok(extents + base)
     }
 }

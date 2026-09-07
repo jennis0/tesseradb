@@ -796,6 +796,16 @@ impl SuggestIndexes {
         SuggestIndexes { by_vocabulary }
     }
 
+    /// This set with `built`'s indexes added, one per vocabulary `built` holds. A vocabulary
+    /// both hold takes `built`'s: the caller builds only for a vocabulary this set lacks, which is
+    /// a category column declared at a running service over a vocabulary no column named before
+    /// (`ingest.md` §1.3), so the two never disagree in practice and the newer wins where they do.
+    pub fn with_built(&self, built: SuggestIndexes) -> SuggestIndexes {
+        let mut by_vocabulary = self.by_vocabulary.clone();
+        by_vocabulary.extend(built.by_vocabulary);
+        SuggestIndexes { by_vocabulary }
+    }
+
     /// **Build every vocabulary's index**, at `Engine::open`.
     ///
     /// A vocabulary whose index will not build is **omitted rather than fatal**, and the omission
