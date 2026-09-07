@@ -823,8 +823,20 @@ pub(crate) struct FoldContext {
     /// bundle-wide schema was the defect — a fold rewriting a group's view dropped the family's
     /// lane, and its values came back as the type's zero.
     pub(crate) scalar_schema: BTreeMap<String, Vec<(String, ScalarType)>>,
-    /// Where each view's schema's group-scoped render suffix begins (`views.md` §5).
-    pub(crate) scoped_from: BTreeMap<String, usize>,
+    /// Per view, the columns of its schema an input segment may lawfully lack
+    /// (`write::lawful_absences`): the view's group-scoped lanes and the runtime columns below.
+    /// A column missing for any other reason is a torn segment, and pass 1 refuses it rather
+    /// than blanking the column and reclaiming the input.
+    pub(crate) absent_ok: BTreeMap<String, Vec<String>>,
+    /// The entity-scoped columns declared at a running service and not yet folded, by name, as
+    /// the live list stood at the plan (`ingest.md` §6.3). None has a base: pass 4a folds each
+    /// from its extents alone and writes the base every later reader opens, and the publication
+    /// moves the column into `MANIFEST.json` and off the runtime list.
+    pub(crate) runtime_attributes: Vec<String>,
+    /// The group-scoped families declared at a running service and not yet folded, by name.
+    /// Each view's column was based by the flush that first wrote it, so the pass reads them as
+    /// it reads a build family's; the list is what the publication moves into `MANIFEST.json`.
+    pub(crate) runtime_scoped_attributes: Vec<String>,
     /// The new base segment's id, one per view — never reused, so a discarded fold's orphans can
     /// never be mistaken for a later one's output (contracts §2.1).
     pub(crate) seg_id: String,
@@ -1052,6 +1064,10 @@ pub(crate) struct CompletedFold {
     /// and IO is the term the non-disruption argument rests on.
     pub(crate) attr_bytes_read: u64,
     pub(crate) attr_bytes_written: u64,
+    /// [`FoldContext::runtime_attributes`] and [`FoldContext::runtime_scoped_attributes`], the
+    /// columns this fold gave a base and the publication moves off the runtime list.
+    pub(crate) runtime_attributes: Vec<String>,
+    pub(crate) runtime_scoped_attributes: Vec<String>,
 }
 
 /// Why a fold produced nothing. **Every failure discards the fold** (compaction §3, pass 5): its
@@ -1151,11 +1167,7 @@ pub(crate) fn execute(plan: FoldPlan, ctx: FoldContext) -> Result<CompletedFold,
                 identity_key: &ctx.identity_key,
                 shard_id: ctx.shard_id,
                 scalar_schema: view_schema,
-                scoped_from: ctx
-                    .scoped_from
-                    .get(&view.view)
-                    .copied()
-                    .unwrap_or(view_schema.len()),
+                absent_ok: ctx.absent_ok.get(&view.view).map_or(&[][..], Vec::as_slice),
                 // `D₀`, whole and unmodified. See the module doc.
                 tombstones: &plan.tombstones,
                 permutation_bound: view.permutation_bound,
@@ -1333,13 +1345,22 @@ pub(crate) fn execute(plan: FoldPlan, ctx: FoldContext) -> Result<CompletedFold,
         // which its signature makes unexpressible. The merge below streams each layer exactly once
         // in entity order, so the readahead suits the access and the drop-behind is the point: these
         // pages are not wanted again, and the request path's are.
-        let base = tessera_filter::ValueColumn::open_dir(
-            &from_dir,
-            tessera_filter::Access::MappedSequential,
-        )
-        .map_err(|e| failed("pass 4a (attributes: the base column)", &e))?;
-        attr_read += file_len(&from_dir.join(tessera_filter::VALUES_FILE))
-            + file_len(&from_dir.join(tessera_filter::PRESENCE_FILE));
+        // **A column declared at a running service has no base until this pass writes one**
+        // (`ingest.md` §6.3): its layers are the extents alone, and a column no flush has carried
+        // yet folds to an empty base, so the reopen finds the files every declared column owes.
+        let unfolded = job.view.is_none() && ctx.runtime_attributes.contains(&job.name);
+        let base = if unfolded {
+            None
+        } else {
+            let base = tessera_filter::ValueColumn::open_dir(
+                &from_dir,
+                tessera_filter::Access::MappedSequential,
+            )
+            .map_err(|e| failed("pass 4a (attributes: the base column)", &e))?;
+            attr_read += file_len(&from_dir.join(tessera_filter::VALUES_FILE))
+                + file_len(&from_dir.join(tessera_filter::PRESENCE_FILE));
+            Some(base)
+        };
         let mut extents = Vec::new();
         for extent in plan
             .attr_extents
@@ -1357,20 +1378,21 @@ pub(crate) fn execute(plan: FoldPlan, ctx: FoldContext) -> Result<CompletedFold,
             attr_read += file_len(&ctx.from_prefix_dir.join(&extent.values))
                 + file_len(&ctx.from_prefix_dir.join(&extent.presence));
         }
-        let layers: Vec<&tessera_filter::ValueColumn> =
-            std::iter::once(&base).chain(extents.iter()).collect();
+        let layers: Vec<&tessera_filter::ValueColumn> = base.iter().chain(extents.iter()).collect();
         // A keyword layer's dictionary, opened beside its ordinals and in the same order, because
         // an ordinal names a position in *its own* layer's dictionary and nothing anywhere else.
         // Empty for every other family, which is what selects the generic fold below.
         let mut keyword_dicts: Vec<tessera_filter::SortedDict> = Vec::new();
         if scalar.arrow_type == tessera_spatial::tiler::ScalarType::Keyword {
-            keyword_dicts.push(
-                tessera_filter::SortedDict::open_dir(
-                    &from_dir,
-                    tessera_filter::Access::MappedSequential,
-                )
-                .map_err(|e| failed("pass 4a (attributes: the base dictionary)", &e))?,
-            );
+            if !unfolded {
+                keyword_dicts.push(
+                    tessera_filter::SortedDict::open_dir(
+                        &from_dir,
+                        tessera_filter::Access::MappedSequential,
+                    )
+                    .map_err(|e| failed("pass 4a (attributes: the base dictionary)", &e))?,
+                );
+            }
             for extent in plan
                 .attr_extents
                 .iter()
@@ -1411,7 +1433,23 @@ pub(crate) fn execute(plan: FoldPlan, ctx: FoldContext) -> Result<CompletedFold,
         // it — a key whose only carrier was blanked leaves the corpus, which is the retention
         // argument reaching dictionary keys (records §7). The two passes are otherwise the same
         // merge under the same guards.
-        let partial = if keyword_dicts.is_empty() {
+        let partial = if layers.is_empty() {
+            // Nothing has carried the column: an empty base with an empty presence, which is
+            // what a column no entity holds a value for is.
+            write_empty_value_column(
+                &values_path,
+                &presence_path,
+                column_kind_of(scalar.arrow_type, job.postings),
+            )
+            .map_err(|e| failed("pass 4a (attributes: an empty base)", &e))?;
+            if scalar.arrow_type == tessera_spatial::tiler::ScalarType::Keyword {
+                write_empty_dictionary(&dict_path)
+                    .map_err(|e| failed("pass 4a (attributes: an empty dictionary)", &e))?;
+                attr_written += file_len(&dict_path);
+                written.push((dict_rel, dict_path.clone()));
+            }
+            true
+        } else if keyword_dicts.is_empty() {
             tessera_filter_write::fold_value_column(
                 &layers,
                 &plan.tombstones,
@@ -1493,6 +1531,13 @@ pub(crate) fn execute(plan: FoldPlan, ctx: FoldContext) -> Result<CompletedFold,
         .declared_scalars
         .iter()
         .any(|d| crate::filter::blob_resident(d, &ctx.vocabularies));
+    // The base blob exists where a column the build or an earlier fold declared is
+    // blob-resident; a blob-resident column declared at a running service has extents alone
+    // until this pass writes the base (`ingest.md` §6.3).
+    let based_blob_resident = ctx.declared_scalars.iter().any(|d| {
+        !ctx.runtime_attributes.contains(&d.name)
+            && crate::filter::blob_resident(d, &ctx.vocabularies)
+    });
     if !blob_resident && !plan.record_extents.is_empty() {
         return Err(FoldFailed(
             "pass 4a (record blob): the manifest names record extents but the schema declares no \
@@ -1508,18 +1553,23 @@ pub(crate) fn execute(plan: FoldPlan, ctx: FoldContext) -> Result<CompletedFold,
 
         // The fold's own mappings, advised sequential like the value columns above (decision
         // 0052): each layer streams exactly once, block by block.
-        let base = tessera_filter::RecordBlob::open_dir(
-            &from_dir,
-            tessera_filter::Access::MappedSequential,
-        )
-        .map_err(|e| failed("pass 4a (record blob: the base)", &e))?;
-        for name in [
-            tessera_filter::RECORD_BLOCKS_FILE,
-            tessera_filter::RECORD_HASROW_FILE,
-            tessera_filter::RECORD_DIRECTORY_FILE,
-        ] {
-            attr_read += file_len(&from_dir.join(name));
-        }
+        let base = if based_blob_resident {
+            let base = tessera_filter::RecordBlob::open_dir(
+                &from_dir,
+                tessera_filter::Access::MappedSequential,
+            )
+            .map_err(|e| failed("pass 4a (record blob: the base)", &e))?;
+            for name in [
+                tessera_filter::RECORD_BLOCKS_FILE,
+                tessera_filter::RECORD_HASROW_FILE,
+                tessera_filter::RECORD_DIRECTORY_FILE,
+            ] {
+                attr_read += file_len(&from_dir.join(name));
+            }
+            Some(base)
+        } else {
+            None
+        };
         let mut extents = Vec::with_capacity(plan.record_extents.len());
         for extent in &plan.record_extents {
             extents.push(
@@ -1535,8 +1585,7 @@ pub(crate) fn execute(plan: FoldPlan, ctx: FoldContext) -> Result<CompletedFold,
                 attr_read += file_len(&ctx.from_prefix_dir.join(rel));
             }
         }
-        let layers: Vec<&tessera_filter::RecordBlob> =
-            std::iter::once(&base).chain(extents.iter()).collect();
+        let layers: Vec<&tessera_filter::RecordBlob> = base.iter().chain(extents.iter()).collect();
 
         let blocks_rel = format!("{record_rel}/{}", tessera_filter::RECORD_BLOCKS_FILE);
         let hasrow_rel = format!("{record_rel}/{}", tessera_filter::RECORD_HASROW_FILE);
@@ -1544,15 +1593,28 @@ pub(crate) fn execute(plan: FoldPlan, ctx: FoldContext) -> Result<CompletedFold,
         let blocks_path = ctx.to_prefix_dir.join(&blocks_rel);
         let hasrow_path = ctx.to_prefix_dir.join(&hasrow_rel);
         let directory_path = ctx.to_prefix_dir.join(&directory_rel);
-        tessera_filter_write::fold_record_blob(
-            &layers,
-            &plan.tombstones,
-            &blocks_path,
-            &hasrow_path,
-            &directory_path,
-            tessera_filter::RECORD_BLOCK_TARGET,
-        )
-        .map_err(|e| failed("pass 4a (record blob: the rewrite)", &e))?;
+        if layers.is_empty() {
+            // A blob-resident column declared at a running service that no flush has carried:
+            // an empty base, so the reopen finds the blob the schema says exists.
+            tessera_filter_write::RecordBlobWriter::create(
+                &blocks_path,
+                &hasrow_path,
+                &directory_path,
+                tessera_filter::RECORD_BLOCK_TARGET,
+            )
+            .and_then(|writer| writer.finish())
+            .map_err(|e| failed("pass 4a (record blob: an empty base)", &e))?;
+        } else {
+            tessera_filter_write::fold_record_blob(
+                &layers,
+                &plan.tombstones,
+                &blocks_path,
+                &hasrow_path,
+                &directory_path,
+                tessera_filter::RECORD_BLOCK_TARGET,
+            )
+            .map_err(|e| failed("pass 4a (record blob: the rewrite)", &e))?;
+        }
         for (rel, path) in [
             (blocks_rel, blocks_path),
             (hasrow_rel, hasrow_path),
@@ -1703,6 +1765,8 @@ pub(crate) fn execute(plan: FoldPlan, ctx: FoldContext) -> Result<CompletedFold,
         finished,
         attr_bytes_read: attr_read,
         attr_bytes_written: attr_written,
+        runtime_attributes: ctx.runtime_attributes,
+        runtime_scoped_attributes: ctx.runtime_scoped_attributes,
     })
 }
 
@@ -1822,18 +1886,26 @@ fn fold_text_columns(
         // access to them is *not* sequential anyway: it reads record `at[i]` of whichever layers
         // hold the least key, which walks each file in ordinal order but interleaved across
         // layers. `MADV_SEQUENTIAL`'s drop-behind would be wrong for that, not merely absent.
-        let mut dicts = vec![tessera_filter::SortedDict::open_dir(
-            &from_dir,
-            tessera_filter::Access::MappedSequential,
-        )
-        .map_err(|e| failed("pass 4a (text: the base dictionary)", &e))?];
-        let mut postings =
-            vec![
+        // A text column declared at a running service has no base index until this pass writes
+        // one (`ingest.md` §6.3): its layers are the extents alone.
+        let unfolded = job.view.is_none() && ctx.runtime_attributes.contains(&job.name);
+        let mut dicts = Vec::new();
+        let mut postings = Vec::new();
+        if !unfolded {
+            dicts.push(
+                tessera_filter::SortedDict::open_dir(
+                    &from_dir,
+                    tessera_filter::Access::MappedSequential,
+                )
+                .map_err(|e| failed("pass 4a (text: the base dictionary)", &e))?,
+            );
+            postings.push(
                 tessera_filter::ColumnPostings::open(&from_dir.join("postings.arrow"), true)
                     .map_err(|e| failed("pass 4a (text: the base postings)", &e))?,
-            ];
-        *attr_read += file_len(&from_dir.join(tessera_filter::DICT_FILE))
-            + file_len(&from_dir.join("postings.arrow"));
+            );
+            *attr_read += file_len(&from_dir.join(tessera_filter::DICT_FILE))
+                + file_len(&from_dir.join("postings.arrow"));
+        }
         for extent in plan
             .text_extents
             .iter()
@@ -1928,6 +2000,60 @@ pub(crate) fn next_prefix_name(bundle_root: &Path) -> std::io::Result<String> {
         }
     }
     Ok(format!("v{:05}", highest + 1))
+}
+
+/// An entity-space value column with no entity in it: the base a column declared at a running
+/// service takes at its first fold when no flush has carried it (`ingest.md` §6.3). Written with
+/// an empty presence bitmap, so the reader takes it as partial rather than as dense to the bound.
+fn write_empty_value_column(
+    values_path: &Path,
+    presence_path: &Path,
+    kind: tessera_filter::ColumnKind,
+) -> std::io::Result<()> {
+    tessera_filter::ValueColumnWriter::create(values_path, presence_path, kind)?
+        .finish(Some(&Bitmap::new()))
+}
+
+/// A keyword column's dictionary with no key in it, beside [`write_empty_value_column`]'s
+/// ordinals.
+fn write_empty_dictionary(dict_path: &Path) -> std::io::Result<()> {
+    let file = std::io::BufWriter::new(std::fs::File::create(dict_path)?);
+    tessera_filter::SortedDictWriter::new(file)
+        .and_then(|writer| writer.finish())
+        .map(|_| ())
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))
+}
+
+/// The storage kind a value column of this declared type is written at: the build's
+/// `column_kind`, over the manifest's type and whether the column is a category. A keyword's
+/// values are `u32` ordinals; a `bool` stores as a `u8`, a `timestamp_us` as the `i64` it is.
+fn column_kind_of(arrow_type: ScalarType, category: bool) -> tessera_filter::ColumnKind {
+    use tessera_filter::ColumnKind;
+    if arrow_type == ScalarType::Keyword {
+        return ColumnKind::U32;
+    }
+    if category {
+        return match arrow_type {
+            ScalarType::U8 => ColumnKind::U8,
+            ScalarType::U16 => ColumnKind::U16,
+            _ => ColumnKind::U32,
+        };
+    }
+    match arrow_type {
+        ScalarType::Bool | ScalarType::U8 => ColumnKind::U8,
+        ScalarType::U16 => ColumnKind::U16,
+        ScalarType::U32 => ColumnKind::U32,
+        ScalarType::U64 => ColumnKind::U64,
+        ScalarType::I8 => ColumnKind::I8,
+        ScalarType::I16 => ColumnKind::I16,
+        ScalarType::I32 => ColumnKind::I32,
+        ScalarType::I64 | ScalarType::TimestampUs => ColumnKind::I64,
+        ScalarType::F32 => ColumnKind::F32,
+        ScalarType::F64 => ColumnKind::F64,
+        // Neither owes a value column: `utf8` is not declarable and `text` folds through its
+        // own pass. Reaching here is a job the predicate above did not produce.
+        ScalarType::Utf8 | ScalarType::Keyword | ScalarType::Text => ColumnKind::U32,
+    }
 }
 
 #[cfg(test)]

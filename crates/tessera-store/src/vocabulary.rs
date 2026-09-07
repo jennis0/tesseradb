@@ -314,6 +314,27 @@ impl VocabularyMinter {
         self.width
     }
 
+    /// Bound this minter's code space to `width`, for a column declared at a running service over
+    /// a vocabulary no column named before (`ingest.md` §1.3).
+    ///
+    /// A vocabulary no column names is seeded at `u32`, the widest domain, and the first column
+    /// to name it is what fixes the width the rows store; the same rule a build applies through
+    /// the columns it compiles (`Vocabularies::seed`). Refused where a code already bound would
+    /// not fit: narrowing past a bound code would leave a row whose stored code the column cannot
+    /// hold, and the offending code is returned so the refusal can name it. Widening is never
+    /// asked for, because a column that names the vocabulary already fixed the width and a
+    /// differing declaration is refused before this is reached.
+    pub fn narrow_to(&mut self, width: ScalarType) -> std::result::Result<(), u32> {
+        let max = usable_max(width);
+        if let Some(&code) = self.assigned.iter().next_back() {
+            if code > max {
+                return Err(code);
+            }
+        }
+        self.width = width;
+        Ok(())
+    }
+
     /// Whether a key this minter does not carry is a typo or a value waiting for a code.
     ///
     /// **Consulted at the boundary, not here.** The refusal for a declared vocabulary belongs in

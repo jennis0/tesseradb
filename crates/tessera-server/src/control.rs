@@ -256,6 +256,9 @@ pub fn router(state: Arc<AppState>) -> Router {
         // refused rather than repeated if it is taken; there is no server-minted name to `POST` to.
         .route("/control/layers", axum::routing::put(register_layer))
         .route("/control/layers/{name}", axum::routing::delete(drop_layer))
+        // **`PUT`, as a layer's declaration is** (`ingest.md` §1.3): the name is the identity, an
+        // identical redeclaration answers the column that exists, and a differing one is refused.
+        .route("/control/attributes", axum::routing::put(declare_attribute))
         // **`PUT` and `DELETE` on the view itself, spelled as a layer's are** (`views.md` §3.2,
         // §3.4): the key is the identity, so the operation is refused rather than repeated if it
         // is taken, and there is no server-minted name to `POST` to. A roster record is small and
@@ -445,6 +448,7 @@ pub const CONTROL_PLANE_ROUTES: &[(&str, &str)] = &[
     ("GET", "/control/status"),
     ("POST", "/control/flush"),
     ("POST", "/control/compact"),
+    ("PUT", "/control/attributes"),
 ];
 
 /// `/control/changes`'s request-body limit.
@@ -576,6 +580,9 @@ fn coordinate_columns(projection: Projection) -> (&'static str, &'static str) {
 struct ParsedBatch {
     items: Vec<RawIngestItem>,
     artifacts: BatchArtifacts,
+    /// How many declared columns the batch omitted, each padded with its absence in every row
+    /// (`ingest.md` §7.1). Reported so a pipeline that stopped sending a column is seen.
+    padded_columns: u64,
     /// Rows whose latitude fell outside the projection's own domain and were moved onto the
     /// frame's edge (`projections.md` §7). Always `0` under `projection = "none"`, which has no
     /// domain.
@@ -1026,17 +1033,20 @@ fn code_at(width: ScalarType, code: u32) -> WalScalar {
 /// # The scalar tail is validated against `MANIFEST.declared_scalars`, and misalignment is a 422
 ///
 /// A row's scalars are stored **positionally**, against the manifest's declared order — nothing
-/// downstream carries a name. So a batch whose scalar columns are not exactly the declared set, in
-/// no matter what order, cannot be read back correctly, and three defects are the same defect:
+/// downstream carries a name. So a batch whose scalar columns are not within the declared set
+/// cannot be read back correctly, and two defects are the same defect:
 ///
 /// * a column the manifest does not declare;
-/// * a declared column the batch omits;
 /// * a declared column present at the wrong arrow type.
 ///
 /// Each is refused with **422 naming the column** (contracts §3.1's "malformed request"), and the
 /// scalar vector is built in **declared** order rather than schema order, which is what makes the
-/// positional read safe. Silently dropping a column would shorten the vector and shift every later
-/// scalar by one: positional misalignment wearing a success's clothes, acknowledged with a 200.
+/// positional read safe. **A declared column the batch omits is absent in every row**
+/// (`ingest.md` §7.1): the vector still takes the column's slot, holding its absence, so the
+/// omission misaligns nothing, and a column declared at a running service is one an older
+/// client's batches do not carry. Silently dropping a column would shorten the vector and shift
+/// every later scalar by one: positional misalignment wearing a success's clothes, acknowledged
+/// with a 200.
 ///
 /// # A category arrives as its key, and the key is checked for membership
 ///
@@ -1122,9 +1132,16 @@ fn parse_ingest_batch(
     let mut items = Vec::new();
     let mut tally = MembershipTally::default();
     let mut clipped = 0u64;
+    let mut padded: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
     for batch in batches {
         let batch = batch?;
         let schema = batch.schema();
+        padded.extend(
+            declared
+                .iter()
+                .filter(|d| batch.column_by_name(&d.name).is_none())
+                .map(|d| d.name.as_str()),
+        );
         // Where this record batch's rows start in the request's own row numbering — what a
         // membership names, since the executor indexes one flat list of rows per batch id.
         let offset = items.len();
@@ -1195,15 +1212,13 @@ fn parse_ingest_batch(
                 .expect("the column was found in this batch's own schema");
             memberships.push(membership_column(name, column, declaration)?);
         }
+        // **A declared column the batch omits is absent in every row** (`ingest.md` §7.1): the
+        // scalar tail is built below in declared order, so an omission misaligns nothing, and
+        // a column declared at a running service is one an older client's batches do not
+        // carry. What is refused is a column present at the wrong type.
         for d in declared {
             let Some(col) = batch.column_by_name(&d.name) else {
-                return Err(ApiError::Contract(format!(
-                    "ingest body: declared scalar '{}' is missing from this batch \
-                     (contracts §2.2). Every declared column must be present: the scalar tail is \
-                     read back by position, so an omission misaligns it exactly as a spurious \
-                     column does",
-                    d.name
-                )));
+                continue;
             };
             // One row's worth is enough to identify the column's type, and a batch with no rows has
             // no scalar to mistype. The decode is keyed by the declaration (see `scalar_at`), so
@@ -1255,9 +1270,12 @@ fn parse_ingest_batch(
             // validation above, so neither `expect` here can fire on a caller's input.
             let mut scalars = Vec::with_capacity(declared.len());
             for d in declared {
-                let col = batch
-                    .column_by_name(&d.name)
-                    .expect("every declared column was found by the validation above");
+                let Some(col) = batch.column_by_name(&d.name) else {
+                    // The batch omits the column: this row's absence, on the family's own
+                    // spelling (`scoped_absent`'s rule, for a declared scalar).
+                    scalars.push(scoped_absent(&declared_as_scoped(d)));
+                    continue;
+                };
                 let value = match d.vocabulary.as_deref() {
                     // A category's absence is in band and `category_code` already spends it: null
                     // resolves to the reserved code 0, which its vocabulary keeps out of the value
@@ -1341,6 +1359,7 @@ fn parse_ingest_batch(
     Ok(ParsedBatch {
         items,
         artifacts: tally.into_artifacts(),
+        padded_columns: padded.len() as u64,
         clipped,
     })
 }
@@ -1360,6 +1379,21 @@ fn scoped_as_declared(family: &ScopedScalar) -> DeclaredScalar {
         analyser: family.analyser.clone(),
         index: family.index,
         render: family.render,
+    }
+}
+
+/// A declared scalar as the family-shaped helpers take it — [`scoped_as_declared`]'s inverse,
+/// so an omitted declared column takes the same absence an omitted family does.
+fn declared_as_scoped(d: &DeclaredScalar) -> ScopedScalar {
+    ScopedScalar {
+        name: d.name.clone(),
+        group: String::new(),
+        arrow_type: d.arrow_type,
+        vocabulary: d.vocabulary.clone(),
+        analyser: d.analyser.clone(),
+        index: d.index,
+        render: d.render,
+        views: Vec::new(),
     }
 }
 
@@ -1677,6 +1711,11 @@ struct IngestResp {
     /// batch at a time has no build to print anything, so this is the only report those rows get.
     /// Always `0` under `projection = "none"`, which has no domain to leave.
     clipped: u64,
+    /// How many declared columns this batch omitted, each taken as absent in every row
+    /// (`ingest.md` §7.1). An omission is lawful, since a column declared at a running service is
+    /// one an older client's batches do not carry; the count is what lets an operator see a
+    /// pipeline that stopped sending one.
+    padded_columns: u64,
     /// Contracts §3.4: `external_id` is optional, so an accepted item may be addressable
     /// only by its `tessera_id` -- returned here per accepted row, in the same order as the
     /// request batch, so a caller can correlate. Present for every accepted row, whether or not
@@ -1756,6 +1795,7 @@ fn run_ingest(
     let ParsedBatch {
         items,
         artifacts,
+        padded_columns,
         clipped,
     } = parse_ingest_batch(
         encoding,
@@ -1871,6 +1911,7 @@ fn run_ingest(
                 // identical body, which is what makes the two agree. `minted` is 0 beside it
                 // because minting *is* an effect and this submission had none.
                 clipped,
+                padded_columns,
                 tessera_ids,
                 // A replay creates nothing: the artifacts this batch's keys named were minted when
                 // it was first accepted, and this submission had no effect at all.
@@ -2071,6 +2112,7 @@ fn run_ingest(
         over_bound,
         over_bound_ids,
         clipped,
+        padded_columns,
         tessera_ids,
         minted,
     })
@@ -2781,6 +2823,79 @@ async fn drop_layer(
         .map_err(crate::error::map_join_error)?
         .map_err(crate::error::map_accept_error)?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// `PUT /control/attributes`' body: the `[[attribute]]` block minus its acquisition keys
+/// (`configuration.md` §6; `ingest.md` §1.3), as JSON.
+///
+/// **`deny_unknown_fields`, because a misspelt flag must not be silently its default.** A
+/// column's width and placement are baked into every row (`per-point-attributes.md` §2.2), so a
+/// declaration that landed with `render` misspelt is one that cannot be corrected under its name.
+/// `width` is a category's code width, taken where no column names the vocabulary yet
+/// (`AttributeRequest::width`).
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AttributeBody {
+    name: String,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(rename = "type")]
+    ty: String,
+    #[serde(default)]
+    vocabulary: Option<String>,
+    #[serde(default)]
+    width: Option<String>,
+    #[serde(default)]
+    analyser: Option<String>,
+    #[serde(default)]
+    index: bool,
+    #[serde(default)]
+    render: bool,
+    /// `"entity"`, or `{"group": "<view_group>"}`, spelled as the block spells it.
+    #[serde(default)]
+    scope: tessera_types::layer::LayerScope,
+}
+
+/// `PUT /control/attributes` — declare one attribute column while the service runs
+/// (`ingest.md` §1.3, §6.3; decision 0136).
+///
+/// **Synchronous, on [`register_layer`]'s rule**: a WAL append and an fsync, then the column
+/// exists for resolution, so a batch sent after the answer may carry it. `201 {name}` for a new
+/// column; `200 {name}` where a column of that name already carries exactly this identity, which
+/// is the fill rule's "present and identical" (`ingest.md` §1.1) and lets a client repeat the
+/// call. A differing identity under a held name is `409`; a declaration the schema's rules
+/// refuse is `422` saying which rule. A failure means the column does not exist.
+async fn declare_attribute(
+    State(state): State<Arc<AppState>>,
+    body: Json<AttributeBody>,
+) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
+    let body = body.0;
+    let name = body.name.clone();
+    let request = tessera_engine::AttributeRequest {
+        name: body.name,
+        title: body.title,
+        ty: body.ty,
+        vocabulary: body.vocabulary,
+        width: body.width,
+        analyser: body.analyser,
+        index: body.index,
+        render: body.render,
+        scope: body.scope,
+    };
+    // The **shared** blocking pool, on `register_layer`'s rule: a declaration is not a deny.
+    let existing = tokio::task::spawn_blocking(move || state.engine.declare_attribute(request))
+        .await
+        .map_err(crate::error::map_join_error)?
+        .map_err(crate::error::map_accept_error)?;
+    let status = if existing {
+        StatusCode::OK
+    } else {
+        StatusCode::CREATED
+    };
+    Ok((
+        status,
+        Json(serde_json::json!({ "name": name, "existing": existing })),
+    ))
 }
 
 /// `PUT /control/views/{group}/{key}`'s body: the roster record, which is the inline

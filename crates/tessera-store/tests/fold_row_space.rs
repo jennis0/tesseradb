@@ -51,6 +51,55 @@ fn write_input(dir: &Path, seg_id: &str, entities: &[u64], stride: u64) -> FoldS
     }
 }
 
+/// **A declared column an input lacks fails the fold unless a declaration since the inputs
+/// explains it** (`ingest.md` §6.3). The inputs carry no scalars; a fold declaring one and naming
+/// none lawful is a torn bundle and refuses naming the column, since writing the rows as absent
+/// would blank the column and then reclaim the input. The same fold with the column named as
+/// declared since the inputs writes it at its placeholder with every row absent.
+#[test]
+fn a_column_an_input_lacks_fails_the_fold_unless_declared_since_the_inputs() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = write_input(dir.path(), "in-a", &[1, 2, 3], 7);
+    let schema = vec![(
+        "citations".to_string(),
+        tessera_spatial::tiler::ScalarType::U64,
+    )];
+    let identity_key = key();
+    let no_tombstones = Bitmap::new();
+    let spec = |absent_ok: &'static [String]| FoldRowSpaceSpec {
+        inputs: std::slice::from_ref(&input),
+        identity_key: &identity_key,
+        shard_id: 0,
+        scalar_schema: &schema,
+        absent_ok,
+        tombstones: &no_tombstones,
+        permutation_bound: 8,
+    };
+    let torn = fold_row_space(
+        &dir.path().join("torn-seg"),
+        &dir.path().join("torn.bin"),
+        &dir.path().join("torn-rows.u32"),
+        spec(&[]),
+    );
+    match torn {
+        Err(e) => assert!(e.to_string().contains("citations"), "{e}"),
+        Ok(_) => panic!("a column no declaration explains refuses the fold"),
+    }
+
+    let lawful: &'static [String] = Box::leak(vec!["citations".to_string()].into_boxed_slice());
+    fold_row_space(
+        &dir.path().join("out-seg"),
+        &dir.path().join("permutation.bin"),
+        &dir.path().join(tessera_store::ROW_ENTITY_FILE),
+        spec(lawful),
+    )
+    .expect("a column declared since the inputs folds as absence");
+    let cols = ColumnsRef::load(&dir.path().join("out-seg").join("columns.arrow")).unwrap();
+    assert!(cols.scalar("citations").is_some());
+    let presence = cols.presence("citations");
+    assert!((0..3u32).all(|row| !presence.contains(row)));
+}
+
 fn tombstones(entities: &[u64]) -> Bitmap {
     Bitmap::of(&entities.iter().map(|&e| e as u32).collect::<Vec<u32>>())
 }
@@ -73,7 +122,7 @@ fn fold(
             identity_key: &key(),
             shard_id: 0,
             scalar_schema: &[],
-            scoped_from: usize::MAX,
+            absent_ok: &[],
             tombstones,
             permutation_bound: bound,
         },

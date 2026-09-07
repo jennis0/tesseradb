@@ -491,10 +491,10 @@ pub enum WalRecord {
     },
     /// An attribute column declared while the service runs (`PUT /control/attributes`,
     /// `ingest.md` §1.3, §6.3). The segments manifest is the declaration's durable home; this
-    /// record is what puts it back between a publication and a restart.
-    ///
-    /// Not built yet: nothing writes this record, and a replay that meets one refuses to open
-    /// naming track T4 ([`unbuilt_track`]).
+    /// record is what puts it back between a publication and a restart. Replay appends the column
+    /// to the served schema where the manifests do not already carry it; a record restating a
+    /// column the manifests carry identically is applied as nothing, which is what a fold that
+    /// moved the column into `MANIFEST.json` ahead of the log's rotation leaves behind.
     AttributeDeclare {
         declaration: Box<AttributeDeclaration>,
     },
@@ -571,13 +571,13 @@ pub fn unbuilt_track(record: &WalRecord) -> Option<(&'static str, &'static str)>
             Some(("ArtifactPublish naming a view", "T2c"))
         }
         WalRecord::ValuesBatch { .. } => Some(("ValuesBatch", "T3")),
-        WalRecord::AttributeDeclare { .. } => Some(("AttributeDeclare", "T4")),
         WalRecord::VocabularyDeclare { .. } => Some(("VocabularyDeclare", "T5")),
         WalRecord::ViewGroupCreate { .. } => Some(("ViewGroupCreate", "T6")),
         WalRecord::PlainViewCreate { .. } => Some(("PlainViewCreate", "T6")),
         // Listed rather than caught by a wildcard, so that a variant added later is a decision
         // here and not a default to "built".
-        WalRecord::VocabularyMint { .. }
+        WalRecord::AttributeDeclare { .. }
+        | WalRecord::VocabularyMint { .. }
         | WalRecord::IngestBatch { .. }
         | WalRecord::OverlaySnapshot { .. }
         | WalRecord::ChangeByEntity { .. }
@@ -2416,7 +2416,8 @@ mod tests {
     /// (`ingest.md` §7.1, §8), so what this checks is the two halves of that arrangement: every
     /// field survives the log verbatim, and [`unbuilt_track`] names each record's track so a
     /// replay refuses rather than passes over it. Every optional and every list is set, which is
-    /// the arrangement a positional decoder misreads first.
+    /// the arrangement a positional decoder misreads first. `AttributeDeclare` is built (T4) and
+    /// so is asserted to wait on no track, beside the growth record every reader applies.
     #[test]
     fn the_ingest_designs_records_round_trip_and_name_their_tracks() {
         use crate::membership::{content_digest, serialise_members, ArtifactShapes};
@@ -2554,7 +2555,8 @@ mod tests {
                 }),
             },
         ];
-        // The four fills are track T2a's and are applied (`ArtifactStore::fill`); the rest wait.
+        // The four fills are track T2a's and are applied (`ArtifactStore::fill`); the attribute
+        // declaration is T4's and is applied (`Executor::declare_attribute`); the rest wait.
         let tracks: Vec<Option<&str>> = records
             .iter()
             .map(|record| unbuilt_track(record).map(|(_, track)| track))
@@ -2568,7 +2570,7 @@ mod tests {
                 None,
                 None,
                 Some("T3"),
-                Some("T4"),
+                None,
                 Some("T5"),
                 Some("T6"),
                 Some("T6")

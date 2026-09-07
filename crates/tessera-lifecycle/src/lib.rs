@@ -38,8 +38,8 @@ pub use alloc::{
 };
 pub use buffer::{BufferedItem, DescriptorResolver, IngestBuffer};
 pub use command::{
-    Ack, BatchArtifacts, BatchEdge, BatchMembership, Command, ExecError, MembershipGrown, Receipt,
-    SubmitError, UnallocatedRow,
+    Ack, AttributeRequest, BatchArtifacts, BatchEdge, BatchMembership, Command, ExecError,
+    MembershipGrown, Receipt, SubmitError, UnallocatedRow,
 };
 pub use faults::WalMeter;
 pub use membership::{

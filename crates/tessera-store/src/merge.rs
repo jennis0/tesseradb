@@ -163,11 +163,10 @@ pub struct MergeSpec<'a> {
     pub identity_key: &'a IdentityKey,
     pub shard_id: u32,
     pub scalar_schema: &'a [(String, ScalarType)],
-    /// Where [`Self::scalar_schema`]'s **group-scoped** render suffix begins (`views.md` §5) — the
-    /// index from which a column the input segment lacks is the ordinary absence rather than a
-    /// malformed bundle. `scalar_schema.len()` for a view outside every scope, which is the
-    /// refuse-everything reading and the one every caller had before families existed.
-    pub scoped_from: usize,
+    /// The columns of `scalar_schema` an input may lawfully lack (`segment_cursor::gather_scalars`):
+    /// the view's group-scoped render lanes and the columns declared at a running service since
+    /// the inputs were written. Any other column an input lacks fails the operation.
+    pub absent_ok: &'a [String],
     /// Where the merged extent begins in view row space — the **first consumed extent's**
     /// `row_base`. A merge emits exactly as many rows as it consumed, so no later extent's
     /// `row_base` moves and `RowSpace::collapsing` puts this where the consumed run was.
@@ -322,7 +321,7 @@ pub fn execute_merge(
         let scalars = gather_scalars(
             &cursor.columns,
             spec.scalar_schema,
-            spec.scoped_from,
+            spec.absent_ok,
             row,
             &cursor.seg_id,
             OP,
@@ -358,16 +357,26 @@ pub fn execute_merge(
     //
     // Skipped entirely for a column no input has a file for, which is every category (its absence
     // is the reserved code 0, in the column) and every column with no absence anywhere.
+    //
+    // **A column an input's schema lacks is an absence in every row of that input**
+    // (`ingest.md` §6.3): a segment written before the column was declared at a running service
+    // carries no lane for it, and the merged segment takes the placeholder zero for those rows
+    // with a presence bitmap that leaves them out. `presence()` answers all-present for a name it
+    // has no file for, so the schema is asked first.
     let mut presence_written: Vec<&str> = Vec::new();
     for (name, _) in spec.scalar_schema {
-        if !cursors
-            .iter()
-            .any(|cursor| cursor.columns.presence(name).bitmap().is_some())
-        {
+        if !cursors.iter().any(|cursor| {
+            cursor.columns.scalar(name).is_none()
+                || cursor.columns.presence(name).bitmap().is_some()
+        }) {
             continue;
         }
         let mut present = Bitmap::new();
         for (index, cursor) in cursors.iter().enumerate() {
+            // An input without the column contributes no present row.
+            if cursor.columns.scalar(name).is_none() {
+                continue;
+            }
             // Indexing `map` by an input row is in range because `ColumnsRef::load` refuses a
             // bitmap naming a row at or past its segment's row count, and every input row is
             // emitted — a merge drops none.
@@ -559,7 +568,7 @@ mod tests {
                 identity_key: &key,
                 shard_id: 0,
                 scalar_schema: &schema(),
-                scoped_from: schema().len(),
+                absent_ok: &[],
                 row_base: 0,
                 watermark: 8,
                 entity_id_high_water: 8,
@@ -615,7 +624,7 @@ mod tests {
                 identity_key: &key,
                 shard_id: 0,
                 scalar_schema: &schema(),
-                scoped_from: schema().len(),
+                absent_ok: &[],
                 row_base: 0,
                 watermark: 2,
                 entity_id_high_water: 2,

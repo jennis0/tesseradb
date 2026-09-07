@@ -111,11 +111,10 @@ pub struct FoldRowSpaceSpec<'a> {
     pub identity_key: &'a IdentityKey,
     pub shard_id: u32,
     pub scalar_schema: &'a [(String, ScalarType)],
-    /// Where [`Self::scalar_schema`]'s **group-scoped** render suffix begins (`views.md` §5) — the
-    /// index from which a column the input segment lacks is the ordinary absence rather than a
-    /// malformed bundle. `scalar_schema.len()` for a view outside every scope, which is the
-    /// refuse-everything reading and the one every caller had before families existed.
-    pub scoped_from: usize,
+    /// The columns of `scalar_schema` an input may lawfully lack (`segment_cursor::gather_scalars`):
+    /// the view's group-scoped render lanes and the columns declared at a running service since
+    /// the inputs were written. Any other column an input lacks fails the operation.
+    pub absent_ok: &'a [String],
     /// `D₀` — the fold plan's tombstone clone (compaction §5), entity ids as a Roaring bitmap
     /// (matching `tessera_lifecycle::Overlay::deleted`'s representation). A row whose entity is a
     /// member is dropped: not appended to the output segment, not scattered into
@@ -216,14 +215,21 @@ pub fn fold_row_space(
     // Only columns some input records an absence in are tracked, which is every category excluded
     // (its absence is the reserved code 0, in the column itself) along with every column that has
     // no absence anywhere.
+    //
+    // **A column an input's schema lacks is an absence in every row of that input**
+    // (`ingest.md` §6.3): a segment written before the column was declared at a running service
+    // carries no lane for it, `gather_scalars` writes the placeholder zero into the new base, and
+    // this is what keeps that zero out of the present set. `presence()` answers all-present for a
+    // name it has no file for, so the schema is asked first.
     let mut absent: Vec<(usize, Bitmap)> = spec
         .scalar_schema
         .iter()
         .enumerate()
         .filter(|(_, (name, _))| {
-            cursors
-                .iter()
-                .any(|cursor| cursor.columns.presence(name).bitmap().is_some())
+            cursors.iter().any(|cursor| {
+                cursor.columns.scalar(name).is_none()
+                    || cursor.columns.presence(name).bitmap().is_some()
+            })
         })
         .map(|(column, _)| (column, Bitmap::new()))
         .collect();
@@ -278,7 +284,7 @@ pub fn fold_row_space(
         let scalars = gather_scalars(
             &cursor.columns,
             spec.scalar_schema,
-            spec.scoped_from,
+            spec.absent_ok,
             row,
             &cursor.seg_id,
             OP,
@@ -295,7 +301,8 @@ pub fn fold_row_space(
         row_entity.push(entity_u32);
         for (column, absent_rows) in &mut absent {
             let (name, _) = &spec.scalar_schema[*column];
-            if !cursors[index].columns.presence(name).contains(row as u32) {
+            let columns = &cursors[index].columns;
+            if columns.scalar(name).is_none() || !columns.presence(name).contains(row as u32) {
                 absent_rows.add(row_count);
             }
         }
@@ -416,7 +423,7 @@ mod tests {
                 identity_key: &key(),
                 shard_id: 0,
                 scalar_schema: &schema(),
-                scoped_from: schema().len(),
+                absent_ok: &[],
                 tombstones,
                 permutation_bound: 8,
             },

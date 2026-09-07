@@ -8,6 +8,7 @@
 
 pub mod artifact_content;
 pub mod artifacts;
+mod attributes;
 pub mod browse;
 mod cache;
 pub mod cancel;
@@ -155,6 +156,9 @@ pub use write::{
     estimate_buffer_retry_after_s, estimate_retry_after_s, RETRY_AFTER_MAX_SECS,
     RETRY_AFTER_MIN_SECS,
 };
+// `PUT /control/attributes`' body as the executor resolves it, re-exported so the server sees
+// engine API types only (SA §3).
+pub use tessera_lifecycle::AttributeRequest;
 
 /// One immutable, atomically-swappable snapshot of engine state (lifecycle §1.1).
 ///

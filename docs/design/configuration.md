@@ -200,7 +200,11 @@ starts = 2026-04-01T00:00:00Z
 | `values` | R for `closed`, unless sourced | inline: an array of keys, or a `key = code` table |
 | `reserved` | O | retired codes, never reassigned |
 
-**`[[attribute]]`** — one per-point column, read from the source it names. Repeatable.
+**`[[attribute]]`** — one per-point column, read from the source it names. Repeatable. **Also
+declarable at a running service**: `PUT /control/attributes` takes this block minus its
+acquisition keys (`field`, `source`, `entity_id_field`, `fields`), as JSON (contracts §3.4;
+`ingest.md` §1.3). A category declared there names `width` where no column yet names its
+vocabulary, the build having compiled the vocabulary's width into the columns that name it.
 
 | Key | | Value |
 |---|---|---|

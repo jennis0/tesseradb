@@ -941,6 +941,46 @@ pub struct Engine {
 /// currently stands, so an unsuppressed entity is simply absent from it; inventing an
 /// `Unsuppress` for an absent entity would let an older manifest clear a suppression the WAL
 /// still holds.
+/// The runtime attribute columns the side manifests carry (`ingest.md` §6.3), **in one order**.
+///
+/// A column's position in the served list is what every buffered row, record-blob tag and
+/// segment tail is positional against, so the order the manifests' lists are appended in decides
+/// which column a value is read under. The partitions are a hash map; they are walked by key,
+/// ascending, so two opens of one bundle build the same list. With one partition this is that
+/// partition's lists; with several, every declaration is a deployment-level fact every partition
+/// publishes alike, and a name met again is skipped by `Manifest::with_attributes`.
+fn side_manifest_attributes(
+    bundle: &Bundle,
+) -> (
+    Vec<tessera_store::manifest::DeclaredScalar>,
+    Vec<tessera_store::manifest::ScopedScalar>,
+) {
+    let mut keys: Vec<&String> = bundle.partitions.keys().collect();
+    keys.sort();
+    let mut attributes = Vec::new();
+    let mut scoped = Vec::new();
+    for key in keys {
+        let manifest = &bundle.partitions[key].manifest;
+        for d in &manifest.attributes {
+            if !attributes
+                .iter()
+                .any(|held: &tessera_store::manifest::DeclaredScalar| held.name == d.name)
+            {
+                attributes.push(d.clone());
+            }
+        }
+        for f in &manifest.scoped_attributes {
+            if !scoped
+                .iter()
+                .any(|held: &tessera_store::manifest::ScopedScalar| held.name == f.name)
+            {
+                scoped.push(f.clone());
+            }
+        }
+    }
+    (attributes, scoped)
+}
+
 fn initial_deny_of(bundle: &Bundle) -> Vec<(EntityId, ChangeOp)> {
     let mut out = Vec::new();
     for partition in bundle.partitions.values() {
@@ -998,7 +1038,19 @@ impl Engine {
         plugin: impl Plugin + 'static,
         config: EngineConfig,
     ) -> Result<Engine> {
-        let bundle = open_bundle(bundle_root).map_err(EngineError::Store)?;
+        let mut bundle = open_bundle(bundle_root).map_err(EngineError::Store)?;
+
+        // **The attribute columns declared while the service ran, appended to the schema before
+        // anything reads it** (`ingest.md` §6.3). The side manifests are the declaration's
+        // durable home; `MANIFEST.json` carries the build's columns and those a fold has since
+        // written. The served list is the two together, in that order, and every consumer below
+        // — the vocabulary seed's widths, the record blob's field tags, the flush's writer schema,
+        // `/v1/meta` — takes it from the bundle manifest. Declarations the log holds past the
+        // last publication are appended after replay, below.
+        let (side_attributes, side_scoped_attributes) = side_manifest_attributes(&bundle);
+        bundle.manifest = bundle
+            .manifest
+            .with_attributes(&side_attributes, &side_scoped_attributes);
 
         // **The plugin that serves a bundle must be the plugin that labelled it** (contracts
         // §2.2). The build records `data_plugin_hash` in `MANIFEST.json`; every posting in the
@@ -1281,6 +1333,11 @@ impl Engine {
                 membership_extents: &manifest_membership_extents,
                 level_versions: &manifest_level_versions,
                 prefix_dir: prefix_dir.clone(),
+                manifest: &bundle.manifest,
+                attributes: crate::attributes::RuntimeAttributes::seed(
+                    side_attributes.clone(),
+                    side_scoped_attributes.clone(),
+                ),
             },
             &dict,
             &initial_deny,
@@ -1299,6 +1356,37 @@ impl Engine {
                 })
             },
         )?;
+
+        // **The declarations the log holds past the last publication**, appended on the side
+        // manifests' rule above, and each category's vocabulary bound to the width the column
+        // stores. The seed fixed the widths the manifests' columns name; a column only the log
+        // names is bound here, on the door's rule (`VocabularyMinter::narrow_to`), and a bound
+        // code past the width is a log that disagrees with the bindings.
+        let (runtime_attributes, runtime_scoped_attributes) = write_state.attributes.snapshot();
+        let unfolded_attributes = write_state.attributes.entity_names();
+        let runtime_categories = runtime_attributes
+            .iter()
+            .filter_map(|d| d.vocabulary.as_deref().map(|v| (v, d.arrow_type)))
+            .chain(
+                runtime_scoped_attributes
+                    .iter()
+                    .filter_map(|f| f.vocabulary.as_deref().map(|v| (v, f.arrow_type))),
+            );
+        for (vocabulary, width) in runtime_categories {
+            let minter = vocabularies.get_mut(vocabulary).ok_or_else(|| {
+                EngineError::Malformed(format!(
+                    "a runtime attribute names vocabulary '{vocabulary}', which this bundle does \
+                     not declare; this node does not open"
+                ))
+            })?;
+            if let Err(code) = minter.narrow_to(width) {
+                return Err(EngineError::Malformed(format!(
+                    "vocabulary '{vocabulary}' binds code {code}, past the {} width a runtime \
+                     attribute stores it at; this node does not open",
+                    width.arrow_type_name()
+                )));
+            }
+        }
 
         let plugin: Arc<dyn Plugin> = Arc::new(plugin);
         let auth_plugin_hash = hex_decode_32(&plugin.auth_plugin_hash()).ok_or_else(|| {
@@ -1348,11 +1436,16 @@ impl Engine {
         let bundle = if created_views.is_empty()
             && dead_incarnations.is_empty()
             && scoped_columns.is_empty()
+            && runtime_attributes.is_empty()
+            && runtime_scoped_attributes.is_empty()
         {
             Arc::new(bundle)
         } else {
+            // The runtime columns first, so a scoped family the log declared has its list to
+            // extend when the pairs a flush wrote for it are applied.
             let manifest = bundle
                 .manifest
+                .with_attributes(&runtime_attributes, &runtime_scoped_attributes)
                 .with_roster(&created_views, &dead_incarnations)
                 .with_scoped_columns(&scoped_columns);
             Arc::new(bundle).with_views(manifest)
@@ -1415,6 +1508,8 @@ impl Engine {
                     &artifact_record_extents,
                     &entity_terms_extents,
                     &text_extents,
+                    // The columns whose base no fold has written yet (`ingest.md` §6.3).
+                    &unfolded_attributes,
                     // Mapped, for the reason `FilterColumns::open` gives: the engine opens every
                     // declared column at once and holds them for the process lifetime, so the
                     // alternative is tens of GB of residency at 10⁹ paid before any filter arrives.
@@ -3299,15 +3394,18 @@ impl Engine {
             return Err(crate::write::AcceptError::SteppedDown);
         }
         // **Arity before the submit.** The commit window indexes `row.scalars` positionally against
-        // `declared_scalars` to find a category key's vocabulary, so a short row indexed out of
-        // bounds and panicked the executor — surfacing as a lost receipt rather than a refusal.
-        // Checked here for the same reason the extent check is: the invariant is about the buffer,
-        // and the buffer has more than one writer.
+        // `declared_scalars`, so a row longer than the schema would pair values with columns that
+        // do not exist. **A shorter row is lawful** (`ingest.md` §7.1): a column declared at a
+        // running service appends at the tail, so a row decoded against the schema before the
+        // declaration, or a batch that omits the column, holds nothing for it and is padded with
+        // its absence at the window's close (`attributes::pad_to_schema`). Checked here for the
+        // same reason the extent check is: the invariant is about the buffer, and the buffer has
+        // more than one writer.
         let declared = self.meta().declared_scalars.len();
         if let Some((index, row)) = rows
             .iter()
             .enumerate()
-            .find(|(_, row)| row.scalars.len() != declared)
+            .find(|(_, row)| row.scalars.len() > declared)
         {
             return Err(crate::write::AcceptError::ScalarArity {
                 index,
@@ -3407,6 +3505,18 @@ impl Engine {
     /// Drop a layer. Its name is tombstoned and refused on recreation for ever.
     pub fn drop_layer(&self, name: String) -> std::result::Result<(), crate::write::AcceptError> {
         self.write.drop_layer(name)
+    }
+
+    /// Declare an attribute column while the service runs (`PUT /control/attributes`;
+    /// `ingest.md` §1.3, §6.3). Answers `true` where a column of that name already carried
+    /// exactly this identity and nothing was appended.
+    ///
+    /// Blocking — a tokio handler must call this inside `spawn_blocking`.
+    pub fn declare_attribute(
+        &self,
+        request: tessera_lifecycle::AttributeRequest,
+    ) -> std::result::Result<bool, crate::write::AcceptError> {
+        self.write.declare_attribute(request)
     }
 
     /// Create a view of a view group while the service runs (`views.md` §3.2, decision 0108).
@@ -3878,10 +3988,17 @@ pub(crate) fn open_rotation(
     })?;
 
     let prefix_dir = bundle_root.join(prefix);
-    let bundle = Arc::new(
-        tessera_store::open_written_prefix(bundle_root, prefix)
-            .map_err(|e| PublishGeometryError::PrefixNotOpenable(e.to_string()))?,
-    );
+    let mut bundle = tessera_store::open_written_prefix(bundle_root, prefix)
+        .map_err(|e| PublishGeometryError::PrefixNotOpenable(e.to_string()))?;
+    // The columns declared while the fold ran, appended on `Engine::open`'s rule: the new
+    // `MANIFEST.json` carries the schema as it stood at the plan, and the side manifest the
+    // fold published carries the rest (`ingest.md` §6.3).
+    let (side_attributes, side_scoped_attributes) = side_manifest_attributes(&bundle);
+    let unfolded_attributes: Vec<String> = side_attributes.iter().map(|d| d.name.clone()).collect();
+    bundle.manifest = bundle
+        .manifest
+        .with_attributes(&side_attributes, &side_scoped_attributes);
+    let bundle = Arc::new(bundle);
     let (phash, partition) = bundle
         .partitions
         .iter()
@@ -3935,6 +4052,7 @@ pub(crate) fn open_rotation(
             &partition.manifest.artifact_record_extents,
             &partition.manifest.entity_terms_extents,
             &partition.manifest.text_extents,
+            &unfolded_attributes,
             true,
         )
         .map_err(|e| PublishGeometryError::PrefixNotOpenable(e.to_string()))?,

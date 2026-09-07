@@ -154,7 +154,16 @@ pub(crate) fn record_batch(
         arrays.push(Arc::new(builder.finish()));
     }
 
+    // **A declared column no row names is omitted from the batch**, which the Arrow decode reads
+    // as the column padded with its absence in every row and reports on the receipt
+    // (`ingest.md` §7.1). A column some rows name is carried by every row of the batch, null
+    // where a row has no value, and a row omitting it is a `422` naming the row and the column
+    // (contracts §3.4). The two doors then agree about what a batch that stopped carrying a
+    // column looks like, and about what a half-carried column is.
     for declared in columns.declared {
+        if !has(&declared.name) {
+            continue;
+        }
         let column = scalar_column(&rows, &declared.name, declared.wire_type(), true)?;
         fields.push(Field::new(&declared.name, column.data_type().clone(), true));
         arrays.push(column);
@@ -254,9 +263,11 @@ fn refusal(row: usize, column: &str, what: &str) -> ApiError {
     ApiError::Contract(format!("ingest body: row {row}, column '{column}' {what}"))
 }
 
-/// One scalar column at its wire type. A declared scalar is `required`: every row carries the
-/// name, null for absence, as every Arrow batch carries the column; a scoped family's column is
-/// absent on the rows that omit it.
+/// One scalar column at its wire type. A declared scalar is `required`: a batch that carries the
+/// name at all carries it on every row, null for absence, as every Arrow batch carries the
+/// column on every row (contracts §3.4). A batch no row names it in does not reach here, the
+/// caller having omitted the column (`ingest.md` §7.1). A scoped family's column is absent on the
+/// rows that omit it.
 fn scalar_column(
     rows: &[Map<String, Value>],
     name: &str,
@@ -269,8 +280,8 @@ fn scalar_column(
             None if required => Err(refusal(
                 row,
                 name,
-                "is missing; every declared column is present on every row, null where the row \
-                 has no value (contracts §2.2)",
+                "is missing; a declared column a batch carries is on every row of it, null where \
+                 the row has no value (contracts §3.4)",
             )),
             None => Ok(&Value::Null),
         }

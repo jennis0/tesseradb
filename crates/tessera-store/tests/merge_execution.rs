@@ -74,7 +74,7 @@ fn merge(root: &Path, inputs: &[MergeInput]) -> tessera_store::flush::FlushOutpu
             identity_key: &key(),
             shard_id: 0,
             scalar_schema: &schema,
-            scoped_from: usize::MAX,
+            absent_ok: &[],
             row_base: 0,
             // The live values a publication would carry — deliberately *above* the inputs' own
             // range, so a merge that derived them from `entity_hi` would show up as a regression.
@@ -265,7 +265,7 @@ fn out_of_order_inputs_are_refused() {
             identity_key: &key(),
             shard_id: 0,
             scalar_schema: &schema,
-            scoped_from: usize::MAX,
+            absent_ok: &[],
             row_base: 0,
             watermark: 10_000,
             entity_id_high_water: 10_000,
@@ -274,14 +274,17 @@ fn out_of_order_inputs_are_refused() {
     assert!(err.is_err());
 }
 
-/// **A declared scalar column an input lacks fails the merge**, rather than being dropped.
+/// **A declared scalar column an input lacks, and no declaration explains, fails the merge**
+/// rather than being dropped or blanked.
 ///
 /// Dropping it shifts every later scalar up a position, so the merged segment carries every value
 /// under the wrong column's name — right count, right types, wrong data, and no error anywhere.
-/// The inputs here are written with no scalars while the merge declares one, which is precisely
-/// the shape a stepped-down or hand-repaired bundle presents.
+/// Blanking it writes the placeholder into every row and marks it absent, which is worse in the
+/// one way that matters: the merge then reclaims the input the values were in. The inputs here
+/// are written with no scalars while the merge declares one and names none lawful, which is the
+/// shape a stepped-down or hand-repaired bundle presents.
 ///
-/// **Mutation:** restore the `filter_map` in `gather_scalars` and this merge succeeds, silently.
+/// **Mutation:** drop the `absent_ok` test in `gather_scalars` and this merge succeeds, silently.
 #[test]
 fn a_missing_scalar_column_fails_the_merge_rather_than_shifting_the_rest() {
     let dir = tempfile::TempDir::new().unwrap();
@@ -301,7 +304,7 @@ fn a_missing_scalar_column_fails_the_merge_rather_than_shifting_the_rest() {
             identity_key: &key(),
             shard_id: 0,
             scalar_schema: &schema,
-            scoped_from: usize::MAX,
+            absent_ok: &[],
             row_base: 0,
             watermark: 10_000,
             entity_id_high_water: 10_000,
@@ -311,6 +314,67 @@ fn a_missing_scalar_column_fails_the_merge_rather_than_shifting_the_rest() {
     assert!(
         err.to_string().contains("citations"),
         "the refusal must name the column: {err}"
+    );
+}
+
+/// **A declared scalar column an input lawfully lacks is absent in every row of that input**,
+/// never dropped and never a held zero (`ingest.md` §6.3).
+///
+/// The inputs here are written with no scalars while the merge declares one and names it as
+/// declared since the inputs were written, which is the shape a column declared at a running
+/// service presents to a merge of segments written before it: the merged segment carries the
+/// column at its placeholder, and its presence bitmap leaves every one of those rows out, so a
+/// reader takes the absence and not the zero.
+///
+/// **Mutation:** drop the schema check in the merge's presence pass and every row reads as
+/// carrying a zero.
+#[test]
+fn a_column_declared_since_the_inputs_is_absent_in_every_row_rather_than_shifting_the_rest() {
+    let dir = tempfile::TempDir::new().unwrap();
+    build_bundle(dir.path(), 10);
+    let a = segment(dir.path(), "in-a", 100, 5, 7);
+    let b = segment(dir.path(), "in-b", 200, 5, 31);
+
+    let schema = vec![("citations".to_string(), ScalarType::U64)];
+    let lawful = vec!["citations".to_string()];
+    let out = execute_merge(
+        &dir.path().join("v00000"),
+        PARTITION,
+        VIEW,
+        MergeSpec {
+            incarnation: 0,
+            seg_id: "merged-1",
+            inputs: &[a, b],
+            identity_key: &key(),
+            shard_id: 0,
+            scalar_schema: &schema,
+            absent_ok: &lawful,
+            row_base: 0,
+            watermark: 10_000,
+            entity_id_high_water: 10_000,
+        },
+    )
+    .expect("a segment lacking a declared column merges, the column absent in its rows");
+    assert_eq!(out.segment.row_count, 10);
+    let d = seg_dir(dir.path(), "merged-1");
+    let cols = ColumnsRef::load(&d.join("columns.arrow")).unwrap();
+    assert!(
+        cols.scalar("citations").is_some(),
+        "the merged segment carries the declared column"
+    );
+    let presence = cols.presence("citations");
+    assert!(
+        presence.bitmap().is_some(),
+        "a presence bitmap is written, because some row is absent"
+    );
+    assert!(
+        (0..10u32).all(|row| !presence.contains(row)),
+        "every row came from an input without the column, so every row is absent"
+    );
+    assert_eq!(
+        cols.tessera_id().len(),
+        10,
+        "the fixed columns keep every row"
     );
 }
 

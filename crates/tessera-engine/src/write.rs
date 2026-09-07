@@ -1497,6 +1497,14 @@ mod ack {
             Published(())
         }
 
+        /// An attribute declaration that met a column already carrying its identity
+        /// (`ingest.md` §1.1: a part present and identical): nothing was appended and nothing
+        /// moved, the effect being in force from the build or the earlier declaration. Takes the
+        /// request that was looked up, on the constructors above's rule.
+        pub(super) fn already_declared(_held: &tessera_lifecycle::AttributeRequest) -> Self {
+            Published(())
+        }
+
         /// A registry or artifact-store record applied. **Neither structure is carried by a
         /// generation**, which is why this is honest without a swap: `/v1/meta`, every reachability
         /// check and every membership read them from `LiveState` behind its own lock, so the effect
@@ -1618,6 +1626,11 @@ pub(crate) struct LiveState {
     /// a WAL append followed by an apply, on the one thread that also holds the allocator — and
     /// read by the request path, which resolves a view id against the manifest the roster made.
     roster: Mutex<tessera_lifecycle::ViewRoster>,
+    /// The attribute columns declared while the service runs and not yet folded into a
+    /// `MANIFEST.json`, on the roster's contract: **written only by the executor** (a declaration
+    /// is a WAL append followed by an apply) and read at every side-manifest publication, which is
+    /// the declaration's durable home (`ingest.md` §6.3).
+    attributes: Mutex<crate::attributes::RuntimeAttributes>,
 }
 
 impl LiveState {
@@ -1851,6 +1864,27 @@ impl LiveState {
     fn with_roster<R>(&self, f: impl FnOnce(&mut tessera_lifecycle::ViewRoster) -> R) -> R {
         let mut roster = lock_recover(&self.roster);
         f(&mut roster)
+    }
+
+    /// Run `f` with the runtime attribute list held: the declaration's apply and the fold's
+    /// retirement, and nothing else.
+    fn with_attributes<R>(
+        &self,
+        f: impl FnOnce(&mut crate::attributes::RuntimeAttributes) -> R,
+    ) -> R {
+        let mut attributes = lock_recover(&self.attributes);
+        f(&mut attributes)
+    }
+
+    /// What a publication carries forward: the declarations no fold has written into a
+    /// `MANIFEST.json`, complete current state, on [`Self::roster_for_publication`]'s contract.
+    fn attributes_for_publication(
+        &self,
+    ) -> (
+        Vec<tessera_store::manifest::DeclaredScalar>,
+        Vec<tessera_store::manifest::ScopedScalar>,
+    ) {
+        lock_recover(&self.attributes).snapshot()
     }
 
     /// What a publication carries forward: the creations and the dead incarnations, complete
@@ -2138,19 +2172,21 @@ pub enum AcceptError {
         index: usize,
         view: String,
     },
-    /// A row carries a number of scalars other than one per declared column.
+    /// A row carries more scalars than the schema declares columns.
     ///
     /// **The commit window indexes `row.scalars` positionally against `MANIFEST.declared_scalars`**
-    /// — that is how a category's key finds its vocabulary — so arity is not a convenience here, it
-    /// is what makes the index in bounds. Without this check a short row panicked inside the write
-    /// executor and surfaced to the caller as a lost receipt.
+    /// — that is how a category's key finds its vocabulary — so a row longer than the schema would
+    /// pair values with columns that do not exist. A row **shorter** than the schema is lawful
+    /// (`ingest.md` §7.1): a column declared at a running service appends at the tail, so a row
+    /// decoded against the schema before the declaration, or a batch omitting a column, holds
+    /// nothing for the positions it lacks, and the window's close pads it with each one's absence
+    /// (`crate::attributes::pad_to_schema`) before anything indexes it.
     ///
     /// Checked at the engine's boundary for the same more-than-one-caller reason as
-    /// [`Self::OutsideExtent`]: the invariant is *every buffered row carries one scalar per declared
-    /// column*, which is a fact about the buffer, and the HTTP handler is only one of the buffer's
-    /// writers. Note the declared list is the **full** one, filterable-only columns included — a
-    /// caller supplies a value for every declared column, and only the *segment* narrows to the
-    /// render ones.
+    /// [`Self::OutsideExtent`]: the invariant is about the buffer, and the HTTP handler is only one
+    /// of the buffer's writers. The declared list is the **full** one, filterable-only columns
+    /// included: a row's scalars cover every declared column, and only the *segment* narrows to
+    /// the render ones.
     ScalarArity {
         index: usize,
         expected: usize,
@@ -2178,9 +2214,9 @@ impl std::fmt::Display for AcceptError {
                 got,
             } => write!(
                 f,
-                "row {index} carries {got} scalars, but the schema declares {expected}. Every \
-                 declared column needs a value, in declaration order — including a column declared \
-                 only for filtering"
+                "row {index} carries {got} scalars, but the schema declares {expected}. A row \
+                 carries at most one value per declared column, in declaration order; a column it \
+                 omits at the tail is absent"
             ),
             AcceptError::OutsideExtent {
                 index,
@@ -2236,6 +2272,9 @@ pub(crate) struct WritePathState {
     /// (`views.md` §3.2). Rebuilt exactly as the layer registry beside it is: seeded from the
     /// manifests, then the log replayed on top.
     pub(crate) roster: tessera_lifecycle::ViewRoster,
+    /// The attribute columns declared at a running service and not yet folded (`ingest.md`
+    /// §6.3), rebuilt as the roster is: seeded from the manifests, then the log replayed on top.
+    pub(crate) attributes: crate::attributes::RuntimeAttributes,
 }
 
 /// The manifest state a reconstruction starts from, before WAL replay unions what was written
@@ -2279,6 +2318,14 @@ pub(crate) struct ManifestSeed<'a> {
     /// would be rejected on every restart. See `ArtifactStore::seed_level_version`.
     pub level_versions: &'a [tessera_store::manifest::LevelVersion],
     pub prefix_dir: std::path::PathBuf,
+    /// The served schema as the manifests make it: the build's columns with every side manifest's
+    /// runtime declarations appended (`Manifest::with_attributes`). Replay compares each
+    /// `AttributeDeclare` record against it, so a record restating a folded column is applied as
+    /// nothing and one contradicting the manifests refuses the open.
+    pub manifest: &'a tessera_store::manifest::Manifest,
+    /// The side manifests' `attributes` and `scoped_attributes`, the runtime declarations no fold
+    /// has written into a `MANIFEST.json`; replay appends to these.
+    pub attributes: crate::attributes::RuntimeAttributes,
 }
 
 /// The levels a fold's retirement is about to move, and the set it retires.
@@ -2598,6 +2645,48 @@ impl WritePath {
             roster.apply(record);
         }
 
+        // **The runtime attribute columns, on the same ordering rule** (`ingest.md` §6.3): the
+        // manifests' lists are the starting point and every record postdates them. A record
+        // naming a column the served schema already holds identically is applied as nothing,
+        // which is what a fold that moved the column into `MANIFEST.json` before the log rotated
+        // leaves behind; one holding a different identity under a held name is a log that
+        // disagrees with the manifests about what every row stores, and refuses the open.
+        let mut attributes = seed.attributes;
+        let mut served = seed.manifest.clone();
+        for record in &records {
+            let WalRecord::AttributeDeclare { declaration } = record else {
+                continue;
+            };
+            let Some(compiled) = crate::attributes::compile_record(declaration) else {
+                return Err(EngineError::Malformed(format!(
+                    "the WAL declares attribute '{}' with type '{}', which this build cannot \
+                     store; this node does not open",
+                    declaration.name, declaration.ty
+                )));
+            };
+            match crate::attributes::held_by_name(&served, &declaration.name) {
+                Some(held) if held == compiled => continue,
+                Some(_) => {
+                    return Err(EngineError::Malformed(format!(
+                        "the WAL declares attribute '{}' with an identity the manifests do not \
+                         carry for that name; every row stored under it is of unknowable shape, \
+                         so this node does not open",
+                        declaration.name
+                    )));
+                }
+                None => {}
+            }
+            match &compiled {
+                crate::attributes::CompiledAttribute::Entity(d) => {
+                    served = served.with_attributes(std::slice::from_ref(d), &[]);
+                }
+                crate::attributes::CompiledAttribute::Scoped(f) => {
+                    served = served.with_attributes(&[], std::slice::from_ref(f));
+                }
+            }
+            attributes.push(compiled);
+        }
+
         // **The manifests' membership extents are the starting point, and replay unions what came
         // after** — the registry's ordering rule above, for the same reason: every WAL record
         // postdates any state a manifest carries, so seeding afterwards would overwrite a later
@@ -2790,6 +2879,7 @@ impl WritePath {
                 registry,
                 artifacts,
                 roster,
+                attributes,
             },
         ))
     }
@@ -2810,6 +2900,7 @@ impl WritePath {
                 registry: Mutex::new(state.registry),
                 artifacts: Mutex::new(state.artifacts),
                 roster: Mutex::new(state.roster),
+                attributes: Mutex::new(state.attributes),
             }),
             wal: Some(state.wal),
             handle: None,
@@ -3255,6 +3346,24 @@ impl WritePath {
         match receipt.outcome {
             Ok(Ack::ViewCreated) => Ok(()),
             Ok(other) => unreachable!("a CreateView command answers ViewCreated, not {other:?}"),
+            Err(e) => Err(AcceptError::Exec(e)),
+        }
+    }
+
+    /// Declare an attribute column while the service runs (`ingest.md` §1.3, §6.3). Answers
+    /// whether the name already carried this identity, in which case nothing was appended.
+    pub(crate) fn declare_attribute(
+        &self,
+        request: tessera_lifecycle::AttributeRequest,
+    ) -> Result<bool, AcceptError> {
+        let receipt = self.handle()?.submit(Command::DeclareAttribute {
+            request: Box::new(request),
+        })?;
+        match receipt.outcome {
+            Ok(Ack::AttributeDeclared { existing }) => Ok(existing),
+            Ok(other) => {
+                unreachable!("a DeclareAttribute command answers AttributeDeclared, not {other:?}")
+            }
             Err(e) => Err(AcceptError::Exec(e)),
         }
     }
@@ -4245,6 +4354,26 @@ pub(crate) fn view_scalar_schema_of(
             .map(|f| (f.name.clone(), f.arrow_type)),
     );
     schema
+}
+
+/// The columns of one view's writer schema an input segment may lawfully lack, for a merge or a
+/// fold of segments written before them (`tessera_store::segment_cursor::gather_scalars`): the
+/// group-scoped render lanes, which begin at `entity_scoped` in the schema (`views.md` §5), and
+/// the entity-scoped columns declared at a running service and not yet folded (`ingest.md` §6.3).
+/// Every other column of the schema is one every input holds, and one missing is a torn segment.
+pub(crate) fn lawful_absences(
+    schema: &[(String, ScalarType)],
+    entity_scoped: usize,
+    runtime: &[String],
+) -> Vec<String> {
+    schema
+        .iter()
+        .enumerate()
+        .filter(|(position, (name, _))| {
+            *position >= entity_scoped || runtime.iter().any(|held| held == name)
+        })
+        .map(|(_, (name, _))| name.clone())
+        .collect()
 }
 
 /// The filterable columns, with the position each occupies in a buffered row's scalar list.
@@ -5990,7 +6119,14 @@ impl Executor {
         // **This view's schema, not the bundle's** — the merged segment must carry the scoped
         // render lanes its inputs carry, or the rewrite serves them as absence (`views.md` §5).
         let scalar_schema = view_scalar_schema_of(manifest, &plan.view);
-        let scoped_from = scalar_schema_of(manifest).len();
+        let runtime: Vec<String> = self
+            .live
+            .attributes_for_publication()
+            .0
+            .into_iter()
+            .map(|d| d.name)
+            .collect();
+        let absent_ok = lawful_absences(&scalar_schema, scalar_schema_of(manifest).len(), &runtime);
         let Some(partition_data) = generation.bundle.partitions.get(&plan.partition) else {
             return;
         };
@@ -6006,7 +6142,7 @@ impl Executor {
             identity_key: self.identity_key,
             shard_id: manifest.identity.shard_id,
             scalar_schema,
-            scoped_from,
+            absent_ok,
             watermark: generation.watermark,
             entity_id_high_water: partition_data.manifest.entity_id_high_water,
         };
@@ -6610,15 +6746,36 @@ impl Executor {
                 )
             })
             .collect();
-        let scoped_from: std::collections::BTreeMap<String, usize> = {
-            let entity_scoped = scalar_schema_of(manifest).len();
-            plan.views
-                .iter()
-                .map(|view| (view.view.clone(), entity_scoped))
-                .collect()
-        };
         let Some(partition_data) = generation.bundle.partitions.get(&plan.partition) else {
             return;
+        };
+        // The columns declared at a running service and not yet folded, by name: the fold writes
+        // each a base from its extents alone, and the publication takes them off the runtime list
+        // (`ingest.md` §6.3). Taken from the live list at the plan, so a declaration made while
+        // the fold runs is not among them.
+        let (runtime_attributes, runtime_scoped_attributes) = {
+            let (entity, scoped) = self.live.attributes_for_publication();
+            (
+                entity.into_iter().map(|d| d.name).collect::<Vec<_>>(),
+                scoped.into_iter().map(|f| f.name).collect::<Vec<_>>(),
+            )
+        };
+        // Per view, the columns an input segment may lawfully lack: the runtime columns above and
+        // the view's group-scoped lanes. Any other missing column fails the fold as a torn segment.
+        // Read from `runtime_attributes` rather than from a second snapshot of the live list: a
+        // declaration landing between two reads would put a column on one list and not the other,
+        // and the fold would then either refuse a lawful absence or accept a torn one.
+        let absent_ok: std::collections::BTreeMap<String, Vec<String>> = {
+            let entity_scoped = scalar_schema_of(manifest).len();
+            scalar_schema
+                .iter()
+                .map(|(view, schema)| {
+                    (
+                        view.clone(),
+                        lawful_absences(schema, entity_scoped, &runtime_attributes),
+                    )
+                })
+                .collect()
         };
         let to_prefix = match crate::compact::next_prefix_name(&self.bundle_root) {
             Ok(prefix) => prefix,
@@ -6638,7 +6795,9 @@ impl Executor {
             identity_key: self.identity_key,
             shard_id: manifest.identity.shard_id,
             scalar_schema,
-            scoped_from,
+            absent_ok,
+            runtime_attributes,
+            runtime_scoped_attributes,
             // The same never-reused shape a flush's and a merge's `seg_id` have (contracts §2.1).
             // A fold writes into a fresh prefix, so nothing can collide today; the id is still
             // unique because a `seg_id` naming two different segments across a bundle's life is
@@ -7359,6 +7518,8 @@ impl Executor {
         // argument above it: the manifest a fold planned against may be several publications
         // behind, and a view created since must not be dropped by the publication that lands.
         let (created_views, dead_view_incarnations) = self.live.roster_for_publication();
+        let (runtime_attributes, runtime_scoped_attributes) =
+            self.live.attributes_for_publication();
 
         let mut segments_manifest = SegmentsManifest {
             // The flight's text extents, and the pass merged every other one into the new base
@@ -7390,12 +7551,27 @@ impl Executor {
             // here would be a second copy of a fact the prefix's own manifest now states
             // (`views.md` §5).
             scoped_columns: Vec::new(),
-            // **Carried from the live manifest, on the roster's argument**: a declaration made
-            // while the fold ran must survive the publication that lands. Whether a fold writes
-            // these into the next `MANIFEST.json` and empties them here, as it does the scoped
-            // columns, is decided where each list is first written (T4, T5, T6; `ingest.md` §8).
-            attributes: live_manifest.attributes.clone(),
-            scoped_attributes: live_manifest.scoped_attributes.clone(),
+            // **The declarations made since the fold planned, and only those.** The fold's
+            // `MANIFEST.json` is the served schema as it stood at the plan, runtime columns
+            // included, with a base written for each (`compact::FoldContext::runtime_attributes`);
+            // restating those here would be a second copy of a fact the prefix's own manifest now
+            // states, on the scoped columns' argument above. A declaration made while the fold ran
+            // is in neither and must survive the publication that lands, so the live list is taken
+            // and the folded names removed from it (`ingest.md` §6.3).
+            attributes: runtime_attributes
+                .iter()
+                .filter(|d| !completed.runtime_attributes.contains(&d.name))
+                .cloned()
+                .collect(),
+            scoped_attributes: runtime_scoped_attributes
+                .iter()
+                .filter(|f| !completed.runtime_scoped_attributes.contains(&f.name))
+                .cloned()
+                .collect(),
+            // Carried from the live manifest, on the roster's argument: a declaration made while
+            // the fold ran must survive the publication that lands. Whether a fold writes these
+            // into the next `MANIFEST.json` and empties them here is decided where each list is
+            // first written (T5, T6; `ingest.md` §8).
             vocabularies: live_manifest.vocabularies.clone(),
             groups: live_manifest.groups.clone(),
             dead_view_incarnations,
@@ -7464,6 +7640,37 @@ impl Executor {
         // field does not re-issue entity ids after a restart — and it is a property of the other
         // reader, not of this one, so a change on either side has to re-check it.
         let mut bundle_manifest = live.bundle.manifest.clone();
+        // **The schema as it stood at the plan.** A column declared while the fold ran has no
+        // base in the new prefix, so it stays off this manifest and on the side manifest's runtime
+        // list, from which the reopen appends it again at the same tail position
+        // (`ingest.md` §6.3; `compact::FoldContext::runtime_attributes`).
+        {
+            let (runtime_attributes, runtime_scoped_attributes) =
+                self.live.attributes_for_publication();
+            let since_plan: Vec<&str> = runtime_attributes
+                .iter()
+                .map(|d| d.name.as_str())
+                .filter(|name| !completed.runtime_attributes.iter().any(|n| n == name))
+                .collect();
+            bundle_manifest
+                .declared_scalars
+                .retain(|d| !since_plan.contains(&d.name.as_str()));
+            let scoped_since_plan: Vec<&str> = runtime_scoped_attributes
+                .iter()
+                .map(|f| f.name.as_str())
+                .filter(|name| {
+                    !completed
+                        .runtime_scoped_attributes
+                        .iter()
+                        .any(|n| n == name)
+                })
+                .collect();
+            for group in &mut bundle_manifest.groups {
+                group
+                    .scoped_scalars
+                    .retain(|f| !scoped_since_plan.contains(&f.name.as_str()));
+            }
+        }
         bundle_manifest.entity_id_high_water = plan.entity_bound;
         bundle_manifest.files = completed.files.clone();
         // **The extensions fold in verbatim, and verbatim is the whole rule** (§3.3). Every binding
@@ -7907,6 +8114,14 @@ impl Executor {
         // applies entries and never assigns.
         self.rotate_wal();
         stairs.record("16 wal");
+        // The columns this fold wrote into `MANIFEST.json` leave the runtime list: from here they
+        // are the build's, with a base every reader opens (`ingest.md` §6.3).
+        self.live.with_attributes(|attributes| {
+            attributes.retire_folded(
+                &completed.runtime_attributes,
+                &completed.runtime_scoped_attributes,
+            )
+        });
 
         // ---- step 8: reclaim the superseded prefix (compaction §8) ------------------------------
         self.pending_reclaim.push(PendingReclaim {
@@ -10693,6 +10908,18 @@ impl Executor {
         let generation = self.generation.load_full();
         let mut vocabularies: Vocabularies = (*generation.vocabularies).clone();
         let declared_scalars = generation.bundle.manifest.declared_scalars.clone();
+        // **The arity is this generation's, and a row admitted under an earlier one is padded
+        // here** (`ingest.md` §7.1). A column declared between a batch's admission and this close
+        // appended at the tail of `declared_scalars`, so the row's own positions keep their
+        // meaning and the positions it lacks are columns it holds nothing for. Padded before the
+        // mint pass below indexes `row.scalars` by declared position, and before the append, so
+        // the log carries every row at the schema its flush will write.
+        let mut closed = closed;
+        for entry in closed.iter_mut() {
+            for row in entry.rows_mut() {
+                crate::attributes::pad_to_schema(&mut row.scalars, &declared_scalars);
+            }
+        }
         // **The group-scoped families, by the view a row names** (`views.md` §5). A row's scoped
         // tail is positional against the families of the group that owns its view, so the mint
         // pass below needs the same list the boundary parsed against — derived once for the
@@ -10700,7 +10927,6 @@ impl Executor {
         // too.
         let scoped_by_view: FxHashMap<String, Vec<tessera_store::manifest::ScopedScalar>> =
             scoped_families_by_view(&generation.bundle.manifest);
-        let mut closed = closed;
         let mut fresh_bindings: Vec<(String, String, u32)> = Vec::new();
         let mut mint_failed: Option<MintError> = None;
         'minting: for entry in closed.iter_mut() {
@@ -11234,6 +11460,9 @@ impl Executor {
                 key,
                 delete_dangling,
             } => self.commit_view_drop(group, key, delete_dangling, respond),
+            Command::DeclareAttribute { request } => {
+                self.commit_attribute_declare(*request, respond)
+            }
             Command::PublishArtifacts {
                 layer,
                 level,
@@ -11874,6 +12103,166 @@ impl Executor {
         respond.ack(Ack::ViewCreated, &published);
     }
 
+    /// `PUT /control/attributes` — declare an attribute column while the service runs
+    /// (`ingest.md` §1.3, §6.3; decision 0136).
+    ///
+    /// **The shape is [`Self::commit_view_create`]'s**: resolve against state only this thread
+    /// may write, append, fsync, apply, publish, ack. The apply reaches the bundle, because the
+    /// served schema is the manifest's `declared_scalars` and every reader takes it from there:
+    /// the successor generation carries the column at the tail of that list, the filter columns
+    /// hold an empty stack for it so the next flush's extent composes onto something, and a
+    /// vocabulary no column named before is narrowed to the width this column stores.
+    ///
+    /// **Ingestable at the ack.** A batch decoded against the successor's schema carries the
+    /// column; one decoded against the predecessor's is shorter by one and is padded with the
+    /// column's absence at its window's close (`crate::attributes::pad_to_schema`). The column is
+    /// listed on `/v1/meta` from the swap and absent for every entity until a row fills it.
+    ///
+    /// An identical redeclaration answers the existing identity with nothing appended; a
+    /// differing one is a conflict (`ingest.md` §1.1). A failed append means the column does not
+    /// exist, on the layer registration's rule.
+    fn commit_attribute_declare(
+        &mut self,
+        request: tessera_lifecycle::AttributeRequest,
+        respond: Responder,
+    ) {
+        let started = std::time::Instant::now();
+        let generation = self.generation.load_full();
+        let resolved = crate::attributes::resolve(
+            &request,
+            &generation.bundle.manifest,
+            &generation.vocabularies,
+            |name| self.live.registered_layer(name).is_some(),
+        );
+        let (compiled, narrow) = match resolved {
+            Ok(crate::attributes::Resolution::Existing) => {
+                respond.ack(
+                    Ack::AttributeDeclared { existing: true },
+                    &Published::already_declared(&request),
+                );
+                return;
+            }
+            Ok(crate::attributes::Resolution::New { compiled, narrow }) => (compiled, narrow),
+            Err(e) => {
+                respond.fail(e);
+                self.health.note_work_refused();
+                return;
+            }
+        };
+        let (entity, scoped) = match &compiled {
+            crate::attributes::CompiledAttribute::Entity(d) => (vec![d.clone()], Vec::new()),
+            crate::attributes::CompiledAttribute::Scoped(f) => (Vec::new(), vec![f.clone()]),
+        };
+        let manifest = generation.bundle.manifest.with_attributes(&entity, &scoped);
+        // An entity-scoped column takes an empty stack in the filter columns, at its position in
+        // the served list; a scoped family's per-view columns are opened by the first flush that
+        // writes one, as a family declared at the build is for a view created since. Built before
+        // the append, so a column this process cannot hold is refused with nothing written.
+        let filter_columns = match &compiled {
+            crate::attributes::CompiledAttribute::Entity(d) => {
+                let declared_index = manifest.declared_scalars.len() - 1;
+                match generation.filter_columns.with_runtime_column(
+                    d,
+                    declared_index,
+                    &manifest.vocabularies,
+                ) {
+                    Ok(columns) => Arc::new(columns),
+                    Err(e) => {
+                        respond.fail(ExecError::AttributeRefused {
+                            detail: format!("attribute '{}': {e}", request.name),
+                        });
+                        self.health.note_work_refused();
+                        return;
+                    }
+                }
+            }
+            crate::attributes::CompiledAttribute::Scoped(_) => {
+                Arc::clone(&generation.filter_columns)
+            }
+        };
+        let record = WalRecord::AttributeDeclare {
+            declaration: Box::new(compiled.declaration(request.title.clone())),
+        };
+        if let Err(e) = self.wal.append(&record).and_then(|()| self.wal.fsync()) {
+            tracing::error!(
+                error = %e,
+                attribute = %request.name,
+                "ALARM: an attribute declaration could not be made durable; the column does not \
+                 exist"
+            );
+            respond.fail(ExecError::Wal(e));
+            return;
+        }
+
+        // The apply: the live list first, then the successor generation built from it.
+        self.live
+            .with_attributes(|attributes| attributes.push(compiled.clone()));
+        let vocabularies = match narrow {
+            Some((vocabulary, width)) => {
+                let mut vocabularies: Vocabularies = (*generation.vocabularies).clone();
+                if let Some(minter) = vocabularies.get_mut(&vocabulary) {
+                    // Checked by `resolve` against the same bindings; a code bound past the width
+                    // between the two reads cannot happen, minting being this thread's alone.
+                    if let Err(code) = minter.narrow_to(width) {
+                        tracing::error!(
+                            vocabulary = %vocabulary,
+                            code,
+                            "ALARM: a vocabulary bound a code past a width the executor had just \
+                             checked it against; the declaration is durable and the width stays \
+                             the wider one"
+                        );
+                    }
+                }
+                Arc::new(vocabularies)
+            }
+            None => Arc::clone(&generation.vocabularies),
+        };
+        // A category over a vocabulary no column named before has no suggestion index, the open
+        // building one only for the vocabularies a column names; built here, on this thread, as
+        // the open builds it, so the suggest verb answers the column from the acknowledgement
+        // rather than from the next restart. A build that fails is omitted and warned, on
+        // `SuggestIndexes::build`'s rule: the suggest verb refuses the column and nothing else is
+        // affected.
+        let suggest = match compiled.category() {
+            Some((vocabulary, _)) if generation.suggest.get(vocabulary).is_none() => {
+                let built = crate::suggest::SuggestIndexes::build(
+                    &self.suggest_dir,
+                    &vocabularies,
+                    [vocabulary.to_string()],
+                    &self.pool,
+                );
+                Arc::new(generation.suggest.with_built(built))
+            }
+            _ => Arc::clone(&generation.suggest),
+        };
+        let bundle = generation.bundle.with_views(manifest);
+        let denied = Arc::new(crate::compose::derive_denied(&generation.overlay, &bundle));
+        let next = Generation {
+            prefix: generation.prefix.clone(),
+            // **Unmoved**, on `publish_roster`'s argument: no row moved.
+            segments_version: generation.segments_version,
+            watermark: generation.watermark,
+            bundle,
+            dict: Arc::clone(&generation.dict),
+            postings: Arc::clone(&generation.postings),
+            fragments: Arc::clone(&generation.fragments),
+            external_index: Arc::clone(&generation.external_index),
+            delta_postings: generation.delta_postings.clone(),
+            overlay_version: generation.overlay_version,
+            overlay: Arc::clone(&generation.overlay),
+            buffer: Arc::clone(&generation.buffer),
+            vocabularies,
+            filter_columns,
+            suggest,
+            denied,
+        };
+        let published = self.publish(next, started);
+        // Durable in the log and not yet in a manifest, and a rotation reclaims the log: the
+        // declaration reaches `SEGMENTS-<n>.json` on the mechanism a deny already uses.
+        self.deny_dirty = true;
+        respond.ack(Ack::AttributeDeclared { existing: false }, &published);
+    }
+
     /// `DELETE /control/views/{group}/{key}` — drop a view, freeing its key and killing its
     /// incarnation (`views.md` §3.4, decision 0115).
     ///
@@ -12368,6 +12757,10 @@ impl Executor {
             let (created_views, dead_view_incarnations) = self.live.roster_for_publication();
             manifest.views = created_views;
             manifest.dead_view_incarnations = dead_view_incarnations;
+            // The runtime attribute columns beside the roster, on its rule (`ingest.md` §6.3).
+            let (attributes, scoped_attributes) = self.live.attributes_for_publication();
+            manifest.attributes = attributes;
+            manifest.scoped_attributes = scoped_attributes;
             // **Membership extents are written before the manifest that names them**, which is the
             // whole of their durability contract: a manifest naming a missing extent refuses at
             // open, so the file has to be durable first. A failure here abandons the publication
@@ -12650,9 +13043,7 @@ impl Executor {
         n: u64,
         retired: &croaring::Bitmap,
     ) -> tessera_store::Result<Vec<tessera_store::manifest::MembershipExtent>> {
-        let ready = self
-            .live
-            .with_artifacts(|store| store.repack_all(retired));
+        let ready = self.live.with_artifacts(|store| store.repack_all(retired));
         if ready.is_empty() {
             return Ok(Vec::new());
         }
@@ -13867,6 +14258,10 @@ impl Executor {
         let (created_views, dead_view_incarnations) = self.live.roster_for_publication();
         manifest.views = created_views;
         manifest.dead_view_incarnations = dead_view_incarnations;
+        // The runtime attribute columns beside the roster, on its rule (`ingest.md` §6.3).
+        let (attributes, scoped_attributes) = self.live.attributes_for_publication();
+        manifest.attributes = attributes;
+        manifest.scoped_attributes = scoped_attributes;
         // **And the group-scoped columns this flush gave a view its first of** (`views.md` §5).
         // Carried forward and appended to, never restated: the list is what a *restart* recovers
         // `scoped_scalars[..].views` from, and a render-only family writes no extent for the

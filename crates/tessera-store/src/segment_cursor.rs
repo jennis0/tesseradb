@@ -81,25 +81,26 @@ impl SegmentCursor {
 
 /// This row's declared scalars, in schema order — the shape [`crate::write::SegmentRow`] wants.
 ///
-/// **A column the input lacks, or holds under another type, fails the operation**, and the
-/// alternative is why: a `filter_map` here drops the missing one and shifts every later scalar up a
-/// position, so the output segment's columns are silently transposed — every value present, every
-/// value under the wrong name, and no count or digest that would show it.
+/// **A column the input holds under another type fails the operation.** A narrowing or widening
+/// here would let a rewrite put a value under a width the manifest does not declare, which the
+/// next reader opens as garbage rather than as an error.
 ///
-/// **`scoped_from` is the one exception, and it is absence rather than malformation**
-/// (`views.md` §5) — the write end's counterpart of `viewport::gather_tile_columns`' own, and the
-/// same index. From that position on the schema names a view's **group-scoped** render lanes, and
-/// a segment of that view may lawfully hold none: a batch into a view of a group that only
-/// *shares* the family's views carries no value, and a view whose family list grew after some of
-/// its segments were flushed has older ones with no lane. Such a column takes the render
-/// placeholder — the type's zero, which is what an absent value is written as anyway (decision
-/// 0064) — and the row keeps its position. A **wrong type** under the name is still malformed,
-/// scoped or not: that is a segment disagreeing with the manifest, not one that predates the
-/// family.
+/// **A column the input's schema lacks is absent when `absent_ok` names it, and a malformed
+/// bundle otherwise.** Two states lawfully produce the absence, and the caller knows which
+/// columns they cover: a view's **group-scoped** render lane that a segment of the view was
+/// written without (`views.md` §5), and an entity-scoped column declared at a running service
+/// after the segment was written (`ingest.md` §6.3). Such a column takes the render placeholder,
+/// the type's zero, which is what an absent value is written as anyway (decision 0064); the
+/// caller records the absence in the column's presence bitmap from the same schema fact, and the
+/// row keeps its position. Answered from the schema alone: the absence is never looked up in the
+/// record blob. A column absent for any other reason is a torn or mismatched segment, and writing
+/// it as absence would blank every row's value and then reclaim the input it was read from: the
+/// operation fails instead, naming the column. Dropping the column would shift every later
+/// scalar up a position and transpose the output segment with no count or digest to show it.
 pub(crate) fn gather_scalars(
     columns: &ColumnsRef,
     schema: &[(String, ScalarType)],
-    scoped_from: usize,
+    absent_ok: &[String],
     row: usize,
     seg_id: &str,
     op: &str,
@@ -112,17 +113,17 @@ pub(crate) fn gather_scalars(
     };
     schema
         .iter()
-        .enumerate()
-        .map(|(position, (name, declared))| {
+        .map(|(name, declared)| {
             let Some(view) = columns.scalar(name) else {
-                if position >= scoped_from {
+                if absent_ok.iter().any(|lawful| lawful == name) {
                     return Ok(ScalarValue::Null.or_render_placeholder(*declared));
                 }
                 return Err(StoreError::MalformedBundle {
                     detail: format!(
                         "{op}: segment '{seg_id}' has no scalar column '{name}', which this \
-                         bundle declares; dropping it would shift every later scalar into the \
-                         wrong column"
+                         bundle declares and no declaration made since the segment explains; \
+                         writing the rows as absent would blank the column and reclaim the \
+                         segment, so the operation is refused"
                     ),
                 });
             };
