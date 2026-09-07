@@ -146,7 +146,9 @@ by content type and decodes both into one record batch before the row rules run;
 envelope in the schema's metadata; `PUT` stays JSON, an artifact record being object-shaped; a
 request with no content type is JSON, and any other content type is refused naming the two. A
 timestamp is integer microseconds since the epoch, the spelling the roster's `timestamp_us` takes.
-A null or absent `access` at the JSON door is a row with no label, as an empty list is. The routes
+A null or absent `access` at the JSON door and a null list cell at the Arrow door are each a row
+with no label, as an empty list is, so the two doors agree; only a column absent from a whole
+batch is refused at either. The routes
 marked ⊘ in §1.3 take JSON when they are built.
 
 ### 1.3 The kinds

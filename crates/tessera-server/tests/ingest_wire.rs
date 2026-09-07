@@ -557,6 +557,7 @@ async fn a_cell_that_does_not_coerce_is_refused_naming_row_and_column() {
         ("score", json!(1.5), "row 1, column 'score'"),
         ("score", json!("ten"), "row 1, column 'score'"),
         ("weight", json!("heavy"), "row 1, column 'weight'"),
+        ("weight", json!(1.0e39), "row 1, column 'weight'"),
         ("big", json!(-1), "row 1, column 'big'"),
         ("seen", json!(1.0e6), "row 1, column 'seen'"),
         ("tag", json!(7), "row 1, column 'tag'"),
@@ -634,9 +635,10 @@ async fn a_cell_that_does_not_coerce_is_refused_naming_row_and_column() {
     );
 }
 
-/// **Decision 0133 at the JSON door.** An empty list, a null and an absent `access` are each a
-/// row with no label: under a declared default all three land under it; under no default the
-/// batch is refused naming the count of such rows and the view.
+/// **Decision 0133 at the JSON door, four cases.** An empty list, a null and an absent `access`
+/// are each a row with no label: under a declared default all three land under it; under no
+/// default the batch is refused naming the count of such rows and the view. An empty element is
+/// no label at all and is refused. The Arrow door's four are in `access_list.rs`.
 #[tokio::test]
 async fn an_unlabelled_json_row_takes_the_declared_default_or_is_refused_with_the_count() {
     async fn served_with_default(default: Option<&str>) -> (TempDir, TestServer) {
@@ -714,6 +716,16 @@ async fn an_unlabelled_json_row_takes_the_declared_default_or_is_refused_with_th
         high_water,
         "the batch had no effect"
     );
+    let (status, resp) = ingest(
+        &server,
+        "empty-element",
+        Some("application/json"),
+        json!([{ "external_id": b64(&external_id_of(N_ITEMS + 600)), "x": 1.0, "y": 1.0, "access": [""] }])
+            .to_string()
+            .into_bytes(),
+    )
+    .await;
+    assert_eq!(status, 422, "an empty element is no label at all: {resp}");
 }
 
 fn member(source_id: u64) -> String {
@@ -1072,6 +1084,107 @@ async fn a_growth_page_as_arrow_lands_what_the_json_page_lands() {
         assert_eq!(count("j"), count("a"), "{terms:?}: {artifacts:?}");
         assert!(count("j") > 5, "the growth landed: {artifacts:?}");
     }
+
+    // The Arrow form carries what the JSON form carries and nothing else: a third column, an
+    // unknown metadata key and a null `members` cell are each refused naming it.
+    fn stream(
+        fields: Vec<Field>,
+        columns: Vec<Arc<dyn Array>>,
+        metadata: &[(&str, &str)],
+    ) -> Vec<u8> {
+        let schema = Arc::new(
+            Schema::new(fields).with_metadata(
+                metadata
+                    .iter()
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .collect(),
+            ),
+        );
+        let batch = RecordBatch::try_new(schema.clone(), columns).unwrap();
+        let mut writer = StreamWriter::try_new(Vec::new(), &schema).unwrap();
+        writer.write(&batch).unwrap();
+        writer.into_inner().unwrap()
+    }
+    fn one_list(members: &[Option<&str>]) -> arrow::array::ListArray {
+        let mut lists = arrow::array::ListBuilder::new(arrow::array::StringBuilder::new());
+        for member in members {
+            lists.values().append_option(*member);
+        }
+        lists.append(true);
+        lists.finish()
+    }
+    let key = || Arc::new(StringArray::from(vec!["a"])) as Arc<dyn Array>;
+    let list = one_list(&[Some("QUFBQUFBQUFBQUE=")]);
+    let list_type = list.data_type().clone();
+    let (status, body) = patch_raw(
+        &server,
+        ARROW,
+        stream(
+            vec![
+                Field::new("key", DataType::Utf8, false),
+                Field::new("members", list_type.clone(), true),
+                Field::new("parent", DataType::Utf8, true),
+            ],
+            vec![key(), Arc::new(list.clone()), key()],
+            &[("addressing", "external")],
+        ),
+    )
+    .await;
+    assert_eq!(status, 422, "{body}");
+    assert!(
+        body["detail"].as_str().unwrap().contains("'parent'"),
+        "{body}"
+    );
+    let (status, body) = patch_raw(
+        &server,
+        ARROW,
+        stream(
+            vec![
+                Field::new("key", DataType::Utf8, false),
+                Field::new("members", list_type.clone(), true),
+            ],
+            vec![key(), Arc::new(list.clone())],
+            &[("addressing", "external"), ("default_space", "wgs84")],
+        ),
+    )
+    .await;
+    assert_eq!(status, 422, "{body}");
+    assert!(
+        body["detail"].as_str().unwrap().contains("`default_space`"),
+        "{body}"
+    );
+    let null_members = {
+        let mut lists = arrow::array::ListBuilder::new(arrow::array::StringBuilder::new());
+        lists.append(false);
+        lists.finish()
+    };
+    let (status, body) = patch_raw(
+        &server,
+        ARROW,
+        stream(
+            vec![
+                Field::new("key", DataType::Utf8, false),
+                Field::new("members", null_members.data_type().clone(), true),
+            ],
+            vec![key(), Arc::new(null_members)],
+            &[("addressing", "external")],
+        ),
+    )
+    .await;
+    assert_eq!(status, 422, "{body}");
+    assert!(
+        body["detail"]
+            .as_str()
+            .unwrap()
+            .contains("column 'members' is null"),
+        "{body}"
+    );
+    let (_, artifacts) = viewport(&server, &["0"], None).await;
+    assert_eq!(
+        artifacts.len(),
+        2,
+        "none of the three refusals applied anything"
+    );
 
     // The Arrow form's envelope is the schema's metadata, and a stream without it is refused
     // naming what it lacks.

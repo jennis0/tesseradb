@@ -327,7 +327,15 @@ fn scalar_column(
             for row in 0..rows.len() {
                 match float(cell(row)?, row, name)? {
                     None => builder.append_null(),
-                    Some(value) => builder.append_value(value as f32),
+                    // Narrowed to the declared width, and refused where the narrowing would
+                    // store an infinity for a finite number.
+                    Some(value) => {
+                        let narrowed = value as f32;
+                        if !narrowed.is_finite() {
+                            return Err(refusal(row, name, "is outside f32's finite range"));
+                        }
+                        builder.append_value(narrowed);
+                    }
                 }
             }
             Arc::new(builder.finish())

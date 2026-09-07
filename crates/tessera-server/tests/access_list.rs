@@ -439,29 +439,85 @@ async fn an_empty_list_is_refused_naming_the_count_where_no_default_is_declared(
     );
 }
 
-/// A null list could mean "no label" or "not supplied", and a null element has no bytes to be a
-/// label; both are refused naming the row, and the batch has no effect.
+/// **The four cases at the Arrow door** (decision 0133): a null list cell and an empty list are
+/// one case, a row with no label, filled by a declared default and refused with the count where
+/// none is declared; an empty element is refused as no label at all; the column absent from the
+/// batch is refused at the schema. The JSON door's four are in `ingest_wire.rs`.
 #[tokio::test]
-async fn a_null_list_and_a_null_element_are_refused_naming_the_row() {
-    let (_tmp, server) = served().await;
-    let high_water_before = control_status(&server).await["entity_id_high_water"].clone();
+async fn a_null_cell_and_an_empty_list_are_one_case_at_the_arrow_door() {
+    fn null_and_empty() -> Vec<u8> {
+        let mut lists = ListBuilder::new(StringBuilder::new());
+        lists.append(false);
+        lists.append(true);
+        body_with_access(2, Arc::new(lists.finish()))
+    }
+    let (_tmp, server) = served_with_default(Some("ir:sealed")).await;
+    let before = visible_to(&server, &["ir:sealed"]).await;
+    let resp = ingest(&server, "filled", null_and_empty()).await;
+    assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
+    flush(&server).await;
+    assert_eq!(
+        visible_to(&server, &["ir:sealed"]).await,
+        before + 2,
+        "the null cell and the empty list both landed under the declared default"
+    );
 
-    let mut null_list = ListBuilder::new(StringBuilder::new());
-    null_list.values().append_value("0");
-    null_list.append(true);
-    null_list.append(false);
-    let resp = ingest(
-        &server,
-        "null-list",
-        body_with_access(2, Arc::new(null_list.finish())),
-    )
-    .await;
+    let (_tmp, server) = served_with_default(None).await;
+    let high_water_before = control_status(&server).await["entity_id_high_water"].clone();
+    let resp = ingest(&server, "refused", null_and_empty()).await;
     assert_eq!(resp.status(), 422);
     let detail = resp.text().await.unwrap();
     assert!(
-        detail.contains("column 'access' is null at row 1"),
-        "{detail}"
+        detail.contains("2 row(s)") && detail.contains("declares no `point_visibility.default`"),
+        "the refusal counts the null cell with the empty list: {detail}"
     );
+
+    let mut empty_element = ListBuilder::new(StringBuilder::new());
+    empty_element.values().append_value("");
+    empty_element.append(true);
+    let resp = ingest(
+        &server,
+        "empty-element",
+        body_with_access(1, Arc::new(empty_element.finish())),
+    )
+    .await;
+    assert_eq!(resp.status(), 422, "an empty element is no label at all");
+
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("external_id", DataType::Binary, false),
+        Field::new("x", DataType::Float32, false),
+        Field::new("y", DataType::Float32, false),
+    ]));
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(BinaryArray::from_iter_values([external_id_of(
+                N_ITEMS + 900,
+            )])),
+            Arc::new(Float32Array::from_iter_values([10.0])),
+            Arc::new(Float32Array::from_iter_values([10.0])),
+        ],
+    )
+    .unwrap();
+    let mut writer = StreamWriter::try_new(Vec::new(), &schema).unwrap();
+    writer.write(&batch).unwrap();
+    let resp = ingest(&server, "absent", writer.into_inner().unwrap()).await;
+    assert_eq!(resp.status(), 422);
+    let detail = resp.text().await.unwrap();
+    assert!(detail.contains("column 'access' missing"), "{detail}");
+    assert_eq!(
+        control_status(&server).await["entity_id_high_water"],
+        high_water_before,
+        "no refused batch had any effect"
+    );
+}
+
+/// A null element has no bytes to be a label; it is refused naming the row, and the batch has no
+/// effect.
+#[tokio::test]
+async fn a_null_element_is_refused_naming_the_row() {
+    let (_tmp, server) = served().await;
+    let high_water_before = control_status(&server).await["entity_id_high_water"].clone();
 
     let mut null_element = ListBuilder::new(StringBuilder::new());
     null_element.values().append_value("0");
@@ -480,6 +536,6 @@ async fn a_null_list_and_a_null_element_are_refused_naming_the_row() {
     assert_eq!(
         control_status(&server).await["entity_id_high_water"],
         high_water_before,
-        "neither refused batch had any effect"
+        "the refused batch had no effect"
     );
 }

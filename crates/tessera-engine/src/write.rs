@@ -269,8 +269,7 @@ pub struct ExecutorHealth {
     /// observed on, rather than on a sleep.
     pub(crate) flushes: AtomicU64,
     /// When the flush now on the pool was dispatched, as an offset from [`Self::base`] plus one;
-    /// `0` when none is. Read by [`Self::record_flush_published`] for the drain sample and by a
-    /// snapshot for [`ExecutorStats::flush_in_flight_nanos`].
+    /// `0` when none is. Read by [`Self::record_flush_published`] for the drain sample.
     flush_started_nanos: AtomicU64,
     /// Wall nanoseconds per row drained, an EWMA over published flushes measured from dispatch to
     /// publication. Always on, where `flush_stage_nanos` is written only under `bench-timing`: it
@@ -772,8 +771,6 @@ pub struct ExecutorStats {
     /// The observed drain cost: wall nanoseconds per row, an EWMA over published flushes from
     /// dispatch to publication. `0` before the first publication.
     pub flush_nanos_per_row_ewma: u64,
-    /// How long the flush now on the pool has been running; `0` when none is.
-    pub flush_in_flight_nanos: u64,
     /// Time until the next scheduled tick; `0` when one is due or overdue.
     pub next_tick_in_nanos: u64,
     /// Times the overlay crossed to at or above the configured soft limit. **It alarms;
@@ -1011,7 +1008,6 @@ impl ExecutorHealth {
             work_service_nanos_ewma: self.work_service_nanos_ewma.load(Ordering::Relaxed),
             work_in_flight_nanos: self.work_in_flight_nanos(),
             flush_nanos_per_row_ewma: self.flush_nanos_per_row_ewma.load(Ordering::Relaxed),
-            flush_in_flight_nanos: self.elapsed_since_marker(&self.flush_started_nanos),
             next_tick_in_nanos: self
                 .flush_period_nanos
                 .load(Ordering::Relaxed)
@@ -1383,9 +1379,10 @@ pub const RETRY_AFTER_MAX_SECS: u64 = 300;
 /// the same floor and ceiling as [`estimate_retry_after_s`].
 ///
 /// An estimator on the same terms as the queue's: the per-row figure is an EWMA over published
-/// flushes and the next flush may be slower; a flush in flight lands before the next tick can
-/// publish. Before any flush has published the per-row figure is `0` and the answer is the time
-/// to the next tick alone, which is the floor an operator would choose for lack of evidence.
+/// flushes and the next flush may be slower, and a flush already on the pool is not counted, so
+/// the answer is a floor on a busy node. Before any flush has published the per-row figure is `0`
+/// and the answer is the time to the next tick alone, which is the floor an operator would choose
+/// for lack of evidence.
 pub fn estimate_buffer_retry_after_s(stats: &ExecutorStats, buffered: u64) -> u64 {
     let drain = (buffered as u128).saturating_mul(stats.flush_nanos_per_row_ewma as u128);
     let nanos = (stats.next_tick_in_nanos as u128).saturating_add(drain);

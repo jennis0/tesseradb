@@ -2388,9 +2388,18 @@ class Cycle:
         start_visible = visible()
         out: dict = {"n": n, "visible_before": start_visible}
 
+        assert self.limits is not None, "the limits block is read before any change is sent"
+        per_page = int(self.limits["changes"]["max_changes_per_request"])
         for op, batch in (("delete", deletes), ("suppress", suppressions)):
             items = [{"external_id": external, "op": op} for external in batch]
-            r, wall = control.changes(items)
+            # Paged by the route's published record count, as publish and grow are; `r` is the
+            # first refusal or the last acknowledgement, and `wall` the pages' total.
+            wall = 0.0
+            for start in range(0, len(items), per_page):
+                r, page_wall = control.changes(items[start : start + per_page])
+                wall += page_wall
+                if r.status_code != 200:
+                    break
             expected = start_visible - len(batch) if op == "delete" else None
             reached, visibility_s = wait_for(
                 lambda: visible() <= (expected if expected is not None else start_visible - len(batch)),

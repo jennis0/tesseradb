@@ -1588,19 +1588,14 @@ impl LabelCells<'_> {
         }
     }
 
-    /// Row `row`'s labels, verbatim and in order. An empty list is a row with no label, which the
-    /// view's declared default fills or, where none is declared, refuses (decision 0133).
-    ///
-    /// **A null list and a null element are both refused**, naming the row. A null list could be
-    /// read as "no label" or as "label not supplied", and the two differ in what every principal
-    /// may see of the row; a null element has no bytes to be a label. Neither is guessed at.
+    /// Row `row`'s labels, verbatim and in order. **A null list and an empty list are one case,
+    /// a row with no label** (decision 0133), which the view's declared default fills or, where
+    /// none is declared, refuses with the count; the JSON door reads an absent or null `access`
+    /// the same way, so the two doors agree. A whole column absent is still refused at the
+    /// schema. A null element has no bytes to be a label and is refused naming the row.
     fn labels_at(&self, row: usize) -> Result<Vec<Vec<u8>>, ApiError> {
         let Some(entries) = self.entries(row) else {
-            return Err(ApiError::Contract(format!(
-                "ingest body: column 'access' is null at row {row}. A row with no label is an \
-                 empty list; a null could mean that or an omission, so it is refused rather than \
-                 read as either"
-            )));
+            return Ok(Vec::new());
         };
         let values = self.values();
         entries
@@ -3010,6 +3005,26 @@ fn grow_body_from_arrow(body: &[u8]) -> Result<GrowBody, ApiError> {
             ApiError::Contract(format!("growth body is not a valid Arrow IPC stream: {e}"))
         })?;
     let metadata = reader.schema().metadata().clone();
+    // The JSON body's `deny_unknown_fields`, applied to the stream: a column other than the two
+    // and a metadata key other than the three are refused naming it, so the Arrow form carries
+    // no more than the JSON form does.
+    for field in reader.schema().fields() {
+        if !matches!(field.name().as_str(), "key" | "members") {
+            return Err(ApiError::Contract(format!(
+                "growth body: column '{}' is not one this route takes; a growth carries `key` \
+                 and `members` and nothing else",
+                field.name()
+            )));
+        }
+    }
+    for name in metadata.keys() {
+        if !matches!(name.as_str(), "addressing" | "level" | "idset") {
+            return Err(ApiError::Contract(format!(
+                "growth body: schema metadata `{name}` is not one this route takes; the envelope \
+                 is `addressing`, `level` and `idset`"
+            )));
+        }
+    }
     let addressing =
         match metadata.get("addressing").map(String::as_str) {
             Some("external") => Addressing::External,
@@ -3062,6 +3077,14 @@ fn grow_body_from_arrow(body: &[u8]) -> Result<GrowBody, ApiError> {
                     .to_string(),
             )
         })?;
+        // A null cell is refused as the JSON form refuses `"members": null`: an artifact with
+        // nothing joining is an empty list.
+        let null_cell = |row: usize| {
+            ApiError::Contract(format!(
+                "growth body: row {row}, column 'members' is null; an artifact with nothing \
+                 joining carries an empty list"
+            ))
+        };
         let entries = |row: usize| -> Result<Vec<String>, ApiError> {
             let (values, range) = match members.data_type() {
                 DataType::List(_) => {
@@ -3070,7 +3093,7 @@ fn grow_body_from_arrow(body: &[u8]) -> Result<GrowBody, ApiError> {
                         .downcast_ref::<ListArray>()
                         .expect("a List column downcasts to a ListArray");
                     if list.is_null(row) {
-                        return Ok(Vec::new());
+                        return Err(null_cell(row));
                     }
                     let offsets = list.value_offsets();
                     (
@@ -3084,7 +3107,7 @@ fn grow_body_from_arrow(body: &[u8]) -> Result<GrowBody, ApiError> {
                         .downcast_ref::<LargeListArray>()
                         .expect("a LargeList column downcasts to a LargeListArray");
                     if list.is_null(row) {
-                        return Ok(Vec::new());
+                        return Err(null_cell(row));
                     }
                     let offsets = list.value_offsets();
                     (
