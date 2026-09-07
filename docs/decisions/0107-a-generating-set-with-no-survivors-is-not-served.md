@@ -1,6 +1,6 @@
 # 0107 — A generating set with no survivors is not served
 
-**Date:** 2026-08-30 · **Status:** Settled (owner ruling, 2026-08-30)
+**Date:** 2026-08-30 · **Status:** Superseded 2026-09-07 by [decision 0135](0135-a-generating-set-is-the-callers-claim-i8-withdrawn.md)'s amendment: the permissive mode this rule bounded is dropped, so the case cannot arise
 
 ## The decision
 

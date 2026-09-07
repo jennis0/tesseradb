@@ -1,6 +1,6 @@
 # 0135 — A generating set is the caller's claim; I8 is withdrawn
 
-**Date:** 2026-09-07 · **Status:** Settled (owner ruling) · ⊘ the mechanism for changing a set at
+**Date:** 2026-09-07 · **Status:** Settled (owner ruling) — **amended the same day**: the strict and permissive modes are dropped (below) · ⊘ the mechanism for changing a set at
 ingest lands with the ingest design under decision 0134; the invariant text is withdrawn now
 
 ## What this answers
@@ -40,3 +40,19 @@ true thing once: the declared set is what is served against, and the caller owns
   piecemeal.
 - The ingest design (decision 0134) gives a generating set the same unit of ingest as a membership;
   a multi-part upload is not required by I8, since I8 is gone.
+
+## Amendment, 2026-09-07: the strict and permissive modes go
+
+The modes existed because I8 forbade the caller from changing a set, so the service had to decide
+for them what a deletion inside a generating set means: strict withdrew the content and the set at
+the fold, permissive removed the deleted item and kept the content (decision 0107 special-casing an
+emptied set). They cost nothing on the request path — containment is the same test in both — and
+permissive was the service editing the caller's claim on the caller's behalf, which is what this
+decision ends.
+
+**Ruled: both modes are dropped. There is one behaviour.** A deleted item leaves every mask, so a
+set holding it fails containment for every principal by arithmetic; the fold withdraws content whose
+generating set lost a member and reports it, and the caller re-declares the set or the content
+through ingest. `withdraw_on_member_deletion` leaves the content declaration; decision 0107 is
+closed as moot; C7 loses its second channel (content reappearing at a fold), which existed only
+under permissive. ⊘ Not yet built.
