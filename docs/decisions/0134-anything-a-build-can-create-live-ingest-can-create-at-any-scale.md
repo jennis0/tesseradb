@@ -1,7 +1,7 @@
 # 0134 — Anything a build can create, live ingest can create, at any scale
 
-**Date:** 2026-09-07 · **Status:** Settled (owner ruling) · ⊘ not yet built; a design pass over
-ingest under this rule is in progress (`docs/evidence/memos/2026-09-07-ingest-at-any-scale-review.md`
+**Date:** 2026-09-07 · **Status:** Settled (owner ruling) · ⊘ not yet built; the design pass is
+[`ingest.md`](../design/ingest.md), normative 2026-09-07, its rulings decision 0136 (`docs/evidence/memos/2026-09-07-ingest-at-any-scale-review.md`
 is the inventory it starts from)
 
 ## What this answers

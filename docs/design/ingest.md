@@ -2,15 +2,7 @@
 
 **Date:** 2026-09-07 · **Revised:** r3, 2026-09-07, after the three-lens review, the owner's
 rulings and the re-review of r2
-**Status:** **Provisional — under review.** Drafted under [decision 0134](../decisions/0134-anything-a-build-can-create-live-ingest-can-create-at-any-scale.md)
-(every kind a build can create, live ingest can create and extend, at any scale) and
-[decision 0135](../decisions/0135-a-generating-set-is-the-callers-claim-i8-withdrawn.md) as
-amended (I8 withdrawn; a generating set is the caller's claim; one behaviour under deletion). The
-first review round ran under three lenses and every finding was ruled on 2026-09-07; the rulings
-are recorded in spec §10 and applied throughout. The re-review of r2 found nine things, dispositioned without a
-ruling and applied at r3. What remains before this is normative: the owner's ruling and promotion,
-with the decision records for spec §10's rulings. Nothing in it is built except
-where a paragraph says so; ⊘ marks a unit or a rule that differs from the routes that exist.
+**Status:** **Normative — 2026-09-07.** Drafted under [decision 0134](../decisions/0134-anything-a-build-can-create-live-ingest-can-create-at-any-scale.md) and [decision 0135](../decisions/0135-a-generating-set-is-the-callers-claim-i8-withdrawn.md); reviewed under three lenses and re-reviewed once on the sections whose shape changed; the owner's rulings are [decision 0136](../decisions/0136-the-ingest-design-rulings.md). ⊘ Nothing in it is built except where a paragraph says so; §8 is the order of work.
 **Reads against:** architecture §4, §11, Appendix C; write-path §1 to §4, §7; contracts §3.4;
 annotation-write-cycle §1 to §6; artifacts-from-points §6; dag-hierarchies §4; views §3, §5, §7;
 per-point-attributes §2.2, §5; records-and-search §3, §7; configuration §1, §2, §9; decisions
