@@ -409,7 +409,7 @@ async fn register_layer(
             "artifact_visibility": { "field": null, "default": "inherited" },
             "require_member_visibility": criterion,
             "hierarchy": { "kind": kind, "prune_children": false },
-            "content": { "computed": [], "supplied": [], "withdraw_on_member_deletion": true },
+            "content": { "computed": [], "supplied": [] },
             "depends_on": [],
             "levels": []
         }))
@@ -1334,8 +1334,7 @@ async fn a_layer_declaring_supplied_content_refuses_to_mint() {
             "hierarchy": { "kind": "flat", "prune_children": false },
             "content": {
                 "computed": [],
-                "supplied": [{ "name": "label", "type": "text", "require_member_visibility": "inherited" }],
-                "withdraw_on_member_deletion": true
+                "supplied": [{ "name": "label", "type": "text", "require_member_visibility": "inherited" }]
             },
             "depends_on": [],
             "levels": []
@@ -1450,7 +1449,7 @@ async fn a_column_naming_a_predicate_layer_is_refused() {
             "artifact_visibility": { "field": null, "default": "inherited" },
             "require_member_visibility": { "count": 2 },
             "hierarchy": { "kind": "flat", "prune_children": false },
-            "content": { "computed": [], "supplied": [], "withdraw_on_member_deletion": true },
+            "content": { "computed": [], "supplied": [] },
             "depends_on": [],
             "levels": []
         }))
@@ -1503,7 +1502,7 @@ async fn a_lineage_naming_an_edge_the_layer_does_not_hold_still_joins() {
             "artifact_visibility": { "field": null, "default": "inherited" },
             "require_member_visibility": null,
             "hierarchy": { "kind": "nested", "prune_children": false },
-            "content": { "computed": [], "supplied": [], "withdraw_on_member_deletion": true },
+            "content": { "computed": [], "supplied": [] },
             "depends_on": [],
             "levels": []
         }))

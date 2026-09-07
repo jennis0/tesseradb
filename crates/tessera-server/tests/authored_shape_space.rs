@@ -249,8 +249,7 @@ fn drawing_layer(name: &str) -> serde_json::Value {
                 "name": "outline",
                 "type": "polygon",
                 "require_member_visibility": "inherited"
-            }],
-            "withdraw_on_member_deletion": true
+            }]
         },
         "depends_on": [],
         "levels": []

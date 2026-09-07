@@ -3591,8 +3591,7 @@ mod tests {
                 "name": "outline",
                 "type": "polygon",
                 "require_member_visibility": "inherited"
-            }],
-            "withdraw_on_member_deletion": true
+            }]
         });
         let declarations = [selects, draws]
             .into_iter()

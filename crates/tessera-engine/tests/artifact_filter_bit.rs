@@ -397,7 +397,6 @@ fn labels() -> LayerDeclaration {
                 // is about the bit rather than about containment — which has its own file.
                 require_member_visibility: tessera_types::layer::SuppliedRequirement::Inherited,
             }],
-            withdraw_on_member_deletion: true,
         },
         depends_on: vec![CLUSTERS.into()],
         levels: Vec::new(),
@@ -574,7 +573,6 @@ fn described() -> LayerDeclaration {
                 ty: "text".into(),
                 require_member_visibility: tessera_types::layer::SuppliedRequirement::All,
             }],
-            withdraw_on_member_deletion: true,
         },
         depends_on: Vec::new(),
         levels: Vec::new(),

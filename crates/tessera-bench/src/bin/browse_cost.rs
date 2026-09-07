@@ -320,7 +320,6 @@ fn scan_layer() -> tessera_types::layer::LayerDeclaration {
         content: ContentDeclaration {
             computed: Vec::new(),
             supplied: Vec::new(),
-            withdraw_on_member_deletion: true,
         },
         depends_on: Vec::new(),
         levels: Vec::new(),

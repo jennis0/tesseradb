@@ -46,7 +46,7 @@ def _layer() -> dict:
         "artifact_visibility": {"field": None, "default": "inherited"},
         "require_member_visibility": None,
         "hierarchy": {"kind": "flat", "prune_children": False},
-        "content": {"computed": [], "supplied": [], "withdraw_on_member_deletion": True},
+        "content": {"computed": [], "supplied": []},
         "depends_on": [],
         "levels": [],
         "layout": None,

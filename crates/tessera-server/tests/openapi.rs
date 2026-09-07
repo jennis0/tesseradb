@@ -238,7 +238,7 @@ async fn publish_layer(server: &TestServer) -> Vec<String> {
         "artifact_visibility": { "field": null, "default": "inherited" },
         "require_member_visibility": { "count": 1 },
         "hierarchy": { "kind": "flat", "prune_children": false },
-        "content": { "computed": ["centroid", "hull", "box"], "supplied": [], "withdraw_on_member_deletion": true },
+        "content": { "computed": ["centroid", "hull", "box"], "supplied": [] },
         "depends_on": [],
         "levels": []
     });

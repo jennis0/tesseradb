@@ -157,8 +157,6 @@ pub struct ContentDisclosure {
     /// no requirement of their own.
     pub computed: Vec<String>,
     pub supplied: Vec<SuppliedDisclosure>,
-    /// Whether supplied content is dropped when one of its generating set is deleted.
-    pub withdraw_on_member_deletion: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -300,7 +298,6 @@ impl Disclosure {
                             },
                         })
                         .collect(),
-                    withdraw_on_member_deletion: layer.content.withdraw_on_member_deletion,
                 },
                 shape: layer.drawn_shape().map(|k| k.name().to_string()),
             })

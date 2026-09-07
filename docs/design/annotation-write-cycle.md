@@ -20,7 +20,7 @@ cluster's labels still serving on routes that do not traverse the edge.
 refute the shape — **Stage 4's first measurement, not its last** — and spec §11's residue, plus the
 deferred edit pass (Stage 7) and the proportional criterion's denominator for predicate membership
 (Stage 6).
-**I8 withdrawn 2026-09-07** ([decision 0135](../decisions/0135-a-generating-set-is-the-callers-claim-i8-withdrawn.md)): a generating set may be grown or replaced by its caller at ingest. Every sentence below that rests on "never grown" is superseded by that decision and is rewritten with the ingest design under decision 0134.
+**I8 withdrawn 2026-09-07** ([decision 0135](../decisions/0135-a-generating-set-is-the-callers-claim-i8-withdrawn.md)): a generating set may be grown or replaced by its caller at ingest. Every sentence below that rests on "never grown" is superseded by that decision and is rewritten with the ingest design under decision 0134. The same decision's amendment drops the strict and permissive modes: §2.1 states the one behaviour, and every other sentence below naming a mode, a shrink of `G`, or decision 0107 is superseded with them.
 
 **Reads against:** design §4 (I1, I2, I3, I7, I8, I9, I10, I12), §7.6–§7.8, §11.2, Appendix C;
 [`write-path.md`](write-path.md) §2–§5 (**normative** for the write path); [`compaction.md`](compaction.md)
@@ -164,103 +164,21 @@ make it behave like an update (decision 0047). So the service has no *edited mem
 It has a deleted member and an unrelated new one, and treating those as a continuity problem — an
 earlier draft bound `G` to caller keys to preserve one — solves a case the write path does not pose.
 
-**What the caller may declare is narrower than it first appears: whether a generating set is
-allowed to shrink** *(owner ruling, 2026-08-15)*. Containment is all-or-nothing, so a generating set
-that loses a member fails for every principal, for ever — that is not a policy, it is what the test
-does. The only question is whether a caller may say *this content survives that*, and it is declared
-per layer:
-
-| Mode | A member is deleted | The kind of object it is for |
-|---|---|---|
-| **Strict** *(default)* | the fold **drops the supplied content and its generating set**; the artifact — no longer declaring that content — thereafter serves whole with its derived content: existence, masked count, recomputed geometry | anything whose text was written from material including the deleted document: a summary, an authored description, a label over a curated set |
-| **Permissive** | the fold **removes the member from the generating set** and the content goes on serving — unless the removal empties the set, in which case the content is withdrawn as under strict (§2.1's limit case, [decision 0107](../decisions/0107-a-generating-set-with-no-survivors-is-not-served.md)) | a toponymy label over a clustering — the sample is statistical, and one document leaving changes nothing the label asserted |
-
-**Membership is not in scope and never was.** A deleted point simply leaves the artifact's
-membership, the masked count falls, and derived content recomputes without it — spec §3.1's delete
-row, unchanged and unaffected by the declaration. The artifact's identity is untouched, and its
-existence changes only where the falling count crosses a declared criterion (spec §3.3). **Only
-supplied corpus-derived content is at stake in this declaration**,
-because only that carries a generating set.
-
-**The shrink is performed by the fold, and I8 does not forbid it** *(owner ruling, 2026-08-15:
-shrinking is explicitly what permissive is)*. I8's headline says a generating set is immutable, but
-its body forbids only *growth* — *"items arriving later are not part of it and must not be added"* —
-and routes the opposite case elsewhere: *"members leaving is an availability problem, addressed in
-§7.6."* §7.6 requires explicit sign-off and a register entry before any shrink, and design r42 gives
-both. So permissive is not an exception to the invariant; it is the branch the invariant already
-pointed at.
-
-**This is also what frees the slot.** [Decision 0072](../decisions/0072-entity-ids-are-slots-and-are-reused-after-a-fold.md)
-requires every durable structure naming a slot to be dealt with before the allocator may reissue it,
-and left "dealt with" undefined. For a permissive layer it is defined here: the slot is dropped from
-`G` by the same fold that frees it. Without that ordering the rebuilt operator would resolve the
-slot to its **new** occupant and re-satisfy containment — §2.2's re-satisfaction unsoundness, reached
-by reuse instead of by Morton adjacency.
-
-**Permissive is not available until the register says so, and that is the whole of its cost.**
-Shrinking a generating set under deletion is **C7**, disposition **Not adopted** — *"a label
-reflecting content the principal may never have been entitled to"* — and §7.6 requires explicit
-sign-off and a register entry before any such shrink. The reason is exact: the label was written from
-material that included the removed member, so a viewer who can see the survivors may receive content
-drawn from a document they were never entitled to. Offering permissive as a declared mode **is**
-adopting C7, narrowed from a service behaviour to a caller's declaration. ✔ **The register carries
-it** — C7 is *Accepted — caller's declaration, strict by default*, and §7.6's closing requirement of
-explicit sign-off is discharged at design r42 (owner ruling, 2026-08-15). Strict remaining the
-default is what the narrowing rests on: an undeclared layer never shrinks, and the service shrinks
-nothing on its own initiative in either mode.
-
-**One action, two outcomes, and neither destroys the artifact.** The fold removes the deleted entity
-from every generating set naming it — that much is uniform — and the layer's declaration decides what
-happens to the content that set generated: **strict** drops it along with the set, **permissive**
-keeps it and serves it from the smaller set. In both cases the artifact's identity is untouched and
-it serves whole again from the fold, and in both cases nothing durable still names the deleted
-entity.
-
-**Permissive says a content survives its survivors, and with none it does not survive**
-*(owner ruling, 2026-08-30; [decision 0107](../decisions/0107-a-generating-set-with-no-survivors-is-not-served.md))*.
-Where the deletion takes a content's **last** source, the fold withdraws the content rather than
-leaving it on the empty set — and the artifact then follows §2.1's own rule, absent until the caller
-republishes if its layer declares supplied content and this was the last of it. The reason is the
-one the publication gate already states: containment is a subset test, and **the empty set is
-contained in every mask**, so a content retained on it would be served to every principal who can
-see any member of the artifact — corpus-derived text drawn from a document they were never entitled
-to, which is exactly what C7's bound excludes and exactly what an empty set removes the bound from.
-Publication refuses such content on the way in for that reason; the fold was the only other route to
-the state. The outcome is identical to a strict withdrawal, so nothing new is expressible: what
-permissive changes remains what it says above, for every case where a member remains.
-
-**Content requiring only inherited visibility is untouched by any of this.** It carries no
-generating set at all — publication refuses one, C28 — so it names none of the entities a fold
-retires and neither the shrink nor the withdrawal reaches it.
-
-**That second property is the whole of [decision 0072](../decisions/0072-entity-ids-are-slots-and-are-reused-after-a-fold.md)'s
-reconciliation.** A freed slot is dangerous only while something durable names it and could resolve
-it to the next occupant. Strict drops the set; permissive shrinks it. **The ordering is the safety
-property** — reconcile, then reclaim. An earlier revision reached the same end through a stored
-`content_withdrawn` bit; it is deleted, because a bit that must be set correctly is a bit that can be
-set wrongly, and removing the member needs no state at all.
-
-**Where the fold does it, and why not earlier.** §4.2's sweep already computes
-`and_cardinality(G, D₀)` per `G`-bearing artifact to produce the caller's report; it now also
-performs the drop or the shrink, in the same publication. The deny lane is not the place: finding
-which generating sets name an entity is the inverted lookup §4.5 exists to avoid, and doing it at
-accept would cost the lane its O(window) bound.
-
-**So the content vanishes at the ack and, under permissive, returns at the fold.** Between the two
-the deleted member is outside every mask and containment fails for everyone — fail-closed, and
-identical under both declarations. They diverge only at the fold, where strict makes the withholding
-permanent by dropping the content and permissive ends it. **And what the interim withholds is the
-artifact's service, not merely its text**
-([decision 0076](../decisions/0076-an-artifact-is-served-whole-or-not-at-all.md)): the content
-whose generating set lost the member is unservable, so the **artifact** is absent to any viewer no
-other entry of the ranked contents covers. Fail-closed and deliberate — the artifact's *identity* is never destroyed
-by a point event; its service resumes at the fold under either declaration. ⊘ **A caller reading
-"permissive" as "nothing changes" will be surprised by that gap**, which is up to one fold long.
-
-**Strict is the default, and it is also what containment does unaided.** A layer that declares
-nothing gets the behaviour the test already has: the content stays withheld, and the fold merely
-makes that permanent rather than leaving a set that could later be re-satisfied. Permissive is the
-only declaration that changes an outcome, which is why it is the one the register carries.
+**A deleted member withdraws the supplied content its generating set produced, at the fold**
+([decision 0135](../decisions/0135-a-generating-set-is-the-callers-claim-i8-withdrawn.md)).
+Containment is all-or-nothing, so from the ack the deleted member is outside every mask and the
+content is withheld from every principal; the artifact is absent to any viewer no other entry of
+its ranked contents covers ([decision 0076](../decisions/0076-an-artifact-is-served-whole-or-not-at-all.md)).
+The fold makes that permanent: it removes the content and its set together, in the same
+publication as spec §4.2's report, which names each content that lost a source, and the caller
+re-declares the set or the content through ingest. The service does not shrink a set and keep the
+content on the survivors: what a content was derived from is the caller's claim, and a principal
+satisfying the survivors would otherwise read text derived from a document they cannot see (C7).
+Membership is not in scope: a deleted point leaves the artifact's membership, the masked count
+falls and derived content recomputes without it (spec §3.1). Content requiring only inherited
+visibility carries no generating set (C28) and is never reached. Dropping the set from every
+durable structure at the fold is what frees the entity's slot for reuse
+([decision 0072](../decisions/0072-entity-ids-are-slots-and-are-reused-after-a-fold.md)).
 
 **Longer term, if a real edit is ever adopted, it needs no artifact machinery** *(owner direction,
 2026-08-15)*: editing a document has no effect on artifact visibility unless it changes the

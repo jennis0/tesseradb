@@ -75,7 +75,6 @@ fn labels() -> LayerDeclaration {
                 ty: "text".into(),
                 require_member_visibility: tessera_types::layer::SuppliedRequirement::All,
             }],
-            withdraw_on_member_deletion: true,
         },
         depends_on: vec![CLUSTERS.into()],
         levels: Vec::new(),

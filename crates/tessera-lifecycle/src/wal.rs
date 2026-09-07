@@ -671,7 +671,11 @@ const WAL_MAGIC: [u8; 4] = *b"TWAL";
 // **18**: a view gate's `visibility` became a list of labels, each one term (decision 0132),
 // where it was one string. Postcard is positional, so the field is on-disk format and a log at
 // 18 is refused rather than read a string's bytes as a list's length.
-const WAL_VERSION: u16 = 19;
+// **20**: `ContentDeclaration` lost `withdraw_on_member_deletion` (decision 0135), which every
+// `LayerCreate` record carried inside its declaration. Postcard is positional, so the field is
+// on-disk format and a log at 19 is refused rather than read a boolean's byte as the start of the
+// `depends_on` list.
+const WAL_VERSION: u16 = 20;
 /// Header size in bytes: `WAL_MAGIC` ‖ `WAL_VERSION` LE ‖ member number LE ‖ base position LE.
 /// Every *offset* in this module is a byte offset from the start of its own file, so it already
 /// accounts for the header living at the front; every *position* is sequence-global and counts
@@ -1951,7 +1955,6 @@ mod tests {
                         require_member_visibility:
                             tessera_types::layer::SuppliedRequirement::Inherited,
                     }],
-                    withdraw_on_member_deletion: true,
                 },
                 depends_on: vec!["clusters/hdbscan-2026-08".into()],
                 levels: vec![

@@ -766,8 +766,6 @@ struct ContentBlock {
     computed: Vec<String>,
     #[serde(default)]
     supplied: Vec<SuppliedBlock>,
-    #[serde(default)]
-    withdraw_on_member_deletion: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -2876,7 +2874,6 @@ fn expand_labels(blocks: &[LayerBlock]) -> Result<(Vec<LayerBlock>, BTreeMap<Str
                     ty: Some(ty),
                     require_member_visibility: Some(content_requirement),
                 }],
-                withdraw_on_member_deletion: None,
             }),
         };
         // **Immediately after its parent**, because a layer is declared after every layer it names
@@ -5202,8 +5199,9 @@ fn compile_layers(
                  of its members is deleted, and the fold has no artifact-withdrawal path — so \
                  accepting it would leave the artifact standing under a declaration saying it had \
                  gone. `false` is the default and the current behaviour: the membership shrinks and \
-                 every computed property is recomputed from what is left. The **content**-level key \
-                 of the same name, on `[layer.content]`, is built and defaults `true`",
+                 every computed property is recomputed from what is left. There is no key of this \
+                 name on `[layer.content]`: a deleted member withdraws supplied content at the fold \
+                 (decision 0135)",
                 block.name
             )));
         }
@@ -5950,9 +5948,6 @@ fn compile_content(block: &LayerBlock) -> Result<ContentDeclaration> {
     Ok(ContentDeclaration {
         computed: content.computed.clone(),
         supplied,
-        // Defaulted `true` — the one direction a disclosure control may default in, the widening
-        // half being the one that must be typed (C7).
-        withdraw_on_member_deletion: content.withdraw_on_member_deletion.unwrap_or(true),
     })
 }
 

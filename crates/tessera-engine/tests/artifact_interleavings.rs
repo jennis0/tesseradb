@@ -80,7 +80,6 @@ fn declaration(name: &str, value_set: ValueSet) -> LayerDeclaration {
         content: ContentDeclaration {
             computed: vec!["centroid".into()],
             supplied: Vec::new(),
-            withdraw_on_member_deletion: true,
         },
         depends_on: Vec::new(),
         levels: Vec::new(),
