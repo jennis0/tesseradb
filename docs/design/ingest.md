@@ -1,15 +1,15 @@
 # Ingest at any scale — design
 
-**Date:** 2026-09-07 · **Revised:** r2, 2026-09-07, after the three-lens review and the owner's
-rulings
+**Date:** 2026-09-07 · **Revised:** r3, 2026-09-07, after the three-lens review, the owner's
+rulings and the re-review of r2
 **Status:** **Provisional — under review.** Drafted under [decision 0134](../decisions/0134-anything-a-build-can-create-live-ingest-can-create-at-any-scale.md)
 (every kind a build can create, live ingest can create and extend, at any scale) and
 [decision 0135](../decisions/0135-a-generating-set-is-the-callers-claim-i8-withdrawn.md) as
 amended (I8 withdrawn; a generating set is the caller's claim; one behaviour under deletion). The
 first review round ran under three lenses and every finding was ruled on 2026-09-07; the rulings
-are recorded in spec §10 and applied throughout. What remains before this is normative: a
-re-review of the sections whose shape changed at r2 (spec §1.2, §1.3, §1.5, §2.1, §2.3, §2.4,
-§4, §6, §7.1, §8), and the decision records for spec §10's rulings. Nothing in it is built except
+are recorded in spec §10 and applied throughout. The re-review of r2 found nine things, dispositioned without a
+ruling and applied at r3. What remains before this is normative: the owner's ruling and promotion,
+with the decision records for spec §10's rulings. Nothing in it is built except
 where a paragraph says so; ⊘ marks a unit or a rule that differs from the routes that exist.
 **Reads against:** architecture §4, §11, Appendix C; write-path §1 to §4, §7; contracts §3.4;
 annotation-write-cycle §1 to §6; artifacts-from-points §6; dag-hierarchies §4; views §3, §5, §7;
@@ -88,12 +88,30 @@ vocabulary value is retired to `reserved`, never removed (per-point-attributes �
 
 **A set carries its cardinality as a stored property**, moved by the same page that joins or
 leaves it and durable in the same record. Containment (`and_cardinality(G, M_auth) == |G|`, I3)
-compares the row-space operator of a set against that stored number, and a test never mixes a
-cardinality from one version of the set with an operator derived from another: the executor
-publishes the two together (spec §1.3). **A content whose declared set is empty is not served**:
-an empty set is contained in every mask, so it would serve to every principal reaching the
-artifact; this is decision 0107's rule re-made for the caller's door, and a page that leaves a
-set empty withdraws its content from the next publication.
+reads **only the pair the executor published together at the tick**: the row-space operator and
+the cardinality it was derived with. The store's current cardinality is not readable by the
+serving path before the tick, so a test never mixes a cardinality from one version of the set with
+an operator derived from another. An operator is derived from entity truth, member by member
+(annotation-write-cycle §2): a delta of joins only is unioned into the last operator, which is the
+same result; a delta containing any leave re-derives the `(artifact, view)` operator whole, since a
+union cannot express a leave and a cardinality moved down against an operator that still holds the
+leaver would pass containment for a principal who sees the leaver and not the rest; and the fold
+re-derives every operator. Spec §4.1 prices the three arms.
+
+**A content whose declared set is empty is not served**: an empty set is contained in every mask,
+so it would serve to every principal reaching the artifact. This is decision 0107's rule re-made
+for the caller's door. A page that leaves a set empty **withdraws the content**: the content record
+is removed, and the page's acknowledgement reports it, naming the artifact's key and the rank. The
+content does not return when the set refills; the caller re-supplies it. 0107's distinction
+stands: an empty declared set under a content is a state that serves nothing, and a content with
+no set does not exist.
+
+**Creating an entity is not monotone; only filling is.** A point page allocates an entity for
+every row it carries, so a page re-sent under a fresh batch id creates a second entity for every
+row that carries no external id, and is refused `409` per duplicate id for every row that does.
+Within the WAL retention window a re-sent page under its own batch id is answered as a replay
+(write-path §2.4); past it the caller's own bookkeeping decides what has been sent, and a resumed
+load carries external ids so that a page sent twice is refused rather than doubled.
 
 This is the rule the build already follows without saying so. A build reads a corpus once, so
 every part is supplied exactly once and nothing is ever present and different. Ingest sees the same
@@ -109,7 +127,11 @@ names are the declared column names, and every value is **coerced against the de
 type**: a number to the declared width, a string to a keyword, text or category key, a list to the
 declared list form, a label list to `access`. A value that does not coerce is a `422` naming the
 row and the column, and the batch has no effect, which is the rule the Arrow decode already
-applies per column (write-path §2.1 step 4) applied per cell. An object-shaped record (a
+applies per column (write-path §2.1 step 4) applied per cell. An integer is parsed exactly from
+its digits, never through a double, so an identifier or a 64-bit value survives the door. A null or
+empty `access` list at the JSON door is what it is at the other two (decision 0133): the view's
+declared `point_visibility.default` where it declares one, and a `422` naming the count of such
+rows and the view where it declares none. An object-shaped record (a
 declaration, an artifact, a vocabulary value) is the JSON the routes already take.
 
 **Arrow IPC is accepted on the same routes by content type** (`application/vnd.apache.arrow.stream`
@@ -133,7 +155,9 @@ built and is described in contracts §3.4. **Visible** has one value for every r
 once here: the acknowledgement means durable, and every effect becomes visible at the **next
 publication**, which is the flush tick (`flush_max_age_secs`, 90 s by default, or earlier on the
 row trigger or `POST /control/flush`; write-path §4.1). A declaration is listed on `/v1/meta` at
-the same moment. Nothing is visible at the ack.
+the same moment. Nothing is visible at the ack. A subject **exists for resolution** at the ack:
+an attribute declared in one request can be filled in the next, an artifact published in one grown
+in the next, and only viewers wait for the tick.
 
 | Kind | What a client sends (one record) | Route | Commit | Pagination units | Idempotency |
 |---|---|---|---|---|---|
@@ -142,7 +166,7 @@ the same moment. Nothing is visible at the ack.
 | **Membership** | the point's layer column, or a page of `members` per artifact | ingest, values, or `PATCH /control/layers/{name}/artifacts` | on the ingest and values routes, the window's fsync (artifacts-from-points §6.2); on `PATCH`, its own append and fsync on the executor | `max_members_per_request` ⊘; `max_body_bytes` | set join: a retry adds nothing (`joined: 0`) |
 | **Generating set of content *k*** ⊘ | a page of members at `rank: k`, `joining` and `leaving`; `leaving` resolves a deleted item, which is its purpose (spec §1.5) | the same `PATCH` | its own append and fsync | as membership; the only route by which a set changes | set join and leave; a retry is a no-op |
 | **Artifact record** | key, and on a group-scoped layer `view` ⊘; `parent`, `attached_to`, shape, content values; a first page of members and generating sets | `PUT /control/layers/{name}/artifacts` creates; `PATCH` fills ⊘ | its own append and fsync; ordinals claimed contiguously | `max_artifacts_per_request` ⊘; `max_body_bytes` | a held key with identical parts is accepted with no effect ⊘ (spec §1.5) |
-| **Membership by exclusion** ⊘ | `excluding`: the entities the membership leaves out, on the artifact record | `PUT` or `PATCH` | its own append and fsync; the complement is taken on the executor | one request, admissible only while the view's entity count is under `max_exclusion_entities` (spec §2.3) | a second `excluding` on a held key is `409` |
+| **Membership by exclusion** ⊘ | `excluding`: the entities the membership leaves out, on the artifact record | `PUT` or `PATCH` | its own append and fsync; the complement is taken on the executor | one request, admissible only while the view's entity count is under `max_excluded_per_request` (spec §2.3) | a second `excluding` on a held key is `409` |
 | **Layer** | the `[[layer]]` block minus acquisition keys | `PUT /control/layers` | its own append and fsync | one request; a declaration is kilobytes | identical redeclaration answers the existing identity ⊘ |
 | **View of a group** | the roster record | `PUT /control/views/{group}/{key}` | its own append and fsync | one request | as above |
 | **View group** ⊘ | the `[[view_group]]` block minus roster and source | `PUT /control/view_groups/{name}` | its own append and fsync | one request; its views follow one by one | as above |
@@ -189,13 +213,13 @@ membership join for an existing entity, through the same `ArtifactGrow` the poin
 **A blob-resident value on a flushed entity is read.** The record blob is a stack of layers, the
 base and one extent per flush, and today an entity's record is read from the one layer that holds
 its row. Under the values kind an entity can hold a row in more than one layer: the layer that
-created it and the layer that filled a column later. ⊘ The record stack reads **newest wins per
-field**: a drill-down or a render reads the entity's rows from every layer holding one and takes,
-per column, the value in the newest. The fill rule keeps that unambiguous, since a column is
-present in at most one layer for an entity, or identical in several. The cost is one extra block
-decode per layer the entity has a row in, at drill-down and at the fold's rewrite, which folds the
-layers into one row again; it is owned by T3 (spec §8). A `text` cell that has flushed is compared
-against the blob under the same rule.
+created it and the layer that filled a column later. The fill rule leaves **a column held by at
+most one layer per entity**, and the per-column presence extents the flush already writes
+(spec §6.3) say which. ⊘ The record stack therefore locates, per column, the layer that claims it
+and reads that block. The cost at drill-down is one block decode per column claimant, which for an
+entity with no filled column is the one decode it pays today; the fold folds the layers into one
+row again. It is owned by T3 (spec §8). A `text` cell that has flushed is compared against the
+block its claimant holds.
 
 Why a route and not a mode of `/control/ingest` (spec §10, R2): a points batch allocates entities
 and needs a view; a values batch allocates nothing and names a view only for a scoped column.
@@ -270,12 +294,12 @@ who deleted the item holds its external id). The caller repairs through ingest, 
 - **after the fold**, the content is absent, so the caller fills it again, with a set that omits
   the item, in as many pages as it needs.
 
-A withdrawn content is **absent for the fill rule**: between the deletion's acknowledgement and the
-fold it is served to nobody, and a `PATCH` carrying content *k* with a new set replaces both in one
-request. That is the one place a fixed part may be supplied twice, and it is narrow by
-construction: nothing it replaces was being served. Replacing a served content stays out of this
-design (decision 0077's deferred edit pass). `withdraw_on_member_deletion` is untouched: it
-withdraws the artifact, where this withdraws a content.
+Those are the two repair routes, and there is no third: **fixed parts are write-once**. A content
+is supplied once and replaced never; what changes under a served content is its set, by pages, and
+what removes a content is the fold's withdrawal or an emptied set (spec §1.1), after which the
+caller supplies it again. Editing a content in place is decision 0077's deferred pass and is not
+opened here. `withdraw_on_member_deletion` is untouched: it withdraws the artifact, where this
+withdraws a content.
 
 ### 1.6 Ordering a client must keep
 
@@ -311,7 +335,7 @@ each complete in itself.
 |---|---|---|---|
 | `/control/ingest` | `max_batch_rows` 10,000 (the commit window's size, so no client picks the sort scope) | `max_batch_bytes` 16 MiB, ceiling 64 MiB | |
 | `/control/values` ⊘ | `max_batch_rows` | `max_batch_bytes` | |
-| `/control/layers/{name}/artifacts` `PUT` | `max_artifacts_per_request` ⊘ | `max_body_bytes` ⊘ (today the constant `PUBLISH_MAX_BODY_BYTES`, 64 MiB) | `max_shape_vertices` 10⁶; `max_exclusion_entities` ⊘ (spec §2.3) |
+| `/control/layers/{name}/artifacts` `PUT` | `max_artifacts_per_request` ⊘ | `max_body_bytes` ⊘ (today the constant `PUBLISH_MAX_BODY_BYTES`, 64 MiB) | `max_shape_vertices` 10⁶; `max_excluded_per_request` ⊘ (spec §2.3) |
 | the same, `PATCH` | `max_members_per_request` ⊘, the sum over the page's artifacts | `max_body_bytes` | |
 | `/control/vocabularies/{name}/values` ⊘ | `max_values_per_request` | `max_body_bytes` | |
 | `/control/changes` | about 10⁴ | 2 MiB | |
@@ -337,7 +361,9 @@ caller sends the entries joining, then the entries leaving. Within one page the 
 joins before leaves (spec §1.1); across pages the order is the caller's. Paged that way, every
 intermediate set is a superset of both the old and the new, so at no point is the content served
 to a principal who could see neither, which is the one property a one-shot replace would have
-bought.
+bought. A caller who pages leaves first can empty the set mid-replace; the page that empties it
+withdraws the content and says so in its acknowledgement (spec §1.1), the content does not return
+when the set refills, and the caller supplies it again after the last page.
 
 **Artifact records** are one request each because ordinals are claimed contiguously at a level's
 cursor and a refusal must spend nothing. Nothing in a record is large except its sets, which page.
@@ -363,15 +389,16 @@ store converged on for the same reasons.
 Three per-object bounds survive, published in the `limits` block, and the argument for each is
 that the object has a smaller spelling or is already bounded elsewhere (spec §10, R8).
 
-- **An exclusion list is one request, and is admissible only while the view's entity count is
-  under `max_exclusion_entities`** ⊘. The complement is taken on the executor against the view's
-  entity set as of that step (every entity holding a row in the view or buffered for it, deleted
-  entities excluded), so the list cannot arrive in pages, and the complement's size is the view's
-  entity count less the list: a Roaring bitmap of order the view's size, materialised on the
-  executor as the membership record and written as the same portable bitmap a page produces. The
-  bound is the same class as `max_shape_vertices`: it caps the work one executor step does, at a
-  number the operator sets. Above it the caller spells the membership as an inclusion, which
-  pages. The build's rule that the two spellings are byte-identical in the bundle
+- **An exclusion list is one request, bounded by `max_excluded_per_request`** ⊘, a record count
+  of the same shape as `max_members_per_request` and a proposed default of 1,000,000 (about
+  15 MB of base64 ids, under the byte cap). What must fit one request is the list, because the
+  complement is taken on the executor against the view's entity set as of that step (every entity
+  holding a row in the view or buffered for it, deleted entities excluded), and it cannot be taken
+  until the whole list is in. The complement itself is not bounded and need not be: it is one
+  `andnot` over the view's entity bitmap, in spec §4.1's units one bitmap operation costing by
+  containers touched, producing a membership of order the view's size, about 12 MB at 10⁸
+  entities (modelled from the per-artifact figure in spec §2.4), which is less than one membership
+  page. A list over the bound is spelled as an inclusion, which pages. The build's rule that the two spellings are byte-identical in the bundle
   (annotation-write-cycle §6.1) holds at ingest **in a quiescent database**: the complement is
   materialised before the record is written, and the record is the inclusion's. Two things
   diverge under concurrent writes, and both are stated rather than closed: an entity ingested
@@ -403,11 +430,14 @@ pinned bytes are therefore: for artifacts published in the current interval, the
 last tick, released at the tick; for artifacts packed in an earlier interval, every page since,
 until the fold. A portable Roaring bitmap over a 10⁸-member artifact is about 12 MB
 (artifacts-from-points §6.1, modelled). A hierarchy loaded roster-first and then grown, which is
-the driver's order, pins each artifact's pages only until the tick after its publication, so the
-log holds at most one interval's pages, of the order of the interval's members at 0.1 to 1 byte
-each; a hierarchy grown long after its publication, rung 3's 1.66×10⁹ closure entries onto packed
-records, pins on the order of 10⁸ to 10⁹ bytes until the fold (both modelled from the per-member
-figure; not measured). The log has no runtime ceiling (write-path §1.3) and replays every pinned
+the driver's order, pins each artifact's pages only until the tick after its publication **when the
+artifact's growth completes within the interval it was published in**; the log then holds at most
+one interval's pages, of the order of the interval's members at 0.1 to 1 byte each. Growth that
+spans ticks lands its later pages on a packed record: every page after the first tick pins until
+the fold, up to about 12 MB per 10⁸-member artifact, so a 10⁸-member artifact grown over several
+intervals pins nearly all of its bitmap until the fold, and a hierarchy grown long after its
+publication, rung 3's 1.66×10⁹ closure entries onto packed records, pins on the order of 10⁸ to
+10⁹ bytes until the fold (all modelled from the per-member figure; not measured). The log has no runtime ceiling (write-path §1.3) and replays every pinned
 record at restart, so the operator's rule is the fold's own: fold after a large growth onto packed
 records. Packing growth at the flush for records below the high-water is the second packing rule
 artifacts-from-points §6.1 declined, and this design does not reopen it.
@@ -437,8 +467,9 @@ per-item status parsing.
 What a client library author expects, from that evidence: a page size they can read rather than
 guess, in records and in bytes; an iterator that splits a table into pages; `429` with
 `Retry-After` and a bounded retry; an idempotency key per page so a lost acknowledgement is safe to
-resend; upsert-by-id semantics so a re-run of a pipeline is a no-op; a schema call that is safe to
-repeat; and JSON. Every one of those is in spec §1 and spec §4.
+resend; fills and set pages that are no-ops on a re-run, and a stated resume rule where creation
+cannot be (points: the batch id within retention, the caller's bookkeeping past it, spec §1.1); a
+schema call that is safe to repeat; and JSON. Every one of those is in spec §1 and spec §4.
 
 ### 3.2 The three hardest cases, as SDK calls
 
@@ -457,7 +488,9 @@ w.flush()                                            # optional; the tick flushe
 ```
 
 Each page is one request, one commit-window entry, one durability receipt. Visibility is the
-flush. At the measured rates (spec §4.1) the loop is bounded by the pool's flush of the widest
+flush. A page re-sent under its batch id within the WAL retention window is a replay; a load
+resumed past it relies on the caller's own record of which pages were acknowledged, and on the
+external ids, which make a page sent twice a `409` rather than a second copy. At the measured rates (spec §4.1) the loop is bounded by the pool's flush of the widest
 column family, not by the client.
 
 **An artifact with 10⁸ members, content, and a generating set of 10⁷.**
@@ -503,7 +536,9 @@ step and the flush, per record, and the flush is the term at every scale measure
 | points, abstracts | flush 133.5 µs/row, 90% the analyser | measured, PaperSeek 92M | 7,427 rows/s measured against a 7,490 ceiling; 10⁹ rows in about 37 h, modelled |
 | values | the flush cost of the columns carried, without the segment, permutation and allocation stages; plus one blob layer per fill at the fold's rewrite | modelled from the stage table (`segment`, `rows`, `promote` are 1.5 to 1.9 µs/row) | between the two rows above, by family |
 | membership and generating-set pages | per member: one base64 decode and one resolution against the external-id sidecar runs on the pool, then a bitmap insert on the executor; per page, one append and one fsync | modelled; the driver records `members_per_s` per layer and the figure is read there | the resolution's binary search over the runs |
-| a level's row forms at the tick | per `(artifact, view)` with deltas: the delta's rows through the permutation into a **shared projection scratch**, one union into the served operator, and the stored cardinality written beside it; nothing for an artifact with no delta | modelled; the same union the growth path performs today, moved to the tick | linear in the interval's delta members, once per tick, on the executor |
+| a level's row forms at the tick, joins only | per `(artifact, view)` with a delta of joins: the delta's rows through the permutation into a **shared projection scratch**, one union into the served operator, and the cardinality it was derived with written beside it; nothing for an artifact with no delta | modelled; the same union the growth path performs today, moved to the tick | linear in the interval's delta members, once per tick, on the executor |
+| the same, any leave in the delta | the `(artifact, view)` operator re-derived whole from entity truth: every member through the permutation into the scratch, then written with its cardinality | modelled; the projection the operator was first built with | linear in the artifact's size, once per tick per artifact with a leave; a generating set is small beside a membership, and memberships never leave |
+| the fold | every operator re-derived whole | as the fold's artifact pass today | the fold's own budget |
 | artifact records and fills | per artifact: key and parent resolution, the cycle walk, a content digest | modelled; kilobytes each | negligible against the pages |
 | declarations | one WAL append and one fsync | modelled by analogy with the deny ack's 3.2 ms quiescent | one per declaration |
 
@@ -537,7 +572,8 @@ Every kind, one table:
 | Answer | Meaning | Client action |
 |---|---|---|
 | `200` / `201` | durable; visible at the next publication | next page |
-| `409 conflict` | a duplicate external id, a batch id replayed with different bytes, or a part present and different | stop; the request is wrong, not the timing |
+| `409 conflict`, a point page | a duplicate external id, or a batch id replayed with different bytes | past the WAL retention window a re-sent page meets this per id: the page was already taken, move on; otherwise the request is wrong |
+| `409 conflict`, any other kind | a part present and different | stop; the request is wrong, not the timing |
 | `422 contract` | malformed body, a cell that does not coerce to its column, an unknown column, a page over a limit (naming it), an unresolvable subject named at position *p* | fix and resend; a page over a limit is re-split |
 | `429 backpressure` | one of the producers above | wait `Retry-After`, resend identical bytes |
 | `500 fail-closed` | durability failed and nothing applied, or the receipt was lost after the swap | resend identical bytes; idempotency resolves which |
@@ -623,8 +659,10 @@ because the service removed a deleted member, is gone.*
 
 **I2, I3, I13.** Every count and containment test is computed inside the composed mask as today.
 A generating set's row-space operator is published by the executor at the tick together with the
-cardinality it was derived with (spec §1.1, §1.3), so I3's test is live against the declared set as
-last published and never mixes versions. No cache holds a containment verdict above the test
+cardinality it was derived with, and the containment test reads that pair and nothing else: the
+store's current cardinality is not on the serving path before the tick (spec §1.1, §1.3), so I3's
+test is against the declared set as last published and never mixes versions, and an operator that
+saw a leave was re-derived from entity truth rather than unioned. No cache holds a containment verdict above the test
 (I3). A page refused yields no partial state, and a page accepted is whole (I13a). Nothing here
 touches I12 or the filter mask.
 
@@ -634,8 +672,8 @@ A column's home is the hot column in the row tail, its family's entity-space str
 record blob (records-and-search §3). A column declared at runtime has no base in any of them.
 Entity-space extents are written per flush over the flushed entities' presence, so a values page
 lands as an extent whose presence covers the filled entities, disjoint from every other extent for
-that column because the fill rule leaves one claimant per cell. The record blob gains a layer, read
-newest-wins per field (spec §1.4). The row tail is in the segments, in row space, and a segment
+that column because the fill rule leaves one claimant per cell. The record blob gains a layer, and a column is
+read from the one layer that claims it (spec §1.4). The row tail is in the segments, in row space, and a segment
 written before the declaration does not carry the column: ⊘ **absence for a runtime column is
 answered from the segment's schema**, the reader taking null for a `render` column the schema lacks
 and never opening a blob to find out, and the fold, which rewrites every segment, writes it. Until
@@ -649,7 +687,7 @@ the fold a back-filled `render` value is filterable where `index` was declared a
 | Change | Kind | Where |
 |---|---|---|
 | JSON the default encoding on every route; Arrow by content type | new rule | contracts §3.4, every row; §5 |
-| `limits` block: a record count and a byte cap per route, plus `max_shape_vertices` and `max_exclusion_entities`; `publish_max_body_bytes` a config key | new field; new keys | `/control/status` (R1); configuration §9's table gains the `[ingest]` keys it defers today |
+| `limits` block: a record count and a byte cap per route, plus `max_shape_vertices` and `max_excluded_per_request`; `publish_max_body_bytes` a config key | new field; new keys | `/control/status` (R1); configuration §9's table gains the `[ingest]` keys it defers today |
 | `PATCH /control/layers/{name}/artifacts` carries `rank`, `leaving`, `parent`, `attached_to`, `content`, `shape` | widened body | contracts §3.4, the r77 row |
 | `PUT` accepts a held key with identical parts (partitioned before allocation); a different part is `409`; `without_content` on the `201`; `view` required on a group-scoped layer; `excluding` | changed rule; new fields | contracts §3.4, the `PUT` row; the sentence "published with as many members as fit" is replaced by the page rule |
 | `POST /control/values`, with the view header for a scoped column | new route | contracts §3.4 |
@@ -722,10 +760,10 @@ recreated, so that every later track lands against one format and none waits on 
 | **T0 formats** | `WAL_VERSION` bump; `bundle_format` 7; the record variants and the stored digest and cardinality fields, unread until their tracks; artifacts recreated | — |
 | **T1 caps and wire** | JSON on every route with Arrow by content type; the `limits` block with record counts; `publish_max_body_bytes`; the `PUT` row corrected; the driver reads every limit it uses from the block | T0 |
 | **T2a artifact record and fill** | `ArtifactFill` and `ArtifactStore::fill`; the digest comparison; the partitioned `PUT`; late lineage with the layer-scoped walk and the second lineage version; `without_content` | T1 |
-| **T2b generating-set pages** | `rank`, `joining` and `leaving` on `PATCH`; the stored cardinality moved by the page; the empty-set floor; the tick's row-form publication for memberships and generating sets with the shared scratch; the per-record pin; permits and pool resolution for pages; the driver publishes over-cap artifacts and sets as pages and `declined` is empty on every rung | T2a |
-| **T2c exclusion and view identity** | `excluding` under `max_exclusion_entities`; `view` in the identity on a group-scoped layer | T2a |
+| **T2b generating-set pages** | `rank`, `joining` and `leaving` on `PATCH`; the stored cardinality moved by the page and published only with its operator; the whole re-derivation of an operator whose delta holds a leave; the empty-set floor and the withdrawal it reports; the tick's row-form publication for memberships and generating sets with the shared scratch; the per-record pin; permits and pool resolution for pages; the driver publishes over-cap artifacts and sets as pages and `declined` is empty on every rung | T2a |
+| **T2c exclusion and view identity** | `excluding` under `max_excluded_per_request`; `view` in the identity on a group-scoped layer | T2a |
 | **T4 attributes** | `PUT /control/attributes`; the manifest home; the schema-answered absence for a `render` column; the tail append and padding for a mid-ingest declaration; the fold's materialisation | T1 |
-| **T3 values** | `POST /control/values`; the fill on the executor beside the join arm; the view header and key-in-group check for scoped columns; layer columns on existing entities; the newest-wins record stack and its fold | T4 |
+| **T3 values** | `POST /control/values`; the fill on the executor beside the join arm; the view header and key-in-group check for scoped columns; layer columns on existing entities; the record stack's per-column claimant read and its fold | T4 |
 | **T5 vocabularies** | `PUT /control/vocabularies/{name}`; value pages; the property upsert (`/control/categories`'s debt) | T4's manifest home |
 | **T6 groups and views** | `PUT /control/view_groups/{name}`; `PUT /control/views/{name}` | T4's manifest home |
 | **T7 conformance** | the 0091 equivalence driver over every kind, **defined over served answers** (masked counts, artifact frames, drill-downs per principal), never over bundle bytes; write-path and annotation-write-cycle rewritten | alongside T2a onward |
@@ -744,8 +782,10 @@ measurement campaign is waiting on (decision 0127's `declined` column); the rest
 | ingest 65,194 rows/s (MedCPT 10%), 11,060 (TreeOfLife 50%), 7,427 (PaperSeek) | measured | `docs/ingest-campaign.md`, the probe |
 | build 20,400 rows/s on PaperSeek 92M | measured (75 min for 91,905,609 rows) | the probe |
 | hours to 10⁹ rows per family | modelled from the per-row figures, base held constant | spec §4.1 |
-| 12 MB bitmap per 10⁸-member artifact; one interval's pages pinned under roster-first loading; 10⁸ to 10⁹ B until the fold for growth onto packed records | modelled | artifacts-from-points §6.1; spec §2.4 |
-| the tick's row-form cost: one union per `(artifact, view)` with a delta | modelled from the existing growth path | spec §4.1 |
+| 12 MB bitmap per 10⁸-member artifact; one interval's pages pinned under roster-first loading that completes within the interval; up to the whole bitmap per artifact for growth spanning ticks; 10⁸ to 10⁹ B until the fold for a hierarchy grown onto packed records | modelled | artifacts-from-points §6.1; spec §2.4 |
+| the complement of an exclusion list: one `andnot`, about 12 MB at 10⁸ entities | modelled | spec §2.3 |
+| a re-derived operator after a leave: linear in the artifact's size | modelled | spec §4.1 |
+| the tick's row-form cost: one union per `(artifact, view)` with a delta of joins; a whole re-derivation where a delta holds a leave | modelled from the existing growth path | spec §4.1 |
 | cycle walk over 30,954 nodes and 42,287 edges | modelled from rung 3's counts | dag-hierarchies §8 |
 | declaration cost ≈ one fsync, 3.2 ms quiescent | modelled by analogy | the deny ack baseline |
 | values throughput between the two point figures | modelled | spec §4.1 |
@@ -761,10 +801,10 @@ cleverness, and minutes of ingest-to-publish latency accepted for large data.
 | 1 | JSON is the default encoding for every kind, coerced against the declared column types; Arrow optional by content type on the same routes; the driver keeps Arrow | spec §1.2 |
 | 2 | every route publishes a record count beside its byte cap; points keep 10,000; memberships, generating sets and values take a count of the same shape | spec §2.1 |
 | 3 | content with an empty declared set is not served (0107's rule re-made at the caller's door); joins before leaves within a page; the superset ordering across pages is the caller's | spec §1.1, §2.2 |
-| 4 | exclusion memberships only under a published entity-count bound; above it, the inclusion spelling; byte-identity claimed in a quiescent database with the two divergences named | spec §2.3 |
+| 4 | exclusion memberships only under a published bound on the list; above it, the inclusion spelling; byte-identity claimed in a quiescent database with the two divergences named | spec §2.3 |
 | 5 | the pin is per record: a growth above the high-water is released at the next tail pack, one below it at the fold | spec §2.4 |
 | 6 | a level's row forms are published by the executor at the tick from the accumulated deltas; a request never builds one; a served form may lag the store by a tick | spec §1.3, §4.1, §6.1 |
-| 7 | the record stack reads newest-wins per field, so a fill on a flushed entity is read; T3 owns the change | spec §1.4, §6.3 |
+| 7 | a fill on a flushed entity is read: the record stack reads a column from the one layer that claims it; T3 owns the change | spec §1.4, §6.3 |
 | R1 | page sizes on `/control/status` | spec §2.1 |
 | R2 | values is its own route | spec §1.4 |
 | R3 | the fill rule replaces the held-key refusal, with the digest comparison and the partitioned `PUT` | spec §1.5 |
