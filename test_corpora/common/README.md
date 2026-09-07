@@ -123,6 +123,10 @@ second file per rung would put two halves of one measurement in two places.
 | `items_per_s` | rows/s | rows **acked** ÷ the wall of the whole hold-out, at that concurrency |
 | `ack_p50`, `ack_p99` | ms | per-batch ack latency, nearest rank over the batches |
 | `statuses` | — | every HTTP status seen, counted. 429 is backpressure and is retried, not an error |
+| `max_body_bytes` | bytes | the byte cap every ingest body was kept under: the served deployment's `ingest_max_batch_bytes`, read from `/control/status` (`ingest.max_batch_bytes`). `--ingest-config '{"ingest_max_batch_bytes": 262144}'` lowers the server's cap, and with it this figure, to exercise the split on a rung whose bodies are under 16 MiB |
+| `bodies_split` | count | ingest bodies that exceeded the byte cap and were split. A batch is at most 10,000 rows (write-path §2's row cap) and its Arrow IPC body must also fit under `max_body_bytes`. A slice whose body is over the cap is halved and each half encoded again until every body fits, in row order, each half under its own first-row index so batch ids stay unique. A half that is still over counts again, so one 10,000-row slice split into eight bodies counts 7. The driver logs the first split |
+| `largest_body_bytes` | bytes | the largest ingest body sent. Under `max_body_bytes` unless a body was one row |
+| `bodies_over_cap` | count | single-row bodies over the cap, sent as they are. One row cannot be split, so the route's 422 is the finding, under `statuses` and `first_refusal`, and the row is counted in `rows_offered` and not in `accepted` |
 | `flush_s` | seconds | from `POST /control/flush` to the executor's `flushes` counter moving |
 | `visibility_s` | seconds | from the same request to a zoom-0 viewport reaching the expected count. **The number a viewer experiences**, and not the same as `flush_s` |
 | `fold_s` | seconds | the server's own `compaction.last_secs`. `POST /control/compact` answers 202 immediately, so an outside timer would measure the request |

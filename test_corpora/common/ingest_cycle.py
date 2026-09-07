@@ -654,13 +654,33 @@ class HoldOut:
     A column-route layer's member list rides each batch as the column named for the layer, joined
     from a [`MemberStream`] read in lockstep with the points; `member_stats` records, per layer, how
     many hold-out rows the table named and how many it did not.
+
+    **A body is bounded by both of the route's caps.** The row cap (`BATCH_ROWS`) sizes a slice.
+    The byte cap (`max_body_bytes`, the served deployment's `ingest_max_batch_bytes`, read from
+    `/control/status` by [`Cycle.max_body_bytes`]) is enforced on the route before decoding, and
+    a 10,000-row slice of a rung with a text attribute can exceed it: rung 4's abstracts put a
+    10,000-row body near the 16 MiB cap, and 19 of the 92M cell's slices went over it. [`bodies`] encodes the slice and, where the body is over the cap, halves the slice and
+    encodes each half again until every piece fits, in row order; each piece keeps its own
+    first-row index, so the batch id the caller derives from it stays unique. `body_stats` counts
+    the bodies sent, the bodies that were over the cap and split (a half that is still over counts
+    again), the bodies sent over the cap because they were one row, and the largest body sent.
     """
 
-    def __init__(self, rung: Path, held: np.ndarray, head_rows: int = 0):
+    def __init__(
+        self,
+        rung: Path,
+        held: np.ndarray,
+        max_body_bytes: int,
+        head_rows: int = 0,
+        log=print,
+    ):
         self.rung = rung
         self.access, self.attributes = wire_columns(rung)
         self.held = np.sort(held)
         self.head_rows = head_rows
+        self.max_body_bytes = int(max_body_bytes)
+        self.log = log
+        self.body_stats = self.new_body_stats()
         self.head: pa.Table | None = None
         self.members = [
             MemberStream(layer["name"], layer["members"], self.held)
@@ -670,6 +690,45 @@ class HoldOut:
         self.columns = [stream.name for stream in self.members]
         self.member_stats = {stream.name: stream.stats for stream in self.members}
         self.last_entity = -1
+
+    @staticmethod
+    def new_body_stats() -> dict:
+        return {"bodies": 0, "slices": 0, "bodies_split": 0, "largest_body_bytes": 0, "over_cap": 0}
+
+    def bodies(self, table: pa.Table, start: int, stats: dict | None = None):
+        """Yield `(first row index, body bytes, row count)` for one slice, every body under the cap.
+
+        The slice is encoded whole. A body over `max_body_bytes` is not sent: the slice is halved
+        and each half is encoded again, so the pieces come out in row order and each carries the
+        index of its first row. Exact rather than estimated: the body that is sent is the body
+        that was measured, so a piece under the cap here is under it on the route. A single row
+        whose body is over the cap cannot be split; it is sent as it is, so the route's 422 is
+        recorded in `statuses` and `first_refusal` and `over_cap` counts it. The first split is
+        logged.
+        """
+        stats = self.body_stats if stats is None else stats
+        stats["slices"] += 1
+        pending = [(start, table)]
+        while pending:
+            first, piece = pending.pop()
+            body = self.encode(piece)
+            if len(body) > self.max_body_bytes and piece.num_rows > 1:
+                half = piece.num_rows // 2
+                # Pushed in reverse so the earlier half is encoded and yielded first.
+                pending.append((first + half, piece.slice(half)))
+                pending.append((first, piece.slice(0, half)))
+                stats["bodies_split"] += 1
+                if stats["bodies_split"] == 1:
+                    self.log(
+                        f"  a {piece.num_rows:,}-row slice encodes to {len(body):,} B, over the "
+                        f"{self.max_body_bytes:,}-byte cap; splitting until every body fits"
+                    )
+                continue
+            if len(body) > self.max_body_bytes:
+                stats["over_cap"] += 1
+            stats["bodies"] += 1
+            stats["largest_body_bytes"] = max(stats["largest_body_bytes"], len(body))
+            yield first, body, piece.num_rows
 
     def batches(self, rows: int = BATCH_ROWS):
         """Yield `(first row index, body bytes, row count)` for the whole hold-out, in file order.
@@ -682,6 +741,7 @@ class HoldOut:
         900 batches and the cell stalled. `read_row_group` holds one decoded row group at a time
         and the same file streams whole with the driver under 3 GB.
         """
+        self.body_stats = self.new_body_stats()
         reader = pq.ParquetFile(self.rung / "points.parquet")
         pending: list[pa.Table] = []
         pending_rows = 0
@@ -713,14 +773,14 @@ class HoldOut:
             pending_rows += table.num_rows
             while pending_rows >= rows:
                 whole = pa.concat_tables(pending)
-                yield emitted, self.encode(whole.slice(0, rows)), rows
+                yield from self.bodies(whole.slice(0, rows), emitted)
                 emitted += rows
                 rest = whole.slice(rows)
                 pending = [rest] if rest.num_rows else []
                 pending_rows = rest.num_rows
         if pending_rows:
             whole = pa.concat_tables(pending)
-            yield emitted, self.encode(whole), pending_rows
+            yield from self.bodies(whole, emitted)
             emitted += pending_rows
         self.total = emitted
         if head:
@@ -1685,6 +1745,20 @@ class Cycle:
 
     # -- 2. ingest ------------------------------------------------------------------------
 
+    @staticmethod
+    def max_body_bytes(status: dict) -> int:
+        """The byte cap a body must stay under.
+
+        The served deployment publishes the `ingest_max_batch_bytes` it parsed as
+        `ingest.max_batch_bytes` on `/control/status`, and that is the value the route refuses
+        over, so it is read from there and from nowhere else: a value carried by the driver, from
+        a flag or a constant, would be a second number that can disagree with the one enforced.
+        To exercise the split on a rung whose bodies are under 16 MiB, lower the server's own cap
+        with `--ingest-config '{"ingest_max_batch_bytes": 262144}'`. A status without the field
+        is a server this driver was not written for, and raises.
+        """
+        return int(status["ingest"]["max_batch_bytes"])
+
     def run_ingest(self, control: Control, source, label: str) -> dict:
         """Put `source`'s batches through `/control/ingest` at *C* concurrent callers.
 
@@ -1827,11 +1901,20 @@ class Cycle:
             )["counts"]["visible"]
 
             head = 3 * args.write_cycle_n if args.write_cycle else 0
-            hold = HoldOut(self.rung, self.held, head_rows=head)
-            self.log(f"ingesting {len(self.held):,} rows at C={args.concurrency}")
-            before = control.status()["write_executor"]
+            status = control.status()
+            cap = self.max_body_bytes(status)
+            hold = HoldOut(self.rung, self.held, cap, head_rows=head, log=self.log)
+            self.log(
+                f"ingesting {len(self.held):,} rows at C={args.concurrency}, bodies under "
+                f"{cap:,} B (the served deployment's ingest_max_batch_bytes)"
+            )
+            before = status["write_executor"]
             self.result["ingest"] = self.run_ingest(control, hold.batches(), "cycle")
             self.result["ingest"]["membership_columns"] = hold.member_stats
+            self.result["ingest"]["max_body_bytes"] = cap
+            self.result["ingest"]["bodies_split"] = hold.body_stats["bodies_split"]
+            self.result["ingest"]["largest_body_bytes"] = hold.body_stats["largest_body_bytes"]
+            self.result["ingest"]["bodies_over_cap"] = hold.body_stats["over_cap"]
             self.result["executor_laps"] = executor_laps(
                 before,
                 control.status()["write_executor"],
@@ -2291,12 +2374,17 @@ class Cycle:
         # re-ingest (decision 0047), so these must be accepted rather than 409'd.
         # `deletes` is `ids[:n]`, so the rows to re-ingest are the head's first `n` — the same
         # bytes, under fresh batch ids, which is what makes this a re-ingest rather than a replay.
+        reingest_bodies = hold.new_body_stats()
+
         def head_slice():
             for start in range(0, n, BATCH_ROWS):
                 chunk = hold.head.slice(start, min(BATCH_ROWS, n - start))
-                yield start, hold.encode(chunk), chunk.num_rows
+                yield from hold.bodies(chunk, start, reingest_bodies)
 
         out["reingest"] = self.run_ingest(control, head_slice(), "recycle")
+        out["reingest"]["bodies_split"] = reingest_bodies["bodies_split"]
+        out["reingest"]["largest_body_bytes"] = reingest_bodies["largest_body_bytes"]
+        out["reingest"]["bodies_over_cap"] = reingest_bodies["over_cap"]
         control.flush()
         before = control.status()["compaction"]["folds"]
         control.compact()
@@ -2362,7 +2450,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         default=None,
         help="a JSON object of `[ingest]` keys written into the served deployment's copy, for a "
         'cell that sweeps a write-path knob: `{"flush_max_age_secs": 5}`. Absent means the '
-        "server's own defaults",
+        "server's own defaults. `{\"ingest_max_batch_bytes\": 262144}` lowers the byte cap the "
+        "driver reads back from `/control/status` and splits bodies under",
     )
     ap.add_argument(
         "--stop-after-ingest",

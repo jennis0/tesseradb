@@ -250,6 +250,13 @@ def ingest_cell(cell: dict) -> dict:
         "ack_p50": ((cell.get("ingest") or {}).get("ack_ms") or {}).get("p50"),
         "ack_p99": ((cell.get("ingest") or {}).get("ack_ms") or {}).get("p99"),
         "statuses": (cell.get("ingest") or {}).get("statuses"),
+        # The byte cap the bodies were kept under and what the driver did to keep them there
+        # (`test_corpora/common/README.md` §3): a cell whose 422s are all single-row bodies over
+        # the cap is a different finding from one whose driver stalled.
+        "max_body_bytes": (cell.get("ingest") or {}).get("max_body_bytes"),
+        "bodies_split": (cell.get("ingest") or {}).get("bodies_split"),
+        "largest_body_bytes": (cell.get("ingest") or {}).get("largest_body_bytes"),
+        "bodies_over_cap": (cell.get("ingest") or {}).get("bodies_over_cap"),
         "flush_s": (cell.get("flush") or {}).get("publish_s"),
         "visibility_s": (cell.get("flush") or {}).get("visibility_s"),
         "fold_s": (cell.get("fold") or {}).get("fold_s"),
