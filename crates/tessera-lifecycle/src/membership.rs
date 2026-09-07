@@ -112,7 +112,9 @@ pub struct ArtifactShapes {
     /// construction and stored with the shape in the log and the record blob (`ingest.md` §1.5).
     /// A later record carrying a shape for an artifact that holds one is compared digest to
     /// digest, which is what makes a repeated publication safe after the level is repacked.
-    /// Read by T2a; the blob decoder checks it against the bytes it decodes.
+    /// Read by T2a. The blob decoder checks it against the bytes it decodes; the log path does
+    /// not, since postcard restores the struct whole, so T2a must route the log's copy through
+    /// [`Self::new`] and compare before it trusts the number.
     digest: [u8; 32],
 }
 
@@ -1018,6 +1020,14 @@ impl ArtifactStore {
     ) -> usize {
         let mut refused = 0;
         for published in artifacts {
+            // A view in the identity has no apply path until T2c (`ingest.md` §1.5). Refused and
+            // counted on the fill's argument: the replay refuses to open before it reaches here
+            // (`crate::wal::unbuilt_track`), and applying such a record as entity-scoped would
+            // serve one view's artifact on every view of its group.
+            if published.view.is_some() {
+                refused += 1;
+                continue;
+            }
             // Damage is a refusal, not an empty membership — see `deserialise_members`. Skipping
             // leaves a hole, which answers *absent*; the alternative decodes a corrupt record to a
             // legitimately emptied artifact and serves it.
@@ -1028,14 +1038,20 @@ impl ArtifactStore {
             // Every generating set decodes or the artifact is refused whole. A content whose set
             // decoded short is one a viewer may be served without containing what it was generated
             // from — the disclosure containment exists to prevent — so the failure may not be
-            // localised to the one content and skipped.
+            // localised to the one content and skipped. The digest is recomputed from the values
+            // the record carries and checked against the stored one, so the log is self-checking
+            // and a record whose two halves disagree is refused as damage.
             let sets: Option<Vec<ContentSet>> = published
                 .contents
                 .iter()
                 .map(|v| {
+                    let digest = content_digest(&v.values);
+                    if digest != v.digest {
+                        return None;
+                    }
                     deserialise_members(&v.generated_from).map(|generated_from| ContentSet {
                         values: Some(v.values.clone()),
-                        digest: v.digest,
+                        digest,
                         generated_from,
                         cardinality: v.cardinality,
                     })

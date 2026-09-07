@@ -573,7 +573,18 @@ pub fn unbuilt_track(record: &WalRecord) -> Option<(&'static str, &'static str)>
         WalRecord::VocabularyDeclare { .. } => Some(("VocabularyDeclare", "T5")),
         WalRecord::ViewGroupCreate { .. } => Some(("ViewGroupCreate", "T6")),
         WalRecord::PlainViewCreate { .. } => Some(("PlainViewCreate", "T6")),
-        _ => None,
+        // Listed rather than caught by a wildcard, so that a variant added later is a decision
+        // here and not a default to "built".
+        WalRecord::VocabularyMint { .. }
+        | WalRecord::IngestBatch { .. }
+        | WalRecord::OverlaySnapshot { .. }
+        | WalRecord::ChangeByEntity { .. }
+        | WalRecord::LayerCreate { .. }
+        | WalRecord::ViewCreate { .. }
+        | WalRecord::ViewDrop { .. }
+        | WalRecord::LayerDrop { .. }
+        | WalRecord::ArtifactPublish { .. }
+        | WalRecord::ArtifactGrow { .. } => None,
     }
 }
 

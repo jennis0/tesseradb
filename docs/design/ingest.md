@@ -691,7 +691,7 @@ the fold a back-filled `render` value is filterable where `index` was declared a
 change made rather than versioned. `bundle_format` moves from 6 to 7, because the manifest is the
 durable home of every declaration that survives WAL rotation (contracts §2.2's `groups` row makes
 the argument for rosters) and gains runtime-declared attributes, vocabularies and groups, and each
-stored content and shape gains its digest. `WAL_VERSION` moves from 19 in **one bump-and-recreate
+stored content and shape gains its digest. `WAL_VERSION` moves from 20 to 21 in **one bump-and-recreate
 commit before any track** (spec §8): `ArtifactGrow` gains a rank, a leaving set and the moved
 cardinality, `ArtifactPublish` a view, and the log gains `ArtifactFill`, `ValuesBatch`,
 `AttributeDeclare`, `VocabularyDeclare`, `ViewGroupCreate` and `PlainViewCreate` (the `[[view]]`
