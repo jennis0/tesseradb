@@ -405,7 +405,8 @@ pub fn replay<'a>(
             | WalRecord::ValuesBatch { .. }
             | WalRecord::AttributeDeclare { .. }
             | WalRecord::VocabularyDeclare { .. }
-            | WalRecord::ViewGroupCreate { .. } => {}
+            | WalRecord::ViewGroupCreate { .. }
+            | WalRecord::PlainViewCreate { .. } => {}
         }
     }
 

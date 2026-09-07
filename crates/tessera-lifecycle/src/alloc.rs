@@ -278,7 +278,8 @@ pub fn high_water_from(records: &[WalRecord]) -> u64 {
             WalRecord::ArtifactFill { .. }
             | WalRecord::AttributeDeclare { .. }
             | WalRecord::VocabularyDeclare { .. }
-            | WalRecord::ViewGroupCreate { .. } => {}
+            | WalRecord::ViewGroupCreate { .. }
+            | WalRecord::PlainViewCreate { .. } => {}
         }
     }
     hw

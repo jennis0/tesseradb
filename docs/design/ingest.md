@@ -694,8 +694,10 @@ the argument for rosters) and gains runtime-declared attributes, vocabularies an
 stored content and shape gains its digest. `WAL_VERSION` moves from 19 in **one bump-and-recreate
 commit before any track** (spec §8): `ArtifactGrow` gains a rank, a leaving set and the moved
 cardinality, `ArtifactPublish` a view, and the log gains `ArtifactFill`, `ValuesBatch`,
-`AttributeDeclare`, `VocabularyDeclare` and `ViewGroupCreate`. Postcard is positional, so a stale
-log is refused rather than read.
+`AttributeDeclare`, `VocabularyDeclare`, `ViewGroupCreate` and `PlainViewCreate` (the `[[view]]`
+block minus its source, for R9's route; its own record because a plain view carries its frame,
+projection and gate itself and belongs to no roster). Postcard is positional, so a stale log is
+refused rather than read.
 
 **Built 2026-09-07, the format half (T0):** `WAL_VERSION` 21 and `bundle_format` 7, with every
 record variant and field above present and serialised. A generating set's cardinality and a

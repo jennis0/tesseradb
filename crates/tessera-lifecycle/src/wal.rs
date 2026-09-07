@@ -512,6 +512,37 @@ pub enum WalRecord {
     ViewGroupCreate {
         declaration: Box<ViewGroupDeclaration>,
     },
+    /// A plain view declared while the service runs (`PUT /control/views/{name}`, `ingest.md`
+    /// §1.3 and §10, R9): the `[[view]]` block minus its source. Its own record and not a
+    /// [`WalRecord::ViewCreate`] with no group, because a roster record carries a key and
+    /// metadata under a group's frame, gate and projection, and a plain view carries those four
+    /// itself and belongs to no roster.
+    ///
+    /// Not built yet: nothing writes this record, and a replay that meets one refuses to open
+    /// naming track T6 ([`unbuilt_track`]).
+    PlainViewCreate {
+        declaration: Box<PlainViewDeclaration>,
+    },
+}
+
+/// A plain view as `PUT /control/views/{name}` declares it (`ingest.md` §1.3): the fields a
+/// `MANIFEST.views` entry records for a built one (contracts §2.2), with the frame and the
+/// projection declared, as [`ViewGroupDeclaration`]'s are.
+///
+/// On-disk format: field order is positional under postcard — see [`WalRow`]'s note.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PlainViewDeclaration {
+    pub name: String,
+    pub title: Option<String>,
+    /// The projection's canonical name (`projections.md` §5), as the manifest records it.
+    pub projection: String,
+    /// The frame the view's positions are quantised against, immutable for its life
+    /// (decision 0040).
+    pub frame: DeclaredFrame,
+    /// The view's gate, a list of labels each one term (decision 0132); `None` is `public`.
+    pub visibility: Option<Vec<String>>,
+    /// The view's `point_visibility.default`, or `None` where it declares none (decision 0133).
+    pub point_default: Option<String>,
 }
 
 /// The track of `ingest.md` §8 whose apply path a record waits on, and the record's own name, or
@@ -541,6 +572,7 @@ pub fn unbuilt_track(record: &WalRecord) -> Option<(&'static str, &'static str)>
         WalRecord::AttributeDeclare { .. } => Some(("AttributeDeclare", "T4")),
         WalRecord::VocabularyDeclare { .. } => Some(("VocabularyDeclare", "T5")),
         WalRecord::ViewGroupCreate { .. } => Some(("ViewGroupCreate", "T6")),
+        WalRecord::PlainViewCreate { .. } => Some(("PlainViewCreate", "T6")),
         _ => None,
     }
 }
@@ -933,7 +965,8 @@ const WAL_MAGIC: [u8; 4] = *b"TWAL";
 // decision 0136). `MembershipGrowth` gained `leaving` and `set` (a rank and the moved
 // cardinality), `PublishedArtifact` gained `view`, `PublishedContent` gained `digest` and
 // `cardinality`, and the variant table gained `ArtifactFill`, `ValuesBatch`, `AttributeDeclare`,
-// `VocabularyDeclare` and `ViewGroupCreate`, appended so no existing discriminant moves. Postcard
+// `VocabularyDeclare`, `ViewGroupCreate` and `PlainViewCreate`, appended so no existing
+// discriminant moves. Postcard
 // is positional, so a 20 growth read at 21 takes the next record's leading bytes for the leaving
 // set it does not carry, and a 20 publication takes the members' length for the view's; a log at
 // 20 is refused.
@@ -2491,6 +2524,21 @@ mod tests {
                     }],
                 }),
             },
+            WalRecord::PlainViewCreate {
+                declaration: Box::new(PlainViewDeclaration {
+                    name: "geographic".into(),
+                    title: None,
+                    projection: "none".into(),
+                    frame: DeclaredFrame {
+                        x_min: 0.0,
+                        x_max: 1.0,
+                        y_min: 0.0,
+                        y_max: 1.0,
+                    },
+                    visibility: None,
+                    point_default: None,
+                }),
+            },
         ];
         let tracks: Vec<&str> = records
             .iter()
@@ -2498,7 +2546,7 @@ mod tests {
             .collect();
         assert_eq!(
             tracks,
-            ["T2b", "T2a", "T2a", "T2a", "T2a", "T3", "T4", "T5", "T6"]
+            ["T2b", "T2a", "T2a", "T2a", "T2a", "T3", "T4", "T5", "T6", "T6"]
         );
 
         let (mut wal, _) = Wal::open(&path).unwrap();
