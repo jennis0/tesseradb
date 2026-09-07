@@ -21,7 +21,7 @@ the other.
 | **I5** | The two authorisation functions must agree on what a term means |
 | **I6** | Authorisation comes only from the token |
 | **I7** | Sampling happens after masking, never before |
-| **I8** | A label's generating set is immutable once supplied |
+| **I8** | Withdrawn 2026-09-07 (decision 0135): a generating set is the caller's claim, changeable at ingest; containment is against the declared set |
 | **I9** | Entity IDs are append-only and never reused |
 | **I10** | Entity IDs never cross the trust boundary |
 | **I11** | Row-space artifacts are versioned together, and a request resolves geometry once |

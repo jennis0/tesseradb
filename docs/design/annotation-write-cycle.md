@@ -20,6 +20,8 @@ cluster's labels still serving on routes that do not traverse the edge.
 refute the shape — **Stage 4's first measurement, not its last** — and spec §11's residue, plus the
 deferred edit pass (Stage 7) and the proportional criterion's denominator for predicate membership
 (Stage 6).
+**I8 withdrawn 2026-09-07** ([decision 0135](../decisions/0135-a-generating-set-is-the-callers-claim-i8-withdrawn.md)): a generating set may be grown or replaced by its caller at ingest. Every sentence below that rests on "never grown" is superseded by that decision and is rewritten with the ingest design under decision 0134.
+
 **Reads against:** design §4 (I1, I2, I3, I7, I8, I9, I10, I12), §7.6–§7.8, §11.2, Appendix C;
 [`write-path.md`](write-path.md) §2–§5 (**normative** for the write path); [`compaction.md`](compaction.md)
 §3–§5, §9; [`filter-index.md`](filter-index.md) §6; [`views.md`](views.md) §3;
