@@ -1649,29 +1649,12 @@ impl LiveState {
 
     /// Apply the fold's executed deletions to the resident artifact store — the second half of the
     /// artifact pass, run once the prefix carrying the rewritten extents is live. Retired artifacts
-    /// leave their levels; retired members leave the memberships that survive; and each layer's
-    /// `withdraw_on_member_deletion` declaration executes against the generating sets that lost a source.
-    /// Returns the levels the retirement moved, which the fold compares with what it stamped.
+    /// leave their levels; retired members leave the memberships that survive; and every content
+    /// whose generating set lost a source is withdrawn (decision 0135; the fold's report already
+    /// named it). Returns the levels the retirement moved, which the fold compares with what it
+    /// stamped.
     fn retire_artifacts(&self, retired: &croaring::Bitmap) -> Vec<(String, u32)> {
-        let policy = self.deletion_policy();
-        lock_recover(&self.artifacts).retire(retired, &policy)
-    }
-
-    /// Each layer's `withdraw_on_member_deletion` declaration, resolved by name.
-    ///
-    /// **A layer the registry cannot answer for gets `true`, spelled out rather than defaulted.**
-    /// `bool::default()` is `false` — the *widening* half, which shrinks the generating set and
-    /// goes on serving content generated from a deleted document — so `unwrap_or_default` here
-    /// would be a fail-open written as tidiness. The case is unreachable (a level exists because
-    /// its layer was registered), and the direction it fails in when it is not is the one that
-    /// costs a republication rather than a disclosure.
-    fn deletion_policy(&self) -> impl Fn(&str) -> bool + '_ {
-        move |layer: &str| {
-            lock_recover(&self.registry)
-                .get(layer)
-                .map(|registered| registered.declaration.content.withdraw_on_member_deletion)
-                .unwrap_or(true)
-        }
+        lock_recover(&self.artifacts).retire(retired)
     }
 
     /// Where an entity sits: `(layer, level, ordinal)`. Addressing only — see
@@ -12404,10 +12387,9 @@ impl Executor {
         n: u64,
         retired: &croaring::Bitmap,
     ) -> tessera_store::Result<Vec<tessera_store::manifest::MembershipExtent>> {
-        let policy = self.live.deletion_policy();
         let ready = self
             .live
-            .with_artifacts(|store| store.repack_all(retired, &policy));
+            .with_artifacts(|store| store.repack_all(retired));
         if ready.is_empty() {
             return Ok(Vec::new());
         }

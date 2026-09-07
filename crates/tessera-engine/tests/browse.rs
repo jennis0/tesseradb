@@ -174,7 +174,6 @@ fn declaration(criterion: Option<ExistenceCriterion>) -> LayerDeclaration {
                 ty: "text".into(),
                 require_member_visibility: SuppliedRequirement::Inherited,
             }],
-            withdraw_on_member_deletion: true,
         },
         depends_on: Vec::new(),
         levels: Vec::new(),

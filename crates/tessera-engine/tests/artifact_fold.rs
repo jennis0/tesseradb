@@ -11,6 +11,10 @@
 //! dropped a suppressed member's bit while it was at it would give a suppression a second
 //! retirement route, and the member would not come back at the unsuppress — fail-open, and
 //! indistinguishable from a cluster that had always been that size.
+//!
+//! A test of decision 0107's rule for a generating set the fold emptied was removed with the
+//! permissive mode that rule bounded (decision 0135): the fold withdraws content whose set lost a
+//! member, so no set is emptied.
 
 mod common;
 
@@ -48,7 +52,6 @@ fn declaration(name: &str) -> LayerDeclaration {
         content: ContentDeclaration {
             computed: vec!["centroid".into()],
             supplied: Vec::new(),
-            withdraw_on_member_deletion: true,
         },
         depends_on: Vec::new(),
         levels: Vec::new(),
@@ -948,17 +951,16 @@ fn a_merge_that_renumbers_extent_rows_disturbs_no_artifacts_count() {
     );
 }
 
-// ---- the layer's declaration, executed at the fold ----------------------------------------------
+// ---- a deleted source, executed at the fold -------------------------------------------------------
 
-/// A layer carrying corpus-derived content under the given deletion declaration.
-fn content_layer(on_deletion: bool) -> LayerDeclaration {
+/// A layer carrying corpus-derived content.
+fn content_layer() -> LayerDeclaration {
     let mut d = declaration("clusters/a");
     d.content.supplied = vec![tessera_types::layer::SuppliedContent {
         name: "topic".into(),
         ty: "text".into(),
         require_member_visibility: tessera_types::layer::SuppliedRequirement::All,
     }];
-    d.content.withdraw_on_member_deletion = on_deletion;
     d
 }
 
@@ -985,15 +987,15 @@ fn publish_described(fx: &Fixture, engine: &Engine) {
 /// vanish at the ack, run a fold, and it **stays gone** — served on no set that no longer names what
 /// the text was derived from.
 ///
-/// And under the strict declaration the artifact goes with it. Its layer declares supplied content;
-/// the fold withdrew the only content that had it; so what is left is an identity and a count with
-/// no description, which decision 0076 forbids serving. The caller republishes.
+/// And the artifact goes with it. Its layer declares supplied content; the fold withdrew the only
+/// content that had it; so what is left is an identity and a count with no description, which
+/// decision 0076 forbids serving. The caller re-declares (decision 0135).
 #[test]
-fn a_strict_layer_withdraws_the_content_at_the_fold_and_the_artifact_with_it() {
+fn a_deleted_source_withdraws_the_content_at_the_fold_and_the_artifact_with_it() {
     let fx = fixture();
     {
         let engine = fx.open();
-        engine.register_layer(content_layer(true)).unwrap();
+        engine.register_layer(content_layer()).unwrap();
         publish_described(&fx, &engine);
         assert_eq!(
             artifacts_of(&engine).len(),
@@ -1025,111 +1027,31 @@ fn a_strict_layer_withdraws_the_content_at_the_fold_and_the_artifact_with_it() {
     );
 }
 
-/// **Permissive is the caller's declaration and the service still does not choose.** The fold
-/// removes the deleted source from the set and the description serves again — to viewers who
-/// satisfy the survivors, which is a channel the caller opened for an object whose membership is
-/// statistical (C7).
+/// **The withdrawal reaches exactly the content whose generating set named the deleted document**
+/// (decision 0135). The fold does not shrink the set and keep the content on the survivors: what a
+/// content was derived from is the caller's claim, and a principal satisfying the survivors would
+/// otherwise read text derived from a document they cannot see. A content whose set names no
+/// retired entity is untouched, and its artifact serves on.
 ///
-/// **Mutations this kills:** a fold that *erases* the generating set rather than subtracting the
-/// retired members from it — `membership.rs`'s `generated_from.andnot_inplace(retired)` written as
-/// `clear()`. An empty set is contained by everyone, so the corpus-derived text would then serve to
-/// every principal who reaches the layer and sees one member of the artifact, and every assertion
-/// made from full coverage would still hold.
+/// `c1` is the control: the same layer, the same fold, the same request, a generating set drawn
+/// inside the subset term and not naming the deleted document. An artifact absent because the
+/// fold broke the layer, or because the viewport returned nothing at all, would satisfy a careless
+/// assertion that `c0` is gone; and the narrow principal being served `c1` shows the layer still
+/// serves on the set the caller declared.
+///
+/// **Mutations this kills:** a fold that subtracts the retired members from the set and keeps the
+/// content (the dropped permissive mode: `c0` would come back for full coverage); one that
+/// withdraws every content of the level rather than the ones whose set lost a member (would take
+/// `c1`); one that withdraws the artifact rather than the content (also takes `c1`, which shares
+/// the level).
 #[test]
-fn a_permissive_layer_shrinks_the_generating_set_at_the_fold_and_serves_again() {
+fn a_deleted_source_withdraws_only_the_content_whose_set_named_it() {
     let fx = fixture();
     let engine = fx.open();
-    engine.register_layer(content_layer(false)).unwrap();
-    publish_described(&fx, &engine);
+    engine.register_layer(content_layer()).unwrap();
 
-    // Resolved before the fold, which renumbers row space and moves the prefix the external-id
-    // extent is read from: these are the entities the control below is published over.
-    let control_members = fx.members((0..300).filter(|s| *s != 7));
+    // The fixture gives the subset term to every third source id, so `7` is outside this set.
     let control_set = fx.members((0..90).filter(|s| terms_of(*s).contains(&SUBSET_TERM)));
-
-    engine
-        .accept_change(fx.member(7), ChangeOp::Delete)
-        .expect("the delete is accepted");
-    assert!(
-        artifacts_of(&engine).is_empty(),
-        "withheld at the ack under either declaration — the interim is fail-closed, and the \
-         declaration only decides what the fold does about it"
-    );
-
-    fold(&engine);
-
-    let served = artifacts_of(&engine);
-    assert_eq!(served.len(), 1, "the artifact is back");
-    assert_eq!(
-        served[0].content,
-        vec!["shipping and logistics"],
-        "with its description, now generated from the surviving sources"
-    );
-    assert_eq!(served[0].masked_count, 299, "and one fewer member");
-
-    // **What the full-coverage assertions above cannot say.** They hold for a shrunk generating
-    // set and equally for one the fold erased, because containment against a full-coverage mask is
-    // satisfied by every set. So the surviving set is asserted from a principal that fails it: the
-    // fixture gives the subset term to every third source id, and the survivors are `0..30` less
-    // the deleted one, twenty of which that principal cannot see.
-    //
-    // `c1` is the control that makes the withholding mean something — the same layer, the same
-    // request, a generating set drawn *inside* the subset term. A narrow principal served nothing
-    // at all would satisfy an emptiness assertion without the fold having done anything right.
-    engine
-        .publish_artifacts(
-            "clusters/a".into(),
-            0,
-            vec![IncomingArtifact::with_content(
-                Some("c1".into()),
-                // Less the deleted source: a membership naming a deleted document is refused.
-                control_members,
-                vec![IncomingContent::new(
-                    vec!["what the subset term covers".into()],
-                    control_set,
-                )],
-            )],
-        )
-        .expect("a second described artifact publishes");
-
-    let narrow: Vec<Option<String>> = artifacts_for(&engine, &subset_credential())
-        .into_iter()
-        .map(|a| a.key)
-        .collect();
-    assert_eq!(
-        narrow,
-        vec![Some("c1".to_string())],
-        "the shrunk generating set is the surviving sources and not the empty set: a principal \
-         that fails the survivors reads neither the artifact nor its description, and is served \
-         the control published beside it"
-    );
-}
-
-/// **The limit of the shrink: a generating set with no survivors is not served**
-/// ([decision 0107](../../../docs/decisions/0107-a-generating-set-with-no-survivors-is-not-served.md)).
-///
-/// The case above deletes one of thirty sources and the content goes on serving from the
-/// twenty-nine. Delete the *only* source and the shrink has nothing left to serve on — and the
-/// state it would otherwise leave behind is the fail-open one, because containment is a subset test
-/// and the empty set is a subset of every mask. So the fold withdraws the content rather than
-/// retaining it emptied, and the artifact goes with it: its layer declares supplied content and it
-/// now has none, which is decision 0076's rule reached through the permissive arm.
-///
-/// **Mutations this kills:** retaining a content whose generating set the permissive arm emptied
-/// (serves the corpus-derived text to every principal who can see any member — the fail-open the
-/// ruling closes); applying the shrink to contents that named none of the retired entities (would
-/// take inherited content, which legitimately carries an empty set); withdrawing the whole artifact
-/// rather than the emptied content (would take `c1` with it).
-#[test]
-fn a_permissive_layer_withdraws_content_whose_last_source_the_fold_deletes() {
-    let fx = fixture();
-    let engine = fx.open();
-    engine.register_layer(content_layer(false)).unwrap();
-
-    // Two artifacts, one layer, one level, published together and differing in exactly one thing:
-    // whether the deletion below empties the generating set. `c1` is the non-vacuity guard — an
-    // artifact absent because the fold broke the layer, or because the viewport returned nothing at
-    // all, would satisfy a careless assertion that `c0` is gone.
     engine
         .publish_artifacts(
             "clusters/a".into(),
@@ -1139,23 +1061,22 @@ fn a_permissive_layer_withdraws_content_whose_last_source_the_fold_deletes() {
                     Some("c0".into()),
                     fx.members(0..300),
                     vec![IncomingContent::new(
-                        vec!["written from one document".into()],
-                        fx.members(std::iter::once(7)),
+                        vec!["shipping and logistics".into()],
+                        fx.members(0..30),
                     )],
                 ),
                 IncomingArtifact::with_content(
                     Some("c1".into()),
                     fx.members(0..300),
                     vec![IncomingContent::new(
-                        vec!["written from another".into()],
-                        fx.members(std::iter::once(8)),
+                        vec!["what the subset term covers".into()],
+                        control_set,
                     )],
                 ),
             ],
         )
         .expect("two described artifacts publish");
     wait_for_publication(&fx, &engine, 1);
-
     assert_eq!(
         artifacts_of(&engine).len(),
         2,
@@ -1165,29 +1086,43 @@ fn a_permissive_layer_withdraws_content_whose_last_source_the_fold_deletes() {
     engine
         .accept_change(fx.member(7), ChangeOp::Delete)
         .expect("the delete is accepted");
+    let at_ack: Vec<Option<String>> = artifacts_of(&engine).into_iter().map(|a| a.key).collect();
+    assert_eq!(
+        at_ack,
+        vec![Some("c1".to_string())],
+        "withheld at the ack by containment alone: the deleted document is outside every mask"
+    );
 
     fold(&engine);
 
-    // Full coverage is the discriminating principal *here*, unusually: the fault this pins is one
-    // an empty generating set satisfies for **everyone**, so a viewer who can see everything is
-    // exactly who would be served the withdrawn text.
     let served = artifacts_of(&engine);
     let keys: Vec<Option<String>> = served.iter().map(|a| a.key.clone()).collect();
     assert_eq!(
         keys,
         vec![Some("c1".to_string())],
-        "the content whose only source was deleted is withdrawn and its artifact with it, while \
-         the one published beside it — same layer, same fold, same request — is served"
+        "the content whose set named the deleted document is withdrawn and its artifact with it, \
+         while the one published beside it — same layer, same fold, same request — is served"
     );
     assert_eq!(
         served[0].content,
-        vec!["written from another"],
-        "and `c1`'s own generating set is untouched: the shrink reaches only sets naming a \
+        vec!["what the subset term covers"],
+        "and `c1`'s own generating set is untouched: the withdrawal reaches only sets naming a \
          retired entity"
     );
     assert_eq!(
         served[0].masked_count, 299,
         "the deletion left the membership as it leaves any other"
+    );
+
+    let narrow: Vec<Option<String>> = artifacts_for(&engine, &subset_credential())
+        .into_iter()
+        .map(|a| a.key)
+        .collect();
+    assert_eq!(
+        narrow,
+        vec![Some("c1".to_string())],
+        "a principal who satisfies `c1`'s declared set is served it, so the layer serves on the \
+         caller's claim and not on a set the fold edited"
     );
 }
 
@@ -1267,7 +1202,7 @@ fn publication_refuses_a_deleted_member_and_accepts_a_suppressed_one() {
 fn publication_refuses_a_generating_set_naming_a_deleted_document() {
     let fx = fixture();
     let engine = fx.open();
-    engine.register_layer(content_layer(true)).unwrap();
+    engine.register_layer(content_layer()).unwrap();
     engine
         .accept_change(fx.member(7), ChangeOp::Delete)
         .expect("the delete is accepted");

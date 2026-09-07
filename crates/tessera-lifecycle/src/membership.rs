@@ -34,8 +34,15 @@ use std::sync::Arc;
 use croaring::{Bitmap, BitmapView, Portable};
 use tessera_types::EntityId;
 
-/// Execute a layer's `withdraw_on_member_deletion` declaration against one record, for the members
-/// this fold retired (`annotation-write-cycle.md` §3.2).
+/// Withdraw every content of one record whose generating set names a member this fold retired
+/// ([decision 0135](../../../docs/decisions/0135-a-generating-set-is-the-callers-claim-i8-withdrawn.md)).
+///
+/// The content and its set leave together. A deleted member is outside every mask, so the set
+/// already fails containment for every principal; what the fold adds is that nothing durable goes
+/// on naming the freed slot (decision 0072), and the caller is told through the fold's report
+/// ([`ArtifactStore::degradations`]) and re-declares the set or the content through ingest. The
+/// service neither shrinks the set nor keeps the content on the survivors: what a content was
+/// derived from is the caller's claim, and the fold does not edit it.
 ///
 /// **An artifact left with no contents is not an artifact with no content** — it is one the
 /// serving path withholds, because its layer declares supplied content and it has none to serve.
@@ -43,47 +50,13 @@ use tessera_types::EntityId;
 /// reached from the write side: the alternative is serving the identity and the count with the
 /// description missing, which is the in-between state the decision forbids.
 ///
-/// **Permissive shrinks a generating set; it does not empty one.** A content whose last source this
-/// fold deleted leaves with the strict arm's contents rather than staying behind on the empty set,
-/// because the empty set is contained in every mask and would serve corpus-derived text to every
-/// principal who can see any member ([decision 0107](../../../docs/decisions/0107-a-generating-set-with-no-survivors-is-not-served.md),
-/// `annotation-write-cycle.md` §2.1). Content that requires only inherited visibility carries no
-/// generating set at all and is not reached by either arm.
-///
-/// Under either arm a content moves exactly when its generating set meets `retired`, which is the
+/// Content that requires only inherited visibility carries no generating set at all (C28) and is
+/// never reached. A content moves exactly when its generating set meets `retired`, which is the
 /// third term of [`record_moved_by`]; whether a record moved is asked there, not here.
-fn apply_deletion_policy(record: &mut ArtifactRecord, retired: &Bitmap, withdraw: bool) {
-    match withdraw {
-        true => {
-            record
-                .contents
-                .retain(|content| content.generated_from.and_cardinality(retired) == 0);
-        }
-        false => {
-            record.contents.retain_mut(|content| {
-                if content.generated_from.and_cardinality(retired) == 0 {
-                    return true;
-                }
-                content.generated_from.andnot_inplace(retired);
-                // **A generating set with no survivors is not served**
-                // ([decision 0107](../../../docs/decisions/0107-a-generating-set-with-no-survivors-is-not-served.md)).
-                // Containment is a subset test, and the empty set is a subset of every mask — so a
-                // content whose last source this fold deleted would read as *satisfied* for every
-                // principal who can see any member, and corpus-derived text written from documents
-                // they were never entitled to would serve to all of them. Permissive says the
-                // content survives *its survivors*; with none, there is nothing for it to survive
-                // on. The publish path already refuses to accept such content
-                // (`registry.rs`, C28); this is the only other route to the state, and it is
-                // closed the same way the strict arm closes it — the content leaves, and an
-                // artifact left with no contents on a layer that declares them is withheld.
-                //
-                // Inherited content is untouched: it legitimately carries an empty generating set,
-                // it names none of the retired entities, and the early return above is what it
-                // takes.
-                !content.generated_from.is_empty()
-            });
-        }
-    }
+fn withdraw_content_of_retired_members(record: &mut ArtifactRecord, retired: &Bitmap) {
+    record
+        .contents
+        .retain(|content| content.generated_from.and_cardinality(retired) == 0);
 }
 
 /// Whether retiring `retired` changes `record`: the artifact's own entity is retired, one of its
@@ -429,8 +402,10 @@ pub struct Degradation {
     /// What the membership held before this fold, so a caller can see the proportion rather than
     /// having to hold the previous number themselves.
     pub declared_members: u64,
-    /// `(rank, members of that generating set the fold retired)`, for the contents
-    /// that lost any. Empty on a layer that declares no supplied content.
+    /// `(rank, members of that generating set the fold retired)`, for the contents that lost any.
+    /// Every content listed here is withdrawn by this fold (decision 0135), so the list's length
+    /// is the number of contents the artifact lost. Empty on a layer that declares no supplied
+    /// content.
     pub contents_lost: Vec<(u32, u64)>,
 }
 
@@ -1391,10 +1366,9 @@ impl ArtifactStore {
     /// Two kinds of loss, and they are not the same event:
     ///
     /// - a **generating set** that lost a member describes content generated from a document that
-    ///   no longer exists. Under the layer's strict declaration the content and its set are dropped
-    ///   at this fold; under permissive the member leaves the set and it serves again. Either way
+    ///   no longer exists. The content and its set are withdrawn at this fold (decision 0135), and
     ///   the caller is owed the notice, because only they can decide whether the text still says
-    ///   something true.
+    ///   something true and re-declare it.
     /// - a **membership** that lost members is smaller than the caller declared it. Nothing is
     ///   wrong with it — every count was already correct at the ack — but a caller planning a
     ///   refresh wants to know which of their sets have drifted.
@@ -1481,29 +1455,21 @@ impl ArtifactStore {
     /// (Rule S), so dropping its bit here would give it a second retirement route, which is
     /// fail-open.
     ///
-    /// **Generating sets move only where the layer said they may**, which is `policy`
-    /// (`annotation-write-cycle.md` §3.2). Under `WithdrawContent` — the default — a content that
-    /// lost a source is **dropped whole**, content and set together, because containment is
-    /// all-or-nothing and a set that lost a member fails it for every principal for ever; the caller
-    /// regenerates. Under `ShrinkGeneratingSet` the member leaves the set and the content serves
-    /// again, which is a channel the caller chose for an object whose membership is statistical.
-    /// Neither is a service *behaviour*: both are the declaration executing.
+    /// A content whose generating set lost a retired member is **dropped whole**, content and set
+    /// together ([`withdraw_content_of_retired_members`], decision 0135): containment is
+    /// all-or-nothing and a set that lost a member fails it for every principal for ever; the
+    /// caller re-declares.
     ///
     /// A level with a hole is reported rather than packed around, exactly as in
     /// [`Self::unpublished`] — but the consequence differs and the caller must not treat it as a
     /// skip: an extent this rewrite omits is a level the new prefix does not carry at all, whose
     /// artifacts come back registered, addressable and served as absent.
-    pub fn repack_all(
-        &self,
-        retired: &Bitmap,
-        policy: &dyn Fn(&str) -> bool,
-    ) -> Vec<PendingExtent> {
+    pub fn repack_all(&self, retired: &Bitmap) -> Vec<PendingExtent> {
         let mut ready = Vec::new();
         for ((layer, level), slots) in &self.levels {
             if slots.is_empty() {
                 continue;
             }
-            let on_deletion = policy(layer);
             let blobs: Vec<Vec<u8>> = slots
                 .iter()
                 .enumerate()
@@ -1535,7 +1501,7 @@ impl ArtifactStore {
                     }
                     let mut record = record.clone();
                     record.members.to_mut().andnot_inplace(retired);
-                    apply_deletion_policy(&mut record, retired, on_deletion);
+                    withdraw_content_of_retired_members(&mut record, retired);
                     encode_record(&record, shape)
                 })
                 .collect();
@@ -1559,11 +1525,7 @@ impl ArtifactStore {
     /// ones it read would be the global grain [`Self::versions`] exists to escape, in the one place
     /// where it is least affordable. Which levels change is [`record_moved_by`]'s answer, the one
     /// [`Self::levels_moved_by`] gave the fold before its manifest was written.
-    pub fn retire(
-        &mut self,
-        retired: &Bitmap,
-        policy: &dyn Fn(&str) -> bool,
-    ) -> Vec<(String, u32)> {
+    pub fn retire(&mut self, retired: &Bitmap) -> Vec<(String, u32)> {
         if retired.is_empty() {
             return Vec::new();
         }
@@ -1572,7 +1534,6 @@ impl ArtifactStore {
         let mut gone: Vec<(EntityId, EntityId)> = Vec::new();
         let mut moved: Vec<(String, u32)> = Vec::new();
         for ((layer, level), slots) in self.levels.iter_mut() {
-            let on_deletion = policy(layer);
             let mut changed = false;
             for slot in slots.iter_mut() {
                 let Some(record) = slot else { continue };
@@ -1596,7 +1557,7 @@ impl ArtifactStore {
                     continue;
                 }
                 record.members.to_mut().andnot_inplace(retired);
-                apply_deletion_policy(record, retired, on_deletion);
+                withdraw_content_of_retired_members(record, retired);
             }
             if changed {
                 moved.push((layer.clone(), *level));
@@ -2183,7 +2144,7 @@ mod tests {
         let mut store = ArtifactStore::new();
         store.put("clusters/a", 0, 0, record(100, &[1, 2, 3]), None);
         store.put("topics/x", 0, 0, attached(200, 100, "clusters/a", 0), None);
-        store.retire(&Bitmap::of(&[200]), &|_| false);
+        store.retire(&Bitmap::of(&[200]));
         assert!(
             store.cascade_from(&[EntityId::new(100)]).is_empty(),
             "the label is gone, so deleting its cluster cascades into nothing"
@@ -2749,8 +2710,9 @@ mod tests {
     /// one.** The fold stamps a reported level's derived structures with `version + 1` before the
     /// retirement runs (`write.rs`'s `artifact_coordinates`), so a level reported and not moved, or
     /// moved and not reported, would hold a structure at a version describing other records.
-    /// Every way a record can move is here: its own entity retired, a member retired, and a
-    /// generating-set member retired under each deletion policy, beside a level nothing touches.
+    /// Every way a record can move is here: its own entity retired, a member retired, a
+    /// generating-set member retired, and a described artifact that lost a member outside its
+    /// generating set, beside a level nothing touches.
     #[test]
     fn retire_moves_exactly_the_levels_levels_moved_by_reports_and_each_by_one() {
         let mut store = ArtifactStore::new();
@@ -2765,7 +2727,7 @@ mod tests {
         );
         assert_eq!(
             store.apply(
-                &publication_with_content("shrunk", 0, 103, &[7], &[7, 8]),
+                &publication_with_content("described", 0, 103, &[7, 8], &[7]),
                 24
             ),
             0
@@ -2779,10 +2741,10 @@ mod tests {
         let retired = Bitmap::of(&[100, 4, 6, 8]);
         let mut reported = store.levels_moved_by(&retired);
         reported.sort();
-        let mut moved = store.retire(&retired, &|layer| layer != "shrunk");
+        let mut moved = store.retire(&retired);
         moved.sort();
 
-        let expected: Vec<(String, u32)> = ["member", "own", "shrunk", "withdrawn"]
+        let expected: Vec<(String, u32)> = ["described", "member", "own", "withdrawn"]
             .iter()
             .map(|layer| (layer.to_string(), 0))
             .collect();
@@ -2808,12 +2770,18 @@ mod tests {
         );
         assert!(
             store.get("withdrawn", 0, 0).unwrap().contents.is_empty(),
-            "the content that lost a source is withdrawn under the strict policy"
+            "the content whose generating set lost a source is withdrawn (decision 0135)"
+        );
+        let described = store.get("described", 0, 0).unwrap();
+        assert_eq!(
+            described.members,
+            Bitmap::of(&[7]),
+            "a member outside the generating set leaves the membership"
         );
         assert_eq!(
-            store.get("shrunk", 0, 0).unwrap().contents[0].generated_from,
+            described.contents[0].generated_from,
             Bitmap::of(&[7]),
-            "and shrunk to its survivors under the permissive one"
+            "and the content whose set did not name it is untouched, its set unchanged"
         );
     }
 
@@ -2864,7 +2832,7 @@ mod tests {
     fn a_growth_against_a_hole_adds_nothing() {
         let mut store = ArtifactStore::new();
         assert_eq!(store.apply(&publication("clusters/a", 0, 100, &[1]), 0), 0);
-        store.retire(&Bitmap::of(&[100]), &|_| false);
+        store.retire(&Bitmap::of(&[100]));
 
         assert_eq!(
             store.apply(&growth("clusters/a", 0, 0, &[7, 8]), 8),
@@ -2962,7 +2930,7 @@ mod tests {
         );
         assert_eq!(store.apply(&growth("clusters/a", 0, 0, &[3, 4]), 8), 0);
 
-        store.retire(&Bitmap::of(&[3]), &|_| false);
+        store.retire(&Bitmap::of(&[3]));
         assert_eq!(
             store.get("clusters/a", 0, 0).unwrap().members,
             Bitmap::of(&[1, 2, 4]),

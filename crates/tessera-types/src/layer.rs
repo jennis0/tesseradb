@@ -509,8 +509,14 @@ impl DrawnShape {
 }
 
 /// What a layer's artifacts carry.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+///
+/// A deleted member withdraws the supplied content its generating set produced (decision 0135).
+/// The item leaves every mask, so the set fails containment for every principal; the fold removes
+/// the content, reports it, and the caller re-declares the set or the content. No field selects
+/// another outcome: the strict and permissive modes, and the `withdraw_on_member_deletion` field
+/// that chose between them, are gone. A declaration still carrying that field is refused by name
+/// rather than read with it ignored (decision 0048); see the `Deserialize` impl below.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct ContentDeclaration {
     /// Properties recomputed per viewer from `membership ∩ M_auth` and nothing else — `centroid`,
     /// `hull`, `box`, `extractive_terms`. Contained by construction, so they take no visibility
@@ -520,36 +526,64 @@ pub struct ContentDeclaration {
     pub computed: Vec<String>,
     #[serde(default)]
     pub supplied: Vec<SuppliedContent>,
-    /// Drop supplied content when one of its generating set is deleted, rather than shrinking the
-    /// set. **Defaulted `true`**, and that is the one direction a disclosure control may default
-    /// in: the widening half is the one that must be typed (C7).
-    ///
-    /// `true` — the content and its generating set are dropped together at the fold and the caller
-    /// regenerates. Right where the exact membership *is* the object: a curated set, a case file.
-    /// Containment being all-or-nothing, a set that loses a member would otherwise fail for every
-    /// principal for ever.
-    ///
-    /// `false` — the fold removes the deleted member and the content goes on serving. Right where
-    /// the membership is statistical, and it means a principal satisfying the survivors may read
-    /// content generated from the deleted item.
-    #[serde(default = "yes")]
-    pub withdraw_on_member_deletion: bool,
 }
 
-/// [`ContentDeclaration::withdraw_on_member_deletion`]'s default, which is **not** `bool::default`.
-/// Deriving `Default` on the struct would give it `false` — the widening half — so the derive is
-/// replaced by the impl below rather than left to be silently wrong.
-fn yes() -> bool {
-    true
-}
+/// The refusal a content declaration carrying the removed field draws.
+pub const WITHDRAW_ON_MEMBER_DELETION_REMOVED: &str = "`withdraw_on_member_deletion` was removed \
+    from the content declaration (decision 0135): a deleted member withdraws the content its \
+    generating set produced, at the fold, and the caller re-declares the set or the content. \
+    Remove the field";
 
-impl Default for ContentDeclaration {
-    fn default() -> Self {
-        ContentDeclaration {
-            computed: Vec::new(),
-            supplied: Vec::new(),
-            withdraw_on_member_deletion: true,
+/// Hand-written so the removed field is refused by name. `deny_unknown_fields` would refuse it as
+/// one unknown key among any; a caller holding a declaration written for the old modes should
+/// read what changed.
+///
+/// The check runs only from a self-describing format (`is_human_readable`, which is JSON at the
+/// control plane). Postcard is positional and carries the two live fields alone, so the WAL's
+/// `LayerCreate` record is read through the positional form.
+impl<'de> Deserialize<'de> for ContentDeclaration {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        const FIELDS: &[&str] = &["computed", "supplied"];
+
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Positional {
+            #[serde(default)]
+            computed: Vec<String>,
+            #[serde(default)]
+            supplied: Vec<SuppliedContent>,
         }
+
+        #[derive(Deserialize)]
+        struct Named {
+            #[serde(default)]
+            computed: Vec<String>,
+            #[serde(default)]
+            supplied: Vec<SuppliedContent>,
+            #[serde(flatten)]
+            other: std::collections::BTreeMap<String, serde::de::IgnoredAny>,
+        }
+
+        if !deserializer.is_human_readable() {
+            let read = Positional::deserialize(deserializer)?;
+            return Ok(ContentDeclaration {
+                computed: read.computed,
+                supplied: read.supplied,
+            });
+        }
+        let read = Named::deserialize(deserializer)?;
+        if read.other.contains_key("withdraw_on_member_deletion") {
+            return Err(serde::de::Error::custom(
+                WITHDRAW_ON_MEMBER_DELETION_REMOVED,
+            ));
+        }
+        if let Some(unknown) = read.other.keys().next() {
+            return Err(serde::de::Error::unknown_field(unknown, FIELDS));
+        }
+        Ok(ContentDeclaration {
+            computed: read.computed,
+            supplied: read.supplied,
+        })
     }
 }
 
@@ -638,7 +672,8 @@ pub struct LayerDeclaration {
     // the point (`annotation-write-cycle.md` §6.1, decision 0013). It would drop the whole
     // artifact when one member is deleted, and the fold has no such path — so the declaration
     // surface refuses `true` at parse rather than carrying a field the fold would silently ignore.
-    // The **content**-level key of the same name is real and lives on `ContentDeclaration`.
+    // The content-level key of the same name was removed by decision 0135; a declaration still
+    // carrying it is refused by name (`ContentDeclaration`'s `Deserialize`).
     /// The layers this one's edges point into. A layer named here needs keys, because an
     /// edge names its target and at publish time the caller has no `tessera_id` for it.
     #[serde(default)]

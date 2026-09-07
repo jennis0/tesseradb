@@ -1398,10 +1398,10 @@ impl ArtifactRows {
             // **Nothing to contain, or nothing left to serve — and the layer's declaration is what
             // tells them apart.** A layer declaring no supplied content has artifacts that serve on
             // their other conjuncts; one that *does* declare it has artifacts that must carry it,
-            // and an artifact here with none has had its last content withdrawn by a fold under
-            // the strict declaration. Serving it would be the identity and the count with the
-            // description missing — the in-between state decision 0076 forbids — so it is absent
-            // until the caller republishes.
+            // and an artifact here with none has had its last content withdrawn by a fold because
+            // its generating set lost a deleted member (decision 0135). Serving it would be the
+            // identity and the count with the description missing — the in-between state decision
+            // 0076 forbids — so it is absent until the caller republishes.
             return if layer_declares_content {
                 Containment::Unsatisfied
             } else {

@@ -34,7 +34,6 @@ fn declaration(name: &str, visibility: Option<&str>) -> LayerDeclaration {
         content: ContentDeclaration {
             computed: vec!["centroid".into(), "hull".into()],
             supplied: Vec::new(),
-            withdraw_on_member_deletion: true,
         },
         depends_on: Vec::new(),
         levels: Vec::new(),

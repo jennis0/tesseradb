@@ -357,7 +357,7 @@ fn the_accepted_key_set_is_configuration_ms_table() {
     expect_keys(
         "[[layer]]\nname = \"l\"\n[layer.content]\nnonesuch = 1\n",
         "[layer.content]",
-        &["computed", "supplied", "withdraw_on_member_deletion"],
+        &["computed", "supplied"],
     );
     expect_keys(
         "[[layer]]\nname = \"l\"\n[[layer.content.supplied]]\nnonesuch = 1\n",
@@ -1439,8 +1439,6 @@ fn a_layer_compiles_its_two_axes() {
     );
     assert!(layer.hierarchy.prune_children);
     assert_eq!(layer.content.computed, vec!["centroid", "box"]);
-    // `[layer.content]`'s withdrawal default is the half that cannot widen.
-    assert!(layer.content.withdraw_on_member_deletion);
 }
 
 /// The three §6 requires on every layer, each with its own reason for having no default.
@@ -1770,21 +1768,22 @@ fn withdrawing_a_whole_artifact_is_refused_as_unbuilt() {
     assert!(parse_str(&text).is_ok());
 }
 
-/// The **content**-level key of the same name is built, defaults `true`, and `false` is the
-/// widening half a caller must type.
+/// The content-level key of the same name is gone (decision 0135): a deleted member withdraws
+/// supplied content at the fold, and a `[layer.content]` block written for the old modes is
+/// refused as carrying an unknown key rather than read with the key ignored (decision 0048).
 #[test]
-fn content_withdrawal_defaults_to_the_half_that_cannot_widen() {
-    let text = with_layer("").replace(
-        "  computed = [\"centroid\", \"box\"]",
-        "  computed = [\"centroid\"]\n  withdraw_on_member_deletion = false",
-    );
-    let config = parse_str(&text).unwrap();
-    assert!(!config.layers[0].content.withdraw_on_member_deletion);
-    assert!(
-        parse_str(&with_layer("")).unwrap().layers[0]
-            .content
-            .withdraw_on_member_deletion
-    );
+fn content_withdrawal_is_no_longer_a_key() {
+    for value in ["true", "false"] {
+        let text = with_layer("").replace(
+            "  computed = [\"centroid\", \"box\"]",
+            &format!("  computed = [\"centroid\"]\n  withdraw_on_member_deletion = {value}"),
+        );
+        let message = err(&text);
+        assert!(
+            message.contains("withdraw_on_member_deletion"),
+            "the refusal names the key: {message}"
+        );
+    }
 }
 
 /// `membership` at its three spellings, and the ways of getting each wrong.

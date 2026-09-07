@@ -58,7 +58,6 @@ fn declaration(layout: Option<ServingLayout>, bar: u64) -> LayerDeclaration {
         content: ContentDeclaration {
             computed: vec!["centroid".into()],
             supplied: Vec::new(),
-            withdraw_on_member_deletion: true,
         },
         depends_on: Vec::new(),
         levels: Vec::new(),

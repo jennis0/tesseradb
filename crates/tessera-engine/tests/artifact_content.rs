@@ -45,7 +45,6 @@ fn declaration(name: &str, derived: &[&str]) -> LayerDeclaration {
         content: ContentDeclaration {
             computed: derived.iter().map(|d| (*d).to_string()).collect(),
             supplied: Vec::new(),
-            withdraw_on_member_deletion: true,
         },
         depends_on: Vec::new(),
         levels: Vec::new(),
@@ -652,9 +651,10 @@ fn two_publications_of_content_both_survive_the_loss_of_the_whole_log() {
 ///
 /// **Mutations this kills:** a rule silently subsumed by an earlier check, or two of the four
 /// collapsed onto one refusal path — any change that leaves the batch refused for the wrong reason.
-/// The fourth case is the one to watch: an empty generating set on corpus-derived content is what
-/// keeps `a_permissive_layer_shrinks_the_generating_set_at_the_fold_and_serves_again`'s
-/// empty-set condition out at the front door, and its identity was pinned by nothing.
+/// The fourth case is the one to watch: an empty generating set on corpus-derived content is
+/// satisfied by every mask, and publication is the only door such a set could enter by (the fold
+/// withdraws a content whole rather than emptying its set, decision 0135), so the refusal's
+/// identity is pinned here and nowhere else.
 #[test]
 fn content_that_disagrees_with_the_declaration_is_refused() {
     let fx = fixture();

@@ -31,8 +31,8 @@ by the source's own name. `--extent`, `--id-key`, `--id-key-file`, `--points`, `
 each naming what is absent per
 decision 0013:
 
-- **`withdraw_on_member_deletion = true` on a *layer*** (not on its content, which needs a fold
-  path) — refused at parse rather than accepted and ignored. A view's or a view group's own
+- **`withdraw_on_member_deletion = true` on a *layer*** — refused at parse rather than accepted
+  and ignored. A view's or a view group's own
   `visibility` **is built and no longer refused** (2026-08-31, `views.md` §6): a label compiles,
   is checked at parse against the plugin that will evaluate it, and gates the view for every
   principal whose satisfied terms it does not meet.
@@ -511,24 +511,16 @@ and four sub-blocks, each below: `[layer.members]` (O), `[layer.content]` (O),
 `[[layer.content.supplied]]` sits under `[layer.content]`, not under the layer, and
 `[layer.labels.members]` under `[layer.labels]`.
 
-**`withdraw_on_member_deletion` exists at two levels, and their defaults differ.** On `[[layer]]`
-it governs the **artifact**; on `[layer.content]` it governs **supplied content** alone. Declaring
-it on the layer subsumes the content one — there is no content left to withdraw once the artifact
-is gone.
-
-- **On the layer, the default is `false`**, and keeping the artifact is safe rather than merely
-  convenient: everything the artifact carries of its own is either its identity or a **computed**
-  property, and computed properties are recomputed per viewer from current membership, so a
-  surviving artifact carries no residue of the deleted member. Setting it `true` is a *semantic*
-  declaration — *this set is the object, so it is no longer that object* — which is right for a
-  curated set or a case file and wrong for a cluster, whose membership was always going to move.
-- **On the content, the default is `true`**, because there the residue is real: supplied content
-  was generated from a set including the deleted item, and serving it on afterwards lets a
-  principal satisfying the survivors read something derived from what was removed. That one is a
-  disclosure control, so its default is the half that cannot widen (C7).
-
-The two defaults therefore point opposite ways for the same rule, which is not an inconsistency:
-one is a semantic choice with no disclosure content, and the other is a disclosure control. What
+**`withdraw_on_member_deletion` is a `[[layer]]` key and governs the artifact.** Its default
+`false` keeps the artifact, and that is safe rather than merely convenient: everything the artifact
+carries of its own is either its identity or a **computed** property, and computed properties are
+recomputed per viewer from current membership, so a surviving artifact carries no residue of the
+deleted member. Setting it `true` is a *semantic* declaration — *this set is the object, so it is
+no longer that object* — which is right for a curated set or a case file and wrong for a cluster,
+whose membership was always going to move. Supplied content takes no key of this name: content
+whose generating set loses a deleted member is withdrawn at the fold, content and set together, the
+fold's report names it, and the caller re-declares it
+([decision 0135](../decisions/0135-a-generating-set-is-the-callers-claim-i8-withdrawn.md)). What
 withdrawal does to artifacts attached to the withdrawn one is the write cycle's
 (`annotation-write-cycle.md` §5), not this document's — a dangling dependent is refused rather than
 repaired, and nothing here changes that.
@@ -606,29 +598,14 @@ two levels one base and a gap would reserve a run no address reaches.
 | `computed` | D `[]` | properties the engine recomputes per viewer from `membership ∩ M_auth` and nothing else: `centroid`, `hull`, `box`, and ⊘ `extractive_terms`, which is specified and not implemented
 (`annotations.md` §4.2) and refused at registration. **Contained by construction**, so they take no visibility declaration and pass containment automatically. The masked count is intrinsic and is never declared here |
 | `supplied` | D `[]` | `[[layer.content.supplied]]` entries, below |
-| `withdraw_on_member_deletion` | D `true` | drop supplied content when one of its generating set is deleted, rather than shrinking the set |
 
-**`withdraw_on_member_deletion` decides whether supplied content outlives its sources.**
-
-- **`true`**, the default — the content and its generating set are dropped together at the fold and
-  the caller regenerates. Right where the exact membership *is* the object: a curated set, a case
-  file. Containment being all-or-nothing, a set that loses a member would otherwise fail for every
-  principal for ever.
-- **`false`** — the fold removes the deleted member and the content goes on serving. Right where
-  the membership is statistical — a topic label drawn from documents it does not enumerate — and it
-  means a principal satisfying the survivors may read content generated from the deleted item.
-
-That second one is a **caller's declaration and never a service behaviour** (C7), which is why
-`true` is the default: the widening half is the one that must be typed.
-
-It was spelled `on_member_deletion`, with values `withdraw_content` and `shrink_generating_set`.
-Both values repeated the object the key had already supplied, and as a boolean it now reads on the
-same rule as `render`, `index` and `prune_children` — an imperative saying what the build should do.
-
-⊘ **It sits on `[layer.content]`, and probably belongs on each supplied kind.** One layer may
-legitimately carry a curated boundary polygon and a statistical label over the same artifacts, and
-today they must share this declaration. Recorded, not changed: it is a model question for
-`annotations.md` rather than a spelling one.
+Supplied content whose generating set loses a deleted member is withdrawn at the fold, content and
+set together, and the fold's report names it; the caller re-declares the set or the content
+([decision 0135](../decisions/0135-a-generating-set-is-the-callers-claim-i8-withdrawn.md)). No key
+selects another outcome: containment is all-or-nothing, so a set that lost a member fails for every
+principal, and a set the service shrank on the caller's behalf would serve content derived from a
+document the reader cannot see (C7). A `withdraw_on_member_deletion` key in this block is refused
+as unknown; the same field in a `PUT /control/layers` body is refused naming it as removed.
 
 **`[[layer.content.supplied]]`** — one kind of content a caller supplies on this layer's artifacts.
 Repeatable.

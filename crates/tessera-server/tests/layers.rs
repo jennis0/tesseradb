@@ -60,7 +60,7 @@ fn declaration(name: &str, visibility: Option<&str>) -> serde_json::Value {
         "artifact_visibility": { "field": null, "default": "inherited" },
         "require_member_visibility": { "count": 50 },
         "hierarchy": { "kind": "nested", "prune_children": true },
-        "content": { "computed": ["centroid", "hull"], "supplied": [], "withdraw_on_member_deletion": true },
+        "content": { "computed": ["centroid", "hull"], "supplied": [] },
         "depends_on": [],
         "levels": []
     })
@@ -373,7 +373,7 @@ async fn publishing_into_a_layer_that_does_not_take_artifacts_is_a_422_that_says
     predicate["require_member_visibility"] = json!({ "count": 25 });
     predicate["hierarchy"] = json!({ "kind": "flat", "prune_children": false });
     predicate["content"] =
-        json!({ "computed": [], "supplied": [], "withdraw_on_member_deletion": true });
+        json!({ "computed": [], "supplied": [] });
     assert_eq!(register(&server, predicate).await.0, 201);
 
     let (status, body) = publish(
@@ -734,7 +734,7 @@ fn tiered_zoomed(name: &str) -> serde_json::Value {
     d["require_member_visibility"] = serde_json::Value::Null;
     d["hierarchy"] = json!({ "kind": "tiered", "prune_children": true });
     d["content"] =
-        json!({ "computed": ["centroid"], "supplied": [], "withdraw_on_member_deletion": true });
+        json!({ "computed": ["centroid"], "supplied": [] });
     d["levels"] = json!([
         { "level": 0, "title": "Country", "zoom": [0, 4] },
         { "level": 1, "title": "Admin 1", "zoom": [3, 7] },
@@ -1181,7 +1181,7 @@ fn spatial_declaration(name: &str) -> serde_json::Value {
         "artifact_visibility": { "field": null, "default": "inherited" },
         "require_member_visibility": null,
         "hierarchy": { "kind": "flat", "prune_children": false },
-        "content": { "computed": ["centroid", "box"], "supplied": [], "withdraw_on_member_deletion": true },
+        "content": { "computed": ["centroid", "box"], "supplied": [] },
         "depends_on": [],
         "levels": [],
         "shape": { "kind": "polygon" }
@@ -1352,8 +1352,7 @@ async fn an_authored_polygon_content_is_canonicalised_at_publication_and_served_
         "supplied": [
             { "name": "label", "type": "text", "require_member_visibility": "inherited" },
             { "name": "outline", "type": "polygon", "require_member_visibility": "inherited" }
-        ],
-        "withdraw_on_member_deletion": true
+        ]
     });
     assert_eq!(register(&server, d).await.0, 201);
     let kinds: Vec<serde_json::Value> = meta_layers(&server, &["0"]).await.iter().map(|l| l["shape"].clone()).collect();
@@ -1413,4 +1412,34 @@ async fn a_hull_beside_an_authored_shape_is_refused_at_registration() {
     let (status, body) = register(&server, d).await;
     assert_eq!(status, 422, "{body}");
     assert!(body.to_string().contains("one drawn geometry"), "{body}");
+}
+
+/// **A declaration carrying the removed `withdraw_on_member_deletion` is refused by name**
+/// (decision 0135). The strict and permissive modes the field selected between are gone, and a
+/// body written for them is refused rather than read with the field ignored (decision 0048): the
+/// caller reads that the field was removed and what the one behaviour is, at either value.
+#[tokio::test]
+async fn a_declaration_carrying_the_removed_withdrawal_field_is_refused_by_name() {
+    let tmp = TempDir::new().unwrap();
+    let server = serve(&tmp).await;
+    for value in [true, false] {
+        let mut d = declaration("clusters/stale", None);
+        d["content"]["withdraw_on_member_deletion"] = json!(value);
+        let resp = server
+            .client
+            .put(server.control_url("/control/layers"))
+            .bearer_auth(OPERATOR_CREDENTIAL)
+            .json(&d)
+            .send()
+            .await
+            .unwrap();
+        let status = resp.status().as_u16();
+        let body = resp.text().await.unwrap();
+        assert_eq!(status, 422, "{body}");
+        assert!(body.contains("`withdraw_on_member_deletion` was removed"), "{body}");
+        assert!(body.contains("decision 0135"), "{body}");
+    }
+    // The same declaration without the field registers, so the refusal was the field's.
+    let (status, body) = register(&server, declaration("clusters/stale", None)).await;
+    assert_eq!(status, 201, "{body}");
 }

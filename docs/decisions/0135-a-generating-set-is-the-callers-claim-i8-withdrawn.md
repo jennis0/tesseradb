@@ -55,4 +55,6 @@ set holding it fails containment for every principal by arithmetic; the fold wit
 generating set lost a member and reports it, and the caller re-declares the set or the content
 through ingest. `withdraw_on_member_deletion` leaves the content declaration; decision 0107 is
 closed as moot; C7 loses its second channel (content reappearing at a fold), which existed only
-under permissive. ⊘ Not yet built.
+under permissive. Built 2026-09-07: the field is gone from the declaration and every parser of one
+(a declaration still carrying it is refused by name), the fold's retire path has one arm, and
+`WAL_VERSION` moved to 20 because the `LayerCreate` record carried the field positionally.

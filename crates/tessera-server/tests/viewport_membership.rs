@@ -62,7 +62,7 @@ async fn register_and_plant(server: &TestServer) {
             "artifact_visibility": { "field": null, "default": "inherited" },
             "require_member_visibility": null,
             "hierarchy": { "kind": "flat", "prune_children": false },
-            "content": { "computed": ["centroid"], "supplied": [], "withdraw_on_member_deletion": true },
+            "content": { "computed": ["centroid"], "supplied": [] },
             "depends_on": [],
             "levels": []
         }))
@@ -301,7 +301,7 @@ async fn a_layer_cannot_be_registered_under_the_reserved_word() {
             "artifact_visibility": { "field": null, "default": "inherited" },
             "require_member_visibility": null,
             "hierarchy": { "kind": "flat", "prune_children": false },
-            "content": { "computed": [], "supplied": [], "withdraw_on_member_deletion": true },
+            "content": { "computed": [], "supplied": [] },
             "depends_on": [],
             "levels": []
         }))

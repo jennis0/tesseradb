@@ -53,7 +53,6 @@ fn declaration(
         content: ContentDeclaration {
             computed: vec!["centroid".into()],
             supplied: Vec::new(),
-            withdraw_on_member_deletion: true,
         },
         depends_on: Vec::new(),
         levels: Vec::new(),
@@ -85,7 +84,6 @@ fn labels() -> LayerDeclaration {
                 ty: "text".into(),
                 require_member_visibility: SuppliedRequirement::All,
             }],
-            withdraw_on_member_deletion: true,
         },
         depends_on: vec![TREE.into()],
         levels: Vec::new(),

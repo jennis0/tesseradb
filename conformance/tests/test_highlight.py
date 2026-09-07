@@ -289,7 +289,6 @@ def _layer(name: str, *, depends_on: list[str], supplied: bool) -> dict:
                 if supplied
                 else []
             ),
-            "withdraw_on_member_deletion": True,
         },
         "depends_on": depends_on,
         "levels": [],
