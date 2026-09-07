@@ -607,10 +607,9 @@ fn a_text_extent_published_after_the_snapshot_is_carried_and_digested() {
 
 /// **A flush whose batch carries no value for a text column publishes no layer for it.**
 ///
-/// An empty extent is not free. Nothing coalesces text layers — the entity-space coalesce skips any
-/// column whose layers carry a dictionary — so every one of them survives until the next fold, and
-/// every `match` pays a dictionary resolve and a posting read per token against each. A layer that
-/// can only ever answer the empty set is a permanent per-query cost buying nothing.
+/// An empty extent is not free. Between coalesces every text layer is a dictionary resolve and a
+/// posting read per token on every `match`, and a coalesce carries an empty layer's cost into its
+/// output. A layer that can only ever answer the empty set is a per-query cost buying nothing.
 ///
 /// The batch here carries a *null*, which is absence. An entity whose prose is the empty string
 /// carries a value and no terms, and must still get a layer — that is why the flush tests presence

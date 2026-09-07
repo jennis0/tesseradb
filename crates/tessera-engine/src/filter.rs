@@ -1146,6 +1146,13 @@ pub struct CoalescedWindow {
     /// The coalesced extent's values path.
     pub values_rel: String,
     pub values: Arc<ValueColumn>,
+    /// The dictionary the coalesced values are ordinals into — a keyword column's merged
+    /// dictionary, `None` for every other family. It arrives beside the values it numbers, as a
+    /// flush's [`PublishedExtent`] carries its own, and [`FilterColumns::with_coalesced`] installs
+    /// the two as one [`Layer`] or refuses: a keyword window without one has no reading, and a
+    /// dictionary on another family's window means the pass and the schema disagree about what
+    /// the values are.
+    pub dict: Option<Arc<SortedDict>>,
 }
 
 /// One text column's window of extents, and the coalesced extent that replaces them.
@@ -1649,6 +1656,39 @@ fn record_open_error(e: tessera_filter::RecordError) -> std::io::Error {
 /// refuses a half. On disc the same pairing is `AttrExtent`'s single record.
 pub type PublishedExtent = (String, String, Arc<ValueColumn>, Option<Arc<SortedDict>>);
 
+/// The one rule under which a layer may join a column: a keyword layer brings its own dictionary,
+/// and no other family's layer brings one.
+///
+/// **This is where "no ordinal is resolved against a dictionary other than the one that minted
+/// it" is enforced**, for every route a layer takes into the live composition — a flush's extent
+/// ([`FilterColumns::compose`]) and a coalesce's replacement ([`FilterColumns::with_coalesced`])
+/// both pass through here, and both then build one [`Layer`] from the pair. A [`Layer`] is the
+/// only thing a scan or a drill-down reads a dictionary from, and it is constructed nowhere a
+/// dictionary could arrive apart from the values it numbers. A keyword layer without one is
+/// refused rather than scanned as codes, which would answer every string predicate with the empty
+/// set; a dictionary on another family's layer is refused because the caller and the schema
+/// disagree about what the values are.
+fn check_dictionary_pairing(family: Family, column: &str, has_dict: bool) -> std::io::Result<()> {
+    match (family == Family::Keyword, has_dict) {
+        (true, false) => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "a layer for keyword column '{column}' carries no sorted dictionary; its values \
+                 are ordinals into the dictionary minted beside them (records §4.3, §7), and a \
+                 layer without one has no reading"
+            ),
+        )),
+        (false, true) => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "a layer for column '{column}' carries a sorted dictionary, but the schema does \
+                 not declare the column a keyword; the two disagree about what its values are"
+            ),
+        )),
+        _ => Ok(()),
+    }
+}
+
 impl FilterColumns {
     /// Open every filter column the manifest declares, with every extent the partition's
     /// side-manifest names.
@@ -1852,7 +1892,6 @@ impl FilterColumns {
         // filterable and always takes the branch below.
         for family in scoped {
             if !family.has_value_column() && !scoped_is_filterable(family) {
-
                 continue;
             }
             for view_id in &family.views {
@@ -2016,7 +2055,10 @@ impl FilterColumns {
         let Some(layers) = self.columns.get(column) else {
             return false;
         };
-        layers.text.iter().any(|layer| layer.present.contains(entity))
+        layers
+            .text
+            .iter()
+            .any(|layer| layer.present.contains(entity))
     }
 
     pub(crate) fn stored_value(&self, column: &str, entity: u32) -> Option<RecordValue> {
@@ -2071,11 +2113,10 @@ impl FilterColumns {
     /// values at once and a filter naming either returning it, with nothing to notice.
     ///
     /// **A keyword extent must bring its own dictionary, and one that does not is refused rather
-    /// than composed.** Its values are ordinals into a dictionary this flush minted, so a layer
-    /// without one has no reading at all: scanned as codes it would answer every string predicate
-    /// with the empty set, and resolved against the base's keys it would return another value's
-    /// entities. The pairing is checked in both directions, because a dictionary arriving for a
-    /// column that is not a keyword means the caller and the schema disagree about the family.
+    /// than composed** ([`check_dictionary_pairing`]). Its values are ordinals into a dictionary
+    /// this flush minted, so a layer without one has no reading at all: scanned as codes it would
+    /// answer every string predicate with the empty set, and resolved against the base's keys it
+    /// would return another value's entities.
     fn compose(
         &mut self,
         column: &str,
@@ -2092,29 +2133,7 @@ impl FilterColumns {
                 ),
             ));
         };
-        match (layers.family == Family::Keyword, dict.is_some()) {
-            (true, false) => {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    format!(
-                        "a filter extent for keyword column '{column}' carries no sorted \
-                         dictionary; its values are ordinals into the dictionary the flush minted \
-                         for them (records §4.3, §7), and a layer without one has no reading"
-                    ),
-                ));
-            }
-            (false, true) => {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    format!(
-                        "a filter extent for column '{column}' carries a sorted dictionary, but \
-                         the schema does not declare the column a keyword; the two disagree about \
-                         what its values are"
-                    ),
-                ));
-            }
-            _ => {}
-        }
+        check_dictionary_pairing(layers.family, column, dict.is_some())?;
         let present = extent.present();
         if layers.covered.and_cardinality(&present) != 0 {
             return Err(std::io::Error::new(
@@ -2284,18 +2303,23 @@ impl FilterColumns {
     /// disagree about what the bundle is, and publishing on that basis would serve a column short
     /// of a window's worth of entities.
     ///
-    /// ⊘ **A keyword column is refused here for the reason [`FilterColumns::with_extents`] gives.**
-    /// A coalesce merges two key sets and renumbers, so its output layer's ordinals are new ones;
-    /// [`CoalescedWindow`] carries no dictionary to go with them, and installing the layer without
-    /// one would leave the column's ordinals resolving against a dictionary that no longer numbers
-    /// them — the recolouring records §7 makes the remap's verification condition about.
+    /// **A keyword window arrives with the dictionary its coalesce minted, and the two are
+    /// installed as one layer.** A coalesce merges the window's dictionaries and renumbers every
+    /// ordinal, so the replacement's ordinals name positions in a dictionary no consumed layer
+    /// held. [`CoalescedWindow::dict`] carries it beside the values, [`check_dictionary_pairing`]
+    /// refuses a keyword window without one (and a dictionary on any other family's window), and
+    /// the pair becomes a single [`Layer`] in one push — the consumed layers leave and the
+    /// replacement enters in the same generation, so no generation ever holds the new ordinals
+    /// beside an old dictionary or the old ordinals beside the new one. That is the composition's
+    /// half of records §7's rule that a keyword layer's files swap atomically; `AttrExtent` is the
+    /// manifest's half.
     ///
-    /// **A text column is not refused, and the difference is the manifest record rather than the
-    /// family.** A text layer's dictionary, postings and presence are one entry, replaced together
-    /// — so the coalesced layer's new ordinals arrive with the dictionary that minted them and
-    /// nothing outside the three files ever held one. `texts` carries those windows; the coverage
-    /// equality above is checked for them too, against `TextLayer::present`, which is exactly what
-    /// a flush extent stores and what makes the check expressible for this family.
+    /// **A text column takes the same rule through its own record.** A text layer's dictionary,
+    /// postings and presence are one entry, replaced together, so the coalesced layer's new
+    /// ordinals arrive with the dictionary that minted them and nothing outside the three files
+    /// ever held one. `texts` carries those windows; the coverage equality above is checked for
+    /// them too, against `TextLayer::present`, which is exactly what a flush extent stores and
+    /// what makes the check expressible for this family.
     /// **The transpose is replaced whole rather than patched**, and `entity_terms` is the stack
     /// the caller re-derived from the rebased manifest — `None` where the axis did not run, in
     /// which case the live stack rides through unchanged. Its ordinals need no attention either
@@ -2366,18 +2390,7 @@ impl FilterColumns {
                     ),
                 ));
             };
-            if layers.family == Family::Keyword {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    format!(
-                        "a coalesce names keyword column '{}', and its replacement layer carries \
-                         no sorted dictionary; a coalesce renumbers the merged key set, so the \
-                         layer's ordinals are meaningless without the dictionary that minted them \
-                         (records §4.3, §7)",
-                        window.column
-                    ),
-                ));
-            }
+            check_dictionary_pairing(layers.family, &window.column, window.dict.is_some())?;
             let mut union = Bitmap::new();
             for rel in &window.consumed {
                 let Some(layer) = layers
@@ -2416,11 +2429,13 @@ impl FilterColumns {
                     .as_ref()
                     .is_none_or(|rel| !window.consumed.contains(rel))
             });
+            // One push of one struct: the coalesced ordinals and the dictionary that numbers
+            // them enter together, checked as a pair above, and the consumed layers left with
+            // their own dictionaries in the `retain` above.
             layers.layers.push(Layer {
                 values_rel: Some(window.values_rel.clone()),
                 values: Arc::clone(&window.values),
-                // Never a keyword column — refused above — so no dictionary is owed here.
-                dict: None,
+                dict: window.dict.clone(),
             });
             // `covered` is unchanged by construction — the equality above is what says so — so it
             // is neither recomputed nor adjusted here.
@@ -4783,6 +4798,195 @@ mod keyword_tests {
             Some(RecordValue::Utf8("beta".into()))
         );
         assert_eq!(columns.stored_value("sub", 7), None);
+    }
+
+    /// **A coalesced keyword window is installed with the dictionary its merge minted, as one
+    /// layer, and every entity still reads its own key.** The merged dictionary numbers `beta` and
+    /// `gamma` the other way round from either consumed layer, so a replacement resolved against
+    /// a consumed layer's dictionary — or a consumed layer left behind beside the merged one —
+    /// would answer another key's entities.
+    ///
+    /// The refusals are the same test's other half: the window without its dictionary is refused
+    /// with the generation unchanged, and a dictionary on a window of a column the schema does not
+    /// call a keyword is refused too — both through the one pairing rule a flush's extent passes.
+    #[test]
+    fn a_coalesced_keyword_window_installs_its_dictionary_beside_its_values() {
+        let columns = keyword_column(
+            "sub",
+            vec![
+                (None, universal(&[0, 1]), dict(&["alpha", "beta"])),
+                // Extent 1: gamma = 0, over entity 10. Extent 2: beta = 0, over entity 11.
+                (
+                    Some("extents/f1.arrow"),
+                    partial(&[10], &[0]),
+                    dict(&["gamma"]),
+                ),
+                (
+                    Some("extents/f2.arrow"),
+                    partial(&[11], &[0]),
+                    dict(&["beta"]),
+                ),
+            ],
+        );
+        let consumed = vec![
+            "extents/f1.arrow".to_string(),
+            "extents/f2.arrow".to_string(),
+        ];
+        // The merge's output: dictionary [beta, gamma], so 10 -> gamma is ordinal 1 and
+        // 11 -> beta is ordinal 0 — neither consumed layer's numbering.
+        let window = |dict: Option<Arc<SortedDict>>| CoalescedWindow {
+            column: "sub".to_string(),
+            consumed: consumed.clone(),
+            values_rel: "coalesced/c-1/attrs/sub/values.arrow".to_string(),
+            values: partial(&[10, 11], &[1, 0]),
+            dict,
+        };
+        let next = columns
+            .with_coalesced(&[window(Some(dict(&["beta", "gamma"])))], &[], None, None)
+            .expect("a keyword window with its dictionary replaces its layers");
+        assert_eq!(
+            next.layer_count("sub"),
+            Some(2),
+            "base plus the one coalesced layer"
+        );
+        let candidate = set(&[0, 1, 10, 11]);
+        let resolve = |columns: &FilterColumns, key: &str| {
+            members(
+                &columns
+                    .resolve("sub", &FilterOperand::TextEquals(key.into()), &candidate)
+                    .expect("answers"),
+            )
+        };
+        assert_eq!(resolve(&next, "alpha"), vec![0]);
+        assert_eq!(resolve(&next, "beta"), vec![1, 11]);
+        assert_eq!(resolve(&next, "gamma"), vec![10]);
+        assert_eq!(
+            next.stored_value("sub", 10),
+            Some(RecordValue::Utf8("gamma".into()))
+        );
+        assert_eq!(
+            next.stored_value("sub", 11),
+            Some(RecordValue::Utf8("beta".into()))
+        );
+        // And exactly what the consumed layers answered, key for key.
+        for key in ["alpha", "beta", "gamma", "delta"] {
+            assert_eq!(resolve(&next, key), resolve(&columns, key), "{key}");
+        }
+
+        // The half: a keyword window with no dictionary has no reading and is refused.
+        let err = columns
+            .with_coalesced(&[window(None)], &[], None, None)
+            .expect_err("a keyword window without its dictionary is refused");
+        assert!(
+            err.to_string().contains("carries no sorted dictionary"),
+            "{err}"
+        );
+        assert_eq!(
+            columns.layer_count("sub"),
+            Some(3),
+            "the generation is untouched"
+        );
+
+        // The other direction: a dictionary on a column the schema does not call a keyword. The
+        // same three layers under a column whose declared family is numeric.
+        let mut numeric = keyword_column(
+            "sub",
+            vec![
+                (None, universal(&[0, 1]), dict(&["alpha", "beta"])),
+                (
+                    Some("extents/f1.arrow"),
+                    partial(&[10], &[0]),
+                    dict(&["gamma"]),
+                ),
+                (
+                    Some("extents/f2.arrow"),
+                    partial(&[11], &[0]),
+                    dict(&["beta"]),
+                ),
+            ],
+        );
+        numeric.columns.get_mut("sub").expect("the column").family = Family::Numeric;
+        let err = numeric
+            .with_coalesced(&[window(Some(dict(&["beta", "gamma"])))], &[], None, None)
+            .expect_err("a dictionary on a non-keyword window is refused");
+        assert!(
+            err.to_string()
+                .contains("does not declare the column a keyword"),
+            "{err}"
+        );
+    }
+
+    /// **A flush that lands between a coalesce's plan and its replace keeps its own dictionary.**
+    /// The replace names the consumed layers by path, so an extent appended meanwhile is neither
+    /// consumed nor renumbered: it stays a layer of its own, its ordinals read against the
+    /// dictionary that minted them, beside the coalesced layer read against the merged one. The
+    /// appended extent numbers `gamma` as ordinal 0 where the merged dictionary numbers it 1, so
+    /// a replace that read either against the other would answer wrongly here.
+    #[test]
+    fn a_flush_landing_between_plan_and_replace_keeps_its_own_dictionary() {
+        let planned = keyword_column(
+            "sub",
+            vec![
+                (None, universal(&[0]), dict(&["alpha"])),
+                (
+                    Some("extents/f1.arrow"),
+                    partial(&[10], &[0]),
+                    dict(&["gamma"]),
+                ),
+                (
+                    Some("extents/f2.arrow"),
+                    partial(&[11], &[0]),
+                    dict(&["beta"]),
+                ),
+            ],
+        );
+        // The flush's extent, composed onto the generation after the window was planned.
+        let live = planned
+            .with_extents(
+                &[(
+                    "sub".to_string(),
+                    "extents/f3.arrow".to_string(),
+                    partial(&[12], &[0]),
+                    Some(dict(&["gamma"])),
+                )],
+                &[],
+                &[],
+                &[],
+            )
+            .expect("the flush's extent composes");
+        let next = live
+            .with_coalesced(
+                &[CoalescedWindow {
+                    column: "sub".to_string(),
+                    consumed: vec!["extents/f1.arrow".into(), "extents/f2.arrow".into()],
+                    values_rel: "coalesced/c-1/attrs/sub/values.arrow".to_string(),
+                    values: partial(&[10, 11], &[1, 0]),
+                    dict: Some(dict(&["beta", "gamma"])),
+                }],
+                &[],
+                None,
+                None,
+            )
+            .expect("the window still rebases: its layers are named by path");
+        assert_eq!(
+            next.layer_count("sub"),
+            Some(3),
+            "base, the coalesced layer, and the flush's own"
+        );
+        let candidate = set(&[0, 10, 11, 12]);
+        let resolve = |key: &str| {
+            members(
+                &next
+                    .resolve("sub", &FilterOperand::TextEquals(key.into()), &candidate)
+                    .expect("answers"),
+            )
+        };
+        assert_eq!(resolve("gamma"), vec![10, 12]);
+        assert_eq!(resolve("beta"), vec![11]);
+        assert_eq!(
+            next.stored_value("sub", 12),
+            Some(RecordValue::Utf8("gamma".into()))
+        );
     }
 
     /// A declaration as the manifest carries it.

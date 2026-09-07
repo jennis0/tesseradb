@@ -40,9 +40,8 @@ What only accumulation shows, and where this module looks for it:
 - **The six axes the coalesce bounds** — delta tiers, dictionary extents, attribute extents,
   record extents, text extents, and external-id runs (with their locators, bounded by the merge)
   — over hundreds of cycles rather than the soak's five. Attribute extents are bounded per
-  column, and a keyword column is the one the coalesce does not take (its extents carry
-  dictionaries; filter-index §5.2, issue #141): there the bound is the writes since the last
-  landed fold, which is what a fold that left an extent behind fails.
+  column, a keyword column among them: its coalesce merges the window's dictionaries and
+  installs the merged one beside the renumbered ordinals (filter-index §5.2, records §7).
 - **The allocator floor and the entity high-water** — monotone across every reload, fold and the
   kill, never re-minting — and the **WAL's reclaim bound**: rotation's steady state is two
   members, held while accepted deletions are still pending their fold.
@@ -212,18 +211,14 @@ SATURATION_BYTES = 1_048_576
 #: pass sits under ~8·log8(ops); a stopped one reaches the ladder phase's write count (hundreds).
 AXIS_CEILING = 32
 #: `attr_extents` is one list over five per-flush columns (weight, seen_at, bay, partition, tag),
-#: so it is bounded per column rather than as a whole. Four of them sawtooth at 2–8 under the
-#: coalesce and take `AXIS_CEILING` each; a stopped pass reaches one entry per flush per column,
-#: several times that line within one ladder phase. `tag` is a keyword column and the exception:
-#: its extents each carry a dictionary, and the entity-space coalesce takes no dictionary-bearing
-#: window, because a coalesced extent is composed as values alone and its renumbered ordinals
-#: would resolve against the dictionaries of the extents they replaced (filter-index §5.2, "such
-#: a column waits for the fold"; records-and-search §7). So a keyword column grows exactly one
-#: extent per flush and only the fold drains it: its bound is the writes since the last landed
-#: fold, kept in the tracker's ledger. A flush that wrote two, or a fold that left one behind
-#: (pass 4a is all-or-nothing), fails it. The base adds nothing to this list — a built bundle
-#: names its columns' files in `MANIFEST.files` and its `attr_extents` is empty (`coalesce.rs`,
-#: "no build guard"). The missing coalesce seam for keyword columns is issue #141.
+#: so it is bounded per column rather than as a whole. Every column sawtooths at 2–8 under the
+#: coalesce and takes `AXIS_CEILING`; a stopped pass reaches one entry per flush per column,
+#: several times that line within one ladder phase. `tag` is a keyword column: its extents each
+#: carry a dictionary, and its coalesce merges the window's dictionaries and installs the merged
+#: one beside the renumbered ordinals as one extent (filter-index §5.2; records-and-search §7),
+#: so it is held to the same ceiling. The base adds nothing to this list — a built bundle names
+#: its columns' files in `MANIFEST.files` and its `attr_extents` is empty (`coalesce.rs`, "no
+#: build guard").
 #: Non-base segments allowed beyond the flushed-bytes ÷ saturation term: up to three unmerged
 #: segments per active ladder size class, a few classes deep.
 LADDER_SLACK = 9
@@ -442,10 +437,6 @@ class Tracker:
     deleted: list["DenyRecord"] = field(default_factory=list)
     pending_deletes: int = 0
     folds_landed: int = 0
-    #: Writes since the last landed fold — the bound on a keyword column's `attr_extents`. A
-    #: ledger rather than the wire's flush counter, which is process-local and resets at every
-    #: reload and at the kill's restart (the same reason `folds_landed` is a ledger).
-    writes_since_fold: int = 0
     observations: list[dict] = field(default_factory=list)
 
     def denied_fx(self) -> frozenset[int]:
@@ -471,8 +462,8 @@ def observe(
     """One observation: read the wire's gauges and the bundle's files, assert every bound that
     must hold at this point in the run, and append the numbers to the report.
 
-    `declaration` is the corpus's own column declaration, read from the materialised schema: it
-    says which attribute columns are keyword columns, whose extents the coalesce does not bound.
+    `declaration` is the corpus's own column declaration, read from the materialised schema: an
+    extent naming a column it does not declare is a foreign writer.
     `quiescent` marks observations taken after maintenance has drained (post-fold, post-ladder):
     only there are wire and disc asserted to agree, since between drains a merge may be mid-swap.
     """
@@ -480,7 +471,6 @@ def observe(
     executor = status["write_executor"]
     view = read_bundle(h.bundle_root)
     declared_columns = set(declaration.names())
-    keyword_columns = {c.name for c in declaration.columns if c.type == "keyword"}
 
     # -- identifier monotonicity ----------------------------------------------------------------
     live_ids = set(view.segment_bytes)
@@ -538,7 +528,6 @@ def observe(
 
     # -- the coalesce-bounded axes and the merge ladder -----------------------------------------
     seg_count = 0
-    kw_attrs = 0
     for partition, manifest in view.latest.items():
         axes = {
             "deltas": len(manifest["deltas"]),
@@ -563,11 +552,9 @@ def observe(
             f"coalesce has stopped bounding this axis, or a publication has frozen it again"
         )
         # The attribute axis is one list over every indexed column, bounded per column
-        # (`AXIS_CEILING`'s note): the coalesce holds each non-keyword column under the flat
-        # ceiling, and a keyword column — which the coalesce cannot take, its extents carrying
-        # dictionaries — grows one extent per flush until the fold drains it, so its bound is the
-        # ledger's writes since the last landed fold. An extent naming a column the corpus never
-        # declared is a foreign writer.
+        # (`AXIS_CEILING`'s note): the coalesce holds each column, keyword columns included,
+        # under the flat ceiling. An extent naming a column the corpus never declared is a
+        # foreign writer.
         per_column = collections.Counter(e["column"] for e in manifest["attr_extents"])
         undeclared = set(per_column) - declared_columns
         assert not undeclared, (
@@ -575,21 +562,11 @@ def observe(
             f"declare ({sorted(declared_columns)})"
         )
         for column, count in sorted(per_column.items()):
-            if column in keyword_columns:
-                kw_attrs += count
-                assert count <= t.writes_since_fold, (
-                    f"{label}: keyword column `{column}` holds {count} `attr_extents` entries "
-                    f"after {t.writes_since_fold} write(s) since the last landed fold — a flush "
-                    f"writes one extent per column and the fold consumes them all (pass 4a), so "
-                    f"either a flush wrote two or a fold left one behind; the coalesce does not "
-                    f"take a dictionary-bearing column (filter-index §5.2, issue #141)"
-                )
-            else:
-                assert count <= AXIS_CEILING, (
-                    f"{label}: column `{column}` holds {count} `attr_extents` entries (ceiling "
-                    f"{AXIS_CEILING}) — this column grows one extent per flush and only the "
-                    f"entity-space coalesce bounds it; a working pass stays under ~8·log8(flushes)"
-                )
+            assert count <= AXIS_CEILING, (
+                f"{label}: column `{column}` holds {count} `attr_extents` entries (ceiling "
+                f"{AXIS_CEILING}) — this column grows one extent per flush and only the "
+                f"entity-space coalesce bounds it; a working pass stays under ~8·log8(flushes)"
+            )
         segments = manifest["segments"]
         seg_count += len(segments)
         runs = len(manifest["external_id_runs"])
@@ -691,8 +668,6 @@ def observe(
         "deltas": sum(len(m["deltas"]) for m in view.latest.values()),
         "dicts": sum(len(m["dict_extents"]) for m in view.latest.values()),
         "attrs": sum(len(m["attr_extents"]) for m in view.latest.values()),
-        "kw_attrs": kw_attrs,
-        "since_fold": t.writes_since_fold,
         "records": sum(len(m["record_extents"]) for m in view.latest.values()),
         "texts": sum(len(m["text_extents"]) for m in view.latest.values()),
         "runs": sum(len(m["external_id_runs"]) for m in view.latest.values()),
@@ -972,7 +947,6 @@ def test_endurance_long_life(tmp_path_factory):
         nonlocal write_cursor
         stages = [write_stage(i) for i in range(write_cursor, write_cursor + count)]
         write_cursor += count
-        t.writes_since_fold += count
         return stages
 
     started = time.monotonic()
@@ -1066,7 +1040,6 @@ def test_endurance_long_life(tmp_path_factory):
                 last = run_and_check(h, [Fold(f"fold-{c}")], claims, drainer)
                 t.folds_landed += 1
                 t.pending_deletes = 0
-                t.writes_since_fold = 0
             await_reclaim(h)
             landed = "killed" if c == kill_cycle else "landed"
             row = observe(h, t, p, declaration, f"fold-{c} ({landed})", quiescent=True)
@@ -1147,8 +1120,7 @@ def _print_report(
     )
     columns = [
         "label", "prefix", "total_kb", "dead_b", "unref_kb", "segments", "non_base",
-        "non_base_kb", "deltas", "dicts", "attrs", "kw_attrs", "since_fold", "records", "texts",
-        "runs", "side_n",
+        "non_base_kb", "deltas", "dicts", "attrs", "records", "texts", "runs", "side_n",
         "overlay", "wal", "high_water", "flushes", "merges", "coalesces", "folds",
     ]
     if t.observations:

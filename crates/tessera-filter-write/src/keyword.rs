@@ -2,19 +2,14 @@
 //! ordinal remap, and the fold's rebuild of the dictionary from the values that survive
 //! (`records-and-search.md` §7; `filter-index.md` §5.2 for the coalesce, §6.2 for the fold).
 //!
-//! **The fold's pass is live; the coalesce's is not, and the reason is the engine's, not this
-//! module's.** `fold_keyword_column` is called from the engine's fold, over layers the base build
-//! and the flush both write. The engine's coalesce still declines a keyword column — ⊘ not for want
-//! of this merge but because a coalesced `AttrExtent` is composed as *values alone*, so the merged
-//! dictionary would have nowhere to be installed and the renumbered ordinals would resolve against
-//! the dictionaries of the extents they replaced. So `coalesce_keyword_extents` is exercised by
-//! this module's tests alone, and a keyword column's extents wait for the fold, which is a bounded
-//! steady state and not a leak.
-//!
-//! The **text** family has the same renumbering and is coalesced ([`crate::coalesce_text_extents`]),
-//! because a text layer's dictionary, postings and presence are one manifest record replaced
-//! together — which is the seam this family lacks, stated here so the asymmetry reads as a
-//! difference in the composition rather than in the merge.
+//! Both passes run from the engine. `coalesce_keyword_extents` is the merge the entity-space
+//! coalesce runs over a window of one keyword column's extents; its three outputs — the merged
+//! dictionary, the renumbered ordinals and the presence — are one `AttrExtent` there and one
+//! composed layer in the live generation, so the ordinals it writes are only ever read against the
+//! dictionary it wrote. `fold_keyword_column` is called from compaction's attribute pass, over the
+//! base and every extent, a coalesced one included. The **text** family has the same renumbering
+//! ([`crate::coalesce_text_extents`]) under the same containment: a text layer's dictionary,
+//! postings and presence are one manifest record replaced together.
 //!
 //! # This merge changes the bytes, and that is a different correctness shape
 //!
@@ -506,12 +501,9 @@ mod tests {
     }
 
     /// A keyword layer over `(entity, key)` pairs: the layer's own sorted dictionary, and one
-    /// ordinal into it per present entity.
-    ///
-    /// **Built here because nothing else builds one yet.** The base build and the flush that will
-    /// produce these layers are a parallel track's; the two libraries this needs — the dictionary
-    /// writer and the value-column writer — are the ones the passes under test consume, so an
-    /// in-process layer is the real artefact rather than a stand-in for it.
+    /// ordinal into it per present entity — written with the dictionary writer and the
+    /// value-column writer the passes under test consume, so it is the real artefact rather than a
+    /// stand-in for it.
     struct Layer {
         column: ValueColumn,
         dict: SortedDict,
