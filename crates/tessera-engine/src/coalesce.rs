@@ -38,10 +38,16 @@
 //!   [`tessera_filter_write::coalesce_attr_extents`] preserves exactly. The selection is per column
 //!   because that is the identity the format carries — an `AttrExtent` records no flush, and
 //!   filter-index §2.5 forbids recovering one from the path — and because it is what keeps one
-//!   heavy text column from stalling every other column's axis. ⊘ A column whose layers carry
-//!   **their own dictionaries** is excluded, and the exclusion is stated at the selection: the
-//!   merge for it exists ([`tessera_filter_write::coalesce_keyword_extents`]) but the composition
-//!   below carries a layer's values alone, so the merged dictionary would have nowhere to swap in.
+//!   heavy text column from stalling every other column's axis. A **keyword** column's window
+//!   takes the same selection and a different merge: each layer's values are ordinals into that
+//!   layer's own dictionary, so [`tessera_filter_write::coalesce_keyword_extents`] merges the
+//!   window's dictionaries, renumbers every ordinal against the merged key set under its own
+//!   content guard, and writes the dictionary as the third file of the one extent. What must not
+//!   change is the set of `(entity, column, key)` triples. The renumbering is contained because
+//!   the dictionary never travels apart from the values it numbers: one `AttrExtent` names all
+//!   three files, one [`CoalescedAttr`] carries the opened pair, and the composition installs the
+//!   pair as one layer or refuses (`FilterColumns::with_coalesced`). No reader ever holds a
+//!   keyword ordinal against a dictionary other than the one that minted it.
 //! - **Record-blob extents** take the attribute axis's argument for the one pseudo-column
 //!   `record` (records §7): the layers are disjoint in entity space and probed by has-row, so
 //!   their division into files is immaterial, and what must not change is the set of
@@ -58,12 +64,11 @@
 //!   tombstone parameter (Rule S / Rule F, write-path §5.4). Without it the drill-down's label
 //!   arm and the join rule's both probe one layer per flush until the next fold.
 //! - **Text extents** take the attribute axis's per-column policy over their own manifest list, and
-//!   are the one axis whose output **renumbers**: the merged dictionary is a new key set and every
-//!   ordinal in the coalesced postings is a position in it. That is safe here and not on the
-//!   attribute axis, and the difference is the *manifest record* rather than the family — a
-//!   `TextExtent` names its dictionary, its postings and its presence together, composed together
-//!   and replaced together, so the renumbering never leaves the layer and nothing outside the three
-//!   files ever held a text ordinal. What must not change is the set of `(entity, term)` pairs,
+//!   renumber as a keyword window does: the merged dictionary is a new key set and every ordinal in
+//!   the coalesced postings is a position in it. The containment argument is the keyword window's
+//!   — a `TextExtent` names its dictionary, its postings and its presence together, composed
+//!   together and replaced together, so the renumbering never leaves the layer and nothing outside
+//!   the three files ever held a text ordinal. What must not change is the set of `(entity, term)` pairs,
 //!   which [`tessera_filter_write::coalesce_text_extents`] preserves exactly. Without it a text
 //!   column accumulates one dictionary-and-postings pair per prose-carrying flush until the next
 //!   fold, and every `match` pays a resolve and a posting read per token *per layer*.
@@ -385,22 +390,13 @@ pub(crate) fn plan_coalesce(
         if !live_window(view, incarnation) {
             continue;
         }
-        // ⊘ **A column whose layers carry a dictionary is not taken**, and the reason is the
-        // *layer's* atomicity rather than the merge's absence:
-        // `tessera_filter_write::coalesce_keyword_extents` merges the dictionaries and rewrites the
-        // ordinals through a guarded remap, but the live generation's composition carries a layer's
-        // values alone. A coalesced extent installed there would sit beside the dictionaries of the
-        // extents it replaced — ordinals renumbered against a dictionary no reader holds, which
-        // records §7 calls a recolouring with no symptom, and a layer's index files are one atomic
-        // manifest unit precisely to prevent it. Such a column waits for the fold, exactly as one
-        // whose single extent exceeds the input cap does.
-        if extents.iter().any(|extent| extent.dict.is_some()) {
-            continue;
-        }
         // **A layer's dictionary counts toward the cap**, because the merge holds it: a keyword
         // window's transient is its remap and its decode cursors, both sized by the keys those
         // files hold, and a cap that ignored them would bound the ordinals while the dictionary —
-        // which for a near-unique column is the larger half — grew unwatched (records §7).
+        // which for a near-unique column is the larger half — grew unwatched (records §7). A
+        // keyword column is otherwise selected exactly as every other column: per column, by
+        // `width`, over the size floor. Whether a window's extents carry dictionaries decides
+        // which merge `execute_coalesce` runs, never whether the window is taken.
         let size = |extent: &&AttrExtent| {
             Some(
                 size_of(&extent.values)
@@ -460,11 +456,9 @@ pub(crate) fn plan_coalesce(
 
     // ---- text extents: per column, over that column's own subsequence of a separate list -------
     //
-    // The attribute axis's policy, and **not** its dictionary exclusion. That exclusion is about
-    // where a merged dictionary can be installed: a coalesced `AttrExtent` is composed as values
-    // alone, so a keyword column's renumbered ordinals would resolve against dictionaries that no
-    // longer number them. A `TextExtent` names its dictionary, its postings and its presence as one
-    // record, composed together and replaced together, so the renumbering never leaves the layer.
+    // The attribute axis's policy over a separate list. A `TextExtent` names its dictionary, its
+    // postings and its presence as one record, composed together and replaced together, so the
+    // renumbering never leaves the layer — the same containment a keyword `AttrExtent` has.
     //
     // Without this axis a text column accumulates one dictionary-and-postings pair per
     // prose-carrying flush until the next fold, and every `match` pays a resolve and a posting read
@@ -637,9 +631,17 @@ pub(crate) struct CompletedCoalesce {
 }
 
 /// One column's window collapsed into one extent: the manifest entry it becomes, and the reader.
+///
+/// For a keyword window the reader is a pair — the ordinals and the dictionary the merge minted
+/// them against — carried together for `FlushedExtent`'s reason: the publication installs both or
+/// neither (`FilterColumns::with_coalesced` refuses a half), and a dictionary rediscovered from a
+/// path at publication would be one the manifest entry could disagree with.
 pub(crate) struct CoalescedAttr {
     pub(crate) extent: AttrExtent,
     pub(crate) values: Arc<tessera_filter::ValueColumn>,
+    /// The merged dictionary `values` are ordinals into — `Some` exactly when [`Self::extent`]
+    /// names one, `None` for every family whose values file carries the values themselves.
+    pub(crate) dict: Option<Arc<tessera_filter::SortedDict>>,
 }
 
 /// Why a coalesce produced nothing. **Every failure is "nothing happened, retry next tick"**: the
@@ -745,18 +747,30 @@ pub(crate) fn execute_coalesce(
     // `attr_extents` names paths and never a path convention (filter-index §2.5).
     let mut attrs = Vec::with_capacity(plan.attrs.len());
     for window in &plan.attrs {
-        // The second line under the selection rule above, and the one that is definitionally safe:
-        // this merge concatenates values **byte-preserved**, which for a column whose values are
-        // ordinals into a per-layer dictionary would publish one layer's ordinals under another
-        // layer's colouring. It refuses rather than doing that.
-        if window.extents.iter().any(|extent| extent.dict.is_some()) {
-            return Err(CoalesceFailed(format!(
-                "column '{}' has layers with their own dictionaries; its values are ordinals and \
-                 concatenating them would recolour the window, so the byte-preserving merge \
-                 refuses it",
-                window.column
-            )));
-        }
+        // **Which merge runs is decided by the window's manifest entries, all of them agreeing.**
+        // A keyword layer's values are ordinals into the dictionary its entry names, and any other
+        // family's are the values themselves; a window that mixes the two is a manifest that
+        // disagrees with itself about what the column is, and neither merge can read it — the
+        // byte-preserving one would publish ordinals under another layer's colouring, the
+        // renumbering one would remap values that are not ordinals.
+        let with_dict = window
+            .extents
+            .iter()
+            .filter(|extent| extent.dict.is_some())
+            .count();
+        let keyword = match with_dict {
+            0 => false,
+            n if n == window.extents.len() => true,
+            _ => {
+                return Err(CoalesceFailed(format!(
+                    "column '{}' has {with_dict} layers with their own dictionaries and {} \
+                     without; a keyword layer's values are ordinals and another family's are \
+                     values, so the window has no single reading and neither merge takes it",
+                    window.column,
+                    window.extents.len() - with_dict
+                )));
+            }
+        };
         // **Per `(column, view)`, not per column** (`views.md` §5): two views of one scoped family
         // share the column's name, so a single directory would have the second window truncate the
         // first's mapped files.
@@ -778,24 +792,89 @@ pub(crate) fn execute_coalesce(
             })
             .collect::<std::io::Result<_>>()
             .map_err(|e| CoalesceFailed(format!("attr extent for '{}': {e}", window.column)))?;
-        let refs: Vec<&tessera_filter::ValueColumn> = inputs.iter().collect();
 
         let values_rel = format!("{column_rel}/{}", tessera_filter::VALUES_FILE);
         let presence_rel = format!("{column_rel}/{}", tessera_filter::PRESENCE_FILE);
         let values_path = ctx.prefix_dir.join(&values_rel);
         let presence_path = ctx.prefix_dir.join(&presence_rel);
-        tessera_filter_write::coalesce_attr_extents(&refs, &values_path, &presence_path)
-            .map_err(|e| CoalesceFailed(format!("attr coalesce for '{}': {e}", window.column)))?;
+        let mut dict_rel = None;
+        if keyword {
+            // Each input's dictionary beside its values, in the same order — the pairing the
+            // manifest entry states and the merge's `KeywordLayer` requires. Sequential, as the
+            // text axis opens its dictionaries: the merge's cursors walk each file once in ordinal
+            // order, and the mapping is the pass's own rather than a request's (decision 0052).
+            let dicts: Vec<tessera_filter::SortedDict> = window
+                .extents
+                .iter()
+                .map(|extent| {
+                    let rel = extent
+                        .dict
+                        .as_deref()
+                        .expect("counted above: every extent of a keyword window names one");
+                    tessera_filter::SortedDict::open(
+                        &ctx.prefix_dir.join(rel),
+                        tessera_filter::Access::MappedSequential,
+                    )
+                })
+                .collect::<Result<_, _>>()
+                .map_err(|e: tessera_filter::DictError| {
+                    CoalesceFailed(format!("keyword dictionary for '{}': {e}", window.column))
+                })?;
+            let layers: Vec<tessera_filter_write::KeywordLayer<'_>> = inputs
+                .iter()
+                .zip(dicts.iter())
+                .map(|(values, dict)| tessera_filter_write::KeywordLayer { values, dict })
+                .collect();
+            let rel = format!("{column_rel}/{}", tessera_filter::DICT_FILE);
+            let dict_path = ctx.prefix_dir.join(&rel);
+            // The merged dictionary, the renumbered ordinals and the presence in one call: the
+            // merge verifies its remap against the dictionary as written before it writes an
+            // ordinal (`verify_remap`), so a wrong remap refuses the pass here and no file the
+            // manifest could name carries a recoloured value.
+            tessera_filter_write::coalesce_keyword_extents(
+                &layers,
+                &values_path,
+                &presence_path,
+                &dict_path,
+            )
+            .map_err(|e| {
+                CoalesceFailed(format!("keyword coalesce for '{}': {e}", window.column))
+            })?;
+            files.insert(rel.clone(), digest_of(&dict_path)?);
+            dict_rel = Some(rel);
+        } else {
+            let refs: Vec<&tessera_filter::ValueColumn> = inputs.iter().collect();
+            tessera_filter_write::coalesce_attr_extents(&refs, &values_path, &presence_path)
+                .map_err(|e| {
+                    CoalesceFailed(format!("attr coalesce for '{}': {e}", window.column))
+                })?;
+        }
         files.insert(values_rel.clone(), digest_of(&values_path)?);
         files.insert(presence_rel.clone(), digest_of(&presence_path)?);
         // Reopened here, on the pool, so the executor's publication is a pointer push — the same
-        // reason a flush opens its extents on the pool.
+        // reason a flush opens its extents on the pool. The dictionary is reopened beside the
+        // values and travels with them from here: the manifest entry below names the same three
+        // paths this pair was read from, so what the publication installs and what a restart
+        // opens are the same files.
         let values = tessera_filter::open_extent(
             &values_path,
             &presence_path,
             tessera_filter::Access::Mapped,
         )
         .map_err(|e| CoalesceFailed(format!("coalesced attr extent: {e}")))?;
+        let dict = dict_rel
+            .as_ref()
+            .map(|rel| {
+                tessera_filter::SortedDict::open(
+                    &ctx.prefix_dir.join(rel),
+                    tessera_filter::Access::Mapped,
+                )
+                .map(Arc::new)
+            })
+            .transpose()
+            .map_err(|e| {
+                CoalesceFailed(format!("the coalesced dictionary does not reopen: {e}"))
+            })?;
         attrs.push(CoalescedAttr {
             extent: AttrExtent {
                 column: window.column.clone(),
@@ -803,11 +882,12 @@ pub(crate) fn execute_coalesce(
                 incarnation: window.incarnation,
                 values: values_rel,
                 presence: presence_rel,
-                dict: None,
+                dict: dict_rel,
                 postings: None,
                 offsets: None,
             },
             values: Arc::new(values),
+            dict,
         });
     }
 
@@ -874,11 +954,10 @@ pub(crate) fn execute_coalesce(
 
     // ---- text extents: the window merged into one layer, dictionary and all (records §7) -------
     //
-    // The one axis whose output *renumbers*, and the one where that is contained: the merged
-    // dictionary is written beside the postings it numbers and the presence they stand for, as one
-    // `TextExtent`, so the layer is self-describing exactly as the flush's is. Nothing per entity
-    // stores a text ordinal, so nothing outside the three files needs remapping — which is what
-    // separates this from the keyword window the attribute axis declines above.
+    // A renumbering merge, contained as the keyword window's is: the merged dictionary is written
+    // beside the postings it numbers and the presence they stand for, as one `TextExtent`, so the
+    // layer is self-describing exactly as the flush's is. Nothing per entity stores a text
+    // ordinal, so nothing outside the three files needs remapping.
     let mut texts = Vec::with_capacity(plan.texts.len());
     for window in &plan.texts {
         let column_rel = coalesced_column_rel(&ctx.out_rel, &window.column, window.view.as_deref());
@@ -1177,11 +1256,18 @@ pub(crate) fn rebase_into(manifest: &mut SegmentsManifest, completed: &Completed
         text_positions.push(subsequence[at].to_vec());
     }
 
+    // Every file a consumed extent names, its dictionary included: a consumed dictionary left in
+    // `files` would be digested for a layer no list names, and the fold's orphan sweep is what
+    // reclaims it, not this edit.
     let attr_paths: Vec<String> = plan
         .attrs
         .iter()
         .flat_map(|w| w.extents.iter())
-        .flat_map(|e| [e.values.clone(), e.presence.clone()])
+        .flat_map(|e| {
+            [e.values.clone(), e.presence.clone()]
+                .into_iter()
+                .chain(e.dict.clone())
+        })
         .collect();
     let text_paths: Vec<String> = plan
         .texts
@@ -1672,6 +1758,7 @@ mod tests {
                     )
                     .expect("an empty extent"),
                 ),
+                dict: None,
             })
             .collect()
     }
@@ -1910,8 +1997,8 @@ mod tests {
     /// column, the larger half (records §7). Sizing the window on values and presence alone would
     /// bound the cheap term and let the expensive one through.
     ///
-    /// Stated against [`select_window`] directly, because [`plan_coalesce`] refuses a column with
-    /// dictionaries outright for the separate reason the next test asserts.
+    /// Stated against [`select_window`] directly, with the two size functions side by side, and
+    /// then against [`plan_coalesce`], whose per-column narrowing must reach the same answer.
     #[test]
     fn a_layers_dictionary_counts_toward_the_input_cap() {
         let mut sizes: BTreeMap<String, u64> = BTreeMap::new();
@@ -1951,17 +2038,43 @@ mod tests {
             None,
             "counting the dictionaries, the same window is 6 MiB and must not be selected"
         );
+
+        // Through the planner: the same three extents, digested in the manifest, narrow to the
+        // two that fit the cap with their dictionaries counted.
+        let (mut manifest, build_files) = manifest_with(0);
+        for extent in &extents {
+            manifest
+                .files
+                .insert(extent.values.clone(), digest(1 << 20));
+            manifest.files.insert(extent.presence.clone(), digest(0));
+            manifest
+                .files
+                .insert(extent.dict.clone().expect("a dictionary"), digest(1 << 20));
+            manifest.attr_extents.push(extent.clone());
+        }
+        let plan =
+            plan_coalesce(PARTITION, &manifest, &build_files, policy, &all_live).expect("a plan");
+        let window = plan
+            .attrs
+            .iter()
+            .find(|w| w.column == "submitter")
+            .expect("the keyword column is selected");
+        assert_eq!(
+            window.extents.len(),
+            2,
+            "narrowed to the two extents whose values and dictionaries fit the cap"
+        );
     }
 
-    /// ⊘ **A column whose layers carry their own dictionaries is not coalesced**, and the reason is
-    /// the layer's atomicity, not the merge's absence: the merge exists
-    /// (`tessera_filter_write::coalesce_keyword_extents`, guarded remap and all), but the live
-    /// generation's composition carries a layer's values alone, so a coalesced extent would be
-    /// installed beside the dictionaries of the extents it replaced. The column waits for the fold.
+    /// **A column whose layers carry their own dictionaries is selected on the same policy as every
+    /// other**, its window naming every extent's dictionary beside its values. The merge for it
+    /// renumbers, and the containment is the manifest record's and the composition's (module doc);
+    /// nothing at selection needs to know the family beyond counting the dictionary toward the cap.
     ///
-    /// Its neighbours are unaffected, which is the same per-column stalling the input cap has.
+    /// **Mutation this kills:** restore a `dict.is_some()` skip at the selection and `title` is
+    /// never selected, so an indexed keyword column gains one extent per flush until the fold.
     #[test]
-    fn a_column_with_per_layer_dictionaries_waits_for_the_fold() {
+    fn a_column_with_per_layer_dictionaries_is_selected_like_any_other() {
         let (mut manifest, build_files) = manifest_with(4);
         for extent in manifest
             .attr_extents
@@ -1974,15 +2087,388 @@ mod tests {
         }
         let plan =
             plan_coalesce(PARTITION, &manifest, &build_files, policy(), &all_live).expect("a plan");
+        let window = plan
+            .attrs
+            .iter()
+            .find(|w| w.column == "title")
+            .expect("the keyword column's window is planned");
+        assert_eq!(window.extents.len(), 3, "the policy's width");
         assert!(
-            !plan.attrs.iter().any(|w| w.column == "title"),
-            "a column whose layers carry dictionaries must not be coalesced by the \
-             byte-preserving merge"
+            window.extents.iter().all(|e| e.dict.is_some()),
+            "every extent of the window names the dictionary its ordinals are read against"
         );
         assert!(
             plan.attrs.iter().any(|w| w.column == "department"),
-            "the neighbour is unaffected"
+            "the neighbour is selected as before"
         );
+    }
+
+    /// **A coalesced keyword extent replaces its window in both halves of the manifest, dictionaries
+    /// included** — and a flush of the same column landing between the plan and the rebase leaves
+    /// the window where it was, with the flush's extent and its own dictionary untouched.
+    ///
+    /// The consumed dictionaries leave `files` with the values and presence they numbered: a
+    /// dictionary left digested for a layer no list names is a file the fold's sweep reclaims and
+    /// the manifest meanwhile misdescribes. The coalesced entry names its merged dictionary, and
+    /// that file is digested — a keyword entry without one is a layer the reader refuses at open.
+    ///
+    /// **Mutation:** drop `e.dict` from the `attr_paths` chain and the consumed dictionaries stay
+    /// digested; drop `dict` from the coalesced entry and `FilterColumns::open` refuses the bundle.
+    #[test]
+    fn a_coalesced_keyword_extent_replaces_its_window_and_its_dictionaries_in_both_halves() {
+        let (mut manifest, build_files) = manifest_with(4);
+        for extent in manifest
+            .attr_extents
+            .iter_mut()
+            .filter(|e| e.column == "title")
+        {
+            let dict = format!("{}.dict", extent.values);
+            manifest.files.insert(dict.clone(), digest(64));
+            extent.dict = Some(dict);
+        }
+        let plan =
+            plan_coalesce(PARTITION, &manifest, &build_files, policy(), &all_live).expect("a plan");
+        let title = plan
+            .attrs
+            .iter()
+            .find(|w| w.column == "title")
+            .expect("the keyword window");
+        let consumed: Vec<String> = title
+            .extents
+            .iter()
+            .flat_map(|e| {
+                [e.values.clone(), e.presence.clone()]
+                    .into_iter()
+                    .chain(e.dict.clone())
+            })
+            .collect();
+        assert_eq!(consumed.len(), 9, "three files per consumed keyword extent");
+
+        // The flush that landed while the pass ran: a fifth `title` extent, with its own
+        // dictionary, appended after the window.
+        let late = {
+            let mut extent = attr_extent_at(PARTITION, "title", "flush-9-1");
+            extent.dict = Some(format!("{}.dict", extent.values));
+            extent
+        };
+        manifest.files.insert(late.values.clone(), digest(1024));
+        manifest.files.insert(late.presence.clone(), digest(64));
+        manifest
+            .files
+            .insert(late.dict.clone().expect("a dictionary"), digest(64));
+        manifest.attr_extents.push(late.clone());
+
+        let out_rel = "partitions/p0/coalesced/coalesce-1-1";
+        let mut attrs = completed_attrs(&plan, out_rel);
+        let merged_dict_rel = format!("{out_rel}/attrs/title/dict.bin");
+        for attr in attrs.iter_mut().filter(|a| a.extent.column == "title") {
+            attr.extent.dict = Some(merged_dict_rel.clone());
+        }
+        let files: BTreeMap<String, FileDigest> = attrs
+            .iter()
+            .flat_map(|a| {
+                [
+                    (a.extent.values.clone(), digest(3072)),
+                    (a.extent.presence.clone(), digest(96)),
+                ]
+                .into_iter()
+                .chain(a.extent.dict.clone().map(|d| (d, digest(192))))
+            })
+            .collect();
+        let dir = tempfile::TempDir::new().unwrap();
+        let completed = CompletedCoalesce {
+            tier: Some(tier_at(dir.path())),
+            run: None,
+            dict: None,
+            attrs,
+            record: None,
+            texts: Vec::new(),
+            terms: None,
+            files,
+            plan,
+            prefix: "v00000".to_string(),
+        };
+        assert!(
+            rebase_into(&mut manifest, &completed),
+            "a flush appending the same column's extent does not move the window"
+        );
+
+        let listed: Vec<&AttrExtent> = manifest
+            .attr_extents
+            .iter()
+            .filter(|e| e.column == "title")
+            .collect();
+        assert_eq!(
+            listed.len(),
+            3,
+            "3 became 1, 1 untouched, and the late flush's: {listed:?}"
+        );
+        assert_eq!(
+            listed[0].dict.as_deref(),
+            Some(merged_dict_rel.as_str()),
+            "the coalesced entry names the merged dictionary beside its values"
+        );
+        assert!(
+            manifest.files.contains_key(&merged_dict_rel),
+            "the merged dictionary is digested"
+        );
+        assert_eq!(
+            listed[2].dict, late.dict,
+            "the late flush's extent keeps its own dictionary"
+        );
+        assert!(manifest.files.contains_key(late.dict.as_deref().unwrap()));
+        for rel in &consumed {
+            assert!(
+                !manifest.files.contains_key(rel),
+                "a consumed extent file is still digested: {rel}"
+            );
+        }
+    }
+
+    /// One flush's keyword extent of `title`, written with the flush's own writer into `prefix_dir`
+    /// and listed in `manifest` with its three files digested. `keys` is one key per entity, in
+    /// `entities`' order; the extent's dictionary is the sorted distinct set of them, so each
+    /// extent numbers its keys its own way.
+    fn write_keyword_flush(
+        prefix_dir: &std::path::Path,
+        manifest: &mut SegmentsManifest,
+        flush: &str,
+        entities: &[u32],
+        keys: &[&str],
+    ) -> AttrExtent {
+        let mut sorted: Vec<&str> = keys.to_vec();
+        sorted.sort_unstable();
+        sorted.dedup();
+        let codes: Vec<u32> = keys
+            .iter()
+            .map(|k| sorted.binary_search(k).expect("from these") as u32)
+            .collect();
+        let mut presence = croaring::Bitmap::new();
+        for e in entities {
+            presence.add(*e);
+        }
+        let column_dir = prefix_dir.join(format!("partitions/{PARTITION}/attrs/title"));
+        let (values, presence_path, dict) = tessera_filter::write_extent(
+            &column_dir,
+            flush,
+            &tessera_filter::Codes::U32(codes.into()),
+            &presence,
+            Some(&sorted),
+        )
+        .expect("the flush's writer writes a keyword extent");
+        let rel = |path: &std::path::Path| {
+            path.strip_prefix(prefix_dir)
+                .expect("under the prefix")
+                .to_str()
+                .expect("utf-8")
+                .to_string()
+        };
+        let extent = AttrExtent {
+            incarnation: None,
+            column: "title".to_string(),
+            view: None,
+            values: rel(&values),
+            presence: rel(&presence_path),
+            dict: Some(rel(&dict.expect("a keyword extent names its dictionary"))),
+            postings: None,
+            offsets: None,
+        };
+        for path in [&extent.values, &extent.presence]
+            .into_iter()
+            .chain(extent.dict.as_ref())
+        {
+            manifest.files.insert(
+                path.clone(),
+                tessera_store::digest_of(&prefix_dir.join(path)).unwrap(),
+            );
+        }
+        manifest.attr_extents.push(extent.clone());
+        extent
+    }
+
+    /// **A keyword window executes into one extent whose dictionary numbers its ordinals, and the
+    /// completed pass carries the pair the manifest entry names** — run over real files with the
+    /// flush's own writer and the merge the pass runs, rather than the stubbed reader the manifest
+    /// tests use.
+    ///
+    /// The three inputs number their keys three different ways (`alpha` is 0 in the first and
+    /// absent from the others; `gamma` is 1 in the first, 0 in the second, 1 in the third), and the
+    /// merged dictionary numbers all five keys a fourth way. Every entity then reads its own key
+    /// through the coalesced pair — through the opened readers the executor installs, and again
+    /// through the files the rebased manifest names, which is what a restart opens.
+    ///
+    /// **Mutation this kills:** leave `dict` off the `CoalescedAttr` or the `AttrExtent` and the
+    /// entry names ordinals with nothing to read them against; run the byte-preserving merge on
+    /// the window and entity 30 reads `alpha` where it carried `gamma`.
+    #[test]
+    fn a_keyword_window_executes_into_one_extent_whose_dictionary_numbers_its_ordinals() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let prefix_dir = dir.path().join("v00000");
+        let (mut manifest, build_files) = manifest_with(0);
+        let flushes: [(&[u32], &[&str]); 3] = [
+            (&[10, 11], &["gamma", "alpha"]),
+            (&[20, 21], &["gamma", "delta"]),
+            (&[30, 31, 32], &["gamma", "beta", "epsilon"]),
+        ];
+        let mut expected: BTreeMap<u32, &str> = BTreeMap::new();
+        for (i, (entities, keys)) in flushes.iter().enumerate() {
+            write_keyword_flush(
+                &prefix_dir,
+                &mut manifest,
+                &format!("flush-{i}-1"),
+                entities,
+                keys,
+            );
+            expected.extend(entities.iter().copied().zip(keys.iter().copied()));
+        }
+        let plan =
+            plan_coalesce(PARTITION, &manifest, &build_files, policy(), &all_live).expect("a plan");
+        assert_eq!(plan.attrs.len(), 1, "the one keyword window");
+        let out_rel = format!("partitions/{PARTITION}/coalesced/coalesce-1-1");
+        let completed = execute_coalesce(
+            plan,
+            CoalesceContext {
+                prefix_dir: prefix_dir.clone(),
+                prefix: "v00000".to_string(),
+                out_rel: out_rel.clone(),
+            },
+        )
+        .expect("the keyword window merges");
+
+        let attr = &completed.attrs[0];
+        let dict_rel = attr
+            .extent
+            .dict
+            .as_deref()
+            .expect("the coalesced entry names the merged dictionary");
+        assert!(dict_rel.starts_with(&out_rel));
+        assert!(
+            completed.files.contains_key(dict_rel),
+            "the merged dictionary is digested with the values it numbers"
+        );
+        let dict = attr
+            .dict
+            .as_ref()
+            .expect("the completed pass carries the dictionary opened, beside the values");
+        assert_eq!(dict.len(), 5, "alpha, beta, delta, epsilon, gamma");
+        let mut scratch = Vec::new();
+        for (entity, key) in &expected {
+            let ordinal = attr
+                .values
+                .value_of(*entity)
+                .expect("every consumed entity is present")
+                .raw();
+            assert_eq!(
+                dict.key_of(ordinal, &mut scratch).expect("in range"),
+                *key,
+                "entity {entity} reads another key through the merged pair"
+            );
+        }
+
+        // The manifest edit, and the files it names reopened from disc as a restart would.
+        assert!(rebase_into(&mut manifest, &completed));
+        let listed: Vec<&AttrExtent> = manifest
+            .attr_extents
+            .iter()
+            .filter(|e| e.column == "title")
+            .collect();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].dict.as_deref(), Some(dict_rel));
+        let values = tessera_filter::open_extent(
+            &prefix_dir.join(&listed[0].values),
+            &prefix_dir.join(&listed[0].presence),
+            tessera_filter::Access::Read,
+        )
+        .expect("the listed values open");
+        let dict = tessera_filter::SortedDict::open(
+            &prefix_dir.join(dict_rel),
+            tessera_filter::Access::Read,
+        )
+        .expect("the listed dictionary opens");
+        for (entity, key) in &expected {
+            let ordinal = values.value_of(*entity).expect("present").raw();
+            assert_eq!(dict.key_of(ordinal, &mut scratch).expect("in range"), *key);
+        }
+    }
+
+    /// **A keyword window the merge refuses installs nothing.** The merge's guards run before any
+    /// ordinal is written, and the executor's only commit point is the manifest edit, so a refusal
+    /// leaves the consumed entries standing, their files digested, and the output directory as an
+    /// orphan the fold reclaims.
+    ///
+    /// The fault here is an input the merge cannot read consistently: an extent whose ordinals
+    /// reach past its own dictionary. A wrong *remap* — the merge's own defect — is refused by the
+    /// same guard family at the merge (`tessera_filter_write::keyword`'s tests inject one), and
+    /// the pass treats every refusal alike: `Err`, and nothing published.
+    #[test]
+    fn a_keyword_window_the_merge_refuses_installs_nothing() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let prefix_dir = dir.path().join("v00000");
+        let (mut manifest, build_files) = manifest_with(0);
+        write_keyword_flush(
+            &prefix_dir,
+            &mut manifest,
+            "flush-0-1",
+            &[10, 11],
+            &["b", "a"],
+        );
+        let faulted = write_keyword_flush(
+            &prefix_dir,
+            &mut manifest,
+            "flush-1-1",
+            &[20, 21],
+            &["d", "c"],
+        );
+        write_keyword_flush(&prefix_dir, &mut manifest, "flush-2-1", &[30], &["e"]);
+        // The second extent's dictionary replaced by one of a single key, so its ordinal 1 names
+        // nothing. The manifest still digests the original bytes; the pass reads the file.
+        let mut dictionary = Vec::new();
+        let mut writer =
+            tessera_filter::SortedDictWriter::new(&mut dictionary).expect("a writer opens");
+        writer.push("c").unwrap();
+        writer.finish().unwrap();
+        std::fs::write(
+            prefix_dir.join(faulted.dict.as_deref().unwrap()),
+            dictionary,
+        )
+        .unwrap();
+        let before = serde_json::to_string(&manifest).unwrap();
+
+        let plan =
+            plan_coalesce(PARTITION, &manifest, &build_files, policy(), &all_live).expect("a plan");
+        let out_rel = format!("partitions/{PARTITION}/coalesced/coalesce-1-1");
+        let err = match execute_coalesce(
+            plan,
+            CoalesceContext {
+                prefix_dir: prefix_dir.clone(),
+                prefix: "v00000".to_string(),
+                out_rel: out_rel.clone(),
+            },
+        ) {
+            Ok(_) => panic!("an ordinal past its dictionary must be refused"),
+            Err(e) => e,
+        };
+        assert!(
+            err.0.contains("keyword coalesce for 'title'"),
+            "the refusal names the merge and the column: {err:?}"
+        );
+        assert_eq!(
+            serde_json::to_string(&manifest).unwrap(),
+            before,
+            "the pass has no commit point before the manifest edit, and never reached it"
+        );
+        assert!(
+            !prefix_dir
+                .join(&out_rel)
+                .join("attrs/title")
+                .join(tessera_filter::VALUES_FILE)
+                .exists(),
+            "no ordinal was written under the merged dictionary"
+        );
+        for extent in &manifest.attr_extents {
+            assert!(prefix_dir.join(&extent.values).exists());
+            assert!(prefix_dir.join(extent.dict.as_deref().unwrap()).exists());
+        }
     }
 
     /// **Both obligations land in one manifest edit: the files and the `attr_extents` entries.**

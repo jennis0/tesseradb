@@ -3476,11 +3476,10 @@ fn every_answer(engine: &tessera_engine::Engine, fx: &Fixture) -> Vec<(String, V
 /// fixture can express rather than a sample, because the failure this guards against — a merge that
 /// pairs values with the wrong entities — moves some answers and not others.
 ///
-/// **`title` is exempt and asserted to be exempt**, because it is a keyword: a coalesce merges two
-/// key sets and renumbers, and the composition installs a layer's values without a dictionary to go
-/// with them, so the pass declines any column whose layers carry one (records §4.3, §7; the
-/// selection's own note in `coalesce.rs`). Its extents therefore stay one per flush, and asserting
-/// that here is what keeps a later change that quietly starts taking them from going unnoticed.
+/// **`title` is a keyword and is taken like every other column.** Its merge renumbers: the window's
+/// dictionaries become one and every ordinal is rewritten against it, and the coalesced extent is
+/// installed with that dictionary as one layer (records §4.3, §7). The prefix and contains answers
+/// over `title` below are what say the renumbering stayed inside the layer.
 ///
 /// **Mutations this kills:** dropping the coalesced extent from `attr_extents` (the post-build
 /// entities stop matching); pushing the coalesced layer without removing the consumed ones (the
@@ -3492,14 +3491,12 @@ fn a_window_of_extents_becomes_one_file_per_column_and_answers_identically() {
     let engine = engine_for_coalesce(&fx, "coalesce");
     let entities = flush_a_window(&engine, "coalesce", 0);
 
-    for (column, count) in extents_per_column(&fx) {
-        if column == "title" {
-            assert_eq!(
-                count, COALESCE_WIDTH,
-                "the keyword column's extents must be left alone, one per flush"
-            );
-            continue;
-        }
+    let per_column = extents_per_column(&fx);
+    assert!(
+        per_column.contains_key("title"),
+        "the keyword column's window was flushed: {per_column:?}"
+    );
+    for (column, count) in per_column {
         assert_eq!(
             count, 1,
             "column '{column}' still holds {count} extents where the window collapsed to one"
@@ -3532,9 +3529,6 @@ fn a_window_of_extents_becomes_one_file_per_column_and_answers_identically() {
     let more = flush_a_window(&engine, "again", COALESCE_WIDTH);
     assert!(engine.write_executor_stats().coalesces >= 2);
     for (column, count) in extents_per_column(&fx) {
-        if column == "title" {
-            continue;
-        }
         assert!(
             count <= 2,
             "column '{column}' holds {count} extents; a coalesced extent must coalesce again"
@@ -3578,6 +3572,16 @@ fn a_coalesced_column_reopens_and_answers_over_every_post_build_entity() {
     };
 
     let reopened = engine_for_coalesce(&fx, "coalesce-restart-2");
+    assert_eq!(
+        extents_per_column(&fx)["title"],
+        1,
+        "the keyword column reopens from its one coalesced extent"
+    );
+    assert_eq!(
+        reopened.generation().filter_columns.layer_count("title"),
+        Some(2),
+        "base plus the coalesced layer, its dictionary opened from the manifest entry"
+    );
     let (generation, cand) = live_candidate(&reopened);
     for (i, entity) in entities.iter().enumerate() {
         let key = ["eng", "sales", "legal"][i % 3];
@@ -3603,6 +3607,233 @@ fn a_coalesced_column_reopens_and_answers_over_every_post_build_entity() {
             .expect("answers");
         assert!(title.contains(*entity as u32));
     }
+}
+
+/// The keys the keyword tests below ingest, one per flush of a window. Repeated across flushes and
+/// out of sorted order, so each flush's dictionary numbers its key 0 and the merged dictionary
+/// numbers five keys another way: a replacement read against any consumed layer's dictionary, or
+/// a consumed layer left beside the merged one, answers another key's entities.
+const KEYS: [&str; COALESCE_WIDTH] = [
+    "delta", "alpha", "gamma", "alpha", "beta", "delta", "epsilon", "gamma",
+];
+
+/// Ingest and flush one window's worth of rows whose `title` is `{tag}-{KEYS[i]}`, one flush each.
+fn flush_keyed_window(engine: &tessera_engine::Engine, tag: &str, from: usize) -> Vec<u64> {
+    (0..COALESCE_WIDTH)
+        .map(|i| {
+            ingest_and_flush_with(
+                engine,
+                &format!("{tag}-{}", from + i),
+                WalScalar::Utf8(["eng", "sales", "legal"][i % 3].to_string()),
+                WalScalar::Utf8("xx".to_string()),
+                &format!("{tag}-{}", KEYS[i]),
+                1_000 + i as i32,
+                WalScalar::Null,
+            )
+        })
+        .collect()
+}
+
+/// Every keyword answer over `title` for a `{tag}-` window, through the three routes a value is
+/// read by: the column reader, the filter expression evaluator, and a viewport request. Each
+/// answer is a sorted id list, so two captures compare as one value.
+fn keyword_answers(
+    engine: &tessera_engine::Engine,
+    fx: &Fixture,
+    tag: &str,
+) -> Vec<(String, Vec<u64>)> {
+    let (generation, cand) = live_candidate(engine);
+    let mut out = Vec::new();
+    let mut operands: Vec<FilterOperand> = KEYS
+        .iter()
+        .map(|key| FilterOperand::TextEquals(format!("{tag}-{key}")))
+        .collect();
+    operands.push(FilterOperand::TextPrefix(format!("{tag}-")));
+    operands.push(FilterOperand::TextPrefix(format!("{tag}-a")));
+    operands.push(FilterOperand::TextContains("lta".into()));
+    operands.push(FilterOperand::TextContains("psi".into()));
+    operands.push(FilterOperand::TextEquals(format!("{tag}-zeta")));
+    for operand in &operands {
+        let answer = generation
+            .filter_columns
+            .resolve("title", operand, &cand)
+            .expect("answers");
+        out.push((
+            format!("resolve {operand:?}"),
+            answer.iter().map(u64::from).collect(),
+        ));
+        let expr = FilterExpr::AllOf(vec![
+            leaf("title", operand.clone()),
+            leaf(
+                "department",
+                FilterOperand::Equals(AttrLocalId::new(fx.codes["eng"])),
+            ),
+        ]);
+        let answer = generation
+            .filter_columns
+            .evaluate(&expr, &cand)
+            .expect("answers");
+        out.push((
+            format!("evaluate {operand:?} and eng"),
+            answer.iter().map(u64::from).collect(),
+        ));
+    }
+    let session = engine
+        .authorise(&full_coverage_credential())
+        .expect("credential resolves");
+    for operand in &operands {
+        let served = engine
+            .viewport(
+                &session,
+                ViewportRequest::new("s0", 0, FULL_VIEWPORT, 10_000)
+                    .filter(leaf("title", operand.clone())),
+            )
+            .expect("a filtered viewport answers");
+        let mut ids: Vec<u64> = served.points.tessera_ids.clone();
+        ids.sort_unstable();
+        out.push((format!("viewport {operand:?}"), ids));
+    }
+    out
+}
+
+/// Drive the tick a coalesce is selected on, with the pass enabled, and wait for it to publish.
+fn coalesce_now(engine: &tessera_engine::Engine) {
+    let coalesces = engine.write_executor_stats().coalesces;
+    engine.set_coalesce_for_test(true);
+    engine.request_flush();
+    wait_until("the coalesce to publish", || {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        engine.write_executor_stats().coalesces > coalesces
+    });
+}
+
+/// **A keyword column's window becomes one extent, installed with the dictionary its merge minted,
+/// and every entity reads the key it was ingested with** — the same answer before and after, over
+/// every operator the family publishes, through the column reader, the expression evaluator and a
+/// viewport request.
+///
+/// The invariant under test is records §7's: no ordinal is resolved against a dictionary other
+/// than the one that minted it. The coalesce renumbers every ordinal in the window, so the only
+/// way the answers stay equal is that the replacement layer's ordinals are read against the
+/// merged dictionary and nothing else — which `FilterColumns::with_coalesced` makes so by
+/// installing the two as one layer or refusing.
+///
+/// **Mutations this kills:** install the coalesced values with a consumed layer's dictionary
+/// (every `TextEquals` moves); leave a consumed layer beside the replacement (its entities answer
+/// twice, under two keys); merge the window byte-preserved (entity 0 reads `alpha` for `delta`).
+#[test]
+fn a_keyword_windows_extents_become_one_and_every_entity_keeps_its_key() {
+    let fx = fixture();
+    let engine = engine_for_coalesce(&fx, "kw-coalesce");
+    engine.set_coalesce_for_test(false);
+    let entities = flush_keyed_window(&engine, "kw", 0);
+    assert_eq!(
+        extents_per_column(&fx)["title"],
+        COALESCE_WIDTH,
+        "one extent per flush before the pass runs"
+    );
+    let before = keyword_answers(&engine, &fx, "kw");
+
+    coalesce_now(&engine);
+    assert_eq!(
+        extents_per_column(&fx)["title"],
+        1,
+        "the keyword window collapsed to one extent"
+    );
+    assert_eq!(
+        engine.generation().filter_columns.layer_count("title"),
+        Some(2),
+        "the live generation serves the base and the one coalesced layer"
+    );
+    let after = keyword_answers(&engine, &fx, "kw");
+    assert_eq!(after, before, "an answer moved across the coalesce");
+
+    // And the relation, entity by entity: each reads exactly its own key, and no other.
+    let (generation, cand) = live_candidate(&engine);
+    for (i, entity) in entities.iter().enumerate() {
+        for key in ["alpha", "beta", "delta", "epsilon", "gamma"] {
+            let answer = generation
+                .filter_columns
+                .resolve(
+                    "title",
+                    &FilterOperand::TextEquals(format!("kw-{key}")),
+                    &cand,
+                )
+                .expect("answers");
+            assert_eq!(
+                answer.contains(*entity as u32),
+                KEYS[i] == key,
+                "entity {entity} (ingested with {}) answers '{key}' wrongly",
+                KEYS[i]
+            );
+        }
+    }
+    assert!(!before.iter().all(|(_, ids)| ids.is_empty()));
+}
+
+/// **A coalesced keyword extent survives a restart and a fold, and coalesces again after both.**
+///
+/// A restart opens the extent from the manifest entry — values, presence and dictionary named
+/// together — so what the process served and what it reopens are the same three files. The fold
+/// then reads the coalesced extent as one of the column's layers, its ordinals against its own
+/// dictionary, and rebuilds the base from the survivors; a fold that resolved the coalesced
+/// ordinals against a flush's dictionary would write a recoloured base with no error.
+#[test]
+fn a_coalesced_keyword_extent_survives_a_restart_and_a_fold() {
+    let fx = fixture();
+    let entities = {
+        let engine = engine_for_coalesce(&fx, "kw-life");
+        engine.set_coalesce_for_test(false);
+        let entities = flush_keyed_window(&engine, "life", 0);
+        coalesce_now(&engine);
+        entities
+    };
+    let expected: Vec<(String, Vec<u64>)> = {
+        let engine = engine_for_coalesce(&fx, "kw-life-2");
+        engine.set_coalesce_for_test(false);
+        assert_eq!(extents_per_column(&fx)["title"], 1);
+        let reopened = keyword_answers(&engine, &fx, "life");
+        for (i, entity) in entities.iter().enumerate() {
+            let (name, ids) = &reopened[2 * i];
+            assert!(
+                ids.contains(entity),
+                "{name} lost entity {entity} to the restart"
+            );
+        }
+
+        fold(&engine);
+        assert!(
+            !extents_per_column(&fx).contains_key("title"),
+            "the fold consumed the coalesced extent"
+        );
+        assert_eq!(
+            engine.generation().filter_columns.layer_count("title"),
+            Some(1),
+            "one base again"
+        );
+        let folded = keyword_answers(&engine, &fx, "life");
+        assert_eq!(folded, reopened, "an answer moved across the fold");
+
+        // A second window after the fold, coalesced against the folded base.
+        let more = flush_keyed_window(&engine, "life", COALESCE_WIDTH);
+        coalesce_now(&engine);
+        assert_eq!(extents_per_column(&fx)["title"], 1);
+        let again = keyword_answers(&engine, &fx, "life");
+        for (i, entity) in more.iter().enumerate() {
+            let (name, ids) = &again[2 * i];
+            assert!(ids.contains(entity), "{name} misses entity {entity}");
+        }
+        for ((name, was), (_, now)) in reopened.iter().zip(&again) {
+            assert!(
+                was.iter().all(|e| now.contains(e)),
+                "{name} lost entities to the second coalesce"
+            );
+        }
+        again
+    };
+    // And once more from disc, after the fold and the second coalesce.
+    let engine = engine_for_coalesce(&fx, "kw-life-3");
+    assert_eq!(keyword_answers(&engine, &fx, "life"), expected);
 }
 
 /// **A coalesce retires nothing** (§5.2, §6): a deleted-but-unfolded entity's value rides through
@@ -3684,10 +3915,9 @@ fn a_coalesce_carries_a_deleted_but_unfolded_entitys_value_through() {
 /// generation. The merge's own duplicate guard makes the mismatch unreachable, which is exactly why
 /// it is cheap to verify and wrong to assume.
 ///
-/// Asserted over `bonus`, a plain numeric column, because a coalesce never takes a keyword one: its
-/// merge renumbers the joined key set, and `CoalescedWindow` carries a layer's values without the
-/// dictionary that would have to be swapped in with them, so `with_coalesced` refuses the family
-/// outright (records §4.3, §7). Using `title` here would test that refusal instead of this one.
+/// Asserted over `bonus`, a plain numeric column, so the window carries no dictionary and the
+/// coverage check is the only one in play. A keyword window's other refusal — arriving without the
+/// dictionary its ordinals are numbered against — is its own test, in `filter.rs`'s `keyword_tests`.
 #[test]
 fn a_coalesced_layer_that_does_not_cover_its_window_is_refused() {
     let fx = fixture();
@@ -3741,6 +3971,7 @@ fn a_coalesced_layer_that_does_not_cover_its_window_is_refused() {
             consumed: vec![first.clone(), second.clone()],
             values_rel: "coalesced/c-1/attrs/bonus/values.arrow".to_string(),
             values,
+            dict: None,
         };
     let err = columns
         .with_coalesced(&[window(extent(&[100, 101, 200]))], &[], None, None)

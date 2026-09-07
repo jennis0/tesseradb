@@ -8044,6 +8044,9 @@ impl Executor {
                 consumed: window.extents.iter().map(|e| e.values.clone()).collect(),
                 values_rel: attr.extent.values.clone(),
                 values: Arc::clone(&attr.values),
+                // A keyword window's merged dictionary, beside the ordinals it numbers; the
+                // composition installs the pair as one layer or refuses.
+                dict: attr.dict.clone(),
             })
             .collect();
         // The text axis's windows, named by dictionary path on both sides. The paths are resolved

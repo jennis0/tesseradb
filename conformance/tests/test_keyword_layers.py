@@ -30,20 +30,19 @@ The catalogue entries records §10 gives this family, and where each is covered:
 | a prefix range empty in one layer and non-empty in the next | `test_a_prefix_range_empty_in_one_layer_and_not_in_the_next` |
 | the first and last value of a dictionary (ordinal boundaries) | `test_the_base_s_ordinal_boundaries_survive_the_extents_and_the_fold` |
 | a needle absent from every dictionary | `test_a_needle_no_layer_holds_answers_empty_at_every_state` |
-| an entity whose only value arrived in a coalesced extent | **not reachable — see below** |
+| an entity whose only value arrived in a coalesced extent | in Rust — see below |
 
-**The coalesced state cannot be reached from this suite, and it is not faked.** The entity-space
-coalesce deliberately does not take a column whose extents carry a dictionary: a coalesced extent
-would sit in the live composition beside the dictionaries of the extents it replaced, its ordinals
-renumbered against a dictionary no reader holds. Such a column waits for the fold instead. The rule
-is in `tessera_engine::coalesce::plan_coalesce` and is pinned there by
-`a_column_with_per_layer_dictionaries_waits_for_the_fold`; the merge itself
-(`tessera_filter_write::coalesce_keyword_extents`) has its own differential in that module,
-`a_coalesced_keyword_extent_reads_back_every_entitys_own_key`, which checks the `(entity, key)`
-relation across a renumbering merge and across a second coalesce of the first's output. So
-there is no HTTP-reachable state in which a keyword value lives in a coalesced extent, and the
-right coverage for the entry is the Rust pair above rather than a hand-written artefact here. What
-this module covers in its place is the **fold**, which is the route such a column actually takes.
+**The coalesced state is driven in Rust rather than here.** The entity-space coalesce takes a
+keyword column's window, merges its dictionaries and installs the merged one beside the renumbered
+ordinals as one extent (filter-index §5.2; records §7). Reaching it needs a window's worth of
+flushes and the tick the pass is selected on, which the Rust tests drive deterministically:
+`tessera-server`'s `tests/keyword_coalesce.rs` serves the same set to every operator before and
+after the pass and after a restart; `tessera-engine`'s `tests/filtering.rs`
+(`a_keyword_windows_extents_become_one_and_every_entity_keeps_its_key`,
+`a_coalesced_keyword_extent_survives_a_restart_and_a_fold`) read the relation entity by entity
+through the reader, the evaluator and a viewport, and across the fold; the merge's own differential
+is `tessera_filter_write::keyword`'s `a_coalesced_keyword_extent_reads_back_every_entitys_own_key`.
+This module covers the two-extent and folded states over the control plane.
 
 Every operator is checked at all three states, so the layered and the folded answers are compared
 against one definition and therefore against each other — records §10's folded-against-layered
