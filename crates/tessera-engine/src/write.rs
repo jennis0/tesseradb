@@ -268,6 +268,20 @@ pub struct ExecutorHealth {
     /// Flushes published since the executor started — what "an acked ingest became visible" is
     /// observed on, rather than on a sleep.
     pub(crate) flushes: AtomicU64,
+    /// When the flush now on the pool was dispatched, as an offset from [`Self::base`] plus one;
+    /// `0` when none is. Read by [`Self::record_flush_published`] for the drain sample and by a
+    /// snapshot for [`ExecutorStats::flush_in_flight_nanos`].
+    flush_started_nanos: AtomicU64,
+    /// Wall nanoseconds per row drained, an EWMA over published flushes measured from dispatch to
+    /// publication. Always on, where `flush_stage_nanos` is written only under `bench-timing`: it
+    /// is the observed drain rate the buffer-occupancy 429 derives `Retry-After` from (ingest
+    /// §4.2; [`estimate_buffer_retry_after_s`]). `0` before the first publication.
+    flush_nanos_per_row_ewma: AtomicU64,
+    /// The last tick, as an offset from [`Self::base`] plus one; `0` before the first.
+    last_tick_nanos: AtomicU64,
+    /// The tick period, `flush_max_age_secs` in nanoseconds, so a snapshot can say how long until
+    /// the next tick without the executor's own clock.
+    flush_period_nanos: AtomicU64,
     /// Side-manifests written for deny state alone — the gauge that makes the restore path's
     /// freshness observable, and what a test asserts a publication happened at all against.
     pub(crate) overlay_publications: AtomicU64,
@@ -755,6 +769,13 @@ pub struct ExecutorStats {
     /// How long the work item currently executing has been running, in nanoseconds; `0` when the
     /// executor is idle. See [`ExecutorHealth::work_started_nanos`].
     pub work_in_flight_nanos: u64,
+    /// The observed drain cost: wall nanoseconds per row, an EWMA over published flushes from
+    /// dispatch to publication. `0` before the first publication.
+    pub flush_nanos_per_row_ewma: u64,
+    /// How long the flush now on the pool has been running; `0` when none is.
+    pub flush_in_flight_nanos: u64,
+    /// Time until the next scheduled tick; `0` when one is due or overdue.
+    pub next_tick_in_nanos: u64,
     /// Times the overlay crossed to at or above the configured soft limit. **It alarms;
     /// it does not act**, and it counts **crossings**, not publications above the limit — see
     /// [`ExecutorHealth::overlay_soft_limit_alarms`].
@@ -853,6 +874,10 @@ impl ExecutorHealth {
             buffered_items: AtomicUsize::new(0),
             flushable_items: AtomicUsize::new(0),
             flushes: AtomicU64::new(0),
+            flush_started_nanos: AtomicU64::new(0),
+            flush_nanos_per_row_ewma: AtomicU64::new(0),
+            last_tick_nanos: AtomicU64::new(0),
+            flush_period_nanos: AtomicU64::new(0),
             flush_skips: AtomicU64::new(0),
             flush_failures: AtomicU64::new(0),
             coalesces: AtomicU64::new(0),
@@ -985,6 +1010,12 @@ impl ExecutorHealth {
             work_depth: work_submitted.saturating_sub(work_completed),
             work_service_nanos_ewma: self.work_service_nanos_ewma.load(Ordering::Relaxed),
             work_in_flight_nanos: self.work_in_flight_nanos(),
+            flush_nanos_per_row_ewma: self.flush_nanos_per_row_ewma.load(Ordering::Relaxed),
+            flush_in_flight_nanos: self.elapsed_since_marker(&self.flush_started_nanos),
+            next_tick_in_nanos: self
+                .flush_period_nanos
+                .load(Ordering::Relaxed)
+                .saturating_sub(self.elapsed_since_marker(&self.last_tick_nanos)),
             overlay_soft_limit_alarms: self.overlay_soft_limit_alarms.load(Ordering::Relaxed),
             fragmentation: *lock_recover(&self.fragmentation),
             tier_fragmentation: *lock_recover(&self.tier_fragmentation),
@@ -1034,11 +1065,61 @@ impl ExecutorHealth {
     /// a job that started "in the future" relative to a stale `base.elapsed()` must report zero
     /// rather than wrap to an enormous drain estimate.
     fn work_in_flight_nanos(&self) -> u64 {
-        match self.work_started_nanos.load(Ordering::Relaxed) {
+        self.elapsed_since_marker(&self.work_started_nanos)
+    }
+
+    /// Nanoseconds since a marker was set, or `0` where it is unset. A marker is an offset from
+    /// [`Self::base`] plus one, so that `0` can mean unset; the `saturating_sub` is
+    /// [`Self::work_in_flight_nanos`]'s argument.
+    fn elapsed_since_marker(&self, marker: &AtomicU64) -> u64 {
+        match marker.load(Ordering::Relaxed) {
             0 => 0,
-            started_plus_one => (self.base.elapsed().as_nanos() as u64)
-                .saturating_sub(started_plus_one.saturating_sub(1)),
+            set_plus_one => (self.base.elapsed().as_nanos() as u64)
+                .saturating_sub(set_plus_one.saturating_sub(1)),
         }
+    }
+
+    /// Set a marker to `at`. `0` is reserved for unset, hence the `+ 1`.
+    fn set_marker(&self, marker: &AtomicU64, at: std::time::Instant) {
+        let offset = at.saturating_duration_since(self.base).as_nanos() as u64;
+        marker.store(offset.saturating_add(1), Ordering::Relaxed);
+    }
+
+    /// The flush unit is about to go to the pool. Executor thread only.
+    fn mark_flush_started(&self, at: std::time::Instant) {
+        self.set_marker(&self.flush_started_nanos, at);
+    }
+
+    /// A flush published `rows`: fold its wall time per row into the drain EWMA and clear the
+    /// marker. Executor thread only. A flush of no rows moves nothing, having drained nothing.
+    fn record_flush_published(&self, rows: usize) {
+        let elapsed = self.elapsed_since_marker(&self.flush_started_nanos);
+        self.flush_started_nanos.store(0, Ordering::Relaxed);
+        if rows == 0 {
+            return;
+        }
+        let sample = elapsed / rows as u64;
+        let prev = self.flush_nanos_per_row_ewma.load(Ordering::Relaxed);
+        // Seeded by the first observation, then the same eighth-weight decay as the work EWMA.
+        let next = if prev == 0 {
+            sample.max(1)
+        } else {
+            let p = prev as i128;
+            let s = sample as i128;
+            (p + (s - p) / 8).max(1) as u64
+        };
+        self.flush_nanos_per_row_ewma.store(next, Ordering::Relaxed);
+    }
+
+    /// A tick happened at `at`. Executor thread only.
+    fn mark_tick(&self, at: std::time::Instant) {
+        self.set_marker(&self.last_tick_nanos, at);
+    }
+
+    /// The tick period, from the executor's flush configuration.
+    fn set_flush_period_secs(&self, secs: u64) {
+        self.flush_period_nanos
+            .store(secs.saturating_mul(1_000_000_000), Ordering::Relaxed);
     }
 
     /// An otherwise-fresh health block whose clock origin is in the past, so a test can construct a
@@ -1295,6 +1376,22 @@ pub const RETRY_AFTER_MIN_SECS: u64 = 1;
 /// broken. The operator's signal for a queue that deep is `work_depth` on `/control/status`, which
 /// is not clamped.
 pub const RETRY_AFTER_MAX_SECS: u64 = 300;
+
+/// `Retry-After` for the buffer-occupancy 429, derived from the observed drain rate (ingest
+/// §4.2): the buffer drains at a flush, which runs at the tick, so the wait is the time until the
+/// next tick plus what draining `buffered` rows costs at the observed per-row figure, clamped to
+/// the same floor and ceiling as [`estimate_retry_after_s`].
+///
+/// An estimator on the same terms as the queue's: the per-row figure is an EWMA over published
+/// flushes and the next flush may be slower; a flush in flight lands before the next tick can
+/// publish. Before any flush has published the per-row figure is `0` and the answer is the time
+/// to the next tick alone, which is the floor an operator would choose for lack of evidence.
+pub fn estimate_buffer_retry_after_s(stats: &ExecutorStats, buffered: u64) -> u64 {
+    let drain = (buffered as u128).saturating_mul(stats.flush_nanos_per_row_ewma as u128);
+    let nanos = (stats.next_tick_in_nanos as u128).saturating_add(drain);
+    let secs = nanos.div_ceil(1_000_000_000);
+    (secs.max(RETRY_AFTER_MIN_SECS as u128) as u64).min(RETRY_AFTER_MAX_SECS)
+}
 
 /// The commit window's row bound for an engine whose embedder sets none.
 ///
@@ -2827,6 +2924,10 @@ impl WritePath {
             .collect();
         #[cfg(feature = "fault-injection")]
         let thread_faults = faults.clone();
+        // The tick clock a snapshot reads, seeded so `next_tick_in_nanos` is one period until
+        // the executor's first tick rather than zero.
+        health.set_flush_period_secs(flush.max_age_secs);
+        health.mark_tick(std::time::Instant::now());
 
         let join = std::thread::Builder::new()
             .name("tessera-lifecycle".to_string())
@@ -5569,6 +5670,7 @@ impl Executor {
         if self.health.flush_in_flight.load(Ordering::SeqCst) {
             if due {
                 self.last_tick = std::time::Instant::now();
+                self.health.mark_tick(self.last_tick);
                 self.health.ticks.fetch_add(1, Ordering::Relaxed);
                 let flushable = generation
                     .buffer
@@ -5600,6 +5702,7 @@ impl Executor {
         }
 
         self.last_tick = std::time::Instant::now();
+        self.health.mark_tick(self.last_tick);
         self.health.ticks.fetch_add(1, Ordering::Relaxed);
         // Requested flushes are consumed by the tick whether or not there is anything to flush: a
         // `POST /control/flush` against an empty buffer is satisfied by the tick it triggered, not
@@ -8663,6 +8766,7 @@ impl Executor {
             .flush_lap(crate::flush::FlushStage::Dispatch, mark);
 
         self.health.flush_in_flight.store(true, Ordering::SeqCst);
+        self.health.mark_flush_started(std::time::Instant::now());
         let health = Arc::clone(&self.health);
         self.pool.spawn(move || {
             for (plan, ctx) in contexts {
@@ -13931,6 +14035,8 @@ impl Executor {
         self.health
             .flush_rows_published
             .fetch_add(completed.consumed.len() as u64, Ordering::Relaxed);
+        // The drain sample the buffer-occupancy 429 is derived from (ingest §4.2).
+        self.health.record_flush_published(completed.consumed.len());
         self.health.record_tier_fragmentation(completed.tier_tally);
         *mark = self.health.flush_lap(crate::flush::FlushStage::Swap, *mark);
 
@@ -14375,6 +14481,52 @@ mod retry_after_tests {
     fn no_observation_yields_the_floor_not_a_zero() {
         assert_eq!(estimate_retry_after_s(64, 0), RETRY_AFTER_MIN_SECS);
         assert_eq!(estimate_retry_after_s(0, 0), RETRY_AFTER_MIN_SECS);
+    }
+
+    /// **The buffer-occupancy figure is the time to the next tick plus the observed drain**
+    /// (ingest §4.2). Before any flush has published, the drain is unobserved and the answer is
+    /// the time to the tick alone; after one, a million rows at the observed 15 µs a row adds
+    /// 15 s to it; and the ceiling holds where the arithmetic would exceed it.
+    ///
+    /// **Mutation:** a fixed constant here fails every arm; dropping the tick term fails the
+    /// first; dropping the drain term fails the second.
+    #[test]
+    fn buffer_retry_after_is_the_tick_plus_the_observed_drain() {
+        let now = std::time::Instant::now();
+        let health = ExecutorHealth::with_base(now - std::time::Duration::from_secs(3_600));
+        health.set_flush_period_secs(90);
+
+        // Thirty seconds into a ninety-second period, nothing published yet.
+        health.mark_tick(now - std::time::Duration::from_secs(30));
+        let stats = health.stats();
+        assert_eq!(stats.flush_nanos_per_row_ewma, 0);
+        let secs = estimate_buffer_retry_after_s(&stats, 1_000_000);
+        assert!((59..=60).contains(&secs), "the tick alone: got {secs}");
+
+        // A flush of a million rows that took fifteen seconds: 15 µs a row, observed.
+        health.mark_flush_started(now - std::time::Duration::from_secs(15));
+        health.record_flush_published(1_000_000);
+        health.mark_tick(now);
+        let stats = health.stats();
+        assert!(
+            (14_000..=16_000).contains(&stats.flush_nanos_per_row_ewma),
+            "per-row drain observed: got {} ns",
+            stats.flush_nanos_per_row_ewma
+        );
+        let secs = estimate_buffer_retry_after_s(&stats, 1_000_000);
+        assert!((104..=106).contains(&secs), "tick plus drain: got {secs}");
+
+        // A hundred million rows at that rate is twenty-five minutes; the ceiling holds.
+        assert_eq!(
+            estimate_buffer_retry_after_s(&stats, 100_000_000),
+            RETRY_AFTER_MAX_SECS
+        );
+        // Nothing buffered and the tick due: the floor, never zero.
+        health.mark_tick(now - std::time::Duration::from_secs(90));
+        assert_eq!(
+            estimate_buffer_retry_after_s(&health.stats(), 0),
+            RETRY_AFTER_MIN_SECS
+        );
     }
 
     /// The derivation itself: a deep queue draining slowly gets a number that is neither `1` nor

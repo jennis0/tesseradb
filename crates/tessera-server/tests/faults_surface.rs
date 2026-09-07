@@ -93,7 +93,7 @@ async fn the_manifest_seam_pauses_and_releases_over_the_control_plane() {
         .post(server.control_url("/control/ingest"))
         .bearer_auth(OPERATOR_CREDENTIAL)
         .header("x-tessera-batch-id", "faults-surface-1")
-        .header("content-type", "application/octet-stream")
+        .header("content-type", "application/vnd.apache.arrow.stream")
         .body(body)
         .send()
         .await

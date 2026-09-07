@@ -217,7 +217,7 @@ POST /control/ingest
 x-tessera-view: quarter:2026-Q4
 x-tessera-batch-id: <uuid>
 
-(external_id, x, y, access, sentiment, mood, note, coverage)   # Arrow, application/octet-stream
+(external_id, x, y, access, sentiment, mood, note, coverage)   # Arrow, application/vnd.apache.arrow.stream
 ```
 
 A row belongs to one view; a point that belongs to several is several batches, one per view, one

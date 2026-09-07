@@ -237,7 +237,7 @@ async fn f_ingest_is_wal_before_ack_and_idempotent() {
         .post(server.control_url("/control/ingest"))
         .bearer_auth(OPERATOR_CREDENTIAL)
         .header("x-tessera-batch-id", "batch-1")
-        .header("content-type", "application/octet-stream")
+        .header("content-type", "application/vnd.apache.arrow.stream")
         .body(body.clone())
         .send()
         .await
@@ -253,7 +253,7 @@ async fn f_ingest_is_wal_before_ack_and_idempotent() {
         .post(server.control_url("/control/ingest"))
         .bearer_auth(OPERATOR_CREDENTIAL)
         .header("x-tessera-batch-id", "batch-1")
-        .header("content-type", "application/octet-stream")
+        .header("content-type", "application/vnd.apache.arrow.stream")
         .body(body.clone())
         .send()
         .await
@@ -267,7 +267,7 @@ async fn f_ingest_is_wal_before_ack_and_idempotent() {
         .post(server.control_url("/control/ingest"))
         .bearer_auth(OPERATOR_CREDENTIAL)
         .header("x-tessera-batch-id", "batch-1")
-        .header("content-type", "application/octet-stream")
+        .header("content-type", "application/vnd.apache.arrow.stream")
         .body(different_body)
         .send()
         .await
@@ -305,7 +305,7 @@ async fn ingest_rejects_duplicate_external_ids_within_one_batch() {
         .post(server.control_url("/control/ingest"))
         .bearer_auth(OPERATOR_CREDENTIAL)
         .header("x-tessera-batch-id", "dup-batch")
-        .header("content-type", "application/octet-stream")
+        .header("content-type", "application/vnd.apache.arrow.stream")
         .body(body)
         .send()
         .await
@@ -348,7 +348,7 @@ async fn ingest_rejects_an_external_id_ingested_after_the_build() {
         .post(server.control_url("/control/ingest"))
         .bearer_auth(OPERATOR_CREDENTIAL)
         .header("x-tessera-batch-id", "z-batch-1")
-        .header("content-type", "application/octet-stream")
+        .header("content-type", "application/vnd.apache.arrow.stream")
         .body(first_body)
         .send()
         .await
@@ -365,7 +365,7 @@ async fn ingest_rejects_an_external_id_ingested_after_the_build() {
         .post(server.control_url("/control/ingest"))
         .bearer_auth(OPERATOR_CREDENTIAL)
         .header("x-tessera-batch-id", "z-batch-2")
-        .header("content-type", "application/octet-stream")
+        .header("content-type", "application/vnd.apache.arrow.stream")
         .body(second_body)
         .send()
         .await
@@ -408,7 +408,7 @@ async fn ingest_rejects_an_external_id_already_in_the_bundle() {
         .post(server.control_url("/control/ingest"))
         .bearer_auth(OPERATOR_CREDENTIAL)
         .header("x-tessera-batch-id", "bundle-dup-batch")
-        .header("content-type", "application/octet-stream")
+        .header("content-type", "application/vnd.apache.arrow.stream")
         .body(body)
         .send()
         .await
@@ -448,7 +448,7 @@ async fn an_idempotent_retry_of_an_accepted_batch_is_a_200_not_a_409() {
         .post(server.control_url("/control/ingest"))
         .bearer_auth(OPERATOR_CREDENTIAL)
         .header("x-tessera-batch-id", "replay-batch")
-        .header("content-type", "application/octet-stream")
+        .header("content-type", "application/vnd.apache.arrow.stream")
         .body(body.clone())
         .send()
         .await
@@ -460,7 +460,7 @@ async fn an_idempotent_retry_of_an_accepted_batch_is_a_200_not_a_409() {
         .post(server.control_url("/control/ingest"))
         .bearer_auth(OPERATOR_CREDENTIAL)
         .header("x-tessera-batch-id", "replay-batch")
-        .header("content-type", "application/octet-stream")
+        .header("content-type", "application/vnd.apache.arrow.stream")
         .body(body)
         .send()
         .await
@@ -498,7 +498,7 @@ async fn ingest_external_id_cap_is_64_bytes_exactly() {
         .post(server.control_url("/control/ingest"))
         .bearer_auth(OPERATOR_CREDENTIAL)
         .header("x-tessera-batch-id", "cap-64")
-        .header("content-type", "application/octet-stream")
+        .header("content-type", "application/vnd.apache.arrow.stream")
         .body(body)
         .send()
         .await
@@ -514,7 +514,7 @@ async fn ingest_external_id_cap_is_64_bytes_exactly() {
         .post(server.control_url("/control/ingest"))
         .bearer_auth(OPERATOR_CREDENTIAL)
         .header("x-tessera-batch-id", "cap-65")
-        .header("content-type", "application/octet-stream")
+        .header("content-type", "application/vnd.apache.arrow.stream")
         .body(body)
         .send()
         .await
@@ -563,7 +563,7 @@ async fn a_batch_resolution_opens_each_extent_at_most_once() {
         .post(server.control_url("/control/ingest"))
         .bearer_auth(OPERATOR_CREDENTIAL)
         .header("x-tessera-batch-id", "big-batch")
-        .header("content-type", "application/octet-stream")
+        .header("content-type", "application/vnd.apache.arrow.stream")
         .body(body)
         .send()
         .await
@@ -861,7 +861,7 @@ async fn ingest_with_a_null_external_id_returns_a_genuinely_resolvable_tessera_i
         .post(server.control_url("/control/ingest"))
         .bearer_auth(OPERATOR_CREDENTIAL)
         .header("x-tessera-batch-id", "null-ext-batch")
-        .header("content-type", "application/octet-stream")
+        .header("content-type", "application/vnd.apache.arrow.stream")
         .body(body)
         .send()
         .await
@@ -927,7 +927,7 @@ async fn ingest_mixed_batch_only_supplied_external_ids_participate_in_dedup() {
         .post(server.control_url("/control/ingest"))
         .bearer_auth(OPERATOR_CREDENTIAL)
         .header("x-tessera-batch-id", "mixed-batch")
-        .header("content-type", "application/octet-stream")
+        .header("content-type", "application/vnd.apache.arrow.stream")
         .body(body)
         .send()
         .await
@@ -949,7 +949,7 @@ async fn ingest_mixed_batch_only_supplied_external_ids_participate_in_dedup() {
         .post(server.control_url("/control/ingest"))
         .bearer_auth(OPERATOR_CREDENTIAL)
         .header("x-tessera-batch-id", "mixed-batch-dup")
-        .header("content-type", "application/octet-stream")
+        .header("content-type", "application/vnd.apache.arrow.stream")
         .body(dup_body)
         .send()
         .await
@@ -981,7 +981,7 @@ async fn ingest_two_null_external_ids_in_one_batch_do_not_collide() {
         .post(server.control_url("/control/ingest"))
         .bearer_auth(OPERATOR_CREDENTIAL)
         .header("x-tessera-batch-id", "two-nulls-batch")
-        .header("content-type", "application/octet-stream")
+        .header("content-type", "application/vnd.apache.arrow.stream")
         .body(body)
         .send()
         .await
@@ -1210,7 +1210,7 @@ async fn concurrent_ingests_do_not_delay_a_control_changes_suppress() {
                 .post(url)
                 .bearer_auth(OPERATOR_CREDENTIAL)
                 .header("x-tessera-batch-id", batch_id)
-                .header("content-type", "application/octet-stream")
+                .header("content-type", "application/vnd.apache.arrow.stream")
                 .body(body)
                 .send()
                 .await
@@ -1930,6 +1930,7 @@ async fn parked_fixture(tmp: &TempDir) -> ParkedFixture {
             admission: PARKED_INGEST_ADMISSION,
             max_batch_rows: 200_000,
             max_batch_bytes: 64 * 1024 * 1024,
+            ..generous_ingest_limits()
         },
     )
     .await;
@@ -1979,7 +1980,7 @@ async fn post_ingest(
         .client
         .post(server.control_url("/control/ingest"))
         .header("x-tessera-batch-id", batch_id)
-        .header("content-type", "application/octet-stream")
+        .header("content-type", "application/vnd.apache.arrow.stream")
         .body(build_ingest_batch(rows));
     if auth {
         req = req.bearer_auth(OPERATOR_CREDENTIAL);
@@ -2056,6 +2057,7 @@ async fn ingest_is_refused_by_buffer_occupancy() {
             admission: 64,
             max_batch_rows: 200_000,
             max_batch_bytes: 64 * 1024 * 1024,
+            ..generous_ingest_limits()
         },
     )
     .await;
@@ -2070,16 +2072,31 @@ async fn ingest_is_refused_by_buffer_occupancy() {
         .client
         .post(server.control_url("/control/ingest"))
         .header("x-tessera-batch-id", "over")
-        .header("content-type", "application/octet-stream")
+        .header("content-type", "application/vnd.apache.arrow.stream")
         .bearer_auth(OPERATOR_CREDENTIAL)
         .body(build_ingest_batch(&rows_from(1000, 1)))
         .send()
         .await
         .unwrap();
     assert_eq!(response.status().as_u16(), 429);
+    let header: u64 = response
+        .headers()
+        .get("retry-after")
+        .expect("a shed ingest must be told when to return")
+        .to_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let body: serde_json::Value = response.json().await.unwrap();
+    // **Derived, not the old fixed period** (ingest §4.2): the time to the next tick plus the
+    // buffered rows at the observed drain cost, within the queue estimator's bounds, and the
+    // body agrees with the header. Nothing has flushed on this server, so the figure is the time
+    // to its first tick, which the harness's period puts under the ceiling.
+    assert_eq!(body["retry_after_s"], header, "{body}");
     assert!(
-        response.headers().contains_key("retry-after"),
-        "a shed ingest must be told when to return"
+        (tessera_engine::RETRY_AFTER_MIN_SECS..=tessera_engine::RETRY_AFTER_MAX_SECS)
+            .contains(&header),
+        "within the estimator's bounds: {header}"
     );
 }
 
@@ -2169,7 +2186,7 @@ async fn an_ingest_body_carries_its_coordinates_at_either_float_width() {
             client
                 .post(url)
                 .header("x-tessera-batch-id", batch_id)
-                .header("content-type", "application/octet-stream")
+                .header("content-type", "application/vnd.apache.arrow.stream")
                 .bearer_auth(OPERATOR_CREDENTIAL)
                 .body(body)
                 .send()
@@ -2535,7 +2552,7 @@ fn ingest_admission_sheds_before_the_blocking_pool_fills() {
                     .post(url)
                     .bearer_auth(OPERATOR_CREDENTIAL)
                     .header("x-tessera-batch-id", format!("parked-{i}"))
-                    .header("content-type", "application/octet-stream")
+                    .header("content-type", "application/vnd.apache.arrow.stream")
                     .body(body)
                     .send()
                     .await
@@ -2663,7 +2680,7 @@ fn changes_never_429s() {
                     .post(url)
                     .bearer_auth(OPERATOR_CREDENTIAL)
                     .header("x-tessera-batch-id", format!("parked-{i}"))
-                    .header("content-type", "application/octet-stream")
+                    .header("content-type", "application/vnd.apache.arrow.stream")
                     .body(body)
                     .send()
                     .await
@@ -2784,6 +2801,7 @@ async fn ingest_429s_when_the_queue_is_full() {
             admission: 8,
             max_batch_rows: 200_000,
             max_batch_bytes: 64 * 1024 * 1024,
+            ..generous_ingest_limits()
         },
     )
     .await;
@@ -2793,7 +2811,7 @@ async fn ingest_429s_when_the_queue_is_full() {
         .post(server.control_url("/control/ingest"))
         .bearer_auth(OPERATOR_CREDENTIAL)
         .header("x-tessera-batch-id", "queue-full")
-        .header("content-type", "application/octet-stream")
+        .header("content-type", "application/vnd.apache.arrow.stream")
         .body(build_ingest_batch(&rows_from(700, 1)))
         .send()
         .await
@@ -2888,6 +2906,7 @@ async fn an_oversized_batch_is_422_not_a_queue_slot() {
             admission: 8,
             max_batch_rows: 4,
             max_batch_bytes: 64 * 1024 * 1024,
+            ..generous_ingest_limits()
         },
     )
     .await;
@@ -2976,6 +2995,7 @@ async fn an_oversized_body_is_422_not_413() {
             admission: 8,
             max_batch_rows: 200_000,
             max_batch_bytes: cap,
+            ..generous_ingest_limits()
         },
     )
     .await;
@@ -3077,6 +3097,7 @@ async fn backpressure_is_invisible_before_auth() {
             // setting it tight here is what made the earlier leg 3 vacuous.
             max_batch_rows: 200_000,
             max_batch_bytes: cap,
+            ..generous_ingest_limits()
         },
     )
     .await;
@@ -3115,7 +3136,7 @@ async fn backpressure_is_invisible_before_auth() {
         let mut req = server_a
             .client
             .post(server_a.control_url("/control/ingest"))
-            .header("content-type", "application/octet-stream")
+            .header("content-type", "application/vnd.apache.arrow.stream")
             .body(one_row.clone());
         if authed {
             req = req.bearer_auth(OPERATOR_CREDENTIAL);
@@ -3157,6 +3178,7 @@ async fn backpressure_is_invisible_before_auth() {
             // over-row-cap batch reaches `run_ingest` and the row check is what answers.
             max_batch_rows: 2,
             max_batch_bytes: 64 * 1024 * 1024,
+            ..generous_ingest_limits()
         },
     )
     .await;
@@ -3620,7 +3642,7 @@ async fn an_unauthenticated_caller_never_gets_a_byte_of_body_buffered() {
     sock.write_all(
         format!(
             "POST /control/ingest HTTP/1.1\r\nHost: {}\r\nx-tessera-batch-id: never-sent\r\n\
-             Content-Type: application/octet-stream\r\nContent-Length: 1073741824\r\n\r\n",
+             Content-Type: application/vnd.apache.arrow.stream\r\nContent-Length: 1073741824\r\n\r\n",
             server.control_addr
         )
         .as_bytes(),
@@ -3902,7 +3924,7 @@ async fn control_status_publishes_tier_scope_fragmentation_once_a_flush_publishe
         .post(server.control_url("/control/ingest"))
         .bearer_auth(OPERATOR_CREDENTIAL)
         .header("x-tessera-batch-id", "frag-1")
-        .header("content-type", "application/octet-stream")
+        .header("content-type", "application/vnd.apache.arrow.stream")
         .body(body)
         .send()
         .await
@@ -4014,7 +4036,7 @@ async fn control_status_publishes_the_live_segment_count_per_view() {
         .post(server.control_url("/control/ingest"))
         .bearer_auth(OPERATOR_CREDENTIAL)
         .header("x-tessera-batch-id", "seg-1")
-        .header("content-type", "application/octet-stream")
+        .header("content-type", "application/vnd.apache.arrow.stream")
         .body(body)
         .send()
         .await
@@ -4124,7 +4146,7 @@ async fn an_undeclared_ingest_column_is_422_naming_the_column() {
         .post(server.control_url("/control/ingest"))
         .bearer_auth(OPERATOR_CREDENTIAL)
         .header("x-tessera-batch-id", "undeclared-1")
-        .header("content-type", "application/octet-stream")
+        .header("content-type", "application/vnd.apache.arrow.stream")
         .body(body)
         .send()
         .await
@@ -4178,7 +4200,7 @@ async fn an_unknown_ingest_view_is_404_and_a_known_one_is_accepted() {
         .bearer_auth(OPERATOR_CREDENTIAL)
         .header("x-tessera-batch-id", "view-bad")
         .header("x-tessera-view", "no-such-view")
-        .header("content-type", "application/octet-stream")
+        .header("content-type", "application/vnd.apache.arrow.stream")
         .body(build_ingest_batch(&[(N_ITEMS + 1, 10.0, 10.0, "0")]))
         .send()
         .await
@@ -4204,7 +4226,7 @@ async fn an_unknown_ingest_view_is_404_and_a_known_one_is_accepted() {
         .bearer_auth(OPERATOR_CREDENTIAL)
         .header("x-tessera-batch-id", "view-good")
         .header("x-tessera-view", "s0")
-        .header("content-type", "application/octet-stream")
+        .header("content-type", "application/vnd.apache.arrow.stream")
         .body(build_ingest_batch(&[(N_ITEMS + 1, 10.0, 10.0, "0")]))
         .send()
         .await
@@ -4216,7 +4238,7 @@ async fn an_unknown_ingest_view_is_404_and_a_known_one_is_accepted() {
         .post(server.control_url("/control/ingest"))
         .bearer_auth(OPERATOR_CREDENTIAL)
         .header("x-tessera-batch-id", "view-absent")
-        .header("content-type", "application/octet-stream")
+        .header("content-type", "application/vnd.apache.arrow.stream")
         .body(build_ingest_batch(&[(N_ITEMS + 2, 10.0, 10.0, "0")]))
         .send()
         .await
@@ -4265,7 +4287,7 @@ async fn over_bound_ids_are_base64_not_lossy_utf8() {
         .post(server.control_url("/control/ingest"))
         .bearer_auth(OPERATOR_CREDENTIAL)
         .header("x-tessera-batch-id", "over-bound-1")
-        .header("content-type", "application/octet-stream")
+        .header("content-type", "application/vnd.apache.arrow.stream")
         .body(build_ingest_batch_labels(external_id, &labels))
         .send()
         .await
@@ -4366,7 +4388,7 @@ async fn a_deleted_holder_does_not_block_reingest_but_a_suppressed_one_does() {
                 .post(url)
                 .bearer_auth(OPERATOR_CREDENTIAL)
                 .header("x-tessera-batch-id", batch)
-                .header("content-type", "application/octet-stream")
+                .header("content-type", "application/vnd.apache.arrow.stream")
                 .body(body)
                 .send()
                 .await
@@ -4674,7 +4696,7 @@ async fn every_declarable_scalar_type_round_trips_ingest_to_filter() {
         .client
         .post(server.control_url("/control/ingest"))
         .header("x-tessera-batch-id", "scalar-tail")
-        .header("content-type", "application/octet-stream")
+        .header("content-type", "application/vnd.apache.arrow.stream")
         .bearer_auth(OPERATOR_CREDENTIAL)
         .body(build_scalar_tail_ingest_batch())
         .send()

@@ -434,7 +434,7 @@ async fn ingest(
         .bearer_auth(OPERATOR_CREDENTIAL)
         .header("x-tessera-batch-id", batch_id)
         .header("x-tessera-view", view)
-        .header("content-type", "application/octet-stream")
+        .header("content-type", "application/vnd.apache.arrow.stream")
         .body(body)
         .send()
         .await
@@ -2055,7 +2055,7 @@ async fn families_ingest(
         .bearer_auth(OPERATOR_CREDENTIAL)
         .header("x-tessera-batch-id", batch_id)
         .header("x-tessera-view", view)
-        .header("content-type", "application/octet-stream")
+        .header("content-type", "application/vnd.apache.arrow.stream")
         .body(families_batch(id, x, y, a))
         .send()
         .await

@@ -210,7 +210,7 @@ async fn flush_and_fold(server: &TestServer) {
         .post(server.control_url("/control/ingest"))
         .bearer_auth(OPERATOR_CREDENTIAL)
         .header("x-tessera-batch-id", "grow-fold")
-        .header("content-type", "application/octet-stream")
+        .header("content-type", "application/vnd.apache.arrow.stream")
         .body(build_ingest_batch_optional(&[(
             Some(&ingested[..]),
             10.0,

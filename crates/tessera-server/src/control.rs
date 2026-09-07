@@ -266,14 +266,16 @@ pub fn router(state: Arc<AppState>) -> Router {
         )
         .route(
             "/control/layers/{name}/artifacts",
-            // **Not the inherited 2 MiB default** — see [`PUBLISH_MAX_BODY_BYTES`]. A membership is
-            // as large as the artifact is, and the batch is the commit unit, so a single artifact
-            // over the cap has no smaller spelling in one publication. `PATCH` grows an artifact
-            // the level holds by the same cap per request (decision 0127); one route entry, so the
-            // two verbs cannot be given two caps.
+            // **Not the inherited 2 MiB default**: `ingest.publish_max_body_bytes`, a pagination
+            // unit (ingest §2.1) enforced on the route as `ingest_max_batch_bytes` is above, so
+            // the refusal names the configured number and buffering is bounded at it. A
+            // publication carries a first page of each membership and `PATCH` carries the rest
+            // (decision 0127); one route entry, so the two verbs cannot be given two caps.
             axum::routing::put(publish_artifacts)
                 .patch(grow_memberships)
-                .layer(axum::extract::DefaultBodyLimit::max(PUBLISH_MAX_BODY_BYTES)),
+                .layer(axum::extract::DefaultBodyLimit::max(
+                    state.publish_max_body_bytes,
+                )),
         );
     // The faults build's arming surface (decision 0071) — absent from a default build rather
     // than mounted and refusing, and above the credential layer below like every other route.
@@ -455,35 +457,58 @@ pub const CONTROL_PLANE_ROUTES: &[(&str, &str)] = &[
 /// item is order 200 B (see `config::RESERVED_DENY_HEADROOM_BYTES`), so this admits roughly ten
 /// thousand suppressions in one request, and a caller with more than that has to split — which is
 /// a latency cost on a batch, not a refusal of any individual deny.
-/// The first row of `items` whose coordinates fall outside `q`, if any.
-///
-/// **Inclusive of the maximum**, matching `fixed32`'s own clamp domain: a point exactly at
-/// `x_max` quantises to the top of the grid and is a legitimate position, not an escape.
-///
-/// `Retry-After` for a buffer-occupancy 429.
-///
-/// **A flush period, not the queue estimator's figure.** `estimate_retry_after_s` models a client
-/// queued behind work the executor is draining now; this client is queued behind a *flush*, which
-/// happens on the tick and not before it, so the honest advice is "after the next tick". A default
-/// tick is 90 s, and a client told 1 s would simply be refused ninety more times.
-const INGEST_BUFFER_FULL_RETRY_AFTER_S: u64 = 90;
-
 const CHANGES_MAX_BODY_BYTES: usize = 2 * 1024 * 1024;
 
-/// The publication route's own body cap.
-///
-/// **A publication is corpus-sized where a declaration and a change list are not**, which is why it
-/// does not inherit axum's 2 MiB default the way `PUT /control/layers` does. One artifact's
-/// `members` is its whole membership and the batch is the commit unit, so an artifact larger than
-/// the cap cannot be split across two requests — it is published entire or not at all. Measured on
-/// the campaign's MedCPT rung: the largest MeSH descriptor over 10⁶ articles holds 756,640 members,
-/// ~11 MB of base64 external ids, and under the inherited default it was unpublishable at any batch
-/// size. 64 MiB carries that with room and is still a bounded buffer.
-///
-/// Stated here rather than inherited so the refusal can name a number that is true, and mapped to
-/// 422 for [`ingest`]'s reason: axum's own rejection is a **413**, which is outside contracts
-/// §3.1's closed code list.
-const PUBLISH_MAX_BODY_BYTES: usize = 64 * 1024 * 1024;
+/// `/control/changes`'s record count per request (ingest §2.1): the pagination unit beside the
+/// byte cap above, and what the byte cap admits at the item size argued there. Over it is a 422
+/// naming the unit; a caller splits, and no deny is refused, only paged.
+const CHANGES_MAX_ITEMS: usize = 10_000;
+
+/// A declaration's body cap: axum's own default for the `Json` extractor, which `PUT
+/// /control/layers` and `PUT /control/views/{group}/{key}` inherit. Named so the `limits` block
+/// on `/control/status` can publish the number the extractor enforces.
+const DECLARATION_MAX_BODY_BYTES: usize = 2 * 1024 * 1024;
+
+/// The content type that selects Arrow IPC on a record-bearing route (ingest §1.2).
+const ARROW_CONTENT_TYPE: &str = "application/vnd.apache.arrow.stream";
+
+/// The two encodings a record-bearing route takes (ingest §1.2). JSON is the default and Arrow
+/// IPC is selected by content type; nothing about a route's semantics depends on which carried
+/// the batch, since both decode to one row form before the executor sees either.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BodyEncoding {
+    Json,
+    Arrow,
+}
+
+/// Which encoding a request's `content-type` names. Absent is JSON, the default; a parameter
+/// (`; charset=utf-8`) is ignored; any other type is refused naming the two this route takes,
+/// rather than sniffed, so a body sent under the wrong type meets a refusal and not a decode
+/// error from the other decoder.
+fn body_encoding(headers: &HeaderMap) -> Result<BodyEncoding, ApiError> {
+    let Some(value) = headers.get(axum::http::header::CONTENT_TYPE) else {
+        return Ok(BodyEncoding::Json);
+    };
+    let raw = value.to_str().map_err(|_| {
+        ApiError::Contract("content-type is not valid UTF-8, so it names no encoding".to_string())
+    })?;
+    let essence = raw
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    match essence.as_str() {
+        "" | "application/json" | "application/x-ndjson" => Ok(BodyEncoding::Json),
+        ARROW_CONTENT_TYPE => Ok(BodyEncoding::Arrow),
+        other => Err(ApiError::Contract(format!(
+            "content-type '{other}' names no encoding this route takes: JSON is \
+             `application/json` (an array of objects, or one object per line, which \
+             `application/x-ndjson` also names) and Arrow IPC is `{ARROW_CONTENT_TYPE}` \
+             (ingest §1.2)"
+        ))),
+    }
+}
 
 fn bearer_token(headers: &HeaderMap) -> Option<&str> {
     headers
@@ -1052,6 +1077,7 @@ fn code_at(width: ScalarType, code: u32) -> WalScalar {
 /// Reserved names are matched first and declared scalars second, so a layer sharing a name with
 /// either is read as the other — a layer called `x` cannot make the geometry column mean a cluster.
 fn parse_ingest_batch(
+    encoding: BodyEncoding,
     body: &[u8],
     projection: Projection,
     declared: &[DeclaredScalar],
@@ -1062,18 +1088,42 @@ fn parse_ingest_batch(
     vocabularies: &Vocabularies,
     layer_of: &dyn Fn(&str) -> Option<tessera_types::layer::LayerDeclaration>,
 ) -> Result<ParsedBatch, ApiError> {
-    let cursor = std::io::Cursor::new(body);
-    let reader = arrow::ipc::reader::StreamReader::try_new(cursor, None).map_err(|e| {
-        ApiError::Contract(format!("ingest body is not a valid Arrow IPC stream: {e}"))
-    })?;
-
     let (x_name, y_name) = coordinate_columns(projection);
+    // **One decode below this line, whichever encoding carried the batch** (ingest §1.2). A JSON
+    // body is coerced into one record batch against the declared column types
+    // (`ingest_json::record_batch`) and then read by every rule the Arrow batches are.
+    let batches: Box<dyn Iterator<Item = Result<arrow::record_batch::RecordBatch, ApiError>>> =
+        match encoding {
+            BodyEncoding::Arrow => {
+                let cursor = std::io::Cursor::new(body);
+                let reader =
+                    arrow::ipc::reader::StreamReader::try_new(cursor, None).map_err(|e| {
+                        ApiError::Contract(format!(
+                            "ingest body is not a valid Arrow IPC stream: {e}"
+                        ))
+                    })?;
+                Box::new(reader.map(|batch| {
+                    batch.map_err(|e| {
+                        ApiError::Contract(format!("ingest body: arrow decode error: {e}"))
+                    })
+                }))
+            }
+            BodyEncoding::Json => Box::new(std::iter::once(crate::ingest_json::record_batch(
+                body,
+                &crate::ingest_json::JsonColumns {
+                    x_name,
+                    y_name,
+                    declared,
+                    scoped,
+                    layer_of,
+                },
+            ))),
+        };
     let mut items = Vec::new();
     let mut tally = MembershipTally::default();
     let mut clipped = 0u64;
-    for batch in reader {
-        let batch = batch
-            .map_err(|e| ApiError::Contract(format!("ingest body: arrow decode error: {e}")))?;
+    for batch in batches {
+        let batch = batch?;
         let schema = batch.schema();
         // Where this record batch's rows start in the request's own row numbering — what a
         // membership names, since the executor indexes one flat list of rows per batch id.
@@ -1316,7 +1366,7 @@ fn scoped_as_declared(family: &ScopedScalar) -> DeclaredScalar {
 /// What a batch column of this family carries on the wire — [`DeclaredScalar::wire_type`]'s
 /// answer, so a scoped category arrives as its **key** exactly as an entity-scoped one does and a
 /// caller is never the minting authority for a code (per-point-attributes §3.1, §5).
-fn scoped_wire_type(family: &ScopedScalar) -> ScalarType {
+pub(crate) fn scoped_wire_type(family: &ScopedScalar) -> ScalarType {
     scoped_as_declared(family).wire_type()
 }
 
@@ -1657,6 +1707,7 @@ struct IngestResp {
 /// *handlers* occupying reactor threads (lifecycle §1.3's deny priority lane).
 fn run_ingest(
     state: &AppState,
+    encoding: BodyEncoding,
     body: &[u8],
     batch_id: String,
     view: Option<&str>,
@@ -1712,6 +1763,7 @@ fn run_ingest(
         artifacts,
         clipped,
     } = parse_ingest_batch(
+        encoding,
         body,
         projection,
         &meta.declared_scalars,
@@ -1936,10 +1988,19 @@ fn run_ingest(
     //
     // The figure read lags by at most one apply; see `Engine::buffered_items` for why that is the
     // right shape for a ceiling with an order of magnitude of headroom rather than a quota.
+    //
+    // **`Retry-After` is derived from the observed drain rate** (ingest §4.2), as the queue's and
+    // the admission bound's are: the buffer drains at a flush, which runs at the tick, so the
+    // figure is the time to the next tick plus the buffered rows at the per-row cost the last
+    // flushes were observed to take. A fixed period would tell a client behind a slow flush to
+    // come back and be refused again.
     let buffered = state.engine.buffered_items();
     if buffered >= state.ingest_buffer_max_items {
         return Err(ApiError::WriteBackpressure {
-            retry_after_s: INGEST_BUFFER_FULL_RETRY_AFTER_S,
+            retry_after_s: tessera_engine::estimate_buffer_retry_after_s(
+                &state.engine.write_executor_stats(),
+                buffered as u64,
+            ),
         });
     }
 
@@ -2100,6 +2161,7 @@ async fn ingest(
         .and_then(|v| v.to_str().ok())
         .ok_or_else(|| ApiError::Contract("missing x-tessera-batch-id header".to_string()))?
         .to_string();
+    let encoding = body_encoding(&headers)?;
 
     // Read here rather than inside `run_ingest` because a `HeaderMap` is the handler's, not the
     // blocking closure's. A header whose bytes are not valid UTF-8 names no view any manifest can
@@ -2149,7 +2211,7 @@ async fn ingest(
     // handler-drop would under-count exactly when the pool is under pressure.
     let resp = tokio::task::spawn_blocking(move || {
         let _permit = permit;
-        run_ingest(&state, &body, batch_id, view.as_deref())
+        run_ingest(&state, encoding, &body, batch_id, view.as_deref())
     })
     .await
     .map_err(map_join_error)??;
@@ -2582,6 +2644,18 @@ async fn changes(
         }
     })?;
 
+    // The record count (ingest §2.1), beside the byte cap the route enforced above: a 422 naming
+    // the unit and the limit, before anything is resolved. A deny is never refused for load; a
+    // page over the count is split by the caller and every item still lands.
+    if items.len() > CHANGES_MAX_ITEMS {
+        return Err(ApiError::Contract(format!(
+            "the change request carries {} items, exceeding the {CHANGES_MAX_ITEMS}-item \
+             per-request limit (limits.changes.max_changes_per_request on /control/status); \
+             split it into smaller requests. Nothing in this request was applied",
+            items.len()
+        )));
+    }
+
     // **No readiness gate here, and that is load-bearing** (lifecycle §4). A
     // `WalPoisoned` node still applies `Delete`/`Suppress` to the live overlay before returning its
     // error, so gating this endpoint on `readyz` would apply the first failing suppression and then
@@ -2878,31 +2952,192 @@ fn position_in_batch(widths: &[usize], flat: usize) -> (usize, usize) {
     (widths.len(), 0)
 }
 
-/// The two body refusals shared by the verbs on `/control/layers/{name}/artifacts`.
+/// The body refusals shared by the verbs on `/control/layers/{name}/artifacts`.
 ///
-/// Contracts §3.1's 422 row is "malformed request, **bounds exceeded**", and a `JsonRejection` is
-/// one or the other. Branched on the rejection's own status rather than collapsed, on [`ingest`]'s
-/// argument: a caller whose 4 KB body was truncated mid-upload must not be told to send fewer
-/// artifacts. The rejection's `Display` is not forwarded (this module's rule). `noun` names the
-/// request in the refusal and `remedy` is what an over-cap caller does next, which differs: a
-/// publication has no smaller spelling of one artifact, a growth is a delta and splits freely.
-fn artifact_body<T>(
-    body: Result<Json<T>, axum::extract::rejection::JsonRejection>,
+/// Contracts §3.1's 422 row is "malformed request, **bounds exceeded**", and a `BytesRejection`
+/// is one or the other. Branched on the rejection's own status rather than collapsed, on
+/// [`ingest`]'s argument: a caller whose 4 KB body was truncated mid-upload must not be told to
+/// send fewer artifacts. The rejection's `Display` is not forwarded (this module's rule). `noun`
+/// names the request in the refusal and `remedy` is what an over-cap caller does next: a
+/// publication pages by artifact and a growth by member (ingest §2.1).
+fn artifact_bytes(
+    state: &AppState,
+    body: Result<Bytes, axum::extract::rejection::BytesRejection>,
     noun: &str,
     remedy: &str,
-) -> Result<T, ApiError> {
-    body.map(|Json(body)| body).map_err(|rejection| {
+) -> Result<Bytes, ApiError> {
+    body.map_err(|rejection| {
         if rejection.status() == StatusCode::PAYLOAD_TOO_LARGE {
             ApiError::Contract(format!(
-                "the {noun} body exceeds the {PUBLISH_MAX_BODY_BYTES}-byte per-request cap; \
-                 refused before decoding, so it allocated no ordinal and appended nothing. {remedy}"
+                "the {noun} body exceeds the {}-byte per-request limit \
+                 (ingest.publish_max_body_bytes; limits.{noun}.max_body_bytes on \
+                 /control/status); refused before decoding, so it allocated no ordinal and \
+                 appended nothing. {remedy}",
+                state.publish_max_body_bytes
             ))
         } else {
             ApiError::Contract(format!(
-                "the {noun} body is not the JSON this route takes, or the connection failed \
-                 mid-upload. Nothing was decoded, allocated or appended"
+                "the {noun} body could not be read to completion: the connection failed \
+                 mid-upload, or the transfer encoding is malformed. Nothing was decoded, \
+                 allocated or appended"
             ))
         }
+    })
+}
+
+/// A JSON body on an artifact route, decoded against `T`'s own shape. A field the shape does not
+/// take is refused by the derive, so a growth still carries no content, lineage or shape.
+fn artifact_json<T: serde::de::DeserializeOwned>(body: &[u8], noun: &str) -> Result<T, ApiError> {
+    serde_json::from_slice(body).map_err(|e| {
+        ApiError::Contract(format!(
+            "the {noun} body is not the JSON this route takes: {e}. Nothing was decoded, \
+             allocated or appended"
+        ))
+    })
+}
+
+/// `PATCH /control/layers/{name}/artifacts`'s Arrow form (ingest §1.2): one row per artifact,
+/// `key: utf8` and `members: list<utf8> | large_list<utf8>`, the addresses spelled as the JSON
+/// form spells them; the request's `addressing`, `level` and `idset` travel as the IPC schema's
+/// metadata under those names, since an Arrow stream has no envelope for them. Decoded into the
+/// same body the JSON form decodes into, so the handler below is one path.
+fn grow_body_from_arrow(body: &[u8]) -> Result<GrowBody, ApiError> {
+    use arrow::array::{LargeListArray, ListArray, StringArray};
+    use arrow::datatypes::DataType;
+
+    let reader = arrow::ipc::reader::StreamReader::try_new(std::io::Cursor::new(body), None)
+        .map_err(|e| {
+            ApiError::Contract(format!("growth body is not a valid Arrow IPC stream: {e}"))
+        })?;
+    let metadata = reader.schema().metadata().clone();
+    let addressing =
+        match metadata.get("addressing").map(String::as_str) {
+            Some("external") => Addressing::External,
+            Some("tessera") => Addressing::Tessera,
+            Some(other) => {
+                return Err(ApiError::Contract(format!(
+                    "growth body: schema metadata `addressing` is '{other}'; it is `external` or \
+                 `tessera`"
+                )))
+            }
+            None => return Err(ApiError::Contract(
+                "growth body: the IPC schema's metadata carries no `addressing`; the Arrow form \
+                 carries `addressing`, `level` and `idset` there"
+                    .to_string(),
+            )),
+        };
+    let level = match metadata.get("level") {
+        None => 0,
+        Some(text) => text.parse::<u32>().map_err(|_| {
+            ApiError::Contract(format!(
+                "growth body: schema metadata `level` is '{text}'; it is a level number"
+            ))
+        })?,
+    };
+    let idset = match metadata.get("idset") {
+        None => None,
+        Some(text) => Some(text.parse::<u32>().map_err(|_| {
+            ApiError::Contract(format!(
+                "growth body: schema metadata `idset` is '{text}'; it is the idset number"
+            ))
+        })?),
+    };
+    let mut artifacts = Vec::new();
+    for batch in reader {
+        let batch = batch
+            .map_err(|e| ApiError::Contract(format!("growth body: arrow decode error: {e}")))?;
+        let keys = batch
+            .column_by_name("key")
+            .and_then(|column| column.as_any().downcast_ref::<StringArray>())
+            .ok_or_else(|| {
+                ApiError::Contract(
+                    "growth body: column 'key' is missing or not utf8; one row per artifact"
+                        .to_string(),
+                )
+            })?;
+        let members = batch.column_by_name("members").ok_or_else(|| {
+            ApiError::Contract(
+                "growth body: column 'members' is missing; it is list<utf8> or large_list<utf8>, \
+                 one address per element"
+                    .to_string(),
+            )
+        })?;
+        let entries = |row: usize| -> Result<Vec<String>, ApiError> {
+            let (values, range) = match members.data_type() {
+                DataType::List(_) => {
+                    let list = members
+                        .as_any()
+                        .downcast_ref::<ListArray>()
+                        .expect("a List column downcasts to a ListArray");
+                    if list.is_null(row) {
+                        return Ok(Vec::new());
+                    }
+                    let offsets = list.value_offsets();
+                    (
+                        list.values().clone(),
+                        offsets[row] as usize..offsets[row + 1] as usize,
+                    )
+                }
+                DataType::LargeList(_) => {
+                    let list = members
+                        .as_any()
+                        .downcast_ref::<LargeListArray>()
+                        .expect("a LargeList column downcasts to a LargeListArray");
+                    if list.is_null(row) {
+                        return Ok(Vec::new());
+                    }
+                    let offsets = list.value_offsets();
+                    (
+                        list.values().clone(),
+                        offsets[row] as usize..offsets[row + 1] as usize,
+                    )
+                }
+                other => {
+                    return Err(ApiError::Contract(format!(
+                        "growth body: column 'members' is {other:?}; it is list<utf8> or \
+                         large_list<utf8>, one address per element"
+                    )))
+                }
+            };
+            let values = values
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .ok_or_else(|| {
+                    ApiError::Contract(
+                        "growth body: column 'members' is a list whose elements are not utf8"
+                            .to_string(),
+                    )
+                })?;
+            range
+                .map(|index| {
+                    if values.is_null(index) {
+                        return Err(ApiError::Contract(format!(
+                            "growth body: row {row}, column 'members' has a null element; every \
+                             element is one address"
+                        )));
+                    }
+                    Ok(values.value(index).to_string())
+                })
+                .collect()
+        };
+        for row in 0..batch.num_rows() {
+            if keys.is_null(row) {
+                return Err(ApiError::Contract(format!(
+                    "growth body: row {row}, column 'key' is null; every row names the artifact \
+                     it grows"
+                )));
+            }
+            artifacts.push(GrowingArtifactBody {
+                key: keys.value(row).to_string(),
+                members: entries(row)?,
+            });
+        }
+    }
+    Ok(GrowBody {
+        level,
+        addressing,
+        idset,
+        artifacts,
     })
 }
 
@@ -3342,26 +3577,49 @@ struct IncomingContentBody {
 async fn publish_artifacts(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(name): axum::extract::Path<String>,
-    body: Result<Json<PublishBody>, axum::extract::rejection::JsonRejection>,
+    headers: HeaderMap,
+    body: Result<Bytes, axum::extract::rejection::BytesRejection>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
+    let body = artifact_bytes(
+        &state,
+        body,
+        "publish",
+        "Send fewer artifacts per request; a membership that does not fit beside its record is \
+         published with a first page and grown with `PATCH` in pages (decision 0127)",
+    )?;
+    // An artifact record is object-shaped (nested content, lineage and a shape) and is the JSON
+    // this route has always taken (ingest §1.2); the row-shaped routes are the ones with an
+    // Arrow form.
+    if body_encoding(&headers)? == BodyEncoding::Arrow {
+        return Err(ApiError::Contract(format!(
+            "a publication takes JSON: an artifact record is object-shaped and has no Arrow \
+             spelling. `{ARROW_CONTENT_TYPE}` is accepted on /control/ingest and on PATCH \
+             /control/layers/{{name}}/artifacts (ingest §1.2)"
+        )));
+    }
     let PublishBody {
         level,
         addressing,
         idset,
         default_space,
         mut artifacts,
-    } = artifact_body(
-        body,
-        "publication",
-        "Send fewer artifacts per request — but a single artifact's membership has no smaller \
-         spelling in one publication, the batch being the commit unit; an artifact larger than \
-         the cap is published with as many members as fit and grown with `PATCH`",
-    )?;
+    } = artifact_json(&body, "publication")?;
 
     if artifacts.is_empty() {
         return Err(ApiError::Contract(
             "a publication carries at least one artifact".to_string(),
         ));
+    }
+    // The record count (ingest §2.1), before any shape is canonicalised or address resolved.
+    if artifacts.len() > state.max_artifacts_per_request {
+        return Err(ApiError::Contract(format!(
+            "the publication carries {} artifacts, exceeding the {}-artifact per-request limit \
+             (ingest.max_artifacts_per_request; limits.publish.max_artifacts_per_request on \
+             /control/status); refused before anything was resolved or allocated. Send fewer \
+             artifacts per request",
+            artifacts.len(),
+            state.max_artifacts_per_request
+        )));
     }
 
     // **The shapes, canonicalised before anything is resolved or allocated** — a refusal spends
@@ -3597,19 +3855,25 @@ struct GrowingArtifactBody {
 async fn grow_memberships(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(name): axum::extract::Path<String>,
-    body: Result<Json<GrowBody>, axum::extract::rejection::JsonRejection>,
+    headers: HeaderMap,
+    body: Result<Bytes, axum::extract::rejection::BytesRejection>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
+    let body = artifact_bytes(
+        &state,
+        body,
+        "grow",
+        "Send fewer members per request: a growth is a delta, so a membership may be grown in as \
+         many requests as it needs",
+    )?;
     let GrowBody {
         level,
         addressing,
         idset,
         artifacts,
-    } = artifact_body(
-        body,
-        "growth",
-        "Send fewer members per request: a growth is a delta, so a membership may be grown in as \
-         many requests as it needs",
-    )?;
+    } = match body_encoding(&headers)? {
+        BodyEncoding::Json => artifact_json(&body, "growth")?,
+        BodyEncoding::Arrow => grow_body_from_arrow(&body)?,
+    };
 
     if artifacts.is_empty() {
         return Err(ApiError::Contract(
@@ -3619,6 +3883,19 @@ async fn grow_memberships(
 
     let widths: Vec<usize> = artifacts.iter().map(|a| a.members.len()).collect();
     let flat: Vec<&String> = artifacts.iter().flat_map(|a| a.members.iter()).collect();
+    // The record count (ingest §2.1): members summed over the page's artifacts, before any
+    // address is resolved.
+    if flat.len() > state.max_members_per_request {
+        return Err(ApiError::Contract(format!(
+            "the growth names {} members, exceeding the {}-member per-request limit \
+             (ingest.max_members_per_request; limits.grow.max_members_per_request on \
+             /control/status); refused before any address was resolved. Send fewer members per \
+             request: a growth is a delta, so a membership may be grown in as many requests as it \
+             needs",
+            flat.len(),
+            state.max_members_per_request
+        )));
+    }
     let resolved =
         resolve_member_addresses(&state, addressing, idset, &flat, &widths, "its members")?;
 
@@ -3912,8 +4189,40 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::V
             "admission": ingest.admission,
             "in_flight": ingest.in_flight,
             "shed_total": ingest.shed_total,
-            "max_batch_rows": state.ingest_max_batch_rows,
-            "max_batch_bytes": state.ingest_max_batch_bytes,
+        },
+        // **The pagination units, one block for every route** (ingest §2.1; decision 0136 R1).
+        // Each route publishes its record count and its byte cap; a client reads the block once
+        // and sizes every page from both, and a page over either is a 422 naming the unit, never
+        // a truncation. `max_excluded_per_request` is published for the exclusion form of a
+        // membership, which is not built: nothing enforces it yet.
+        "limits": {
+            "ingest": {
+                "route": "POST /control/ingest",
+                "max_batch_rows": state.ingest_max_batch_rows,
+                "max_batch_bytes": state.ingest_max_batch_bytes,
+            },
+            "publish": {
+                "route": "PUT /control/layers/{name}/artifacts",
+                "max_artifacts_per_request": state.max_artifacts_per_request,
+                "max_body_bytes": state.publish_max_body_bytes,
+                "max_shape_vertices": state.max_shape_vertices,
+                "max_excluded_per_request": state.max_excluded_per_request,
+            },
+            "grow": {
+                "route": "PATCH /control/layers/{name}/artifacts",
+                "max_members_per_request": state.max_members_per_request,
+                "max_body_bytes": state.publish_max_body_bytes,
+            },
+            "changes": {
+                "route": "POST /control/changes",
+                "max_changes_per_request": CHANGES_MAX_ITEMS,
+                "max_body_bytes": CHANGES_MAX_BODY_BYTES,
+            },
+            "declarations": {
+                "route": "PUT /control/layers, PUT /control/views/{group}/{key}",
+                "max_records_per_request": 1,
+                "max_body_bytes": DECLARATION_MAX_BODY_BYTES,
+            },
         },
         // **A read-path constant, not a maintenance counter** (decision 0049). Merge's size ladder
         // saturates at `max_merged_segment_bytes`, so this settles at corpus bytes ÷ the saturation
@@ -4214,6 +4523,7 @@ mod tests {
             nullable: bool,
         ) -> Result<Vec<RawIngestItem>, ApiError> {
             parse_ingest_batch(
+                BodyEncoding::Arrow,
                 &body(column, nullable),
                 Projection::None,
                 &declared(),
@@ -4306,6 +4616,7 @@ mod tests {
         #[test]
         fn a_novel_key_under_a_discovered_vocabulary_travels_unresolved() {
             let items = parse_ingest_batch(
+                BodyEncoding::Arrow,
                 &body(Arc::new(StringArray::from(vec!["k9-unit"])), false),
                 Projection::None,
                 &declared(),
@@ -4327,6 +4638,7 @@ mod tests {
         #[test]
         fn a_bound_key_under_a_discovered_vocabulary_still_resolves_here() {
             let items = parse_ingest_batch(
+                BodyEncoding::Arrow,
                 &body(Arc::new(StringArray::from(vec!["ops"])), false),
                 Projection::None,
                 &declared(),

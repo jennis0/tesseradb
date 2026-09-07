@@ -151,7 +151,10 @@ pub use flush::FlushStage;
 // `estimate_retry_after_s`'s
 // own doc names them as the bounds on its result, and a documented bound whose value is unreachable
 // from the crate that reads the doc is a dead reference.
-pub use write::{estimate_retry_after_s, RETRY_AFTER_MAX_SECS, RETRY_AFTER_MIN_SECS};
+pub use write::{
+    estimate_buffer_retry_after_s, estimate_retry_after_s, RETRY_AFTER_MAX_SECS,
+    RETRY_AFTER_MIN_SECS,
+};
 
 /// One immutable, atomically-swappable snapshot of engine state (lifecycle §1.1).
 ///

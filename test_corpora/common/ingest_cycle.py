@@ -108,11 +108,6 @@ from pyarrow import ipc
 from . import serve_battery
 from .deployment import Deployment
 
-#: Write-path §2's per-batch row cap. The driver sends exactly this, so a run also exercises the
-#: cap's own boundary rather than sitting comfortably under it.
-BATCH_ROWS = 10_000
-
-
 # ---------------------------------------------------------------------------------------------
 # The split
 # ---------------------------------------------------------------------------------------------
@@ -655,9 +650,11 @@ class HoldOut:
     from a [`MemberStream`] read in lockstep with the points; `member_stats` records, per layer, how
     many hold-out rows the table named and how many it did not.
 
-    **A body is bounded by both of the route's caps.** The row cap (`BATCH_ROWS`) sizes a slice.
-    The byte cap (`max_body_bytes`, the served deployment's `ingest_max_batch_bytes`, read from
-    `/control/status` by [`Cycle.max_body_bytes`]) is enforced on the route before decoding, and
+    **A body is bounded by both of the route's caps, and both are read from the served
+    deployment's `limits` block** ([`Cycle.served_limits`]). The row cap (`batch_rows`, the
+    deployment's `ingest_max_batch_rows`) sizes a slice; the driver sends exactly it, so a run also
+    exercises the cap's own boundary. The byte cap (`max_body_bytes`, the deployment's
+    `ingest_max_batch_bytes`) is enforced on the route before decoding, and
     a 10,000-row slice of a rung with a text attribute can exceed it: rung 4's abstracts put a
     10,000-row body near the 16 MiB cap, and 19 of the 92M cell's slices went over it. [`bodies`] encodes the slice and, where the body is over the cap, halves the slice and
     encodes each half again until every piece fits, in row order; each piece keeps its own
@@ -671,10 +668,12 @@ class HoldOut:
         rung: Path,
         held: np.ndarray,
         max_body_bytes: int,
+        batch_rows: int,
         head_rows: int = 0,
         log=print,
     ):
         self.rung = rung
+        self.batch_rows = batch_rows
         self.access, self.attributes = wire_columns(rung)
         self.held = np.sort(held)
         self.head_rows = head_rows
@@ -730,8 +729,9 @@ class HoldOut:
             stats["largest_body_bytes"] = max(stats["largest_body_bytes"], len(body))
             yield first, body, piece.num_rows
 
-    def batches(self, rows: int = BATCH_ROWS):
-        """Yield `(first row index, body bytes, row count)` for the whole hold-out, in file order.
+    def batches(self, rows: int | None = None):
+        """Yield `(first row index, body bytes, row count)` for the whole hold-out, in file order,
+        in slices of `rows` (the served row cap unless given).
 
         **One row group at a time through `read_row_group`, not `iter_batches`.** Measured on
         rung 4's 52 GB points file (`probes/2026-09-05-holdout-memory/`): pyarrow 25's
@@ -741,6 +741,7 @@ class HoldOut:
         900 batches and the cell stalled. `read_row_group` holds one decoded row group at a time
         and the same file streams whole with the driver under 3 GB.
         """
+        rows = self.batch_rows if rows is None else rows
         self.body_stats = self.new_body_stats()
         reader = pq.ParquetFile(self.rung / "points.parquet")
         pending: list[pa.Table] = []
@@ -794,13 +795,6 @@ class HoldOut:
 # ---------------------------------------------------------------------------------------------
 # Publication — the artifacts, after their points
 # ---------------------------------------------------------------------------------------------
-
-#: The publication route's own body cap, `PUBLISH_MAX_BODY_BYTES` in `tessera-server/src/control.rs`,
-#: and `PATCH /control/layers/{name}/artifacts`' too. `--publish-max-bytes` is clamped to it. An
-#: artifact whose whole membership does not fit under the working cap is published with as many
-#: members as fit and then **grown** by PATCH in slices under the cap (decision 0127); only an
-#: artifact whose key, content and parents alone do not fit is declined, and recorded.
-ROUTE_MAX_BODY_BYTES = 64 * 1024 * 1024
 
 #: The base64 alphabet, indexed by sextet.
 _B64 = np.frombuffer(b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/", np.uint8)
@@ -1066,14 +1060,30 @@ class Publication:
     refused too, each refusal is counted and logged, and the census then lists the subtree.
     """
 
-    def __init__(self, roster: Path, members: Path | None, work: Path, max_bytes: int, bucket_rows: int):
+    def __init__(
+        self,
+        roster: Path,
+        members: Path | None,
+        work: Path,
+        max_bytes: int,
+        bucket_rows: int,
+        limits: dict,
+    ):
         self.table = in_parent_order(pq.read_table(roster))
         self.rows = self.table.to_pylist()
         self.keys = [row["key"] for row in self.rows]
         self.held = set(self.keys)
         self.members_path = members
         self.work = work
-        self.max_bytes = min(max_bytes, ROUTE_MAX_BODY_BYTES)
+        # **Every cap is the served deployment's**, read from `/control/status`'s `limits` block
+        # ([`Cycle.served_limits`]): `--publish-max-bytes` is clamped to the publication route's
+        # byte cap, a batch closes at its artifact count, and a growth slice stays under both the
+        # growth route's byte cap and its member count. A value carried by the driver would be a
+        # second number that can disagree with the one the route refuses over.
+        self.max_bytes = min(max_bytes, int(limits["publish"]["max_body_bytes"]))
+        self.max_artifacts = int(limits["publish"]["max_artifacts_per_request"])
+        self.grow_max_bytes = min(max_bytes, int(limits["grow"]["max_body_bytes"]))
+        self.max_members = int(limits["grow"]["max_members_per_request"])
         self.bucket_rows = bucket_rows
         self.stats = {
             "artifacts": len(self.rows),
@@ -1232,9 +1242,10 @@ class Publication:
         batch fills, and `("grow", level, key, body, members)` for each slice that grows an artifact
         the batch before it published.
 
-        A batch closes when the next artifact would take it over `--publish-max-bytes` or sits on
-        another level; the wrapper is one level per request. An artifact whose whole membership does
-        not fit closes the batch it is in, so its slices follow the request that created it.
+        A batch closes when the next artifact would take it over `--publish-max-bytes` or the
+        route's artifact count, or sits on another level; the wrapper is one level per request. An
+        artifact whose whole membership does not fit closes the batch it is in, so its slices
+        follow the request that created it.
         """
         if self.members_path is not None:
             self.work.mkdir(parents=True, exist_ok=True)
@@ -1247,7 +1258,11 @@ class Publication:
             if block is None:
                 continue
             row_level = int(self.rows[i].get("level") or 0)
-            if batch and (row_level != level or size + len(block) + 1 > self.max_bytes):
+            if batch and (
+                row_level != level
+                or size + len(block) + 1 > self.max_bytes
+                or counts[0] >= self.max_artifacts
+            ):
                 yield "put", level, self._body(level, batch), *counts
                 batch, size, counts = [], 0, [0, 0, 0]
             batch.append(block)
@@ -1270,9 +1285,10 @@ class Publication:
         )
 
     def _grow_slices(self, level: int, key: str, members: np.ndarray):
-        """`("grow", level, key, body, members)` for `members`, in slices of at most the cap."""
+        """`("grow", level, key, body, members)` for `members`, in slices under the growth
+        route's byte cap and its member count."""
         fixed = len(self._grow_body(level, key, EMPTY_ENTITIES)) - 2
-        per_slice = max(1, (self.max_bytes - fixed - 1) // 15)
+        per_slice = max(1, min((self.grow_max_bytes - fixed - 1) // 15, self.max_members))
         self.stats["grown_artifacts"] += 1
         self.stats["grown_members_sent"] += len(members)
         for start in range(0, len(members), per_slice):
@@ -1377,7 +1393,7 @@ class Control:
         r = session.post(
             f"{self.base}/control/ingest",
             headers=self.headers
-            | {"x-tessera-batch-id": batch_id, "Content-Type": "application/octet-stream"}
+            | {"x-tessera-batch-id": batch_id, "Content-Type": "application/vnd.apache.arrow.stream"}
             | ({"x-tessera-view": self.view} if self.view else {}),
             data=body,
             timeout=timeout,
@@ -1655,8 +1671,10 @@ class Cycle:
             "fraction": args.fraction,
             "concurrency": args.concurrency,
             "seed": args.seed,
-            "batch_rows": BATCH_ROWS,
         }
+        #: The served deployment's `limits` block, read once the server is up
+        #: ([`Cycle.served_limits`]); every request is sized from it.
+        self.limits: dict | None = None
 
     def log(self, message: str) -> None:
         print(f"[{time.strftime('%H:%M:%S')}] {message}", flush=True)
@@ -1746,18 +1764,28 @@ class Cycle:
     # -- 2. ingest ------------------------------------------------------------------------
 
     @staticmethod
-    def max_body_bytes(status: dict) -> int:
-        """The byte cap a body must stay under.
+    def served_limits(status: dict) -> dict:
+        """The pagination units every route publishes (ingest §2.1): `/control/status`'s
+        `limits` block, one entry per route with its record count and byte cap.
 
-        The served deployment publishes the `ingest_max_batch_bytes` it parsed as
-        `ingest.max_batch_bytes` on `/control/status`, and that is the value the route refuses
-        over, so it is read from there and from nowhere else: a value carried by the driver, from
-        a flag or a constant, would be a second number that can disagree with the one enforced.
-        To exercise the split on a rung whose bodies are under 16 MiB, lower the server's own cap
-        with `--ingest-config '{"ingest_max_batch_bytes": 262144}'`. A status without the field
-        is a server this driver was not written for, and raises.
+        Every cap this driver sizes a request by is read from here and from nowhere else: the
+        ingest route's `max_batch_rows` and `max_batch_bytes`, the publication route's
+        `max_body_bytes` and `max_artifacts_per_request`, the growth route's `max_body_bytes`
+        and `max_members_per_request`. A value carried by the driver, from a flag or a constant,
+        would be a second number that can disagree with the one the route refuses over. To
+        exercise the ingest split on a rung whose bodies are under 16 MiB, lower the server's own
+        cap with `--ingest-config '{"ingest_max_batch_bytes": 262144}'`. A status without the
+        block is a server this driver was not written for, and raises.
         """
-        return int(status["ingest"]["max_batch_bytes"])
+        limits = status["limits"]
+        for route, keys in {
+            "ingest": ("max_batch_rows", "max_batch_bytes"),
+            "publish": ("max_body_bytes", "max_artifacts_per_request"),
+            "grow": ("max_body_bytes", "max_members_per_request"),
+        }.items():
+            for key in keys:
+                int(limits[route][key])
+        return limits
 
     def run_ingest(self, control: Control, source, label: str) -> dict:
         """Put `source`'s batches through `/control/ingest` at *C* concurrent callers.
@@ -1902,11 +1930,14 @@ class Cycle:
 
             head = 3 * args.write_cycle_n if args.write_cycle else 0
             status = control.status()
-            cap = self.max_body_bytes(status)
-            hold = HoldOut(self.rung, self.held, cap, head_rows=head, log=self.log)
+            self.limits = self.served_limits(status)
+            cap = int(self.limits["ingest"]["max_batch_bytes"])
+            batch_rows = int(self.limits["ingest"]["max_batch_rows"])
+            self.result["batch_rows"] = batch_rows
+            hold = HoldOut(self.rung, self.held, cap, batch_rows, head_rows=head, log=self.log)
             self.log(
-                f"ingesting {len(self.held):,} rows at C={args.concurrency}, bodies under "
-                f"{cap:,} B (the served deployment's ingest_max_batch_bytes)"
+                f"ingesting {len(self.held):,} rows at C={args.concurrency}, bodies of at most "
+                f"{batch_rows:,} rows under {cap:,} B (the served deployment's limits)"
             )
             before = status["write_executor"]
             self.result["ingest"] = self.run_ingest(control, hold.batches(), "cycle")
@@ -2060,8 +2091,14 @@ class Cycle:
 
     def publish_layer(self, control: Control, name: str, layer: dict, work: Path) -> dict:
         """One layer: its bodies assembled and sent in turn, one caller, serial."""
+        assert self.limits is not None, "the limits block is read before any layer is published"
         publication = Publication(
-            layer["roster"], layer["members"], work, self.args.publish_max_bytes, self.args.publish_bucket_rows
+            layer["roster"],
+            layer["members"],
+            work,
+            self.args.publish_max_bytes,
+            self.args.publish_bucket_rows,
+            self.limits,
         )
         statuses: dict[str, int] = {}
         refusal = None
@@ -2377,8 +2414,8 @@ class Cycle:
         reingest_bodies = hold.new_body_stats()
 
         def head_slice():
-            for start in range(0, n, BATCH_ROWS):
-                chunk = hold.head.slice(start, min(BATCH_ROWS, n - start))
+            for start in range(0, n, hold.batch_rows):
+                chunk = hold.head.slice(start, min(hold.batch_rows, n - start))
                 yield from hold.bodies(chunk, start, reingest_bodies)
 
         out["reingest"] = self.run_ingest(control, head_slice(), "recycle")
@@ -2464,9 +2501,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--publish-max-bytes",
         type=int,
         default=32 * 1024 * 1024,
-        help="the publication byte cap, clamped to the route's own 64 MiB: a batch is split between "
-        "artifacts to stay under it, and an artifact whose whole membership does not fit is published "
-        "with as many members as fit and grown by PATCH in slices under it (decision 0127)",
+        help="the publication byte cap, clamped to the served deployment's publish_max_body_bytes "
+        "(read from /control/status's limits block): a batch is split between artifacts to stay "
+        "under it, and an artifact whose whole membership does not fit is published with as many "
+        "members as fit and grown by PATCH in slices under it (decision 0127)",
     )
     ap.add_argument(
         "--state-extent",

@@ -113,7 +113,7 @@ is decision 0091's test restated for pages.
 
 ### 1.2 The wire: JSON by default, Arrow by content type
 
-**JSON is the default encoding for every kind** ⊘, as newline-delimited objects or an array of
+**JSON is the default encoding for every kind**, as newline-delimited objects or an array of
 objects, one object per record. A row-shaped record (a point, a values row) is an object whose
 names are the declared column names, and every value is **coerced against the declared column
 type**: a number to the declared width, a string to a keyword, text or category key, a list to the
@@ -139,6 +139,15 @@ executor's per-row cost (spec §4.1); a bulk loader that already holds a table s
 The ingest driver (`test_corpora/common/ingest_cycle.py`) keeps Arrow for that reason. A page of
 base64 member ids costs about 15 bytes a member in either encoding (measured on rung 3,
 2026-09-05), so no third form is needed for sets.
+
+**Built 2026-09-07 (T1) for the routes that exist**: `POST /control/ingest` takes JSON and Arrow
+by content type and decodes both into one record batch before the row rules run; `PATCH
+/control/layers/{name}/artifacts` takes JSON and an Arrow form of one row per artifact with the
+envelope in the schema's metadata; `PUT` stays JSON, an artifact record being object-shaped; a
+request with no content type is JSON, and any other content type is refused naming the two. A
+timestamp is integer microseconds since the epoch, the spelling the roster's `timestamp_us` takes.
+A null or absent `access` at the JSON door is a row with no label, as an empty list is. The routes
+marked ⊘ in §1.3 take JSON when they are built.
 
 ### 1.3 The kinds
 
@@ -327,18 +336,24 @@ each complete in itself.
 |---|---|---|---|
 | `/control/ingest` | `max_batch_rows` 10,000 (the commit window's size, so no client picks the sort scope) | `max_batch_bytes` 16 MiB, ceiling 64 MiB | |
 | `/control/values` ⊘ | `max_batch_rows` | `max_batch_bytes` | |
-| `/control/layers/{name}/artifacts` `PUT` | `max_artifacts_per_request` ⊘ | `max_body_bytes` ⊘ (today the constant `PUBLISH_MAX_BODY_BYTES`, 64 MiB) | `max_shape_vertices` 10⁶; `max_excluded_per_request` ⊘ (spec §2.3) |
-| the same, `PATCH` | `max_members_per_request` ⊘, the sum over the page's artifacts | `max_body_bytes` | |
+| `/control/layers/{name}/artifacts` `PUT` | `max_artifacts_per_request` 10,000 | `max_body_bytes` (`publish_max_body_bytes`, 64 MiB) | `max_shape_vertices` 10⁶; `max_excluded_per_request` 10⁶, published and not enforced until the exclusion form is built (spec §2.3) |
+| the same, `PATCH` | `max_members_per_request` 5,000,000, the sum over the page's artifacts | `max_body_bytes` | |
 | `/control/vocabularies/{name}/values` ⊘ | `max_values_per_request` | `max_body_bytes` | |
-| `/control/changes` | about 10⁴ | 2 MiB | |
+| `/control/changes` | 10,000 | 2 MiB | |
 | declarations | one | 2 MiB | |
 
-All of it is one `limits` block on `/control/status` (spec §10, R1), which the driver already reads
-`ingest.max_batch_bytes` from. A client reads the block once and sizes every page from both
-units; a page over either is a `422` naming the limit and the field, never a truncation. The
-record counts are of one shape and one reason: a page's cost on the executor is linear in its
-records, and a count bounds what one executor step does where bytes bound what one connection
-holds.
+All of it is one `limits` block on `/control/status` (spec §10, R1). A client reads the block once
+and sizes every page from both units; a page over either is a `422` naming the limit and the
+field, never a truncation. The record counts are of one shape and one reason: a page's cost on the
+executor is linear in its records, and a count bounds what one executor step does where bytes
+bound what one connection holds.
+
+**Built 2026-09-07 (T1)**: the block, keyed `ingest`, `publish`, `grow`, `changes` and
+`declarations`, each entry naming its route; the four `[ingest]` keys `publish_max_body_bytes`,
+`max_artifacts_per_request`, `max_members_per_request` and `max_excluded_per_request`
+(configuration §1); every count and byte cap of the routes that exist enforced at the published
+value as a `422` naming the unit; and the driver reads every limit it sizes a request by from the
+block. The rows for `/control/values` and the vocabulary values route wait on their routes.
 
 ### 2.2 Why no kind needs a multi-part upload
 
@@ -549,7 +564,7 @@ artifacts of which a page touched ten costs ten unions.
 |---|---|---|
 | admission semaphore, `ingest_admission` 64 | points, values, artifact records, set pages, vocabulary values | `429`, `Retry-After` from the observed service rate, 1 to 300 s |
 | command queue, `ingest_queue_bound` 32 | every kind on this plane | `429`, drain-derived `Retry-After` |
-| buffer occupancy, `ingest_buffer_max_items` 10⁶ rows | points, values | `429`, `Retry-After` derived from the observed drain rate, as the other two are (today a fixed 90 s) ⊘ |
+| buffer occupancy, `ingest_buffer_max_items` 10⁶ rows | points, values | `429`, `Retry-After` derived from the observed drain rate, as the other two are: the time to the next tick plus the buffered rows at the per-row cost the last flushes took, clamped to 1 to 300 s (built 2026-09-07, T1) |
 | the deny lane | changes | never refused for load |
 
 **A publish or growth page takes an admission permit and resolves its addresses on the pool, not

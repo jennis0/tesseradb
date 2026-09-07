@@ -184,7 +184,7 @@ fn main() {
             .post(format!("{}/control/ingest", args.control))
             .bearer_auth(&args.credential)
             .header("x-tessera-batch-id", &batch_id)
-            .header("content-type", "application/octet-stream")
+            .header("content-type", "application/vnd.apache.arrow.stream")
             .body(body)
             .send()
             .expect("the ingest request");

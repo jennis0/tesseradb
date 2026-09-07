@@ -1274,7 +1274,7 @@ async fn ingest_scoped(
         .bearer_auth(OPERATOR_CREDENTIAL)
         .header("x-tessera-batch-id", batch_id)
         .header("x-tessera-view", view)
-        .header("content-type", "application/octet-stream")
+        .header("content-type", "application/vnd.apache.arrow.stream")
         .body(scoped_batch(rows))
         .send()
         .await

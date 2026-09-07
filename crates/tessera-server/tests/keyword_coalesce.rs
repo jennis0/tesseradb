@@ -152,7 +152,7 @@ async fn ingest(server: &TestServer, batch_id: &str, tag: &str, i: usize) {
         .bearer_auth(OPERATOR_CREDENTIAL)
         .header("x-tessera-batch-id", batch_id)
         .header("x-tessera-view", "s0")
-        .header("content-type", "application/octet-stream")
+        .header("content-type", "application/vnd.apache.arrow.stream")
         .body(batch(
             batch_id.as_bytes(),
             100.0 + i as f32,

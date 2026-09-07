@@ -879,8 +879,17 @@ a browser that cannot read them is a browser that cannot cache, not one that is 
 from something. The control plane is never wrapped by either list.
 
 The rest of `[serve]` and all of `[ingest]` are tuning, documented at SA §7 under its own rule —
-performance knobs default, disclosure controls do not. Four of them are the shape work's and are
-named here because a reader of `[layer.shape]` will look for them: `max_shape_vertices` (default
+performance knobs default, disclosure controls do not. **The pagination units are named here**
+([`ingest.md`](ingest.md) §2.1), because a client reads them from `/control/status`'s `limits`
+block and an operator sets them in `[ingest]`: `ingest_max_batch_rows` (10,000) and
+`ingest_max_batch_bytes` (16 MiB, ceiling 64 MiB) bound one `POST /control/ingest` body;
+`publish_max_body_bytes` (64 MiB) bounds one `PUT` or `PATCH /control/layers/{name}/artifacts`
+body; `max_artifacts_per_request` (10,000) the artifacts one publication carries;
+`max_members_per_request` (5,000,000) the members one growth page carries, summed over its
+artifacts; and `max_excluded_per_request` (1,000,000) is the bound an exclusion list will be
+admissible under, published and not enforced while that form is unbuilt. Each is a request over it
+refused with a `422` naming the unit, never a truncation, and a zero refuses to start. Four more
+are the shape work's and are named here because a reader of `[layer.shape]` will look for them: `max_shape_vertices` (default
 10⁶ — a published shape over it is refused at the build and at `PUT /control/layers`, the one
 input a caller can simplify; the held decomposition is reported and never capped),
 `max_region_vertices` (10,000 — a `region` leaf's polygon over it is `422` naming the cap),

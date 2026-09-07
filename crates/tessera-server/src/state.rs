@@ -624,6 +624,18 @@ pub struct AppState {
     /// handler** — see `control::router`. Carried here so the layer and the 422's detail string
     /// read the same number.
     pub ingest_max_batch_bytes: usize,
+    /// Per-request body-byte cap on `PUT` and `PATCH /control/layers/{name}/artifacts`; over is
+    /// 422. Enforced by the route's `DefaultBodyLimit` as `ingest_max_batch_bytes` is, and
+    /// carried here so the refusal and the `limits` block read the same number.
+    pub publish_max_body_bytes: usize,
+    /// Artifact records per publication; over is 422. See `Config::max_artifacts_per_request`.
+    pub max_artifacts_per_request: usize,
+    /// Members per growth page, summed over its artifacts; over is 422. See
+    /// `Config::max_members_per_request`.
+    pub max_members_per_request: usize,
+    /// The published bound on an exclusion list (ingest §2.3). Published, not enforced: the
+    /// field it bounds is not built. See `Config::max_excluded_per_request`.
+    pub max_excluded_per_request: usize,
     /// Runtime half of the trailer's `stage_ns` gate (see `Config::stage_timing`). The other half
     /// is the `bench-timing` compile feature; both must hold.
     pub stage_timing: bool,

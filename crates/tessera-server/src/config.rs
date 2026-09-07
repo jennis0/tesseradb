@@ -753,6 +753,14 @@ struct RawIngest {
     #[serde(default)]
     ingest_max_batch_bytes: Option<usize>,
     #[serde(default)]
+    publish_max_body_bytes: Option<usize>,
+    #[serde(default)]
+    max_artifacts_per_request: Option<usize>,
+    #[serde(default)]
+    max_members_per_request: Option<usize>,
+    #[serde(default)]
+    max_excluded_per_request: Option<usize>,
+    #[serde(default)]
     wal_hard_limit_bytes: Option<u64>,
     #[serde(default)]
     overlay_soft_limit: Option<usize>,
@@ -1116,6 +1124,18 @@ pub struct Config {
     /// headroom assertion (see [`DEFAULT_WAL_HARD_LIMIT_BYTES`]), because a queue bounded in
     /// *entries* bounds nothing without it. See [`DEFAULT_INGEST_MAX_BATCH_BYTES`].
     pub ingest_max_batch_bytes: usize,
+    /// Per-request body-byte cap on `PUT` and `PATCH /control/layers/{name}/artifacts`; over is
+    /// 422. See [`DEFAULT_PUBLISH_MAX_BODY_BYTES`]. Published on `/control/status`'s `limits`.
+    pub publish_max_body_bytes: usize,
+    /// Artifact records per `PUT /control/layers/{name}/artifacts`; over is 422. See
+    /// [`DEFAULT_MAX_ARTIFACTS_PER_REQUEST`].
+    pub max_artifacts_per_request: usize,
+    /// Members per `PATCH /control/layers/{name}/artifacts`, summed over the page; over is 422.
+    /// See [`DEFAULT_MAX_MEMBERS_PER_REQUEST`].
+    pub max_members_per_request: usize,
+    /// The bound an exclusion list is admissible under (ingest §2.3). Published; not enforced,
+    /// since the field it bounds is not built. See [`DEFAULT_MAX_EXCLUDED_PER_REQUEST`].
+    pub max_excluded_per_request: usize,
     /// The WAL's byte ceiling *as a startup relation between config values*, and the right-hand
     /// side of the headroom assertion. **Not a runtime ceiling: appends do not stop here** — `Wal`
     /// has no length accessor, so nothing compares the live log against this number. See
@@ -1710,6 +1730,27 @@ const DEFAULT_INGEST_MAX_BATCH_ROWS: usize = 10_000;
 /// entries lets one ten-million-row batch walk straight past it, which is why this key exists at all
 /// rather than the row cap alone.
 const DEFAULT_INGEST_MAX_BATCH_BYTES: usize = 16 * 1024 * 1024;
+
+/// Per-request body-byte cap on `PUT` and `PATCH /control/layers/{name}/artifacts`; over is 422
+/// (ingest §2.1). A pagination unit, never a ceiling on reach: an artifact's membership travels
+/// in as many growth pages as it needs (decision 0127), and a publication carries a first page.
+/// 64 MiB carries about 4.4 million base64 external ids a page (measured on rung 3, 2026-09-05).
+const DEFAULT_PUBLISH_MAX_BODY_BYTES: usize = 64 * 1024 * 1024;
+
+/// Artifact records per `PUT /control/layers/{name}/artifacts`; over is 422 (ingest §2.1). The
+/// same shape as the row cap: a page's cost on the executor is linear in its records, and the
+/// count bounds one executor step where the bytes bound one connection.
+const DEFAULT_MAX_ARTIFACTS_PER_REQUEST: usize = 10_000;
+
+/// Members per `PATCH /control/layers/{name}/artifacts`, summed over the page's artifacts; over
+/// is 422 (ingest §2.1). Set above what the default byte cap admits (about 4.4 million ids at
+/// 15 bytes each), so at the defaults the byte cap is the one a page meets first.
+const DEFAULT_MAX_MEMBERS_PER_REQUEST: usize = 5_000_000;
+
+/// Entities an exclusion list may name in one request (ingest §2.3): published on
+/// `/control/status`. Not built yet: the `excluding` field does not exist on the publication
+/// route, so nothing is enforced against it; a client reads it as the bound the field will take.
+const DEFAULT_MAX_EXCLUDED_PER_REQUEST: usize = 1_000_000;
 
 /// The WAL's byte ceiling, and the right-hand side of the startup headroom assertion
 /// (`ingest_queue_bound × ingest_max_batch_bytes` + reserved deny headroom must sit strictly below
@@ -2380,6 +2421,37 @@ fn parse(text: &str) -> Result<Config> {
             ingest_max_batch_bytes,
         });
     }
+    let publish_max_body_bytes = non_zero_usize(
+        "ingest.publish_max_body_bytes",
+        raw.ingest
+            .publish_max_body_bytes
+            .unwrap_or(DEFAULT_PUBLISH_MAX_BODY_BYTES),
+        "every publication and growth would be refused with 422, closing the artifact plane \
+         while every health surface still reports the server up",
+    )?;
+    let max_artifacts_per_request = non_zero_usize(
+        "ingest.max_artifacts_per_request",
+        raw.ingest
+            .max_artifacts_per_request
+            .unwrap_or(DEFAULT_MAX_ARTIFACTS_PER_REQUEST),
+        "every publication would be refused with 422, since a publication carries at least one \
+         artifact",
+    )?;
+    let max_members_per_request = non_zero_usize(
+        "ingest.max_members_per_request",
+        raw.ingest
+            .max_members_per_request
+            .unwrap_or(DEFAULT_MAX_MEMBERS_PER_REQUEST),
+        "every growth page naming a member would be refused with 422",
+    )?;
+    let max_excluded_per_request = non_zero_usize(
+        "ingest.max_excluded_per_request",
+        raw.ingest
+            .max_excluded_per_request
+            .unwrap_or(DEFAULT_MAX_EXCLUDED_PER_REQUEST),
+        "a published bound of zero admits no exclusion list at all, which is the inclusion \
+         spelling's job and not a bound",
+    )?;
     let wal_hard_limit_bytes = non_zero_u64(
         "ingest.wal_hard_limit_bytes",
         raw.ingest
@@ -2723,6 +2795,10 @@ fn parse(text: &str) -> Result<Config> {
         ingest_admission,
         ingest_max_batch_rows,
         ingest_max_batch_bytes,
+        publish_max_body_bytes,
+        max_artifacts_per_request,
+        max_members_per_request,
+        max_excluded_per_request,
         wal_hard_limit_bytes,
         overlay_soft_limit,
         compaction,
@@ -3655,6 +3731,22 @@ compaction_after_deletions = 9000
             config.ingest_max_batch_bytes,
             DEFAULT_INGEST_MAX_BATCH_BYTES
         );
+        assert_eq!(
+            config.publish_max_body_bytes,
+            DEFAULT_PUBLISH_MAX_BODY_BYTES
+        );
+        assert_eq!(
+            config.max_artifacts_per_request,
+            DEFAULT_MAX_ARTIFACTS_PER_REQUEST
+        );
+        assert_eq!(
+            config.max_members_per_request,
+            DEFAULT_MAX_MEMBERS_PER_REQUEST
+        );
+        assert_eq!(
+            config.max_excluded_per_request,
+            DEFAULT_MAX_EXCLUDED_PER_REQUEST
+        );
         assert_eq!(config.wal_hard_limit_bytes, DEFAULT_WAL_HARD_LIMIT_BYTES);
         assert_eq!(config.overlay_soft_limit, DEFAULT_OVERLAY_SOFT_LIMIT);
         assert_eq!(config.flush_max_age_secs, DEFAULT_FLUSH_MAX_AGE_SECS);
@@ -3713,6 +3805,10 @@ compaction_after_deletions = 9000
             "ingest_admission",
             "ingest_max_batch_rows",
             "ingest_max_batch_bytes",
+            "publish_max_body_bytes",
+            "max_artifacts_per_request",
+            "max_members_per_request",
+            "max_excluded_per_request",
             "wal_hard_limit_bytes",
             "overlay_soft_limit",
             "flush_max_age_secs",
@@ -3725,8 +3821,9 @@ compaction_after_deletions = 9000
         ];
         assert_eq!(
             ingest_keys.len() + serve_keys.len(),
-            12,
-            "there are twelve write-path and admission knobs; this table must cover all of them"
+            16,
+            "there are sixteen write-path, artifact-plane and admission knobs; this table must \
+             cover all of them"
         );
 
         for key in ingest_keys {

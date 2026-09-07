@@ -13,6 +13,7 @@ pub mod cors;
 pub mod error;
 mod filter_dto;
 pub mod health;
+mod ingest_json;
 pub mod session;
 pub mod state;
 pub mod viewer;
@@ -337,6 +338,10 @@ pub fn prepare(config_path: &Path) -> Result<Prepared, BoxError> {
         ingest_max_batch_rows: config.ingest_max_batch_rows,
         ingest_buffer_max_items: config.ingest_buffer_max_items,
         ingest_max_batch_bytes: config.ingest_max_batch_bytes,
+        publish_max_body_bytes: config.publish_max_body_bytes,
+        max_artifacts_per_request: config.max_artifacts_per_request,
+        max_members_per_request: config.max_members_per_request,
+        max_excluded_per_request: config.max_excluded_per_request,
         stage_timing: config.stage_timing,
         stream_flush_bytes: config.stream_flush_bytes,
         stream_write_stall_ms: config.stream_write_stall_ms,

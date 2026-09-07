@@ -378,6 +378,12 @@ pub struct IngestLimits {
     pub max_batch_bytes: usize,
     /// Buffer occupancy at which ingest is refused (§1.3).
     pub buffer_max_items: usize,
+    /// The artifact routes' pagination units (ingest §2.1): the byte cap on `PUT` and `PATCH
+    /// /control/layers/{name}/artifacts`, the artifacts per publication and the members per
+    /// growth page.
+    pub publish_max_body_bytes: usize,
+    pub max_artifacts_per_request: usize,
+    pub max_members_per_request: usize,
 }
 
 /// Generous enough that no test which is not about these bounds can observe them — the same
@@ -395,6 +401,9 @@ pub fn generous_ingest_limits() -> IngestLimits {
         // 429 about a bound it never meant to exercise.
         buffer_max_items: 10_000_000,
         max_batch_bytes: 64 * 1024 * 1024,
+        publish_max_body_bytes: 64 * 1024 * 1024,
+        max_artifacts_per_request: 100_000,
+        max_members_per_request: 50_000_000,
     }
 }
 
@@ -567,6 +576,10 @@ async fn mount_server_with_flush(
         ingest_max_batch_rows: ingest_limits.max_batch_rows,
         ingest_buffer_max_items: ingest_limits.buffer_max_items,
         ingest_max_batch_bytes: ingest_limits.max_batch_bytes,
+        publish_max_body_bytes: ingest_limits.publish_max_body_bytes,
+        max_artifacts_per_request: ingest_limits.max_artifacts_per_request,
+        max_members_per_request: ingest_limits.max_members_per_request,
+        max_excluded_per_request: 1_000_000,
         // On, so the header assertions below exercise the emission path rather than only its
         // absence. The compile-time `bench-timing` gate still decides whether anything is sent.
         stage_timing: true,
