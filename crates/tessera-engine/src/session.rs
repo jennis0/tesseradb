@@ -3488,8 +3488,11 @@ impl Engine {
         self.write.drop_view(group, key, delete_dangling)
     }
 
-    /// Publish a batch of artifacts into one level of a layer, returning a `tessera_id` per
-    /// artifact in the caller's submitted order.
+    /// Put a batch of artifacts into one level of a layer, returning a `tessera_id` per artifact
+    /// in the caller's submitted order and the batch's counts (`ingest.md` §1.5).
+    ///
+    /// A key the level holds is accepted under the fill rule and answers the held artifact's
+    /// identifier; a key it does not hold is published (`LayerRegistry::prepare_put`).
     ///
     /// **Members must be points, and that is checked here.** An enumerated membership is a set of
     /// documents; a row-less entity — another layer, another artifact — has no row, so it would
@@ -3500,12 +3503,12 @@ impl Engine {
     ///
     /// The check is against the point region's high-water mark, which only rises, so it cannot go
     /// stale between here and the executor.
-    pub fn publish_artifacts(
+    pub fn put_artifacts(
         &self,
         layer: String,
         level: u32,
         artifacts: Vec<tessera_lifecycle::IncomingArtifact>,
-    ) -> std::result::Result<Vec<TesseraId>, crate::write::AcceptError> {
+    ) -> std::result::Result<PublishedArtifacts, crate::write::AcceptError> {
         // Entity space is `u32` by I9, and both marks sit inside it — the row-less ceiling is
         // derived from `u32::MAX` — so the narrowing is total rather than merely usually safe.
         let high_water = self.allocator_high_water() as u32;
@@ -3572,9 +3575,10 @@ impl Engine {
             ));
         }
 
-        let entities = self.write.publish_artifacts(layer, level, artifacts)?;
+        let batch = self.write.publish_artifacts(layer, level, artifacts)?;
         let shard = generation.bundle.manifest.identity.shard_id;
-        entities
+        let tessera_ids = batch
+            .entities
             .into_iter()
             .map(|entity| {
                 self.identity_key.forward(shard, entity).map_err(|_| {
@@ -3584,7 +3588,26 @@ impl Engine {
                     })
                 })
             })
-            .collect()
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(PublishedArtifacts {
+            tessera_ids,
+            created: batch.created,
+            without_content: batch.without_content,
+            filled: batch.filled,
+            joined: batch.joined,
+        })
+    }
+
+    /// [`Self::put_artifacts`], answering the identifiers alone — the shape every caller that
+    /// publishes new artifacts under new keys wants.
+    pub fn publish_artifacts(
+        &self,
+        layer: String,
+        level: u32,
+        artifacts: Vec<tessera_lifecycle::IncomingArtifact>,
+    ) -> std::result::Result<Vec<TesseraId>, crate::write::AcceptError> {
+        self.put_artifacts(layer, level, artifacts)
+            .map(|published| published.tessera_ids)
     }
 
     /// Add points to the memberships of artifacts that already exist, each named by the key it was
@@ -3687,6 +3710,7 @@ impl Engine {
                 Ok(GrownMembership {
                     tessera_id,
                     joined: receipt.joined,
+                    filled: receipt.filled,
                 })
             })
             .collect()
@@ -3773,6 +3797,25 @@ pub struct GrownMembership {
     /// The artifact's identifier, the same one its publication answered with.
     pub tessera_id: TesseraId,
     /// How many of the joining members were not already in the membership.
+    pub joined: u64,
+    /// How many of the fixed parts the join carried were absent and are now held
+    /// (`ingest.md` §1.5).
+    pub filled: u64,
+}
+
+/// What [`Engine::put_artifacts`] answers: the identifiers in the caller's order and the batch's
+/// counts (`ingest.md` §1.5), each bounded by the caller's own request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublishedArtifacts {
+    /// One per artifact in the caller's order: a held artifact's own, or the new one's.
+    pub tessera_ids: Vec<TesseraId>,
+    /// How many artifacts the batch created; the rest were held.
+    pub created: u64,
+    /// How many created artifacts carry no content on a layer declaring some (R5).
+    pub without_content: u64,
+    /// How many fixed parts were filled on held artifacts.
+    pub filled: u64,
+    /// How many members joined held artifacts that did not already hold them.
     pub joined: u64,
 }
 

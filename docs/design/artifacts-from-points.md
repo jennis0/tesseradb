@@ -333,15 +333,18 @@ needs no new record shape, only the right order:
   beside the store's — one level up and no further, because entry *k* of a list is the parent of
   entry *k+1* and searching past a gap would invent an edge the reader deliberately does not read.
 
-**At most one live artifact per key per level, by construction three times over** (§5's second and
-third rulings). The keys are gathered into one map before anything is prepared, so two points in one
-batch — or two batches in one window — mint once. The map is then resolved against
-`ArtifactStore::ordinal_of_key` a second time, so a key that acquired an artifact since admission
-grows instead. And `prepare_publish` refuses a key its level already holds, which it has always done:
-so even if both resolutions were written against the served view, the second artifact would be
-*refused* rather than created. **That is what closes the design's one fail-open** — a suppression
-defeated by ingesting a point — and the innermost of the three guards is the append-only rule rather
-than anything added here.
+**At most one live artifact per key per level, and no route can mint a second** (§5's second and
+third rulings; `ingest.md` §1.5, built 2026-09-07). The keys are gathered into one map before
+anything is prepared, so two points in one batch — or two batches in one window — mint once. The
+map is then resolved against `ArtifactStore::ordinal_of_key` a second time, so a key that acquired
+an artifact since admission grows instead. The control plane's `PUT` partitions its batch against
+the same index before any ordinal is claimed: a key the level holds is compared with the artifact
+under it part by part and resolves to that artifact's ordinal, so a repeated publication fills or
+joins and never publishes again. The mint pass's own `prepare_publish` still refuses a key its
+level holds, so a resolution written against the served view would be refused rather than land a
+second artifact. **That is what closes the design's one fail-open** — a suppression defeated by
+ingesting a point — and the innermost guard is the store's key index, which a suppression does not
+touch, rather than anything added here.
 
 `ArtifactStore::ordinal_of_key` is suppression-blind because there is nothing in it that could see a
 suppression: the index loses a key at exactly one event, the fold retiring the artifact's own entity,

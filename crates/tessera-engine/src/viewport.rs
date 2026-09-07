@@ -4865,7 +4865,7 @@ impl Engine {
                     // **The engine's own pool**, for `Engine::masked_counts`' reason: the
                     // projection's decode fans out, and a build outside `install` would take
                     // rayon's global pool rather than the one the deployment sized.
-                    let (rows, level_version) = self.pool.install(|| {
+                    let (rows, level_version, lineage_version) = self.pool.install(|| {
                         self.write.with_artifacts(|store| {
                             let predicate = predicate_source(
                                 &layer.declaration,
@@ -4892,6 +4892,7 @@ impl Engine {
                                     generation.segments_version,
                                 ),
                                 store.level_version(&layer.declaration.name, level),
+                                store.lineage_version(&layer.declaration.name, level),
                             )
                         })
                     });
@@ -4903,8 +4904,11 @@ impl Engine {
                     // mask, a viewport or a principal, so neither is work a request should be
                     // doing — and leaving them lazy would leave *some* per-process build on the
                     // first request after the expensive one had been moved.
-                    self.lineages
-                        .get_or_build(&layer.declaration.name, level, level_version, || {
+                    self.lineages.get_or_build(
+                        &layer.declaration.name,
+                        level,
+                        lineage_version,
+                        || {
                             let records = rows.records();
                             let edges = (0..records.len() as u32).map(|ordinal| {
                                 let within = records
@@ -6098,7 +6102,7 @@ impl Engine {
                     continue;
                 }
                 let recorded = layer.layout_of(level);
-                let (rows, level_version) = self.write.with_artifacts(|store| {
+                let (rows, level_version, lineage_version) = self.write.with_artifacts(|store| {
                     let predicate = predicate_source(
                         &layer.declaration,
                         generation,
@@ -6124,6 +6128,7 @@ impl Engine {
                             generation.segments_version,
                         ),
                         store.level_version(&name, level),
+                        store.lineage_version(&name, level),
                     )
                 });
                 // **The count's route, decided by the level's layout and by nothing about the
@@ -6223,26 +6228,33 @@ impl Engine {
                 // work: ~96 ms at a level of ten million, against the ~3 ms the cut over them now
                 // costs.
                 //
-                // **Read from the row form, whose records and version were taken inside one hold
+                // **Read from the row form, whose records and versions were taken inside one hold
                 // of the artifacts lock** (above), which is what makes the cached lineage the
                 // lineage *of* the version it is filed under: read separately, a write landing
                 // between the two would file the new level's edges under the old level's version,
                 // and the next request would serve a cut through a tree that has moved.
-                let lineage = self.lineages.get_or_build(&name, level, level_version, || {
-                    let records = rows.records();
-                    let edges = (0..records.len() as u32).map(|ordinal| {
-                        let within = records
-                            .parents(ordinal)
-                            .iter()
-                            .filter(move |parent| parent.level == level)
-                            .map(|parent| parent.ordinal);
-                        (ordinal, within)
+                //
+                // **Filed under the level's lineage version, not its record version**
+                // (`ingest.md` §1.5, §4.1): a page of members joining moves the records and not
+                // the edges, so it leaves this lineage held; a publication, a parent fill and a
+                // retirement move both.
+                let lineage = self
+                    .lineages
+                    .get_or_build(&name, level, lineage_version, || {
+                        let records = rows.records();
+                        let edges = (0..records.len() as u32).map(|ordinal| {
+                            let within = records
+                                .parents(ordinal)
+                                .iter()
+                                .filter(move |parent| parent.level == level)
+                                .map(|parent| parent.ordinal);
+                            (ordinal, within)
+                        });
+                        match lineage_kind(layer.declaration.hierarchy.kind) {
+                            Some(true) => crate::cut::Lineage::dag(edges),
+                            _ => crate::cut::Lineage::new(edges),
+                        }
                     });
-                    match lineage_kind(layer.declaration.hierarchy.kind) {
-                        Some(true) => crate::cut::Lineage::dag(edges),
-                        _ => crate::cut::Lineage::new(edges),
-                    }
-                });
                 let ordinals: Vec<u32> = passing.iter().map(|&(o, ..)| o).collect();
                 // Ascending and deduplicated, which the cut guarantees — so the membership test in
                 // the emit loop below is a binary search rather than a scan of the served set once

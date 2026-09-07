@@ -492,7 +492,19 @@ pub enum Ack {
     /// a position in a dense level, so a caller holding two of them learns how many artifacts sit
     /// between; across two principals it is a corpus-wide count over objects one of them may not
     /// see, which is C8's row. The `tessera_id` is the only artifact address that crosses the wire.
-    ArtifactsPublished { entities: Vec<EntityId> },
+    ///
+    /// The counts are the batch's own (`ingest.md` §1.5): a key the level held is accepted under
+    /// the fill rule and is not created, so `created` is how many artifacts the batch minted,
+    /// `without_content` how many of those carry no content on a layer declaring some (R5),
+    /// `filled` how many fixed parts were filled on held artifacts, and `joined` how many members
+    /// joined held artifacts. Each is bounded by the caller's own request and names no artifact.
+    ArtifactsPublished {
+        entities: Vec<EntityId>,
+        created: u64,
+        without_content: u64,
+        filled: u64,
+        joined: u64,
+    },
     /// Memberships grew: one receipt per join the caller submitted, in the caller's order.
     ///
     /// **The artifact's entity, which the handler turns into a `tessera_id`, and how many of the
@@ -512,6 +524,9 @@ pub struct MembershipGrown {
     /// How many of the joining members were not already in the membership. Zero where the join
     /// named the artifact and added nothing to it, which is accepted rather than refused.
     pub joined: u64,
+    /// How many of the fixed parts the join carried were absent and are now held (`ingest.md`
+    /// §1.5). A part held identically counts nothing, on `joined`'s rule.
+    pub filled: u64,
 }
 
 /// Why an accepted command failed while executing. See [`SubmitError`] for the "never started"
@@ -590,6 +605,11 @@ pub enum ExecError {
     /// name tombstoned, a tree declaring levels — which is exactly the class of detail a caller can
     /// act on and cannot otherwise obtain. It names no entity, no path and no other layer's terms.
     LayerRefused { detail: String },
+    /// An artifact record supplied a fixed part the artifact already holds, and the two differ
+    /// (`ingest.md` §1.1) → **409**. Separate from [`Self::LayerRefused`] on
+    /// [`Self::ViewConflict`]'s argument: the caller's remedy differs. The detail names the part
+    /// and never the held value.
+    PartConflict { detail: String },
     /// A view create or drop the roster refused on its own terms — the key's charset, the
     /// metadata against the group's declaration, a gate this build cannot honour → **422**.
     ViewRefused { detail: String },
@@ -637,6 +657,7 @@ impl std::fmt::Display for ExecError {
             ),
             ExecError::VocabularyRefused { detail } => write!(f, "{detail}"),
             ExecError::LayerRefused { detail } => write!(f, "{detail}"),
+            ExecError::PartConflict { detail } => write!(f, "{detail}"),
             ExecError::ViewRefused { detail }
             | ExecError::ViewConflict { detail }
             | ExecError::ViewUnknown { detail }

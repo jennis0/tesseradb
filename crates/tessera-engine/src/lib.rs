@@ -66,7 +66,7 @@ pub use gate::VisibleViews;
 pub use geometry::{GeometryPublication, GeometryRefused, GeometryRefusedReason};
 pub use session::{
     default_compute_threads, Engine, EngineConfig, EngineError, GrownMembership, PartitionStatus,
-    Session, ViewSegments,
+    PublishedArtifacts, Session, ViewSegments,
 };
 // The row-projection cache's gauges. `single_flight` itself stays private — the cache, its slot
 // state machine and its four eviction rules are engine-internal — but the numbers

@@ -89,6 +89,22 @@ pub type PendingExtent = (String, u32, u32, Vec<Vec<u8>>);
 /// encode them one at a time. See [`ArtifactStore::pending_ranges`].
 pub type PendingRange = (String, u32, u32, u32);
 
+/// What [`ArtifactStore::fill`] did with one part, under the fill rule (`ingest.md` §1.1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FillOutcome {
+    /// The part was absent and is now held.
+    Filled,
+    /// The part was held identically; nothing changed.
+    Identical,
+    /// The part was held differently; nothing changed. Refused on the live path before the
+    /// record is appended, so at replay this is damage.
+    Differs,
+    /// The ordinal names no record, so there is nothing to fill: a hole a fold left.
+    NoRecord,
+    /// The part's digest does not match its bytes, or a content names a rank past the next.
+    Undecodable,
+}
+
 /// One artifact's canonical shapes — **one per view of its layer, as bytes this crate stores and
 /// never interprets** (`polygon-membership.md` §4.3, §6.6).
 ///
@@ -112,9 +128,9 @@ pub struct ArtifactShapes {
     /// construction and stored with the shape in the log and the record blob (`ingest.md` §1.5).
     /// A later record carrying a shape for an artifact that holds one is compared digest to
     /// digest, which is what makes a repeated publication safe after the level is repacked.
-    /// Read by T2a. The blob decoder checks it against the bytes it decodes; the log path does
-    /// not, since postcard restores the struct whole, so T2a must route the log's copy through
-    /// [`Self::new`] and compare before it trusts the number.
+    /// The blob decoder checks it against the bytes it decodes; the log path does not, since
+    /// postcard restores the struct whole, so `ArtifactStore::fill` routes the log's copy through
+    /// [`Self::new`] and compares before it trusts the number.
     digest: [u8; 32],
 }
 
@@ -369,7 +385,8 @@ impl IncomingArtifact {
     }
 }
 
-/// Entities joining an artifact that already exists, as a caller offers them.
+/// Entities joining an artifact that already exists, and the fixed parts a caller supplies for
+/// it, as a caller offers them (`ingest.md` §1.5).
 ///
 /// **Addressed by the caller's own key, and resolved on the executor.** An ordinal never crosses
 /// the wire (C8) and the caller holds none; the key is the address they published under, and
@@ -379,6 +396,11 @@ impl IncomingArtifact {
 ///
 /// **Members are entities, resolved at admission**, on [`IncomingArtifact`]'s rule: no blinded
 /// identifier reaches durable state, where a key rotation would silently redirect it (I10).
+///
+/// **The fixed parts follow the fill rule** (`ingest.md` §1.1): a part the artifact does not hold
+/// is filled, a part it holds identically is accepted with no effect, and a part it holds
+/// differently refuses the batch naming the part. Each fill is its own record
+/// ([`crate::wal::WalRecord::ArtifactFill`]) beside the growth's.
 #[derive(Debug, Clone, PartialEq)]
 pub struct IncomingGrowth {
     /// The key the artifact was published under. **An unknown one is refused rather than minted**,
@@ -390,6 +412,38 @@ pub struct IncomingGrowth {
     /// The entities joining. Empty is a no-op rather than a refusal: nothing joining is a thing a
     /// caller can honestly say, and it discloses nothing.
     pub joining: Bitmap,
+    /// The fixed parts supplied for the artifact; every field empty on a growth that only joins.
+    pub parts: FixedParts,
+}
+
+/// The fixed parts of an artifact a record may supply, each on the fill rule (`ingest.md` §1.5):
+/// the parent list, the attachment, the shape, and each content's values at its rank.
+///
+/// A content here carries values and no generating set: the set is a set part and travels as a
+/// growth at the same rank ([`crate::wal::GrownSet::GeneratingSet`], track T2b). Until that
+/// lands, a content on a layer whose content requires every member visible has no set to be
+/// tested against and is refused, as a publication carrying an empty set is.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct FixedParts {
+    /// The parents, each named by the parent's own key, on [`IncomingArtifact::parent_keys`]'s
+    /// terms.
+    pub parent_keys: Vec<String>,
+    /// The attachment, named by the target's key, on [`IncomingArtifact::attached_to`]'s terms.
+    pub attached_to: Option<IncomingAttachment>,
+    /// Contents by rank: `(rank, values)`, the values positional to the layer's declared kinds.
+    pub contents: Vec<(u16, Vec<String>)>,
+    /// The canonical shapes, on [`IncomingArtifact::shape`]'s terms.
+    pub shape: Option<ArtifactShapes>,
+}
+
+impl FixedParts {
+    /// Whether no part is supplied.
+    pub fn is_empty(&self) -> bool {
+        self.parent_keys.is_empty()
+            && self.attached_to.is_none()
+            && self.contents.is_empty()
+            && self.shape.is_none()
+    }
 }
 
 impl IncomingGrowth {
@@ -400,6 +454,7 @@ impl IncomingGrowth {
         IncomingGrowth {
             key,
             joining: bitmap_of_entities(joining),
+            parts: FixedParts::default(),
         }
     }
 }
@@ -691,7 +746,7 @@ pub struct ContentSet {
     pub values: Option<Vec<String>>,
     /// SHA-256 over the values ([`content_digest`]), carried in every copy including the one a
     /// packed extent restores, which holds no values: it is what a later record carrying this
-    /// content is compared against (`ingest.md` §1.5). Read by T2a.
+    /// content is compared against (`ingest.md` §1.5; [`ArtifactStore::fill`]).
     pub digest: [u8; 32],
     /// Entity-space, canonical. **Empty means corpus-independent** — containment is vacuous and the
     /// content serves to everyone who reaches the layer — and that is a real declaration rather
@@ -811,6 +866,32 @@ pub struct ArtifactStore {
     /// make a cached form built over the *old* artifacts compare equal to the new level and be
     /// served. [`Self::remove_layer`] therefore bumps what it drops rather than forgetting it.
     versions: BTreeMap<(String, u32), u64>,
+    /// Per `(layer, level)`, how many writes have moved its **edges**: the second version counter
+    /// of `ingest.md` §1.5 and §4.1. A publication, a fill of a parent list, a retirement and a
+    /// layer drop move it; a growth and a fill of any other part move [`Self::versions`] alone. The
+    /// served lineage is keyed on this one, so a page of members joining never rebuilds the
+    /// hierarchy, which at rung 3's 30,954 nodes is about half a second per page.
+    ///
+    /// In-process only: no derived structure filed under it survives a restart, so it starts at
+    /// zero at open and is never seeded. Monotone in a running process, on [`Self::versions`]'
+    /// argument.
+    lineage_versions: BTreeMap<(String, u32), u64>,
+    /// Where the oldest **fill** of a fixed part sits in the log — the third half of the rotation
+    /// bound ([`Self::oldest_wal_pos`]), released when the fold has rewritten every level whole
+    /// ([`Self::mark_growth_packed`]), because a filled record sits below its level's high-water
+    /// as a grown one does and only the fold's rewrite carries a filled part into an extent.
+    filled_wal_pos: Option<u64>,
+    /// Where the oldest fill of a **content's values** sits in the log, released only once the
+    /// content extent carrying them is named by a durable manifest
+    /// ([`Self::mark_content_published`]). Held apart from `filled_wal_pos` because it is released
+    /// by a different event: the fold rewrites membership extents and carries content extents
+    /// forward unchanged, so a fold does not make filled values durable and must not release the
+    /// record that holds them.
+    content_wal_pos: Option<u64>,
+    /// The artifacts whose content values were filled since their last content extent, as
+    /// `(layer, level, ordinal)`. [`Self::unpublished_content`] writes them beside the level's
+    /// tail, and [`Self::mark_content_published`] clears the set once the extent is durable.
+    content_pending: std::collections::BTreeSet<(String, u32, u32)>,
 }
 
 impl ArtifactStore {
@@ -963,24 +1044,30 @@ impl ArtifactStore {
     /// posture `oldest_wal_pos`'s unknown-position arm takes in the ingest buffer, and for the same
     /// reason: a sequence that grows is noticed, a record that vanishes is not.
     ///
-    /// **Two bounds, one answer.** The oldest unpacked publication, and the oldest growth no whole
-    /// rewrite has covered — the minimum of the two, because rotation takes a single bound and the
-    /// two are released by different events (`grown_wal_pos`).
+    /// **Four bounds, one answer.** The oldest unpacked publication, the oldest growth and the
+    /// oldest fill no whole rewrite has covered, and the oldest content fill no content extent
+    /// carries — the minimum, because rotation takes a single bound and each is released by a
+    /// different event (`grown_wal_pos`, `filled_wal_pos`, `content_wal_pos`).
     pub fn oldest_wal_pos(&self) -> Option<u64> {
-        match (self.oldest_wal_pos, self.grown_wal_pos) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (a, b) => a.or(b),
-        }
+        [
+            self.oldest_wal_pos,
+            self.grown_wal_pos,
+            self.filled_wal_pos,
+            self.content_wal_pos,
+        ]
+        .into_iter()
+        .flatten()
+        .min()
     }
 
-    /// Applies a durable publication or a durable growth — the **two** paths by which memberships
-    /// enter, taken by both the live write path and replay.
+    /// Applies a durable publication, a durable growth or a durable fill — the **three** paths by
+    /// which artifact state enters, taken by both the live write path and replay.
     ///
     /// `position` is where the record sits in the log. **Replay applies the recorded ordinals and
     /// entities rather than re-deriving them**, on [`crate::LayerRegistry::apply`]'s contract: a
     /// re-derived ordinal would move an artifact under every suppression naming it.
     ///
-    /// Records other than these two are ignored, so a caller can hand the whole replay stream to
+    /// Records other than these three are ignored, so a caller can hand the whole replay stream to
     /// this and to the registry alike.
     ///
     /// Returns how many memberships **did not decode** — always zero in any healthy log. The count
@@ -1002,13 +1089,229 @@ impl ArtifactStore {
                 level,
                 growth,
             } => self.apply_growth(layer, *level, growth, position),
-            // A fill has no apply path until T2a (`ArtifactStore::fill`, `ingest.md` §1.5).
-            // Counted as refused rather than passed over: the replay refuses to open before it
-            // reaches here (`crate::wal::unbuilt_track`), and this arm is what keeps a caller that
-            // did not ask from applying the record as nothing.
-            crate::wal::WalRecord::ArtifactFill { .. } => 1,
+            crate::wal::WalRecord::ArtifactFill {
+                layer,
+                level,
+                ordinal,
+                part,
+            } => self.apply_fill(layer, *level, *ordinal, part, position),
             _ => 0,
         }
+    }
+
+    fn apply_fill(
+        &mut self,
+        layer: &str,
+        level: u32,
+        ordinal: u32,
+        part: &crate::wal::ArtifactPart,
+        position: u64,
+    ) -> usize {
+        let refused = match self.fill(layer, level, ordinal, part) {
+            FillOutcome::Filled | FillOutcome::Identical => 0,
+            // A record the log carries that disagrees with the record it names, or that does not
+            // decode, is damage on the publication's argument: it was compared before it was
+            // appended, so a live disagreement cannot reach here, and a replayed one means the
+            // durable prefix and the seeded extents describe two different artifacts.
+            FillOutcome::Differs | FillOutcome::NoRecord | FillOutcome::Undecodable => 1,
+        };
+        // Held until the fold's whole rewrite on the growth's argument: a filled record sits
+        // below the level's high-water, which the tail pack never rewrites. Content values are
+        // held further, until the content extent carrying them is durable.
+        self.filled_wal_pos = Some(match self.filled_wal_pos {
+            Some(existing) => existing.min(position),
+            None => position,
+        });
+        if refused == 0
+            && matches!(part, crate::wal::ArtifactPart::Content { .. })
+            && self
+                .content_pending
+                .contains(&(layer.to_string(), level, ordinal))
+        {
+            self.content_wal_pos = Some(match self.content_wal_pos {
+                Some(existing) => existing.min(position),
+                None => position,
+            });
+        }
+        // Unconditional, on the growth's argument: the refusal has been counted for a caller who
+        // will act on it, and one rebuild of one level is the cheaper mistake.
+        self.bump(layer, level);
+        refused
+    }
+
+    /// **The one way a fixed part is filled**, taken by every route through the durable record
+    /// above and by no other caller (`ingest.md` §1.5).
+    ///
+    /// The fill rule, applied to the record the ordinal names: an absent part is filled, a present
+    /// identical part is [`FillOutcome::Identical`] and changes nothing, a present differing part
+    /// is [`FillOutcome::Differs`] and changes nothing. Identity is by the stored digest for a
+    /// content and a shape, by the resolved references for parents and an attachment. The live
+    /// path makes the same comparison before it appends, so on that path this answers `Filled` or
+    /// `Identical`; the other answers are replay's, where they count as damage.
+    ///
+    /// **A content's values are stored beside its digest and the record is queued for the next
+    /// content extent** ([`Self::unpublished_content`]). An identical content on a record restored
+    /// from an extent takes the values back into memory and is not queued: its row is already in
+    /// a durable extent, and the record stack holds one row per entity.
+    ///
+    /// **The log's copy of a shape is rebuilt through [`ArtifactShapes::new`]** and its digest
+    /// compared with the recorded one: postcard restores the struct whole, so the stored digest is
+    /// trusted only once it has been recomputed from the bytes beside it.
+    ///
+    /// **An ordinal naming no record fills nothing**, on [`Self::grow`]'s argument: creating a
+    /// record here would resurrect an artifact a fold retired.
+    ///
+    /// The level's version moves in the caller ([`Self::apply_fill`]); the lineage version moves
+    /// here, for a parent list alone, since that is the one part the served hierarchy reads.
+    pub fn fill(
+        &mut self,
+        layer: &str,
+        level: u32,
+        ordinal: u32,
+        part: &crate::wal::ArtifactPart,
+    ) -> FillOutcome {
+        use crate::wal::ArtifactPart;
+        let key = (layer.to_string(), level);
+        let Some(record) = self
+            .levels
+            .get_mut(&key)
+            .and_then(|slots| slots.get_mut(ordinal as usize))
+            .and_then(Option::as_mut)
+        else {
+            return FillOutcome::NoRecord;
+        };
+        match part {
+            ArtifactPart::Parents(parents) => {
+                if !record.parents.is_empty() {
+                    return if record.parents == *parents {
+                        FillOutcome::Identical
+                    } else {
+                        FillOutcome::Differs
+                    };
+                }
+                record.parents = parents.clone();
+                *self.lineage_versions.entry(key).or_insert(0) += 1;
+                FillOutcome::Filled
+            }
+            ArtifactPart::AttachedTo(attachment) => {
+                let wanted = Attachment {
+                    layer: attachment.layer.clone(),
+                    level: attachment.level,
+                    ordinal: attachment.ordinal,
+                    entity: attachment.entity,
+                };
+                if let Some(held) = &record.attached_to {
+                    return if *held == wanted {
+                        FillOutcome::Identical
+                    } else {
+                        FillOutcome::Differs
+                    };
+                }
+                let dependent = record.entity;
+                record.attached_to = Some(wanted);
+                let entry = self.dependents.entry(attachment.entity).or_default();
+                if !entry.contains(&dependent) {
+                    entry.push(dependent);
+                }
+                FillOutcome::Filled
+            }
+            ArtifactPart::Shape(shape) => {
+                let Some(rebuilt) = ArtifactShapes::new(shape.by_view.clone()) else {
+                    return FillOutcome::Undecodable;
+                };
+                if rebuilt.digest() != shape.digest() {
+                    return FillOutcome::Undecodable;
+                }
+                let shapes = self
+                    .shapes
+                    .entry(layer.to_string())
+                    .or_default()
+                    .entry(level)
+                    .or_default();
+                if shapes.len() <= ordinal as usize {
+                    shapes.resize(ordinal as usize + 1, None);
+                }
+                match &shapes[ordinal as usize] {
+                    Some(held) if held.digest() == rebuilt.digest() => FillOutcome::Identical,
+                    Some(_) => FillOutcome::Differs,
+                    None => {
+                        shapes[ordinal as usize] = Some(rebuilt);
+                        FillOutcome::Filled
+                    }
+                }
+            }
+            ArtifactPart::Content {
+                rank,
+                values,
+                digest,
+            } => {
+                if content_digest(values) != *digest {
+                    return FillOutcome::Undecodable;
+                }
+                let rank = *rank as usize;
+                if let Some(held) = record.contents.get_mut(rank) {
+                    if held.digest != *digest {
+                        return FillOutcome::Differs;
+                    }
+                    if held.values.is_none() {
+                        held.values = Some(values.clone());
+                    }
+                    return FillOutcome::Identical;
+                }
+                if rank != record.contents.len() {
+                    // Ranks are positions in a list, so a fill past the next one names a content
+                    // between two that does not exist. The live path refuses this before the
+                    // append; at replay it is damage.
+                    return FillOutcome::Undecodable;
+                }
+                record.contents.push(ContentSet {
+                    values: Some(values.clone()),
+                    digest: *digest,
+                    generated_from: Bitmap::new(),
+                    cardinality: 0,
+                });
+                self.content_pending
+                    .insert((layer.to_string(), level, ordinal));
+                FillOutcome::Filled
+            }
+        }
+    }
+
+    /// See [`Self::lineage_versions`]: what a lineage derived from this level is valid for.
+    pub fn lineage_version(&self, layer: &str, level: u32) -> u64 {
+        self.lineage_versions
+            .get(&(layer.to_string(), level))
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// Whether the artifact at `ordinal` has a row in a durable content extent, or is in a
+    /// manifest whose content extent would already hold one if it had content: **an artifact
+    /// packed at or below the level's high-water with content it was packed with.** A further
+    /// content rank on such an artifact cannot be written, because the record stack holds one row
+    /// per entity and reads the first layer that has it (`ingest.md` §1.4 gives the per-column
+    /// read to track T3). The registry refuses the fill on this answer.
+    pub fn content_row_is_packed(&self, layer: &str, level: u32, ordinal: u32) -> bool {
+        let through = self
+            .published_through
+            .get(&(layer.to_string(), level))
+            .copied()
+            .unwrap_or(0);
+        ordinal < through
+            && self
+                .get(layer, level, ordinal)
+                .is_some_and(|record| !record.contents.is_empty())
+            && !self
+                .content_pending
+                .contains(&(layer.to_string(), level, ordinal))
+    }
+
+    /// Record that the content extent naming every pending content fill is durable, releasing the
+    /// log from the records that carried the values. Called beside [`Self::mark_published`], after
+    /// the manifest naming the extent is durable, and from nowhere else.
+    pub fn mark_content_published(&mut self) {
+        self.content_pending.clear();
+        self.content_wal_pos = None;
     }
 
     fn apply_publish(
@@ -1087,6 +1390,7 @@ impl ArtifactStore {
             None => position,
         });
         self.bump(layer, level);
+        self.bump_lineage(layer, level);
         refused
     }
 
@@ -1261,9 +1565,11 @@ impl ArtifactStore {
             .collect();
         for level in dropped {
             self.bump(layer, level);
+            self.bump_lineage(layer, level);
         }
         self.levels.retain(|(l, _), _| l != layer);
         self.keys.remove(layer);
+        self.content_pending.retain(|(l, _, _)| l != layer);
         self.dependents.clear();
         let edges: Vec<(EntityId, EntityId)> = self
             .levels
@@ -1297,6 +1603,15 @@ impl ArtifactStore {
     /// Move one level's version — called by every route that changes what a level's records say.
     fn bump(&mut self, layer: &str, level: u32) {
         *self.versions.entry((layer.to_string(), level)).or_insert(0) += 1;
+    }
+
+    /// Move one level's lineage version — called by the routes that change what a level's edges
+    /// say ([`Self::lineage_versions`]); a parent fill moves it inside [`Self::fill`].
+    fn bump_lineage(&mut self, layer: &str, level: u32) {
+        *self
+            .lineage_versions
+            .entry((layer.to_string(), level))
+            .or_insert(0) += 1;
     }
 
     /// Set one level's version to what the manifest that published it recorded. **Open only.**
@@ -1642,6 +1957,9 @@ impl ArtifactStore {
         }
         for (layer, level) in &moved {
             self.bump(layer, *level);
+            // A retired artifact's slot is a hole, and a hole has no edges: the lineage over the
+            // level has moved.
+            self.bump_lineage(layer, *level);
         }
         // A retired artifact's edge leaves with it, in both directions: its own outgoing edge here,
         // and any edges pointing *at* it — nothing can attach to an artifact that is gone, and a
@@ -1671,6 +1989,12 @@ impl ArtifactStore {
     /// Every content of one artifact carries a value for every declared kind — refused at
     /// publication otherwise — so the stride is the same for all of them and is recoverable from
     /// the layer's declaration alone.
+    ///
+    /// **A record whose content was filled since its last content extent is written beside the
+    /// tail** ([`Self::content_pending`]), whichever side of the high-water it sits. Such a record
+    /// held no content when it was packed, so its entity is in no content extent and the row this
+    /// writes is the first; the registry refuses a fill that would need a second
+    /// ([`Self::content_row_is_packed`]).
     pub fn unpublished_content(&self) -> Vec<(EntityId, Vec<(u16, String)>)> {
         let mut out = Vec::new();
         for ((layer, level), slots) in &self.levels {
@@ -1678,10 +2002,12 @@ impl ArtifactStore {
                 .published_through
                 .get(&(layer.clone(), *level))
                 .unwrap_or(&0) as usize;
-            if from >= slots.len() {
-                continue;
-            }
-            for slot in &slots[from..] {
+            let pending = (0..from.min(slots.len())).filter(|ordinal| {
+                self.content_pending
+                    .contains(&(layer.clone(), *level, *ordinal as u32))
+            });
+            let tail = from..slots.len();
+            for slot in pending.chain(tail).map(|ordinal| &slots[ordinal]) {
                 let Some(record) = slot else { continue };
                 let mut fields = Vec::new();
                 for (v, content) in record.contents.iter().enumerate() {
@@ -1759,6 +2085,10 @@ impl ArtifactStore {
     /// and this call.
     pub fn mark_growth_packed(&mut self) {
         self.grown_wal_pos = None;
+        // A filled parent, attachment, shape or content digest is in the rewritten membership
+        // extents on the same argument. Filled content *values* are not: the fold carries content
+        // extents forward unchanged, so `content_wal_pos` waits for the content extent.
+        self.filled_wal_pos = None;
     }
 
     /// The log position of the oldest publication whose memberships are not yet in a manifest.
@@ -3063,5 +3393,311 @@ mod tests {
         store.put("clusters/b", 0, 0, record(102, &[3]), None);
         assert_eq!(store.layer("clusters/a").count(), 1);
         assert_eq!(store.layer("clusters/a-suffix").count(), 1);
+    }
+
+    // ---- Fills (`ingest.md` §1.5): one store method, replayed from the record ----------------
+
+    fn fill_record(
+        layer: &str,
+        ordinal: u32,
+        part: crate::wal::ArtifactPart,
+    ) -> crate::wal::WalRecord {
+        crate::wal::WalRecord::ArtifactFill {
+            layer: layer.to_string(),
+            level: 0,
+            ordinal,
+            part,
+        }
+    }
+
+    /// **Every fixed part fills once from its record, an identical record is nothing, a differing
+    /// one is damage, and a replay over a fresh store reaches the same state** — the live path
+    /// and replay being one method ([`ArtifactStore::fill`]).
+    #[test]
+    fn each_fixed_part_fills_once_from_its_record_and_replays_to_the_same_state() {
+        use crate::wal::{ArtifactPart, ParentRef, PublishedAttachment};
+        let values = vec!["a topic".to_string()];
+        let records = [
+            publication("clusters/a", 0, 100, &[1, 2]),
+            publication("clusters/a", 1, 101, &[3]),
+            fill_record(
+                "clusters/a",
+                1,
+                ArtifactPart::Parents(vec![ParentRef {
+                    level: 0,
+                    ordinal: 0,
+                }]),
+            ),
+            fill_record(
+                "clusters/a",
+                1,
+                ArtifactPart::AttachedTo(PublishedAttachment {
+                    layer: "clusters/a".into(),
+                    level: 0,
+                    ordinal: 0,
+                    entity: EntityId::new(100),
+                }),
+            ),
+            fill_record(
+                "clusters/a",
+                1,
+                ArtifactPart::Content {
+                    rank: 0,
+                    values: values.clone(),
+                    digest: content_digest(&values),
+                },
+            ),
+            fill_record(
+                "clusters/a",
+                1,
+                ArtifactPart::Shape(
+                    ArtifactShapes::new(vec![("default".into(), vec![4, 0, 1])]).unwrap(),
+                ),
+            ),
+        ];
+        let expect_state = |store: &ArtifactStore| {
+            let record = store.get("clusters/a", 0, 1).unwrap();
+            assert_eq!(
+                record.parents,
+                vec![ParentRef {
+                    level: 0,
+                    ordinal: 0
+                }]
+            );
+            assert_eq!(
+                record.attached_to,
+                Some(Attachment {
+                    layer: "clusters/a".into(),
+                    level: 0,
+                    ordinal: 0,
+                    entity: EntityId::new(100),
+                })
+            );
+            assert_eq!(record.contents.len(), 1);
+            assert_eq!(record.contents[0].values.as_ref(), Some(&values));
+            assert_eq!(record.contents[0].digest, content_digest(&values));
+            assert!(store.shape_of("clusters/a", 0, 1).is_some());
+            assert_eq!(
+                store.cascade_from(&[EntityId::new(100)]),
+                vec![EntityId::new(101)],
+                "a filled attachment enters the dependency index"
+            );
+        };
+
+        let mut live = ArtifactStore::new();
+        for (position, record) in records.iter().enumerate() {
+            assert_eq!(live.apply(record, position as u64 * 8), 0);
+        }
+        expect_state(&live);
+        assert_eq!(
+            live.oldest_wal_pos(),
+            Some(0),
+            "the publication pins the log first"
+        );
+
+        // Replay over a store seeded from what an extent would restore: the publications
+        // through `seed`, then every record of the log.
+        let mut replayed = ArtifactStore::new();
+        for (position, record) in records.iter().enumerate() {
+            assert_eq!(replayed.apply(record, position as u64 * 8), 0);
+        }
+        expect_state(&replayed);
+        assert_eq!(
+            replayed.level_version("clusters/a", 0),
+            live.level_version("clusters/a", 0)
+        );
+
+        // Identical fills change nothing; differing ones are damage, counted and not applied.
+        for record in &records[2..] {
+            assert_eq!(live.apply(record, 64), 0);
+        }
+        expect_state(&live);
+        let other = vec!["another topic".to_string()];
+        assert_eq!(
+            live.apply(
+                &fill_record(
+                    "clusters/a",
+                    1,
+                    ArtifactPart::Content {
+                        rank: 0,
+                        values: other.clone(),
+                        digest: content_digest(&other),
+                    }
+                ),
+                72
+            ),
+            1
+        );
+        assert_eq!(
+            live.apply(
+                &fill_record(
+                    "clusters/a",
+                    1,
+                    ArtifactPart::Parents(vec![ParentRef {
+                        level: 0,
+                        ordinal: 1
+                    }])
+                ),
+                80
+            ),
+            1
+        );
+        expect_state(&live);
+        // A fill against a hole fills nothing and is counted, on the growth's argument.
+        assert_eq!(
+            live.apply(
+                &fill_record("clusters/a", 7, ArtifactPart::Parents(Vec::new())),
+                88
+            ),
+            1
+        );
+    }
+
+    /// **A shape's digest is recomputed from the bytes beside it before it is trusted**, and a
+    /// shape held differently is refused by that digest.
+    #[test]
+    fn a_shape_fill_whose_digest_disagrees_is_refused_and_a_differing_shape_is_a_conflict() {
+        use crate::wal::ArtifactPart;
+        let mut store = ArtifactStore::new();
+        assert_eq!(store.apply(&publication("boxes", 0, 100, &[]), 0), 0);
+        let shape = ArtifactShapes::new(vec![("default".into(), vec![1, 2, 3])]).unwrap();
+        let mut tampered = shape.clone();
+        tampered.digest[0] ^= 0xff;
+        assert_eq!(
+            store.fill("boxes", 0, 0, &ArtifactPart::Shape(tampered)),
+            FillOutcome::Undecodable
+        );
+        assert!(store.shape_of("boxes", 0, 0).is_none());
+        assert_eq!(
+            store.fill("boxes", 0, 0, &ArtifactPart::Shape(shape.clone())),
+            FillOutcome::Filled
+        );
+        assert_eq!(
+            store.fill("boxes", 0, 0, &ArtifactPart::Shape(shape)),
+            FillOutcome::Identical
+        );
+        let other = ArtifactShapes::new(vec![("default".into(), vec![9, 9, 9])]).unwrap();
+        assert_eq!(
+            store.fill("boxes", 0, 0, &ArtifactPart::Shape(other)),
+            FillOutcome::Differs
+        );
+    }
+
+    /// **A growth moves the level's version and not its lineage version; a parent fill moves
+    /// both** (`ingest.md` §4.1) — the second counter that keeps a page of members from
+    /// rebuilding the hierarchy.
+    #[test]
+    fn a_growth_leaves_the_lineage_version_and_a_parent_fill_moves_it() {
+        use crate::wal::{ArtifactPart, ParentRef};
+        let mut store = ArtifactStore::new();
+        assert_eq!(store.apply(&publication("clusters/t", 0, 100, &[1]), 0), 0);
+        assert_eq!(store.apply(&publication("clusters/t", 1, 101, &[2]), 8), 0);
+        let (records, lineage) = (
+            store.level_version("clusters/t", 0),
+            store.lineage_version("clusters/t", 0),
+        );
+        assert_eq!(lineage, 2, "each publication moved it");
+
+        assert_eq!(store.apply(&growth("clusters/t", 0, 1, &[3, 4]), 16), 0);
+        assert_eq!(store.level_version("clusters/t", 0), records + 1);
+        assert_eq!(store.lineage_version("clusters/t", 0), lineage);
+
+        let content = vec!["x".to_string()];
+        assert_eq!(
+            store.apply(
+                &fill_record(
+                    "clusters/t",
+                    1,
+                    ArtifactPart::Content {
+                        rank: 0,
+                        values: content.clone(),
+                        digest: content_digest(&content),
+                    }
+                ),
+                24
+            ),
+            0
+        );
+        assert_eq!(store.level_version("clusters/t", 0), records + 2);
+        assert_eq!(
+            store.lineage_version("clusters/t", 0),
+            lineage,
+            "a content fill moves no edge"
+        );
+
+        assert_eq!(
+            store.apply(
+                &fill_record(
+                    "clusters/t",
+                    1,
+                    ArtifactPart::Parents(vec![ParentRef {
+                        level: 0,
+                        ordinal: 0
+                    }])
+                ),
+                32
+            ),
+            0
+        );
+        assert_eq!(store.level_version("clusters/t", 0), records + 3);
+        assert_eq!(store.lineage_version("clusters/t", 0), lineage + 1);
+
+        // A retirement of a member of the level moves both, as a hole has no edges.
+        store.retire(&Bitmap::of(&[100]));
+        assert_eq!(store.lineage_version("clusters/t", 0), lineage + 2);
+    }
+
+    /// **A filled content's values reach the content extent and hold the log until they do**,
+    /// wherever the artifact sits against the high-water — and once packed, a further rank is
+    /// refused at the registry on [`ArtifactStore::content_row_is_packed`]'s answer.
+    #[test]
+    fn a_content_fill_is_written_beside_the_tail_and_pins_the_log_until_its_extent_is_durable() {
+        use crate::wal::ArtifactPart;
+        let mut store = ArtifactStore::new();
+        assert_eq!(store.apply(&publication("topics/x", 0, 100, &[1]), 0), 0);
+        store.mark_published("topics/x", 0, 1);
+        assert_eq!(store.oldest_wal_pos(), None, "packed, nothing pinned");
+        assert!(
+            !store.content_row_is_packed("topics/x", 0, 0),
+            "no content, no row"
+        );
+
+        let values = vec!["shipping".to_string()];
+        assert_eq!(
+            store.apply(
+                &fill_record(
+                    "topics/x",
+                    0,
+                    ArtifactPart::Content {
+                        rank: 0,
+                        values: values.clone(),
+                        digest: content_digest(&values),
+                    }
+                ),
+                40
+            ),
+            0
+        );
+        assert_eq!(
+            store.unpublished_content(),
+            vec![(EntityId::new(100), vec![(0u16, "shipping".to_string())])],
+            "a filled record below the high-water is written beside the tail"
+        );
+        assert_eq!(store.oldest_wal_pos(), Some(40), "pinned at the fill");
+        assert!(
+            !store.content_row_is_packed("topics/x", 0, 0),
+            "pending, not yet a row"
+        );
+
+        // The fold's rewrite releases the fill's pin but not the content's: the fold carries
+        // content extents forward and writes no values.
+        store.mark_growth_packed();
+        assert_eq!(store.oldest_wal_pos(), Some(40));
+        assert_eq!(store.unpublished_content().len(), 1);
+
+        store.mark_content_published();
+        assert_eq!(store.oldest_wal_pos(), None);
+        assert!(store.unpublished_content().is_empty());
+        assert!(store.content_row_is_packed("topics/x", 0, 0));
     }
 }

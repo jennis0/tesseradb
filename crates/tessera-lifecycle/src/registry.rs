@@ -177,12 +177,57 @@ pub enum RegistryError {
         level: u32,
         cycle: Vec<String>,
     },
+    /// A record supplied a fixed part the artifact already holds, and the two differ
+    /// (`ingest.md` §1.1, §1.5). A fixed part is written once; the record names the part and
+    /// never the held value, which is the caller's own data and may be another caller's.
+    PartConflict {
+        layer: String,
+        level: u32,
+        key: String,
+        part: String,
+    },
 }
 
 /// **No artifact is about to exist** — the `pending` answer every caller but the ingest route's
 /// mint pass gives [`LayerRegistry::parent_ref`] and [`LayerRegistry::prepare_publish`].
 pub fn no_pending(_: &str) -> Option<crate::wal::ParentRef> {
     None
+}
+
+/// What [`LayerRegistry::prepare_put`] prepared for one `PUT` batch: the records to append, in
+/// the order to apply them, and what the acknowledgement reports.
+///
+/// The publication first, so that a fill or a growth on a held artifact never precedes the
+/// record of a sibling it may name; then the fills; then the growth. One fsync covers them all,
+/// as one covers a commit window's records.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PreparedPut {
+    /// The new artifacts, or `None` where every key was held.
+    pub publish: Option<WalRecord>,
+    /// One [`WalRecord::ArtifactFill`] per fixed part filled on a held artifact.
+    pub fills: Vec<WalRecord>,
+    /// The members joining held artifacts, or `None` where none were.
+    pub growth: Option<WalRecord>,
+    /// One entity per artifact in the caller's order: a held artifact's own, or the one the
+    /// publication claimed.
+    pub entities: Vec<tessera_types::EntityId>,
+    /// How many artifacts the publication created.
+    pub created: u64,
+    /// How many created artifacts carry no content on a layer that declares some (R5).
+    pub without_content: u64,
+    /// How many members joined held artifacts that did not already hold them.
+    pub joined: u64,
+}
+
+/// What [`LayerRegistry::prepare_grow`] prepared for one `PATCH` batch.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PreparedGrow {
+    /// The members joining, or `None` where nothing was joining.
+    pub growth: Option<WalRecord>,
+    /// One [`WalRecord::ArtifactFill`] per fixed part filled.
+    pub fills: Vec<WalRecord>,
+    /// Per join in the caller's order, how many of its parts were filled.
+    pub filled: Vec<u64>,
 }
 
 /// What [`LayerRegistry::check_edge`] found.
@@ -374,6 +419,17 @@ impl std::fmt::Display for RegistryError {
                  descend a cut from and a cycle has none, so the publication is refused",
                 cycle.join(" → ")
             ),
+            RegistryError::PartConflict {
+                layer,
+                level,
+                key,
+                part,
+            } => write!(
+                f,
+                "{layer} level {level}: the artifact keyed {key} already holds its {part}, and \
+                 the record supplies a different one. A fixed part is written once; what changes \
+                 an artifact is a delete and a re-publish (ingest.md §1.5)"
+            ),
             RegistryError::Alloc(e) => write!(f, "{e}"),
         }
     }
@@ -544,7 +600,11 @@ impl LayerRegistry {
     /// half is the write cycle's edit pass, which is a later stage's work. Silently replacing would
     /// be the fail-open reading — it would strand the old artifact's entity while callers still
     /// hold its `tessera_id`, so a suppression against the thing they were shown would land on
-    /// nothing.
+    /// nothing. The control plane's `PUT` partitions a batch before it reaches here
+    /// ([`prepare_put`]), so a held key is compared under the fill rule there and this refusal is
+    /// the ingest route's mint pass's, where a held key means a resolution went wrong.
+    ///
+    /// [`prepare_put`]: LayerRegistry::prepare_put
     ///
     /// [`prepare_create`]: LayerRegistry::prepare_create
     /// `pending` is what [`parent_ref`] answers a parent key with when the artifact naming it does
@@ -581,6 +641,495 @@ impl LayerRegistry {
             });
         }
         self.prepare_artifacts(layer_name, level, incoming, store, alloc, pending)
+            .map(|(record, _)| record)
+    }
+
+    /// The control plane's publication (`PUT /control/layers/{name}/artifacts`, `ingest.md`
+    /// §1.5): [`prepare_publish`] with the batch **partitioned before any ordinal is claimed**
+    /// into the keys the level holds and the keys it does not.
+    ///
+    /// A held key is not refused. Its record is compared part by part with the artifact held
+    /// under it, on the fill rule: a fixed part the artifact lacks is filled by its own
+    /// [`WalRecord::ArtifactFill`], a part held identically is accepted with no effect, and a part
+    /// held differently refuses the whole batch naming the part
+    /// ([`RegistryError::PartConflict`]). The membership is a set part and joins by an
+    /// [`WalRecord::ArtifactGrow`]; a generating set is compared by bitmap equality, since a set
+    /// page is track T2b's. A held key resolves to its existing ordinal, so a new artifact naming
+    /// it as a parent or as an attachment target lands on that ordinal, and no second artifact is
+    /// ever minted under a held key. The new keys go through [`prepare_publish`]'s own body.
+    ///
+    /// Every comparison and every resolution runs before the first allocation, so a refusal
+    /// spends nothing, on [`prepare_publish`]'s contract; the caller appends every record the
+    /// answer carries, syncs once, and applies them in the order given.
+    ///
+    /// [`prepare_publish`]: LayerRegistry::prepare_publish
+    pub fn prepare_put(
+        &self,
+        layer_name: &str,
+        level: u32,
+        incoming: &[IncomingArtifact],
+        store: &ArtifactStore,
+        alloc: &mut Allocator,
+    ) -> Result<PreparedPut, RegistryError> {
+        let layer = self
+            .layers
+            .get(layer_name)
+            .ok_or_else(|| RegistryError::NoSuchLayer(layer_name.to_string()))?;
+        if matches!(layer.declaration.membership, MembershipSource::Attribute(_)) {
+            return Err(RegistryError::NotEnumerated {
+                layer: layer_name.to_string(),
+            });
+        }
+        if layer.runs.get(level as usize).is_none() {
+            return Err(RegistryError::NoSuchLevel {
+                layer: layer_name.to_string(),
+                level,
+            });
+        }
+
+        // The partition. A key the level holds is a held artifact; everything else, a key it does
+        // not hold or no key at all, is new. Resolved against the store's key index and never the
+        // served view, on `resolve_or_mint`'s argument: a suppressed artifact resolves like any
+        // other, so its key is never minted again under it.
+        let held: Vec<Option<u32>> = incoming
+            .iter()
+            .map(|artifact| {
+                artifact
+                    .key
+                    .as_deref()
+                    .and_then(|key| store.ordinal_of_key(layer_name, level, key))
+            })
+            .collect();
+        let fresh: Vec<IncomingArtifact> = incoming
+            .iter()
+            .zip(&held)
+            .filter(|(_, held)| held.is_none())
+            .map(|(artifact, _)| artifact.clone())
+            .collect();
+
+        // **The new artifacts' ordinals, fixed before anything is allocated** — the same cursor
+        // `prepare_artifacts` reads, so the two agree — and the edges they create, resolved here
+        // a second time so the cycle walk below sees them beside the held artifacts' fills.
+        // Resolving twice costs a key lookup per parent and keeps the walk ahead of the
+        // allocation.
+        let first_ordinal = store.next_ordinal(layer_name, level);
+        let fresh_index: std::collections::HashMap<&str, u32> = fresh
+            .iter()
+            .enumerate()
+            .filter_map(|(i, a)| a.key.as_deref().map(|key| (key, first_ordinal + i as u32)))
+            .collect();
+        let pending = |key: &str| {
+            fresh_index.get(key).map(|ordinal| crate::wal::ParentRef {
+                level,
+                ordinal: *ordinal,
+            })
+        };
+        let mut batch_edges: BTreeMap<crate::wal::ParentRef, Vec<crate::wal::ParentRef>> =
+            BTreeMap::new();
+        for (i, artifact) in fresh.iter().enumerate() {
+            let child = crate::wal::ParentRef {
+                level,
+                ordinal: first_ordinal + i as u32,
+            };
+            let parents: Vec<crate::wal::ParentRef> = artifact
+                .parent_keys
+                .iter()
+                .map(|key| {
+                    self.parent_ref(
+                        layer_name,
+                        level,
+                        artifact.key.as_deref(),
+                        key,
+                        store,
+                        &pending,
+                    )
+                })
+                .collect::<Result<_, _>>()?;
+            batch_edges.insert(child, parents);
+        }
+
+        // The held artifacts: every part compared, every fill prepared, and the walk run over
+        // the layer's edges and the batch's own, before any ordinal is claimed.
+        let mut fills = Vec::new();
+        // The delta and never the whole list, so a re-`PUT` whose members are all held appends
+        // no growth: a set part already in the state the record asks for is a no-op.
+        let mut joins: Vec<(u32, croaring::Bitmap)> = Vec::new();
+        let mut joined = 0u64;
+        for (artifact, ordinal) in incoming.iter().zip(&held) {
+            let Some(ordinal) = *ordinal else { continue };
+            let key = artifact.key.as_deref().expect("a held key is a key");
+            let record = store
+                .get(layer_name, level, ordinal)
+                .expect("the key index names a record");
+            let parts = crate::membership::FixedParts {
+                parent_keys: artifact.parent_keys.clone(),
+                attached_to: artifact.attached_to.clone(),
+                contents: artifact
+                    .contents
+                    .iter()
+                    .enumerate()
+                    .map(|(rank, content)| (rank as u16, content.values.clone()))
+                    .collect(),
+                shape: artifact.shape.clone(),
+            };
+            let prepared = self.prepare_fills(
+                layer_name,
+                level,
+                ordinal,
+                key,
+                &parts,
+                store,
+                &pending,
+                &mut batch_edges,
+            )?;
+            // A generating set is compared by equality, never joined: a set page is track T2b's,
+            // and until then a re-`PUT` says the set it said before or refuses.
+            for (rank, content) in artifact.contents.iter().enumerate() {
+                if let Some(held) = record.contents.get(rank) {
+                    if held.generated_from != content.generated_from {
+                        return Err(RegistryError::PartConflict {
+                            layer: layer_name.to_string(),
+                            level,
+                            key: key.to_string(),
+                            part: format!("content[{rank}].generated_from"),
+                        });
+                    }
+                }
+            }
+            fills.extend(prepared.into_iter().map(|part| WalRecord::ArtifactFill {
+                layer: layer_name.to_string(),
+                level,
+                ordinal,
+                part,
+            }));
+            let delta = artifact.members.andnot(&record.members);
+            if !delta.is_empty() {
+                joined += delta.cardinality();
+                joins.push((ordinal, delta));
+            }
+        }
+        let growth = crate::membership::growth_record(
+            layer_name,
+            level,
+            joins.iter().map(|(ordinal, delta)| (*ordinal, delta)),
+        );
+
+        let (publish, without_content) = if fresh.is_empty() {
+            (None, 0)
+        } else {
+            let (record, without_content) =
+                self.prepare_artifacts(layer_name, level, &fresh, store, alloc, &pending)?;
+            (Some(record), without_content)
+        };
+
+        // The entities, in the caller's order: the held artifact's own, or the one the
+        // publication claimed, read back off the record.
+        let mut claimed = match &publish {
+            Some(WalRecord::ArtifactPublish { artifacts, .. }) => {
+                artifacts.iter().map(|a| a.entity).collect::<Vec<_>>()
+            }
+            _ => Vec::new(),
+        }
+        .into_iter();
+        let entities = held
+            .iter()
+            .map(|held| match held {
+                Some(ordinal) => {
+                    store
+                        .get(layer_name, level, *ordinal)
+                        .expect("the key index names a record")
+                        .entity
+                }
+                None => claimed
+                    .next()
+                    .expect("the publication claimed one entity per new artifact"),
+            })
+            .collect();
+
+        Ok(PreparedPut {
+            publish,
+            fills,
+            growth,
+            entities,
+            created: fresh.len() as u64,
+            without_content,
+            joined,
+        })
+    }
+
+    /// The fills a record's fixed parts call for on the artifact at `ordinal`, each compared with
+    /// the part held under the fill rule (`ingest.md` §1.1): absent is filled, identical is
+    /// nothing, different is [`RegistryError::PartConflict`] naming the part.
+    ///
+    /// `pending` answers a parent key the batch is about to create; `batch_edges` holds every edge
+    /// the batch creates, by child, and gains this artifact's parent list so a later fill in the
+    /// same batch walks it. The cycle walk runs over the layer's held edges and the batch's as one
+    /// graph (`ingest.md` §1.5, R4): from each named parent upward, refusing if it reaches the
+    /// child. Serial on the executor, so no two requests can each pass and together close a
+    /// cycle.
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_fills(
+        &self,
+        layer_name: &str,
+        level: u32,
+        ordinal: u32,
+        key: &str,
+        parts: &crate::membership::FixedParts,
+        store: &ArtifactStore,
+        pending: &dyn Fn(&str) -> Option<crate::wal::ParentRef>,
+        batch_edges: &mut BTreeMap<crate::wal::ParentRef, Vec<crate::wal::ParentRef>>,
+    ) -> Result<Vec<crate::wal::ArtifactPart>, RegistryError> {
+        use crate::wal::ArtifactPart;
+        let layer = self
+            .layers
+            .get(layer_name)
+            .ok_or_else(|| RegistryError::NoSuchLayer(layer_name.to_string()))?;
+        let record = store
+            .get(layer_name, level, ordinal)
+            .expect("a resolved ordinal names a record");
+        let conflict = |part: String| RegistryError::PartConflict {
+            layer: layer_name.to_string(),
+            level,
+            key: key.to_string(),
+            part,
+        };
+        let mut fills = Vec::new();
+
+        if !parts.parent_keys.is_empty() {
+            let mut resolved: Vec<crate::wal::ParentRef> = parts
+                .parent_keys
+                .iter()
+                .map(|parent| self.parent_ref(layer_name, level, Some(key), parent, store, pending))
+                .collect::<Result<_, _>>()?;
+            resolved.sort_unstable();
+            resolved.dedup();
+            let kind = layer.declaration.hierarchy.kind;
+            if resolved.len() > 1 && kind != tessera_types::layer::HierarchyKind::Dag {
+                let mut named = parts.parent_keys.clone();
+                named.sort_unstable();
+                named.dedup();
+                return Err(RegistryError::SeveralParents {
+                    layer: layer_name.to_string(),
+                    level,
+                    child: key.to_string(),
+                    parents: named,
+                    kind: format!("{kind:?}").to_lowercase(),
+                });
+            }
+            let child = crate::wal::ParentRef { level, ordinal };
+            if record.parents.is_empty() {
+                if let Some(cycle) =
+                    self.cycle_through(layer_name, store, batch_edges, child, &resolved)
+                {
+                    return Err(RegistryError::Cycle {
+                        layer: layer_name.to_string(),
+                        level,
+                        cycle: cycle
+                            .into_iter()
+                            .map(|at| self.key_at(layer_name, at, store))
+                            .collect(),
+                    });
+                }
+                batch_edges.insert(child, resolved.clone());
+                fills.push(ArtifactPart::Parents(resolved));
+            } else if record.parents != resolved {
+                return Err(conflict("parent".to_string()));
+            }
+        }
+
+        if let Some(wanted) = &parts.attached_to {
+            let attachment = self.resolve_attachment(layer_name, wanted, store)?;
+            match &record.attached_to {
+                None => fills.push(ArtifactPart::AttachedTo(crate::wal::PublishedAttachment {
+                    layer: attachment.layer,
+                    level: attachment.level,
+                    ordinal: attachment.ordinal,
+                    entity: attachment.entity,
+                })),
+                Some(held) if *held == attachment => {}
+                Some(_) => return Err(conflict("attached_to".to_string())),
+            }
+        }
+
+        if let Some(shape) = &parts.shape {
+            if layer.declaration.shape.is_none() {
+                return Err(RegistryError::Shape {
+                    layer: layer_name.to_string(),
+                    detail: format!(
+                        "the artifact keyed {key} is given a shape, and this layer declares no \
+                         `shape`. Its members come from the stored set its membership names, so \
+                         a shape beside them is a region nothing evaluates"
+                    ),
+                });
+            }
+            match store.shape_of(layer_name, level, ordinal) {
+                None => fills.push(ArtifactPart::Shape(shape.clone())),
+                Some(held) if held.digest() == shape.digest() => {}
+                Some(_) => return Err(conflict("shape".to_string())),
+            }
+        }
+
+        let declared = &layer.declaration.content.supplied;
+        let refuse_content = |detail: String| RegistryError::Content {
+            layer: layer_name.to_string(),
+            detail: format!("the artifact keyed {key}: {detail}"),
+        };
+        // Ranks fill in order within one record, so a record carrying two new ranks sees the
+        // first before it checks the second.
+        let mut next_rank = record.contents.len();
+        let mut supplied: Vec<&(u16, Vec<String>)> = parts.contents.iter().collect();
+        supplied.sort_by_key(|(rank, _)| *rank);
+        for (rank, values) in supplied {
+            let rank = *rank as usize;
+            if declared.is_empty() {
+                return Err(refuse_content(
+                    "carries supplied content, and this layer declares none — the kinds a client \
+                     may draw come from the layer's declaration, so content under no declared \
+                     kind could never be served"
+                        .to_string(),
+                ));
+            }
+            if values.len() != declared.len() {
+                return Err(refuse_content(format!(
+                    "content[{rank}] supplies {} value(s) for {} declared kind(s); every entry is \
+                     a whole description, and a viewer is served one of them entire or no \
+                     artifact at all",
+                    values.len(),
+                    declared.len()
+                )));
+            }
+            let digest = crate::membership::content_digest(values);
+            if let Some(held) = record.contents.get(rank) {
+                if held.digest != digest {
+                    return Err(conflict(format!("content[{rank}]")));
+                }
+                continue;
+            }
+            if rank != next_rank {
+                return Err(refuse_content(format!(
+                    "content[{rank}] names a rank past the next one, {next_rank}; ranks are \
+                     positions in the artifact's list of contents and fill in order"
+                )));
+            }
+            // A fill carries values and no generating set (T2b's page brings the set), so on a
+            // layer that tests one it would be content served to everyone: the refusal a
+            // publication with an empty set draws, at the same door.
+            if declared
+                .iter()
+                .any(|s| s.require_member_visibility.requires_all_members())
+            {
+                return Err(refuse_content(format!(
+                    "content[{rank}] declares no generating set, and this layer's content \
+                     requires every member visible; a set is supplied with the content at \
+                     publication, and a page at a rank is not built yet (ingest.md §8, T2b)"
+                )));
+            }
+            if store.content_row_is_packed(layer_name, level, ordinal) {
+                return Err(refuse_content(format!(
+                    "content[{rank}] would be a further content on an artifact whose content row \
+                     is in a durable extent; the record blob holds one row per artifact until it \
+                     reads per column (ingest.md §1.4, T3), so the rank cannot be written"
+                )));
+            }
+            fills.push(ArtifactPart::Content {
+                rank: rank as u16,
+                values: values.clone(),
+                digest,
+            });
+            next_rank += 1;
+        }
+
+        Ok(fills)
+    }
+
+    /// Resolve an attachment a record names, on the publication's rules: the target layer is one
+    /// this layer declares in `depends_on`, and the target exists.
+    fn resolve_attachment(
+        &self,
+        layer_name: &str,
+        wanted: &crate::membership::IncomingAttachment,
+        store: &ArtifactStore,
+    ) -> Result<crate::membership::Attachment, RegistryError> {
+        let layer = self
+            .layers
+            .get(layer_name)
+            .ok_or_else(|| RegistryError::NoSuchLayer(layer_name.to_string()))?;
+        if !layer.declaration.depends_on.contains(&wanted.layer) {
+            return Err(RegistryError::UndeclaredAttachment {
+                layer: layer_name.to_string(),
+                target: wanted.layer.clone(),
+            });
+        }
+        let missing = || RegistryError::NoSuchAttachmentTarget {
+            layer: layer_name.to_string(),
+            target: wanted.layer.clone(),
+            level: wanted.level,
+            key: wanted.key.clone(),
+        };
+        let target = self.layers.get(&wanted.layer).ok_or_else(missing)?;
+        let ordinal = store
+            .ordinal_of_key(&wanted.layer, wanted.level, &wanted.key)
+            .ok_or_else(missing)?;
+        let entity = target
+            .runs
+            .get(wanted.level as usize)
+            .and_then(|runs| runs.entity_of(ordinal as u64))
+            .ok_or_else(missing)?;
+        Ok(crate::membership::Attachment {
+            layer: wanted.layer.clone(),
+            level: wanted.level,
+            ordinal,
+            entity: EntityId::new(entity),
+        })
+    }
+
+    /// The cycle a parent list on `child` would close, walking **up** from each named parent
+    /// through the layer's held edges and the batch's own as one graph (`ingest.md` §1.5, R4):
+    /// the path `[child, parent, …, child]` by position, or `None` where every walk reaches a
+    /// root. Over artifacts and never members, so rung 3's 30,954 nodes and 42,287 edges are
+    /// microseconds (modelled).
+    fn cycle_through(
+        &self,
+        layer_name: &str,
+        store: &ArtifactStore,
+        batch_edges: &BTreeMap<crate::wal::ParentRef, Vec<crate::wal::ParentRef>>,
+        child: crate::wal::ParentRef,
+        parents: &[crate::wal::ParentRef],
+    ) -> Option<Vec<crate::wal::ParentRef>> {
+        let parents_of = |at: crate::wal::ParentRef| -> Vec<crate::wal::ParentRef> {
+            let mut up: Vec<crate::wal::ParentRef> =
+                batch_edges.get(&at).cloned().unwrap_or_default();
+            if let Some(record) = store.get(layer_name, at.level, at.ordinal) {
+                up.extend(record.parents.iter().copied());
+            }
+            up
+        };
+        let mut visited: BTreeSet<crate::wal::ParentRef> = BTreeSet::new();
+        for &start in parents {
+            // Depth first with the chain kept, so the refusal can say the path.
+            let mut chain: Vec<(crate::wal::ParentRef, Vec<crate::wal::ParentRef>)> =
+                vec![(start, parents_of(start))];
+            if start == child {
+                return Some(vec![child, child]);
+            }
+            visited.insert(start);
+            while let Some((_, up)) = chain.last_mut() {
+                let Some(next) = up.pop() else {
+                    chain.pop();
+                    continue;
+                };
+                if next == child {
+                    let mut cycle = vec![child];
+                    cycle.extend(chain.iter().map(|(at, _)| *at));
+                    cycle.push(child);
+                    return Some(cycle);
+                }
+                if visited.insert(next) {
+                    chain.push((next, parents_of(next)));
+                }
+            }
+        }
+        None
     }
 
     /// **Mint the artifacts a predicate's own rule names** — the values an attribute column
@@ -644,6 +1193,7 @@ impl LayerRegistry {
             alloc,
             &crate::no_pending,
         )
+        .map(|(record, _)| record)
     }
 
     /// The allocation and validation both entry points share — everything [`prepare_publish`] does
@@ -663,7 +1213,7 @@ impl LayerRegistry {
         store: &ArtifactStore,
         alloc: &mut Allocator,
         pending: &dyn Fn(&str) -> Option<crate::wal::ParentRef>,
-    ) -> Result<WalRecord, RegistryError> {
+    ) -> Result<(WalRecord, u64), RegistryError> {
         let layer = self
             .layers
             .get(layer_name)
@@ -692,15 +1242,24 @@ impl LayerRegistry {
             }
         }
 
-        // **What the layer declares is what every artifact must carry**, checked once here rather
-        // than discovered per request. The three refusals are one rule read three ways: a client
-        // draws what `/v1/meta` says the layer carries, so a served artifact must never lack a
-        // declared kind, must never carry an undeclared one, and must never carry a generating set
-        // nothing will test.
+        // **What the layer declares is what every content must carry**, checked once here rather
+        // than discovered per request. The refusals are one rule read three ways: a client draws
+        // what `/v1/meta` says the layer carries, so a served content must never lack a declared
+        // kind, must never carry an undeclared one, and must never carry a generating set nothing
+        // will test.
+        //
+        // **An artifact with no content on a layer that declares some is accepted and counted**
+        // (`ingest.md` §1.5, R5). The serving path withholds it until a content is filled
+        // (decision 0076: served whole or not at all), which a viewer cannot tell from content
+        // withheld, so it discloses nothing; the count is the caller's fidelity signal.
         let declared = &layer.declaration.content.supplied;
         let requires_all_members = declared
             .iter()
             .any(|s| s.require_member_visibility.requires_all_members());
+        let without_content = incoming
+            .iter()
+            .filter(|artifact| !declared.is_empty() && artifact.contents.is_empty())
+            .count() as u64;
         for (i, artifact) in incoming.iter().enumerate() {
             let refuse = |detail: String| {
                 Err(RegistryError::Content {
@@ -715,14 +1274,6 @@ impl LayerRegistry {
                      could never be served"
                         .to_string(),
                 );
-            }
-            if !declared.is_empty() && artifact.contents.is_empty() {
-                return refuse(format!(
-                    "carries no supplied content, and this layer declares {} kind(s); an artifact \
-                     served without content its layer declares cannot be told apart from one whose \
-                     content was withheld",
-                    declared.len()
-                ));
             }
             for (rank, content) in artifact.contents.iter().enumerate() {
                 if content.values.len() != declared.len() {
@@ -928,12 +1479,15 @@ impl LayerRegistry {
             .collect::<Result<_, _>>()?;
 
         // **The cycle check, over the edges this publication creates** (`dag-hierarchies.md` §4).
-        // A growth never adds lineage, so an edge into an artifact the layer already holds cannot
-        // close a cycle — every cycle is among the artifacts one publication mints, and the batch's
-        // own adjacency is the whole of what has to be walked. The ingest route's `mint_records`
-        // reaches this through `prepare_publish`, so the check holds at both entry points from one
-        // body. A tiered layer's parents sit at coarser levels and never in the batch, so its
-        // adjacency here is empty, which is the shape that cannot hold a cycle.
+        // A held artifact's edges were settled before this batch and none of them can name an
+        // artifact that does not exist yet, so an edge from a new artifact into a held one cannot
+        // close a cycle on its own: every cycle among these records is among the artifacts this
+        // publication mints, and the batch's own adjacency is what has to be walked. The one way
+        // a held artifact gains an edge is a fill of its parent list, and `prepare_put` walks the
+        // layer and the batch as one graph for that before it reaches here. The ingest route's
+        // `mint_records` reaches this through `prepare_publish`, so the check holds at both entry
+        // points from one body. A tiered layer's parents sit at coarser levels and never in the
+        // batch, so its adjacency here is empty, which is the shape that cannot hold a cycle.
         let batch_end = first_ordinal as u32 + incoming.len() as u32;
         let adjacency: Vec<Vec<usize>> = parents
             .iter()
@@ -1019,12 +1573,15 @@ impl LayerRegistry {
             })
             .collect();
 
-        Ok(WalRecord::ArtifactPublish {
-            layer: layer_name.to_string(),
-            level,
-            extend_runs,
-            artifacts,
-        })
+        Ok((
+            WalRecord::ArtifactPublish {
+                layer: layer_name.to_string(),
+                level,
+                extend_runs,
+                artifacts,
+            },
+            without_content,
+        ))
     }
 
     /// Validates a batch of joins against the artifacts they name and returns the record that makes
@@ -1055,7 +1612,7 @@ impl LayerRegistry {
         level: u32,
         incoming: &[crate::membership::IncomingGrowth],
         store: &ArtifactStore,
-    ) -> Result<Option<WalRecord>, RegistryError> {
+    ) -> Result<PreparedGrow, RegistryError> {
         let layer = self
             .layers
             .get(layer_name)
@@ -1076,18 +1633,42 @@ impl LayerRegistry {
             });
         }
 
-        // Every key resolves before anything is written: the whole batch or none of it, on
-        // `prepare_publish`'s rule. A partially applied growth would leave a caller unable to say
-        // which of their joins happened.
+        // Every key resolves and every part compares before anything is written: the whole batch
+        // or none of it, on `prepare_publish`'s rule. A partially applied growth would leave a
+        // caller unable to say which of their joins happened.
         let mut growth = Vec::with_capacity(incoming.len());
+        let mut fills = Vec::new();
+        let mut filled = Vec::with_capacity(incoming.len());
+        let mut batch_edges = BTreeMap::new();
         for join in incoming {
             let ordinal = self.resolve_growth_key(layer_name, level, &join.key, store)?;
+            let parts = self.prepare_fills(
+                layer_name,
+                level,
+                ordinal,
+                &join.key,
+                &join.parts,
+                store,
+                &no_pending,
+                &mut batch_edges,
+            )?;
+            filled.push(parts.len() as u64);
+            fills.extend(parts.into_iter().map(|part| WalRecord::ArtifactFill {
+                layer: layer_name.to_string(),
+                level,
+                ordinal,
+                part,
+            }));
             if join.joining.is_empty() {
                 continue;
             }
             growth.push((ordinal, &join.joining));
         }
-        Ok(crate::membership::growth_record(layer_name, level, growth))
+        Ok(PreparedGrow {
+            growth: crate::membership::growth_record(layer_name, level, growth),
+            fills,
+            filled,
+        })
     }
 
     /// The ordinal a member key names, or **`None` where the layer is open and nothing holds it**
@@ -2526,5 +3107,436 @@ mod tests {
             "one block for the level, one fresh block for the entity cursor"
         );
         assert_ne!(reg.get("c").unwrap().entity.raw(), b + 1);
+    }
+
+    // ---- The fill rule (`ingest.md` §1.1, §1.5; decision 0136 R3, R4, R5) ----------------------
+
+    /// A layer declaring one supplied content that needs no generating set, so a content can be
+    /// filled without a set page (track T2b).
+    fn described(name: &str) -> LayerDeclaration {
+        let mut d = declaration(name);
+        d.content.supplied = vec![tessera_types::layer::SuppliedContent {
+            name: "topic".into(),
+            ty: "text".into(),
+            require_member_visibility: tessera_types::layer::SuppliedRequirement::Inherited,
+        }];
+        d
+    }
+
+    /// Apply every record a prepared `PUT` carries, in its order, the way the executor does it.
+    fn apply_put(reg: &mut LayerRegistry, store: &mut ArtifactStore, prepared: &PreparedPut) {
+        for record in prepared
+            .publish
+            .iter()
+            .chain(prepared.fills.iter())
+            .chain(prepared.growth.iter())
+        {
+            reg.apply(record);
+            assert_eq!(store.apply(record, 0), 0);
+        }
+    }
+
+    fn part_of(record: &WalRecord) -> &crate::wal::ArtifactPart {
+        let WalRecord::ArtifactFill { part, .. } = record else {
+            panic!("a fill record");
+        };
+        part
+    }
+
+    /// **A `PUT` naming a held key fills what the artifact lacks, accepts what it holds
+    /// identically, and refuses what it holds differently, naming the part and never the value.**
+    #[test]
+    fn a_put_on_a_held_key_fills_absent_parts_and_refuses_a_differing_one_by_name() {
+        let mut reg = LayerRegistry::new();
+        let mut store = ArtifactStore::new();
+        let mut alloc = Allocator::new(0);
+        let mut layer = described("topics/t");
+        layer.hierarchy.kind = HierarchyKind::Nested;
+        register(&mut reg, &mut alloc, layer).unwrap();
+
+        // Published bare: no parent, no content — accepted and counted (R5).
+        let first = reg
+            .prepare_put(
+                "topics/t",
+                0,
+                &[incoming("root", &[1, 2, 3]), incoming("child", &[1])],
+                &store,
+                &mut alloc,
+            )
+            .unwrap();
+        assert_eq!((first.created, first.without_content), (2, 2));
+        apply_put(&mut reg, &mut store, &first);
+        assert_eq!(store.next_ordinal("topics/t", 0), 2);
+
+        // The same keys again, carrying the parts: two fills and a join, nothing minted.
+        let mut child = incoming("child", &[1, 4]);
+        child.parent_keys = vec!["root".into()];
+        child.contents = vec![crate::membership::IncomingContent::new(
+            vec!["a topic".into()],
+            [],
+        )];
+        let mark = alloc.low_water();
+        let second = reg
+            .prepare_put("topics/t", 0, &[child.clone()], &store, &mut alloc)
+            .unwrap();
+        assert_eq!(alloc.low_water(), mark, "a held key allocates nothing");
+        assert!(second.publish.is_none());
+        assert_eq!(second.created, 0);
+        assert_eq!(
+            second.joined, 1,
+            "the member the artifact did not hold joins"
+        );
+        assert_eq!(
+            second.fills.len(),
+            2,
+            "the parent and the content are filled"
+        );
+        assert_eq!(
+            second.entities,
+            vec![store.get("topics/t", 0, 1).unwrap().entity],
+            "the answer is the held artifact's own entity"
+        );
+        apply_put(&mut reg, &mut store, &second);
+        let held = store.get("topics/t", 0, 1).unwrap();
+        assert_eq!(
+            held.parents,
+            vec![crate::wal::ParentRef {
+                level: 0,
+                ordinal: 0
+            }]
+        );
+        assert_eq!(held.contents.len(), 1);
+        assert_eq!(
+            held.contents[0].values.as_deref(),
+            Some(&["a topic".to_string()][..])
+        );
+        assert_eq!(held.members, croaring::Bitmap::of(&[1, 4]));
+        assert_eq!(store.next_ordinal("topics/t", 0), 2, "nothing was minted");
+
+        // Identical again: no record at all.
+        let third = reg
+            .prepare_put("topics/t", 0, &[child], &store, &mut alloc)
+            .unwrap();
+        assert!(third.publish.is_none() && third.fills.is_empty() && third.growth.is_none());
+        assert_eq!((third.created, third.joined), (0, 0));
+
+        // A differing content: refused naming the part, and the held value is not in the text.
+        let mut differing = incoming("child", &[]);
+        differing.contents = vec![crate::membership::IncomingContent::new(
+            vec!["another topic".into()],
+            [],
+        )];
+        let refused = reg
+            .prepare_put("topics/t", 0, &[differing], &store, &mut alloc)
+            .unwrap_err();
+        assert_eq!(
+            refused,
+            RegistryError::PartConflict {
+                layer: "topics/t".into(),
+                level: 0,
+                key: "child".into(),
+                part: "content[0]".into(),
+            }
+        );
+        assert!(
+            !refused.to_string().contains("a topic"),
+            "the held value is never echoed: {refused}"
+        );
+
+        // A differing parent, the same way.
+        let other = incoming("other", &[7]);
+        let put = reg
+            .prepare_put("topics/t", 0, &[other], &store, &mut alloc)
+            .unwrap();
+        apply_put(&mut reg, &mut store, &put);
+        let mut reparented = incoming("child", &[]);
+        reparented.parent_keys = vec!["other".into()];
+        let refused = reg
+            .prepare_put("topics/t", 0, &[reparented], &store, &mut alloc)
+            .unwrap_err();
+        assert!(
+            matches!(&refused, RegistryError::PartConflict { part, .. } if part == "parent"),
+            "{refused:?}"
+        );
+        assert!(!refused.to_string().contains("root"), "{refused}");
+    }
+
+    /// **A batch mixing held keys with new ones mints only the new ones, and a new artifact
+    /// naming a held sibling as its parent lands on the held ordinal** (R3): no second artifact is
+    /// ever minted under a held key.
+    #[test]
+    fn a_mixed_put_mints_only_the_new_keys_and_resolves_a_held_sibling_parent() {
+        let mut reg = LayerRegistry::new();
+        let mut store = ArtifactStore::new();
+        let mut alloc = Allocator::new(0);
+        register(
+            &mut reg,
+            &mut alloc,
+            treed("clusters/t", HierarchyKind::Nested),
+        )
+        .unwrap();
+        publish(
+            &mut reg,
+            &mut store,
+            &mut alloc,
+            "clusters/t",
+            &[under("root", &[])],
+        )
+        .unwrap();
+
+        let prepared = reg
+            .prepare_put(
+                "clusters/t",
+                0,
+                &[
+                    under("leaf-a", &["root"]),
+                    under("root", &[]),
+                    under("leaf-b", &["leaf-a"]),
+                ],
+                &store,
+                &mut alloc,
+            )
+            .unwrap();
+        assert_eq!(prepared.created, 2);
+        let Some(WalRecord::ArtifactPublish { artifacts, .. }) = &prepared.publish else {
+            panic!("two new artifacts are published");
+        };
+        assert_eq!(
+            artifacts.iter().map(|a| a.ordinal).collect::<Vec<_>>(),
+            vec![1, 2],
+            "the new ordinals follow the held one"
+        );
+        assert_eq!(
+            artifacts[0].parents,
+            vec![crate::wal::ParentRef {
+                level: 0,
+                ordinal: 0
+            }],
+            "the held sibling resolves to its existing ordinal"
+        );
+        assert_eq!(
+            artifacts[1].parents,
+            vec![crate::wal::ParentRef {
+                level: 0,
+                ordinal: 1
+            }],
+            "and a new sibling to the ordinal this batch claims"
+        );
+        assert_eq!(
+            prepared.entities[1],
+            store.get("clusters/t", 0, 0).unwrap().entity,
+            "the held key answers with the artifact it names, in the caller's order"
+        );
+        apply_put(&mut reg, &mut store, &prepared);
+        assert_eq!(store.next_ordinal("clusters/t", 0), 3);
+        assert_eq!(store.ordinal_of_key("clusters/t", 0, "root"), Some(0));
+    }
+
+    /// **A lineage fill that would close a cycle across held edges and the batch's own is
+    /// refused** (R4), with nothing applied and nothing allocated.
+    #[test]
+    fn a_lineage_fill_closing_a_cycle_across_held_and_batch_edges_is_refused() {
+        let mut reg = LayerRegistry::new();
+        let mut store = ArtifactStore::new();
+        let mut alloc = Allocator::new(0);
+        register(
+            &mut reg,
+            &mut alloc,
+            treed("clusters/t", HierarchyKind::Nested),
+        )
+        .unwrap();
+        publish(
+            &mut reg,
+            &mut store,
+            &mut alloc,
+            "clusters/t",
+            &[under("a", &[]), under("b", &[]), under("c", &["b"])],
+        )
+        .unwrap();
+
+        // Held edge c → b. A fill b → a is fine; a fill a → c then closes a → c → b → a.
+        let fill = |reg: &LayerRegistry, store: &ArtifactStore, child: &str, parent: &str| {
+            let mut join = crate::membership::IncomingGrowth::from_entities(child.into(), []);
+            join.parts.parent_keys = vec![parent.into()];
+            reg.prepare_grow("clusters/t", 0, &[join], store)
+        };
+        let prepared = fill(&reg, &store, "b", "a").unwrap();
+        assert_eq!(prepared.filled, vec![1]);
+        for record in &prepared.fills {
+            assert_eq!(store.apply(record, 0), 0);
+        }
+        let refused = fill(&reg, &store, "a", "c").unwrap_err();
+        assert_eq!(
+            refused,
+            RegistryError::Cycle {
+                layer: "clusters/t".into(),
+                level: 0,
+                cycle: vec!["a".into(), "c".into(), "b".into(), "a".into()],
+            }
+        );
+        assert!(store.get("clusters/t", 0, 0).unwrap().parents.is_empty());
+
+        // Across a `PUT`: a new artifact under a held one, and the held one filled under the new.
+        let mark = alloc.low_water();
+        let mut a_under_d = under("a", &["d"]);
+        a_under_d.members = croaring::Bitmap::new();
+        let refused = reg
+            .prepare_put(
+                "clusters/t",
+                0,
+                &[under("d", &["a"]), a_under_d],
+                &store,
+                &mut alloc,
+            )
+            .unwrap_err();
+        assert!(
+            matches!(refused, RegistryError::Cycle { .. }),
+            "the walk sees the batch's edge and the fill together: {refused:?}"
+        );
+        assert_eq!(alloc.low_water(), mark, "the refusal spends nothing");
+        assert_eq!(store.next_ordinal("clusters/t", 0), 3);
+    }
+
+    /// **The parts a `PATCH` may fill, each once**: an attachment and a content, beside the
+    /// parent above, with the growth's receipt saying how many were filled.
+    #[test]
+    fn a_growth_fills_an_attachment_and_a_content_once_each() {
+        let mut reg = LayerRegistry::new();
+        let mut store = ArtifactStore::new();
+        let mut alloc = Allocator::new(0);
+        register(&mut reg, &mut alloc, declaration("clusters/a")).unwrap();
+        let mut labels = described("topics/x");
+        labels.depends_on = vec!["clusters/a".into()];
+        register(&mut reg, &mut alloc, labels).unwrap();
+        publish(
+            &mut reg,
+            &mut store,
+            &mut alloc,
+            "clusters/a",
+            &[incoming("c0", &[1, 2, 3])],
+        )
+        .unwrap();
+        // A label published attached (its layer requires it) and without content.
+        let mut label = incoming("l0", &[1, 2]);
+        label.attached_to = Some(crate::membership::IncomingAttachment {
+            layer: "clusters/a".into(),
+            level: 0,
+            key: "c0".into(),
+        });
+        let put = reg
+            .prepare_put("topics/x", 0, &[label], &store, &mut alloc)
+            .unwrap();
+        assert_eq!(put.without_content, 1);
+        apply_put(&mut reg, &mut store, &put);
+
+        let mut join = crate::membership::IncomingGrowth::from_entities("l0".into(), []);
+        join.parts.attached_to = Some(crate::membership::IncomingAttachment {
+            layer: "clusters/a".into(),
+            level: 0,
+            key: "c0".into(),
+        });
+        join.parts.contents = vec![(0, vec!["shipping".into()])];
+        let prepared = reg
+            .prepare_grow("topics/x", 0, &[join.clone()], &store)
+            .unwrap();
+        assert_eq!(
+            prepared.filled,
+            vec![1],
+            "the attachment is held identically; the content fills"
+        );
+        assert!(prepared.growth.is_none());
+        assert!(matches!(
+            part_of(&prepared.fills[0]),
+            crate::wal::ArtifactPart::Content { rank: 0, .. }
+        ));
+        for record in &prepared.fills {
+            assert_eq!(store.apply(record, 0), 0);
+        }
+        let again = reg.prepare_grow("topics/x", 0, &[join], &store).unwrap();
+        assert!(again.fills.is_empty() && again.growth.is_none());
+        assert_eq!(again.filled, vec![0]);
+
+        // A second rank on the same, unpacked artifact fills; a rank past the next is refused.
+        let mut next = crate::membership::IncomingGrowth::from_entities("l0".into(), []);
+        next.parts.contents = vec![(2, vec!["far".into()])];
+        let refused = reg
+            .prepare_grow("topics/x", 0, &[next], &store)
+            .unwrap_err();
+        assert!(
+            matches!(&refused, RegistryError::Content { detail, .. } if detail.contains("past the next one, 1")),
+            "{refused}"
+        );
+        let mut next = crate::membership::IncomingGrowth::from_entities("l0".into(), []);
+        next.parts.contents = vec![(1, vec!["near".into()])];
+        let prepared = reg.prepare_grow("topics/x", 0, &[next], &store).unwrap();
+        assert_eq!(prepared.filled, vec![1]);
+        for record in &prepared.fills {
+            assert_eq!(store.apply(record, 0), 0);
+        }
+        assert_eq!(store.get("topics/x", 0, 0).unwrap().contents.len(), 2);
+
+        // Once the artifact's content row is packed, a further rank cannot be written (T3).
+        store.mark_published("topics/x", 0, 1);
+        store.mark_content_published();
+        let mut third = crate::membership::IncomingGrowth::from_entities("l0".into(), []);
+        third.parts.contents = vec![(2, vec!["third".into()])];
+        let refused = reg
+            .prepare_grow("topics/x", 0, &[third], &store)
+            .unwrap_err();
+        assert!(
+            matches!(&refused, RegistryError::Content { detail, .. } if detail.contains("durable extent")),
+            "{refused}"
+        );
+
+        // An attachment the artifact holds differently is the conflict, by name.
+        publish(
+            &mut reg,
+            &mut store,
+            &mut alloc,
+            "clusters/a",
+            &[incoming("c1", &[4])],
+        )
+        .unwrap();
+        let mut moved = crate::membership::IncomingGrowth::from_entities("l0".into(), []);
+        moved.parts.attached_to = Some(crate::membership::IncomingAttachment {
+            layer: "clusters/a".into(),
+            level: 0,
+            key: "c1".into(),
+        });
+        let refused = reg
+            .prepare_grow("topics/x", 0, &[moved], &store)
+            .unwrap_err();
+        assert!(
+            matches!(&refused, RegistryError::PartConflict { part, .. } if part == "attached_to"),
+            "{refused:?}"
+        );
+        assert!(!refused.to_string().contains("c0"), "{refused}");
+    }
+
+    /// **A content fill on a layer whose content requires every member visible is refused**: a
+    /// fill carries no generating set, and the set page is track T2b's. The refusal is the one a
+    /// publication with an empty set draws.
+    #[test]
+    fn a_content_fill_needing_a_generating_set_is_refused_until_the_set_page_exists() {
+        let mut reg = LayerRegistry::new();
+        let mut store = ArtifactStore::new();
+        let mut alloc = Allocator::new(0);
+        let mut layer = described("topics/all");
+        layer.content.supplied[0].require_member_visibility =
+            tessera_types::layer::SuppliedRequirement::All;
+        register(&mut reg, &mut alloc, layer).unwrap();
+        let put = reg
+            .prepare_put("topics/all", 0, &[incoming("t0", &[1])], &store, &mut alloc)
+            .unwrap();
+        apply_put(&mut reg, &mut store, &put);
+        let mut join = crate::membership::IncomingGrowth::from_entities("t0".into(), []);
+        join.parts.contents = vec![(0, vec!["x".into()])];
+        let refused = reg
+            .prepare_grow("topics/all", 0, &[join], &store)
+            .unwrap_err();
+        assert!(
+            matches!(&refused, RegistryError::Content { detail, .. } if detail.contains("declares no generating set")),
+            "{refused}"
+        );
     }
 }

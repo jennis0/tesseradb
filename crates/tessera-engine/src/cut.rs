@@ -487,20 +487,21 @@ impl Lineage {
 /// larger than everything the cut itself now costs — and it is the same fact for the depth table
 /// and the child index the lineage carries beside them.
 ///
-/// Keyed on the level's version and nothing else: unlike a row-space projection this holds no view
-/// and no prefix, because a parent is an ordinal in the same level whichever view is served, and a
-/// fold renumbers rows rather than ordinals. The level's own version therefore carries the whole
-/// of the invalidation, and it reaches: the two writes that can move a parent pointer are a
-/// publication and the fold's retire, and both bump it.
+/// Keyed on the level's **lineage version** and nothing else (`ArtifactStore::lineage_version`;
+/// `ingest.md` §1.5, §4.1): unlike a row-space projection this holds no view and no prefix,
+/// because a parent is an ordinal in the same level whichever view is served, and a fold
+/// renumbers rows rather than ordinals. The three writes that can move a parent pointer are a
+/// publication, a fill of a parent list and the fold's retire, and each moves that counter.
 ///
-/// **A growth rebuilds this and cannot have moved an edge** — it unions members and touches
-/// nothing else about a record — so that is a rebuild the shared version buys and the lineage does
-/// not need. One version per level is one thing to keep in step; a second counter for structure
-/// alone would be two, and what argues for it is a cost rather than a correctness case.
+/// **A growth moves the level's record version and not its lineage version**, because it unions
+/// members and touches no edge, so a page of members joining leaves the held lineage in place.
+/// Under a paged load the pages arrive many times a minute, and a lineage rebuilt per page is
+/// about half a second each at rung 3's 30,954 nodes; the second counter is what keeps that off
+/// the request path.
 /// A level of a layer — what a lineage is held against.
 type LevelOf = (String, u32);
 
-/// A held lineage and the level version it was derived from.
+/// A held lineage and the lineage version it was derived from.
 type Held = (u64, std::sync::Arc<Lineage>);
 
 #[derive(Debug, Default)]
@@ -536,7 +537,7 @@ impl Lineages {
             .retain(|(held, _), _| held != layer);
     }
 
-    /// This level's lineage at `level_version`, building it if what is held is stale.
+    /// This level's lineage at `lineage_version`, building it if what is held is stale.
     ///
     /// **The version and the build must come from one reading of the store**, which is the
     /// caller's obligation rather than this module's: `cut` knows nothing about an artifact store
@@ -550,7 +551,7 @@ impl Lineages {
         &self,
         layer: &str,
         level: u32,
-        level_version: u64,
+        lineage_version: u64,
         build: F,
     ) -> std::sync::Arc<Lineage>
     where
@@ -563,7 +564,7 @@ impl Lineages {
             .unwrap_or_else(|e| e.into_inner())
             .get(&key)
         {
-            if *held == level_version {
+            if *held == lineage_version {
                 return std::sync::Arc::clone(lineage);
             }
         }
@@ -573,7 +574,7 @@ impl Lineages {
         self.cached
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .insert(key, (level_version, std::sync::Arc::clone(&lineage)));
+            .insert(key, (lineage_version, std::sync::Arc::clone(&lineage)));
         lineage
     }
 }

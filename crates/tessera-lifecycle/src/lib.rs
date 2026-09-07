@@ -42,9 +42,14 @@ pub use command::{
     SubmitError, UnallocatedRow,
 };
 pub use faults::WalMeter;
-pub use membership::{ArtifactRecord, ArtifactStore, IncomingArtifact, IncomingGrowth, Members};
+pub use membership::{
+    ArtifactRecord, ArtifactStore, FillOutcome, FixedParts, IncomingArtifact, IncomingGrowth,
+    Members,
+};
 pub use overlay::{owner_id_only, replay, Overlay};
-pub use registry::{no_pending, EdgeCheck, LayerRegistry, RegistryError, ResolvedLayers};
+pub use registry::{
+    no_pending, EdgeCheck, LayerRegistry, PreparedGrow, PreparedPut, RegistryError, ResolvedLayers,
+};
 pub use roster::{GroupFacts, RosterError, ViewRoster};
 pub use wal::{
     ChangeOp, ExecutorWal, MembershipGrowth, OverlaySnapshotEntry, PublishedArtifact, Wal,

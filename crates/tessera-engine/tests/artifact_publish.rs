@@ -174,20 +174,31 @@ fn a_second_batch_continues_the_numbering_rather_than_restarting_it() {
     );
     assert_eq!(engine.published_artifacts(), 2);
 
-    // And a key already in the level is refused, naming the reason: publication is append-only,
-    // and an edit is a delete plus a re-publish.
-    let refused = engine
-        .publish_artifacts(
+    // And a key already in the level mints nothing: the record is applied under the fill rule
+    // (`ingest.md` §1.5), so its members join the held artifact and the answer is the held
+    // artifact's own identifier.
+    let again = engine
+        .put_artifacts(
             "clusters/a".into(),
             0,
             vec![artifact("c0", fx.members(20..30))],
         )
-        .expect_err("the key is taken");
-    assert!(
-        refused.to_string().contains("append-only"),
-        "the refusal says why, since it is the caller's to fix: {refused}"
+        .expect("a held key is accepted under the fill rule");
+    assert_eq!(again.created, 0, "nothing was minted under a held key");
+    assert_eq!(
+        again.joined, 10,
+        "the members joined the artifact the key names"
     );
-    assert_eq!(engine.published_artifacts(), 2, "and nothing was published");
+    assert_eq!(
+        again.tessera_ids,
+        vec![first[0]],
+        "the identity did not move"
+    );
+    assert_eq!(
+        engine.published_artifacts(),
+        2,
+        "and no second artifact exists"
+    );
 }
 
 /// A member with no row would count towards the artifact's declared size — the denominator the

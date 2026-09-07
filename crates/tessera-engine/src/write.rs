@@ -1490,6 +1490,13 @@ mod ack {
             Published(())
         }
 
+        /// The same, for a `PUT` whose every key the level held with every part identical
+        /// (`ingest.md` §1.5): the preparation carries no record, so nothing moved. Takes the
+        /// prepared batch, on `nothing_to_apply`'s rule.
+        pub(super) fn nothing_prepared(_prepared: &tessera_lifecycle::PreparedPut) -> Self {
+            Published(())
+        }
+
         /// A registry or artifact-store record applied. **Neither structure is carried by a
         /// generation**, which is why this is honest without a swap: `/v1/meta`, every reachability
         /// check and every membership read them from `LiveState` behind its own lock, so the effect
@@ -1728,6 +1735,16 @@ impl LiveState {
         for (layer, level, len) in levels {
             artifacts.mark_published(&layer, level, len);
         }
+    }
+
+    /// Record that the content extent carrying every pending content fill is named by a durable
+    /// manifest — see [`tessera_lifecycle::membership::ArtifactStore::mark_content_published`].
+    ///
+    /// **Called from the overlay publication and not from the fold.** The publication writes the
+    /// content extent (`write_content_extent`) before its manifest; the fold carries content
+    /// extents forward unchanged, so a fill pending at a fold is still pending after it.
+    fn mark_content_published(&self) {
+        lock_recover(&self.artifacts).mark_content_published();
     }
 
     /// Release the log from every growth the fold's whole rewrite has just made durable — see
@@ -3283,20 +3300,33 @@ impl WritePath {
         self.live.registered_layers()
     }
 
-    /// Publish a batch of artifacts, returning their entities in the caller's submitted order.
+    /// Publish a batch of artifacts, returning their entities in the caller's submitted order and
+    /// the batch's counts (`Ack::ArtifactsPublished`).
     pub(crate) fn publish_artifacts(
         &self,
         layer: String,
         level: u32,
         artifacts: Vec<IncomingArtifact>,
-    ) -> Result<Vec<EntityId>, AcceptError> {
+    ) -> Result<PublishedBatch, AcceptError> {
         let receipt = self.handle()?.submit(Command::PublishArtifacts {
             layer,
             level,
             artifacts,
         })?;
         match receipt.outcome {
-            Ok(Ack::ArtifactsPublished { entities }) => Ok(entities),
+            Ok(Ack::ArtifactsPublished {
+                entities,
+                created,
+                without_content,
+                filled,
+                joined,
+            }) => Ok(PublishedBatch {
+                entities,
+                created,
+                without_content,
+                filled,
+                joined,
+            }),
             Ok(other) => {
                 unreachable!("a PublishArtifacts command answers ArtifactsPublished, not {other:?}")
             }
@@ -10143,10 +10173,12 @@ fn growth_receipt(
     layer: &str,
     level: u32,
     joins: &[tessera_lifecycle::IncomingGrowth],
+    filled: &[u64],
 ) -> Vec<tessera_lifecycle::MembershipGrown> {
     joins
         .iter()
-        .map(|join| {
+        .zip(filled)
+        .map(|(join, filled)| {
             let ordinal = registry
                 .resolve_growth_key(layer, level, &join.key, store)
                 .expect("prepare_grow resolved every key before the receipt was read");
@@ -10156,9 +10188,35 @@ fn growth_receipt(
             tessera_lifecycle::MembershipGrown {
                 entity: record.entity,
                 joined: join.joining.andnot_cardinality(&record.members),
+                filled: *filled,
             }
         })
         .collect()
+}
+
+/// The executor's refusal for a registry error: a differing fixed part is the caller's `409`
+/// (`ExecError::PartConflict`), everything else the `422` a refused layer operation has always
+/// been.
+fn refusal_of(e: tessera_lifecycle::RegistryError) -> ExecError {
+    match e {
+        tessera_lifecycle::RegistryError::PartConflict { .. } => ExecError::PartConflict {
+            detail: e.to_string(),
+        },
+        other => ExecError::LayerRefused {
+            detail: other.to_string(),
+        },
+    }
+}
+
+/// What `WritePath::publish_artifacts` answers: the entities in the caller's order and the
+/// batch's counts, as `Ack::ArtifactsPublished` carries them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PublishedBatch {
+    pub(crate) entities: Vec<EntityId>,
+    pub(crate) created: u64,
+    pub(crate) without_content: u64,
+    pub(crate) filled: u64,
+    pub(crate) joined: u64,
 }
 
 impl Executor {
@@ -11415,32 +11473,50 @@ impl Executor {
         let before = self
             .live
             .with_artifacts(|store| store.level_version(&layer, level));
+        // **Partitioned before any ordinal is claimed** (`ingest.md` §1.5, R3): a key the level
+        // holds is compared under the fill rule and resolves to its existing ordinal, and only the
+        // keys it does not hold are published. The answer is up to three kinds of record, in the
+        // order they are appended and applied.
         let prepared = self.live.with_publication_state(|registry, store, alloc| {
-            registry.prepare_publish(
-                &layer,
-                level,
-                &incoming,
-                store,
-                alloc,
-                &tessera_lifecycle::no_pending,
-            )
+            registry.prepare_put(&layer, level, &incoming, store, alloc)
         });
-        let record = match prepared {
-            Ok(record) => record,
+        let prepared = match prepared {
+            Ok(prepared) => prepared,
             Err(e) => {
-                respond.fail(ExecError::LayerRefused {
-                    detail: e.to_string(),
-                });
+                respond.fail(refusal_of(e));
                 return;
             }
         };
+        let records: Vec<&WalRecord> = prepared
+            .publish
+            .iter()
+            .chain(prepared.fills.iter())
+            .chain(prepared.growth.iter())
+            .collect();
+        if records.is_empty() {
+            // Every key was held and every part identical: nothing to append, on
+            // `commit_growth`'s no-op rule, and the acknowledgement is the held artifacts' own.
+            let published = Published::nothing_prepared(&prepared);
+            let ack = Ack::ArtifactsPublished {
+                entities: prepared.entities,
+                created: 0,
+                without_content: 0,
+                filled: 0,
+                joined: 0,
+            };
+            respond.ack(ack, &published);
+            return;
+        }
 
-        // The position the record will occupy — read **before** the append, because that is the
+        // The position each record will occupy — read **before** its append, because that is the
         // bound rotation must not reclaim past, and after the append it names the next record
-        // instead.
-        let position = self.wal.position();
-
-        if let Err(e) = self.wal.append(&record).and_then(|()| self.wal.fsync()) {
+        // instead. Several records, one fsync: the batch is the commit unit, as a window's is.
+        let mut positions = Vec::with_capacity(records.len());
+        let appended = records.iter().try_for_each(|record| {
+            positions.push(self.wal.position());
+            self.wal.append(record)
+        });
+        if let Err(e) = appended.and_then(|()| self.wal.fsync()) {
             // The ordinals and any extension block this preparation spent are not returned, on
             // `commit_registry`'s argument: a torn append that replays would otherwise land these
             // artifacts on entities a later batch also holds.
@@ -11453,13 +11529,13 @@ impl Executor {
             return;
         }
 
-        let WalRecord::ArtifactPublish { artifacts, .. } = &record else {
-            unreachable!("prepare_publish returns an ArtifactPublish");
-        };
-        let entities = artifacts.iter().map(|a| a.entity).collect();
         let undecodable = self.live.with_publication_state(|registry, store, _| {
-            registry.apply(&record);
-            store.apply(&record, position)
+            let mut undecodable = 0;
+            for (record, position) in records.iter().zip(&positions) {
+                registry.apply(record);
+                undecodable += store.apply(record, *position);
+            }
+            undecodable
         });
         if undecodable > 0 {
             // Unreachable in practice — these bytes were serialised from a live bitmap moments ago
@@ -11467,17 +11543,32 @@ impl Executor {
             // that is silently absent.
             tracing::error!(
                 count = undecodable,
-                "ALARM: an artifact membership did not survive its own round trip"
+                "ALARM: an artifact record did not survive its own round trip"
             );
         }
-        let ordinals: Vec<u32> = artifacts.iter().map(|a| a.ordinal).collect();
-        self.bring_artifacts_forward(
-            &layer,
-            level,
-            &crate::artifacts::LevelDelta::Published(&ordinals),
-            before,
-        );
-        let published = Published::registry_applied(&record);
+        // **Every held row form takes the same records the store just took, in the same order**
+        // (`Self::bring_artifacts_forward`): the publication's ordinals and the growth's joins are
+        // deltas the form can take; a fill drops the form (`Self::forget_filled_level`). Each
+        // record moved the level's version by one, so `before` walks with them.
+        for (at, record) in (before..).zip(records.iter()) {
+            match record {
+                WalRecord::ArtifactPublish { artifacts, .. } => {
+                    let ordinals: Vec<u32> = artifacts.iter().map(|a| a.ordinal).collect();
+                    self.bring_artifacts_forward(
+                        &layer,
+                        level,
+                        &crate::artifacts::LevelDelta::Published(&ordinals),
+                        at,
+                    );
+                }
+                WalRecord::ArtifactGrow { .. } => {
+                    self.bring_grown_forward(&layer, level, record, at);
+                }
+                WalRecord::ArtifactFill { .. } => self.forget_filled_level(&layer, level),
+                _ => unreachable!("prepare_put answers artifact records"),
+            }
+        }
+        let published = Published::registry_applied(records[0]);
         // A shape layer's held shapes were rebuilt inside the bring-forward above, at the version
         // this record moved the level to, and the new shapes resolved over every segment the
         // generation serves before the ack (`polygon-membership.md` §6.3: built at publication and
@@ -11486,7 +11577,30 @@ impl Executor {
         // `SEGMENTS-<n>.json` at the next flush on the deny lane's mechanism; the membership half
         // has nowhere to reach, which is what the rotation pin holds the log for.
         self.deny_dirty = true;
-        respond.ack(Ack::ArtifactsPublished { entities }, &published);
+        respond.ack(
+            Ack::ArtifactsPublished {
+                entities: prepared.entities,
+                created: prepared.created,
+                without_content: prepared.without_content,
+                filled: prepared.fills.len() as u64,
+                joined: prepared.joined,
+            },
+            &published,
+        );
+    }
+
+    /// **A fill drops the level's held row form**, and the next request projects the level again.
+    ///
+    /// A filled parent, attachment, shape or content changes what the form's records say about
+    /// an ordinal (its edges, its visibility term, its membership rule, its containment ranks)
+    /// without adding a row, and the form's amendment path takes rows. Amending the records in
+    /// place would also have to move the containment partition and the shapes beside them, each
+    /// keyed on the same version; dropping the form is the construction that is plainly correct,
+    /// and a fill is a kilobyte record against pages of members (`ingest.md` §4.1). The lineage
+    /// is keyed on the level's lineage version and is left alone: only a parent fill moves that,
+    /// and the store does so itself.
+    fn forget_filled_level(&self, layer: &str, level: u32) {
+        self.artifact_projections.forget_level(layer, level);
     }
 
     /// Grow the memberships of artifacts that already exist — `commit_artifacts`'s sequence
@@ -11534,48 +11648,61 @@ impl Executor {
         // record is applied: afterwards every joining member is a member, and how many were new
         // is gone.
         let prepared = self.live.with_publication_state(|registry, store, _| {
-            let record = registry.prepare_grow(&layer, level, &joins, store)?;
-            Ok::<_, tessera_lifecycle::RegistryError>((
-                record,
-                growth_receipt(registry, store, &layer, level, &joins),
-            ))
+            let prepared = registry.prepare_grow(&layer, level, &joins, store)?;
+            let grown = growth_receipt(registry, store, &layer, level, &joins, &prepared.filled);
+            Ok::<_, tessera_lifecycle::RegistryError>((prepared, grown))
         });
-        let (record, grown) = match prepared {
-            // Every key resolved and nothing was joining. No record is owed for a no-op, and
-            // appending an empty one would pin the log at a growth that changed nothing.
-            Ok((None, grown)) => {
-                respond.ack(
-                    Ack::MembershipsGrown { grown },
-                    &Published::nothing_to_apply(&joins),
-                );
-                return;
-            }
-            Ok((Some(record), grown)) => (record, grown),
+        let (prepared, grown) = match prepared {
+            Ok(prepared) => prepared,
             Err(e) => {
-                respond.fail(ExecError::LayerRefused {
-                    detail: e.to_string(),
-                });
+                respond.fail(refusal_of(e));
                 return;
             }
         };
+        // The fills first, then the growth: the order the records are applied in, and the order a
+        // held form takes them in below.
+        let records: Vec<&WalRecord> = prepared
+            .fills
+            .iter()
+            .chain(prepared.growth.iter())
+            .collect();
+        if records.is_empty() {
+            // Every key resolved, nothing was joining and every part was held identically. No
+            // record is owed for a no-op, and appending an empty one would pin the log at a
+            // growth that changed nothing.
+            respond.ack(
+                Ack::MembershipsGrown { grown },
+                &Published::nothing_to_apply(&joins),
+            );
+            return;
+        }
 
-        // The position the record will occupy, read **before** the append — `commit_artifacts`'s
+        // The position each record will occupy, read **before** its append — `commit_artifacts`'s
         // reason, and here it is the bound that holds the log until the fold rewrites the level
-        // whole, since a grown record sits below the high-water the tail pack starts from.
-        let position = self.wal.position();
-
-        if let Err(e) = self.wal.append(&record).and_then(|()| self.wal.fsync()) {
+        // whole, since a grown or filled record sits below the high-water the tail pack starts
+        // from. Several records, one fsync: the batch is the commit unit.
+        let mut positions = Vec::with_capacity(records.len());
+        let appended = records.iter().try_for_each(|record| {
+            positions.push(self.wal.position());
+            self.wal.append(record)
+        });
+        if let Err(e) = appended.and_then(|()| self.wal.fsync()) {
             tracing::error!(
                 error = %e,
-                "ALARM: a membership growth could not be made durable; the entities did not join"
+                "ALARM: a membership growth could not be made durable; the entities did not join \
+                 and no part was filled"
             );
             respond.fail(ExecError::Wal(e));
             return;
         }
 
-        let undecodable = self
-            .live
-            .with_publication_state(|_, store, _| store.apply(&record, position));
+        let undecodable = self.live.with_publication_state(|_, store, _| {
+            records
+                .iter()
+                .zip(&positions)
+                .map(|(record, position)| store.apply(record, *position))
+                .sum::<usize>()
+        });
         if undecodable > 0 {
             // Unreachable in practice — these bytes were serialised from a live bitmap moments ago
             // — and alarmed rather than asserted, because the alternative to noticing is an
@@ -11585,8 +11712,15 @@ impl Executor {
                 "ALARM: a membership growth did not survive its own round trip"
             );
         }
-        self.bring_grown_forward(&layer, level, &record, before);
-        let published = Published::registry_applied(&record);
+        for (at, record) in (before..).zip(records.iter()) {
+            match record {
+                WalRecord::ArtifactGrow { .. } => {
+                    self.bring_grown_forward(&layer, level, record, at)
+                }
+                _ => self.forget_filled_level(&layer, level),
+            }
+        }
+        let published = Published::registry_applied(records[0]);
         // A growth against an artifact **above** its level's high-water is carried by the next
         // tail pack like any other unpublished record; one below it waits for the fold, held in the
         // log by the pin. Marking the manifest dirty is what gets the first case published.
@@ -12323,8 +12457,10 @@ impl Executor {
 
         // **Only now**, with every partition's manifest durable, is the log free of these
         // memberships. Marking earlier would let rotation reclaim the records behind an extent a
-        // crash could still lose.
+        // crash could still lose. The content fills the same publication packed are released on
+        // the same argument.
         self.live.mark_memberships_published();
+        self.live.mark_content_published();
 
         self.deny_dirty = false;
         self.windows_since_publication = 0;
@@ -13417,7 +13553,7 @@ impl Executor {
                 self.lineages.get_or_build(
                     layer,
                     *level,
-                    store.level_version(layer, *level),
+                    store.lineage_version(layer, *level),
                     || {
                         crate::cut::Lineage::new(store.level(layer, *level).map(
                             |(ordinal, record)| {

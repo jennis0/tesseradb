@@ -3150,9 +3150,19 @@ fn grow_body_from_arrow(body: &[u8]) -> Result<GrowBody, ApiError> {
                      it grows"
                 )));
             }
+            // The Arrow form carries members and no fixed part (`ingest.md` §1.5): a part is
+            // object-shaped and travels on the JSON form.
             artifacts.push(GrowingArtifactBody {
                 key: keys.value(row).to_string(),
                 members: entries(row)?,
+                parent: Vec::new(),
+                attached_to: None,
+                content: Vec::new(),
+                bbox: None,
+                circle: None,
+                ellipse: None,
+                wkt: None,
+                space: None,
             });
         }
     }
@@ -3160,6 +3170,7 @@ fn grow_body_from_arrow(body: &[u8]) -> Result<GrowBody, ApiError> {
         level,
         addressing,
         idset,
+        default_space: None,
         artifacts,
     })
 }
@@ -3363,6 +3374,46 @@ struct IncomingArtifactBody {
     space: Option<String>,
 }
 
+/// The shape fields of one row, as both the publication's and the growth's row carry them, so
+/// [`canonical_row_shape`] reads one shape from either.
+struct RowShape<'a> {
+    bbox: &'a Option<Vec<f64>>,
+    circle: &'a Option<Vec<f64>>,
+    ellipse: &'a Option<Vec<f64>>,
+    wkt: &'a Option<String>,
+    space: &'a Option<String>,
+}
+
+impl IncomingArtifactBody {
+    fn row_shape(&self) -> RowShape<'_> {
+        RowShape {
+            bbox: &self.bbox,
+            circle: &self.circle,
+            ellipse: &self.ellipse,
+            wkt: &self.wkt,
+            space: &self.space,
+        }
+    }
+}
+
+impl GrowingArtifactBody {
+    fn row_shape(&self) -> RowShape<'_> {
+        RowShape {
+            bbox: &self.bbox,
+            circle: &self.circle,
+            ellipse: &self.ellipse,
+            wkt: &self.wkt,
+            space: &self.space,
+        }
+    }
+
+    /// Whether the row carries any shape field: a growth without one fills no shape, where a
+    /// publication's row on a shape layer is refused without one.
+    fn carries_shape(&self) -> bool {
+        self.bbox.is_some() || self.circle.is_some() || self.ellipse.is_some() || self.wkt.is_some()
+    }
+}
+
 /// One ranked content's authored shape — the text at the layer's shape slot — canonicalised for
 /// every view of its layer, by the route [`canonical_row_shape`] takes for a membership shape.
 ///
@@ -3439,7 +3490,7 @@ fn canonical_row_shape(
     state: &AppState,
     declaration: &tessera_types::layer::LayerDeclaration,
     index: usize,
-    artifact: &IncomingArtifactBody,
+    artifact: &RowShape<'_>,
     default_space: tessera_engine::shapes::ShapeSpace,
 ) -> Result<
     Option<(
@@ -3454,25 +3505,25 @@ fn canonical_row_shape(
     let count = |field: &str, n: usize, want: usize| {
         refuse(format!("`{field}` has {n} value(s); it is exactly {want}"))
     };
-    if let Some(v) = &artifact.bbox {
+    if let Some(v) = artifact.bbox {
         let [a, b, c, d] = v[..] else {
             return Err(count("bbox", v.len(), 4));
         };
         carried.push(("bbox", ShapeInput::Bbox([a, b, c, d])));
     }
-    if let Some(v) = &artifact.circle {
+    if let Some(v) = artifact.circle {
         let [a, b, c] = v[..] else {
             return Err(count("circle", v.len(), 3));
         };
         carried.push(("circle", ShapeInput::Circle([a, b, c])));
     }
-    if let Some(v) = &artifact.ellipse {
+    if let Some(v) = artifact.ellipse {
         let [a, b, c, d, e] = v[..] else {
             return Err(count("ellipse", v.len(), 5));
         };
         carried.push(("ellipse", ShapeInput::Ellipse([a, b, c, d, e])));
     }
-    if let Some(text) = &artifact.wkt {
+    if let Some(text) = artifact.wkt {
         carried.push(("wkt", ShapeInput::Wkt(text.clone())));
     }
     let Some(kind) = declaration.shape.map(|s| s.kind) else {
@@ -3584,6 +3635,13 @@ struct IncomingContentBody {
 /// a partial acceptance would leave the level's dense addressing describing artifacts that do not
 /// exist. Every check therefore runs before anything is allocated, and a refusal spends nothing.
 ///
+/// **A key the level holds is accepted under the fill rule** (`ingest.md` §1.5): the batch is
+/// partitioned on the executor before any ordinal is claimed, a held artifact's absent parts are
+/// filled and its identical parts accepted with no effect, a differing part is `409` naming the
+/// part, and its members join. A new artifact naming a held sibling as its parent resolves to the
+/// held ordinal. A layer declaring supplied content accepts an artifact without it and the answer
+/// counts them (`without_content`); such an artifact is withheld until a content is filled.
+///
 /// **Members are resolved to entities here, once, at the boundary** — the rule `/control/changes`
 /// follows and for the same reason. A `tessera_id` is a keyed permutation of entity space, so a
 /// membership stored under one would be reinterpreted by the next key rotation and would name a
@@ -3664,7 +3722,13 @@ async fn publish_artifacts(
     for (index, artifact) in artifacts.iter().enumerate() {
         match &declaration {
             Some(declaration) => {
-                match canonical_row_shape(&state, declaration, index, artifact, default_space)? {
+                match canonical_row_shape(
+                    &state,
+                    declaration,
+                    index,
+                    &artifact.row_shape(),
+                    default_space,
+                )? {
                     Some((canonical, report)) => {
                         shapes.push(Some(canonical));
                         shape_reports.push(serde_json::json!({
@@ -3802,13 +3866,14 @@ async fn publish_artifacts(
 
     // The **shared** blocking pool, on `register_layer`'s argument: a publication is not a deny,
     // and delaying one under ingest load is backpressure working.
-    let ids =
-        tokio::task::spawn_blocking(move || state.engine.publish_artifacts(name, level, incoming))
+    let batch =
+        tokio::task::spawn_blocking(move || state.engine.put_artifacts(name, level, incoming))
             .await
             .map_err(crate::error::map_join_error)?
             .map_err(crate::error::map_accept_error)?;
 
-    let published: Vec<serde_json::Value> = ids
+    let published: Vec<serde_json::Value> = batch
+        .tessera_ids
         .iter()
         .zip(keys)
         .map(|(id, key)| serde_json::json!({ "key": key, "tessera_id": id.raw().to_string() }))
@@ -3816,11 +3881,27 @@ async fn publish_artifacts(
     // **The same report the build prints, in the body** (`polygon-membership.md` §6.4): what
     // canonicalisation did to each shape, per view, and what its decomposition holds. Absent
     // where the layer declares no shape, so the enumerated case's response is unchanged.
-    let mut body = serde_json::json!({ "artifacts": published });
+    //
+    // **The counts are the batch's own** (`ingest.md` §1.5): how many artifacts it created, how
+    // many of those carry no content on a layer declaring some (R5), and what it filled and joined
+    // on the keys the level held. `201` where anything was created, `200` where every key was
+    // held, on the growth route's rule.
+    let mut body = serde_json::json!({
+        "artifacts": published,
+        "created": batch.created,
+        "without_content": batch.without_content,
+        "filled": batch.filled,
+        "joined": batch.joined,
+    });
     if !shape_reports.is_empty() {
         body["shapes"] = serde_json::Value::Array(shape_reports);
     }
-    Ok((StatusCode::CREATED, Json(body)))
+    let status = if batch.created > 0 {
+        StatusCode::CREATED
+    } else {
+        StatusCode::OK
+    };
+    Ok((status, Json(body)))
 }
 
 /// `PATCH /control/layers/{name}/artifacts`'s body: the publication's addressing, and per artifact
@@ -3839,9 +3920,16 @@ struct GrowBody {
     /// Required for `tessera` addressing and refused otherwise, on [`PublishBody::idset`]'s rule.
     #[serde(default)]
     idset: Option<u32>,
+    /// The space a row's shape and authored shape content are in where the row names none, on
+    /// [`PublishBody::default_space`]'s rule.
+    #[serde(default)]
+    default_space: Option<String>,
     artifacts: Vec<GrowingArtifactBody>,
 }
 
+/// One artifact of a `PATCH`: the key, the members joining, and the fixed parts the caller
+/// supplies (`ingest.md` §1.5). Every part is optional; a row carrying only a key names the
+/// artifact and changes nothing.
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct GrowingArtifactBody {
@@ -3850,31 +3938,73 @@ struct GrowingArtifactBody {
     key: String,
     /// The members joining, addressed as [`IncomingArtifactBody::members`] are. Empty names the
     /// artifact and adds nothing, which is accepted and answers `joined: 0`.
+    #[serde(default)]
     members: Vec<String>,
+    /// The parents, each by the parent's own key, on [`IncomingArtifactBody::parent`]'s terms.
+    /// Filled on an artifact that holds none; identical on one that holds them; `409` otherwise.
+    #[serde(default)]
+    parent: Vec<String>,
+    /// The attachment, on [`IncomingArtifactBody::attached_to`]'s terms and the same fill rule.
+    #[serde(default)]
+    attached_to: Option<AttachmentBody>,
+    /// Contents by rank: each fills the content at its rank, or is identical to it, or is `409`.
+    /// A content here carries values and no generating set (the set is a page at the rank, track
+    /// T2b), so on a layer whose content requires every member visible it is refused.
+    #[serde(default)]
+    content: Vec<ContentFillBody>,
+    /// The shape, in its layer's kind's field, on [`IncomingArtifactBody::bbox`]'s terms; absent
+    /// where the row fills no shape.
+    #[serde(default)]
+    bbox: Option<Vec<f64>>,
+    #[serde(default)]
+    circle: Option<Vec<f64>>,
+    #[serde(default)]
+    ellipse: Option<Vec<f64>>,
+    #[serde(default)]
+    wkt: Option<String>,
+    /// This row's own space, on [`IncomingArtifactBody::space`]'s terms.
+    #[serde(default)]
+    space: Option<String>,
+}
+
+/// One content a `PATCH` fills: its rank and its values, positional to the layer's declared
+/// kinds.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ContentFillBody {
+    rank: u16,
+    values: Vec<String>,
 }
 
 /// `PATCH /control/layers/{name}/artifacts` — grow the memberships of artifacts the level already
-/// holds (decision 0127).
+/// holds (decision 0127), and fill the fixed parts they lack (`ingest.md` §1.5).
 ///
-/// **The publication's resource and body cap, with the precondition inverted.** `PUT` publishes an
-/// artifact under a key the level does not hold and refuses one it does; `PATCH` adds members to a
-/// key the level holds and refuses one it does not. A publisher whose artifact is larger than the
-/// cap publishes it once, with its key, its content, its parents and as many members as fit, then
-/// grows it here in requests of at most the cap. Each request is a delta, so a membership has as
-/// many spellings as it needs, and the batch is still the commit unit: every key resolves and
-/// every member resolves or nothing is applied.
+/// **The publication's resource and body cap, addressed to keys the level holds.** `PATCH` names
+/// artifacts by the key each was published under and refuses one the level does not hold. A
+/// publisher whose artifact is larger than the cap publishes it once, with its key and as many
+/// members as fit, then grows it here in requests of at most the cap; a publisher enriching an
+/// artifact the points minted fills its parent, attachment, content or shape here. Each request
+/// is a delta, so a membership has as many spellings as it needs, and the batch is still the
+/// commit unit: every key resolves, every member resolves and every part compares, or nothing is
+/// applied.
+///
+/// **A fixed part follows the fill rule** (`ingest.md` §1.1): absent is filled, identical is
+/// accepted with no effect, different is `409` naming the part and never the held value. A
+/// membership is a set part and joins. A shape and an authored shape content are canonicalised
+/// as a publication's are, in the batch's `default_space` or the row's own.
 ///
 /// Members are resolved as a publication's are ([`resolve_member_addresses`]), and the request
-/// reaches `Engine::grow_memberships` carrying keys and entities and nothing else: no ordinal is
-/// claimed, no content or lineage travels ([`GrowBody`] refuses the fields), and an unknown key is
-/// refused rather than minted. The two member refusals and the suppressed-artifact rule are the
-/// engine's (`artifacts-from-points.md` §6.1). A growth discloses what a publication discloses.
+/// reaches `Engine::grow_memberships` carrying keys, entities and resolved parts: no ordinal is
+/// claimed, and an unknown key is refused rather than minted. The two member refusals and the
+/// suppressed-artifact rule are the engine's (`artifacts-from-points.md` §6.1). A growth discloses
+/// what a publication discloses.
 ///
-/// The response carries, per artifact, its `tessera_id` and how many of the joining members were
-/// not already in the membership — **never an ordinal and never a membership size** (C8). `joined`
-/// does tell the caller how many of the members they sent were already members, a lower bound on
-/// the size the publication route never states; it is accepted as an operator-plane figure, the
-/// operator having written the membership it bounds. `200` rather than `201`: nothing was created.
+/// The response carries, per artifact, its `tessera_id`, how many of the joining members were
+/// not already in the membership, and how many parts were filled — **never an ordinal and never
+/// a membership size** (C8). `joined` does tell the caller how many of the members they sent
+/// were already members, a lower bound on the size the publication route never states; it is
+/// accepted as an operator-plane figure, the operator having written the membership it bounds.
+/// `200` rather than `201`: nothing was created.
 async fn grow_memberships(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(name): axum::extract::Path<String>,
@@ -3892,7 +4022,8 @@ async fn grow_memberships(
         level,
         addressing,
         idset,
-        artifacts,
+        default_space,
+        mut artifacts,
     } = match body_encoding(&headers)? {
         BodyEncoding::Json => artifact_json(&body, "growth")?,
         BodyEncoding::Arrow => grow_body_from_arrow(&body)?,
@@ -3902,6 +4033,81 @@ async fn grow_memberships(
         return Err(ApiError::Contract(
             "a growth names at least one artifact".to_string(),
         ));
+    }
+
+    // **The shapes and the authored shape contents, canonicalised before anything is resolved**,
+    // on the publication's rule and through the publication's own reader, so a shape filled here
+    // is byte for byte the shape a publication would have stored. A row carrying no shape field
+    // fills no shape; one carrying a shape on a layer that declares none is refused as a
+    // publication's row is.
+    let default_space = match default_space.as_deref() {
+        None => tessera_engine::shapes::ShapeSpace::View,
+        Some(word) => tessera_engine::shapes::ShapeSpace::parse(word)
+            .map_err(|e| ApiError::Contract(format!("`default_space`: {e}")))?,
+    };
+    let declaration = state
+        .engine
+        .registered_layer(&name)
+        .map(|registered| registered.declaration);
+    let mut shapes: Vec<Option<tessera_lifecycle::membership::ArtifactShapes>> =
+        Vec::with_capacity(artifacts.len());
+    let mut shape_reports: Vec<serde_json::Value> = Vec::new();
+    for (index, artifact) in artifacts.iter().enumerate() {
+        match &declaration {
+            Some(declaration) if artifact.carries_shape() => {
+                match canonical_row_shape(
+                    &state,
+                    declaration,
+                    index,
+                    &artifact.row_shape(),
+                    default_space,
+                )? {
+                    Some((canonical, report)) => {
+                        shapes.push(Some(canonical));
+                        shape_reports.push(serde_json::json!({
+                            "key": artifact.key,
+                            "views": report,
+                        }));
+                    }
+                    None => shapes.push(None),
+                }
+            }
+            _ => shapes.push(None),
+        }
+    }
+    if let Some((slot, kind)) = declaration.as_ref().and_then(|d| d.authored_shape()) {
+        let declaration = declaration
+            .as_ref()
+            .expect("an authored slot names a declaration");
+        for (index, artifact) in artifacts.iter_mut().enumerate() {
+            let space = match artifact.space.as_deref() {
+                None => default_space,
+                Some(word) => tessera_engine::shapes::ShapeSpace::parse(word)
+                    .map_err(|e| ApiError::Contract(format!("artifact {index}: `space`: {e}")))?,
+            };
+            for content in artifact.content.iter_mut() {
+                let rank = content.rank as usize;
+                let Some(text) = content.values.get_mut(slot) else {
+                    // Short of a value: the engine refuses the row below, naming the count.
+                    continue;
+                };
+                let (canonical, report) = canonical_authored_content(
+                    &state,
+                    declaration,
+                    index,
+                    rank,
+                    kind,
+                    space,
+                    text,
+                )?;
+                shape_reports.push(serde_json::json!({
+                    "key": artifact.key,
+                    "content": rank,
+                    "views": report,
+                }));
+                *text = canonical.content_text();
+            }
+        }
     }
 
     let widths: Vec<usize> = artifacts.iter().map(|a| a.members.len()).collect();
@@ -3926,10 +4132,28 @@ async fn grow_memberships(
     let mut entities = resolved.into_iter();
     let joins: Vec<tessera_lifecycle::IncomingGrowth> = artifacts
         .into_iter()
-        .map(|artifact| {
+        .zip(shapes)
+        .map(|(artifact, shape)| {
             let members: Vec<tessera_types::EntityId> =
                 entities.by_ref().take(artifact.members.len()).collect();
-            tessera_lifecycle::IncomingGrowth::from_entities(artifact.key, members)
+            let mut join = tessera_lifecycle::IncomingGrowth::from_entities(artifact.key, members);
+            join.parts = tessera_lifecycle::FixedParts {
+                parent_keys: artifact.parent,
+                attached_to: artifact.attached_to.map(|a| {
+                    tessera_lifecycle::membership::IncomingAttachment {
+                        layer: a.layer,
+                        level: a.level,
+                        key: a.key,
+                    }
+                }),
+                contents: artifact
+                    .content
+                    .into_iter()
+                    .map(|c| (c.rank, c.values))
+                    .collect(),
+                shape,
+            };
+            join
         })
         .collect();
     let keys: Vec<String> = joins.iter().map(|j| j.key.clone()).collect();
@@ -3950,15 +4174,16 @@ async fn grow_memberships(
                 "key": key,
                 "tessera_id": receipt.tessera_id.raw().to_string(),
                 "joined": receipt.joined,
+                "filled": receipt.filled,
             })
         })
         .collect();
-    Ok((
-        StatusCode::OK,
-        Json(serde_json::json!({ "artifacts": artifacts })),
-    ))
+    let mut body = serde_json::json!({ "artifacts": artifacts });
+    if !shape_reports.is_empty() {
+        body["shapes"] = serde_json::Value::Array(shape_reports);
+    }
+    Ok((StatusCode::OK, Json(body)))
 }
-
 /// `POST /control/faults/arm` — the correctness suite's arming surface (decision 0071;
 /// correctness-suite §12.3). **The faults build only**; a default build does not mount the route.
 ///

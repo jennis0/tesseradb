@@ -396,13 +396,13 @@ pub fn replay<'a>(
             | WalRecord::LayerDrop { .. }
             | WalRecord::ArtifactPublish { .. }
             | WalRecord::ArtifactGrow { .. }
+            | WalRecord::ArtifactFill { .. }
             | WalRecord::ViewCreate { .. } => {}
-            // The ingest design's records (`ingest.md` §7.1) are not applied by anything yet, and
-            // a replay that meets one refuses to open before reaching here
+            // The ingest design's remaining records (`ingest.md` §7.1) are not applied by anything
+            // yet, and a replay that meets one refuses to open before reaching here
             // (`crate::wal::unbuilt_track`). None of them names the deny lane: a values row fills
-            // cells, a fill names an artifact's part, and a declaration names no entity.
-            WalRecord::ArtifactFill { .. }
-            | WalRecord::ValuesBatch { .. }
+            // cells, and a declaration names no entity.
+            WalRecord::ValuesBatch { .. }
             | WalRecord::AttributeDeclare { .. }
             | WalRecord::VocabularyDeclare { .. }
             | WalRecord::ViewGroupCreate { .. }

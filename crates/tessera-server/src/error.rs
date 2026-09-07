@@ -562,6 +562,11 @@ pub fn map_accept_error(e: tessera_engine::AcceptError) -> ApiError {
         // WAL append, so the answer is a clean 422 with no effect, and a 422 the caller cannot read
         // is one they cannot fix.
         AcceptError::Exec(ExecError::LayerRefused { detail }) => ApiError::Contract(detail.clone()),
+        // **A fixed part held differently is the caller's 409** (`ingest.md` §1.1, §4.3): the
+        // request is wrong and the timing is not, so a retry with the same bytes answers the same.
+        // The detail names the part and never the held value. Decided before the append, so
+        // nothing is in force.
+        AcceptError::Exec(ExecError::PartConflict { detail }) => ApiError::Conflict(detail.clone()),
         // **The roster's three answers, told apart because the caller's remedy differs**
         // (`views.md` §3.2). A refused record is one to correct; a taken or burnt key is one to
         // replace, a roster record being immutable; and an unknown group or key is the same 404
@@ -768,7 +773,7 @@ fn exec_failure_may_be_in_force(
         // Not reachable from a `/control/changes` item — a layer verb is a different endpoint —
         // and false is the honest answer anyway: a registry refusal happens before the append, so
         // nothing is in force.
-        ExecError::LayerRefused { .. } => false,
+        ExecError::LayerRefused { .. } | ExecError::PartConflict { .. } => false,
         // Not reachable from a `/control/changes` item either — a view verb is its own endpoint —
         // and false is honest for the same reason: every one of the three is decided before the
         // append. The deletions `delete_dangling` submits are ordinary `/control/changes` items

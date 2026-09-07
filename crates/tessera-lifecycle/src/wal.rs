@@ -455,10 +455,13 @@ pub enum WalRecord {
     /// A fixed part filled on an artifact that exists (`ingest.md` §1.5): a parent list, an
     /// attachment, a shape, or one content's values. Its own record beside the publication rather
     /// than a rewrite of it, so the log says what happened in the order it happened, and a repeat
-    /// is compared digest to digest against the stored part.
+    /// is compared digest to digest against the stored part. Applied by
+    /// `ArtifactStore::fill`, the one path the live write and replay share.
     ///
-    /// Not built yet: nothing writes this record, and a replay that meets one refuses to open
-    /// naming track T2a ([`unbuilt_track`]) rather than applying it as nothing.
+    /// **Pinned in the log as a growth is.** A filled record sits below its level's high-water,
+    /// which the tail pack never rewrites, so the fold's whole rewrite is what carries the part
+    /// into an extent and releases the record; a content's values wait for the content extent
+    /// that carries them (`ArtifactStore::oldest_wal_pos`).
     ArtifactFill {
         layer: String,
         level: u32,
@@ -567,7 +570,6 @@ pub fn unbuilt_track(record: &WalRecord) -> Option<(&'static str, &'static str)>
         {
             Some(("ArtifactPublish naming a view", "T2c"))
         }
-        WalRecord::ArtifactFill { .. } => Some(("ArtifactFill", "T2a")),
         WalRecord::ValuesBatch { .. } => Some(("ValuesBatch", "T3")),
         WalRecord::AttributeDeclare { .. } => Some(("AttributeDeclare", "T4")),
         WalRecord::VocabularyDeclare { .. } => Some(("VocabularyDeclare", "T5")),
@@ -584,7 +586,8 @@ pub fn unbuilt_track(record: &WalRecord) -> Option<(&'static str, &'static str)>
         | WalRecord::ViewDrop { .. }
         | WalRecord::LayerDrop { .. }
         | WalRecord::ArtifactPublish { .. }
-        | WalRecord::ArtifactGrow { .. } => None,
+        | WalRecord::ArtifactGrow { .. }
+        | WalRecord::ArtifactFill { .. } => None,
     }
 }
 
@@ -630,7 +633,7 @@ pub enum GrownSet {
 
 /// The fixed part an [`WalRecord::ArtifactFill`] supplies (`ingest.md` §1.5). Each is filled once;
 /// a later record carrying the part is compared to the stored one and accepted only where
-/// identical, by the stored digest for a content or a shape.
+/// identical, by the stored digest for a content or a shape (`ArtifactStore::fill`).
 ///
 /// On-disk format: variants are positional under postcard — see [`WalRecord`]'s note.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -845,7 +848,7 @@ pub struct PublishedContent {
     /// publication and at a fill so that a later record carrying the part is compared digest to
     /// digest (`ingest.md` §1.5). Stored rather than recomputed because the extent a repack
     /// writes holds the digest and not the values (decision 0077), and the comparison has to
-    /// survive the repack. Read by T2a.
+    /// survive the repack (`ArtifactStore::fill`).
     pub digest: [u8; 32],
     /// The entity-space generating set, CRoaring portable. Empty means corpus-independent, which is
     /// a declaration rather than an omission — a set supplied where none is tested is refused at
@@ -2551,13 +2554,25 @@ mod tests {
                 }),
             },
         ];
-        let tracks: Vec<&str> = records
+        // The four fills are track T2a's and are applied (`ArtifactStore::fill`); the rest wait.
+        let tracks: Vec<Option<&str>> = records
             .iter()
-            .map(|record| unbuilt_track(record).expect("every record here waits on a track").1)
+            .map(|record| unbuilt_track(record).map(|(_, track)| track))
             .collect();
         assert_eq!(
             tracks,
-            ["T2b", "T2a", "T2a", "T2a", "T2a", "T3", "T4", "T5", "T6", "T6"]
+            [
+                Some("T2b"),
+                None,
+                None,
+                None,
+                None,
+                Some("T3"),
+                Some("T4"),
+                Some("T5"),
+                Some("T6"),
+                Some("T6")
+            ]
         );
 
         let (mut wal, _) = Wal::open(&path).unwrap();
@@ -2571,12 +2586,9 @@ mod tests {
         assert_eq!(replayed, records);
 
         // The membership route's own growth is what every reader applies today.
-        let membership = crate::membership::growth_record(
-            "topics/openalex",
-            0,
-            [(3u32, &Bitmap::of(&[1, 2]))],
-        )
-        .unwrap();
+        let membership =
+            crate::membership::growth_record("topics/openalex", 0, [(3u32, &Bitmap::of(&[1, 2]))])
+                .unwrap();
         assert_eq!(unbuilt_track(&membership), None);
     }
 

@@ -641,17 +641,19 @@ fn two_publications_of_content_both_survive_the_loss_of_the_whole_log() {
     );
 }
 
-/// The four ways a batch can disagree with what its layer declared, each refused at publication —
-/// and each refused by **its own** rule, which is why the assertions read the message rather than
-/// the `is_err()` beneath it.
+/// The three ways a batch's content can disagree with what its layer declared, each refused at
+/// publication and each by **its own** rule, which is why the assertions read the message rather
+/// than the `is_err()` beneath it; and the one that is no longer a refusal, an artifact without
+/// content on a layer that declares some, which is accepted, counted and withheld (`ingest.md`
+/// §1.5, R5).
 ///
-/// Three of the four go to `topics/a`, a layer no successful publication here exercises. A bare
+/// Two of the three go to `topics/a`, a layer no successful publication here exercises. A bare
 /// `is_err()` on those is satisfied by any refusal at all — a layer that failed to register usably
-/// would pass three of them, and the closing emptiness check is consistent with that too.
+/// would pass both of them, and the closing emptiness check is consistent with that too.
 ///
-/// **Mutations this kills:** a rule silently subsumed by an earlier check, or two of the four
+/// **Mutations this kills:** a rule silently subsumed by an earlier check, or two of the three
 /// collapsed onto one refusal path — any change that leaves the batch refused for the wrong reason.
-/// The fourth case is the one to watch: an empty generating set on corpus-derived content is
+/// The last case is the one to watch: an empty generating set on corpus-derived content is
 /// satisfied by every mask, and publication is the only door such a set could enter by (the fold
 /// withdraws a content whole rather than emptying its set, decision 0135), so the refusal's
 /// identity is pinned here and nowhere else.
@@ -691,16 +693,27 @@ fn content_that_disagrees_with_the_declaration_is_refused() {
          {undeclared}"
     );
 
-    // No content on a layer that declares some.
-    let missing = refusal(
-        "topics/a",
-        "a declared kind left unsupplied",
-        IncomingArtifact::from_entities(Some("t1".into()), fx.members(0..10)),
+    // No content on a layer that declares some: accepted and counted (`ingest.md` §1.5, R5), and
+    // withheld from every viewer until a content is filled, which a viewer cannot tell from
+    // content withheld by containment.
+    let missing = engine
+        .put_artifacts(
+            "topics/a".into(),
+            0,
+            vec![IncomingArtifact::from_entities(
+                Some("t1".into()),
+                fx.members(0..10),
+            )],
+        )
+        .expect("an artifact without its declared content is published and counted");
+    assert_eq!(missing.created, 1);
+    assert_eq!(
+        missing.without_content, 1,
+        "the publication reports the artifact it accepted without content"
     );
     assert!(
-        missing.contains("carries no supplied content, and this layer declares 1 kind(s)"),
-        "an artifact short of a kind its layer declares must be refused by that rule, naming the \
-         count it fell short of: {missing}"
+        artifacts_of(&engine, &full_coverage_credential()).is_empty(),
+        "an artifact without the content its layer declares is served to nobody"
     );
 
     // A content supplying the wrong number of values.
@@ -739,17 +752,17 @@ fn content_that_disagrees_with_the_declaration_is_refused() {
          {vacuous}"
     );
 
-    // Four rules, four refusals: a change collapsing any two onto one path moves this.
-    let distinct: std::collections::BTreeSet<&String> = [&undeclared, &missing, &arity, &vacuous]
-        .into_iter()
-        .collect();
+    // Three rules, three refusals: a change collapsing any two onto one path moves this.
+    let distinct: std::collections::BTreeSet<&String> =
+        [&undeclared, &arity, &vacuous].into_iter().collect();
     assert_eq!(
         distinct.len(),
-        4,
+        3,
         "each rule refuses in its own words, so an operator can tell which one they broke"
     );
 
-    // Every batch was refused whole, so nothing landed under any of those keys.
+    // Every refused batch was refused whole, and the accepted one is withheld, so nothing is
+    // served under any of those keys.
     assert!(artifacts_of(&engine, &full_coverage_credential()).is_empty());
 }
 

@@ -7,8 +7,9 @@
 //! member each refuse the whole batch with nothing applied; a suppressed member joins and stays
 //! outside every mask; a suppressed artifact grows and stays suppressed; the growth comes back from
 //! a restart and survives a fold; the same under `tessera` addressing, with a stale idset refused;
-//! and the body takes keys and members and nothing else. The response carries a `tessera_id` and
-//! the count that joined, and never an ordinal or a membership size (C8).
+//! and the body takes keys, members and the fixed parts and nothing else (the fills are
+//! `artifact_fill.rs`'s subject). The response carries a `tessera_id` and the count that joined,
+//! and never an ordinal or a membership size (C8).
 
 mod common;
 
@@ -613,17 +614,20 @@ async fn tessera_addressing_grows_under_the_current_idset_and_refuses_a_stale_on
     assert_eq!(status, 422, "{body}");
 }
 
-/// The body is keys and members. Content, lineage, a shape, an attachment and a missing key are
-/// each refused at decoding, so a growth cannot carry what a publication carries.
+/// The body is keys, members and the fixed parts (`ingest.md` §1.5). A field outside that set, a
+/// missing key and a batch naming nothing are each refused at decoding; a part this layer cannot
+/// hold — a shape on a layer declaring none, content on a layer declaring none, a parent on a flat
+/// layer, an attachment into an undeclared layer — is refused by the engine, the whole batch
+/// without effect. The fills themselves are `artifact_fill.rs`'s subject.
 #[tokio::test]
-async fn a_growth_body_carries_keys_and_members_and_nothing_else() {
+async fn a_growth_body_carries_keys_members_and_the_fixed_parts_and_nothing_else() {
     let tmp = TempDir::new().unwrap();
     let server = serve(&tmp).await;
     register(&server).await;
     publish(&server, "a", members(0..10)).await;
 
     for extra in [
-        json!({ "content": [{ "values": ["x"] }] }),
+        json!({ "content": [{ "rank": 0, "values": ["x"] }] }),
         json!({ "parent": ["a"] }),
         json!({ "bbox": [0.0, 0.0, 1.0, 1.0] }),
         json!({ "attached_to": { "layer": LAYER, "key": "a" } }),
@@ -635,20 +639,16 @@ async fn a_growth_body_carries_keys_and_members_and_nothing_else() {
         let (status, body) = grow(&server, json!([artifact])).await;
         assert_eq!(status, 422, "{extra}: {body}");
     }
+    let (status, body) = grow(
+        &server,
+        json!([{ "key": "a", "members": members(10..20), "leaving": [] }]),
+    )
+    .await;
+    assert_eq!(status, 422, "a field outside the body: {body}");
     let (status, body) = grow(&server, json!([{ "members": members(10..20) }])).await;
     assert_eq!(status, 422, "a growth without a key: {body}");
     let (status, body) = grow(&server, json!([])).await;
     assert_eq!(status, 422, "a growth naming nothing: {body}");
-    let (status, body) = grow_raw(
-        &server,
-        json!({
-            "addressing": "external",
-            "default_space": "wgs84",
-            "artifacts": [{ "key": "a", "members": members(10..20) }]
-        }),
-    )
-    .await;
-    assert_eq!(status, 422, "a batch field a growth has no use for: {body}");
 
     assert_eq!(
         count(&server, &["0"]).await,

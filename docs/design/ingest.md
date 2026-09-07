@@ -168,7 +168,7 @@ in the next, and only viewers wait for the tick.
 | **Attribute values for an existing entity** ⊘ | id, attribute columns, layer columns; no coordinates; the view header where a group-scoped column is carried | `POST /control/values` (spec §1.4) | the commit window's fsync | `max_batch_rows`; `max_batch_bytes` | batch id + hash; the fill rule per cell |
 | **Membership** | the point's layer column, or a page of `members` per artifact | ingest, values, or `PATCH /control/layers/{name}/artifacts` | on the ingest and values routes, the window's fsync (artifacts-from-points §6.2); on `PATCH`, its own append and fsync on the executor | `max_members_per_request` ⊘; `max_body_bytes` | set join: a retry adds nothing (`joined: 0`) |
 | **Generating set of content *k*** ⊘ | a page of members at `rank: k`, `joining` and `leaving`; `leaving` resolves a deleted item, which is its purpose (spec §1.5) | the same `PATCH` | its own append and fsync | as membership; the only route by which a set changes | set join and leave; a retry is a no-op |
-| **Artifact record** | key, and on a group-scoped layer `view` ⊘; `parent`, `attached_to`, shape, content values; a first page of members and generating sets | `PUT /control/layers/{name}/artifacts` creates; `PATCH` fills ⊘ | its own append and fsync; ordinals claimed contiguously | `max_artifacts_per_request` ⊘; `max_body_bytes` | a held key with identical parts is accepted with no effect ⊘ (spec §1.5) |
+| **Artifact record** | key, and on a group-scoped layer `view` ⊘; `parent`, `attached_to`, shape, content values; a first page of members and generating sets | `PUT /control/layers/{name}/artifacts` creates; `PATCH` fills | its own append and fsync; ordinals claimed contiguously | `max_artifacts_per_request` ⊘; `max_body_bytes` | a held key with identical parts is accepted with no effect (spec §1.5) |
 | **Membership by exclusion** ⊘ | `excluding`: the entities the membership leaves out, on the artifact record | `PUT` or `PATCH` | its own append and fsync; the complement is taken on the executor | one request, admissible only while the view's entity count is under `max_excluded_per_request` (spec §2.3) | a second `excluding` on a held key is `409` |
 | **Layer** | the `[[layer]]` block minus acquisition keys | `PUT /control/layers` | its own append and fsync | one request; a declaration is kilobytes | identical redeclaration answers the existing identity ⊘ |
 | **View of a group** | the roster record | `PUT /control/views/{group}/{key}` | its own append and fsync | one request | as above |
@@ -240,15 +240,14 @@ rank)`; annotation-write-cycle §6.1), each carrying its stored cardinality (spe
 parts** are derived per viewer and are never sent.
 
 `PUT` creates the record with whatever parts the caller has, including a first page of each set.
-`PATCH` ⊘ fills a fixed part that is absent and applies set deltas: per artifact `{key, members?,
-leaving?, rank?, parent?, attached_to?, content?, shape?}`. Today `PATCH` carries members and
-nothing else (decision 0127; `GrowBody` refuses every other field). The extension is what
-decision 0091 requires for enrichment: a build's `artifacts` table is enrichment over artifacts the
-points minted (artifacts-from-points §3), and at ingest an artifact minted from a column can
-receive no name, parent or content, because `PUT` refuses a held key and `PATCH` carries no part.
+`PATCH` fills a fixed part that is absent (built 2026-09-07, below) and applies set deltas ⊘: per
+artifact `{key, members?, leaving?, rank?, parent?, attached_to?, content?, shape?}`. The
+extension is what decision 0091 requires for enrichment: a build's `artifacts` table is
+enrichment over artifacts the points minted (artifacts-from-points §3), and at ingest an
+artifact minted from a column receives its name, parent or content by `PATCH`.
 
 **How a fill is recorded and compared.** A fill of a fixed part is its own WAL record,
-`ArtifactFill{layer, level, ordinal, part}` ⊘, applied through its own store path
+`ArtifactFill{layer, level, ordinal, part}`, applied through its own store path
 (`ArtifactStore::fill`), beside `ArtifactPublish` and `ArtifactGrow` and never by rewriting the
 publication record. The comparison that makes a repeat safe reads a **digest stored in the
 record**: each content value and each shape is stored with its digest at publish or fill, and a
@@ -280,6 +279,29 @@ Three consequences of the parts model, each a change to a rule that exists:
   An artifact without its declared content is served without content, indistinguishable from one
   whose content is withheld, which discloses nothing; it is a fidelity signal, and the `201` carries
   `without_content: n` so a pipeline sees it.
+
+**Built 2026-09-07 (T2a).** `ArtifactFill` is written and applied through `ArtifactStore::fill`,
+the one method the live path and replay share; a content's values and a shape are compared by
+their stored digest, parents and an attachment by their resolved references, and the log's copy
+of a shape is rebuilt through the shape constructor and its digest compared before it is trusted.
+`PATCH` carries `parent`, `attached_to`, `content` at a rank and the shape fields; `PUT`
+partitions its batch before any ordinal is claimed, fills and joins on a held key, and answers
+`created`, `without_content`, `filled` and `joined` beside the identifiers, `201` where anything
+was created and `200` where every key was held. The cycle walk runs over the layer by
+`(level, ordinal)` with the batch's edges, and the served lineage is keyed on the level's own
+lineage version, which a growth does not move. A layer declaring supplied content publishes an
+artifact without it and the count is reported; the artifact is withheld until a content is
+filled. Two things wait on later tracks. A content fill carries values and no generating set,
+since the set is a page at the rank (T2b), so on a layer whose content requires every member
+visible a fill is refused in the words a publication with an empty set is; the set arrives with
+the content on the `PUT` until then. And a content filled at a further rank on an artifact whose
+content row is already in a durable extent is refused, because the record blob holds one row per
+entity until the per-column read (§1.4, T3); a first content on an artifact that has none is
+written beside the level's tail whichever side of the high-water the artifact sits. A fill pins
+the log as a growth does, until the fold rewrites the level; a content's values pin it until the
+content extent naming them is durable, since the fold carries content extents forward. A fill
+drops the level's held row form and the next request projects the level again; the delta
+amendment a growth takes is not built for fills.
 
 **Deletion, and the repair the caller makes.** Under decision 0135's amendment there is one
 behaviour when a member of a generating set is deleted, and the set page is the caller's only
@@ -778,7 +800,7 @@ recreated, so that every later track lands against one format and none waits on 
 |---|---|---|
 | **T0 formats** | `WAL_VERSION` bump; `bundle_format` 7; the record variants and the stored digest and cardinality fields, unread until their tracks; artifacts recreated | — |
 | **T1 caps and wire** | JSON on every route with Arrow by content type; the `limits` block with record counts; `publish_max_body_bytes`; the `PUT` row corrected; the driver reads every limit it uses from the block | T0 |
-| **T2a artifact record and fill** | `ArtifactFill` and `ArtifactStore::fill`; the digest comparison; the partitioned `PUT`; late lineage with the layer-scoped walk and the second lineage version; `without_content` | T1 |
+| **T2a artifact record and fill** (built 2026-09-07) | `ArtifactFill` and `ArtifactStore::fill`; the digest comparison; the partitioned `PUT`; late lineage with the layer-scoped walk and the second lineage version; `without_content` | T1 |
 | **T2b generating-set pages** | `rank`, `joining` and `leaving` on `PATCH`; the stored cardinality moved by the page and published only with its operator; the whole re-derivation of an operator whose delta holds a leave; the empty-set floor and the withdrawal it reports; the tick's row-form publication for memberships and generating sets with the shared scratch; the per-record pin; permits and pool resolution for pages; the driver publishes over-cap artifacts and sets as pages and `declined` is empty on every rung | T2a |
 | **T2c exclusion and view identity** | `excluding` under `max_excluded_per_request`; `view` in the identity on a group-scoped layer | T2a |
 | **T4 attributes** | `PUT /control/attributes`; the manifest home; the schema-answered absence for a `render` column; the tail append and padding for a mid-ingest declaration; the fold's materialisation | T1 |
