@@ -2690,8 +2690,10 @@ impl WritePath {
                         minter
                             .seed_value(&value.key, value.code)
                             .map_err(|e| EngineError::Malformed(e.to_string()))?;
+                        // Replayed in log order, so the last title a page supplied is the one
+                        // the minter ends holding (decision 0136's amendment).
                         if let Some(title) = &value.title {
-                            minter.fill_title(&value.key, title.clone());
+                            minter.set_title(&value.key, title.clone());
                         }
                     }
                     for &code in &compiled.reserved {
@@ -3697,17 +3699,22 @@ impl WritePath {
         }
     }
 
-    /// Declare a vocabulary. Answers `(existing, added)`: whether a vocabulary of that name
-    /// already carried this identity, and how many of the request's values were novel.
+    /// Declare a vocabulary. Answers `(existing, added, titles)`: whether a vocabulary of that
+    /// name already carried this identity, how many of the request's values were novel, and how
+    /// many held values it gave a new title.
     pub(crate) fn declare_vocabulary(
         &self,
         request: tessera_lifecycle::VocabularyRequest,
-    ) -> Result<(bool, u64), AcceptError> {
+    ) -> Result<(bool, u64, u64), AcceptError> {
         let receipt = self.handle()?.submit(Command::DeclareVocabulary {
             request: Box::new(request),
         })?;
         match receipt.outcome {
-            Ok(Ack::VocabularyDeclared { existing, added }) => Ok((existing, added)),
+            Ok(Ack::VocabularyDeclared {
+                existing,
+                added,
+                titles,
+            }) => Ok((existing, added, titles)),
             Ok(other) => {
                 unreachable!(
                     "a DeclareVocabulary command answers VocabularyDeclared, not {other:?}"
@@ -3717,17 +3724,21 @@ impl WritePath {
         }
     }
 
-    /// A page of values for a vocabulary that exists. Answers `(added, existing)`.
+    /// A page of values for a vocabulary that exists. Answers `(added, existing, titles)`.
     pub(crate) fn mint_vocabulary_values(
         &self,
         vocabulary: String,
         values: Vec<tessera_lifecycle::DeclaredValue>,
-    ) -> Result<(u64, u64), AcceptError> {
+    ) -> Result<(u64, u64, u64), AcceptError> {
         let receipt = self
             .handle()?
             .submit(Command::MintVocabularyValues { vocabulary, values })?;
         match receipt.outcome {
-            Ok(Ack::VocabularyValuesMinted { added, existing }) => Ok((added, existing)),
+            Ok(Ack::VocabularyValuesMinted {
+                added,
+                existing,
+                titles,
+            }) => Ok((added, existing, titles)),
             Ok(other) => unreachable!(
                 "a MintVocabularyValues command answers VocabularyValuesMinted, not {other:?}"
             ),
@@ -13834,7 +13845,7 @@ impl Executor {
                 }
             }
             if let Some(title) = &value.title {
-                minter.fill_title(&value.key, title.clone());
+                minter.set_title(&value.key, title.clone());
             }
         }
         let record = WalRecord::VocabularyDeclare {
@@ -13895,6 +13906,9 @@ impl Executor {
             Ack::VocabularyDeclared {
                 existing: false,
                 added,
+                // A new vocabulary holds no value whose title could be replaced: every title it
+                // carries arrived with the value that drew its code.
+                titles: 0,
             },
             &published,
         );
@@ -13919,6 +13933,10 @@ impl Executor {
     /// append and one fsync — a `VocabularyDeclare` record carrying the page's values with the
     /// codes drawn for them, because a value's title is part of what the page acknowledges and a
     /// `VocabularyMint` record carries none.
+    ///
+    /// **A title supplied for a held key replaces the held title** and is counted into the
+    /// acknowledgement (decision 0136's amendment). The key-to-code binding does not move, so a
+    /// row already carrying the code means what it meant; what changes is the name a client draws.
     fn commit_vocabulary_page(
         &mut self,
         vocabulary: String,
@@ -13942,11 +13960,14 @@ impl Executor {
             self.health.note_work_refused();
             return;
         };
-        if let Err(e) = crate::vocabularies::check_page(held, &vocabulary, &values) {
-            respond.fail(e);
-            self.health.note_work_refused();
-            return;
-        }
+        let titles = match crate::vocabularies::check_page(held, &vocabulary, &values) {
+            Ok(titles) => titles,
+            Err(e) => {
+                respond.fail(e);
+                self.health.note_work_refused();
+                return;
+            }
+        };
         let mut minter = held.clone();
         let mut codes = Vec::with_capacity(values.len());
         let mut added = 0u64;
@@ -13970,25 +13991,28 @@ impl Executor {
                 }
             }
             if let Some(title) = &value.title {
-                minter.fill_title(&value.key, title.clone());
+                minter.set_title(&value.key, title.clone());
             }
         }
-        // **Nothing to append where the page bound nothing and filled nothing.** A repeat of a
+        // **Nothing to append where the page bound nothing and changed no title.** A repeat of a
         // page already applied is the no-op `ingest.md` §1.1 asks for, and an fsync for it would
-        // be a durable record of a decision nothing made.
-        let fills = values
-            .iter()
-            .filter(|v| v.title.is_some() && held.title_of(&v.key).is_none())
-            .count();
-        if added == 0 && fills == 0 {
+        // be a durable record of a decision nothing made. `titles` counts the held keys whose
+        // title this page changes, so a page restating the titles a deployment holds appends
+        // nothing.
+        if added == 0 && titles == 0 {
             respond.ack(
                 if redeclaration {
                     Ack::VocabularyDeclared {
                         existing: true,
                         added: 0,
+                        titles: 0,
                     }
                 } else {
-                    Ack::VocabularyValuesMinted { added, existing }
+                    Ack::VocabularyValuesMinted {
+                        added,
+                        existing,
+                        titles: 0,
+                    }
                 },
                 &Published::nothing_bound(&values),
             );
@@ -14055,9 +14079,14 @@ impl Executor {
                 Ack::VocabularyDeclared {
                     existing: true,
                     added,
+                    titles,
                 }
             } else {
-                Ack::VocabularyValuesMinted { added, existing }
+                Ack::VocabularyValuesMinted {
+                    added,
+                    existing,
+                    titles,
+                }
             },
             &published,
         );

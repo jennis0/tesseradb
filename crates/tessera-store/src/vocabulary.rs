@@ -33,8 +33,8 @@ use rand::RngCore;
 use tessera_spatial::tiler::ScalarType;
 
 use crate::manifest::{
-    DeclaredScalar, ManifestVocabulary, ManifestVocabularyValue, VocabularyExtension,
-    Visibility, VocabularyKind,
+    DeclaredScalar, ManifestVocabulary, ManifestVocabularyValue, Visibility, VocabularyExtension,
+    VocabularyKind,
 };
 
 /// The reserved *absent* code (§3.6). Never drawn and never in a value block, so a row carrying no
@@ -389,17 +389,15 @@ impl VocabularyMinter {
         self.titles.get(key).map(String::as_str)
     }
 
-    /// Give a bound value the title its author supplied (`ingest.md` §1.3).
+    /// Give a bound value the title its author supplied, replacing any title it holds
+    /// (`ingest.md` §1.3; decision 0136's amendment).
     ///
-    /// **A title is filled and never amended here.** A value whose title this minter already
-    /// holds is left as it is: the caller's door compares the two and refuses a differing one
-    /// (`crate::vocabulary` is not where that answer belongs), so reaching this with a different
-    /// title would be a write nobody decided. A key nothing has bound is ignored, because a title
-    /// without a binding has no value to present.
-    pub fn fill_title(&mut self, key: &str, title: String) {
-        if self.titles.contains_key(key) {
-            return;
-        }
+    /// **A title upserts; a value's identity does not.** The key-to-code binding is immutable and
+    /// a code is never reused, so nothing a viewer's stored code means can change here. A title is
+    /// presentation, and an operator recolouring a legend is doing what the control plane exists
+    /// for. A key nothing has bound is ignored, because a title without a binding has no value to
+    /// present.
+    pub fn set_title(&mut self, key: &str, title: String) {
         // Keyed by the `Arc` the binding interned, so a title costs no second copy of its key.
         if let Some((interned, _)) = self.codes.get_key_value(key) {
             self.titles.insert(Arc::clone(interned), title);
@@ -624,6 +622,13 @@ impl Vocabularies {
             })?;
             for value in &extension.values {
                 minter.seed_value(&value.key, value.code)?;
+                // **The extension's title wins over the manifest's**, the manifest having been
+                // seeded above: an extension carries a value whose title was supplied since, and
+                // dropping it here would lose an upsert at every restart before the fold
+                // (`ingest.md` §1.3).
+                if let Some(title) = &value.title {
+                    minter.set_title(&value.key, title.clone());
+                }
             }
         }
         Ok(Vocabularies { by_name })
@@ -666,20 +671,34 @@ impl Vocabularies {
     /// verbatim into the next `MANIFEST.vocabularies` — so a title dropped here is a title the
     /// fold destroys, in a value set whose keys and codes survive. A discovered value has no
     /// title and carries `None`, which is what it had before.
+    ///
+    /// **A value the manifest already binds is carried where its live title differs from the
+    /// manifest's**, which is what a title upserted onto a build-declared value needs
+    /// (decision 0136's amendment). Its key and its code are the manifest's own, restated
+    /// unchanged; only the title is new. Without this the upsert would live in the minters alone
+    /// and the next fold would publish the title the build wrote.
     pub fn extensions_beyond(
         &self,
         vocabularies: &[ManifestVocabulary],
     ) -> Vec<VocabularyExtension> {
         let mut out = Vec::new();
         for (name, minter) in &self.by_name {
-            let built: BTreeSet<&str> = vocabularies
+            let held: BTreeMap<&str, Option<&str>> = vocabularies
                 .iter()
                 .find(|v| &v.name == name)
-                .map(|v| v.values.iter().map(|value| value.key.as_str()).collect())
+                .map(|v| {
+                    v.values
+                        .iter()
+                        .map(|value| (value.key.as_str(), value.title.as_deref()))
+                        .collect()
+                })
                 .unwrap_or_default();
             let values: Vec<ManifestVocabularyValue> = minter
                 .bindings()
-                .filter(|(key, _)| !built.contains(key))
+                .filter(|(key, _)| match held.get(key) {
+                    None => true,
+                    Some(&title) => minter.title_of(key).is_some() && minter.title_of(key) != title,
+                })
                 .map(|(key, code)| ManifestVocabularyValue {
                     title: minter.title_of(key).map(str::to_string),
                     key: key.to_string(),
@@ -724,12 +743,14 @@ pub fn fold_extensions_into(
                 .iter_mut()
                 .find(|held| held.key == value.key)
             {
-                // **A title is filled and never overwritten.** A value the table already carries
-                // keeps its key and its code — that is the verbatim rule — and the one thing an
-                // extension can add to it is a presentation title it did not have, which is what
-                // a page onto a build-declared vocabulary supplies (`ingest.md` §1.3).
+                // **The title is the one thing an extension changes.** A value the table already
+                // carries keeps its key and its code — that is the verbatim rule — and an
+                // extension carrying a title replaces the one the table holds, which is what a
+                // page onto a build-declared vocabulary supplies (`ingest.md` §1.3, decision
+                // 0136's amendment). An extension with no title leaves the held one alone: a
+                // discovered value carries `None` and would otherwise erase a name.
                 Some(held) => {
-                    if held.title.is_none() {
+                    if value.title.is_some() {
                         held.title = value.title.clone();
                     }
                 }
@@ -1089,12 +1110,16 @@ mod tests {
     /// `MANIFEST.vocabularies` before the rotation reclaims the record it came from. A title
     /// dropped at either end is a title the fold destroys while keeping the key and the code — the
     /// value survives and the name a client draws does not, with nothing to notice.
+    ///
+    /// The last arm is the upsert (decision 0136's amendment): a title supplied for a value the
+    /// manifest already binds makes an extension of its own, and the fold replaces the title the
+    /// manifest held.
     #[test]
-    fn an_extension_carries_a_title_and_the_fold_fills_it_onto_a_held_value() {
+    fn an_extension_carries_a_title_and_the_fold_writes_it_onto_a_held_value() {
         let mut minter = minter(ScalarType::U16);
         let alpha = minter.mint("alpha").unwrap().code();
         let beta = minter.mint("beta").unwrap().code();
-        minter.fill_title("alpha", "Alpha".to_string());
+        minter.set_title("alpha", "Alpha".to_string());
         let mut live = Vocabularies::default();
         live.insert(minter);
 
@@ -1137,11 +1162,72 @@ mod tests {
             "the held value keeps its code and gains the title the page supplied"
         );
 
-        // And a title the table already holds is never overwritten: the fold moves bindings, it
-        // does not settle a disagreement about a name.
+        // **A title upserts.** A value the table holds under another title takes the extension's,
+        // its key and its code untouched.
         table[0].values[0].title = Some("Authored".to_string());
         fold_extensions_into(&mut table, &extensions);
-        assert_eq!(table[0].values[0].title.as_deref(), Some("Authored"));
+        assert_eq!(table[0].values[0].title.as_deref(), Some("Alpha"));
+        assert_eq!(table[0].values[0].code, alpha);
+        // An extension with no title leaves the held one alone: a discovered value carries `None`
+        // and must not erase a name.
+        assert_eq!(table[0].values[1].title, None);
+    }
+
+    /// **A title upserted onto a value the manifest already binds reaches the manifest.** The
+    /// binding is not new, so nothing but the changed title makes this value an extension; without
+    /// it the upsert would live in the minters alone and the next fold would publish the title the
+    /// build wrote (decision 0136's amendment).
+    #[test]
+    fn a_title_changed_on_a_built_value_is_carried_as_an_extension_and_folded() {
+        let built = vec![ManifestVocabulary {
+            name: "departments".to_string(),
+            kind: VocabularyKind::Declared,
+            visibility: Visibility::Derived,
+            width: "u16".to_string(),
+            values: vec![ManifestVocabularyValue {
+                key: "alpha".to_string(),
+                code: 41,
+                title: Some("Alpha".to_string()),
+            }],
+            reserved: Vec::new(),
+        }];
+        let mut live = Vocabularies::seed(&built, &[], &[]).expect("the built table seeds");
+        live.get_mut("departments")
+            .unwrap()
+            .set_title("alpha", "Alpha Team".to_string());
+
+        let extensions = live.extensions_beyond(&built);
+        assert_eq!(extensions.len(), 1, "the changed title makes an extension");
+        let carried: Vec<(&str, u32, Option<&str>)> = extensions[0]
+            .values
+            .iter()
+            .map(|v| (v.key.as_str(), v.code, v.title.as_deref()))
+            .collect();
+        assert_eq!(
+            carried,
+            [("alpha", 41, Some("Alpha Team"))],
+            "the key and the code are the manifest's own, restated"
+        );
+
+        let mut table = built.clone();
+        fold_extensions_into(&mut table, &extensions);
+        assert_eq!(table[0].values[0].title.as_deref(), Some("Alpha Team"));
+        assert_eq!(table[0].values[0].code, 41);
+
+        // And a restart before the fold: the extension's title beats the manifest's.
+        let reopened = Vocabularies::seed(&built, &[], &extensions).expect("the reopen seeds");
+        assert_eq!(
+            reopened.get("departments").unwrap().title_of("alpha"),
+            Some("Alpha Team")
+        );
+
+        // A page restating the title the deployment holds makes no extension at all.
+        let mut settled = Vocabularies::seed(&table, &[], &[]).expect("the folded table seeds");
+        settled
+            .get_mut("departments")
+            .unwrap()
+            .set_title("alpha", "Alpha Team".to_string());
+        assert!(settled.extensions_beyond(&table).is_empty());
     }
 
     /// The fold moves bindings between homes and must not change one. A code that came back

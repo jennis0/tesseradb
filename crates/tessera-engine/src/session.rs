@@ -3625,8 +3625,9 @@ impl Engine {
     }
 
     /// Declare a vocabulary while the service runs (`PUT /control/vocabularies/{name}`;
-    /// `ingest.md` §1.3). Answers `(existing, added)`: whether a vocabulary of that name already
-    /// carried this identity, and how many of the request's values were novel.
+    /// `ingest.md` §1.3). Answers `(existing, added, titles)`: whether a vocabulary of that name
+    /// already carried this identity, how many of the request's values were novel, and how many
+    /// held values it gave a new title.
     ///
     /// **Nothing is validated here**, on `register_layer`'s rule: whether the name is free, and
     /// what a held vocabulary's identity is, are state only the write executor may read.
@@ -3635,19 +3636,19 @@ impl Engine {
     pub fn declare_vocabulary(
         &self,
         request: tessera_lifecycle::VocabularyRequest,
-    ) -> std::result::Result<(bool, u64), crate::write::AcceptError> {
+    ) -> std::result::Result<(bool, u64, u64), crate::write::AcceptError> {
         self.write.declare_vocabulary(request)
     }
 
     /// A page of values for a vocabulary that exists (`PATCH /control/vocabularies/{name}/values`;
-    /// `ingest.md` §1.3). Answers `(added, existing)`.
+    /// `ingest.md` §1.3). Answers `(added, existing, titles)`.
     ///
     /// Blocking — a tokio handler must call this inside `spawn_blocking`.
     pub fn mint_vocabulary_values(
         &self,
         vocabulary: String,
         values: Vec<tessera_lifecycle::DeclaredValue>,
-    ) -> std::result::Result<(u64, u64), crate::write::AcceptError> {
+    ) -> std::result::Result<(u64, u64, u64), crate::write::AcceptError> {
         self.write.mint_vocabulary_values(vocabulary, values)
     }
 

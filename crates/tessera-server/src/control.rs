@@ -3561,7 +3561,7 @@ async fn declare_vocabulary(
         reserved: body.reserved,
     };
     // The **shared** blocking pool, on `register_layer`'s rule: a declaration is not a deny.
-    let (existing, added) =
+    let (existing, added, titles) =
         tokio::task::spawn_blocking(move || state.engine.declare_vocabulary(request))
             .await
             .map_err(crate::error::map_join_error)?
@@ -3573,7 +3573,12 @@ async fn declare_vocabulary(
     };
     Ok((
         status,
-        Json(serde_json::json!({ "name": name, "existing": existing, "added": added })),
+        Json(serde_json::json!({
+            "name": name,
+            "existing": existing,
+            "added": added,
+            "titles": titles
+        })),
     ))
 }
 
@@ -3582,8 +3587,12 @@ async fn declare_vocabulary(
 ///
 /// **A page adds and never removes.** A value is retired to `reserved` and never deleted
 /// (per-point-attributes §2.2), so the page's whole vocabulary is join: `added` drew a code and
-/// `existing` was already bound. A title on a value that has none fills it; one differing from
-/// the title held is a `409`, and the page has no effect.
+/// `existing` was already bound.
+///
+/// **A title upserts and the identity does not** (decision 0136's amendment). A title supplied for
+/// a held key replaces the held title, and `titles` is how many the page changed. The key-to-code
+/// binding is immutable and a code is never reused, so a row already carrying the code means what
+/// it meant; a page that would change a binding is a `409`.
 ///
 /// A vocabulary this deployment does not carry is a `404`, not a create: the width and the
 /// visibility of a value set are the declaration's to state, and a page carries neither.
@@ -3602,15 +3611,18 @@ async fn mint_vocabulary_values(
         })
         .collect();
     let vocabulary = name.clone();
-    let (added, existing) = tokio::task::spawn_blocking(move || {
+    let (added, existing, titles) = tokio::task::spawn_blocking(move || {
         state.engine.mint_vocabulary_values(vocabulary, values)
     })
     .await
     .map_err(crate::error::map_join_error)?
     .map_err(crate::error::map_accept_error)?;
-    Ok(Json(
-        serde_json::json!({ "name": name, "added": added, "existing": existing }),
-    ))
+    Ok(Json(serde_json::json!({
+        "name": name,
+        "added": added,
+        "existing": existing,
+        "titles": titles
+    })))
 }
 
 /// The frame a view or a group declares, in **frame coordinates**: the four bounds a Morton code

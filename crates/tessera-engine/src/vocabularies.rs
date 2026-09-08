@@ -13,14 +13,13 @@
 //! codes would be the minting authority for a space the server owns, and neither the scatter nor
 //! the never-reuse rule would survive it.
 //!
-//! **A value's properties are supplied once.** A page restating a value it already holds
-//! identically does nothing, a title on a value that has none fills it, and a title differing
-//! from the one held is a `409` — the three arms of `ingest.md` §1.1's monotone rule.
-//!
-//! ⊘ **`per-point-attributes.md` §2.2 and §5 promise an *upsert* of a held property** — "properties
-//! are upserted without a rebuild, so recolouring a legend never touches the build path" — and
-//! this refuses one. The two cannot both stand, and which does is an owner ruling rather than a
-//! choice for this module; the documents carry the marker at the claim.
+//! **A value's title upserts; its identity does not** (per-point-attributes §2.2, §5; decision
+//! 0136's amendment). A value is addressed by its key. The key-to-code binding is immutable and a
+//! code is never reused, so nothing a row already carries can change meaning here; the code is an
+//! internal optimisation and does not enter the argument. A title supplied for a held key replaces
+//! the held title, and the acknowledgement says how many titles were updated. Every identity field
+//! — the key's binding, and the vocabulary's width, kind, visibility and `reserved` — is a `409`
+//! on a difference, because each is baked into rows or into what ingest may say.
 //!
 //! **The rules are the build's, transcribed**, on `crate::attributes`' argument: a declaration
 //! the build accepts and this route refuses, or the reverse, is a feature that works at one door
@@ -229,8 +228,8 @@ fn normalised(reserved: &[u32]) -> Vec<u32> {
     out
 }
 
-/// Merge every live binding into the manifest's own vocabulary table, filling a title the table
-/// lacks — what a fold writes into the next `MANIFEST.json` (`ingest.md` §1.3).
+/// Merge every live binding into the manifest's own vocabulary table, taking the live title where
+/// there is one — what a fold writes into the next `MANIFEST.json` (`ingest.md` §1.3).
 ///
 /// **A union, never a substitution.** The minters are seeded from every durable home a binding
 /// lives in, so they are a superset of the table; taking them *instead* would still be a
@@ -249,8 +248,11 @@ pub(crate) fn merge_live_values(manifest: &mut Manifest, vocabularies: &Vocabula
                 .iter_mut()
                 .find(|held| held.key == value.key)
             {
+                // The key and the code are the table's own and do not move; the title is the
+                // one thing a live minter may have changed (decision 0136's amendment). A minter
+                // holding no title leaves the table's alone, a discovered value having none.
                 Some(held) => {
-                    if held.title.is_none() {
+                    if value.title.is_some() {
                         held.title = value.title;
                     }
                 }
@@ -365,17 +367,21 @@ fn check_value_key(vocabulary: &str, key: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Check one page of values against the minter that holds them, before any code is drawn.
+/// Check one page of values before any code is drawn, and count the titles it will change.
 ///
-/// **The three arms are `ingest.md` §1.1's**, per value: a title the deployment does not hold is
-/// filled, an identical one does nothing, and a differing one refuses the whole page. Decided
-/// before any draw, so a refused page binds nothing.
+/// **A title upserts** (decision 0136's amendment): a value is addressed by its key, and a title
+/// supplied for a held key replaces the held title. The count returned is how many held keys the
+/// page gives a title they do not already carry, which is what the acknowledgement reports; a key
+/// the page is about to bind is not among them, its title arriving with the value. Nothing here
+/// refuses on a title, so the refusals left are the key's own spelling and a key named twice in
+/// one page, which is two answers to what its title is.
 pub(crate) fn check_page(
     minter: &VocabularyMinter,
     vocabulary: &str,
     values: &[DeclaredValue],
-) -> Result<(), ExecError> {
+) -> Result<u64, ExecError> {
     let mut seen = std::collections::BTreeSet::new();
+    let mut titles = 0u64;
     for value in values {
         check_value_key(vocabulary, &value.key)
             .map_err(|detail| ExecError::VocabularyRefused { detail })?;
@@ -389,22 +395,12 @@ pub(crate) fn check_page(
                 ),
             });
         }
-        let (Some(supplied), Some(held)) = (value.title.as_deref(), minter.title_of(&value.key))
-        else {
-            continue;
-        };
-        if supplied != held {
-            return Err(ExecError::VocabularyConflict {
-                detail: format!(
-                    "vocabulary '{vocabulary}': value '{}' is already held with a different \
-                     title. A value's properties are supplied once with the value \
-                     (per-point-attributes §2.2): a property this deployment does not hold is \
-                     filled, and one it holds differently is refused, two callers disagreeing \
-                     about a name not being a race for the last write to settle",
-                    value.key
-                ),
-            });
+        if let Some(supplied) = value.title.as_deref() {
+            if minter.code_of(&value.key).is_some() && minter.title_of(&value.key) != Some(supplied)
+            {
+                titles += 1;
+            }
         }
     }
-    Ok(())
+    Ok(titles)
 }

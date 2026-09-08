@@ -77,3 +77,18 @@ anything.
 ⊘ **Open, for a wider pass on live editing of a served database.** Beside it, and raised by the
 owner in the same conversation: how a view created at runtime interacts with group-scoped
 attributes, which decisions 0116 and 0136's R2 and R9 each touch from one side and none joins up.
+
+## Amendment, 2026-09-08: a vocabulary value's title upserts, its identity does not
+
+T5 built `PATCH /control/vocabularies/{name}/values` as a fill and a refusal — a title the
+deployment did not hold was filled and a differing one was a `409` — and
+[`per-point-attributes.md`](../design/per-point-attributes.md) §2.2 and §5 promised an upsert. The
+question went to the owner rather than being settled in the branch.
+
+**Ruled: the integer code is an internal optimisation and does not enter the argument. Upserting to
+change a title is fine; upserting to change a value is not.** A value is addressed by its key. The
+key-to-code binding is immutable and a code is never reused, so a row already carrying a code means
+what it meant. A title supplied for a held key replaces the held title, and both routes' answers
+carry `titles`, the count of held values whose title the request changed. Every identity field —
+the key's binding, and the vocabulary's width, kind, visibility and `reserved` list — stays a `409`
+on a difference. §2.2, §5 and §6's rows stand as originally written.

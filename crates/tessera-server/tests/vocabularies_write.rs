@@ -437,14 +437,14 @@ async fn the_route_declares_answers_redeclarations_and_refuses_what_the_schema_r
     assert_eq!(status, 201, "{body}");
     assert_eq!(
         body,
-        json!({ "name": "severity", "existing": false, "added": 2 })
+        json!({ "name": "severity", "existing": false, "added": 2, "titles": 0 })
     );
 
     let (status, body) = declare(&served, "severity", severity()).await;
     assert_eq!(status, 200, "identical: the vocabulary that exists: {body}");
     assert_eq!(
         body,
-        json!({ "name": "severity", "existing": true, "added": 0 }),
+        json!({ "name": "severity", "existing": true, "added": 0, "titles": 0 }),
         "a repeated value is a no-op"
     );
 
@@ -514,13 +514,25 @@ async fn the_route_declares_answers_redeclarations_and_refuses_what_the_schema_r
     assert_eq!(status, 422, "{body}");
 }
 
-/// **A value page adds values, a repeat adds nothing, an absent title is filled and a differing
-/// one is refused** (`ingest.md` §1.1's three arms), and a page against a vocabulary this
-/// deployment does not carry is the same `404` an unknown view is.
+/// **A value page adds values, a repeat adds nothing, and a title upserts** (`ingest.md` §1.1;
+/// decision 0136's amendment): a value is addressed by its key, a title supplied for a held key
+/// replaces the held title, and the answer counts how many titles changed. A page against a
+/// vocabulary this deployment does not carry is the same `404` an unknown view is.
 #[tokio::test]
-async fn a_value_page_adds_values_and_a_held_property_is_filled_or_refused() {
+async fn a_value_page_adds_values_and_a_held_title_upserts() {
     let served = serve().await;
     assert_eq!(declare(&served, "severity", severity()).await.0, 201);
+    // A column over it, so the values are readable back through `/v1/categories`.
+    assert_eq!(
+        declare_attribute(
+            &served,
+            json!({ "name": "severity", "type": "category", "vocabulary": "severity",
+                    "width": "u8", "index": true }),
+        )
+        .await
+        .0,
+        201
+    );
 
     let (status, body) = page(
         &served,
@@ -531,37 +543,65 @@ async fn a_value_page_adds_values_and_a_held_property_is_filled_or_refused() {
     assert_eq!(status, 200, "{body}");
     assert_eq!(body["added"], 2);
     assert_eq!(body["existing"], 0);
+    assert_eq!(
+        body["titles"], 0,
+        "a title arriving with its value is not an update"
+    );
 
     let (status, body) = page(&served, "severity", json!([{ "key": "medium" }])).await;
     assert_eq!(status, 200, "{body}");
     assert_eq!(body["added"], 0, "a repeated value is a no-op");
     assert_eq!(body["existing"], 1);
+    assert_eq!(body["titles"], 0);
 
-    // Absent, so filled.
+    // A value that has no title gains one.
     let (status, body) = page(
         &served,
         "severity",
         json!([{ "key": "medium", "title": "Medium" }]),
     )
     .await;
-    assert_eq!(
-        status, 200,
-        "a title on a value that has none fills it: {body}"
-    );
+    assert_eq!(status, 200, "{body}");
     assert_eq!(body["added"], 0);
+    assert_eq!(body["titles"], 1);
 
-    // Held differently, so refused.
+    // And a title the deployment holds is replaced, the key and its code untouched.
+    let code_before = titled(&served, "severity")
+        .await
+        .into_iter()
+        .find(|(key, _, _)| key == "medium")
+        .map(|(_, code, _)| code);
     let (status, body) = page(
         &served,
         "severity",
         json!([{ "key": "medium", "title": "Middling" }]),
     )
     .await;
-    assert_eq!(status, 409, "{body}");
-    assert!(
-        body["detail"].as_str().unwrap().contains("different title"),
-        "{body}"
+    assert_eq!(status, 200, "a title upserts: {body}");
+    assert_eq!(body["added"], 0);
+    assert_eq!(body["titles"], 1, "the answer counts the title it changed");
+    assert_eq!(
+        titled(&served, "severity")
+            .await
+            .into_iter()
+            .find(|(key, _, _)| key == "medium"),
+        Some((
+            "medium".to_string(),
+            code_before.unwrap(),
+            Some("Middling".to_string())
+        )),
+        "the title is the page's and the code is the one already assigned"
     );
+
+    // A repeat of the same title changes nothing.
+    let (status, body) = page(
+        &served,
+        "severity",
+        json!([{ "key": "medium", "title": "Middling" }]),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["titles"], 0, "an identical title is a no-op");
 
     let (status, body) = page(&served, "nothing", json!([{ "key": "a" }])).await;
     assert_eq!(status, 404, "{body}");
@@ -696,7 +736,12 @@ async fn a_page_onto_a_build_declared_vocabulary_keeps_its_titles_past_a_fold() 
     );
 
     // A title on a value the folded table already carries without one is still a fill.
-    let (status, body) = page(&served, "built", json!([{ "key": "beta", "title": "Beta" }])).await;
+    let (status, body) = page(
+        &served,
+        "built",
+        json!([{ "key": "beta", "title": "Beta" }]),
+    )
+    .await;
     assert_eq!(status, 200, "{body}");
     assert_eq!(body["added"], 0);
     assert!(
@@ -705,6 +750,143 @@ async fn a_page_onto_a_build_declared_vocabulary_keeps_its_titles_past_a_fold() 
             .iter()
             .any(|(key, _, title)| key == "beta" && title.as_deref() == Some("Beta")),
         "a title fills onto a folded value"
+    );
+}
+
+/// **An upserted title survives a flush, a fold and a restart**, on a vocabulary the build
+/// declared and on one declared at a running service (decision 0136's amendment). A first title
+/// and a replacement travel different ways: a first title reaches a manifest with the binding that
+/// carries it, where a replacement is a change to a value every durable home already holds. Three
+/// places drop it if it is not carried — the extension derivation, the fold's merge into
+/// `MANIFEST.vocabularies`, and the seed that reopens a prefix — and each drop keeps the key and
+/// the code, so a value survives under the name it was recoloured away from.
+#[tokio::test]
+async fn an_upserted_title_survives_a_flush_a_fold_and_a_restart() {
+    let served = serve().await;
+    // The build's vocabulary, through a column over it; and one declared here.
+    assert_eq!(
+        declare_attribute(
+            &served,
+            json!({ "name": "built", "type": "category", "vocabulary": "built",
+                    "width": "u8", "index": true }),
+        )
+        .await
+        .0,
+        201
+    );
+    assert_eq!(declare(&served, "severity", severity()).await.0, 201);
+    assert_eq!(
+        declare_attribute(
+            &served,
+            json!({ "name": "severity", "type": "category", "vocabulary": "severity",
+                    "width": "u8", "index": true }),
+        )
+        .await
+        .0,
+        201
+    );
+
+    // A first title on each, then a replacement for it.
+    assert_eq!(
+        page(
+            &served,
+            "built",
+            json!([{ "key": "seed", "title": "Seed" }])
+        )
+        .await
+        .1["titles"],
+        1
+    );
+    let (status, body) = page(
+        &served,
+        "built",
+        json!([{ "key": "seed", "title": "Sown" }]),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["titles"], 1);
+    let (status, body) = page(
+        &served,
+        "severity",
+        json!([{ "key": "high", "title": "Severe" }]),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["titles"], 1, "the build-time title `High` is replaced");
+
+    let title_of = |values: Vec<(String, u64, Option<String>)>, key: &str| {
+        values
+            .into_iter()
+            .find(|(k, _, _)| k == key)
+            .map(|(_, code, title)| (code, title))
+            .expect("the value is served")
+    };
+    let built_before = title_of(titled(&served, "built").await, "seed");
+    let severity_before = title_of(titled(&served, "severity").await, "high");
+    assert_eq!(built_before.1.as_deref(), Some("Sown"));
+    assert_eq!(severity_before.1.as_deref(), Some("Severe"));
+
+    // A row, so the flush has something to publish and the fold something to fold.
+    assert_eq!(
+        ingest(&served, "rows", batch(&[("r1", 1.0, Some("high"))], true))
+            .await
+            .0,
+        200
+    );
+    flush(&served).await;
+    assert_eq!(
+        title_of(titled(&served, "built").await, "seed"),
+        built_before
+    );
+    assert_eq!(
+        title_of(titled(&served, "severity").await, "high"),
+        severity_before
+    );
+
+    fold(&served).await;
+    assert_eq!(
+        title_of(titled(&served, "built").await, "seed"),
+        built_before,
+        "the fold writes the upserted title into MANIFEST.vocabularies"
+    );
+    assert_eq!(
+        title_of(titled(&served, "severity").await, "high"),
+        severity_before
+    );
+
+    // The fold rotates the log, so MANIFEST.json is the only copy left.
+    let served = restart(served).await;
+    assert_eq!(
+        title_of(titled(&served, "built").await, "seed"),
+        built_before,
+        "and the reopen reads it back with the code unchanged"
+    );
+    assert_eq!(
+        title_of(titled(&served, "severity").await, "high"),
+        severity_before
+    );
+
+    // A restart *before* a fold reads the upsert from the segments manifest.
+    let (status, body) = page(
+        &served,
+        "built",
+        json!([{ "key": "seed", "title": "Planted" }]),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["titles"], 1);
+    assert_eq!(
+        ingest(&served, "rows-2", batch(&[("r2", 2.0, Some("low"))], true))
+            .await
+            .0,
+        200
+    );
+    flush(&served).await;
+    let served = restart(served).await;
+    assert_eq!(
+        title_of(titled(&served, "built").await, "seed"),
+        (built_before.0, Some("Planted".to_string())),
+        "the extension carries a title changed on a value the manifest already binds"
     );
 }
 

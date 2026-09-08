@@ -577,11 +577,25 @@ pub enum Ack {
     AttributeDeclared { existing: bool },
     /// A vocabulary was declared, or an identical declaration met the one that already carries
     /// that name (`existing`). `added` is how many of the record's inline values were novel, the
-    /// rest having been bound already.
-    VocabularyDeclared { existing: bool, added: u64 },
+    /// rest having been bound already, and `titles` how many held values the request gave a title
+    /// differing from the one they carried.
+    VocabularyDeclared {
+        existing: bool,
+        added: u64,
+        titles: u64,
+    },
     /// A page of values was applied: `added` were novel and drew a code, `existing` were already
-    /// bound with the same properties and did nothing. Both are bounded by the caller's own page.
-    VocabularyValuesMinted { added: u64, existing: u64 },
+    /// bound, and `titles` of those held values had their title replaced by the one the page
+    /// supplied. All three are bounded by the caller's own page.
+    ///
+    /// **`titles` is reported because a title upsert overwrites** (decision 0136's amendment). The
+    /// count is what tells a caller how much of their page changed a name a client draws, where
+    /// `added` and `existing` say only which keys were bound.
+    VocabularyValuesMinted {
+        added: u64,
+        existing: u64,
+        titles: u64,
+    },
     /// A view group was declared, or an identical declaration met the group that already carries
     /// that name (`existing`). Nothing else to return: the name is the group's only address.
     ViewGroupCreated { existing: bool },

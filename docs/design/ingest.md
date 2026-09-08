@@ -190,7 +190,7 @@ in the next, and only viewers wait for the tick.
 | **View group** (built 2026-09-08, T6) | the `[[view_group]]` block minus roster and source | `PUT /control/view_groups/{name}` | its own append and fsync | one request; its views follow one by one | as above |
 | **Plain view** (built 2026-09-08, T6) | the `[[view]]` block minus source | `PUT /control/views/{name}` | its own append and fsync | one request | as above |
 | **Vocabulary** (built 2026-09-08, T5) | the `[[vocabulary]]` block minus source; values inline where they fit | `PUT /control/vocabularies/{name}` | its own append and fsync | the declaration, then pages of values | as above |
-| **Vocabulary values** (built 2026-09-08, T5) | a page of `{key, title?}`; never a code | `PATCH /control/vocabularies/{name}/values` | one `VocabularyDeclare` per page, one fsync | `max_values_per_request` ⊘; `max_body_bytes` | append-only; an identical value is a no-op; a different property on a held key is an upsert of properties, never of key or code — ⊘ **built as a fill and a refusal, not an upsert**: a property this deployment does not hold is filled and one it holds differently is a `409` (2026-09-08). With the owner |
+| **Vocabulary values** (built 2026-09-08, T5) | a page of `{key, title?}`; never a code | `PATCH /control/vocabularies/{name}/values` | one `VocabularyDeclare` per page, one fsync | `max_values_per_request` ⊘; `max_body_bytes` | append-only; an identical value is a no-op; a different property on a held key is an upsert of properties, never of key or code, and the answer counts the titles it changed |
 | **Attribute column** (built 2026-09-07, T4) | the `[[attribute]]` block minus acquisition keys | `PUT /control/attributes` | its own append and fsync | one request | as above |
 | **Suppress, delete, unsuppress** | `{id, op}` | `POST /control/changes` | the deny window | about 10⁴ per request; `max_body_bytes` | each op idempotent |
 
@@ -223,11 +223,16 @@ same fsync as the value. **A page is one `VocabularyDeclare` record, not a run o
 `VocabularyMint`s**: a value's title is part of what the page acknowledges and a mint record
 carries none, so a page recorded as mints would come back from a restart with its bindings and
 without the names a client draws. A title travels the same way past the fold: it rides the
-binding into `vocabulary_extensions`, and the fold both copies it into the next
-`MANIFEST.vocabularies` and fills it onto a value the table already carried without one — which is
-what a page onto a *build-declared* vocabulary supplies. ⊘ **A title the deployment already holds
-is not amended** but refused (`per-point-attributes.md` §2.2 and §5 promise an upsert; the
-question is with the owner). The runtime declarations are the segments manifest's
+binding into `vocabulary_extensions`, and the fold copies it into the next
+`MANIFEST.vocabularies` over whatever the table carried — which is
+what a page onto a *build-declared* vocabulary supplies.
+
+**A title supplied for a held key replaces the held title**, and the answer says how many titles
+changed (per-point-attributes §2.2, §5). The key-to-code binding is immutable and a code is never
+reused, so a row already carrying the code means what it meant and the change is to the name a
+client draws. A value whose title changed is carried as an extension of its own although its
+binding is not new; without that the upsert would live in the minters alone and the next fold
+would publish the title the build wrote. The runtime declarations are the segments manifest's
 `vocabularies` list, restated from the live state at every publication with each value as the live
 minter holds it; a restart appends them to `MANIFEST.vocabularies` before the widths are read off
 the columns that name them, and the fold writes them into the next `MANIFEST.json` and leaves the
@@ -907,8 +912,8 @@ batch arriving after the declaration carries the column or omits it, either bein
 - **contracts.md §3.4** as spec §7.1; the truncation sentence corrected (contradiction 3).
 - **artifacts-from-points.md §9**: predicate membership is built and served (contradiction 1);
   §8's asymmetry (a growth never mints) stands.
-- **per-point-attributes.md §2.2, §5, §6**: the vocabulary upsert exists once spec §8's T5 lands
-  (contradiction 2); until then §6's "still owed" is the true line.
+- **per-point-attributes.md §2.2, §5, §6**: the vocabulary title upsert exists (contradiction 2,
+  closed by T5 and decision 0136's amendment).
 - **dag-hierarchies.md §4**: the cycle check becomes layer-scoped by `(level, ordinal)` with late
   lineage (contradiction 5).
 - **configuration.md §9**: names the `[ingest]` keys (contradiction 6).
@@ -954,7 +959,7 @@ recreated, so that every later track lands against one format and none waits on 
 | **T2c exclusion and view identity** (built 2026-09-08) | `excluding` under `max_excluded_per_request`; `view` in the identity on a group-scoped layer | T2a |
 | **T4 attributes** | `PUT /control/attributes`; the manifest home; the interim refusal of `render`; the tail append and padding for a mid-ingest declaration; the fold's materialisation | T1 |
 | **T3 values** (built 2026-09-08) | `POST /control/values`; the fill on the executor beside the join arm; the view header and key-in-group check for scoped columns; layer columns on existing entities; the record stack's per-column claimant read and its fold | T4 |
-| **T5 vocabularies** | `PUT /control/vocabularies/{name}`; value pages; the property upsert (`/control/categories`'s debt) | T4's manifest home |
+| **T5 vocabularies** (built 2026-09-08) | `PUT /control/vocabularies/{name}`; value pages; the title upsert (`/control/categories`'s debt) | T4's manifest home |
 | **T6 groups and views** | `PUT /control/view_groups/{name}`; `PUT /control/views/{name}` | T4's manifest home |
 | **T7 conformance** | the 0091 equivalence driver over every kind, **defined over served answers** (masked counts, artifact frames, drill-downs per principal), never over bundle bytes; write-path and annotation-write-cycle rewritten | alongside T2a onward |
 
