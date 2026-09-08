@@ -389,6 +389,23 @@ impl VocabularyMinter {
         self.titles.get(key).map(String::as_str)
     }
 
+    /// Give a bound value the title its author supplied (`ingest.md` §1.3).
+    ///
+    /// **A title is filled and never amended here.** A value whose title this minter already
+    /// holds is left as it is: the caller's door compares the two and refuses a differing one
+    /// (`crate::vocabulary` is not where that answer belongs), so reaching this with a different
+    /// title would be a write nobody decided. A key nothing has bound is ignored, because a title
+    /// without a binding has no value to present.
+    pub fn fill_title(&mut self, key: &str, title: String) {
+        if self.titles.contains_key(key) {
+            return;
+        }
+        // Keyed by the `Arc` the binding interned, so a title costs no second copy of its key.
+        if let Some((interned, _)) = self.codes.get_key_value(key) {
+            self.titles.insert(Arc::clone(interned), title);
+        }
+    }
+
     /// How many codes are spent — the quantity a cardinality alarm watches.
     pub fn assigned_count(&self) -> u64 {
         self.assigned.len() as u64
@@ -577,11 +594,17 @@ impl Vocabularies {
 
         let mut by_name = BTreeMap::new();
         for vocabulary in vocabularies {
-            // A vocabulary no column names is carried but unusable; `u32` is the widest domain, so
-            // a width that is never consulted can only fail to exhaust, never to collide.
+            // **A column that names the vocabulary is the authority; the declaration's own width
+            // is the answer where none does.** A built vocabulary no column names is carried but
+            // unusable, so either answer would serve; one declared at a running service is minted
+            // into before any column names it (`ingest.md` §1.3), and taking the widest domain
+            // there would draw codes the column later declared for it cannot hold. A width this
+            // build cannot parse is `u32`, the widest domain, which can only fail to exhaust and
+            // never to collide.
             let width = widths
                 .get(vocabulary.name.as_str())
                 .map(|&(w, _)| w)
+                .or_else(|| ScalarType::parse(&vocabulary.width))
                 .unwrap_or(ScalarType::U32);
             let mut minter = VocabularyMinter::new(
                 vocabulary.name.clone(),
@@ -608,6 +631,17 @@ impl Vocabularies {
 
     pub fn get(&self, name: &str) -> Option<&VocabularyMinter> {
         self.by_name.get(name)
+    }
+
+    /// Add a vocabulary declared while the service runs (`ingest.md` §1.3), replacing any minter
+    /// held under the same name.
+    ///
+    /// **Only the executor may call this**, on [`VocabularyMinter::mint`]'s rule: a name added
+    /// between another thread's check and its draw is a second code space for one vocabulary. The
+    /// caller has already refused a redeclaration under a different identity, so a replacement
+    /// here is the same vocabulary seen twice.
+    pub fn insert(&mut self, minter: VocabularyMinter) {
+        self.by_name.insert(minter.name().to_string(), minter);
     }
 
     pub fn get_mut(&mut self, name: &str) -> Option<&mut VocabularyMinter> {
@@ -745,6 +779,7 @@ mod tests {
             name: "departments".to_string(),
             kind: VocabularyKind::Declared,
             visibility: Visibility::Derived,
+            width: "u32".to_string(),
             values: (1..=100)
                 .map(|c| ManifestVocabularyValue {
                     key: format!("built-{c}"),
@@ -900,6 +935,7 @@ mod tests {
             name: name.to_string(),
             kind: VocabularyKind::Declared,
             visibility: Visibility::Derived,
+            width: "u32".to_string(),
             values: values
                 .iter()
                 .map(|(key, code)| ManifestVocabularyValue {
@@ -1036,6 +1072,7 @@ mod tests {
             name: "departments".to_string(),
             kind: VocabularyKind::Declared,
             visibility: Visibility::Derived,
+            width: "u32".to_string(),
             values: vec![ManifestVocabularyValue {
                 key: "ops".to_string(),
                 code: 4711,

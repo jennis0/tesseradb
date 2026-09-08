@@ -949,6 +949,20 @@ pub struct Engine {
 /// ascending, so two opens of one bundle build the same list. With one partition this is that
 /// partition's lists; with several, every declaration is a deployment-level fact every partition
 /// publishes alike, and a name met again is skipped by `Manifest::with_attributes`.
+fn side_manifest_vocabularies(bundle: &Bundle) -> Vec<tessera_store::manifest::ManifestVocabulary> {
+    let mut keys: Vec<&String> = bundle.partitions.keys().collect();
+    keys.sort();
+    let mut out: Vec<tessera_store::manifest::ManifestVocabulary> = Vec::new();
+    for key in keys {
+        for vocabulary in &bundle.partitions[key].manifest.vocabularies {
+            if !out.iter().any(|held| held.name == vocabulary.name) {
+                out.push(vocabulary.clone());
+            }
+        }
+    }
+    out
+}
+
 fn side_manifest_attributes(
     bundle: &Bundle,
 ) -> (
@@ -1047,6 +1061,13 @@ impl Engine {
         // — the vocabulary seed's widths, the record blob's field tags, the flush's writer schema,
         // `/v1/meta` — takes it from the bundle manifest. Declarations the log holds past the
         // last publication are appended after replay, below.
+        // **The vocabularies declared while the service ran, before the columns that name
+        // them** (`ingest.md` §1.3): the side manifests are the declaration's durable home, on
+        // the attribute columns' argument, and a runtime column over a runtime vocabulary refuses
+        // to seed if the vocabulary is not in the manifest by the time its width is read.
+        let side_vocabularies = side_manifest_vocabularies(&bundle);
+        bundle.manifest = bundle.manifest.with_vocabularies(&side_vocabularies);
+
         let (side_attributes, side_scoped_attributes) = side_manifest_attributes(&bundle);
         bundle.manifest = bundle
             .manifest
@@ -1338,6 +1359,9 @@ impl Engine {
                     side_attributes.clone(),
                     side_scoped_attributes.clone(),
                 ),
+                vocabularies: crate::vocabularies::RuntimeVocabularies::seed(
+                    side_vocabularies.clone(),
+                ),
             },
             &dict,
             &initial_deny,
@@ -1362,6 +1386,10 @@ impl Engine {
         // stores. The seed fixed the widths the manifests' columns name; a column only the log
         // names is bound here, on the door's rule (`VocabularyMinter::narrow_to`), and a bound
         // code past the width is a log that disagrees with the bindings.
+        // **And the vocabularies the log holds past the last publication**, before the widths
+        // below are read off the columns that name them.
+        let runtime_vocabularies = write_state.vocabularies.snapshot(&vocabularies);
+        bundle.manifest = bundle.manifest.with_vocabularies(&runtime_vocabularies);
         let (runtime_attributes, runtime_scoped_attributes) = write_state.attributes.snapshot();
         let unfolded_attributes = write_state.attributes.entity_names();
         let runtime_categories = runtime_attributes
@@ -3541,6 +3569,33 @@ impl Engine {
         request: tessera_lifecycle::ValuesRequest,
     ) -> std::result::Result<crate::write::ValuesReceipt, crate::write::AcceptError> {
         self.write.fill_values(request)
+    }
+
+    /// Declare a vocabulary while the service runs (`PUT /control/vocabularies/{name}`;
+    /// `ingest.md` §1.3). Answers `(existing, added)`: whether a vocabulary of that name already
+    /// carried this identity, and how many of the request's values were novel.
+    ///
+    /// **Nothing is validated here**, on `register_layer`'s rule: whether the name is free, and
+    /// what a held vocabulary's identity is, are state only the write executor may read.
+    ///
+    /// Blocking — a tokio handler must call this inside `spawn_blocking`.
+    pub fn declare_vocabulary(
+        &self,
+        request: tessera_lifecycle::VocabularyRequest,
+    ) -> std::result::Result<(bool, u64), crate::write::AcceptError> {
+        self.write.declare_vocabulary(request)
+    }
+
+    /// A page of values for a vocabulary that exists (`PATCH /control/vocabularies/{name}/values`;
+    /// `ingest.md` §1.3). Answers `(added, existing)`.
+    ///
+    /// Blocking — a tokio handler must call this inside `spawn_blocking`.
+    pub fn mint_vocabulary_values(
+        &self,
+        vocabulary: String,
+        values: Vec<tessera_lifecycle::DeclaredValue>,
+    ) -> std::result::Result<(u64, u64), crate::write::AcceptError> {
+        self.write.mint_vocabulary_values(vocabulary, values)
     }
 
     /// Create a view of a view group while the service runs (`views.md` §3.2, decision 0108).

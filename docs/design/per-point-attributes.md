@@ -118,7 +118,7 @@ corpus — I9's side of the line.
 |---|---|
 | Append a vocabulary value | Safe. New code assigned, never reusing a retired one |
 | Retire a vocabulary value | Safe. Moves to `reserved`, never reassigned |
-| Amend a value's properties | Safe, no rebuild — control-plane upsert (§5) |
+| Supply a value's properties | Safe, no rebuild. A property the deployment does not hold is filled by `PATCH /control/vocabularies/{name}/values`; one it holds differently is refused (§5) |
 | Add `index` | Build pass; no row rewrite — a derivation pass over the record blob where the field was blob-resident |
 | Add `render` | Rewrites every segment |
 | Change `width`, reuse a reserved code, change type | **Refused.** Rebuild |
@@ -503,8 +503,13 @@ alone. That function has one definition, reached from every layer that needs it 
 `u16` category comes to be validated as a plain `u16`, which accepts raw codes and reopens the hole
 keys close.
 
-**Runtime vocabulary amendment** is a control-plane operation: properties are upserted without a
-rebuild, so recolouring a legend never touches the build path.
+**A vocabulary is declared and extended on the control plane**, without a rebuild:
+`PUT /control/vocabularies/{name}` declares one and `PATCH /control/vocabularies/{name}/values`
+pages its values (`ingest.md` §1.3, built 2026-09-08). A value's properties are supplied once with
+the value: a title the deployment does not hold is filled, and one it holds differently is refused,
+because two callers disagreeing about a name is not a race for the last write to settle. Renaming a
+value for display is therefore a rebuild, as changing its width or its code is; what the control
+plane buys is that a value set grows without one.
 
 **Declare-then-use.** An ingest row naming an undeclared value under `vocabulary = "declared"` is a
 `422` naming the column and the key, the whole batch without effect, following views §80 — *"no
@@ -541,7 +546,7 @@ describe**. Nothing here is waiting on someone to type it out.
 | **contracts §2.4** — the attribute dictionary namespace and its postings file, and an attribute `dict_extents` counterpart | **Changed, and mostly not needed.** A *category* needs no attribute dictionary: the vocabulary already enumerates every value and the code is the identifier, so nothing caller-supplied is interned and §3.5's collision hazard — an attribute descriptor byte-equal to a satisfied auth descriptor — cannot arise. What §3.3's visibility wants is a postings file keyed by `(column, code)`, sized at 0.31–1.01× the render column it indexes (`probes/2026-08-07-category-membership/`). A dictionary is for attribute terms that are *not* categories, which nothing declares |
 | **contracts §2.6** — attribute columns and their widths, **per view** | **Delivered without the per-view half** (contracts r22). `render_in` is refused at parse: `declared_scalars` is one flat bundle-wide list, and accepting a per-view declaration would put the column in every view anyway, silently. Per-view enumeration belongs with the views epic, which the roadmap already pairs it with |
 | **contracts §3.2** — `/v1/categories`, its relationship to `/v1/meta`, the empty-operand rule | **Delivered, less the gate** (contracts r25; the empty-operand rule delivered at r26). The relationship to `/v1/meta` resolves as a **schema/values split**: `/v1/meta` carries the column descriptor and `/v1/categories/{column}` carries the values, in two forms — resolve named codes, or page by value key. That is what answers §3.8's size worry, since the viewer's normal path names the codes it drew and never fetches a set. Visibility is the vocabulary's `visibility`, fail-closed: `public` publishes, `derived` is filtered per principal by §3.3's membership predicate, and a column whose member sets cannot be read is refused rather than served empty. The authored per-value gate (§3.8, C23) is ⊘ unbuilt, so membership-derivation is the only gate a value has. The empty-operand rule belonged to the filter surface and is **delivered** (contracts §3.2 r26, decision 0062): an unknown *value* is an empty operand, where an unknown column — or an operator outside the column's family — is a `422`. The split is which side of the trust boundary the fact sits on |
-| **contracts §3.4** — ingest carries attribute columns; declare-then-use; `/control/categories` | **Delivered for the wire and the rule** (contracts r24, [#82]): a category column carries `utf8` value keys, an unknown key under `vocabulary = "declared"` is a 422 naming column and key, null is *absent* and the empty string is refused. §5 is amended with it, so its first paragraph no longer claims the scalar-tail validation extends to categories unchanged. `/control/categories` is **still owed** and needs no new decision — runtime vocabulary amendment (§5) has no endpoint |
+| **contracts §3.4** — ingest carries attribute columns; declare-then-use; `/control/categories` | **Delivered for the wire and the rule** (contracts r24, [#82]): a category column carries `utf8` value keys, an unknown key under `vocabulary = "declared"` is a 422 naming column and key, null is *absent* and the empty string is refused. §5 is amended with it, so its first paragraph no longer claims the scalar-tail validation extends to categories unchanged. `/control/categories` is **delivered under two names** (2026-09-08; `ingest.md` §1.3, track T5): `PUT /control/vocabularies/{name}` declares a vocabulary at a running service and `PATCH /control/vocabularies/{name}/values` pages its values. What the amendments list asked for and did not get is an *amendment* of a held property: a property this deployment does not hold is filled, and one it holds differently is refused |
 | **architecture §5.3** — the hot-column list | **Owed**, and unchanged by anything since |
 | **architecture §8.2** — category filter operands | **Owed**, unchanged, and belongs with [#43] rather than here |
 | **architecture Appendix A** — attribute columns join the sizing tables; a residency *ceiling* is an owner decision | **Owed; the ceiling is ruled — there is none** (owner, 2026-08-07). The figure was modelled and never measured, and a threshold nobody has measured is a number invented to look careful. The plan step reports and cannot refuse, as §2.3 already says. Measured figures now exist to put in the table |

@@ -274,6 +274,21 @@ pub enum Command {
     /// which only the executor may move between a check and an apply. Boxed for the reason the
     /// layer declaration is.
     DeclareAttribute { request: Box<AttributeRequest> },
+    /// Declare a vocabulary while the service runs (`PUT /control/vocabularies/{name}`,
+    /// `ingest.md` §1.3). On the executor for [`Command::DeclareAttribute`]'s reason: whether the
+    /// name is free and whether a held vocabulary carries this identity read state only the
+    /// executor may move between a check and an apply. Boxed as the attribute request is.
+    DeclareVocabulary { request: Box<VocabularyRequest> },
+    /// A page of values for a vocabulary that already exists
+    /// (`PATCH /control/vocabularies/{name}/values`, `ingest.md` §1.3).
+    ///
+    /// **The codes are not here**, and cannot be: a code is drawn on the executor at the moment
+    /// the binding becomes durable, and a caller who supplied one would be the minting authority
+    /// for a space the server owns (per-point-attributes §3.1).
+    MintVocabularyValues {
+        vocabulary: String,
+        values: Vec<DeclaredValue>,
+    },
     /// Publish a batch of artifacts into one level of one layer.
     ///
     /// **Members are entities already.** The handler inverts the caller's `tessera_id`s once, at
@@ -548,6 +563,13 @@ pub enum Ack {
     /// carries it (`existing`). Nothing else to return: the name is the column's only address, on
     /// every surface that names one.
     AttributeDeclared { existing: bool },
+    /// A vocabulary was declared, or an identical declaration met the one that already carries
+    /// that name (`existing`). `added` is how many of the record's inline values were novel, the
+    /// rest having been bound already.
+    VocabularyDeclared { existing: bool, added: u64 },
+    /// A page of values was applied: `added` were novel and drew a code, `existing` were already
+    /// bound with the same properties and did nothing. Both are bounded by the caller's own page.
+    VocabularyValuesMinted { added: u64, existing: u64 },
     /// A view was dropped. `deleted` is how many entities `delete_dangling` submitted for
     /// deletion — **reported because the operation is not undoable**, on the same rule
     /// [`Ack::Ingested`]'s `minted` is reported by, and `0` for a drop that did not ask for it.
@@ -643,6 +665,36 @@ pub struct AttributeRequest {
     pub index: bool,
     pub render: bool,
     pub scope: tessera_types::layer::LayerScope,
+}
+
+/// A vocabulary as `PUT /control/vocabularies/{name}` declares it: the `[[vocabulary]]` block
+/// minus its acquisition keys (`source`, `fields`), with the values that fit the request inline
+/// (`configuration.md` §1; `ingest.md` §1.3).
+///
+/// **No code travels here**, at the door or in the request: codes are the server's to assign
+/// (per-point-attributes §3.1), so the executor draws each one and records it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VocabularyRequest {
+    pub name: String,
+    pub title: Option<String>,
+    pub kind: tessera_types::vocabulary::VocabularyKind,
+    pub visibility: tessera_types::vocabulary::Visibility,
+    /// The code space's width by its contracts §2.2 name: `u8`, `u16` or `u32`.
+    pub width: String,
+    pub values: Vec<DeclaredValue>,
+    /// Retired codes, never drawn.
+    pub reserved: Vec<u32>,
+}
+
+/// One value a declaration or a page supplies: the stable opaque key, and its presentation.
+///
+/// **The key is not the display name** (per-point-attributes §3.4): `sev_1` is what a row's code
+/// stands for and "Critical" is a property of it, so the two are separate fields and a title is
+/// amendable in neither direction without the value being resupplied identically.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeclaredValue {
+    pub key: String,
+    pub title: Option<String>,
 }
 
 /// Why an accepted command failed while executing. See [`SubmitError`] for the "never started"
@@ -783,6 +835,13 @@ pub enum ExecError {
     /// remedy differs: a conflicting cell is one the caller may not have, and an unresolved id is
     /// one the caller ingests first (`ingest.md` §1.6).
     ValuesRefused { detail: String },
+    /// A vocabulary of this name exists with a different identity, or a value of this key is held
+    /// with a different property → HTTP **409**, no effect (`ingest.md` §1.1: a part present and
+    /// different). Separate from [`Self::VocabularyRefused`] on
+    /// [`Self::AttributeConflict`]'s rule: a refused declaration is corrected and resent, and a
+    /// held identity is one the caller cannot have — a value's key and code are baked into every
+    /// row that carries them, and its properties are supplied once with the value.
+    VocabularyConflict { detail: String },
 }
 
 impl std::fmt::Display for ExecError {
@@ -799,7 +858,9 @@ impl std::fmt::Display for ExecError {
                 "{count} row(s) name an external id this deployment already knows; the batch had \
                  no effect"
             ),
-            ExecError::VocabularyRefused { detail } => write!(f, "{detail}"),
+            ExecError::VocabularyRefused { detail } | ExecError::VocabularyConflict { detail } => {
+                write!(f, "{detail}")
+            }
             ExecError::LayerRefused { detail } => write!(f, "{detail}"),
             ExecError::PartConflict { detail } => write!(f, "{detail}"),
             ExecError::ViewRefused { detail }

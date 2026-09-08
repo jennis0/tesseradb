@@ -208,6 +208,19 @@ pub struct ManifestVocabulary {
     /// Whether the *existence* of a value is sensitive (§3.8) — the disclosure control
     /// `/v1/categories` gates on.
     pub visibility: Visibility,
+    /// The code space's width, by its contracts §2.2 name (`u8`, `u16`, `u32`) — the declaration's
+    /// own `width` key (`configuration.md` §1, per-point-attributes §3.6).
+    ///
+    /// **A column that names this vocabulary is still the authority**, and this is the answer
+    /// where none does. The width bounds every code drawn into the set, so a vocabulary declared
+    /// at a running service and not yet named by a column would otherwise come back from a
+    /// restart at `u32` and draw codes the column declared for it cannot hold
+    /// ([`crate::vocabulary::Vocabularies::seed`]).
+    ///
+    /// **Required, not `default`.** A defaulted `u32` is the widest domain, so a vocabulary whose
+    /// width went missing mints codes no narrower column can store, and the refusal arrives at
+    /// the column rather than at the manifest.
+    pub width: String,
     pub values: Vec<ManifestVocabularyValue>,
     /// Retired codes, never reassigned (§3.4). Carried into the manifest rather than left in the
     /// schema file so that a later build reading this bundle's lineage can see which codes are
@@ -1110,6 +1123,29 @@ impl Manifest {
                 continue;
             }
             group.scoped_scalars.push(family.clone());
+        }
+        manifest
+    }
+
+    /// This manifest with the vocabularies declared at a running service appended
+    /// (`ingest.md` §1.3), each with its values as last published.
+    ///
+    /// **A name this manifest already holds is skipped, not merged.** The door refuses a
+    /// redeclaration under another identity, so a repeat here is the same vocabulary seen twice —
+    /// which is what a fold that moved it into `MANIFEST.json` while the side manifest still
+    /// names it leaves behind. Values minted into a *built* vocabulary travel as
+    /// [`VocabularyExtension`]s and are not this list's business.
+    pub fn with_vocabularies(&self, vocabularies: &[ManifestVocabulary]) -> Manifest {
+        let mut manifest = self.clone();
+        for vocabulary in vocabularies {
+            if manifest
+                .vocabularies
+                .iter()
+                .any(|v| v.name == vocabulary.name)
+            {
+                continue;
+            }
+            manifest.vocabularies.push(vocabulary.clone());
         }
         manifest
     }

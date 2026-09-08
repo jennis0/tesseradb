@@ -84,7 +84,9 @@ use crate::cache::KEEP_SUPERSEDED_GENERATIONS;
 use crate::geometry::{check_publishable, GeometryPublication, GeometryRefused};
 use tessera_plugin::Descriptor;
 use tessera_spatial::tiler::ScalarType;
-use tessera_store::manifest::{DenyEntry as ManifestDenyEntry, SegmentsManifest};
+use tessera_store::manifest::{
+    DenyEntry as ManifestDenyEntry, ManifestVocabulary, SegmentsManifest,
+};
 use tessera_store::merge::MergePolicy;
 use tessera_store::render_presence::RENDER_PRESENCE_DIR;
 use tessera_store::vocabulary::{MintError, Minted, Vocabularies};
@@ -1505,6 +1507,13 @@ mod ack {
             Published(())
         }
 
+        /// A page of vocabulary values that bound nothing and filled nothing
+        /// (`ingest.md` §1.1: every part present and identical). Nothing was appended and nothing
+        /// moved. Takes the page, on the constructors above's rule.
+        pub(super) fn nothing_bound(_page: &[tessera_lifecycle::DeclaredValue]) -> Self {
+            Published(())
+        }
+
         /// A registry or artifact-store record applied. **Neither structure is carried by a
         /// generation**, which is why this is honest without a swap: `/v1/meta`, every reachability
         /// check and every membership read them from `LiveState` behind its own lock, so the effect
@@ -1631,6 +1640,10 @@ pub(crate) struct LiveState {
     /// is a WAL append followed by an apply) and read at every side-manifest publication, which is
     /// the declaration's durable home (`ingest.md` §6.3).
     attributes: Mutex<crate::attributes::RuntimeAttributes>,
+    /// The vocabularies declared while the service runs and not yet folded into a
+    /// `MANIFEST.json`, on the attribute list's contract: written only by the executor, read at
+    /// every side-manifest publication (`ingest.md` §1.3).
+    vocabularies: Mutex<crate::vocabularies::RuntimeVocabularies>,
 }
 
 impl LiveState {
@@ -1885,6 +1898,26 @@ impl LiveState {
         Vec<tessera_store::manifest::ScopedScalar>,
     ) {
         lock_recover(&self.attributes).snapshot()
+    }
+
+    /// Run `f` with the runtime vocabulary list held: the declaration's apply, a page's apply and
+    /// the fold's retirement, and nothing else.
+    fn with_vocabularies<R>(
+        &self,
+        f: impl FnOnce(&mut crate::vocabularies::RuntimeVocabularies) -> R,
+    ) -> R {
+        let mut vocabularies = lock_recover(&self.vocabularies);
+        f(&mut vocabularies)
+    }
+
+    /// What a publication carries forward: the vocabularies no fold has written into a
+    /// `MANIFEST.json`, with their values as the live minters hold them, on
+    /// [`Self::attributes_for_publication`]'s contract.
+    fn vocabularies_for_publication(
+        &self,
+        vocabularies: &Vocabularies,
+    ) -> Vec<tessera_store::manifest::ManifestVocabulary> {
+        lock_recover(&self.vocabularies).snapshot(vocabularies)
     }
 
     /// What a publication carries forward: the creations and the dead incarnations, complete
@@ -2275,6 +2308,9 @@ pub(crate) struct WritePathState {
     /// The attribute columns declared at a running service and not yet folded (`ingest.md`
     /// §6.3), rebuilt as the roster is: seeded from the manifests, then the log replayed on top.
     pub(crate) attributes: crate::attributes::RuntimeAttributes,
+    /// The vocabularies declared at a running service and not yet folded (`ingest.md` §1.3),
+    /// rebuilt as the attribute columns beside them are.
+    pub(crate) vocabularies: crate::vocabularies::RuntimeVocabularies,
 }
 
 /// The manifest state a reconstruction starts from, before WAL replay unions what was written
@@ -2326,6 +2362,8 @@ pub(crate) struct ManifestSeed<'a> {
     /// The side manifests' `attributes` and `scoped_attributes`, the runtime declarations no fold
     /// has written into a `MANIFEST.json`; replay appends to these.
     pub attributes: crate::attributes::RuntimeAttributes,
+    /// The side manifests' `vocabularies`, on [`Self::attributes`]' rule; replay appends to it.
+    pub vocabularies: crate::vocabularies::RuntimeVocabularies,
 }
 
 /// The levels a fold's retirement is about to move, and the set it retires.
@@ -2576,6 +2614,81 @@ impl WritePath {
         // conflicts — and a conflict inside the durable prefix is corruption of acked state, never
         // a race: every row written under either binding is of unknowable colour. Refusing to open
         // is the only answer that does not silently recolour one of them.
+        // **The vocabularies declared while the service ran, before the mints that name them**
+        // (`ingest.md` §1.3): the manifests' runtime list is the starting point and every record
+        // postdates it, on the registry's ordering rule. A record restating a vocabulary the
+        // manifests already carry identically is applied as the values it names and nothing else
+        // — what a fold that moved the declaration into `MANIFEST.json` before the log rotated
+        // leaves behind — and one carrying a different identity under a held name is a log that
+        // disagrees with the manifests about what every code of that vocabulary stands for, and
+        // refuses the open.
+        //
+        // **A page of values is one of these records too**, not a run of `VocabularyMint`s: a
+        // value's title is part of what the page acknowledged and a mint record carries none, so
+        // a page recorded as mints would come back from a restart with its bindings and without
+        // the names a client draws.
+        let mut runtime_vocabularies = seed.vocabularies;
+        for record in &records {
+            let WalRecord::VocabularyDeclare { declaration } = record else {
+                continue;
+            };
+            let compiled = crate::vocabularies::compile_record(declaration);
+            match vocabularies.get_mut(&compiled.name) {
+                Some(minter) => {
+                    if minter.kind() != compiled.kind || minter.visibility() != compiled.visibility
+                    {
+                        return Err(EngineError::Malformed(format!(
+                            "the WAL declares vocabulary '{}' with an identity the manifests do \
+                             not carry for that name; every row holding one of its codes is of \
+                             unknowable colour, so this node does not open",
+                            compiled.name
+                        )));
+                    }
+                    for value in &compiled.values {
+                        minter
+                            .seed_value(&value.key, value.code)
+                            .map_err(|e| EngineError::Malformed(e.to_string()))?;
+                        if let Some(title) = &value.title {
+                            minter.fill_title(&value.key, title.clone());
+                        }
+                    }
+                    for &code in &compiled.reserved {
+                        minter.seed_reserved(code);
+                    }
+                }
+                None => {
+                    // The width the declaration named, so a code drawn after this restart lands
+                    // in the space the columns over it store (`ManifestVocabulary::width`).
+                    let width = tessera_spatial::tiler::ScalarType::parse(&compiled.width)
+                        .unwrap_or(tessera_spatial::tiler::ScalarType::U32);
+                    let mut minter = tessera_store::vocabulary::VocabularyMinter::new(
+                        compiled.name.clone(),
+                        compiled.kind,
+                        compiled.visibility,
+                        width,
+                    );
+                    minter
+                        .seed_manifest(&compiled)
+                        .map_err(|e| EngineError::Malformed(e.to_string()))?;
+                    vocabularies.insert(minter);
+                }
+            }
+            // The runtime list is what the next publication writes. A name `MANIFEST.json`
+            // already carries is one a fold has folded in, and belongs to one list, not two.
+            if !runtime_vocabularies.holds(&compiled.name)
+                && !seed
+                    .manifest
+                    .vocabularies
+                    .iter()
+                    .any(|v| v.name == compiled.name)
+            {
+                runtime_vocabularies.push(ManifestVocabulary {
+                    values: Vec::new(),
+                    ..compiled
+                });
+            }
+        }
+
         for record in &records {
             if let WalRecord::VocabularyMint {
                 vocabulary,
@@ -2973,6 +3086,7 @@ impl WritePath {
                 artifacts,
                 roster,
                 attributes,
+                vocabularies: runtime_vocabularies,
             },
         ))
     }
@@ -2994,6 +3108,7 @@ impl WritePath {
                 artifacts: Mutex::new(state.artifacts),
                 roster: Mutex::new(state.roster),
                 attributes: Mutex::new(state.attributes),
+                vocabularies: Mutex::new(state.vocabularies),
             }),
             wal: Some(state.wal),
             handle: None,
@@ -3482,6 +3597,44 @@ impl WritePath {
                 joined,
             }),
             Ok(other) => unreachable!("a Values command answers ValuesFilled, not {other:?}"),
+            Err(e) => Err(AcceptError::Exec(e)),
+        }
+    }
+
+    /// Declare a vocabulary. Answers `(existing, added)`: whether a vocabulary of that name
+    /// already carried this identity, and how many of the request's values were novel.
+    pub(crate) fn declare_vocabulary(
+        &self,
+        request: tessera_lifecycle::VocabularyRequest,
+    ) -> Result<(bool, u64), AcceptError> {
+        let receipt = self.handle()?.submit(Command::DeclareVocabulary {
+            request: Box::new(request),
+        })?;
+        match receipt.outcome {
+            Ok(Ack::VocabularyDeclared { existing, added }) => Ok((existing, added)),
+            Ok(other) => {
+                unreachable!(
+                    "a DeclareVocabulary command answers VocabularyDeclared, not {other:?}"
+                )
+            }
+            Err(e) => Err(AcceptError::Exec(e)),
+        }
+    }
+
+    /// A page of values for a vocabulary that exists. Answers `(added, existing)`.
+    pub(crate) fn mint_vocabulary_values(
+        &self,
+        vocabulary: String,
+        values: Vec<tessera_lifecycle::DeclaredValue>,
+    ) -> Result<(u64, u64), AcceptError> {
+        let receipt = self
+            .handle()?
+            .submit(Command::MintVocabularyValues { vocabulary, values })?;
+        match receipt.outcome {
+            Ok(Ack::VocabularyValuesMinted { added, existing }) => Ok((added, existing)),
+            Ok(other) => unreachable!(
+                "a MintVocabularyValues command answers VocabularyValuesMinted, not {other:?}"
+            ),
             Err(e) => Err(AcceptError::Exec(e)),
         }
     }
@@ -4854,6 +5007,7 @@ mod vocabulary_extensions_tests {
             name: name.to_string(),
             kind: VocabularyKind::Discovered,
             visibility: crate::Visibility::Derived,
+            width: "u32".to_string(),
             values: Vec::new(),
             reserved: Vec::new(),
         }
@@ -7727,6 +7881,11 @@ impl Executor {
         let (created_views, dead_view_incarnations) = self.live.roster_for_publication();
         let (runtime_attributes, runtime_scoped_attributes) =
             self.live.attributes_for_publication();
+        // The vocabularies this fold is about to write into `MANIFEST.json`, named here so the
+        // live list can be emptied of exactly them once the publication has landed.
+        let folded_vocabularies = self
+            .live
+            .with_vocabularies(|vocabularies| vocabularies.names());
 
         let mut segments_manifest = SegmentsManifest {
             // The flight's text extents, and the pass merged every other one into the new base
@@ -7775,11 +7934,18 @@ impl Executor {
                 .filter(|f| !completed.runtime_scoped_attributes.contains(&f.name))
                 .cloned()
                 .collect(),
+            // **Emptied, because the fold has just written them into `MANIFEST.json`**, on the
+            // scoped columns' argument above: `bundle_manifest` below is the live manifest, which
+            // carries every runtime vocabulary the merge appended, so restating them here would be
+            // a second copy of a fact the new prefix's own manifest states. A vocabulary declared
+            // *while the fold ran* is in the live manifest too — a declaration writes no artefact
+            // for the fold to have missed, unlike an attribute column's base — so it folds in with
+            // the rest and needs no since-plan half.
+            vocabularies: Vec::new(),
             // Carried from the live manifest, on the roster's argument: a declaration made while
-            // the fold ran must survive the publication that lands. Whether a fold writes these
-            // into the next `MANIFEST.json` and empties them here is decided where each list is
-            // first written (T5, T6; `ingest.md` §8).
-            vocabularies: live_manifest.vocabularies.clone(),
+            // the fold ran must survive the publication that lands. Whether a fold writes this
+            // into the next `MANIFEST.json` and empties it here is decided where the list is
+            // first written (T6; `ingest.md` §8).
             groups: live_manifest.groups.clone(),
             dead_view_incarnations,
             // **The pass's own output, not the live list.** The paths are prefix-relative and the
@@ -8329,6 +8495,12 @@ impl Executor {
                 &completed.runtime_scoped_attributes,
             )
         });
+        // The vocabularies beside them. Every one the list held when the manifest was assembled is
+        // in the `MANIFEST.json` this fold wrote, that manifest being the live one, so the list
+        // empties by name rather than by a since-plan subtraction; a declaration made after the
+        // assembly is not among them and stays.
+        self.live
+            .with_vocabularies(|vocabularies| vocabularies.retire_folded(&folded_vocabularies));
 
         // ---- step 8: reclaim the superseded prefix (compaction §8) ------------------------------
         self.pending_reclaim.push(PendingReclaim {
@@ -12104,6 +12276,12 @@ impl Executor {
                 self.commit_attribute_declare(*request, respond)
             }
             Command::Values { request } => self.commit_values(*request, respond),
+            Command::DeclareVocabulary { request } => {
+                self.commit_vocabulary_declare(*request, respond)
+            }
+            Command::MintVocabularyValues { vocabulary, values } => {
+                self.commit_vocabulary_values(vocabulary, values, respond)
+            }
             Command::PublishArtifacts {
                 layer,
                 level,
@@ -13283,6 +13461,297 @@ impl Executor {
         respond.ack(Ack::AttributeDeclared { existing: false }, &published);
     }
 
+    /// `PUT /control/vocabularies/{name}` — declare a vocabulary while the service runs
+    /// (`ingest.md` §1.3; decision 0136).
+    ///
+    /// **The shape is [`Self::commit_attribute_declare`]'s**: resolve against state only this
+    /// thread may write, draw the codes, append, fsync, apply, publish, ack. The apply reaches
+    /// the bundle, because the served vocabulary table is the manifest's `vocabularies` and every
+    /// reader takes it from there: the successor generation carries the vocabulary, and its
+    /// minter holds the values the declaration named.
+    ///
+    /// **Usable at the ack.** A `declared` category column may name the vocabulary in the next
+    /// request, and a row may carry a value it holds; a key it does not hold is the declare-then-
+    /// use refusal, unchanged (per-point-attributes §5).
+    ///
+    /// An identical redeclaration answers the vocabulary that exists and applies the request's
+    /// values as a page; a differing one is a conflict (`ingest.md` §1.1). A failed append means
+    /// the vocabulary does not exist and no code was spent.
+    fn commit_vocabulary_declare(
+        &mut self,
+        request: tessera_lifecycle::VocabularyRequest,
+        respond: Responder,
+    ) {
+        let started = std::time::Instant::now();
+        let generation = self.generation.load_full();
+        let compiled = match crate::vocabularies::resolve(&request, &generation.bundle.manifest) {
+            Ok(crate::vocabularies::Resolution::Existing) => {
+                // A redeclaration is the same vocabulary, and its values are a page against it.
+                self.commit_vocabulary_page(request.name, request.values, true, respond);
+                return;
+            }
+            Ok(crate::vocabularies::Resolution::New(compiled)) => *compiled,
+            Err(e) => {
+                respond.fail(e);
+                self.health.note_work_refused();
+                return;
+            }
+        };
+        // The codes, drawn into a minter this thread owns and nothing has published. A draw that
+        // exhausts the width refuses with nothing appended and no binding anywhere.
+        let width = tessera_spatial::tiler::ScalarType::parse(&compiled.width)
+            .unwrap_or(tessera_spatial::tiler::ScalarType::U32);
+        let mut minter = tessera_store::vocabulary::VocabularyMinter::new(
+            compiled.name.clone(),
+            compiled.kind,
+            compiled.visibility,
+            width,
+        );
+        for &code in &compiled.reserved {
+            minter.seed_reserved(code);
+        }
+        let mut codes = Vec::with_capacity(request.values.len());
+        for value in &request.values {
+            match minter.mint(&value.key) {
+                Ok(minted) => codes.push((value.key.clone(), minted.code())),
+                Err(e) => {
+                    respond.fail(ExecError::VocabularyRefused {
+                        detail: e.to_string(),
+                    });
+                    self.health.note_work_refused();
+                    return;
+                }
+            }
+            if let Some(title) = &value.title {
+                minter.fill_title(&value.key, title.clone());
+            }
+        }
+        let record = WalRecord::VocabularyDeclare {
+            declaration: Box::new(crate::vocabularies::declaration_record(
+                &request, &compiled, &codes,
+            )),
+        };
+        if let Err(e) = self.wal.append(&record).and_then(|()| self.wal.fsync()) {
+            tracing::error!(
+                error = %e,
+                vocabulary = %compiled.name,
+                "ALARM: a vocabulary declaration could not be made durable; the vocabulary does \
+                 not exist"
+            );
+            respond.fail(ExecError::Wal(e));
+            return;
+        }
+
+        // The apply: the live list first, then the successor generation built from it.
+        let added = codes.len() as u64;
+        self.live
+            .with_vocabularies(|vocabularies| vocabularies.push(compiled.clone()));
+        let mut vocabularies: Vocabularies = (*generation.vocabularies).clone();
+        vocabularies.insert(minter);
+        let manifest = generation
+            .bundle
+            .manifest
+            .with_vocabularies(std::slice::from_ref(&compiled));
+        let bundle = generation.bundle.with_views(manifest);
+        let denied = Arc::new(crate::compose::derive_denied(&generation.overlay, &bundle));
+        let next = Generation {
+            prefix: generation.prefix.clone(),
+            // **Unmoved**, on `publish_roster`'s argument: no row moved.
+            segments_version: generation.segments_version,
+            watermark: generation.watermark,
+            bundle,
+            dict: Arc::clone(&generation.dict),
+            postings: Arc::clone(&generation.postings),
+            fragments: Arc::clone(&generation.fragments),
+            external_index: Arc::clone(&generation.external_index),
+            delta_postings: generation.delta_postings.clone(),
+            overlay_version: generation.overlay_version,
+            overlay: Arc::clone(&generation.overlay),
+            buffer: Arc::clone(&generation.buffer),
+            vocabularies: Arc::new(vocabularies),
+            filter_columns: Arc::clone(&generation.filter_columns),
+            // **No suggestion index.** One is built for the vocabularies a *column* names, and
+            // this vocabulary is named by none until one is declared over it — which is where the
+            // index is built (`commit_attribute_declare`).
+            suggest: Arc::clone(&generation.suggest),
+            denied,
+        };
+        let published = self.publish(next, started);
+        // Durable in the log and not yet in a manifest, and a rotation reclaims the log: the
+        // declaration reaches `SEGMENTS-<n>.json` on the mechanism a deny already uses.
+        self.deny_dirty = true;
+        respond.ack(
+            Ack::VocabularyDeclared {
+                existing: false,
+                added,
+            },
+            &published,
+        );
+    }
+
+    /// `PATCH /control/vocabularies/{name}/values` — a page of values for a vocabulary that
+    /// exists (`ingest.md` §1.3).
+    fn commit_vocabulary_values(
+        &mut self,
+        vocabulary: String,
+        values: Vec<tessera_lifecycle::DeclaredValue>,
+        respond: Responder,
+    ) {
+        self.commit_vocabulary_page(vocabulary, values, false, respond);
+    }
+
+    /// One page of values, whether it arrived on the values route or as the inline values of a
+    /// redeclaration.
+    ///
+    /// **Every value of the page is checked before any code is drawn**, so a refused page binds
+    /// nothing and a caller's corrected retry means what they think it means. The page is one
+    /// append and one fsync — a `VocabularyDeclare` record carrying the page's values with the
+    /// codes drawn for them, because a value's title is part of what the page acknowledges and a
+    /// `VocabularyMint` record carries none.
+    fn commit_vocabulary_page(
+        &mut self,
+        vocabulary: String,
+        values: Vec<tessera_lifecycle::DeclaredValue>,
+        redeclaration: bool,
+        respond: Responder,
+    ) {
+        let started = std::time::Instant::now();
+        let generation = self.generation.load_full();
+        let Some(held) = generation.vocabularies.get(&vocabulary) else {
+            // The same 404 an unknown view is, and for the same reason: a vocabulary nobody
+            // declared and one this deployment does not carry are one answer.
+            respond.fail(ExecError::ViewUnknown {
+                detail: format!(
+                    "unknown vocabulary '{vocabulary}'. A vocabulary is declared at a build or by \
+                     `PUT /control/vocabularies/{{name}}` (ingest §1.3); a page of values does \
+                     not create one, because the value set's width and visibility are the \
+                     declaration's to state"
+                ),
+            });
+            self.health.note_work_refused();
+            return;
+        };
+        if let Err(e) = crate::vocabularies::check_page(held, &vocabulary, &values) {
+            respond.fail(e);
+            self.health.note_work_refused();
+            return;
+        }
+        let mut minter = held.clone();
+        let mut codes = Vec::with_capacity(values.len());
+        let mut added = 0u64;
+        let mut existing = 0u64;
+        for value in &values {
+            match minter.mint(&value.key) {
+                Ok(tessera_store::vocabulary::Minted::Fresh(code)) => {
+                    added += 1;
+                    codes.push((value.key.clone(), code));
+                }
+                Ok(tessera_store::vocabulary::Minted::Existing(code)) => {
+                    existing += 1;
+                    codes.push((value.key.clone(), code));
+                }
+                Err(e) => {
+                    respond.fail(ExecError::VocabularyRefused {
+                        detail: e.to_string(),
+                    });
+                    self.health.note_work_refused();
+                    return;
+                }
+            }
+            if let Some(title) = &value.title {
+                minter.fill_title(&value.key, title.clone());
+            }
+        }
+        // **Nothing to append where the page bound nothing and filled nothing.** A repeat of a
+        // page already applied is the no-op `ingest.md` §1.1 asks for, and an fsync for it would
+        // be a durable record of a decision nothing made.
+        let fills = values
+            .iter()
+            .filter(|v| v.title.is_some() && held.title_of(&v.key).is_none())
+            .count();
+        if added == 0 && fills == 0 {
+            respond.ack(
+                if redeclaration {
+                    Ack::VocabularyDeclared {
+                        existing: true,
+                        added: 0,
+                    }
+                } else {
+                    Ack::VocabularyValuesMinted { added, existing }
+                },
+                &Published::nothing_bound(&values),
+            );
+            return;
+        }
+        let declaration = tessera_lifecycle::wal::VocabularyDeclaration {
+            name: vocabulary.clone(),
+            title: None,
+            kind: minter.kind(),
+            visibility: minter.visibility(),
+            width: minter.width().arrow_type_name().to_string(),
+            values: codes
+                .iter()
+                .map(
+                    |(key, code)| tessera_lifecycle::wal::DeclaredVocabularyValue {
+                        key: key.clone(),
+                        code: Some(*code),
+                        title: minter.title_of(key).map(str::to_string),
+                    },
+                )
+                .collect(),
+            reserved: Vec::new(),
+        };
+        let record = WalRecord::VocabularyDeclare {
+            declaration: Box::new(declaration),
+        };
+        if let Err(e) = self.wal.append(&record).and_then(|()| self.wal.fsync()) {
+            tracing::error!(
+                error = %e,
+                vocabulary = %vocabulary,
+                "ALARM: a page of vocabulary values could not be made durable; none of them is \
+                 bound"
+            );
+            respond.fail(ExecError::Wal(e));
+            return;
+        }
+        let mut vocabularies: Vocabularies = (*generation.vocabularies).clone();
+        vocabularies.insert(minter);
+        let next = Generation {
+            prefix: generation.prefix.clone(),
+            segments_version: generation.segments_version,
+            watermark: generation.watermark,
+            bundle: Arc::clone(&generation.bundle),
+            dict: Arc::clone(&generation.dict),
+            postings: Arc::clone(&generation.postings),
+            fragments: Arc::clone(&generation.fragments),
+            external_index: Arc::clone(&generation.external_index),
+            delta_postings: generation.delta_postings.clone(),
+            overlay_version: generation.overlay_version,
+            overlay: Arc::clone(&generation.overlay),
+            buffer: Arc::clone(&generation.buffer),
+            vocabularies: Arc::new(vocabularies),
+            filter_columns: Arc::clone(&generation.filter_columns),
+            suggest: Arc::clone(&generation.suggest),
+            denied: Arc::clone(&generation.denied),
+        };
+        let published = self.publish(next, started);
+        // A binding of a *built* vocabulary reaches the manifest as a `vocabulary_extensions`
+        // entry and one of a runtime-declared vocabulary as a value of its own runtime entry;
+        // both are written at the next side-manifest publication, which this marks due.
+        self.deny_dirty = true;
+        respond.ack(
+            if redeclaration {
+                Ack::VocabularyDeclared {
+                    existing: true,
+                    added,
+                }
+            } else {
+                Ack::VocabularyValuesMinted { added, existing }
+            },
+            &published,
+        );
+    }
+
     /// `DELETE /control/views/{group}/{key}` — drop a view, freeing its key and killing its
     /// incarnation (`views.md` §3.4, decision 0115).
     ///
@@ -13781,6 +14250,11 @@ impl Executor {
             let (attributes, scoped_attributes) = self.live.attributes_for_publication();
             manifest.attributes = attributes;
             manifest.scoped_attributes = scoped_attributes;
+            // And the runtime vocabularies, each with its values as the live minters hold them
+            // (`ingest.md` §1.3). Restated from the live state rather than carried forward, on
+            // the roster's rule: a declaration or a page that landed since the manifest was
+            // cloned would otherwise be dropped, and a rotation makes that permanent.
+            manifest.vocabularies = self.live.vocabularies_for_publication(&live.vocabularies);
             // **Membership extents are written before the manifest that names them**, which is the
             // whole of their durability contract: a manifest naming a missing extent refuses at
             // open, so the file has to be durable first. A failure here abandons the publication
@@ -15294,6 +15768,8 @@ impl Executor {
         let (attributes, scoped_attributes) = self.live.attributes_for_publication();
         manifest.attributes = attributes;
         manifest.scoped_attributes = scoped_attributes;
+        // And the runtime vocabularies with their values, on the same rule (`ingest.md` §1.3).
+        manifest.vocabularies = self.live.vocabularies_for_publication(&live.vocabularies);
         // **And the group-scoped columns this flush gave a view its first of** (`views.md` §5).
         // Carried forward and appended to, never restated: the list is what a *restart* recovers
         // `scoped_scalars[..].views` from, and a render-only family writes no extent for the

@@ -266,6 +266,18 @@ pub fn router(state: Arc<AppState>) -> Router {
         // **`PUT`, as a layer's declaration is** (`ingest.md` §1.3): the name is the identity, an
         // identical redeclaration answers the column that exists, and a differing one is refused.
         .route("/control/attributes", axum::routing::put(declare_attribute))
+        // **`PUT` for the declaration and `PATCH` for a page of values**, spelled as the artifact
+        // routes are: the name is the identity, and the values are a set part that grows
+        // (`ingest.md` §1.1, §1.3). A declaration and a page are both kilobytes, so neither takes
+        // a body limit of its own.
+        .route(
+            "/control/vocabularies/{name}",
+            axum::routing::put(declare_vocabulary),
+        )
+        .route(
+            "/control/vocabularies/{name}/values",
+            axum::routing::patch(mint_vocabulary_values),
+        )
         // **`PUT` and `DELETE` on the view itself, spelled as a layer's are** (`views.md` §3.2,
         // §3.4): the key is the identity, so the operation is refused rather than repeated if it
         // is taken, and there is no server-minted name to `POST` to. A roster record is small and
@@ -457,6 +469,8 @@ pub const CONTROL_PLANE_ROUTES: &[(&str, &str)] = &[
     ("POST", "/control/flush"),
     ("POST", "/control/compact"),
     ("PUT", "/control/attributes"),
+    ("PUT", "/control/vocabularies/{name}"),
+    ("PATCH", "/control/vocabularies/{name}/values"),
 ];
 
 /// `/control/changes`'s request-body limit.
@@ -3433,6 +3447,156 @@ async fn declare_attribute(
     ))
 }
 
+/// `PUT /control/vocabularies/{name}`' body: the `[[vocabulary]]` block minus its acquisition
+/// keys (`configuration.md` §1; `ingest.md` §1.3), as JSON.
+///
+/// **`deny_unknown_fields`, and it is what refuses a caller-supplied code.** Codes are the
+/// server's to assign (per-point-attributes §3.1), so no field carries one and a body that names
+/// `code` anywhere is refused rather than read past — a caller who believes they pinned a code
+/// and did not would have a corpus coloured by numbers they did not choose. The same rule catches
+/// a misspelt `value_set`, which decides whether an unknown key at ingest is a typo or a value.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct VocabularyBody {
+    #[serde(default)]
+    title: Option<String>,
+    /// `closed` or `open`, spelled as the block spells it: is an unknown key at ingest refused,
+    /// or minted?
+    value_set: ValueSet,
+    /// `public` or `derived` — whether the *existence* of a value is sensitive. This slot takes
+    /// no access label (decision 0090).
+    visibility: tessera_types::vocabulary::Visibility,
+    /// The code space's width: `u8`, `u16` or `u32`.
+    width: String,
+    #[serde(default)]
+    values: Vec<VocabularyValueBody>,
+    /// Retired codes, never assigned.
+    #[serde(default)]
+    reserved: Vec<u32>,
+}
+
+/// The configuration surface's two words for a value set, which the manifest records as
+/// `declared` and `discovered` (`configuration.md` §1). Spelled here as the declaration spells
+/// it, so one document describes both doors.
+#[derive(serde::Deserialize, Clone, Copy)]
+#[serde(rename_all = "snake_case")]
+enum ValueSet {
+    Closed,
+    Open,
+}
+
+impl ValueSet {
+    fn kind(self) -> tessera_types::vocabulary::VocabularyKind {
+        match self {
+            ValueSet::Closed => tessera_types::vocabulary::VocabularyKind::Declared,
+            ValueSet::Open => tessera_types::vocabulary::VocabularyKind::Discovered,
+        }
+    }
+}
+
+/// One value on either vocabulary route: its stable opaque key and its presentation.
+///
+/// **No `code`**, and `deny_unknown_fields` is what says so: the executor draws every code
+/// (per-point-attributes §3.1, §3.4).
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct VocabularyValueBody {
+    key: String,
+    #[serde(default)]
+    title: Option<String>,
+}
+
+/// `PATCH /control/vocabularies/{name}/values`' body: a page of values.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct VocabularyValuesBody {
+    values: Vec<VocabularyValueBody>,
+}
+
+/// `PUT /control/vocabularies/{name}` — declare a vocabulary while the service runs
+/// (`ingest.md` §1.3; decision 0136).
+///
+/// **Synchronous, on [`declare_attribute`]'s rule**: a WAL append and an fsync, then the
+/// vocabulary exists for resolution, so an attribute declared after the answer may name it and a
+/// batch may carry one of its values. `201` for a new vocabulary; `200` where one of that name
+/// already carries exactly this identity, whose values the request is then applied to as a page
+/// (`ingest.md` §1.1's "present and identical"). A differing identity under a held name is `409`;
+/// a declaration the schema's rules refuse is `422` saying which rule.
+async fn declare_vocabulary(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(name): axum::extract::Path<String>,
+    body: Json<VocabularyBody>,
+) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
+    let body = body.0;
+    let request = tessera_engine::VocabularyRequest {
+        name: name.clone(),
+        title: body.title,
+        kind: body.value_set.kind(),
+        visibility: body.visibility,
+        width: body.width,
+        values: body
+            .values
+            .into_iter()
+            .map(|v| tessera_engine::DeclaredValue {
+                key: v.key,
+                title: v.title,
+            })
+            .collect(),
+        reserved: body.reserved,
+    };
+    // The **shared** blocking pool, on `register_layer`'s rule: a declaration is not a deny.
+    let (existing, added) =
+        tokio::task::spawn_blocking(move || state.engine.declare_vocabulary(request))
+            .await
+            .map_err(crate::error::map_join_error)?
+            .map_err(crate::error::map_accept_error)?;
+    let status = if existing {
+        StatusCode::OK
+    } else {
+        StatusCode::CREATED
+    };
+    Ok((
+        status,
+        Json(serde_json::json!({ "name": name, "existing": existing, "added": added })),
+    ))
+}
+
+/// `PATCH /control/vocabularies/{name}/values` — a page of values for a vocabulary that exists
+/// (`ingest.md` §1.3).
+///
+/// **A page adds and never removes.** A value is retired to `reserved` and never deleted
+/// (per-point-attributes §2.2), so the page's whole vocabulary is join: `added` drew a code and
+/// `existing` was already bound. A title on a value that has none fills it; one differing from
+/// the title held is a `409`, and the page has no effect.
+///
+/// A vocabulary this deployment does not carry is a `404`, not a create: the width and the
+/// visibility of a value set are the declaration's to state, and a page carries neither.
+async fn mint_vocabulary_values(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(name): axum::extract::Path<String>,
+    body: Json<VocabularyValuesBody>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let values: Vec<tessera_engine::DeclaredValue> = body
+        .0
+        .values
+        .into_iter()
+        .map(|v| tessera_engine::DeclaredValue {
+            key: v.key,
+            title: v.title,
+        })
+        .collect();
+    let vocabulary = name.clone();
+    let (added, existing) = tokio::task::spawn_blocking(move || {
+        state.engine.mint_vocabulary_values(vocabulary, values)
+    })
+    .await
+    .map_err(crate::error::map_join_error)?
+    .map_err(crate::error::map_accept_error)?;
+    Ok(Json(
+        serde_json::json!({ "name": name, "added": added, "existing": existing }),
+    ))
+}
+
 /// `PUT /control/views/{group}/{key}`'s body: the roster record, which is the inline
 /// `[[view_group.view]]` block written as a request (`views.md` §3.2).
 ///
@@ -5545,6 +5709,7 @@ mod tests {
                     name: "departments".to_string(),
                     kind,
                     visibility: tessera_engine::Visibility::Derived,
+                    width: "u32".to_string(),
                     values: vec![tessera_engine::ManifestVocabularyValue {
                         key: "ops".to_string(),
                         code: CODE_OPS,

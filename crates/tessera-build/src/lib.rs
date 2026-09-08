@@ -1936,6 +1936,9 @@ fn write_manifests(
                             }
                         },
                         visibility: v.visibility,
+                        // The declared code space, carried so that a reader with no column over
+                        // this vocabulary still knows what bounds a code drawn into it.
+                        width: v.width.arrow_type_name().to_string(),
                         values,
                         reserved: v.reserved.clone(),
                     }

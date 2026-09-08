@@ -601,6 +601,14 @@ pub fn map_accept_error(e: tessera_engine::AcceptError) -> ApiError {
         // are decided before the append, so neither has an effect.
         AcceptError::Exec(ExecError::ValueConflict { detail }) => ApiError::Conflict(detail.clone()),
         AcceptError::Exec(ExecError::ValuesRefused { detail }) => ApiError::Contract(detail.clone()),
+        // **A vocabulary declaration's own two answers**, on the attribute declaration's rule
+        // above: a refused declaration or page is corrected and resent, and a held identity — a
+        // vocabulary's, or a value's title — is one the caller cannot have, because a code's
+        // width is baked into every row and a value's properties are supplied once with the
+        // value. Both are decided before the append, so neither has an effect.
+        AcceptError::Exec(ExecError::VocabularyConflict { detail }) => {
+            ApiError::Conflict(detail.clone())
+        }
         // Both are the caller's row, malformed in a way the engine refused before anything was
         // acked or WAL-durable — a contract answer, not a fault.
         // 404 and not 422, because that is what an unknown view id is on both planes
@@ -812,7 +820,9 @@ fn exec_failure_may_be_in_force(
         ExecError::ValueConflict { .. } | ExecError::ValuesRefused { .. } => false,
         // Not reachable from a `/control/changes` item — a declaration is its own endpoint — and
         // false is honest: both are decided before the append.
-        ExecError::AttributeRefused { .. } | ExecError::AttributeConflict { .. } => false,
+        ExecError::AttributeRefused { .. }
+        | ExecError::AttributeConflict { .. }
+        | ExecError::VocabularyConflict { .. } => false,
         ExecError::Alloc(_) => false,
     }
 }

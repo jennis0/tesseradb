@@ -186,7 +186,12 @@ label  = "Q2 2026"
 starts = 2026-04-01T00:00:00Z
 ```
 
-**`[[vocabulary]]`** — a named value set. Repeatable.
+**`[[vocabulary]]`** — a named value set. Repeatable. **Also declarable at a running service**:
+`PUT /control/vocabularies/{name}` takes this block minus its acquisition keys (`source`,
+`fields`), as JSON, with `values` as a list of `{key, title?}` and its values paged afterwards by
+`PATCH /control/vocabularies/{name}/values` (contracts §3.4; `ingest.md` §1.3). Codes are never
+declared there: a `[vocabulary.values]` table pins them at a build so a rebuild preserves them,
+and at a running service there is nothing to preserve, so the server draws every one.
 
 | Key | | Value |
 |---|---|---|

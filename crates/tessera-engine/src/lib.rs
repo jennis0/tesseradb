@@ -40,6 +40,7 @@ pub mod suggest_set;
 pub mod tile_index;
 pub mod timing;
 pub mod viewport;
+mod vocabularies;
 mod write;
 
 use std::sync::Arc;
@@ -162,6 +163,9 @@ pub use write::{
 pub use tessera_lifecycle::AttributeRequest;
 // `POST /control/values`' body as the executor takes it, re-exported on `AttributeRequest`'s rule.
 pub use tessera_lifecycle::{IncomingValues, ValuesRequest};
+// The two vocabulary routes' bodies, and the two view declarations', on the same rule.
+pub use tessera_lifecycle::wal::{DeclaredFrame, PlainViewDeclaration, ViewGroupDeclaration};
+pub use tessera_lifecycle::{DeclaredValue, VocabularyRequest};
 
 /// One immutable, atomically-swappable snapshot of engine state (lifecycle §1.1).
 ///
