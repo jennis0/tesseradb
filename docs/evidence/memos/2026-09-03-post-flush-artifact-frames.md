@@ -152,8 +152,9 @@ implied — would write gigabytes per flush for the same rebuild and is declined
 
 `probes/2026-09-03-growth-trigger/` (the reproduction, no flush), `probes/2026-09-02-cold-start/`
 (the projection's cost alone), `test_corpora/common/ingest_cycle.py` (`probe_layers`,
-`probe_layers_after_ingest`), `data/ladder/.measure/medcpt36/ingest-0.10.json`
-(`layers_after_ingest`, `served: false`), `crates/tessera-engine/src/artifacts.rs`
+`probe_layers_after_ingest`), the ingest cycle's own run record
+(`layers_after_ingest`, `served: false`; its measurement directory was cleared on 2026-09-08 when
+every bundle on the box was superseded by `bundle_format` 8), `crates/tessera-engine/src/artifacts.rs`
 (`ArtifactProjections::get_or_build`, `MembershipRows::put`), `crates/tessera-engine/src/shapes.rs`
 (the per-segment piece pattern), `crates/tessera-lifecycle/src/membership.rs` (`bump` and its
 callers), `docs/decisions/0094-…`, `docs/decisions/0060-…`, `docs/decisions/0091-…`.

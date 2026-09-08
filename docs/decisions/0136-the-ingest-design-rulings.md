@@ -43,8 +43,9 @@ large data**.
     filled, the cycle walk over the layer as one graph. **R5** a supplied-content layer publishes
     without content and reports the count. **R6** an annotation on C7 stating the bound. **R7**
     memberships never shrink. **R8** the three per-object bounds stand and are published. **R9** a
-    plain view has a create route, last in order. **R10** a runtime render column reads absent
-    until the fold, answered from the segment schema.
+    plain view has a create route, last in order. **R10 is withdrawn** (2026-09-08,
+    the same day): it described a state nobody had reasoned through rather than a ruling anyone
+    made. See the amendment below.
 
 ## Consequences
 
@@ -55,3 +56,24 @@ large data**.
 - `write-path.md` and `annotation-write-cycle.md` are rewritten under T7; until then their
   superseded sentences carry the markers decisions 0134 and 0135 placed.
 - The register: C7 annotated with the growth-withdrawal bound; no new row.
+
+## Amendment, 2026-09-08: R10 is withdrawn and a runtime `render` column is not accepted
+
+R10 read *a runtime render column reads absent until the fold, answered from the segment schema*.
+It was drafted as a consequence of the runtime attribute route rather than as a question anyone had
+put, and the implementation found why: a rendered value lives in the hot column of the row that
+carries it, and both routes that could give an existing entity one address entities rather than
+rows — so a runtime `render` column is declarable today and can never be filled, and the values
+route grew a refusal to cope with a column kind that should not have reached it.
+
+**Ruled: R10 is withdrawn as never actually ruled on, and `PUT /control/attributes` refuses
+`render` until the question is worked through.** The refusal is an interim, not a principle:
+**there is no invariant against a rendered column arriving at a running service**, and the reason
+it is not accepted is that the design has not explored what it would mean — where the value lands
+for an entity that already holds rows, what a view drawn before the declaration shows, and how the
+fold closes the gap. Refusing keeps a half-working path out of the deployment; it does not settle
+anything.
+
+⊘ **Open, for a wider pass on live editing of a served database.** Beside it, and raised by the
+owner in the same conversation: how a view created at runtime interacts with group-scoped
+attributes, which decisions 0116 and 0136's R2 and R9 each touch from one side and none joins up.
