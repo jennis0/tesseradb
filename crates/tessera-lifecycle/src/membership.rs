@@ -1224,6 +1224,29 @@ impl ArtifactStore {
     /// that never cleared its criterion.
     #[must_use]
     pub fn apply(&mut self, record: &crate::wal::WalRecord, position: u64) -> usize {
+        self.apply_reporting(record, position, &mut Vec::new())
+    }
+
+    /// [`Self::apply`], saying **which growth entries it refused**, by their position in the
+    /// record.
+    ///
+    /// The engine holds each accepted write's delta until the flush tick and applies it to the
+    /// level's row forms there (`ingest.md` §1.3). A delta this store refused must not be among
+    /// them: the form would then union entities the records never took, or publish an operator
+    /// beside a cardinality the store did not move. Refusals are damage — the live path compared
+    /// and serialised the record moments before — so this is the list being empty in every healthy
+    /// process, and the tick reading it rather than assuming so.
+    ///
+    /// A refused publication needs no entry here: the ordinal it did not create reads absent from
+    /// the store, so a form takes nothing for it. Nor does a refused fill: the form re-reads the
+    /// record the fill did not change.
+    #[must_use]
+    pub fn apply_reporting(
+        &mut self,
+        record: &crate::wal::WalRecord,
+        position: u64,
+        refused_growth: &mut Vec<usize>,
+    ) -> usize {
         match record {
             crate::wal::WalRecord::ArtifactPublish {
                 layer,
@@ -1235,7 +1258,7 @@ impl ArtifactStore {
                 layer,
                 level,
                 growth,
-            } => self.apply_growth(layer, *level, growth, position),
+            } => self.apply_growth(layer, *level, growth, position, refused_growth),
             crate::wal::WalRecord::ArtifactFill {
                 layer,
                 level,
@@ -1540,19 +1563,22 @@ impl ArtifactStore {
         level: u32,
         growth: &[crate::wal::MembershipGrowth],
         position: u64,
+        refused_growth: &mut Vec<usize>,
     ) -> usize {
         let mut refused = 0;
-        for grown in growth {
+        for (index, grown) in growth.iter().enumerate() {
             // Damage is a refusal, not an empty delta, on the publication's argument: a growth
             // decoded short is an acked join that silently did not happen, and the artifact then
             // serves the count it had before — which nothing distinguishes from a criterion it
             // failed to clear.
             let Some(joining) = deserialise_members(&grown.joining) else {
                 refused += 1;
+                refused_growth.push(index);
                 continue;
             };
             let Some(leaving) = deserialise_leaving(&grown.leaving) else {
                 refused += 1;
+                refused_growth.push(index);
                 continue;
             };
             match grown.set {
@@ -1563,6 +1589,7 @@ impl ArtifactStore {
                     // leaves would serve a set nobody declared.
                     if !leaving.is_empty() {
                         refused += 1;
+                        refused_growth.push(index);
                         continue;
                     }
                     self.grow(layer, level, grown.ordinal, &joining);
@@ -1578,6 +1605,7 @@ impl ArtifactStore {
                         cardinality,
                     ) {
                         refused += 1;
+                        refused_growth.push(index);
                     }
                 }
             }
@@ -2655,13 +2683,23 @@ pub fn decode_record(
         let digest: [u8; 32] = take(32)?.try_into().ok()?;
         let cardinality = u64::from_le_bytes(take(8)?.try_into().ok()?);
         let set_len = u32::from_le_bytes(take(4)?.try_into().ok()?) as usize;
+        let generated_from = deserialise_members(take(set_len)?)?;
+        // **The pair is checked here, as `ArtifactStore::grow_set` checks it at replay**
+        // (`ingest.md` §1.1). Containment reads the row-space operator against the stored
+        // cardinality, and the two now come from different places in these bytes: an extent whose
+        // number is smaller than the set it travels with would pass containment for a principal
+        // holding a subset of what the content was generated from. Refusing the record is the
+        // reading damage takes everywhere else in this decoder.
+        if generated_from.cardinality() != cardinality {
+            return None;
+        }
         contents.push(ContentSet {
             // ⊘ The extent carries no values — see [`ContentSet::values`]. A restored content is
             // therefore unservable until the blob write lands, which is fail-closed and loud rather
             // than an artifact served with its description missing.
             values: None,
             digest,
-            generated_from: deserialise_members(take(set_len)?)?,
+            generated_from,
             cardinality,
         });
     }
@@ -3355,6 +3393,42 @@ mod tests {
                 blob.len()
             );
         }
+    }
+
+    /// **A record whose stored cardinality is not the size of the set beside it is refused.**
+    ///
+    /// Containment reads the row-space operator against this number (`ingest.md` §1.1), and in an
+    /// extent the two are separate fields: a smaller number would pass containment for a principal
+    /// holding a subset of what the content was generated from. `ArtifactStore::grow_set` makes the
+    /// same check on the log's own delta; this is the one on the packed record.
+    #[test]
+    fn a_content_whose_stored_cardinality_is_not_its_sets_size_is_refused() {
+        let mut r = record(100, &[1, 2, 3]);
+        r.contents = vec![ContentSet {
+            values: Some(vec!["a label".into()]),
+            digest: content_digest(&["a label".to_string()]),
+            generated_from: Bitmap::of(&[1, 2, 3]),
+            cardinality: 3,
+        }];
+        let whole = encode_record(&r, None);
+        assert!(
+            decode_record(r.entity, &whole).is_some(),
+            "the pair agrees, so the record decodes"
+        );
+
+        r.contents[0].cardinality = 1;
+        let corrupt = encode_record(&r, None);
+        assert!(
+            decode_record(r.entity, &corrupt).is_none(),
+            "a cardinality smaller than the set it travels with is damage: a principal holding \
+             one member of three would satisfy |G ∩ M| == |G|"
+        );
+
+        r.contents[0].cardinality = 9;
+        assert!(
+            decode_record(r.entity, &encode_record(&r, None)).is_none(),
+            "and a larger one is damage too, though it fails containment for everybody"
+        );
     }
 
     #[test]

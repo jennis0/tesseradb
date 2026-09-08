@@ -1051,8 +1051,8 @@ fn a_window_that_could_not_append_leaves_neither_the_rows_nor_the_joins() {
 
 /// **A reader never sees a membership part-grown.** One thread serves the viewport while another
 /// ingests, publishes, grows and ticks; every count the reader takes is one of the values a
-/// completed growth leaves, never a value between two of them, and never a value above what the
-/// writer has accepted.
+/// completed growth leaves — a multiple of the step above the published 300 — and never one
+/// between two of them, and no artifact it has been served goes away.
 ///
 /// **It may repeat a value the reader has already passed, and that is the tick's own rule**
 /// (`ingest.md` §1.3). A request is served the level's form as last published; a request whose row

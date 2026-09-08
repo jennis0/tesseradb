@@ -105,8 +105,11 @@ is refused — a membership never shrinks. The cardinality the delta produces is
 page is prepared and travels in the growth record, and a replay whose recomputed set disagrees with
 it refuses the delta rather than publishing a pair that was never derived together. A page that
 empties a set removes the content record, moves the ranks above it down as the fold's withdrawal
-does, and the acknowledgement names the rank beside the caller's key; a later page at that rank
-names no content and is refused, which is the content not returning when the set refills. The
+does, and the acknowledgement names the rank beside the caller's key. The withdrawn content does
+not come back: a later page at that rank names whichever content moved down into it, and one past
+the last names no content and is refused, so the caller supplies the content again rather than
+refilling its set. A batch naming one key more than once with a rank is refused for the same
+reason — a withdrawal in the first row would move the rank the second names. The
 containment test reads the operator and the cardinality the executor published together at the
 tick, both taken from one read of the store.
 

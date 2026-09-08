@@ -542,8 +542,11 @@ impl std::fmt::Display for RegistryError {
             RegistryError::RepeatedKey { layer, key } => write!(
                 f,
                 "{layer}: the key {key} appears more than once in this batch and a row of it \
-                 carries a fixed part. A fixed part is filled once, so name a key once per \
-                 batch where it carries a parent, an attachment, a content or a shape"
+                 carries a fixed part or pages a generating set. A fixed part is filled once, and \
+                 a page is read against the set as the batch found it while a withdrawal moves \
+                 the ranks above it — so name a key once per batch where it carries a parent, an \
+                 attachment, a content, a shape or a rank, and send a second page as a second \
+                 request"
             ),
             RegistryError::ViewIdentity {
                 layer,
@@ -595,8 +598,10 @@ impl std::fmt::Display for RegistryError {
     }
 }
 
-/// The keys a batch names more than once where any of their rows carries a fixed part — the
-/// [`RegistryError::RepeatedKey`] check, one body for both routes.
+/// The keys a batch names more than once where any of their rows carries a fixed part or pages a
+/// generating set — the [`RegistryError::RepeatedKey`] check, one body for both routes. What
+/// counts as carrying is the caller's; the growth route's argument is on
+/// [`LayerRegistry::prepare_grow`].
 fn repeated_key_with_parts<'a>(
     rows: impl Iterator<Item = (Option<&'a str>, Option<&'a str>, bool)>,
 ) -> Option<String> {
@@ -2074,13 +2079,30 @@ impl LayerRegistry {
         let mut growth = Vec::with_capacity(incoming.len());
         let mut fills = Vec::new();
         let mut filled = Vec::with_capacity(incoming.len());
-        if let Some(key) = repeated_key_with_parts(
-            incoming
-                .iter()
-                // The growth route carries no view and addresses no group-scoped layer
-                // (`resolve_growth_key`), so every key here is in the one set.
-                .map(|join| (None, Some(join.key.as_str()), !join.parts.is_empty())),
-        ) {
+        // **A row naming a rank counts as carrying a part here**, so a key repeated with ranks
+        // refuses the batch and a key repeated with members alone stays lawful (a join twice).
+        //
+        // A page is checked against the set the store holds and the store applies the pages of one
+        // record in order, so two rows against one artifact would each be prepared against the
+        // state before the batch. That is not merely a stale count: a page that empties a set
+        // withdraws its content and moves every rank above it down, so a second row's rank then
+        // names a different content than the caller wrote — and where the two sets happen to be
+        // the same size, the cardinality check that would otherwise catch it agrees by
+        // coincidence, leaving one content serving against its old set and another holding a
+        // member nobody declared for it. Modelling the shift instead would have to decide what
+        // the caller's second rank meant after the first row moved it, which is a question the
+        // design does not answer; a caller who wants two pages sends two requests, and each one's
+        // ranks are read against the state the previous acknowledgement reported.
+        //
+        // The growth route carries no view and addresses no group-scoped layer
+        // (`resolve_growth_key`), so every key here is in the one set.
+        if let Some(key) = repeated_key_with_parts(incoming.iter().map(|join| {
+            (
+                None,
+                Some(join.key.as_str()),
+                !join.parts.is_empty() || join.rank.is_some(),
+            )
+        })) {
             return Err(RegistryError::RepeatedKey {
                 layer: layer_name.to_string(),
                 key,

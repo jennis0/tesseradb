@@ -2359,18 +2359,23 @@ impl ArtifactProjections {
             return;
         };
         let map_key = (view.to_string(), layer.to_string(), level);
-        // **Taken out of the map, not cloned from it.** A request that arrives meanwhile misses
-        // either way — the store is already at the new version and the held key is not — so the
-        // absence costs nothing it would not have paid; and taking the entry is what leaves this
-        // thread the only holder of the `Arc` between requests, so the `make_mut` below copies
-        // only where a request is still reading the form.
-        let Some(Held { key, at, mut rows }) = self
-            .cached
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(&map_key)
-        else {
-            return;
+        // **Read under the lock first, and taken out of the map only where there is an amendment
+        // to make.** A request arriving while the entry is out finds nothing held and projects the
+        // level whole, on the request path — the cost this whole mechanism exists to avoid — so
+        // the window is narrowed to the amendment itself (`elapsed_ms` in the line below, 15 ms at
+        // rung 3's `mesh/descriptors`) and a level with no delta to take never leaves the map at
+        // all.
+        //
+        // **Taking it is what makes the amendment cheap**: between requests this thread is then
+        // the `Arc`'s only holder, so `Arc::make_mut` copies nothing. Cloning the entry instead
+        // would leave the map holding a second reference and copy the level's records, generating
+        // sets and tile index on every publication.
+        let (read_prefix, read_at, pending_from) = {
+            let cached = self.cached.lock().unwrap_or_else(|e| e.into_inner());
+            let Some(held) = cached.get(&map_key) else {
+                return;
+            };
+            (held.key.prefix.clone(), held.at, held.key.level_version)
         };
         // **The deltas this form has not taken**, which is those at or after the version it
         // stands at. The interval's deltas carry consecutive versions — every route that changes a
@@ -2379,11 +2384,34 @@ impl ArtifactProjections {
         // mid-interval takes only what landed after its build.
         let pending: Vec<&LevelDelta> = deltas
             .iter()
-            .filter(|delta| delta.before >= key.level_version)
+            .filter(|delta| delta.before >= pending_from)
             .collect();
-        let now = pending
-            .last()
-            .map_or(key.level_version, |delta| delta.before + 1);
+        let now = pending.last().map_or(pending_from, |delta| delta.before + 1);
+        if pending.is_empty() && read_prefix == prefix {
+            // The form was built from the store after every delta held here, and it is still the
+            // form this prefix serves. Nothing to apply, and it never left the map.
+            return;
+        }
+        let Some(Held { key, at, mut rows }) = self
+            .cached
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&map_key)
+        else {
+            // A request replaced or a drop removed the entry between the two locks. Whatever
+            // stands there now was filed against the store this delta has already reached.
+            return;
+        };
+        if key.level_version != pending_from || at != read_at {
+            // The same race one step in: the entry that came out is not the one that was read, so
+            // the run of deltas selected above may not be its own. It goes back untouched and the
+            // next tick publishes onto it.
+            self.cached
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(map_key, Held { key, at, rows });
+            return;
+        }
         // **Every term that would make the amendment describe something other than what is held.**
         // A form from another prefix or at a version no delta follows has missed a write; a form
         // whose rows are not rows of this row space is the merge case [`ArtifactRows::covers`]
@@ -2416,15 +2444,6 @@ impl ArtifactProjections {
                 "a level's held row form could not be published and is dropped; the next \
                  request naming this level projects it whole"
             );
-            return;
-        }
-        if pending.is_empty() {
-            // The form was built from the store after every delta held here. Nothing to apply, and
-            // it goes back where it was.
-            self.cached
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .insert(map_key, Held { key, at, rows });
             return;
         }
 

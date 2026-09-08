@@ -11302,16 +11302,23 @@ impl Executor {
                     *at += 1;
                 }
             });
+            // **What the store refused, per record**, so the tick's row forms take only what the
+            // records took (`ArtifactStore::apply_reporting`).
+            let mut refused_per_record: Vec<Vec<usize>> =
+                vec![Vec::new(); minted.len() + growth.len()];
             let undecodable = self.live.with_publication_state(|registry, store, _| {
                 let mut undecodable = 0;
                 // The registry half first, per record: a mint may have extended its level's
                 // reserved runs, and the store's own apply resolves ordinals against them.
-                for (record, position) in &minted {
+                for ((record, position), refused) in minted.iter().zip(&mut refused_per_record) {
                     registry.apply(record);
-                    undecodable += store.apply(record, *position);
+                    undecodable += store.apply_reporting(record, *position, refused);
                 }
-                for (record, position) in &growth {
-                    undecodable += store.apply(record, *position);
+                for ((record, position), refused) in growth
+                    .iter()
+                    .zip(refused_per_record.iter_mut().skip(minted.len()))
+                {
+                    undecodable += store.apply_reporting(record, *position, refused);
                 }
                 undecodable
             });
@@ -11327,8 +11334,13 @@ impl Executor {
             // **And every delta the records just took is held for the tick**, in the order they
             // took it, rather than being applied to the row forms here — the ingest twin of
             // `commit_growth`'s own accumulation (`ingest.md` §1.3).
-            for ((record, _), before) in minted.iter().chain(growth.iter()).zip(befores) {
-                self.hold_delta(record, before);
+            for (((record, _), before), refused) in minted
+                .iter()
+                .chain(growth.iter())
+                .zip(befores)
+                .zip(&refused_per_record)
+            {
+                self.hold_delta(record, before, refused);
             }
             // A growth against an artifact **above** its level's high-water is carried by the next
             // tail pack like any other unpublished record; one below it waits for the fold, held in
@@ -11599,7 +11611,13 @@ impl Executor {
     /// generating set, a fill — arrives here with the level version it followed, and the level's
     /// row forms take the run of them at the next tick. A record naming no level's forms is held
     /// all the same: which views hold a form is not this thread's question until it publishes.
-    fn hold_delta(&mut self, record: &WalRecord, before: u64) {
+    ///
+    /// **`refused` names the growth entries the store did not take**, by their position in the
+    /// record (`ArtifactStore::apply_reporting`), and they are held for nothing: a form that
+    /// unioned an entity the records refused would count a member no artifact has. A record whose
+    /// every entry was refused is still held, empty, because it moved the level's version and the
+    /// versions of an interval's deltas must stay consecutive.
+    fn hold_delta(&mut self, record: &WalRecord, before: u64, refused: &[usize]) {
         let (layer, level, kind) = match record {
             WalRecord::ArtifactPublish {
                 layer,
@@ -11624,7 +11642,10 @@ impl Executor {
                 // enter the records either, and the alarm it raised has already been said.
                 let mut joins = Vec::new();
                 let mut pages = Vec::new();
-                for grown in growth {
+                for (index, grown) in growth.iter().enumerate() {
+                    if refused.contains(&index) {
+                        continue;
+                    }
                     let Some(joining) =
                         tessera_lifecycle::membership::deserialise_members(&grown.joining)
                     else {
@@ -11679,9 +11700,10 @@ impl Executor {
     /// **Publish every level's row forms from the deltas held since the last tick** — the one
     /// moment a served form changes (`ingest.md` §1.3, §10 ruling 6).
     ///
-    /// Called from the tick and from the open's warm, and from nowhere else: a request never
-    /// builds a form and never brings one forward, so a level whose deltas are not yet published
-    /// is served as last published, up to a tick stale.
+    /// Called from the tick and from nowhere else: a request never brings a form forward, so a
+    /// level whose deltas are not yet published is served as last published, up to a tick stale.
+    /// A level with no form held takes nothing here; the open's warm and the first request to
+    /// reach such a level are what build one.
     fn publish_row_forms(&mut self) {
         let pending = std::mem::take(&mut self.pending_forms);
         for ((layer, level), deltas) in &pending {
@@ -11969,11 +11991,14 @@ impl Executor {
             return;
         }
 
+        let mut refused_per_record: Vec<Vec<usize>> = vec![Vec::new(); records.len()];
         let undecodable = self.live.with_publication_state(|registry, store, _| {
             let mut undecodable = 0;
-            for (record, position) in records.iter().zip(&positions) {
+            for ((record, position), refused) in
+                records.iter().zip(&positions).zip(&mut refused_per_record)
+            {
                 registry.apply(record);
-                undecodable += store.apply(record, *position);
+                undecodable += store.apply_reporting(record, *position, refused);
             }
             undecodable
         });
@@ -11990,8 +12015,8 @@ impl Executor {
         // (`Self::hold_delta`): the publication's ordinals, the growth's joins and pages, and the
         // ordinals a fill changed. Each record moved the level's version by one, so `before` walks
         // with them.
-        for (at, record) in (before..).zip(records.iter()) {
-            self.hold_delta(record, at);
+        for ((at, record), refused) in (before..).zip(records.iter()).zip(&refused_per_record) {
+            self.hold_delta(record, at, refused);
         }
         let published = Published::registry_applied(records[0]);
         // A shape layer's held shapes are rebuilt at the tick's publication, at the version these
@@ -12203,11 +12228,15 @@ impl Executor {
             return;
         }
 
+        let mut refused_per_record: Vec<Vec<usize>> = vec![Vec::new(); records.len()];
         let undecodable = self.live.with_publication_state(|_, store, _| {
             records
                 .iter()
                 .zip(&positions)
-                .map(|(record, position)| store.apply(record, *position))
+                .zip(&mut refused_per_record)
+                .map(|((record, position), refused)| {
+                    store.apply_reporting(record, *position, refused)
+                })
                 .sum::<usize>()
         });
         if undecodable > 0 {
@@ -12219,8 +12248,8 @@ impl Executor {
                 "ALARM: a membership growth did not survive its own round trip"
             );
         }
-        for (at, record) in (before..).zip(records.iter()) {
-            self.hold_delta(record, at);
+        for ((at, record), refused) in (before..).zip(records.iter()).zip(&refused_per_record) {
+            self.hold_delta(record, at, refused);
         }
         let published = Published::registry_applied(records[0]);
         // A growth against an artifact **above** its level's high-water is carried by the next

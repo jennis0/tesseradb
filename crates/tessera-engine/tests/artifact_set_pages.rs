@@ -243,6 +243,93 @@ fn a_page_that_leaves_a_membership_is_refused() {
     );
 }
 
+/// **A key repeated in one batch with a rank is refused; repeated with members alone it is a join
+/// twice.**
+///
+/// A page is prepared against the set the store holds, and the store applies the pages of one
+/// record in order — so two rows against one artifact would both be read against the state before
+/// the batch. That is not only a stale count. A page that empties a set withdraws its content and
+/// moves the ranks above it down, so the second row's rank then names a content the caller did not
+/// write; where the two sets are the same size the cardinality check agrees by coincidence, and
+/// one content goes on serving against its old set while another acquires a member nobody declared
+/// for it. The batch is refused instead, and the caller sends two requests.
+#[test]
+fn a_key_repeated_with_a_rank_is_refused_and_repeated_with_members_alone_is_not() {
+    let fx = fixture();
+    let engine = fx.open();
+    engine.register_layer(label_layer(LAYER)).unwrap();
+    // Two contents, the second's set the same size as the first's, which is what makes the
+    // rank-shift undetectable by cardinality alone.
+    engine
+        .publish_artifacts(
+            LAYER.into(),
+            0,
+            vec![IncomingArtifact::with_content(
+                Some("t0".into()),
+                fx.members(0..300),
+                vec![
+                    IncomingContent::new(vec!["rank zero".to_string()], fx.members([0, 1])),
+                    IncomingContent::new(vec!["rank one".to_string()], fx.members([2, 3])),
+                ],
+            )],
+        )
+        .unwrap();
+    tick(&engine);
+
+    // The benign repeat: one key twice, members alone, no rank. Both rows join.
+    let grown = engine
+        .grow_memberships(
+            LAYER.into(),
+            0,
+            vec![
+                IncomingGrowth::from_entities("t0".into(), fx.members([300])),
+                IncomingGrowth::from_entities("t0".into(), fx.members([301])),
+            ],
+        )
+        .expect("a key repeated with members alone is a join twice");
+    assert_eq!((grown[0].joined, grown[1].joined), (1, 1));
+    tick(&engine);
+    assert_eq!(
+        artifacts_of(&engine, &full_coverage_credential())[0].masked_count,
+        302,
+        "both rows joined"
+    );
+
+    // The rank-shift case: the first row empties rank 0 and the second names rank 1, which the
+    // withdrawal would have moved.
+    let refused = engine
+        .grow_memberships(
+            LAYER.into(),
+            0,
+            vec![
+                IncomingGrowth::page_of_entities(
+                    "t0".into(),
+                    Some(0),
+                    fx.members([]),
+                    fx.members([0, 1]),
+                ),
+                IncomingGrowth::page_of_entities(
+                    "t0".into(),
+                    Some(1),
+                    fx.members([4]),
+                    fx.members([]),
+                ),
+            ],
+        )
+        .expect_err("a key repeated with a rank is refused");
+    let text = refused.to_string();
+    assert!(text.contains("more than once"), "{text}");
+    assert!(text.contains("rank"), "the refusal names what makes it one: {text}");
+
+    tick(&engine);
+    assert_eq!(
+        label_for(&engine, &full_coverage_credential()).as_deref(),
+        Some("rank zero"),
+        "and the batch had no effect: rank 0 is where it was, holding the set it was published \
+         with, rather than serving against a set the second row moved under it"
+    );
+}
+
 // ---- the pair --------------------------------------------------------------------------------
 
 /// **The cardinality moves with the page, and a request reads the pair the tick published.**

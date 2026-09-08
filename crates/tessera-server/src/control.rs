@@ -4400,18 +4400,18 @@ async fn grow_memberships(
                 entities.by_ref().take(artifact.members.len()).collect();
             let leaving: Vec<tessera_types::EntityId> =
                 entities.by_ref().take(artifact.leaving.len()).collect();
-            if artifact.rank.is_some() || !leaving.is_empty() {
-                // A row naming a rank pages that content's set; a row naming members leaving and
-                // no rank is refused on the executor, which is where the caller is told that a
-                // membership never shrinks (`ingest.md` §10, R7). Neither carries a fixed part.
-                return tessera_lifecycle::IncomingGrowth::page_of_entities(
-                    artifact.key,
-                    artifact.rank,
-                    members,
-                    leaving,
-                );
-            }
-            let mut join = tessera_lifecycle::IncomingGrowth::from_entities(artifact.key, members);
+            // **One shape for every row, and the executor decides what the combination means.**
+            // A row naming a rank pages that content's generating set; one naming members leaving
+            // and no rank is refused there, which is where the caller is told that a membership
+            // never shrinks (`ingest.md` §10, R7); one naming a rank *and* a fixed part is refused
+            // there too. Dropping the parts here instead would answer `200` for a shape or a
+            // content the batch threw away.
+            let mut join = tessera_lifecycle::IncomingGrowth::page_of_entities(
+                artifact.key,
+                artifact.rank,
+                members,
+                leaving,
+            );
             join.parts = tessera_lifecycle::FixedParts {
                 parent_keys: artifact.parent,
                 attached_to: artifact.attached_to.map(|a| {

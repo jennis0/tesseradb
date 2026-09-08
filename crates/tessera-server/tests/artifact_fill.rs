@@ -502,7 +502,7 @@ async fn a_page_moves_a_generating_set_and_the_ack_reports_what_it_did() {
     assert_eq!(status, 422, "{body}");
     assert!(body.to_string().contains("never shrinks"), "{body}");
 
-    // A rank the artifact holds no content at is refused, and so is a set beside a fixed part.
+    // A rank the artifact holds no content at is refused.
     let (status, body) = patch(
         &server,
         TOPICS,
@@ -511,6 +511,39 @@ async fn a_page_moves_a_generating_set_and_the_ack_reports_what_it_did() {
     .await;
     assert_eq!(status, 422, "{body}");
     assert!(body.to_string().contains("no content at rank 3"), "{body}");
+
+    // **A fixed part on a ranked row is refused rather than dropped.** A row pages one set or
+    // fills fixed parts; answering `200` for a part the batch discarded would tell the caller
+    // their content was taken.
+    for part in [
+        json!({ "content": [{ "rank": 0, "values": ["another"] }] }),
+        json!({ "parent": ["t0"] }),
+        json!({ "attached_to": { "layer": TOPICS, "key": "t0" } }),
+    ] {
+        let mut row = json!({ "key": "t0", "rank": 0, "members": members(20..21) });
+        for (name, value) in part.as_object().unwrap() {
+            row[name] = value.clone();
+        }
+        let (status, body) = patch(&server, TOPICS, json!([row])).await;
+        assert_eq!(status, 422, "{part}: {body}");
+        assert!(
+            body.to_string().contains("names a rank and carries a fixed part"),
+            "{part}: {body}"
+        );
+    }
+
+    // A key repeated with a rank is refused: a withdrawal in one row moves the rank another names.
+    let (status, body) = patch(
+        &server,
+        TOPICS,
+        json!([
+            { "key": "t0", "rank": 0, "members": members(20..21) },
+            { "key": "t0", "rank": 0, "leaving": members(20..21) }
+        ]),
+    )
+    .await;
+    assert_eq!(status, 422, "{body}");
+    assert!(body.to_string().contains("more than once"), "{body}");
 
     // The page that empties the set: the content is withdrawn, the ack names the rank and the key,
     // and the artifact is withheld because its layer declares supplied content it now lacks.
