@@ -281,6 +281,21 @@ async fn one_key_in_two_views_is_two_artifacts_each_drawn_on_its_own_view() {
         "{body}"
     );
 
+    // A view no view of the bundle answers to is refused rather than acked and drawn nowhere.
+    let (status, body) = put(
+        &server,
+        SCOPED,
+        json!([{ "key": "c1", "view": "q9", "members": members(0..10) }]),
+    )
+    .await;
+    assert_eq!(status, 422, "{body}");
+    let detail = body["detail"].as_str().unwrap_or_default().to_string();
+    assert!(detail.contains("q9"), "{detail}");
+    assert!(
+        detail.contains("q1, q2"),
+        "the keys held are named: {detail}"
+    );
+
     // One key, two views, one batch: two artifacts and two identifiers.
     let (status, body) = put(
         &server,
@@ -375,4 +390,146 @@ async fn a_parent_in_another_view_is_refused() {
         served(&server, "quarter:q1", SCOPED).await,
         vec![("leaf".to_string(), 5), ("root".to_string(), 20)]
     );
+}
+
+async fn wait_until(
+    server: &TestServer,
+    what: &str,
+    done: impl Fn(&tessera_engine::ExecutorStats) -> bool,
+) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    loop {
+        if done(&server.state.engine.write_executor_stats()) {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "{what}: never happened"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+}
+
+/// Flush, then fold — `grow_memberships.rs`' sequence, and its reason: a flush with nothing
+/// buffered publishes nothing, so a row is ingested first to give the fold something to fold.
+async fn flush_and_fold(server: &TestServer) {
+    let ingested = external_id_of(9_001);
+    let resp = server
+        .client
+        .post(server.control_url("/control/ingest"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .header("x-tessera-batch-id", "views-fold")
+        // A multi-view bundle names the batch's view: which one a row belongs to is not
+        // inferable (contracts §3.4).
+        .header("x-tessera-view", format!("quarter:{}", KEYS[0]))
+        .header("content-type", "application/vnd.apache.arrow.stream")
+        .body(build_ingest_batch_optional(&[(
+            Some(&ingested[..]),
+            10.0,
+            10.0,
+            "0",
+        )]))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status().as_u16(),
+        200,
+        "{}",
+        resp.text().await.unwrap()
+    );
+    let before = server.state.engine.write_executor_stats();
+    let resp = server
+        .client
+        .post(server.control_url("/control/flush"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 202);
+    wait_until(server, "the flush published", move |now| {
+        now.flushes > before.flushes
+    })
+    .await;
+    let before = server.state.engine.write_executor_stats();
+    let resp = server
+        .client
+        .post(server.control_url("/control/compact"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 202);
+    wait_until(server, "the fold published", move |now| {
+        assert_eq!(
+            now.fold_failures, before.fold_failures,
+            "the fold was discarded rather than published"
+        );
+        now.folds > before.folds
+    })
+    .await;
+}
+
+/// **The view survives the fold and the reopen** (`bundle_format` 8): the fold packs each record
+/// into a membership extent and a restart seeds the store from those bytes, so a view lost there
+/// would collapse two views' keys into one index and draw one view's artifacts on every view of
+/// the group. Asserted on the served answers and on the key's uniqueness scope afterwards.
+#[tokio::test]
+async fn a_group_scoped_level_survives_a_fold_and_a_reopen_with_its_views() {
+    let tmp = TempDir::new().unwrap();
+    let server = serve(&tmp).await;
+    register(&server, declaration(SCOPED, Some("quarter"), "flat")).await;
+
+    let (status, body) = put(
+        &server,
+        SCOPED,
+        json!([
+            { "key": "c1", "view": "q1", "members": members(0..10) },
+            { "key": "c1", "view": "q2", "members": members(0..30) },
+            { "key": "c2", "view": "q2", "members": members(0..50) },
+        ]),
+    )
+    .await;
+    assert_eq!(status, 201, "{body}");
+    let q1 = body["artifacts"][0]["tessera_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    flush_and_fold(&server).await;
+    assert_eq!(
+        served(&server, "quarter:q1", SCOPED).await,
+        vec![("c1".to_string(), 10)],
+        "the folded level keeps q1's one artifact"
+    );
+    assert_eq!(
+        served(&server, "quarter:q2", SCOPED).await,
+        vec![("c1".to_string(), 30), ("c2".to_string(), 50)]
+    );
+
+    // Reopened from the packed extents, with the log's publication behind the fold's high-water:
+    // the views come back off the blob.
+    drop(server);
+    let server = open(&tmp).await;
+    assert_eq!(
+        served(&server, "quarter:q1", SCOPED).await,
+        vec![("c1".to_string(), 10)],
+        "the view came back off the packed extent"
+    );
+    assert_eq!(
+        served(&server, "quarter:q2", SCOPED).await,
+        vec![("c1".to_string(), 30), ("c2".to_string(), 50)]
+    );
+
+    // And the key's uniqueness scope is still the view's: `c1` in q1 is the held artifact, not a
+    // key the restored index has confused with q2's.
+    let (status, body) = put(
+        &server,
+        SCOPED,
+        json!([{ "key": "c1", "view": "q1", "members": members(0..10) }]),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["created"], 0, "{body}");
+    assert_eq!(body["artifacts"][0]["tessera_id"], q1, "{body}");
 }

@@ -190,9 +190,11 @@ held key is the `409` the idempotency column states; the row's route is `PUT` al
 being track T2b's and a membership never shrinking (spec §10, R7). *The artifact record's `view`*:
 required on a group-scoped layer and refused on an entity-scoped one, part of the key's uniqueness
 scope, and carried in the publication record so a replay lands the artifact in the view it was
-acked in. The growth route addresses no group-scoped layer, carrying no view. ⊘ A packed
-membership extent does not carry the view: a level folded and reopened comes back with none, and
-giving the blob a view is a `bundle_format` bump this track does not make.
+acked in, and in the packed extent's blob so a fold and a reopen land it there too
+(`bundle_format` 8, spec §7.1). The growth route addresses no group-scoped layer, carrying no
+view. A view no view of the bundle answers to is refused rather than acked and drawn nowhere: the
+roster the generation carries is the build's views plus every view created since, so the check
+sees a view created a moment ago.
 
 **A level under continuous paging.** An artifact's served forms, its row-space membership operator
 per view, its generating-set operators and its lineage, are derivatives of the store. Under a
@@ -452,9 +454,13 @@ that the object has a smaller spelling or is already bounded elsewhere (spec §1
   a suppressed entity is in both (suppression is not deletion), where a build has no suppressions.
   **Built 2026-09-08 (T2c)**: the list is refused over the bound with a `422` naming the limit and
   the inclusion spelling; the complement is one `andnot` on the executor over the view's entities
-  — every entity holding a row in the view or buffered for it, deleted entities excluded — taken
-  against the artifact's own view on a group-scoped layer and against the union of the layer's
-  views otherwise, and its size is logged. `members` and `excluding` on one row is a `422`.
+  — every entity holding a row in the view or buffered for it, deleted entities excluded — and its
+  size is logged. `members` and `excluding` on one row is a `422`. **Which view**, since an
+  entity-scoped layer is drawn on several: the artifact's own on a group-scoped layer, where it
+  belongs to one; the union of the layer's declared views otherwise, that being the corpus the
+  layer is drawn over. On a single-view corpus the union is the whole entity space, which is what
+  the build complements against (`0..high_water`), so the two doors agree where the build has an
+  opinion.
 - **A single value is one batch.** A text cell, a keyword, a number arrive on one row, and a row
   cannot page. The bound is `max_batch_bytes`, 64 MiB at the ceiling. What such a value costs, so
   the bound is understood as a bound on cost and not a ceiling on reach: the analyser runs at
@@ -753,7 +759,8 @@ the entity's row, which before T3 is the row that created the entity.
 | the buffer-occupancy `429` carries a drain-derived `Retry-After` | changed value | contracts §3.4, the ingest row |
 
 `api_version` stays at 1: no client outside this repository exists and decision 0048 rules the
-change made rather than versioned. `bundle_format` moves from 6 to 7, because the manifest is the
+change made rather than versioned. `bundle_format` moves from 6 to 7 at T0 and to **8 at T2c**,
+the blob gaining the artifact's view beside its key (spec §1.5), because the manifest is the
 durable home of every declaration that survives WAL rotation (contracts §2.2's `groups` row makes
 the argument for rosters) and gains runtime-declared attributes, vocabularies and groups, and each
 stored content and shape gains its digest. `WAL_VERSION` moves from 20 to 21 in **one bump-and-recreate
@@ -764,7 +771,8 @@ block minus its source, for R9's route; its own record because a plain view carr
 projection and gate itself and belongs to no roster). Postcard is positional, so a stale log is
 refused rather than read.
 
-**Built 2026-09-07, the format half (T0):** `WAL_VERSION` 21 and `bundle_format` 7, with every
+**Built 2026-09-07, the format half (T0)**, and `bundle_format` moved again to 8 at T2c
+(2026-09-08) for the record blob's view: `WAL_VERSION` 21, with every
 record variant and field above present and serialised. A generating set's cardinality and a
 content's digest travel in the `ArtifactPublish` record and the record blob, a shape's digest with
 the shape, and the growth record carries its rank, leaving set and moved cardinality as one

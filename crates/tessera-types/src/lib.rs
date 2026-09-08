@@ -124,9 +124,15 @@ pub struct GenerationStamp {
 // (`attributes`, `scoped_attributes`, `vocabularies`, `groups`). A reader at 7 would take the
 // first forty bytes of a 6 blob's generating set as a digest and a cardinality and read the set
 // out of the bytes that follow; the number is what stops it opening.
+// 8: the record blob carries the artifact's view beside its key — part of the identity on a
+// layer whose `scope` names a group (`ingest.md` §1.5, `views.md` §3.5; decision 0136, ruling 9).
+// A reader at 8 would take the two bytes a 7 blob spends on its content count as a view length
+// and read the view out of the membership; and a 7 blob read by a reader that ignored the field
+// restores every artifact of a group-scoped level with no view, collapsing two views' keys into
+// one index. The number is what stops it opening.
 // Each bump makes a stale local bundle a loud refusal rather than a silent misread — a fail-closed
 // guard, not compatibility (decision 0048).
-pub const BUNDLE_FORMAT: u32 = 7;
+pub const BUNDLE_FORMAT: u32 = 8;
 pub const API_VERSION: u32 = 1;
 pub const ABI_VERSION: u32 = 1;
 pub const ROW_ABSENT: u32 = 0xFFFF_FFFF;
@@ -150,7 +156,7 @@ mod tests {
     }
     #[test]
     fn constants() {
-        assert_eq!(BUNDLE_FORMAT, 7);
+        assert_eq!(BUNDLE_FORMAT, 8);
         assert_eq!(ROW_ABSENT, 0xFFFF_FFFF);
     }
 }

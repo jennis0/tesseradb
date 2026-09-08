@@ -638,7 +638,7 @@ impl MembershipRows {
 /// A view's own key — the last component of its path — which is what an artifact of a
 /// group-scoped layer names (`views.md` §3.5): a group's several layouts over one key set draw
 /// the same artifact in each.
-fn view_key(view: &str) -> &str {
+pub(crate) fn view_key(view: &str) -> &str {
     tessera_store::view_path_components(view)
         .last()
         .copied()

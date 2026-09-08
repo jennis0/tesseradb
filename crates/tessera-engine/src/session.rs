@@ -3652,6 +3652,50 @@ impl Engine {
         //
         // **The refusal reports a count and a position, never an entity id** (I10): the detail is
         // forwarded to the caller as the 422 body, and an entity id in it would cross the boundary.
+        // **A view no view of this bundle answers to is refused** (`ingest.md` §1.5). The view is
+        // part of the identity on a group-scoped layer, and an artifact stamped with a key the
+        // roster does not hold is drawn nowhere: a publication the operator asked for, acked, and
+        // then silently visible to no one. The roster the generation carries is the build's views
+        // plus every view created while the service ran (`views.md` §3.2), so the check sees a
+        // view created a moment ago; a view is compared by its own key, which is what an artifact
+        // names and what a group's several layouts share.
+        //
+        // The refusal names the view and the keys the bundle holds — operator-plane names, on the
+        // control plane, which decision 0024 puts outside the register's viewer scope.
+        {
+            let generation = self.generation();
+            let named: std::collections::BTreeSet<&str> = artifacts
+                .iter()
+                .filter_map(|artifact| artifact.view.as_deref())
+                .collect();
+            if !named.is_empty() {
+                let manifest = &generation.bundle.manifest;
+                let known: std::collections::BTreeSet<&str> = manifest
+                    .views
+                    .iter()
+                    .map(|view| crate::artifacts::view_key(&view.id))
+                    .chain(
+                        manifest
+                            .groups
+                            .iter()
+                            .flat_map(|group| group.views.iter().map(|view| view.key.as_str())),
+                    )
+                    .collect();
+                if let Some(unknown) = named.iter().find(|view| !known.contains(**view)) {
+                    return Err(crate::write::AcceptError::Exec(
+                        tessera_lifecycle::ExecError::LayerRefused {
+                            detail: format!(
+                                "this batch names the view '{unknown}', which no view of this \
+                                 bundle answers to; an artifact stamped with it would be drawn \
+                                 nowhere. The keys held are: {}",
+                                known.iter().copied().collect::<Vec<_>>().join(", ")
+                            ),
+                        },
+                    ));
+                }
+            }
+        }
+
         // **A membership spelled by exclusion carries no members here**: the complement is taken
         // on the executor, against the view's entity set with the deleted already out of it
         // (`ingest.md` §2.3), so both checks pass over the empty set the record carries at this

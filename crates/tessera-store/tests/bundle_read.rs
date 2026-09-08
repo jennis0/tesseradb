@@ -156,7 +156,7 @@ fn build_bundle(root: &Path, n: u64) -> (Vec<TilerItem>, Vec<u32>) {
     fs::write(partition_dir.join("SEGMENTS-0.json"), &segments_bytes).expect("write SEGMENTS-0");
 
     let manifest = Manifest {
-        bundle_format: 7,
+        bundle_format: 8,
         created_at: "2026-07-28T00:00:00Z".to_string(),
         data_plugin_hash: tessera_plugin::Passthrough::new().data_plugin_hash(),
         declared_bounds: serde_json::json!({}),
@@ -216,7 +216,7 @@ fn open_bundle_loads_segments_and_columns_round_trip() {
     let (items, codes) = build_bundle(dir.path(), 200);
 
     let bundle = open_bundle(dir.path()).expect("open_bundle");
-    assert_eq!(bundle.manifest.bundle_format, 7);
+    assert_eq!(bundle.manifest.bundle_format, 8);
 
     let partition = bundle.partitions.get("default").expect("default partition");
     assert_eq!(partition.segments_n, 0);
@@ -686,15 +686,16 @@ fn a_manifest_with_no_unhonourable_state_opens_at_the_highest_n() {
     );
 }
 
-/// **A bundle at the previous number refuses at open on the number alone** (`bundle_format` 7,
-/// `ingest.md` §7.1, decision 0136).
+/// **A bundle at the previous number refuses at open on the number alone** (`bundle_format` 8,
+/// `ingest.md` §1.5, §7.1, decision 0136).
 ///
-/// Format 6's record blob stored a content's generating set with no digest and no cardinality
-/// in front of it and a shape with no digest, so a bundle at 6 whose `MANIFEST.json` parsed
-/// cleanly would have every artifact's first forty set bytes read as a digest and a cardinality
-/// and the set read out of what follows — the misread the number exists to stop. The manifest
-/// here is exactly the one the writer at 7 produced with the number turned back, so nothing but
-/// the number can be what refuses.
+/// Format 7's record blob carried the artifact's key and then its content count, with no view
+/// between them, so a bundle at 7 whose `MANIFEST.json` parsed cleanly would have every
+/// artifact's content count read as a view length and its view read out of the membership — the
+/// misread the number exists to stop. And a record restored with no view is a group-scoped
+/// level whose two views' keys collapse into one index. The manifest here is exactly the one the
+/// writer at 8 produced with the number turned back, so nothing but the number can be what
+/// refuses.
 #[test]
 fn a_bundle_at_the_previous_number_is_refused_on_the_number_alone() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -704,7 +705,7 @@ fn a_bundle_at_the_previous_number_is_refused_on_the_number_alone() {
     let mut value: serde_json::Value =
         serde_json::from_slice(&fs::read(&manifest_path).expect("read MANIFEST.json"))
             .expect("parse MANIFEST.json");
-    value["bundle_format"] = serde_json::json!(6);
+    value["bundle_format"] = serde_json::json!(7);
     let bytes = serde_json::to_vec_pretty(&value).expect("serialise");
     fs::write(&manifest_path, &bytes).expect("rewrite MANIFEST.json");
     let current = CurrentPointer {
@@ -720,7 +721,7 @@ fn a_bundle_at_the_previous_number_is_refused_on_the_number_alone() {
     let err = open_bundle(dir.path()).expect_err("a bundle at another format must not open");
     match err {
         StoreError::UnsupportedBundleFormat { found, supported } => {
-            assert_eq!((found, supported), (6, 7));
+            assert_eq!((found, supported), (7, 8));
         }
         other => panic!("refused for the wrong reason: {other}"),
     }

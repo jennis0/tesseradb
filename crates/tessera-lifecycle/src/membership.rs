@@ -720,11 +720,9 @@ pub struct ArtifactRecord {
     /// this type there is one shape and no second structure saying which view an artifact is
     /// drawn in.
     ///
-    /// ⊘ **A packed extent does not carry it** (`encode_record`): a level folded into an extent
-    /// and reopened comes back with `None` on every record. Nothing built publishes a
-    /// group-scoped layer into a fold today — the build's per-view passes read the store while it
-    /// is still in memory — and giving the blob a view is a `bundle_format` bump this track does
-    /// not make.
+    /// **A packed extent carries it** ([`encode_record`], `bundle_format` 8): a level folded and
+    /// reopened comes back with each artifact in the view it was published into, which is what
+    /// keeps two views' keys apart across a fold.
     pub view: Option<String>,
     /// Entity-space membership — the canonical, view-invariant record. Owned, or read through a
     /// mapping of the bytes that carry it (see [`Members`]).
@@ -2300,6 +2298,7 @@ impl ArtifactStore {
 ///
 /// ```text
 /// blob       := u16 LE key_len | key bytes (UTF-8)
+///             | u16 LE view_len | view bytes (UTF-8)   -- 0 on an entity-scoped layer
 ///             | u16 LE content_count
 ///             | u32 LE members_len | membership bytes (portable Roaring)
 ///             | content*
@@ -2340,6 +2339,13 @@ impl ArtifactStore {
 /// blob as a shorter membership — an artifact with a low masked count for every viewer, which the
 /// criterion renders as absent with nothing to notice. With a length in front, short is short.
 ///
+/// **The view travels beside the key, and for the same reason** (`bundle_format` 8): it is part
+/// of an artifact's identity on a group-scoped layer (`ingest.md` §1.5), keys are unique per
+/// `(layer, view)`, and a level folded into an extent and reopened without it would collide two
+/// views' keys under one index and draw one view's artifacts on every view of the group. A
+/// zero length is the entity-scoped layer's one set, which is a complete statement rather than
+/// an unfilled one.
+///
 /// **The key travels with the membership because nothing else durable carries it.** An artifact's
 /// entity is derivable from its layer's reserved runs and its ordinal, so the extent need not carry
 /// it; a caller's key is derivable from nothing. Putting it in the manifest instead would put
@@ -2367,6 +2373,15 @@ pub fn encode_record(record: &ArtifactRecord, shape: Option<&ArtifactShapes>) ->
     out.extend_from_slice(&key_len.to_le_bytes());
     if key_len != u16::MAX {
         out.extend_from_slice(key);
+    }
+    // The view, on the key's rule and with the same consequence one step further: a view name
+    // that could not round-trip would restore a group-scoped artifact as though it belonged to
+    // every view of its group.
+    let view = record.view.as_deref().unwrap_or_default().as_bytes();
+    let view_len = u16::try_from(view.len()).unwrap_or(u16::MAX);
+    out.extend_from_slice(&view_len.to_le_bytes());
+    if view_len != u16::MAX {
+        out.extend_from_slice(view);
     }
     // Same argument, one level up: more contents than a `u16` can count is a publication this
     // encoding cannot read back, so it refuses rather than writing a prefix of the ranking. A
@@ -2437,7 +2452,7 @@ pub fn encode_record(record: &ArtifactRecord, shape: Option<&ArtifactShapes>) ->
 ///
 /// **The build's one use for it**: an extent it has just written is mapped back, and a record's
 /// heap bitmap is replaced by a view over these bytes ([`Members::mapped`]). Nothing is copied and
-/// nothing is parsed but the three lengths [`encode_record`] puts in front — which is the whole
+/// nothing is parsed but the four lengths [`encode_record`] puts in front — which is the whole
 /// reason the membership carries an explicit length rather than being the blob's tail.
 ///
 /// `None` where the framing does not hold, on [`decode_record`]'s rule: the caller keeps the
@@ -2447,7 +2462,15 @@ pub fn members_bytes(blob: &[u8]) -> Option<&[u8]> {
     if key_len == u16::MAX as usize {
         return None;
     }
+    // The view sits between the key and the content count (`bundle_format` 8), and is skipped
+    // here for the same reason the key is: this reader wants the membership's offset and parses
+    // only the lengths in front of it.
     let at = 2 + key_len;
+    let view_len = u16::from_le_bytes(blob.get(at..at + 2)?.try_into().ok()?) as usize;
+    if view_len == u16::MAX as usize {
+        return None;
+    }
+    let at = at + 2 + view_len;
     let count = u16::from_le_bytes(blob.get(at..at + 2)?.try_into().ok()?) as usize;
     if count == u16::MAX as usize {
         return None;
@@ -2482,6 +2505,15 @@ pub fn decode_record(
         None
     } else {
         Some(std::str::from_utf8(take(key_len)?).ok()?.to_string())
+    };
+    let view_len = u16::from_le_bytes(take(2)?.try_into().ok()?) as usize;
+    if view_len == u16::MAX as usize {
+        return None;
+    }
+    let view = if view_len == 0 {
+        None
+    } else {
+        Some(std::str::from_utf8(take(view_len)?).ok()?.to_string())
     };
     let count = u16::from_le_bytes(take(2)?.try_into().ok()?) as usize;
     if count == u16::MAX as usize {
@@ -2580,8 +2612,7 @@ pub fn decode_record(
         ArtifactRecord {
             entity,
             key,
-            // The blob carries no view — see `ArtifactRecord::view`.
-            view: None,
+            view,
             members: Members::owned(members),
             contents,
             attached_to,
@@ -3079,6 +3110,47 @@ mod tests {
         assert_eq!(deserialise_members(&serialise_members(&empty)), Some(empty));
         assert_eq!(deserialise_members(&[0xff, 0xff, 0xff, 0xff]), None);
         assert_eq!(deserialise_members(&[]), None);
+    }
+
+    /// **An artifact's view survives the packed extent** (`bundle_format` 8): a group-scoped
+    /// level folded and reopened comes back with each record in the view it was published into,
+    /// which is what keeps two views' keys apart across a fold — restored without it, the level's
+    /// key index would hold one entry per key and the artifacts of one view would be drawn on
+    /// every view of the group. An entity-scoped record's absent view round-trips as absent, the
+    /// two being different states.
+    #[test]
+    fn an_artifacts_view_survives_the_packed_extent_and_absence_is_its_own_state() {
+        let mut scoped = record(100, &[1, 2, 3]);
+        scoped.key = Some("c1".into());
+        scoped.view = Some("q1".into());
+        let (restored, _) = decode_record(scoped.entity, &encode_record(&scoped, None))
+            .expect("the blob round-trips");
+        assert_eq!(restored.view.as_deref(), Some("q1"));
+        assert_eq!(restored.key.as_deref(), Some("c1"));
+        assert_eq!(restored.members, scoped.members);
+
+        let mut plain = record(101, &[4]);
+        plain.key = Some("c1".into());
+        let (restored, _) = decode_record(plain.entity, &encode_record(&plain, None))
+            .expect("the blob round-trips");
+        assert_eq!(restored.view, None);
+
+        // The two keys are one key in two views, and the store that seeds from the extents keeps
+        // them apart on the field it just read back.
+        let mut store = ArtifactStore::default();
+        store.seed("clusters/q", 0, 0, scoped, None);
+        let mut second = record(102, &[9]);
+        second.key = Some("c1".into());
+        second.view = Some("q2".into());
+        store.seed("clusters/q", 0, 1, second, None);
+        assert_eq!(
+            store.ordinal_of_key("clusters/q", 0, Some("q1"), "c1"),
+            Some(0)
+        );
+        assert_eq!(
+            store.ordinal_of_key("clusters/q", 0, Some("q2"), "c1"),
+            Some(1)
+        );
     }
 
     /// **An attachment survives the packed extent, and a lost one is a decode failure.** A label
