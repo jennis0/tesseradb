@@ -139,6 +139,10 @@ struct PlannedContent {
 /// membership materialised — the complement included.
 #[derive(Debug)]
 struct ResolvedArtifact {
+    /// The view this artifact belongs to on a group-scoped layer (`views.md` §3.5) — the row's
+    /// own `view` column, carried to the record rather than to a side map: the store holds one
+    /// shape for the build's artifacts and the wire's (`ArtifactRecord::view`).
+    view: Option<String>,
     members: ResolvedMembers,
     contents: Vec<IncomingContent>,
     attached_to: Option<IncomingAttachment>,
@@ -1645,28 +1649,23 @@ pub fn publish(
     }
 
     // **Which view's set each published artifact belongs to**, on a layer scoped to a group
-    // (`views.md` §3.5). Taken here, where the plan's keys and the store's ordinals are both in
-    // hand: the artifact pass draws an artifact in its own view and in no other, and an ordinal is
-    // what it has to say that with.
-    let mut wanted: BTreeMap<(&str, u32), BTreeMap<&str, &str>> = BTreeMap::new();
-    for ((layer, level, key), index) in &plan.artifacts {
-        if let Some(view) = &plan.bodies[*index].view_key {
-            wanted
-                .entry((layer.as_str(), *level))
-                .or_default()
-                .insert(key.as_str(), view.as_str());
-        }
-    }
+    // (`views.md` §3.5) — **read back off the records**, which carry the view since it became
+    // part of the identity (`ingest.md` §1.5): the artifact pass draws an artifact in its own
+    // view and in no other, and an ordinal is what it has to say that with.
     let mut artifact_views: BTreeMap<String, BTreeMap<(u32, u32), String>> = BTreeMap::new();
-    for ((layer, level), keys) in wanted {
-        for (ordinal, record) in store.level(layer, level) {
-            let Some(view) = record.key.as_deref().and_then(|key| keys.get(key)) else {
-                continue;
-            };
-            artifact_views
-                .entry(layer.to_string())
-                .or_default()
-                .insert((level, ordinal), (*view).to_string());
+    let scoped: Vec<String> = registry
+        .iter()
+        .filter(|(_, layer)| layer.declaration.scope.group().is_some())
+        .map(|(name, _)| name.to_string())
+        .collect();
+    for layer in &scoped {
+        for (level, ordinal, record) in store.layer(layer) {
+            if let Some(view) = &record.view {
+                artifact_views
+                    .entry(layer.clone())
+                    .or_default()
+                    .insert((level, ordinal), view.clone());
+            }
         }
     }
 
@@ -2485,6 +2484,7 @@ fn resolve_artifact(
     }
 
     Ok(ResolvedArtifact {
+        view: artifact.view_key.take(),
         members,
         contents,
         attached_to: artifact.attached_to.take(),
@@ -2519,6 +2519,7 @@ fn incoming_artifact(
     };
     result.parent_keys = std::mem::take(&mut artifact.parent_keys);
     result.shape = artifact.shape.take();
+    result.view = artifact.view.take();
     Ok(result)
 }
 

@@ -384,6 +384,8 @@ pub struct IngestLimits {
     pub publish_max_body_bytes: usize,
     pub max_artifacts_per_request: usize,
     pub max_members_per_request: usize,
+    /// The entities one artifact's `excluding` list may name (ingest §2.3).
+    pub max_excluded_per_request: usize,
 }
 
 /// Generous enough that no test which is not about these bounds can observe them — the same
@@ -404,6 +406,7 @@ pub fn generous_ingest_limits() -> IngestLimits {
         publish_max_body_bytes: 64 * 1024 * 1024,
         max_artifacts_per_request: 100_000,
         max_members_per_request: 50_000_000,
+        max_excluded_per_request: 1_000_000,
     }
 }
 
@@ -579,7 +582,7 @@ async fn mount_server_with_flush(
         publish_max_body_bytes: ingest_limits.publish_max_body_bytes,
         max_artifacts_per_request: ingest_limits.max_artifacts_per_request,
         max_members_per_request: ingest_limits.max_members_per_request,
-        max_excluded_per_request: 1_000_000,
+        max_excluded_per_request: ingest_limits.max_excluded_per_request,
         // On, so the header assertions below exercise the emission path rather than only its
         // absence. The compile-time `bench-timing` gate still decides whether anything is sent.
         stage_timing: true,

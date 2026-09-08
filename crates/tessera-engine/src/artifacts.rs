@@ -635,6 +635,16 @@ impl MembershipRows {
     }
 }
 
+/// A view's own key — the last component of its path — which is what an artifact of a
+/// group-scoped layer names (`views.md` §3.5): a group's several layouts over one key set draw
+/// the same artifact in each.
+fn view_key(view: &str) -> &str {
+    tessera_store::view_path_components(view)
+        .last()
+        .copied()
+        .unwrap_or(view)
+}
+
 /// The whole of a view's row space — base and every extent — as a row count.
 fn total_rows(space: &RowSpace) -> u32 {
     u32::try_from(space.total_rows()).unwrap_or(u32::MAX)
@@ -2375,7 +2385,9 @@ impl ArtifactProjections {
             let started = std::time::Instant::now();
             let amended = Arc::make_mut(&mut rows);
             let (added, rows_taken) = match source {
-                SegmentRows::Projected => amended.extend_by(store.level(layer, *level), next),
+                SegmentRows::Projected => {
+                    amended.extend_by(store.level_in_view(layer, *level, view_key(view)), next)
+                }
                 SegmentRows::Resolved(piece) => {
                     // The one segment resolved is the one this flush published, so a form more
                     // than one segment short has nothing here for the others — the straddling
@@ -2737,7 +2749,12 @@ impl ArtifactProjections {
                 .map(Arc::new),
         };
         let transposed = claimed.as_ref().and_then(|column| {
-            ArtifactRows::build_from_column(store.level(layer, level), space, column, &mut adopted)
+            ArtifactRows::build_from_column(
+                store.level_in_view(layer, level, view_key(view)),
+                space,
+                column,
+                &mut adopted,
+            )
         });
         let from_transpose = transposed.is_some();
         if claimed.is_some() && !from_transpose {
@@ -2751,7 +2768,11 @@ impl ArtifactProjections {
         }
         let built = transposed
             .unwrap_or_else(|| {
-                ArtifactRows::build_over(store.level(layer, level), space, adopted.take())
+                ArtifactRows::build_over(
+                    store.level_in_view(layer, level, view_key(view)),
+                    space,
+                    adopted.take(),
+                )
             })
             .with_partition(partition);
         // **The column, claimed from the prefix or composed from the form just built** — and the

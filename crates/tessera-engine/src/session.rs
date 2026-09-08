@@ -3652,6 +3652,10 @@ impl Engine {
         //
         // **The refusal reports a count and a position, never an entity id** (I10): the detail is
         // forwarded to the caller as the 422 body, and an entity id in it would cross the boundary.
+        // **A membership spelled by exclusion carries no members here**: the complement is taken
+        // on the executor, against the view's entity set with the deleted already out of it
+        // (`ingest.md` §2.3), so both checks pass over the empty set the record carries at this
+        // point and neither has anything to say about a list of entities to leave out.
         let generation = self.generation();
         let mut deleted = 0u64;
         let mut first_artifact = None;

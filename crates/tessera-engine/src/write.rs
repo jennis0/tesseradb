@@ -5212,6 +5212,72 @@ fn dangling_entities(generation: &Generation, views: &[String]) -> Vec<EntityId>
     candidates
 }
 
+/// Every entity holding a row in one of these views, or buffered for one, **minus the deleted**
+/// — the set an exclusion is complemented against (`ingest.md` §2.3).
+///
+/// [`dangling_entities`]'s walk without its second question: that one asks which entities would
+/// be left with no row if these views went away, and this asks which have a row in them now. A
+/// view that publishes no row→entity table is walked over entity space, and the warning there is
+/// that walk's, not repeated here.
+///
+/// **A deleted entity is excluded and a suppressed one is not.** A deletion is irreversible and
+/// its entity can contribute to no count again — publishing a membership that named one would be
+/// refused a statement later — where a suppression is a live member temporarily outside every
+/// mask, which the inclusion spelling would have named and this one keeps.
+fn view_entities(generation: &Generation, views: &[String]) -> croaring::Bitmap {
+    let mut entities = croaring::Bitmap::new();
+    for view in views {
+        for partition in generation.bundle.partitions.values() {
+            let Some(view_data) = partition.views.get(view) else {
+                continue;
+            };
+            let rows = view_data.row_space.total_rows();
+            if view_data.row_space.can_invert() {
+                for row in 0..rows {
+                    if let Some(entity) = view_data
+                        .row_space
+                        .entity_of(tessera_types::RowId::new(row as u32))
+                    {
+                        entities.add(entity.raw() as u32);
+                    }
+                }
+            } else {
+                let bound = view_data.row_space.base().bound();
+                tracing::warn!(
+                    view = %view,
+                    entities = bound,
+                    "this view publishes no row→entity table, so an exclusion's complement walks \
+                     entity space to enumerate its rows"
+                );
+                for raw in 0..bound {
+                    let entity = EntityId::new(raw);
+                    if view_data.row_space.row_of(entity).is_some() {
+                        entities.add(raw as u32);
+                    }
+                }
+            }
+        }
+    }
+    // **Buffered rows are in the view** (`rows()`, joins included): a point acknowledged and not
+    // yet flushed is an entity of this view, and an exclusion taken without it would leave every
+    // such point out of the membership for ever — the one asymmetry between the two spellings
+    // that would not be stale but wrong.
+    for (entity, item) in generation.buffer.rows() {
+        if views.iter().any(|view| view == &item.view) {
+            entities.add(entity.raw() as u32);
+        }
+    }
+    entities.remove_run_compression();
+    let deleted: Vec<u32> = entities
+        .iter()
+        .filter(|raw| generation.overlay.is_deleted(EntityId::new(*raw as u64)))
+        .collect();
+    for raw in deleted {
+        entities.remove(raw);
+    }
+    entities
+}
+
 fn views_of(generation: &Generation) -> Vec<String> {
     let mut views: Vec<String> = generation
         .bundle
@@ -10414,7 +10480,11 @@ fn growth_receipt(
 /// been.
 fn refusal_of(e: tessera_lifecycle::RegistryError) -> ExecError {
     match e {
-        tessera_lifecycle::RegistryError::PartConflict { .. } => ExecError::PartConflict {
+        // A second `excluding` on a held key is the same `409` a differing fixed part is: the
+        // complement it asks for is a different set from the one the artifact holds
+        // (`ingest.md` §1.3).
+        tessera_lifecycle::RegistryError::PartConflict { .. }
+        | tessera_lifecycle::RegistryError::ExclusionOnHeldKey { .. } => ExecError::PartConflict {
             detail: e.to_string(),
         },
         other => ExecError::LayerRefused {
@@ -10651,7 +10721,9 @@ impl Executor {
             let prepared = self.live.with_publication_state(|registry, store, alloc| {
                 let fresh: Vec<String> = wanted
                     .iter()
-                    .filter(|key| store.ordinal_of_key(&layer, 0, key).is_none())
+                    // A predicate layer is entity-scoped: `LayerRegistry::prepare_derive`
+                    // refuses a group-scoped one, so the key sits in the one set.
+                    .filter(|key| store.ordinal_of_key(&layer, 0, None, key).is_none())
                     .cloned()
                     .collect();
                 if fresh.is_empty() {
@@ -10736,7 +10808,9 @@ impl Executor {
             let mut to_mint: BTreeMap<(&str, u32), Vec<(&str, &croaring::Bitmap)>> =
                 BTreeMap::new();
             for ((layer, level, key), (_, members)) in &wanted {
-                match store.ordinal_of_key(layer, *level, key) {
+                // The ingest route carries no artifact view; `resolve_or_mint` refuses a
+                // group-scoped layer there (`ingest.md` §1.5), so the key sits in the one set.
+                match store.ordinal_of_key(layer, *level, None, key) {
                     Some(ordinal) => {
                         resolved.insert((layer.clone(), *level, key.clone()), ordinal);
                     }
@@ -10758,7 +10832,11 @@ impl Executor {
                     .iter()
                     .map(|(key, members)| tessera_lifecycle::IncomingArtifact {
                         key: Some((*key).to_string()),
+                        // Entity-scoped: a group-scoped layer is refused at admission, a point's
+                        // layer column carrying no artifact view (`ingest.md` §1.5).
+                        view: None,
                         members: (*members).clone(),
+                        excluding: None,
                         // **Nothing but its name.** A layer declaring supplied content or a
                         // dependency refuses the key at admission rather than minting an artifact
                         // that could not be served — `LayerRegistry::resolve_or_mint` makes both
@@ -11694,9 +11772,19 @@ impl Executor {
         &mut self,
         layer: String,
         level: u32,
-        incoming: Vec<IncomingArtifact>,
+        mut incoming: Vec<IncomingArtifact>,
         respond: Responder,
     ) {
+        // **The complement, taken here and nowhere else** (`ingest.md` §2.3): a membership spelled
+        // by exclusion is materialised on the executor, against the view's entity set as it stands
+        // at this step, *before* the record is written — so the log, the store and every read path
+        // carry the inclusion the other spelling would have produced, and no serving path can
+        // evaluate a complement against a viewer's mask, which would disclose the existence of
+        // items outside it (`annotation-write-cycle.md` §6.1).
+        if let Err(detail) = self.materialise_exclusions(&layer, &mut incoming) {
+            respond.fail(ExecError::LayerRefused { detail });
+            return;
+        }
         // Read before the record is applied, because it is what says a held row form is the form
         // this publication follows — see [`Self::bring_artifacts_forward`].
         let before = self
@@ -11816,6 +11904,67 @@ impl Executor {
             },
             &published,
         );
+    }
+
+    /// Materialise every membership this batch spelled by exclusion, and answer the refusal where
+    /// the layer cannot be read (`ingest.md` §2.3).
+    ///
+    /// **The view's entity set is every entity holding a row in it or buffered for it, deleted
+    /// entities excluded**, and the membership is one `andnot` of the caller's list over it. On a
+    /// group-scoped layer the view is the artifact's own; on an entity-scoped one it is the union
+    /// of the views the layer is drawn on, which is the layer's whole corpus and the set the
+    /// build complements against (`layers.rs::resolve_artifact`, `0..high_water`).
+    ///
+    /// **Two divergences from the build's byte-identity are structural and stated rather than
+    /// closed** (`ingest.md` §2.3): an entity ingested after this step is in the inclusion
+    /// spelling's membership and not in the exclusion's, and a suppressed entity is in both,
+    /// suppression not being deletion.
+    ///
+    /// The size is logged rather than answered: how large a membership a caller's exclusion came
+    /// to is operator-facing, and a count of the corpus is not something a publication's
+    /// acknowledgement carries (C8).
+    fn materialise_exclusions(
+        &self,
+        layer: &str,
+        incoming: &mut [IncomingArtifact],
+    ) -> Result<(), String> {
+        if !incoming.iter().any(|a| a.excluding.is_some()) {
+            return Ok(());
+        }
+        let Some(registered) = self.live.registered_layer(layer) else {
+            // The registry refuses the unknown layer a statement later, in its own words.
+            return Ok(());
+        };
+        let generation = self.generation.load_full();
+        let mut sets: std::collections::HashMap<Option<String>, croaring::Bitmap> =
+            std::collections::HashMap::new();
+        for artifact in incoming.iter_mut() {
+            let Some(excluded) = artifact.excluding.as_ref().map(|e| e.cardinality()) else {
+                continue;
+            };
+            let view = artifact.view.clone();
+            let entities = sets.entry(view.clone()).or_insert_with(|| {
+                let views: Vec<String> = match &view {
+                    Some(view) => vec![view.clone()],
+                    None => registered.declaration.views.clone(),
+                };
+                view_entities(&generation, &views)
+            });
+            let started = std::time::Instant::now();
+            let members = artifact
+                .complement_against(entities)
+                .expect("the artifact carries an exclusion");
+            tracing::info!(
+                layer = %layer,
+                view = ?view,
+                excluded,
+                in_view = entities.cardinality(),
+                members,
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                "a membership spelled by exclusion was complemented against the view's entities"
+            );
+        }
+        Ok(())
     }
 
     /// **A fill drops the level's held row form**, and the next request projects the level again.

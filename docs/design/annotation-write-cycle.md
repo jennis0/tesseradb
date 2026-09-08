@@ -527,7 +527,15 @@ long source reading as though it should hold the whole membership.
 **Membership by exclusion is an input spelling.** `fields = { excluding = … }` names the entities a
 membership leaves out; the build complements once against the view's entity set and materialises
 exactly the membership the included form would have produced, so the segment, the manifest and
-every read path are byte-identical and never learn which way the source was written. It exists for
+every read path are byte-identical and never learn which way the source was written. **At ingest
+the same spelling is `excluding` on a publication** (`ingest.md` §2.3, built 2026-09-08), and the
+byte-identity holds there **in a quiescent database**: the complement is taken on the executor,
+against the view's entity set as of that step, before the record is written, and the record is the
+inclusion's. Two things diverge under concurrent writes, and both are stated rather than closed —
+an entity ingested after the complement was taken is in the inclusion's membership if the caller
+listed it and not in the exclusion's, the exclusion having been evaluated over the entities that
+then existed; and a suppressed entity is in both, suppression not being deletion, where a build
+has no suppressions. It exists for
 the producer: a tree's root is empty as an exclusion and the whole corpus as an inclusion, and the
 clusters with large exclusion sets are the ones with short member lists. **Not** a complement taken
 at request time, which would be a fourth membership source with the *"never stale"* character
@@ -566,8 +574,9 @@ and a key is required — it is what an edge into the layer names.
 **Small layers need no data file at all**: `artifacts = [{ key = …, contents = [ … ] }]` inline, for
 what a person authors rather than what a pipeline produces. It is a spelling and never a second kind
 of layer, which the build asserts the hard way: an inline layer and the same layer read from a file
-produce a **byte-identical bundle**, as do `excluding` and the inclusion it complements to, and a
-membership on the artifact row and the same one in `[layer.members]`.
+produce a **byte-identical bundle**, as do `excluding` and the inclusion it complements to — at
+ingest under the quiescence this section's exclusion paragraph states — and a membership on the
+artifact row and the same one in `[layer.members]`.
 
 The layer entity exists for one reason: an operator discovering a leaking layer needs immediate,
 reversible, fail-closed hiding, and a gate re-evaluated only at authorise cannot give it — a layer

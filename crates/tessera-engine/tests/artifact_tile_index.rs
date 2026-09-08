@@ -173,6 +173,7 @@ fn build_fixture(shape: Shape) -> Fixture {
             ArtifactRecord {
                 entity: EntityId::new(u64::from(u32::MAX - ordinal)),
                 key: None,
+                view: None,
                 members: members.into(),
                 contents,
                 attached_to: None,
@@ -823,6 +824,7 @@ fn an_index_over_another_population_is_refused_and_the_level_derives_its_own() {
             ArtifactRecord {
                 entity: EntityId::new(u64::from(ordinal)),
                 key: None,
+                view: None,
                 members: [fx.order[ordinal as usize].raw() as u32]
                     .into_iter()
                     .collect::<Bitmap>()

@@ -3439,11 +3439,32 @@ struct IncomingArtifactBody {
     /// its target, and at publish time the caller holds no `tessera_id` for it.
     #[serde(default)]
     key: Option<String>,
+    /// **The view this artifact belongs to, on a layer whose artifacts are a set per view**
+    /// (`ingest.md` §1.5, `views.md` §3.5) — the view's own key, as the build's `view` column
+    /// carries it.
+    ///
+    /// Part of the identity and never a fillable part: required on a group-scoped layer and
+    /// refused on an entity-scoped one, each a `422` at decoding. Keys are unique per
+    /// `(layer, view)`, so the same key in two views is two artifacts, and an edge — a parent or
+    /// an attachment — may not cross views.
+    #[serde(default)]
+    view: Option<String>,
     /// Base64 external ids, or base-10 `tessera_id` strings, according to the batch's `addressing`.
     /// External ids are base64 on the same rule `/control/changes` follows — they are bytes, not
     /// text — and identifiers are strings because a bare JSON number loses a `u64` past 2⁵³ in
     /// every JavaScript client, silently.
+    #[serde(default)]
     members: Vec<String>,
+    /// **The membership spelled by exclusion**: the entities it leaves out, addressed exactly as
+    /// `members` is (`ingest.md` §2.3). Beside `members` on one row is a `422` — a membership has
+    /// one spelling.
+    ///
+    /// The complement is taken on the executor, against the view's entity set as of that step,
+    /// before the record is written, so the bundle carries the inclusion the other spelling would
+    /// have produced. Admissible only while the list is at or under
+    /// `max_excluded_per_request`; above it, the inclusion spelling, which pages.
+    #[serde(default)]
+    excluding: Option<Vec<String>>,
     /// The artifact's supplied content, as **ranked contents**, most specific first. Absent on a
     /// layer that declares no supplied content; required on one that does, and refused on one that
     /// does not — the engine decides that, since the declaration is its state and not this
@@ -3818,6 +3839,70 @@ async fn publish_artifacts(
         )));
     }
 
+    // **The exclusion bound, and the one-spelling rule** (`ingest.md` §2.3). A list over the
+    // published bound is refused naming the limit and the remedy — the inclusion spelling, which
+    // pages — because what must fit one request is the list: the complement is taken against the
+    // view's entity set on the executor and cannot be taken until the whole list is in. The
+    // complement itself is not bounded and need not be.
+    for (index, artifact) in artifacts.iter().enumerate() {
+        let Some(excluding) = artifact.excluding.as_ref() else {
+            continue;
+        };
+        if !artifact.members.is_empty() {
+            return Err(ApiError::Contract(format!(
+                "artifact {index} of this publication carries both `members` and `excluding`. A \
+                 membership has one spelling: name the members it holds, or the entities it \
+                 leaves out (ingest.md §2.3)"
+            )));
+        }
+        if excluding.len() > state.max_excluded_per_request {
+            return Err(ApiError::Contract(format!(
+                "artifact {index} of this publication excludes {} entities, exceeding the {} the \
+                 exclusion spelling admits (ingest.max_excluded_per_request; \
+                 limits.publish.max_excluded_per_request on /control/status); refused before \
+                 anything was resolved or allocated. What must fit one request is the list, the \
+                 complement being taken against the view's entities on the executor — so a list \
+                 this long is spelled as an inclusion instead, naming the members the artifact \
+                 holds, which pages over as many requests as it takes (ingest.md §2.3)",
+                excluding.len(),
+                state.max_excluded_per_request
+            )));
+        }
+    }
+
+    // **The view in the identity, at decoding** (`ingest.md` §1.5): required on a group-scoped
+    // layer and refused on an entity-scoped one. The engine refuses it a second time on the
+    // executor, where the declaration is its own state; here the caller is told before a shape is
+    // canonicalised or an id resolved. A layer this deployment does not hold is the engine's
+    // refusal below, so an absent declaration checks nothing here.
+    if let Some(declaration) = state
+        .engine
+        .registered_layer(&name)
+        .map(|registered| registered.declaration)
+    {
+        for (index, artifact) in artifacts.iter().enumerate() {
+            match (declaration.scope.group(), artifact.view.as_deref()) {
+                (Some(_), Some(_)) | (None, None) => {}
+                (Some(group), None) => {
+                    return Err(ApiError::Contract(format!(
+                        "artifact {index} of this publication names no `view`, and layer '{name}' \
+                         is scoped to the group '{group}' — its artifacts are a different set per \
+                         view and each belongs to one. Name the view's key: it is part of the \
+                         identity, keys being unique per (layer, view), and no later record can \
+                         fill it (views §3.5)"
+                    )))
+                }
+                (None, Some(view)) => {
+                    return Err(ApiError::Contract(format!(
+                        "artifact {index} of this publication names the view '{view}', and layer \
+                         '{name}' is entity-scoped — one artifact set, drawn on every view it \
+                         names — so there is no per-view set for it to belong to (views §3.5)"
+                    )))
+                }
+            }
+        }
+    }
+
     // **The shapes, canonicalised before anything is resolved or allocated** — a refusal spends
     // nothing, and the batch is the commit unit. The layer's declaration is the engine's state;
     // a layer this deployment does not hold is the engine's refusal below, so here it simply
@@ -3906,10 +3991,15 @@ async fn publish_artifacts(
     // the same boundary as a membership, and for the same reason: a `tessera_id` in durable state
     // would be reinterpreted by the next key rotation, and a containment test over a set that names
     // different documents than the caller wrote is a disclosure rather than a stale answer.
+    // **The exclusion list is resolved on the membership's own route**, in the members' place:
+    // an excluded entity is named the way a member is, and a list that named a blinded identifier
+    // the boundary did not invert would exclude a different document at the next key rotation
+    // (I10) — the same reason the membership is resolved here.
     let widths: Vec<usize> = artifacts
         .iter()
         .map(|a| {
             a.members.len()
+                + a.excluding.as_ref().map_or(0, |e| e.len())
                 + a.content
                     .iter()
                     .map(|v| v.generated_from.len())
@@ -3921,6 +4011,7 @@ async fn publish_artifacts(
         .flat_map(|a| {
             a.members
                 .iter()
+                .chain(a.excluding.iter().flatten())
                 .chain(a.content.iter().flat_map(|v| v.generated_from.iter()))
         })
         .collect();
@@ -3942,6 +4033,10 @@ async fn publish_artifacts(
         .map(|(artifact, shape)| {
             let members: Vec<tessera_types::EntityId> =
                 entities.by_ref().take(artifact.members.len()).collect();
+            let excluded: Option<Vec<tessera_types::EntityId>> = artifact
+                .excluding
+                .as_ref()
+                .map(|list| entities.by_ref().take(list.len()).collect());
             let contents: Vec<tessera_lifecycle::membership::IncomingContent> = artifact
                 .content
                 .into_iter()
@@ -3974,6 +4069,12 @@ async fn publish_artifacts(
             };
             incoming.shape = shape;
             incoming.parent_keys = artifact.parent;
+            incoming.view = artifact.view;
+            // The list travels; the complement is the executor's, taken against the view's
+            // entity set before the record is written (`ingest.md` §2.3).
+            if let Some(excluded) = excluded {
+                incoming.exclude(excluded);
+            }
             incoming
         })
         .collect();

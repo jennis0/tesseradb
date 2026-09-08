@@ -867,6 +867,9 @@ async fn every_limit_in_the_block_is_enforced_at_its_published_value() {
         publish_max_body_bytes: two_artifacts.len(),
         max_artifacts_per_request: 2,
         max_members_per_request: 3,
+        // The exclusion bound has its own file (`artifact_exclusion.rs`), the list being one
+        // artifact's rather than the request's.
+        max_excluded_per_request: 1_000_000,
     };
     let (_tmp, server) = served_plain(limits).await;
 

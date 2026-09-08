@@ -186,6 +186,36 @@ pub enum RegistryError {
         key: String,
         part: String,
     },
+    /// A record for a group-scoped layer names no view, or a record for an entity-scoped layer
+    /// names one (`ingest.md` §1.5, `views.md` §3.5). The view is part of the identity on a
+    /// layer whose artifacts are a set per view, and it is not a part any later record may fill:
+    /// an artifact published without it would be drawn on every view of the group, and one
+    /// published with it on an entity-scoped layer would name a set that layer does not have.
+    ViewIdentity {
+        layer: String,
+        key: String,
+        detail: String,
+    },
+    /// An edge names an artifact in another view. **Edges may not cross views** (`views.md`
+    /// §3.5): a group's views are separate artifact sets, so a parent or an attachment target in
+    /// another view is a key that resolves to an artifact this one is not drawn beside.
+    CrossViewEdge {
+        layer: String,
+        level: u32,
+        child: String,
+        parent: String,
+        held_in: Vec<String>,
+    },
+    /// A record spelled its membership by exclusion on a key the level already holds
+    /// (`ingest.md` §1.3, the idempotency column). The membership is the complement taken at the
+    /// moment the artifact was published; a second exclusion would mean a *different* set, taken
+    /// over the entities that exist now, so it is the `409` a differing fixed part is rather than
+    /// a join.
+    ExclusionOnHeldKey {
+        layer: String,
+        level: u32,
+        key: String,
+    },
     /// One batch names a key more than once and one of its rows carries a fixed part. Two rows
     /// filling one part would each compare it as absent, and the second's record would fail at
     /// apply after the batch was acknowledged; refused before anything is appended, naming the
@@ -441,6 +471,33 @@ impl std::fmt::Display for RegistryError {
                  carries a fixed part. A fixed part is filled once, so name a key once per \
                  batch where it carries a parent, an attachment, a content or a shape"
             ),
+            RegistryError::ViewIdentity {
+                layer,
+                key,
+                detail,
+            } => write!(f, "{layer}: the artifact keyed {key}: {detail}"),
+            RegistryError::CrossViewEdge {
+                layer,
+                level,
+                child,
+                parent,
+                held_in,
+            } => write!(
+                f,
+                "{layer} level {level}: the artifact keyed {child} names {parent} as a parent or \
+                 an attachment target, and this level holds that key in {} rather than in this \
+                 artifact's view. A group's views are separate artifact sets and an edge may not \
+                 cross them (views §3.5); publish the parent in this view, or the child in the \
+                 parent's",
+                held_in.join(", ")
+            ),
+            RegistryError::ExclusionOnHeldKey { layer, level, key } => write!(
+                f,
+                "{layer} level {level}: the artifact keyed {key} already exists and this record \
+                 spells its membership by exclusion. An exclusion is complemented once, against \
+                 the entities that existed at that moment, so a second one would mean a different \
+                 set rather than the same one; name the members joining instead (ingest.md §1.3)"
+            ),
             RegistryError::Alloc(e) => write!(f, "{e}"),
         }
     }
@@ -449,22 +506,117 @@ impl std::fmt::Display for RegistryError {
 /// The keys a batch names more than once where any of their rows carries a fixed part — the
 /// [`RegistryError::RepeatedKey`] check, one body for both routes.
 fn repeated_key_with_parts<'a>(
-    rows: impl Iterator<Item = (Option<&'a str>, bool)>,
+    rows: impl Iterator<Item = (Option<&'a str>, Option<&'a str>, bool)>,
 ) -> Option<String> {
-    let mut seen: std::collections::HashMap<&str, (usize, bool)> = std::collections::HashMap::new();
-    for (key, carries_part) in rows {
+    let mut seen: std::collections::HashMap<(Option<&str>, &str), (usize, bool)> =
+        std::collections::HashMap::new();
+    for (view, key, carries_part) in rows {
         let Some(key) = key else { continue };
-        let entry = seen.entry(key).or_insert((0, false));
+        let entry = seen.entry((view, key)).or_insert((0, false));
         entry.0 += 1;
         entry.1 |= carries_part;
     }
     let mut repeated: Vec<&str> = seen
         .iter()
         .filter(|(_, (count, carries_part))| *count > 1 && *carries_part)
-        .map(|(key, _)| *key)
+        .map(|((_, key), _)| *key)
         .collect();
     repeated.sort_unstable();
     repeated.first().map(|key| key.to_string())
+}
+
+/// A batch's own keys by `(view, key)`, each at the ordinal the publication will give it — what
+/// answers a parent naming a sibling this batch is about to create (`ingest.md` §1.5).
+///
+/// **Owned keys.** The lookup runs behind `&dyn Fn(&str)`, whose argument outlives nothing, so a
+/// borrowed key cannot be probed with; a publication is bounded at
+/// `max_artifacts_per_request` and the pair is allocated once per named parent.
+type SiblingIndex = std::collections::HashMap<(Option<String>, String), u32>;
+
+/// The ordinal `index` gives a key inside one view, as a parent reference at `level`.
+fn sibling_ordinal(
+    index: &SiblingIndex,
+    level: u32,
+    view: Option<String>,
+) -> impl Fn(&str) -> Option<crate::wal::ParentRef> + '_ {
+    move |key: &str| {
+        index
+            .get(&(view.clone(), key.to_string()))
+            .map(|ordinal| crate::wal::ParentRef {
+                level,
+                ordinal: *ordinal,
+            })
+    }
+}
+
+/// The refusal a parent key that this level holds **in another view** deserves, or `None` where
+/// no view holds it and the key is simply missing (`views.md` §3.5).
+fn crossing(
+    registry: &LayerRegistry,
+    layer_name: &str,
+    level: u32,
+    view: Option<&str>,
+    child_key: Option<&str>,
+    parent_key: &str,
+    store: &ArtifactStore,
+) -> Option<RegistryError> {
+    let _ = registry;
+    let mut held_in: Vec<String> = (0..=level)
+        .flat_map(|at| store.views_holding_key(layer_name, at, view, parent_key))
+        .collect();
+    held_in.sort_unstable();
+    held_in.dedup();
+    if held_in.is_empty() {
+        return None;
+    }
+    Some(RegistryError::CrossViewEdge {
+        layer: layer_name.to_string(),
+        level,
+        child: child_key.unwrap_or("<no key>").to_string(),
+        parent: parent_key.to_string(),
+        held_in,
+    })
+}
+
+/// The view a record belongs to, checked against its layer's scope (`ingest.md` §1.5): required
+/// on a group-scoped layer and refused on an entity-scoped one, at both entry points and before
+/// anything is allocated.
+///
+/// **`view` is part of the identity and never a fillable part.** A group-scoped artifact
+/// published without one would be indistinguishable from every other view's, and the keys of two
+/// views would collide under one index; an entity-scoped artifact published with one would name
+/// a set its layer does not have.
+fn scoped_view<'a>(
+    layer_name: &str,
+    scope: &tessera_types::layer::LayerScope,
+    key: Option<&str>,
+    view: Option<&'a str>,
+) -> Result<Option<&'a str>, RegistryError> {
+    let named = || key.unwrap_or("<no key>").to_string();
+    match (scope.group(), view) {
+        (Some(_), Some(view)) => Ok(Some(view)),
+        (None, None) => Ok(None),
+        (Some(group), None) => Err(RegistryError::ViewIdentity {
+            layer: layer_name.to_string(),
+            key: named(),
+            detail: format!(
+                "this layer is scoped to the group '{group}', so its artifacts are a different \
+                 set per view and each belongs to one. Name the view on the record: it is part of \
+                 the identity, keys being unique per (layer, view), and no later record can fill \
+                 it (views §3.5)"
+            ),
+        }),
+        (None, Some(view)) => Err(RegistryError::ViewIdentity {
+            layer: layer_name.to_string(),
+            key: named(),
+            detail: format!(
+                "the record names the view '{view}' and this layer is entity-scoped — one \
+                 artifact set, drawn on every view it names — so there is no per-view set for it \
+                 to belong to. Declare `scope = {{ group = … }}` on the layer, or drop the view \
+                 (views §3.5)"
+            ),
+        }),
+    }
 }
 
 impl std::error::Error for RegistryError {}
@@ -723,15 +875,32 @@ impl LayerRegistry {
         // not hold or no key at all, is new. Resolved against the store's key index and never the
         // served view, on `resolve_or_mint`'s argument: a suppressed artifact resolves like any
         // other, so its key is never minted again under it.
-        if let Some(key) = repeated_key_with_parts(incoming.iter().map(|artifact| {
-            (
-                artifact.key.as_deref(),
-                !artifact.parent_keys.is_empty()
-                    || artifact.attached_to.is_some()
-                    || !artifact.contents.is_empty()
-                    || artifact.shape.is_some(),
-            )
-        })) {
+        // **The view each record names, checked against the layer's scope before anything else**
+        // (`ingest.md` §1.5): it is part of the identity, so every lookup below — the held-key
+        // partition, the duplicate check, the parent and the attachment — is made inside it.
+        let views: Vec<Option<&str>> = incoming
+            .iter()
+            .map(|artifact| {
+                scoped_view(
+                    layer_name,
+                    &layer.declaration.scope,
+                    artifact.key.as_deref(),
+                    artifact.view.as_deref(),
+                )
+            })
+            .collect::<Result<_, _>>()?;
+        if let Some(key) =
+            repeated_key_with_parts(incoming.iter().zip(&views).map(|(artifact, view)| {
+                (
+                    *view,
+                    artifact.key.as_deref(),
+                    !artifact.parent_keys.is_empty()
+                        || artifact.attached_to.is_some()
+                        || !artifact.contents.is_empty()
+                        || artifact.shape.is_some(),
+                )
+            }))
+        {
             return Err(RegistryError::RepeatedKey {
                 layer: layer_name.to_string(),
                 key,
@@ -739,11 +908,12 @@ impl LayerRegistry {
         }
         let held: Vec<Option<u32>> = incoming
             .iter()
-            .map(|artifact| {
+            .zip(&views)
+            .map(|(artifact, view)| {
                 artifact
                     .key
                     .as_deref()
-                    .and_then(|key| store.ordinal_of_key(layer_name, level, key))
+                    .and_then(|key| store.ordinal_of_key(layer_name, level, *view, key))
             })
             .collect();
         let fresh: Vec<IncomingArtifact> = incoming
@@ -759,17 +929,20 @@ impl LayerRegistry {
         // Resolving twice costs a key lookup per parent and keeps the walk ahead of the
         // allocation.
         let first_ordinal = store.next_ordinal(layer_name, level);
-        let fresh_index: std::collections::HashMap<&str, u32> = fresh
+        // **Keyed by `(view, key)`, because that is the identity** (`ingest.md` §1.5): a sibling
+        // this batch is about to create answers a parent lookup only inside its own view, so an
+        // edge cannot be resolved across a group's sets by arriving in one batch.
+        let fresh_index: SiblingIndex = fresh
             .iter()
             .enumerate()
-            .filter_map(|(i, a)| a.key.as_deref().map(|key| (key, first_ordinal + i as u32)))
-            .collect();
-        let pending = |key: &str| {
-            fresh_index.get(key).map(|ordinal| crate::wal::ParentRef {
-                level,
-                ordinal: *ordinal,
+            .filter_map(|(i, a)| {
+                a.key
+                    .clone()
+                    .map(|key| ((a.view.clone(), key), first_ordinal + i as u32))
             })
-        };
+            .collect();
+        let pending_in =
+            |view: Option<&str>| sibling_ordinal(&fresh_index, level, view.map(str::to_string));
         let mut batch_edges: BTreeMap<crate::wal::ParentRef, Vec<crate::wal::ParentRef>> =
             BTreeMap::new();
         for (i, artifact) in fresh.iter().enumerate() {
@@ -777,6 +950,8 @@ impl LayerRegistry {
                 level,
                 ordinal: first_ordinal + i as u32,
             };
+            let view = artifact.view.as_deref();
+            let pending = pending_in(view);
             let parents: Vec<crate::wal::ParentRef> = artifact
                 .parent_keys
                 .iter()
@@ -784,6 +959,7 @@ impl LayerRegistry {
                     self.parent_ref(
                         layer_name,
                         level,
+                        view,
                         artifact.key.as_deref(),
                         key,
                         store,
@@ -801,9 +977,21 @@ impl LayerRegistry {
         // no growth: a set part already in the state the record asks for is a no-op.
         let mut joins: Vec<(u32, croaring::Bitmap)> = Vec::new();
         let mut joined = 0u64;
-        for (artifact, ordinal) in incoming.iter().zip(&held) {
+        for ((artifact, ordinal), view) in incoming.iter().zip(&held).zip(&views) {
             let Some(ordinal) = *ordinal else { continue };
             let key = artifact.key.as_deref().expect("a held key is a key");
+            // **A second `excluding` on a held key is a `409`** (`ingest.md` §1.3): the
+            // complement was taken over the entities that existed at the first publication, so
+            // the same list means a different set now, and the fill rule's *present and
+            // identical* cannot be asserted of it.
+            if artifact.excluding.is_some() {
+                return Err(RegistryError::ExclusionOnHeldKey {
+                    layer: layer_name.to_string(),
+                    level,
+                    key: key.to_string(),
+                });
+            }
+            let pending = pending_in(*view);
             let record = store
                 .get(layer_name, level, ordinal)
                 .expect("the key index names a record");
@@ -822,6 +1010,7 @@ impl LayerRegistry {
                 layer_name,
                 level,
                 ordinal,
+                *view,
                 key,
                 &parts,
                 store,
@@ -879,8 +1068,12 @@ impl LayerRegistry {
         let (publish, without_content) = if fresh.is_empty() {
             (None, 0)
         } else {
+            // `no_pending`, and not this batch's own index: [`Self::prepare_artifacts`] builds
+            // the same index over the same slice, keyed by `(view, key)`, and answers a sibling
+            // from it. The argument is for a caller minting artifacts *elsewhere* — the ingest
+            // route's mint pass — which is entity-scoped.
             let (record, without_content) =
-                self.prepare_artifacts(layer_name, level, &fresh, store, alloc, &pending)?;
+                self.prepare_artifacts(layer_name, level, &fresh, store, alloc, &no_pending)?;
             (Some(record), without_content)
         };
 
@@ -935,6 +1128,10 @@ impl LayerRegistry {
         layer_name: &str,
         level: u32,
         ordinal: u32,
+        // `view` is the one this artifact belongs to (`ingest.md` §1.5), inside which every key
+        // a filled part names is resolved: a lineage or attachment fill may no more cross views
+        // than a publication's edge may.
+        view: Option<&str>,
         key: &str,
         parts: &crate::membership::FixedParts,
         store: &ArtifactStore,
@@ -961,7 +1158,9 @@ impl LayerRegistry {
             let mut resolved: Vec<crate::wal::ParentRef> = parts
                 .parent_keys
                 .iter()
-                .map(|parent| self.parent_ref(layer_name, level, Some(key), parent, store, pending))
+                .map(|parent| {
+                    self.parent_ref(layer_name, level, view, Some(key), parent, store, pending)
+                })
                 .collect::<Result<_, _>>()?;
             resolved.sort_unstable();
             resolved.dedup();
@@ -1000,7 +1199,7 @@ impl LayerRegistry {
         }
 
         if let Some(wanted) = &parts.attached_to {
-            let attachment = self.resolve_attachment(layer_name, wanted, store)?;
+            let attachment = self.resolve_attachment(layer_name, view, key, wanted, store)?;
             match &record.attached_to {
                 None => fills.push(ArtifactPart::AttachedTo(crate::wal::PublishedAttachment {
                     layer: attachment.layer,
@@ -1110,6 +1309,8 @@ impl LayerRegistry {
     fn resolve_attachment(
         &self,
         layer_name: &str,
+        view: Option<&str>,
+        key: &str,
         wanted: &crate::membership::IncomingAttachment,
         store: &ArtifactStore,
     ) -> Result<crate::membership::Attachment, RegistryError> {
@@ -1130,9 +1331,29 @@ impl LayerRegistry {
             key: wanted.key.clone(),
         };
         let target = self.layers.get(&wanted.layer).ok_or_else(missing)?;
-        let ordinal = store
-            .ordinal_of_key(&wanted.layer, wanted.level, &wanted.key)
-            .ok_or_else(missing)?;
+        // **An attachment stays inside its view where the target layer has one set per view**
+        // (`views.md` §3.5): the target is looked up under this artifact's own view, and a key
+        // this level holds in another view is named as the crossing it is rather than reported
+        // as a missing target.
+        let in_view = target.declaration.scope.group().and(view);
+        let ordinal = match store.ordinal_of_key(&wanted.layer, wanted.level, in_view, &wanted.key)
+        {
+            Some(ordinal) => ordinal,
+            None => {
+                let held_in =
+                    store.views_holding_key(&wanted.layer, wanted.level, in_view, &wanted.key);
+                if !held_in.is_empty() {
+                    return Err(RegistryError::CrossViewEdge {
+                        layer: layer_name.to_string(),
+                        level: wanted.level,
+                        child: key.to_string(),
+                        parent: wanted.key.clone(),
+                        held_in,
+                    });
+                }
+                return Err(missing());
+            }
+        };
         let entity = target
             .runs
             .get(wanted.level as usize)
@@ -1241,7 +1462,11 @@ impl LayerRegistry {
             .iter()
             .map(|key| IncomingArtifact {
                 key: Some(key.clone()),
+                // A predicate layer's artifacts are derived from a value column, which is
+                // entity-scoped; a group-scoped one is refused at `scoped_view`.
+                view: None,
                 members: croaring::Bitmap::new(),
+                excluding: None,
                 contents: Vec::new(),
                 attached_to: None,
                 parent_keys: Vec::new(),
@@ -1289,15 +1514,36 @@ impl LayerRegistry {
                 level,
             })?;
 
+        // **The view each record names, checked against the layer's scope** (`ingest.md` §1.5),
+        // before a key is compared or an ordinal claimed: it is the scope every key below is
+        // unique within.
+        let views: Vec<Option<&str>> = incoming
+            .iter()
+            .map(|artifact| {
+                scoped_view(
+                    layer_name,
+                    &layer.declaration.scope,
+                    artifact.key.as_deref(),
+                    artifact.view.as_deref(),
+                )
+            })
+            .collect::<Result<_, _>>()?;
+
         // Duplicate keys, against the level and against the rest of the batch. Both, because a
         // batch that repeats a key internally would otherwise publish two artifacts under one name
-        // and leave the index pointing at whichever landed last.
+        // and leave the index pointing at whichever landed last. **Per `(view, key)`**: on a
+        // group-scoped layer the same key in two views is two artifacts, which is what `view`
+        // being part of the identity means.
         let mut within_batch = BTreeSet::new();
-        for artifact in incoming {
+        for (artifact, view) in incoming.iter().zip(&views) {
             let Some(key) = &artifact.key else {
                 continue;
             };
-            if store.ordinal_of_key(layer_name, level, key).is_some() || !within_batch.insert(key) {
+            if store
+                .ordinal_of_key(layer_name, level, *view, key)
+                .is_some()
+                || !within_batch.insert((*view, key))
+            {
                 return Err(RegistryError::DuplicateKey {
                     layer: layer_name.to_string(),
                     key: key.clone(),
@@ -1421,7 +1667,8 @@ impl LayerRegistry {
         // `verdict` lookup instead of a registry walk.
         let attachments: Vec<Option<crate::membership::Attachment>> = incoming
             .iter()
-            .map(|artifact| {
+            .zip(&views)
+            .map(|(artifact, view)| {
                 let Some(wanted) = &artifact.attached_to else {
                     // **A layer that declares a dependency publishes only dependents** (decision
                     // 0089). Refused here rather than served ungated: the serving predicate reads
@@ -1451,9 +1698,35 @@ impl LayerRegistry {
                     key: wanted.key.clone(),
                 };
                 let target = self.layers.get(&wanted.layer).ok_or_else(missing)?;
-                let ordinal = store
-                    .ordinal_of_key(&wanted.layer, wanted.level, &wanted.key)
-                    .ok_or_else(missing)?;
+                // The target's own view, on `resolve_attachment`'s rule: inside this artifact's
+                // view where the target layer is group-scoped, and a key held only in another
+                // view is the crossing rather than a missing target (`views.md` §3.5).
+                let in_view = target.declaration.scope.group().and(*view);
+                let ordinal =
+                    match store.ordinal_of_key(&wanted.layer, wanted.level, in_view, &wanted.key) {
+                        Some(ordinal) => ordinal,
+                        None => {
+                            let held_in = store.views_holding_key(
+                                &wanted.layer,
+                                wanted.level,
+                                in_view,
+                                &wanted.key,
+                            );
+                            if !held_in.is_empty() {
+                                return Err(RegistryError::CrossViewEdge {
+                                    layer: layer_name.to_string(),
+                                    level: wanted.level,
+                                    child: artifact
+                                        .key
+                                        .clone()
+                                        .unwrap_or_else(|| "<no key>".to_string()),
+                                    parent: wanted.key.clone(),
+                                    held_in,
+                                });
+                            }
+                            return Err(missing());
+                        }
+                    };
                 let entity = target
                     .runs
                     .get(wanted.level as usize)
@@ -1481,19 +1754,20 @@ impl LayerRegistry {
         // very thing [`ArtifactStore::keys`] exists to avoid for the duplicate check above. The
         // first position is the *only* position: that duplicate check has already refused a batch
         // repeating a key, so the map answers exactly what `position` did.
-        let batch_index: std::collections::HashMap<&str, usize> = incoming
+        let batch_index: SiblingIndex = incoming
             .iter()
             .enumerate()
-            .filter_map(|(i, a)| a.key.as_deref().map(|key| (key, i)))
+            .filter_map(|(i, a)| {
+                a.key
+                    .clone()
+                    .map(|key| ((a.view.clone(), key), first_ordinal as u32 + i as u32))
+            })
             .collect();
-        let batch_ordinal = |key: &str| {
-            batch_index
-                .get(key)
-                .map(|i| crate::wal::ParentRef {
-                    level,
-                    ordinal: first_ordinal as u32 + *i as u32,
-                })
-                .or_else(|| pending(key))
+        // **A sibling answers inside the naming artifact's own view** (`ingest.md` §1.5), so a
+        // batch carrying one key in two views resolves each child's parent to the one beside it.
+        let batch_ordinal = |view: Option<&str>| {
+            let sibling = sibling_ordinal(&batch_index, level, view.map(str::to_string));
+            move |key: &str| sibling(key).or_else(|| pending(key))
         };
         // **Several parents are a `dag` layer's to hold and every other kind's to refuse**
         // (`dag-hierarchies.md` §4, decision 0117). Ascending and deduplicated, so a key named
@@ -1507,8 +1781,10 @@ impl LayerRegistry {
         };
         let parents: Vec<Vec<crate::wal::ParentRef>> = incoming
             .iter()
+            .zip(&views)
             .enumerate()
-            .map(|(i, artifact)| {
+            .map(|(i, (artifact, view))| {
+                let pending = batch_ordinal(*view);
                 let mut resolved: Vec<crate::wal::ParentRef> = artifact
                     .parent_keys
                     .iter()
@@ -1516,10 +1792,11 @@ impl LayerRegistry {
                         self.parent_ref(
                             layer_name,
                             level,
+                            *view,
                             artifact.key.as_deref(),
                             key,
                             store,
-                            &batch_ordinal,
+                            &pending,
                         )
                     })
                     .collect::<Result<_, _>>()?;
@@ -1607,10 +1884,10 @@ impl LayerRegistry {
                     ordinal: ordinal as u32,
                     entity: EntityId::new(entity),
                     key: artifact.key.clone(),
-                    // The view is part of the identity on a group-scoped layer (`ingest.md`
-                    // §1.5) and is recorded by T2c; until then every publication is entity-scoped
-                    // here and a record naming a view refuses at replay.
-                    view: None,
+                    // **Part of the identity on a group-scoped layer** (`ingest.md` §1.5),
+                    // checked against the layer's scope above and recorded here, so replay lands
+                    // the artifact in the view it was acked in.
+                    view: artifact.view.clone(),
                     members: serialise_members(&artifact.members),
                     contents: artifact
                         .contents
@@ -1705,7 +1982,9 @@ impl LayerRegistry {
         if let Some(key) = repeated_key_with_parts(
             incoming
                 .iter()
-                .map(|join| (Some(join.key.as_str()), !join.parts.is_empty())),
+                // The growth route carries no view and addresses no group-scoped layer
+                // (`resolve_growth_key`), so every key here is in the one set.
+                .map(|join| (None, Some(join.key.as_str()), !join.parts.is_empty())),
         ) {
             return Err(RegistryError::RepeatedKey {
                 layer: layer_name.to_string(),
@@ -1719,6 +1998,7 @@ impl LayerRegistry {
                 layer_name,
                 level,
                 ordinal,
+                None,
                 &join.key,
                 &join.parts,
                 store,
@@ -1845,8 +2125,13 @@ impl LayerRegistry {
                 level,
             });
         }
+        // **This route carries no view, so it addresses no group-scoped layer** (`ingest.md`
+        // §1.5): a key there names one artifact per view of the group, and resolving it under
+        // `None` would either miss every one of them or, worse, pick one. Refused where it is
+        // asked, naming what the caller has to use instead.
+        scoped_view(layer_name, &layer.declaration.scope, Some(key), None)?;
         store
-            .ordinal_of_key(layer_name, level, key)
+            .ordinal_of_key(layer_name, level, None, key)
             .ok_or_else(|| RegistryError::NoSuchArtifact {
                 layer: layer_name.to_string(),
                 level,
@@ -1932,7 +2217,8 @@ impl LayerRegistry {
                 Some(held) => Err(contradicted(*held)),
             };
         }
-        let claimed = self.parent_ref(layer, level, Some(child), parent, store, &no_pending)?;
+        let claimed =
+            self.parent_ref(layer, level, None, Some(child), parent, store, &no_pending)?;
         if held.contains(&claimed) {
             return Ok(EdgeCheck::Agrees);
         }
@@ -1974,10 +2260,16 @@ impl LayerRegistry {
     /// declared kind says which shape its edges have, and an edge of the other shape refuses.
     ///
     /// [`ParentRef`]: crate::wal::ParentRef
+    #[allow(clippy::too_many_arguments)]
     pub fn parent_ref(
         &self,
         layer_name: &str,
         level: u32,
+        // `view` is the child's, on a group-scoped layer, and the parent key is resolved inside
+        // it: **an edge may not cross views** (`views.md` §3.5), so a key this layer holds only
+        // in another view is refused as [`RegistryError::CrossViewEdge`] rather than resolved.
+        // `None` on an entity-scoped layer, whose keys sit in one set.
+        view: Option<&str>,
         child_key: Option<&str>,
         parent_key: &str,
         store: &ArtifactStore,
@@ -2036,7 +2328,7 @@ impl LayerRegistry {
                 .filter(|p| p.level < level)
                 .chain((0..level).filter_map(|coarser| {
                     store
-                        .ordinal_of_key(layer_name, coarser, parent_key)
+                        .ordinal_of_key(layer_name, coarser, view, parent_key)
                         .map(|ordinal| crate::wal::ParentRef {
                             level: coarser,
                             ordinal,
@@ -2051,16 +2343,22 @@ impl LayerRegistry {
             // A key that exists only at this level or a finer one is an edge running the wrong way
             // — refused rather than reinterpreted, since a tiered layer's whole guarantee is that
             // lineage never runs against the levels.
-            return found.ok_or_else(missing);
+            return found.ok_or_else(|| {
+                crossing(self, layer_name, level, view, child_key, parent_key, store)
+                    .unwrap_or_else(missing)
+            });
         }
         pending(parent_key)
             .filter(|p| p.level == level)
             .or_else(|| {
                 store
-                    .ordinal_of_key(layer_name, level, parent_key)
+                    .ordinal_of_key(layer_name, level, view, parent_key)
                     .map(|ordinal| crate::wal::ParentRef { level, ordinal })
             })
-            .ok_or_else(missing)
+            .ok_or_else(|| {
+                crossing(self, layer_name, level, view, child_key, parent_key, store)
+                    .unwrap_or_else(missing)
+            })
     }
 
     /// Validates a drop and returns the record that makes it durable, on [`prepare_create`]'s
@@ -2565,7 +2863,9 @@ mod tests {
     fn incoming(key: &str, members: &[u32]) -> IncomingArtifact {
         IncomingArtifact {
             key: Some(key.into()),
+            view: None,
             members: croaring::Bitmap::of(members),
+            excluding: None,
             contents: Vec::new(),
             attached_to: None,
             parent_keys: Vec::new(),
@@ -2868,7 +3168,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(store.next_ordinal("clusters/a", 0), 3);
-        assert_eq!(store.ordinal_of_key("clusters/a", 0, "c2"), Some(2));
+        assert_eq!(store.ordinal_of_key("clusters/a", 0, None, "c2"), Some(2));
 
         // Every ordinal resolves back to the entity the level's run gives it, and the layer's own
         // entity is none of them — suppressing the layer must not suppress an artifact.
@@ -3034,8 +3334,8 @@ mod tests {
             assert!(artifact.parents.is_empty());
             assert!(artifact.shape.is_none());
         }
-        assert_eq!(store.ordinal_of_key("regions/uk", 0, "high"), Some(0));
-        assert_eq!(store.ordinal_of_key("regions/uk", 0, "low"), Some(1));
+        assert_eq!(store.ordinal_of_key("regions/uk", 0, None, "high"), Some(0));
+        assert_eq!(store.ordinal_of_key("regions/uk", 0, None, "low"), Some(1));
 
         // **A key the level already holds never mints a second artifact**, which is what keeps a
         // suppressed value from being re-minted unsuppressed: the check reads the store's key
@@ -3113,7 +3413,7 @@ mod tests {
             store.get("clusters/a", 0, 0).map(|r| &r.members)
         );
         assert_eq!(
-            replayed_store.ordinal_of_key("clusters/a", 0, "c1"),
+            replayed_store.ordinal_of_key("clusters/a", 0, None, "c1"),
             Some(1)
         );
         // And the pin comes back with it — the log may not be reclaimed past the publication.
@@ -3402,7 +3702,7 @@ mod tests {
         );
         apply_put(&mut reg, &mut store, &prepared);
         assert_eq!(store.next_ordinal("clusters/t", 0), 3);
-        assert_eq!(store.ordinal_of_key("clusters/t", 0, "root"), Some(0));
+        assert_eq!(store.ordinal_of_key("clusters/t", 0, None, "root"), Some(0));
     }
 
     /// **A lineage fill that would close a cycle across held edges and the batch's own is
@@ -3763,6 +4063,192 @@ mod tests {
             .unwrap_err();
         assert!(
             matches!(&refused, RegistryError::Content { detail, .. } if detail.contains("declares a generating set, and none of this layer's content requires")),
+            "{refused:?}"
+        );
+    }
+
+    /// A group-scoped layer, whose artifacts are a set per view of the group.
+    fn scoped(name: &str, group: &str) -> LayerDeclaration {
+        let mut d = declaration(name);
+        d.scope = tessera_types::layer::LayerScope::Group(group.into());
+        d
+    }
+
+    fn in_view(key: &str, view: &str, members: &[u32]) -> IncomingArtifact {
+        let mut artifact = incoming(key, members);
+        artifact.view = Some(view.into());
+        artifact
+    }
+
+    /// **`view` is part of the identity** (`ingest.md` §1.5, `views.md` §3.5): required on a
+    /// group-scoped layer, refused on an entity-scoped one, and the same key in two views is two
+    /// artifacts with two ordinals and two entities.
+    #[test]
+    fn the_view_is_required_refused_and_makes_one_key_two_artifacts() {
+        let mut reg = LayerRegistry::new();
+        let mut alloc = Allocator::new(0);
+        let mut store = ArtifactStore::default();
+        register(&mut reg, &mut alloc, scoped("clusters/q", "quarter")).unwrap();
+        register(&mut reg, &mut alloc, declaration("clusters/one")).unwrap();
+
+        // Absent where the layer is a set per view.
+        let refused = reg
+            .prepare_put("clusters/q", 0, &[incoming("c1", &[1])], &store, &mut alloc)
+            .unwrap_err();
+        assert!(
+            matches!(&refused, RegistryError::ViewIdentity { detail, .. } if detail.contains("scoped to the group 'quarter'")),
+            "{refused:?}"
+        );
+        // Named where the layer has one set.
+        let refused = reg
+            .prepare_put(
+                "clusters/one",
+                0,
+                &[in_view("c1", "q1", &[1])],
+                &store,
+                &mut alloc,
+            )
+            .unwrap_err();
+        assert!(
+            matches!(&refused, RegistryError::ViewIdentity { detail, .. } if detail.contains("entity-scoped")),
+            "{refused:?}"
+        );
+
+        // One key, two views, two artifacts — in one batch, which is also where a duplicate key
+        // would have been refused had the view not been part of the identity.
+        let prepared = reg
+            .prepare_put(
+                "clusters/q",
+                0,
+                &[in_view("c1", "q1", &[1, 2]), in_view("c1", "q2", &[3])],
+                &store,
+                &mut alloc,
+            )
+            .unwrap();
+        assert_eq!(prepared.created, 2);
+        assert_ne!(prepared.entities[0], prepared.entities[1]);
+        apply_put(&mut reg, &mut store, &prepared);
+        assert_eq!(
+            store.ordinal_of_key("clusters/q", 0, Some("q1"), "c1"),
+            Some(0)
+        );
+        assert_eq!(
+            store.ordinal_of_key("clusters/q", 0, Some("q2"), "c1"),
+            Some(1)
+        );
+        assert_eq!(store.ordinal_of_key("clusters/q", 0, None, "c1"), None);
+        assert_eq!(
+            store.get("clusters/q", 0, 0).unwrap().view.as_deref(),
+            Some("q1")
+        );
+        // Each is served only in its own view: the level projected for q2 holds one artifact.
+        assert_eq!(store.level_in_view("clusters/q", 0, "q2").count(), 1);
+
+        // A re-`PUT` of the same key in the same view is the held artifact, not a third.
+        let prepared = reg
+            .prepare_put(
+                "clusters/q",
+                0,
+                &[in_view("c1", "q1", &[1, 2])],
+                &store,
+                &mut alloc,
+            )
+            .unwrap();
+        assert_eq!(prepared.created, 0);
+        assert_eq!(prepared.joined, 0);
+    }
+
+    /// **An edge may not cross views** (`views.md` §3.5): a parent this level holds in another
+    /// view is refused naming the crossing, and the same key in the child's own view resolves.
+    #[test]
+    fn a_parent_in_another_view_is_refused_and_the_one_in_this_view_resolves() {
+        let mut reg = LayerRegistry::new();
+        let mut alloc = Allocator::new(0);
+        let mut store = ArtifactStore::default();
+        let mut d = scoped("clusters/q", "quarter");
+        d.hierarchy.kind = HierarchyKind::Nested;
+        register(&mut reg, &mut alloc, d).unwrap();
+
+        let prepared = reg
+            .prepare_put(
+                "clusters/q",
+                0,
+                &[in_view("root", "q1", &[1])],
+                &store,
+                &mut alloc,
+            )
+            .unwrap();
+        apply_put(&mut reg, &mut store, &prepared);
+
+        let mut child = in_view("leaf", "q2", &[2]);
+        child.parent_keys = vec!["root".into()];
+        let refused = reg
+            .prepare_put("clusters/q", 0, &[child], &store, &mut alloc)
+            .unwrap_err();
+        assert!(
+            matches!(&refused, RegistryError::CrossViewEdge { held_in, .. } if held_in == &["q1".to_string()]),
+            "{refused:?}"
+        );
+
+        let mut child = in_view("leaf", "q1", &[2]);
+        child.parent_keys = vec!["root".into()];
+        let prepared = reg
+            .prepare_put("clusters/q", 0, &[child], &store, &mut alloc)
+            .unwrap();
+        apply_put(&mut reg, &mut store, &prepared);
+        assert_eq!(
+            store.get("clusters/q", 0, 1).unwrap().parents,
+            vec![crate::wal::ParentRef {
+                level: 0,
+                ordinal: 0
+            }]
+        );
+    }
+
+    /// **A second `excluding` on a held key is refused** (`ingest.md` §1.3): the complement it
+    /// asks for is taken over the entities that exist now, so it is a different set from the one
+    /// the artifact holds rather than the same one said twice.
+    #[test]
+    fn a_second_exclusion_on_a_held_key_is_refused() {
+        let mut reg = LayerRegistry::new();
+        let mut alloc = Allocator::new(0);
+        let mut store = ArtifactStore::default();
+        register(&mut reg, &mut alloc, declaration("clusters/a")).unwrap();
+        let prepared = reg
+            .prepare_put(
+                "clusters/a",
+                0,
+                &[incoming("c1", &[1, 2, 3])],
+                &store,
+                &mut alloc,
+            )
+            .unwrap();
+        apply_put(&mut reg, &mut store, &prepared);
+
+        let mut again = incoming("c1", &[]);
+        again.exclude([EntityId::new(4)]);
+        let refused = reg
+            .prepare_put("clusters/a", 0, &[again], &store, &mut alloc)
+            .unwrap_err();
+        assert!(
+            matches!(&refused, RegistryError::ExclusionOnHeldKey { key, .. } if key == "c1"),
+            "{refused:?}"
+        );
+    }
+
+    /// The growth route carries no view, so it addresses no group-scoped layer: refused naming
+    /// what the caller has instead, rather than resolving one view's artifact by accident.
+    #[test]
+    fn the_growth_route_refuses_a_group_scoped_layer() {
+        let mut reg = LayerRegistry::new();
+        let mut alloc = Allocator::new(0);
+        let store = ArtifactStore::default();
+        register(&mut reg, &mut alloc, scoped("clusters/q", "quarter")).unwrap();
+        let refused = reg
+            .resolve_growth_key("clusters/q", 0, "c1", &store)
+            .unwrap_err();
+        assert!(
+            matches!(&refused, RegistryError::ViewIdentity { .. }),
             "{refused:?}"
         );
     }

@@ -565,11 +565,6 @@ pub fn unbuilt_track(record: &WalRecord) -> Option<(&'static str, &'static str)>
         {
             Some(("ArtifactGrow with a leaving set or a rank", "T2b"))
         }
-        WalRecord::ArtifactPublish { artifacts, .. }
-            if artifacts.iter().any(|a| a.view.is_some()) =>
-        {
-            Some(("ArtifactPublish naming a view", "T2c"))
-        }
         WalRecord::ValuesBatch { .. } => Some(("ValuesBatch", "T3")),
         WalRecord::VocabularyDeclare { .. } => Some(("VocabularyDeclare", "T5")),
         WalRecord::ViewGroupCreate { .. } => Some(("ViewGroupCreate", "T6")),
@@ -769,8 +764,9 @@ pub struct PublishedArtifact {
     pub key: Option<String>,
     /// The view this artifact belongs to, on a layer scoped to a group: part of the identity, since
     /// keys are unique per `(layer, view)` and edges may not cross views (`ingest.md` §1.5,
-    /// `views.md` §3.5). `None` on an entity-scoped layer. Not built yet: every writer records
-    /// `None`, and a record carrying a view refuses at replay naming T2c ([`unbuilt_track`]).
+    /// `views.md` §3.5). `None` on an entity-scoped layer. Applied since T2c: replay lands the
+    /// artifact in the view its publication was acked in, which is what makes the identity
+    /// survive a restart.
     pub view: Option<String>,
     /// Entity-space membership, CRoaring portable. **Entity space and not row space** — a row-space
     /// membership is a frozen projection, correct until the first fold and then naming other

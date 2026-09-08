@@ -168,8 +168,8 @@ in the next, and only viewers wait for the tick.
 | **Attribute values for an existing entity** ⊘ | id, attribute columns, layer columns; no coordinates; the view header where a group-scoped column is carried | `POST /control/values` (spec §1.4) | the commit window's fsync | `max_batch_rows`; `max_batch_bytes` | batch id + hash; the fill rule per cell |
 | **Membership** | the point's layer column, or a page of `members` per artifact | ingest, values, or `PATCH /control/layers/{name}/artifacts` | on the ingest and values routes, the window's fsync (artifacts-from-points §6.2); on `PATCH`, its own append and fsync on the executor | `max_members_per_request` ⊘; `max_body_bytes` | set join: a retry adds nothing (`joined: 0`) |
 | **Generating set of content *k*** ⊘ | a page of members at `rank: k`, `joining` and `leaving`; `leaving` resolves a deleted item, which is its purpose (spec §1.5) | the same `PATCH` | its own append and fsync | as membership; the only route by which a set changes | set join and leave; a retry is a no-op |
-| **Artifact record** | key, and on a group-scoped layer `view` ⊘; `parent`, `attached_to`, shape, content values; a first page of members and generating sets | `PUT /control/layers/{name}/artifacts` creates; `PATCH` fills | its own append and fsync; ordinals claimed contiguously | `max_artifacts_per_request` ⊘; `max_body_bytes` | a held key with identical parts is accepted with no effect (spec §1.5) |
-| **Membership by exclusion** ⊘ | `excluding`: the entities the membership leaves out, on the artifact record | `PUT` or `PATCH` | its own append and fsync; the complement is taken on the executor | one request, admissible only while the view's entity count is under `max_excluded_per_request` (spec §2.3) | a second `excluding` on a held key is `409` |
+| **Artifact record** | key, and on a group-scoped layer `view`; `parent`, `attached_to`, shape, content values; a first page of members and generating sets | `PUT /control/layers/{name}/artifacts` creates; `PATCH` fills | its own append and fsync; ordinals claimed contiguously | `max_artifacts_per_request` ⊘; `max_body_bytes` | a held key with identical parts is accepted with no effect (spec §1.5) |
+| **Membership by exclusion** | `excluding`: the entities the membership leaves out, on the artifact record | `PUT` | its own append and fsync; the complement is taken on the executor | one request, admissible only while the view's entity count is under `max_excluded_per_request` (spec §2.3) | a second `excluding` on a held key is `409` |
 | **Layer** | the `[[layer]]` block minus acquisition keys | `PUT /control/layers` | its own append and fsync | one request; a declaration is kilobytes | identical redeclaration answers the existing identity ⊘ |
 | **View of a group** | the roster record | `PUT /control/views/{group}/{key}` | its own append and fsync | one request | as above |
 | **View group** ⊘ | the `[[view_group]]` block minus roster and source | `PUT /control/view_groups/{name}` | its own append and fsync | one request; its views follow one by one | as above |
@@ -182,6 +182,17 @@ in the next, and only viewers wait for the tick.
 A discovered category value is not a kind: it is minted at the window close of the batch that
 carries it, by the view-first rule (per-point-attributes §5), and this document changes nothing
 there. A declared category value is a vocabulary value above.
+
+**Built 2026-09-08 (T2c), two rows of the table.** *Membership by exclusion*: `excluding` on a
+`PUT` record carries the entities the membership leaves out, the executor complements the list
+once against the view's entity set before the record is written, and a second `excluding` on a
+held key is the `409` the idempotency column states; the row's route is `PUT` alone, a growth page
+being track T2b's and a membership never shrinking (spec §10, R7). *The artifact record's `view`*:
+required on a group-scoped layer and refused on an entity-scoped one, part of the key's uniqueness
+scope, and carried in the publication record so a replay lands the artifact in the view it was
+acked in. The growth route addresses no group-scoped layer, carrying no view. ⊘ A packed
+membership extent does not carry the view: a level folded and reopened comes back with none, and
+giving the blob a view is a `bundle_format` bump this track does not make.
 
 **A level under continuous paging.** An artifact's served forms, its row-space membership operator
 per view, its generating-set operators and its lineage, are derivatives of the store. Under a
@@ -363,7 +374,7 @@ each complete in itself.
 |---|---|---|---|
 | `/control/ingest` | `max_batch_rows` 10,000 (the commit window's size, so no client picks the sort scope) | `max_batch_bytes` 16 MiB, ceiling 64 MiB | |
 | `/control/values` ⊘ | `max_batch_rows` | `max_batch_bytes` | |
-| `/control/layers/{name}/artifacts` `PUT` | `max_artifacts_per_request` 10,000 | `max_body_bytes` (`publish_max_body_bytes`, 64 MiB) | `max_shape_vertices` 10⁶; `max_excluded_per_request` 10⁶, published and not enforced until the exclusion form is built (spec §2.3) |
+| `/control/layers/{name}/artifacts` `PUT` | `max_artifacts_per_request` 10,000 | `max_body_bytes` (`publish_max_body_bytes`, 64 MiB) | `max_shape_vertices` 10⁶; `max_excluded_per_request` 10⁶, enforced per artifact's list (spec §2.3) |
 | the same, `PATCH` | `max_members_per_request` 5,000,000, the sum over the page's artifacts | `max_body_bytes` | |
 | `/control/vocabularies/{name}/values` ⊘ | `max_values_per_request` | `max_body_bytes` | |
 | `/control/changes` | 10,000 | 2 MiB | |
@@ -423,7 +434,7 @@ store converged on for the same reasons.
 Three per-object bounds survive, published in the `limits` block, and the argument for each is
 that the object has a smaller spelling or is already bounded elsewhere (spec §10, R8).
 
-- **An exclusion list is one request, bounded by `max_excluded_per_request`** ⊘, a record count
+- **An exclusion list is one request, bounded by `max_excluded_per_request`**, a record count
   of the same shape as `max_members_per_request` and a proposed default of 1,000,000 (about
   15 MB of base64 ids, under the byte cap). What must fit one request is the list, because the
   complement is taken on the executor against the view's entity set as of that step (every entity
@@ -439,6 +450,11 @@ that the object has a smaller spelling or is already bounded elsewhere (spec §1
   after the complement was taken is in the inclusion's membership if the caller listed it and not
   in the exclusion's, because the exclusion was evaluated over the entities that then existed; and
   a suppressed entity is in both (suppression is not deletion), where a build has no suppressions.
+  **Built 2026-09-08 (T2c)**: the list is refused over the bound with a `422` naming the limit and
+  the inclusion spelling; the complement is one `andnot` on the executor over the view's entities
+  — every entity holding a row in the view or buffered for it, deleted entities excluded — taken
+  against the artifact's own view on a group-scoped layer and against the union of the layer's
+  views otherwise, and its size is logged. `members` and `excluding` on one row is a `422`.
 - **A single value is one batch.** A text cell, a keyword, a number arrive on one row, and a row
   cannot page. The bound is `max_batch_bytes`, 64 MiB at the ceiling. What such a value costs, so
   the bound is understood as a bound on cost and not a ceiling on reach: the analyser runs at
@@ -812,7 +828,7 @@ recreated, so that every later track lands against one format and none waits on 
 | **T1 caps and wire** | JSON on every route with Arrow by content type; the `limits` block with record counts; `publish_max_body_bytes`; the `PUT` row corrected; the driver reads every limit it uses from the block | T0 |
 | **T2a artifact record and fill** (built 2026-09-07) | `ArtifactFill` and `ArtifactStore::fill`; the digest comparison; the partitioned `PUT`; late lineage with the layer-scoped walk and the second lineage version; `without_content` | T1 |
 | **T2b generating-set pages** | `rank`, `joining` and `leaving` on `PATCH`; the stored cardinality moved by the page and published only with its operator; the whole re-derivation of an operator whose delta holds a leave; the empty-set floor and the withdrawal it reports; the tick's row-form publication for memberships and generating sets with the shared scratch; the per-record pin; permits and pool resolution for pages; the driver publishes over-cap artifacts and sets as pages and `declined` is empty on every rung | T2a |
-| **T2c exclusion and view identity** | `excluding` under `max_excluded_per_request`; `view` in the identity on a group-scoped layer | T2a |
+| **T2c exclusion and view identity** (built 2026-09-08) | `excluding` under `max_excluded_per_request`; `view` in the identity on a group-scoped layer | T2a |
 | **T4 attributes** | `PUT /control/attributes`; the manifest home; the schema-answered absence for a `render` column; the tail append and padding for a mid-ingest declaration; the fold's materialisation | T1 |
 | **T3 values** | `POST /control/values`; the fill on the executor beside the join arm; the view header and key-in-group check for scoped columns; layer columns on existing entities; the record stack's per-column claimant read and its fold | T4 |
 | **T5 vocabularies** | `PUT /control/vocabularies/{name}`; value pages; the property upsert (`/control/categories`'s debt) | T4's manifest home |

@@ -249,7 +249,25 @@ pub struct IncomingArtifact {
     /// layer's edges point into**: an edge names its target, and at publish time the caller holds
     /// no `tessera_id` for it.
     pub key: Option<String>,
+    /// The view this artifact belongs to, on a layer scoped to a group — **part of the identity,
+    /// required at publish and never a fillable part** (`ingest.md` §1.5, `views.md` §3.5): keys
+    /// are unique per `(layer, view)`, so one key in two views is two artifacts, and an edge may
+    /// not cross views. `None` on an entity-scoped layer, whose one artifact set is drawn on
+    /// every view it names, and refused there.
+    pub view: Option<String>,
     pub members: Bitmap,
+    /// The entities the membership leaves out, where the caller spelled it by exclusion
+    /// (`ingest.md` §2.3), and `None` for the inclusion spelling `members` carries.
+    ///
+    /// **It does not survive admission.** The complement is taken on the executor against the
+    /// view's entity set before the record is written and `members` becomes the set an inclusion
+    /// would have carried; the list itself travels no further than
+    /// [`crate::LayerRegistry::prepare_put`], which reads it for one thing only — a held key,
+    /// whose second exclusion is a `409` — and writes it into no record. **There is no type below
+    /// this one that can carry the spelling**, so no serving path can learn it and none can
+    /// evaluate a complement against a viewer's mask, which would disclose the existence of items
+    /// outside it (`annotation-write-cycle.md` §6.1).
+    pub excluding: Option<Bitmap>,
     /// The artifact's supplied content, as **ranked contents** — most specific first. Empty on a
     /// layer that declares no supplied content, which is every layer Stage 2 could publish.
     ///
@@ -353,12 +371,38 @@ impl IncomingArtifact {
     pub fn from_entities(key: Option<String>, members: impl IntoIterator<Item = EntityId>) -> Self {
         IncomingArtifact {
             key,
+            view: None,
             members: bitmap_of_entities(members),
+            excluding: None,
             contents: Vec::new(),
             attached_to: None,
             parent_keys: Vec::new(),
             shape: None,
         }
+    }
+
+    /// Spell this artifact's membership by exclusion: `excluded` names the entities it leaves
+    /// out, and `members` stays empty until the executor complements it (`ingest.md` §2.3).
+    ///
+    /// **The method exists so the bitmap type stays inside this crate**, on
+    /// [`Self::from_entities`]'s argument: the request plane names a list without being able to
+    /// complement one.
+    pub fn exclude(&mut self, excluded: impl IntoIterator<Item = EntityId>) {
+        self.excluding = Some(bitmap_of_entities(excluded));
+    }
+
+    /// The membership an exclusion means: `entities` — the view's entity set as of this step —
+    /// minus the excluded list, materialised here and the spelling dropped.
+    ///
+    /// One `andnot` over the view's entity bitmap, which is what the bound on the *list* buys:
+    /// the complement itself is not bounded and need not be (`ingest.md` §2.3). Answers how large
+    /// the membership became, for the caller's log, or `None` where the artifact carried no
+    /// exclusion. The list is left in place: the held-key refusal is what reads it, and it
+    /// reaches no record.
+    pub fn complement_against(&mut self, entities: &Bitmap) -> Option<u64> {
+        let excluded = self.excluding.as_ref()?;
+        self.members = entities.andnot(excluded);
+        Some(self.members.cardinality())
     }
 
     /// The same, attached to another layer's artifact — the shape a label layer publishes.
@@ -653,6 +697,11 @@ impl PartialEq<Members> for Bitmap {
     }
 }
 
+/// `layer → level → view → key → ordinal`, the key index of [`ArtifactStore`]. The view level is
+/// the identity's (`ingest.md` §1.5); see the field's own note for why the map is nested rather
+/// than keyed by a tuple.
+type KeyIndex = BTreeMap<String, BTreeMap<u32, BTreeMap<Option<String>, BTreeMap<String, u32>>>>;
+
 /// One artifact's durable state, as the registry holds it.
 #[derive(Debug, Clone)]
 pub struct ArtifactRecord {
@@ -662,6 +711,21 @@ pub struct ArtifactRecord {
     /// layer's edges point into**: an edge names its target, and at publish time the caller holds
     /// no `tessera_id` for it.
     pub key: Option<String>,
+    /// The view this artifact belongs to, on a layer scoped to a group (`views.md` §3.5), and
+    /// `None` on an entity-scoped layer. Part of the key's uniqueness scope: `ArtifactStore::keys`
+    /// indexes `(layer, level, view, key)`, so one key in two views is two artifacts.
+    ///
+    /// **The build's rows and the wire's records take this one field.** A build reads it from the
+    /// artifact source's `view` column and the publication route from the record's `view`; below
+    /// this type there is one shape and no second structure saying which view an artifact is
+    /// drawn in.
+    ///
+    /// ⊘ **A packed extent does not carry it** (`encode_record`): a level folded into an extent
+    /// and reopened comes back with `None` on every record. Nothing built publishes a
+    /// group-scoped layer into a fold today — the build's per-view passes read the store while it
+    /// is still in memory — and giving the blob a view is a `bundle_format` bump this track does
+    /// not make.
+    pub view: Option<String>,
     /// Entity-space membership — the canonical, view-invariant record. Owned, or read through a
     /// mapping of the bytes that carry it (see [`Members`]).
     pub members: Members,
@@ -823,7 +887,10 @@ pub struct ArtifactStore {
     /// the whole reason for the shape: a `BTreeMap<String, _>` answers a `&str`, so a lookup
     /// borrows where a tuple key forced two `String` allocations at every probe — on a path the
     /// serving side takes as well as the build.
-    keys: BTreeMap<String, BTreeMap<u32, BTreeMap<String, u32>>>,
+    /// The third level is the artifact's view (`ingest.md` §1.5): a group-scoped layer's keys are
+    /// unique per `(layer, view)` and an entity-scoped layer's sit under `None`, so the same key
+    /// in two views resolves to two ordinals and neither can be reached from the other's view.
+    keys: KeyIndex,
     /// Where the oldest surviving publication sits in the log — the bound rotation may not reclaim
     /// past. See [`ArtifactStore::oldest_wal_pos`].
     oldest_wal_pos: Option<u64>,
@@ -918,6 +985,8 @@ impl ArtifactStore {
                 .entry(layer.to_string())
                 .or_default()
                 .entry(level)
+                .or_default()
+                .entry(record.view.clone())
                 .or_default()
                 .insert(key.clone(), ordinal);
         }
@@ -1024,9 +1093,49 @@ impl ArtifactStore {
             .unwrap_or(0)
     }
 
-    /// The ordinal a caller's own key names in this level, if any.
-    pub fn ordinal_of_key(&self, layer: &str, level: u32, key: &str) -> Option<u32> {
-        self.keys.get(layer)?.get(&level)?.get(key).copied()
+    /// The ordinal a caller's own key names in this level of this view, if any.
+    ///
+    /// **The view is part of the address** (`ingest.md` §1.5): a group-scoped layer's key is
+    /// unique per `(layer, view)`, so a probe under one view never reaches another's artifact —
+    /// which is what keeps an edge inside its view and lets one key name two artifacts.
+    pub fn ordinal_of_key(
+        &self,
+        layer: &str,
+        level: u32,
+        view: Option<&str>,
+        key: &str,
+    ) -> Option<u32> {
+        self.keys
+            .get(layer)?
+            .get(&level)?
+            .get(&view.map(str::to_string))?
+            .get(key)
+            .copied()
+    }
+
+    /// The views, other than `view`, whose set of this level holds `key` — what a cross-view edge
+    /// is reported with (`views.md` §3.5). Empty on an entity-scoped layer and wherever the key
+    /// is held nowhere else.
+    pub fn views_holding_key(
+        &self,
+        layer: &str,
+        level: u32,
+        view: Option<&str>,
+        key: &str,
+    ) -> Vec<String> {
+        let Some(levels) = self.keys.get(layer).and_then(|l| l.get(&level)) else {
+            return Vec::new();
+        };
+        levels
+            .iter()
+            .filter(|(held, _)| held.as_deref() != view)
+            .filter(|(_, keys)| keys.contains_key(key))
+            .map(|(held, _)| {
+                held.as_deref()
+                    .unwrap_or("(the layer's one set)")
+                    .to_string()
+            })
+            .collect()
     }
 
     /// The log position of the oldest surviving publication, or `None` if none survives.
@@ -1323,14 +1432,6 @@ impl ArtifactStore {
     ) -> usize {
         let mut refused = 0;
         for published in artifacts {
-            // A view in the identity has no apply path until T2c (`ingest.md` §1.5). Refused and
-            // counted on the fill's argument: the replay refuses to open before it reaches here
-            // (`crate::wal::unbuilt_track`), and applying such a record as entity-scoped would
-            // serve one view's artifact on every view of its group.
-            if published.view.is_some() {
-                refused += 1;
-                continue;
-            }
             // Damage is a refusal, not an empty membership — see `deserialise_members`. Skipping
             // leaves a hole, which answers *absent*; the alternative decodes a corrupt record to a
             // legitimately emptied artifact and serves it.
@@ -1372,6 +1473,7 @@ impl ArtifactStore {
                 ArtifactRecord {
                     entity: published.entity,
                     key: published.key.clone(),
+                    view: published.view.clone(),
                     members: Members::owned(members),
                     contents,
                     attached_to: published.attached_to.clone().map(|a| Attachment {
@@ -1524,6 +1626,26 @@ impl ArtifactStore {
                     .enumerate()
                     .filter_map(|(i, slot)| slot.as_ref().map(|r| (i as u32, r)))
             })
+    }
+
+    /// The artifacts of one level a given view is **drawn** (`views.md` §3.5): every record of an
+    /// entity-scoped layer, whose one set is drawn on every view it names, and on a group-scoped
+    /// layer only the records belonging to this view.
+    ///
+    /// **`view` is the view's own key**, not its path: a group's several layouts over one key set
+    /// draw the same artifact in each, which is what the build's per-view pass reads too.
+    ///
+    /// A group-scoped artifact drawn in every view would be a real, wrong artifact in the others
+    /// — a Q1 cluster's frame and count on Q2's map — so the filter is here, where every form is
+    /// projected, rather than at each caller.
+    pub fn level_in_view<'a>(
+        &'a self,
+        layer: &str,
+        level: u32,
+        view: &'a str,
+    ) -> impl Iterator<Item = (u32, &'a ArtifactRecord)> {
+        self.level(layer, level)
+            .filter(move |(_, record)| record.view.as_deref().is_none_or(|own| own == view))
     }
 
     /// Every artifact of every level of one layer, as `(level, ordinal, record)`.
@@ -1935,10 +2057,13 @@ impl ArtifactStore {
                 changed = true;
                 if retired.contains(record.entity.raw() as u32) {
                     if let Some(key) = &record.key {
-                        if let Some(levels) = self.keys.get_mut(layer.as_str()) {
-                            if let Some(keys) = levels.get_mut(level) {
-                                keys.remove(key.as_str());
-                            }
+                        if let Some(keys) = self
+                            .keys
+                            .get_mut(layer.as_str())
+                            .and_then(|levels| levels.get_mut(level))
+                            .and_then(|views| views.get_mut(&record.view))
+                        {
+                            keys.remove(key.as_str());
                         }
                     }
                     if let Some(attachment) = &record.attached_to {
@@ -2455,6 +2580,8 @@ pub fn decode_record(
         ArtifactRecord {
             entity,
             key,
+            // The blob carries no view — see `ArtifactRecord::view`.
+            view: None,
             members: Members::owned(members),
             contents,
             attached_to,
@@ -2523,6 +2650,7 @@ mod tests {
         ArtifactRecord {
             entity: EntityId::new(entity),
             key: None,
+            view: None,
             members: Members::owned(Bitmap::of(members)),
             contents: Vec::new(),
             attached_to: None,

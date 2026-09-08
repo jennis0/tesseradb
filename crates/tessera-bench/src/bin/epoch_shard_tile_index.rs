@@ -441,6 +441,7 @@ fn build_shard(fixture: &Fixture, sharding: &Sharding, shard: u32, scratch: &Pat
                 ArtifactRecord {
                     entity: record.entity,
                     key: None,
+                    view: None,
                     members: Members::owned(members),
                     contents: Vec::new(),
                     attached_to: None,
