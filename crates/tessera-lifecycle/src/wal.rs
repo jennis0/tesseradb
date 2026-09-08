@@ -556,15 +556,20 @@ pub struct PlainViewDeclaration {
 /// no-op: a log carrying one was written by a binary this one is not, and replaying past it would
 /// serve state that omits what the record said. Every replay asks this before it applies anything
 /// and refuses to open, naming the track.
+///
+/// **Every record of the ingest design is applied now** (T0 to T6), so every arm answers `None`.
+/// The shape is kept rather than deleted with the last track: a variant added later is a decision
+/// taken here, and the alternative — no function, or a wildcard — is a new record silently
+/// replayed as a no-op by a reader that does not know what it says.
 pub fn unbuilt_track(record: &WalRecord) -> Option<(&'static str, &'static str)> {
     match record {
-        WalRecord::ViewGroupCreate { .. } => Some(("ViewGroupCreate", "T6")),
-        WalRecord::PlainViewCreate { .. } => Some(("PlainViewCreate", "T6")),
         // Listed rather than caught by a wildcard, so that a variant added later is a decision
         // here and not a default to "built".
         WalRecord::AttributeDeclare { .. }
         | WalRecord::ValuesBatch { .. }
         | WalRecord::VocabularyDeclare { .. }
+        | WalRecord::ViewGroupCreate { .. }
+        | WalRecord::PlainViewCreate { .. }
         | WalRecord::VocabularyMint { .. }
         | WalRecord::IngestBatch { .. }
         | WalRecord::OverlaySnapshot { .. }
@@ -2410,9 +2415,9 @@ mod tests {
     /// (`ingest.md` §7.1, §8), so what this checks is the two halves of that arrangement: every
     /// field survives the log verbatim, and [`unbuilt_track`] names each record's track so a
     /// replay refuses rather than passes over it. Every optional and every list is set, which is
-    /// the arrangement a positional decoder misreads first. `AttributeDeclare` (T4) and
-    /// `VocabularyDeclare` (T5) are built and so are asserted to wait on no track, beside the
-    /// growth record every reader applies.
+    /// the arrangement a positional decoder misreads first. `AttributeDeclare` (T4),
+    /// `VocabularyDeclare` (T5) and the two view declarations (T6) are built and so are asserted
+    /// to wait on no track, beside the growth record every reader applies.
     #[test]
     fn the_ingest_designs_records_round_trip_and_name_their_tracks() {
         use crate::membership::{content_digest, serialise_members, ArtifactShapes};
@@ -2552,9 +2557,10 @@ mod tests {
         ];
         // The growth's rank and leaving set are applied by `ArtifactStore::grow_set`, the four
         // fills by `ArtifactStore::fill`, the attribute declaration by
-        // `Executor::declare_attribute`, the values batch by `Executor::commit_values` and the
-        // vocabulary declaration by `Executor::commit_vocabulary_declare`; the rest wait for
-        // their tracks.
+        // `Executor::declare_attribute`, the values batch by `Executor::commit_values`, the
+        // vocabulary declaration by `Executor::commit_vocabulary_declare` and the two view
+        // declarations by `Executor::commit_view_group_create` and `commit_plain_view_create`.
+        // **Every record of the ingest design is applied now**, so no arm names a track.
         let tracks: Vec<Option<&str>> = records
             .iter()
             .map(|record| unbuilt_track(record).map(|(_, track)| track))
@@ -2570,8 +2576,8 @@ mod tests {
                 None,
                 None,
                 None,
-                Some("T6"),
-                Some("T6")
+                None,
+                None
             ]
         );
 

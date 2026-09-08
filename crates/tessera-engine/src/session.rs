@@ -949,6 +949,35 @@ pub struct Engine {
 /// ascending, so two opens of one bundle build the same list. With one partition this is that
 /// partition's lists; with several, every declaration is a deployment-level fact every partition
 /// publishes alike, and a name met again is skipped by `Manifest::with_attributes`.
+/// The view groups and plain views the side manifests carry (`ingest.md` §1.3), on
+/// [`side_manifest_vocabularies`]' rule: the partitions are walked by key, ascending, and a name
+/// met again is skipped by the manifest merge.
+fn side_manifest_view_declarations(
+    bundle: &Bundle,
+) -> (
+    Vec<tessera_store::manifest::GroupDescriptor>,
+    Vec<tessera_store::manifest::ViewDescriptor>,
+) {
+    let mut keys: Vec<&String> = bundle.partitions.keys().collect();
+    keys.sort();
+    let mut groups: Vec<tessera_store::manifest::GroupDescriptor> = Vec::new();
+    let mut plain: Vec<tessera_store::manifest::ViewDescriptor> = Vec::new();
+    for key in keys {
+        let manifest = &bundle.partitions[key].manifest;
+        for group in &manifest.groups {
+            if !groups.iter().any(|held| held.name == group.name) {
+                groups.push(group.clone());
+            }
+        }
+        for view in &manifest.plain_views {
+            if !plain.iter().any(|held| held.id == view.id) {
+                plain.push(view.clone());
+            }
+        }
+    }
+    (groups, plain)
+}
+
 fn side_manifest_vocabularies(bundle: &Bundle) -> Vec<tessera_store::manifest::ManifestVocabulary> {
     let mut keys: Vec<&String> = bundle.partitions.keys().collect();
     keys.sort();
@@ -1061,6 +1090,17 @@ impl Engine {
         // — the vocabulary seed's widths, the record blob's field tags, the flush's writer schema,
         // `/v1/meta` — takes it from the bundle manifest. Declarations the log holds past the
         // last publication are appended after replay, below.
+        // **The view groups and plain views declared while the service ran, before the roster**
+        // (`ingest.md` §1.3, §10 R9): `Manifest::with_roster` drops a creation whose group the
+        // manifest does not declare, so a runtime group has to be in the manifest before the
+        // roster's records are applied to it, and a group-scoped column's family names a group
+        // the same way.
+        let (side_groups, side_plain_views) = side_manifest_view_declarations(&bundle);
+        bundle.manifest = bundle
+            .manifest
+            .with_groups(&side_groups)
+            .with_plain_views(&side_plain_views);
+
         // **The vocabularies declared while the service ran, before the columns that name
         // them** (`ingest.md` §1.3): the side manifests are the declaration's durable home, on
         // the attribute columns' argument, and a runtime column over a runtime vocabulary refuses
@@ -1362,6 +1402,10 @@ impl Engine {
                 vocabularies: crate::vocabularies::RuntimeVocabularies::seed(
                     side_vocabularies.clone(),
                 ),
+                view_declarations: crate::view_declarations::RuntimeViewDeclarations::seed(
+                    side_groups.clone(),
+                    side_plain_views.clone(),
+                ),
             },
             &dict,
             &initial_deny,
@@ -1447,6 +1491,9 @@ impl Engine {
         // dropped. Applied here, before the first generation is built, because everything below
         // reads the manifest — the deny mask over every view, `/v1/meta`, view resolution on both
         // planes — and a created view absent from it comes back from a restart as a 404.
+        // **And the groups and plain views the log holds past the last publication**, before the
+        // roster below is applied to the manifest, on the merge's own rule above.
+        let (runtime_groups, runtime_plain_views) = write_state.view_declarations.snapshot();
         let (created_views, dead_incarnations) = write_state.roster.snapshot();
         // **And the group-scoped columns a flush wrote** (`views.md` §5).
         // `scoped_scalars[..].views` names the views that have a column; a flush of a view created
@@ -1466,13 +1513,19 @@ impl Engine {
             && scoped_columns.is_empty()
             && runtime_attributes.is_empty()
             && runtime_scoped_attributes.is_empty()
+            && runtime_groups.is_empty()
+            && runtime_plain_views.is_empty()
         {
             Arc::new(bundle)
         } else {
-            // The runtime columns first, so a scoped family the log declared has its list to
-            // extend when the pairs a flush wrote for it are applied.
+            // The groups and plain views first, so a creation the log holds for a group the log
+            // also declared lands on a group the manifest carries; then the runtime columns, so a
+            // scoped family the log declared has its list to extend when the pairs a flush wrote
+            // for it are applied.
             let manifest = bundle
                 .manifest
+                .with_groups(&runtime_groups)
+                .with_plain_views(&runtime_plain_views)
                 .with_attributes(&runtime_attributes, &runtime_scoped_attributes)
                 .with_roster(&created_views, &dead_incarnations)
                 .with_scoped_columns(&scoped_columns);
@@ -3598,6 +3651,89 @@ impl Engine {
         self.write.mint_vocabulary_values(vocabulary, values)
     }
 
+    /// Declare a view group while the service runs (`PUT /control/view_groups/{name}`;
+    /// `ingest.md` §1.3). Answers `true` where a group of that name already carried exactly this
+    /// identity and nothing was appended.
+    ///
+    /// **The gate's labels are checked here**, on [`Engine::create_view`]'s rule: whether the
+    /// plugin can read a label is a question only the engine can ask. Every other rule is the
+    /// write executor's.
+    ///
+    /// Blocking — a tokio handler must call this inside `spawn_blocking`.
+    pub fn create_view_group(
+        &self,
+        declaration: tessera_lifecycle::wal::ViewGroupDeclaration,
+    ) -> std::result::Result<bool, crate::write::AcceptError> {
+        self.check_gate_labels(declaration.visibility.as_deref())?;
+        self.write.create_view_group(declaration)
+    }
+
+    /// Create a plain view while the service runs (`PUT /control/views/{name}`; `ingest.md` §1.3
+    /// and §10, R9), on [`Engine::create_view_group`]'s rule.
+    ///
+    /// Blocking — a tokio handler must call this inside `spawn_blocking`.
+    pub fn create_plain_view(
+        &self,
+        declaration: tessera_lifecycle::wal::PlainViewDeclaration,
+    ) -> std::result::Result<bool, crate::write::AcceptError> {
+        self.check_gate_labels(declaration.visibility.as_deref())?;
+        self.write.create_plain_view(declaration)
+    }
+
+    /// The half of a gate's validation that needs the plugin (`views.md` §6, decision 0132).
+    ///
+    /// A view's gate is satisfied by exactly the item-visibility predicate, so the labels go
+    /// through the same `Plugin::terms_of_labels` call an item's `access` list takes at
+    /// `/control/ingest`, each element one label taken verbatim. A list the plugin cannot read —
+    /// an empty element, or no element at all — is refused rather than stored: stored, it would
+    /// be a gate no principal could ever satisfy, including the operator who wrote it. `public`
+    /// is not asked about — it is the label every principal holds inside the trust boundary
+    /// (decision 0088) — and is recognised only as the whole of the list.
+    fn check_gate_labels(
+        &self,
+        visibility: Option<&[String]>,
+    ) -> std::result::Result<(), crate::write::AcceptError> {
+        let public = std::str::from_utf8(tessera_authz::PUBLIC_LABEL).expect("the label is ASCII");
+        let Some(labels) = visibility.filter(|l| *l != [public]) else {
+            return Ok(());
+        };
+        let refused = |detail: String| {
+            crate::write::AcceptError::Exec(tessera_lifecycle::ExecError::ViewRefused { detail })
+        };
+        if labels.is_empty() {
+            return Err(refused(
+                "visibility = [] names no terms. A gate is satisfied where its term set meets the \
+                 principal's, so an empty one is satisfied by nobody and the view would be \
+                 reachable by no principal at all. Write `public`, or the labels the gate names, \
+                 one per element (views §6)"
+                    .to_string(),
+            ));
+        }
+        if labels.iter().any(|l| l == public) {
+            return Err(refused(format!(
+                "visibility = {labels:?} lists `public` beside another label. `public` is the \
+                 label every principal holds, so a gate naming it is satisfied by everybody; \
+                 write `public` alone, or leave it out of the list (views §6)"
+            )));
+        }
+        let descriptors: Vec<Vec<u8>> = labels.iter().map(|l| l.as_bytes().to_vec()).collect();
+        let descriptors = self.plugin.terms_of_labels(&descriptors).map_err(|e| {
+            refused(format!(
+                "visibility = {labels:?} is not a label list the plugin can read ({e}). A view's \
+                 gate is satisfied by the item-visibility predicate (views §6), so a label the \
+                 plugin cannot turn into a term is one no principal could satisfy"
+            ))
+        })?;
+        if descriptors.is_empty() {
+            return Err(refused(format!(
+                "visibility = {labels:?} names no terms. A gate is satisfied where its term set \
+                 meets the principal's, so an empty one is satisfied by nobody and the view would \
+                 be reachable by no principal at all. Write `public`, or labels naming terms"
+            )));
+        }
+        Ok(())
+    }
+
     /// Create a view of a view group while the service runs (`views.md` §3.2, decision 0108).
     ///
     /// **Almost nothing is validated here**, on `register_layer`'s rule: whether the key is free
@@ -3605,16 +3741,8 @@ impl Engine {
     /// overtaken between its check and the enqueue.
     ///
     /// The **gate's labels** are the exception, and they are here because only the engine holds
-    /// the plugin. A view's gate is satisfied by exactly the item-visibility predicate
-    /// (`views.md` §6), so the labels are put through the same [`Plugin::terms_of_labels`] call
-    /// an item's `access` list takes at `/control/ingest`, each element one label taken verbatim
-    /// (decision 0132), and a list the plugin cannot read — an empty element, or no element at
-    /// all — is refused rather than stored. Stored, it would be a gate no principal could ever
-    /// satisfy: a view created and reachable by nobody, including the operator who created it.
-    /// `public` is not asked about — it is the label every principal holds inside the trust
-    /// boundary (decision 0088), and the roster stores its absence. It is recognised only as the
-    /// whole of the list: beside another label it would be a gate everybody passes, spelled as
-    /// if it were narrower.
+    /// the plugin: [`Engine::check_gate_labels`], the one site every gate on this plane is
+    /// checked at.
     pub fn create_view(
         &self,
         group: String,
@@ -3622,46 +3750,7 @@ impl Engine {
         visibility: Option<Vec<String>>,
         metadata: std::collections::BTreeMap<String, tessera_types::view::ViewMetadataValue>,
     ) -> std::result::Result<(), crate::write::AcceptError> {
-        let public = std::str::from_utf8(tessera_authz::PUBLIC_LABEL).expect("the label is ASCII");
-        if let Some(labels) = visibility.as_deref().filter(|l| *l != [public]) {
-            let refused = |detail: String| {
-                crate::write::AcceptError::Exec(tessera_lifecycle::ExecError::LayerRefused {
-                    detail,
-                })
-            };
-            if labels.is_empty() {
-                return Err(refused(
-                    "visibility = [] names no terms. A gate is satisfied where its term set meets \
-                     the principal's, so an empty one is satisfied by nobody and the view would be \
-                     reachable by no principal at all. Write `public`, or the labels the gate \
-                     names, one per element (views §6)"
-                        .to_string(),
-                ));
-            }
-            if labels.iter().any(|l| l == public) {
-                return Err(refused(format!(
-                    "visibility = {labels:?} lists `public` beside another label. `public` is the \
-                     label every principal holds, so a gate naming it is satisfied by everybody; \
-                     write `public` alone, or leave it out of the list (views §6)"
-                )));
-            }
-            let descriptors: Vec<Vec<u8>> = labels.iter().map(|l| l.as_bytes().to_vec()).collect();
-            let descriptors = self.plugin.terms_of_labels(&descriptors).map_err(|e| {
-                refused(format!(
-                    "visibility = {labels:?} is not a label list the plugin can read ({e}). A \
-                     view's gate is satisfied by the item-visibility predicate (views §6), so a \
-                     label the plugin cannot turn into a term is one no principal could satisfy"
-                ))
-            })?;
-            if descriptors.is_empty() {
-                return Err(refused(format!(
-                    "visibility = {labels:?} names no terms. A gate is satisfied where its term \
-                     set meets the principal's, so an empty one is satisfied by nobody and the \
-                     view would be reachable by no principal at all. Write `public`, or labels \
-                     naming terms"
-                )));
-            }
-        }
+        self.check_gate_labels(visibility.as_deref())?;
         self.write.create_view(group, key, visibility, metadata)
     }
 

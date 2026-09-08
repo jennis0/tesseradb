@@ -1150,6 +1150,41 @@ impl Manifest {
         manifest
     }
 
+    /// This manifest with the view groups declared at a running service appended
+    /// (`ingest.md` §1.3), each carrying the group's own half and an empty roster.
+    ///
+    /// **Called before [`Self::with_roster`] at every open**, which is the whole of the ordering
+    /// rule: a create names its group, and a roster record whose group this manifest does not
+    /// declare is dropped rather than expanded. A name this manifest already holds is skipped, on
+    /// [`Self::with_vocabularies`]' rule — the door refuses a redeclaration under another
+    /// identity, so a repeat is the same group seen twice.
+    pub fn with_groups(&self, groups: &[GroupDescriptor]) -> Manifest {
+        let mut manifest = self.clone();
+        for group in groups {
+            if manifest.groups.iter().any(|g| g.name == group.name) {
+                continue;
+            }
+            manifest.groups.push(group.clone());
+        }
+        manifest
+    }
+
+    /// This manifest with the plain views declared at a running service appended
+    /// (`ingest.md` §1.3, §10 R9), each with the empty row space every view created at a running
+    /// service starts with.
+    ///
+    /// A name this manifest already holds is skipped, on [`Self::with_groups`]' rule.
+    pub fn with_plain_views(&self, views: &[ViewDescriptor]) -> Manifest {
+        let mut manifest = self.clone();
+        for view in views {
+            if manifest.views.iter().any(|v| v.id == view.id) {
+                continue;
+            }
+            manifest.views.push(view.clone());
+        }
+        manifest
+    }
+
     pub fn with_scoped_columns(&self, columns: &[(String, String, ViewIncarnation)]) -> Manifest {
         let mut manifest = self.clone();
         for (column, view, incarnation) in columns {
@@ -1822,9 +1857,23 @@ pub struct SegmentsManifest {
     pub vocabularies: Vec<ManifestVocabulary>,
     /// Every view group declared while the service runs (`ingest.md` §1.3), complete current
     /// state, on [`Self::attributes`]' argument. Its roster is [`Self::views`], which already
-    /// carries every view created at a running service whichever group owns it. Not built yet:
-    /// empty from every writer; T6.
+    /// carries every view created at a running service whichever group owns it, so a descriptor
+    /// here carries the group's own half — frame, projection, gate, point default, metadata — and
+    /// its `views` list is rebuilt from the roster at every open.
     pub groups: Vec<GroupDescriptor>,
+    /// Every **plain view** declared while the service runs (`ingest.md` §1.3 and §10, R9),
+    /// complete current state, on [`Self::attributes`]' argument.
+    ///
+    /// **Its own list rather than [`Self::views`]**, which carries roster records: a plain view
+    /// belongs to no group and carries its frame, projection, gate and point default itself,
+    /// where a roster record carries a key and metadata under a group's. Merged into
+    /// `MANIFEST.views` at every open ([`Manifest::with_plain_views`]), so nothing downstream
+    /// tells a plain view the build declared from one declared since.
+    ///
+    /// No `serde(default)`, on `layers`' argument: a manifest omitting it is malformed, not
+    /// view-free, and the two are indistinguishable under a default while only one is safe to
+    /// serve.
+    pub plain_views: Vec<ViewDescriptor>,
     /// Every **incarnation of a key that has died** and whose artifacts a fold has not yet
     /// reclaimed (`views.md` §3.4, decision 0115).
     ///
@@ -2264,6 +2313,7 @@ mod tests {
             scoped_attributes: Vec::new(),
             vocabularies: Vec::new(),
             groups: Vec::new(),
+            plain_views: Vec::new(),
             dead_view_incarnations: Vec::new(),
             membership_extents: Vec::new(),
             level_versions: Vec::new(),

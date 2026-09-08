@@ -1137,10 +1137,27 @@ permanent (I9), which is why the anchor is a declaration and not a default.
 **Populate at ingest** is spec §2's addressing and spec §4's join rule, for a plain view and a
 group's view alike, after the create operation of spec §3.2 where the view is new.
 
-**No plain view is added after the build.** A new whole-corpus embedding is a rebuild; growth at
-ingest is what groups are for. r4's `--attach-view` — a build-plane backfill of one view over an
-existing corpus, the other views carried by manifest reference — is withdrawn with it; if the
-need arrives the design is in git.
+**A plain view is declared at a build or at a running service.** `PUT /control/views/{name}`
+takes the `[[view]]` block minus its source and creates the view empty; it takes rows at its first
+flush, exactly as a view created under a group does (spec §3.2). The declaration is durable at the
+acknowledgement, in the WAL and then in the segments manifest, and a fold writes it into
+`MANIFEST.json`.
+
+This overturns the rule this section held until [decision 0136](../decisions/0136-the-ingest-design-rulings.md)
+(R9, owner ruling, 2026-09-07): *no plain view is added after the build*, on the argument that a
+view carries a frame and a gate and the design has one place where those are reviewed. The wider
+rule [decision 0134](../decisions/0134-anything-a-build-can-create-live-ingest-can-create-at-any-scale.md)
+states is that anything a build can create, live ingest can create; the review a frame and a gate
+want is the operator's, and the control plane holds the operator credential. **One spelling
+differs**: a declaration at a running service names its frame in frame coordinates
+(`extent = { x = [a, b], y = [c, d] }`) and never `auto` or a `lon`/`lat` box, there being no
+source to survey and the projected box being what both build spellings produce. r4's
+`--attach-view` — a build-plane backfill of one view over an existing corpus, the other views
+carried by manifest reference — stays withdrawn; if the need arrives the design is in git.
+
+**A view group is declared at a running service too** (`PUT /control/view_groups/{name}`): the
+`[[view_group]]` block minus its roster and its source, whose keys are then created one by one by
+spec §3.2's route. A group declared this way carries no roster until they are.
 
 > **⊘ Partially implemented — the build is complete for a declaration; ingest is not.** `--view`
 > is gone and a build materialises every view the declaration enumerates: pass one unions
@@ -1163,6 +1180,19 @@ need arrives the design is in git.
 > key gets. Spec §3.1 states the four rules the declaration does not settle. Populating a view at
 > ingest — spec §4's join rule — is built (2026-08-31), §4's own markers saying what remains inside
 > it.
+>
+> **Built 2026-09-08 (T6)** for the two routes above (`ingest.md` §1.3, contracts §3.4 r88).
+> Both answer `201` for a new object, `200` where one of that name already carries exactly this
+> identity, `409` where it carries another, and `422` for a declaration the rules refuse; the
+> rules are the build's, transcribed, less `auto` and the degree box. A group's name and a plain
+> view's name are one namespace, a group naming a held view — or a view naming a held group —
+> being a `422`. The durable homes are the segments manifest's `groups` and `plain_views` lists,
+> which a restart merges into the manifest **before** the roster is applied, so a view created
+> under a runtime group comes back with it; a fold writes both into the next `MANIFEST.json` and
+> leaves the lists empty. A group declared with `members` names an owner that exists and owns its
+> own keys, chains being refused as they are at a build, and a group whose metadata names a
+> category is refused at the declaration rather than at every create — the create route resolves
+> no category value (spec §3.2).
 >
 > **The registry's order is the declaration's, block kind by block kind**: the plain `[[view]]`
 > blocks in declaration order, then each `[[view_group]]` in declaration order with its views in

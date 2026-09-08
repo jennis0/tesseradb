@@ -1514,6 +1514,13 @@ mod ack {
             Published(())
         }
 
+        /// A view group or plain view declaration that met the object already carrying its
+        /// identity (`ingest.md` §1.1): nothing was appended and nothing moved. Takes the name
+        /// that was looked up, on the constructors above's rule.
+        pub(super) fn already_declared_view(_name: &str) -> Self {
+            Published(())
+        }
+
         /// A registry or artifact-store record applied. **Neither structure is carried by a
         /// generation**, which is why this is honest without a swap: `/v1/meta`, every reachability
         /// check and every membership read them from `LiveState` behind its own lock, so the effect
@@ -1644,6 +1651,9 @@ pub(crate) struct LiveState {
     /// `MANIFEST.json`, on the attribute list's contract: written only by the executor, read at
     /// every side-manifest publication (`ingest.md` §1.3).
     vocabularies: Mutex<crate::vocabularies::RuntimeVocabularies>,
+    /// The view groups and plain views declared while the service runs and not yet folded, on
+    /// the vocabulary list's contract (`ingest.md` §1.3, §10 R9).
+    view_declarations: Mutex<crate::view_declarations::RuntimeViewDeclarations>,
 }
 
 impl LiveState {
@@ -1918,6 +1928,27 @@ impl LiveState {
         vocabularies: &Vocabularies,
     ) -> Vec<tessera_store::manifest::ManifestVocabulary> {
         lock_recover(&self.vocabularies).snapshot(vocabularies)
+    }
+
+    /// Run `f` with the runtime view declarations held: a declaration's apply and the fold's
+    /// retirement, and nothing else.
+    fn with_view_declarations<R>(
+        &self,
+        f: impl FnOnce(&mut crate::view_declarations::RuntimeViewDeclarations) -> R,
+    ) -> R {
+        let mut declarations = lock_recover(&self.view_declarations);
+        f(&mut declarations)
+    }
+
+    /// What a publication carries forward: the view groups and plain views no fold has written
+    /// into a `MANIFEST.json`, complete current state.
+    fn view_declarations_for_publication(
+        &self,
+    ) -> (
+        Vec<tessera_store::manifest::GroupDescriptor>,
+        Vec<tessera_store::manifest::ViewDescriptor>,
+    ) {
+        lock_recover(&self.view_declarations).snapshot()
     }
 
     /// What a publication carries forward: the creations and the dead incarnations, complete
@@ -2311,6 +2342,9 @@ pub(crate) struct WritePathState {
     /// The vocabularies declared at a running service and not yet folded (`ingest.md` §1.3),
     /// rebuilt as the attribute columns beside them are.
     pub(crate) vocabularies: crate::vocabularies::RuntimeVocabularies,
+    /// The view groups and plain views declared at a running service and not yet folded
+    /// (`ingest.md` §1.3), rebuilt as the vocabularies beside them are.
+    pub(crate) view_declarations: crate::view_declarations::RuntimeViewDeclarations,
 }
 
 /// The manifest state a reconstruction starts from, before WAL replay unions what was written
@@ -2364,6 +2398,9 @@ pub(crate) struct ManifestSeed<'a> {
     pub attributes: crate::attributes::RuntimeAttributes,
     /// The side manifests' `vocabularies`, on [`Self::attributes`]' rule; replay appends to it.
     pub vocabularies: crate::vocabularies::RuntimeVocabularies,
+    /// The side manifests' `groups` and `plain_views`, on [`Self::attributes`]' rule; replay
+    /// appends to them.
+    pub view_declarations: crate::view_declarations::RuntimeViewDeclarations,
 }
 
 /// The levels a fold's retirement is about to move, and the set it retires.
@@ -2758,6 +2795,58 @@ impl WritePath {
             roster.apply(record);
         }
 
+        // **The view groups and plain views declared while the service ran, on the registry's
+        // ordering rule** (`ingest.md` §1.3): the manifests' runtime lists are the starting point
+        // and every record postdates them. A record naming an object the served manifest already
+        // carries is applied as nothing, which is what a fold that moved the declaration into
+        // `MANIFEST.json` before the log rotated leaves behind; one this build cannot compile is
+        // a log written by a binary this one is not, and refuses the open.
+        //
+        // **Before the roster is seeded is not required and before the manifest merge is**: a
+        // create names a group, and `Manifest::with_roster` drops a record whose group the
+        // manifest does not declare, so the group has to reach the manifest first
+        // (`Engine::open`).
+        let mut view_declarations = seed.view_declarations;
+        for record in &records {
+            match record {
+                WalRecord::ViewGroupCreate { declaration } => {
+                    match crate::view_declarations::resolve_group(declaration, seed.manifest) {
+                        Ok(crate::view_declarations::Resolution::New(group)) => {
+                            if !view_declarations.holds_group(&group.name) {
+                                view_declarations.push_group(*group);
+                            }
+                        }
+                        Ok(crate::view_declarations::Resolution::Existing) => {}
+                        Err(e) => {
+                            return Err(EngineError::Malformed(format!(
+                                "the WAL declares view group '{}', which this bundle refuses \
+                                 ({e}); this node does not open",
+                                declaration.name
+                            )));
+                        }
+                    }
+                }
+                WalRecord::PlainViewCreate { declaration } => {
+                    match crate::view_declarations::resolve_plain(declaration, seed.manifest) {
+                        Ok(crate::view_declarations::Resolution::New(view)) => {
+                            if !view_declarations.holds_plain(&view.id) {
+                                view_declarations.push_plain(*view);
+                            }
+                        }
+                        Ok(crate::view_declarations::Resolution::Existing) => {}
+                        Err(e) => {
+                            return Err(EngineError::Malformed(format!(
+                                "the WAL declares view '{}', which this bundle refuses ({e}); \
+                                 this node does not open",
+                                declaration.name
+                            )));
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
         // **The runtime attribute columns, on the same ordering rule** (`ingest.md` §6.3): the
         // manifests' lists are the starting point and every record postdates them. A record
         // naming a column the served schema already holds identically is applied as nothing,
@@ -3087,6 +3176,7 @@ impl WritePath {
                 roster,
                 attributes,
                 vocabularies: runtime_vocabularies,
+                view_declarations,
             },
         ))
     }
@@ -3109,6 +3199,7 @@ impl WritePath {
                 roster: Mutex::new(state.roster),
                 attributes: Mutex::new(state.attributes),
                 vocabularies: Mutex::new(state.vocabularies),
+                view_declarations: Mutex::new(state.view_declarations),
             }),
             wal: Some(state.wal),
             handle: None,
@@ -3635,6 +3726,40 @@ impl WritePath {
             Ok(other) => unreachable!(
                 "a MintVocabularyValues command answers VocabularyValuesMinted, not {other:?}"
             ),
+            Err(e) => Err(AcceptError::Exec(e)),
+        }
+    }
+
+    /// Declare a view group. Answers whether a group of that name already carried this identity.
+    pub(crate) fn create_view_group(
+        &self,
+        declaration: tessera_lifecycle::wal::ViewGroupDeclaration,
+    ) -> Result<bool, AcceptError> {
+        let receipt = self.handle()?.submit(Command::CreateViewGroup {
+            declaration: Box::new(declaration),
+        })?;
+        match receipt.outcome {
+            Ok(Ack::ViewGroupCreated { existing }) => Ok(existing),
+            Ok(other) => {
+                unreachable!("a CreateViewGroup command answers ViewGroupCreated, not {other:?}")
+            }
+            Err(e) => Err(AcceptError::Exec(e)),
+        }
+    }
+
+    /// Create a plain view. Answers whether a view of that name already carried this identity.
+    pub(crate) fn create_plain_view(
+        &self,
+        declaration: tessera_lifecycle::wal::PlainViewDeclaration,
+    ) -> Result<bool, AcceptError> {
+        let receipt = self.handle()?.submit(Command::CreatePlainView {
+            declaration: Box::new(declaration),
+        })?;
+        match receipt.outcome {
+            Ok(Ack::PlainViewCreated { existing }) => Ok(existing),
+            Ok(other) => {
+                unreachable!("a CreatePlainView command answers PlainViewCreated, not {other:?}")
+            }
             Err(e) => Err(AcceptError::Exec(e)),
         }
     }
@@ -4977,6 +5102,7 @@ mod vocabulary_extensions_tests {
             scoped_attributes: Vec::new(),
             vocabularies: Vec::new(),
             groups: Vec::new(),
+            plain_views: Vec::new(),
             dead_view_incarnations: Vec::new(),
             membership_extents: Vec::new(),
             level_versions: Vec::new(),
@@ -7886,6 +8012,10 @@ impl Executor {
         let folded_vocabularies = self
             .live
             .with_vocabularies(|vocabularies| vocabularies.names());
+        // The view groups and plain views likewise (`ingest.md` §1.3).
+        let (folded_groups, folded_plain_views) = self
+            .live
+            .with_view_declarations(|declarations| declarations.names());
 
         let mut segments_manifest = SegmentsManifest {
             // The flight's text extents, and the pass merged every other one into the new base
@@ -7942,11 +8072,12 @@ impl Executor {
             // for the fold to have missed, unlike an attribute column's base — so it folds in with
             // the rest and needs no since-plan half.
             vocabularies: Vec::new(),
-            // Carried from the live manifest, on the roster's argument: a declaration made while
-            // the fold ran must survive the publication that lands. Whether a fold writes this
-            // into the next `MANIFEST.json` and empties it here is decided where the list is
-            // first written (T6; `ingest.md` §8).
-            groups: live_manifest.groups.clone(),
+            // **Emptied, because the fold has just written them into `MANIFEST.json`**, on the
+            // vocabularies' argument above: a group and a plain view are manifest state and write
+            // no artefact for the fold to have missed, so one declared while the fold ran folds in
+            // with the rest.
+            groups: Vec::new(),
+            plain_views: Vec::new(),
             dead_view_incarnations,
             // **The pass's own output, not the live list.** The paths are prefix-relative and the
             // fold publishes a *new* prefix, so what step 3a wrote is the only list that names
@@ -8501,6 +8632,10 @@ impl Executor {
         // assembly is not among them and stays.
         self.live
             .with_vocabularies(|vocabularies| vocabularies.retire_folded(&folded_vocabularies));
+        // The view groups and plain views beside them, on the same rule.
+        self.live.with_view_declarations(|declarations| {
+            declarations.retire_folded(&folded_groups, &folded_plain_views)
+        });
 
         // ---- step 8: reclaim the superseded prefix (compaction §8) ------------------------------
         self.pending_reclaim.push(PendingReclaim {
@@ -12282,6 +12417,12 @@ impl Executor {
             Command::MintVocabularyValues { vocabulary, values } => {
                 self.commit_vocabulary_values(vocabulary, values, respond)
             }
+            Command::CreateViewGroup { declaration } => {
+                self.commit_view_group_create(*declaration, respond)
+            }
+            Command::CreatePlainView { declaration } => {
+                self.commit_plain_view_create(*declaration, respond)
+            }
             Command::PublishArtifacts {
                 layer,
                 level,
@@ -13461,6 +13602,160 @@ impl Executor {
         respond.ack(Ack::AttributeDeclared { existing: false }, &published);
     }
 
+    /// `PUT /control/view_groups/{name}` — declare a view group while the service runs
+    /// (`ingest.md` §1.3; decision 0136).
+    ///
+    /// **The shape is [`Self::commit_attribute_declare`]'s**: resolve against state only this
+    /// thread may write, append, fsync, apply, publish, ack. The apply reaches the bundle,
+    /// because the served roster is the manifest's `groups` and every reader takes it from there:
+    /// the successor generation carries the group with an empty roster, and a view of it may be
+    /// created in the next request.
+    ///
+    /// An identical redeclaration answers the group that exists; a differing one is a conflict
+    /// (`ingest.md` §1.1). A failed append means the group does not exist.
+    fn commit_view_group_create(
+        &mut self,
+        declaration: tessera_lifecycle::wal::ViewGroupDeclaration,
+        respond: Responder,
+    ) {
+        let started = std::time::Instant::now();
+        let generation = self.generation.load_full();
+        let compiled = match crate::view_declarations::resolve_group(
+            &declaration,
+            &generation.bundle.manifest,
+        ) {
+            Ok(crate::view_declarations::Resolution::Existing) => {
+                respond.ack(
+                    Ack::ViewGroupCreated { existing: true },
+                    &Published::already_declared_view(&declaration.name),
+                );
+                return;
+            }
+            Ok(crate::view_declarations::Resolution::New(compiled)) => *compiled,
+            Err(e) => {
+                respond.fail(e);
+                self.health.note_work_refused();
+                return;
+            }
+        };
+        let record = WalRecord::ViewGroupCreate {
+            declaration: Box::new(declaration),
+        };
+        if let Err(e) = self.wal.append(&record).and_then(|()| self.wal.fsync()) {
+            tracing::error!(
+                error = %e,
+                group = %compiled.name,
+                "ALARM: a view group declaration could not be made durable; the group does not \
+                 exist"
+            );
+            respond.fail(ExecError::Wal(e));
+            return;
+        }
+        self.live
+            .with_view_declarations(|declarations| declarations.push_group(compiled.clone()));
+        let manifest = generation
+            .bundle
+            .manifest
+            .with_groups(std::slice::from_ref(&compiled));
+        let published = self.publish_view_manifest(&generation, manifest, started);
+        // Durable in the log and not yet in a manifest, and a rotation reclaims the log: the
+        // declaration reaches `SEGMENTS-<n>.json` on the mechanism a deny already uses.
+        self.deny_dirty = true;
+        respond.ack(Ack::ViewGroupCreated { existing: false }, &published);
+    }
+
+    /// `PUT /control/views/{name}` — create a plain view while the service runs (`ingest.md`
+    /// §1.3 and §10, R9; decision 0136).
+    ///
+    /// **The shape is [`Self::commit_view_group_create`]'s**, and what differs is that a plain
+    /// view has a *row space* — an empty one, until its first flush — so the apply goes through
+    /// `Bundle::with_views`, which is what gives a view created at a running service its place in
+    /// the per-view map. A view absent from that map is read as an unknown view by the viewport
+    /// and as a disagreement between the mask and the bundle by the deny mask.
+    fn commit_plain_view_create(
+        &mut self,
+        declaration: tessera_lifecycle::wal::PlainViewDeclaration,
+        respond: Responder,
+    ) {
+        let started = std::time::Instant::now();
+        let generation = self.generation.load_full();
+        let compiled = match crate::view_declarations::resolve_plain(
+            &declaration,
+            &generation.bundle.manifest,
+        ) {
+            Ok(crate::view_declarations::Resolution::Existing) => {
+                respond.ack(
+                    Ack::PlainViewCreated { existing: true },
+                    &Published::already_declared_view(&declaration.name),
+                );
+                return;
+            }
+            Ok(crate::view_declarations::Resolution::New(compiled)) => *compiled,
+            Err(e) => {
+                respond.fail(e);
+                self.health.note_work_refused();
+                return;
+            }
+        };
+        let record = WalRecord::PlainViewCreate {
+            declaration: Box::new(declaration),
+        };
+        if let Err(e) = self.wal.append(&record).and_then(|()| self.wal.fsync()) {
+            tracing::error!(
+                error = %e,
+                view = %compiled.id,
+                "ALARM: a plain view creation could not be made durable; the view does not exist"
+            );
+            respond.fail(ExecError::Wal(e));
+            return;
+        }
+        self.live
+            .with_view_declarations(|declarations| declarations.push_plain(compiled.clone()));
+        let manifest = generation
+            .bundle
+            .manifest
+            .with_plain_views(std::slice::from_ref(&compiled));
+        let published = self.publish_view_manifest(&generation, manifest, started);
+        self.deny_dirty = true;
+        respond.ack(Ack::PlainViewCreated { existing: false }, &published);
+    }
+
+    /// Publish a generation carrying `manifest` and nothing else moved — the swap a group
+    /// declaration and a plain view creation both make.
+    ///
+    /// **`Bundle::with_views`, which brings the per-view map into step with the manifest**: a
+    /// view the manifest declares and the map does not is an unknown view to the viewport, and a
+    /// created view gains the empty row space `views.md` §3.2 gives it. `segments_version` and
+    /// the watermark are unmoved, on `publish_roster`'s argument: no row moved.
+    fn publish_view_manifest(
+        &mut self,
+        generation: &Arc<Generation>,
+        manifest: tessera_store::manifest::Manifest,
+        started: std::time::Instant,
+    ) -> Published {
+        let bundle = generation.bundle.with_views(manifest);
+        let denied = Arc::new(crate::compose::derive_denied(&generation.overlay, &bundle));
+        let next = Generation {
+            prefix: generation.prefix.clone(),
+            segments_version: generation.segments_version,
+            watermark: generation.watermark,
+            bundle,
+            dict: Arc::clone(&generation.dict),
+            postings: Arc::clone(&generation.postings),
+            fragments: Arc::clone(&generation.fragments),
+            external_index: Arc::clone(&generation.external_index),
+            delta_postings: generation.delta_postings.clone(),
+            overlay_version: generation.overlay_version,
+            overlay: Arc::clone(&generation.overlay),
+            buffer: Arc::clone(&generation.buffer),
+            vocabularies: Arc::clone(&generation.vocabularies),
+            filter_columns: Arc::clone(&generation.filter_columns),
+            suggest: Arc::clone(&generation.suggest),
+            denied,
+        };
+        self.publish(next, started)
+    }
+
     /// `PUT /control/vocabularies/{name}` — declare a vocabulary while the service runs
     /// (`ingest.md` §1.3; decision 0136).
     ///
@@ -14255,6 +14550,16 @@ impl Executor {
             // the roster's rule: a declaration or a page that landed since the manifest was
             // cloned would otherwise be dropped, and a rotation makes that permanent.
             manifest.vocabularies = self.live.vocabularies_for_publication(&live.vocabularies);
+        // And the view groups and plain views, on the same rule (`ingest.md` §1.3).
+        let (groups, plain_views) = self.live.view_declarations_for_publication();
+        manifest.groups = groups;
+        manifest.plain_views = plain_views;
+            // And the view groups and plain views declared at a running service, on the roster's
+            // rule (`ingest.md` §1.3). A group's roster is `manifest.views` above, restated from
+            // the live roster; what these carry is the group's own half and the plain views.
+            let (groups, plain_views) = self.live.view_declarations_for_publication();
+            manifest.groups = groups;
+            manifest.plain_views = plain_views;
             // **Membership extents are written before the manifest that names them**, which is the
             // whole of their durability contract: a manifest naming a missing extent refuses at
             // open, so the file has to be durable first. A failure here abandons the publication

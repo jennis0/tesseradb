@@ -279,6 +279,18 @@ pub enum Command {
     /// name is free and whether a held vocabulary carries this identity read state only the
     /// executor may move between a check and an apply. Boxed as the attribute request is.
     DeclareVocabulary { request: Box<VocabularyRequest> },
+    /// Declare a view group while the service runs (`PUT /control/view_groups/{name}`,
+    /// `ingest.md` §1.3). On the executor for [`Command::DeclareAttribute`]'s reason: whether the
+    /// name is free, and what a held group's identity is, read state only the executor may move
+    /// between a check and an apply.
+    CreateViewGroup {
+        declaration: Box<crate::wal::ViewGroupDeclaration>,
+    },
+    /// Create a plain view while the service runs (`PUT /control/views/{name}`, `ingest.md` §1.3
+    /// and §10, R9), on [`Command::CreateViewGroup`]'s rule.
+    CreatePlainView {
+        declaration: Box<crate::wal::PlainViewDeclaration>,
+    },
     /// A page of values for a vocabulary that already exists
     /// (`PATCH /control/vocabularies/{name}/values`, `ingest.md` §1.3).
     ///
@@ -570,6 +582,12 @@ pub enum Ack {
     /// A page of values was applied: `added` were novel and drew a code, `existing` were already
     /// bound with the same properties and did nothing. Both are bounded by the caller's own page.
     VocabularyValuesMinted { added: u64, existing: u64 },
+    /// A view group was declared, or an identical declaration met the group that already carries
+    /// that name (`existing`). Nothing else to return: the name is the group's only address.
+    ViewGroupCreated { existing: bool },
+    /// A plain view was created, or an identical declaration met the view that already carries
+    /// that name (`existing`), on [`Ack::ViewGroupCreated`]'s rule.
+    PlainViewCreated { existing: bool },
     /// A view was dropped. `deleted` is how many entities `delete_dangling` submitted for
     /// deletion — **reported because the operation is not undoable**, on the same rule
     /// [`Ack::Ingested`]'s `minted` is reported by, and `0` for a drop that did not ask for it.

@@ -286,6 +286,16 @@ pub fn router(state: Arc<AppState>) -> Router {
             "/control/views/{group}/{key}",
             axum::routing::put(create_view).delete(drop_view),
         )
+        // **`PUT`, as every declaration on this plane is** (`ingest.md` §1.3, §10 R9): the name
+        // is the identity, an identical redeclaration answers the object that exists, and a
+        // differing one is refused. A plain view's route is `/control/views/{name}` and a group's
+        // view's is `/control/views/{group}/{key}`, so the two are told apart by the path's
+        // length, which is what makes a plain view's name and a group's name one namespace.
+        .route(
+            "/control/view_groups/{name}",
+            axum::routing::put(create_view_group),
+        )
+        .route("/control/views/{name}", axum::routing::put(create_plain_view))
         .route(
             "/control/layers/{name}/artifacts",
             // **Not the inherited 2 MiB default**: `ingest.publish_max_body_bytes`, a pagination
@@ -471,6 +481,8 @@ pub const CONTROL_PLANE_ROUTES: &[(&str, &str)] = &[
     ("PUT", "/control/attributes"),
     ("PUT", "/control/vocabularies/{name}"),
     ("PATCH", "/control/vocabularies/{name}/values"),
+    ("PUT", "/control/view_groups/{name}"),
+    ("PUT", "/control/views/{name}"),
 ];
 
 /// `/control/changes`'s request-body limit.
@@ -3594,6 +3606,204 @@ async fn mint_vocabulary_values(
     .map_err(crate::error::map_accept_error)?;
     Ok(Json(
         serde_json::json!({ "name": name, "added": added, "existing": existing }),
+    ))
+}
+
+/// The frame a view or a group declares, in **frame coordinates**: the four bounds a Morton code
+/// is a fraction of (`views.md` §2, decision 0040).
+///
+/// **No `auto`, and no `lon`/`lat` pair.** A build fits `auto` by surveying its source and turns
+/// a degree box into the aligned square that contains it; a declaration at a running service has
+/// no source to survey, and the projected box is what both spellings produce, so this route takes
+/// the box itself. Nothing a build can declare is unsayable here — it is spelled once rather than
+/// twice (`ingest.md` §1.3).
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExtentBody {
+    x: [f64; 2],
+    y: [f64; 2],
+}
+
+impl ExtentBody {
+    fn frame(&self) -> tessera_engine::DeclaredFrame {
+        tessera_engine::DeclaredFrame {
+            x_min: self.x[0],
+            x_max: self.x[1],
+            y_min: self.y[0],
+            y_max: self.y[1],
+        }
+    }
+}
+
+/// `point_visibility` as a declaration at a running service spells it: the `default` alone.
+///
+/// **`field` and `source` are acquisition keys** — where a build reads each point's label — and a
+/// batch carries its own `access` list, so the only half that reaches this plane is what a point
+/// carrying no label of its own is given (decision 0133).
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PointVisibilityBody {
+    #[serde(default)]
+    default: Option<String>,
+}
+
+/// One declared metadata name and its type, as a group's declaration carries it
+/// (`configuration.md` §1).
+///
+/// **A list rather than a map, because the order is declared**: the roster serves metadata in
+/// declaration order, and a JSON object's field order is not something a client can rely on a
+/// server to keep.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MetadataFieldBody {
+    name: String,
+    #[serde(rename = "type")]
+    ty: tessera_types::view::ViewMetadataType,
+    #[serde(default)]
+    vocabulary: Option<String>,
+}
+
+/// `PUT /control/view_groups/{name}`' body: the `[[view_group]]` block minus its roster and its
+/// source (`configuration.md` §1; `ingest.md` §1.3).
+///
+/// **`deny_unknown_fields`, on [`ViewRecord`]'s rule**: a group's frame is immutable for its life
+/// and its gate, once written, never changes, so a key that did not land is one that can never be
+/// supplied under this name.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ViewGroupBody {
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default = "projection_none")]
+    projection: String,
+    extent: ExtentBody,
+    /// One label, or a list of labels, each element one term taken verbatim (decision 0132).
+    /// Absent is `public`.
+    #[serde(default)]
+    visibility: Option<tessera_types::view::DeclaredGate>,
+    #[serde(default)]
+    point_visibility: Option<PointVisibilityBody>,
+    /// Another group's name: this group's views are that group's (`views.md` §3.3).
+    #[serde(default)]
+    members: Option<String>,
+    #[serde(default)]
+    metadata: Vec<MetadataFieldBody>,
+}
+
+/// `PUT /control/views/{name}`' body: the `[[view]]` block minus its source (`ingest.md` §1.3
+/// and §10, R9).
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PlainViewBody {
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default = "projection_none")]
+    projection: String,
+    extent: ExtentBody,
+    #[serde(default)]
+    visibility: Option<tessera_types::view::DeclaredGate>,
+    #[serde(default)]
+    point_visibility: Option<PointVisibilityBody>,
+}
+
+/// The declaration surface's own default for `projection` (`configuration.md` §1): positions are
+/// placed by nothing, and the frame is read as it is written.
+fn projection_none() -> String {
+    "none".to_string()
+}
+
+/// `PUT /control/view_groups/{name}` — declare a view group while the service runs
+/// (`ingest.md` §1.3; decision 0136).
+///
+/// **Synchronous, on [`declare_attribute`]'s rule**: a WAL append and an fsync, then the group
+/// exists for resolution, so `PUT /control/views/{group}/{key}` may create a view of it in the
+/// next request. `201` for a new group; `200` where a group of that name already carries exactly
+/// this identity. A differing identity under a held name is `409`; a declaration the rules refuse
+/// is `422`; a `members` group naming a group this deployment does not carry is `404`, the same
+/// answer an unknown view id is.
+///
+/// **The group starts with an empty roster.** Its keys are created one by one, which is what the
+/// roster route already does for a group the build declared.
+async fn create_view_group(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(name): axum::extract::Path<String>,
+    body: Json<ViewGroupBody>,
+) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
+    let body = body.0;
+    let declaration = tessera_engine::ViewGroupDeclaration {
+        name: name.clone(),
+        title: body.title,
+        projection: body.projection,
+        frame: body.extent.frame(),
+        visibility: body
+            .visibility
+            .map(tessera_types::view::DeclaredGate::into_labels),
+        point_default: body.point_visibility.and_then(|p| p.default),
+        members: body.members,
+        metadata: body
+            .metadata
+            .into_iter()
+            .map(|f| tessera_types::view::GroupMetadataField {
+                name: f.name,
+                ty: f.ty,
+                vocabulary: f.vocabulary,
+            })
+            .collect(),
+    };
+    // The **shared** blocking pool, on `register_layer`'s rule: a declaration is not a deny.
+    let existing = tokio::task::spawn_blocking(move || state.engine.create_view_group(declaration))
+        .await
+        .map_err(crate::error::map_join_error)?
+        .map_err(crate::error::map_accept_error)?;
+    let status = if existing {
+        StatusCode::OK
+    } else {
+        StatusCode::CREATED
+    };
+    Ok((
+        status,
+        Json(serde_json::json!({ "group": name, "existing": existing })),
+    ))
+}
+
+/// `PUT /control/views/{name}` — create a plain view while the service runs (`ingest.md` §1.3
+/// and §10, R9; decision 0136).
+///
+/// **This is what R9 overturns.** `views.md` §7 ruled that a plain view is declared when the
+/// corpus is built and adding one is a rebuild; decision 0134's wider rule is that anything a
+/// build can create, live ingest can create, and the review a frame and a gate want is the
+/// operator's, which is whose credential this plane holds.
+///
+/// The answers are [`create_view_group`]'s. The view starts with an **empty row space** — the one
+/// a view created under a group already gets — and takes rows at its first flush.
+async fn create_plain_view(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(name): axum::extract::Path<String>,
+    body: Json<PlainViewBody>,
+) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
+    let body = body.0;
+    let declaration = tessera_engine::PlainViewDeclaration {
+        name: name.clone(),
+        title: body.title,
+        projection: body.projection,
+        frame: body.extent.frame(),
+        visibility: body
+            .visibility
+            .map(tessera_types::view::DeclaredGate::into_labels),
+        point_default: body.point_visibility.and_then(|p| p.default),
+    };
+    let existing = tokio::task::spawn_blocking(move || state.engine.create_plain_view(declaration))
+        .await
+        .map_err(crate::error::map_join_error)?
+        .map_err(crate::error::map_accept_error)?;
+    let status = if existing {
+        StatusCode::OK
+    } else {
+        StatusCode::CREATED
+    };
+    Ok((
+        status,
+        Json(serde_json::json!({ "view": name, "existing": existing })),
     ))
 }
 

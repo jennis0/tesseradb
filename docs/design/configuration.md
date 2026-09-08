@@ -115,7 +115,12 @@ one may say otherwise** — a view through its own `fields.entity_id`, an attrib
 no `fields` map and so has no way to say otherwise; it is `(entity_id, term_id)` under those names
 (§8). A default a block could not override would be a constraint rather than a default.
 
-**`[[view]]`** — one named coordinate system. Repeatable.
+**`[[view]]`** — one named coordinate system. Repeatable. **Also declarable at a running
+service**: `PUT /control/views/{name}` takes this block minus its acquisition keys (`source`,
+`fields`) and minus `point_visibility`'s own `field` and `source`, as JSON (contracts §3.4;
+`ingest.md` §1.3; `views.md` §7). `extent` there is the frame's own box, `{x: [a, b], y: [c, d]}`:
+`auto` has no source to survey at a running service, and a `lon`/`lat` box is the projected box
+spelled twice.
 
 | Key | | Value |
 |---|---|---|
@@ -130,7 +135,10 @@ no `fields` map and so has no way to say otherwise; it is `(entity_id, term_id)`
 
 **`[[view_group]]`** — a set of views sharing every setting, differing by a key and per-view
 metadata ([`views.md`](views.md) §3,
-decision 0108). Repeatable. **It takes
+decision 0108). Repeatable. **Also declarable at a running service**: `PUT
+/control/view_groups/{name}` takes this block minus its roster and its acquisition keys, on the
+`[[view]]` block's terms above, with `metadata` as a list of `{name, type, vocabulary?}` in
+declaration order; its keys are then created one by one by `PUT /control/views/{group}/{key}`. **It takes
 every `[[view]]` key above, with the same meaning**, and adds the four below. Its `title` is the
 one served on `/v1/meta`'s `groups` entry — a view's own is still compiled and published nowhere. A group is not a
 view: it cannot be named on a viewer verb and has no row space of its own; its views are, each

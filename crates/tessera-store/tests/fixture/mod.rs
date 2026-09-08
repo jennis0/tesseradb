@@ -110,6 +110,7 @@ pub fn build_bundle(root: &Path, n: u64) {
         scoped_attributes: Vec::new(),
         vocabularies: Vec::new(),
         groups: Vec::new(),
+        plain_views: Vec::new(),
         dead_view_incarnations: Vec::new(),
         membership_extents: Vec::new(),
         level_versions: Vec::new(),

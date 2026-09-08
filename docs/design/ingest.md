@@ -187,8 +187,8 @@ in the next, and only viewers wait for the tick.
 | **Membership by exclusion** | `excluding`: the entities the membership leaves out, on the artifact record | `PUT` | its own append and fsync; the complement is taken on the executor | one request, admissible only while the view's entity count is under `max_excluded_per_request` (spec §2.3) | a second `excluding` on a held key is `409` |
 | **Layer** | the `[[layer]]` block minus acquisition keys | `PUT /control/layers` | its own append and fsync | one request; a declaration is kilobytes | identical redeclaration answers the existing identity ⊘ |
 | **View of a group** | the roster record | `PUT /control/views/{group}/{key}` | its own append and fsync | one request | as above |
-| **View group** ⊘ | the `[[view_group]]` block minus roster and source | `PUT /control/view_groups/{name}` | its own append and fsync | one request; its views follow one by one | as above |
-| **Plain view** ⊘ | the `[[view]]` block minus source | `PUT /control/views/{name}` | its own append and fsync | one request | as above |
+| **View group** (built 2026-09-08, T6) | the `[[view_group]]` block minus roster and source | `PUT /control/view_groups/{name}` | its own append and fsync | one request; its views follow one by one | as above |
+| **Plain view** (built 2026-09-08, T6) | the `[[view]]` block minus source | `PUT /control/views/{name}` | its own append and fsync | one request | as above |
 | **Vocabulary** (built 2026-09-08, T5) | the `[[vocabulary]]` block minus source; values inline where they fit | `PUT /control/vocabularies/{name}` | its own append and fsync | the declaration, then pages of values | as above |
 | **Vocabulary values** (built 2026-09-08, T5) | a page of `{key, title?}`; never a code | `PATCH /control/vocabularies/{name}/values` | one `VocabularyDeclare` per page, one fsync | `max_values_per_request` ⊘; `max_body_bytes` | append-only; an identical value is a no-op; a property the deployment does not hold is filled and one it holds differently is a `409`, never an amendment of key, code or title |
 | **Attribute column** (built 2026-09-07, T4) | the `[[attribute]]` block minus acquisition keys | `PUT /control/attributes` | its own append and fsync | one request | as above |
@@ -197,6 +197,21 @@ in the next, and only viewers wait for the tick.
 A discovered category value is not a kind: it is minted at the window close of the batch that
 carries it, by the view-first rule (per-point-attributes §5), and this document changes nothing
 there. A declared category value is a vocabulary value above.
+
+**Built 2026-09-08 (T6), two rows of the table.** A group declaration and a plain view
+creation are each resolved against the served manifest, appended, fsynced and published, and the
+answers are the attribute declaration's: `201`, `200` for an identical redeclaration, `409` for a
+held name under another identity, `422` for a declaration the rules refuse and `404` for a
+`members` group naming a group this deployment does not carry. **A group's name and a plain view's
+name are one namespace**, both being read at the same position of a request. The frame is the
+frame's own box and never `auto` or a degree pair (`views.md` §7's amendment says why). Both carry
+an **empty row space** until their first flush: a plain view reaches the per-view map through
+`Bundle::with_views`, which is what a view created under a group already goes through. The durable
+homes are the segments manifest's `groups` and `plain_views` lists, restated from the live state at
+every publication; a restart merges them into the manifest **before** the roster is applied, so a
+view created under a runtime group is not dropped as a creation naming an undeclared group, and
+replays the log's declarations on top. A fold writes both into the next `MANIFEST.json` and leaves
+the lists empty, a declaration writing no artefact for the fold to have missed.
 
 **Built 2026-09-08 (T5), two rows of the table.** A declaration is resolved against the served
 manifest, appended and fsynced, and published: from the acknowledgement a `declared` category

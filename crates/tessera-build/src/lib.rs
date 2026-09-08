@@ -1817,6 +1817,7 @@ fn write_manifests(
         scoped_attributes: Vec::new(),
         vocabularies: Vec::new(),
         groups: Vec::new(),
+        plain_views: Vec::new(),
         dead_view_incarnations: Vec::new(),
         membership_extents: published_layers.membership_extents.clone(),
         level_versions: published_layers.level_versions.clone(),
