@@ -159,7 +159,20 @@ export class TesseraClient {
     if (!this.opts.sessionCredential) {
       throw new Error('authorise needs a sessionCredential');
     }
-    const authData = btoa(JSON.stringify({terms}));
+    // **`btoa` takes bytes, not text, and a term is text.** It maps each UTF-16 code unit to one
+    // byte: it throws `InvalidCharacterError` above U+00FF, and below it silently emits Latin-1
+    // rather than UTF-8. The session plane base64-decodes this to a `Vec<u8>` and reads it as UTF-8
+    // JSON (`crates/tessera-server/src/session.rs`), so both halves of that are wrong — a term
+    // carrying an en-dash refuses the whole authorise, and one carrying an accent authorises
+    // against bytes no dictionary holds. Encode to UTF-8 first, then base64 the bytes.
+    const bytes = new TextEncoder().encode(JSON.stringify({terms}));
+    // Chunked because `String.fromCharCode(...bytes)` spreads one argument per byte and overflows
+    // the call stack on a candidate list of any size.
+    let binary = '';
+    for (let i = 0; i < bytes.length; i += 0x8000) {
+      binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+    }
+    const authData = btoa(binary);
     const response = await fetch(`${this.opts.sessionUrl}/session/authorise`, {
       method: 'POST',
       headers: {
