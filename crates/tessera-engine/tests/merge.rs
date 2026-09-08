@@ -930,6 +930,60 @@ fn a_racer_inside_a_merges_refresh_window_is_shed_rather_than_rebuilding() {
     );
 }
 
+/// **A session established inside the refresh window builds, rather than waiting out a pass that
+/// will never produce its key.**
+///
+/// Rung 3's shed trades a build for a wait, and the wait is owed only where it ends in the value.
+/// The refresh iterates resident entries and derives each successor from the entry it holds, so a
+/// session authorised after the publication is not one of them: it has nothing resident, no pass
+/// will reach its key, and shedding it lasts the whole pass and buys it nothing. The same window
+/// is a correct shed for the session beside it, which does have a predecessor — asserted here
+/// together, because a rung 3 that never sheds would pass either half alone.
+///
+/// **Mutation:** drop `predecessor_resident` from rung 3's test and the arriving session is
+/// refused for as long as the pass is held.
+#[test]
+fn a_session_established_inside_a_merges_refresh_window_is_served_rather_than_shed() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().join("bundle");
+    let (engine, items) = engine_with_pending_merge(&tmp, &root);
+    let entities: Vec<EntityId> = items.iter().map(|(e, _)| *e).collect();
+
+    let established = engine.authorise(&full_coverage_credential()).unwrap();
+    viewport(&engine, &established);
+    let builds_before = engine.full_projection_builds();
+
+    // Hold the refresh, then let the merge publish: the window stays open until we release it.
+    engine.set_refresh_paused_for_test(true);
+    run_merge(&engine, &entities);
+
+    // The window is genuinely open, which is what makes the second half of this test a claim.
+    let refused = engine
+        .viewport(&established, whole_extent())
+        .expect_err("the session with a resident predecessor is shed");
+    assert!(
+        matches!(refused, tessera_engine::EngineError::ProjectionBuilding),
+        "and shed as backpressure: {refused}"
+    );
+
+    let arrived = engine.authorise(&full_coverage_credential()).unwrap();
+    let served = engine
+        .viewport(&arrived, whole_extent())
+        .expect("a session with nothing resident must build inside the window, not be refused");
+    assert_eq!(
+        served.tiles.iter().map(|t| t.visible).sum::<u64>(),
+        (64 + TIER_WIDTH * ROWS_EACH) as u64,
+        "and what it built is the live geometry, every item drawn"
+    );
+    assert_eq!(
+        engine.full_projection_builds(),
+        builds_before + 1,
+        "exactly one build: the arriving session's own establishment cost"
+    );
+
+    engine.set_refresh_paused_for_test(false);
+}
+
 // ---------------------------------------------------------------------------------------------
 // The configured policy knobs (write-path §10). Until 2026-08-15 `serve.tier_width` and
 // `serve.segment_floor_bytes` were parsed and validated by the server and reached the engine

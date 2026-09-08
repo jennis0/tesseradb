@@ -2653,12 +2653,17 @@ impl Engine {
         // (`crate::cache::KEEP_SUPERSEDED_GENERATIONS`) and the only one an append can be served
         // across.
         let space = &view_data.row_space;
+        // Whether the refresh pass has an entry to derive this request's key from. Set on a
+        // `Ready` predecessor whether or not rung 2 can serve it: a merge leaves an entry rung 2
+        // must refuse, and the pass still rebases it into this key.
+        let mut predecessor_resident = false;
         if let Some(previous) = key.segments_version.checked_sub(1) {
             let stale_key = RowProjectionKey {
                 segments_version: previous,
                 ..key.clone()
             };
             if let Peek::Ready(geometry) = self.row_projection_cache.peek(&stale_key) {
+                predecessor_resident = true;
                 if geometry.projection.extends_to(space) {
                     self.stale_serves.fetch_add(1, Ordering::Relaxed);
                     return Ok(geometry);
@@ -2670,7 +2675,25 @@ impl Engine {
         // claim names the `segments_version` whose refresh is running, so a pass still finishing
         // for a *superseded* generation does not shed a request whose key nothing is coming to
         // produce — which would be a 429 with no end.
-        if self.refresh_in_flight.load(Ordering::SeqCst) == key.segments_version {
+        //
+        // **And conjoined with rung 2's peek, for the same reason.** The shed trades a build for a
+        // wait, so it is owed only where the wait ends in the value. `crate::refresh` iterates
+        // resident entries and derives each successor from the entry it already holds, so the only
+        // keys a pass produces are the successors of what was resident when it started. A session
+        // authorised after the publication has no resident entry, no pass will reach its key, and
+        // refusing it lasts the whole pass and buys it nothing. The peek above is exact because
+        // the retention depth keeps one superseded generation
+        // (`crate::cache::KEEP_SUPERSEDED_GENERATIONS`), so the version immediately below is the
+        // only predecessor the cache can hold.
+        //
+        // A predecessor under a superseded prefix is not seen here, because the peek carries this
+        // generation's prefix. The pass rebuilds such an entry (`crate::refresh::Carry::Rebuild`),
+        // so that request builds where it could have been shed. That is the direction this rung
+        // may err in: a build that duplicates a pass's work costs the requester the rebuild, where
+        // a shed no pass will answer costs it the request.
+        if predecessor_resident
+            && self.refresh_in_flight.load(Ordering::SeqCst) == key.segments_version
+        {
             return Err(EngineError::ProjectionBuilding);
         }
 
