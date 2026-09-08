@@ -10708,10 +10708,14 @@ fn plan_fills(
     //   column. One column answering two ways depending on the shape of the request is the
     //   reason this is refused rather than half-served.
     //
-    // Narrower than spec §6.3's R10, which reads a back-filled `render` value as filterable where
-    // `index` was declared. That much is true of the entity route; what R10 does not say is that
-    // the value is drawn nowhere until the fold, and the refusal is what keeps the two surfaces
-    // from disagreeing in the meantime.
+    // **The guard stands although `PUT /control/attributes` now refuses `render`** (decision
+    // 0136's amendment, 2026-09-08). That door closes the runtime half: no column declared at a
+    // running service carries the flag. A column the *build* declared `render` still reaches
+    // here, which is every rendered column a deployment has, so this is the arm that fires.
+    //
+    // R10, which read a back-filled `render` value as filterable where `index` was declared, is
+    // withdrawn. It was true of the entity route and said nothing about the value being drawn
+    // nowhere, which is what this refusal keeps the two surfaces from disagreeing over.
     let row_tail_only = |d: &tessera_store::manifest::DeclaredScalar| d.render;
     let mut columns = Vec::with_capacity(request.columns.len());
     for name in &request.columns {

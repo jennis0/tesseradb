@@ -15,6 +15,12 @@
 //! at the commit window's close and at the flush ([`absent_scalar`]), so one flush writes one
 //! schema.
 //!
+//! **`render` is not accepted here** (decision 0136's amendment, 2026-09-08). A rendered value
+//! lives in the hot column of the row that carries it, and this route addresses entities rather
+//! than rows, so a column declared here has nowhere to put one. The refusal is an interim: what a
+//! rendered column arriving at a running service should mean has not been worked through, and no
+//! invariant forbids it. [`resolve`] carries the reason at the site.
+//!
 //! **The rules are the build's, transcribed.** `tessera_build::config::compile_attributes` is
 //! the other statement of what a declaration may say, over the config's own types; the engine
 //! does not depend on the build crate, so the rules are restated here and a change to one is a
@@ -156,6 +162,31 @@ pub(crate) fn resolve(
             "attribute '{name}': a registered layer holds that name, and an ingest batch's \
              columns are declared scalars or layer names (contracts §3.4), so a column under it \
              would make a batch mean two things"
+        )));
+    }
+
+    // **`render` is not accepted on this route** (decision 0136's amendment, 2026-09-08). A
+    // rendered value is served from the hot column of the row that carries it, and this route
+    // declares a column against entities rather than rows, so a declaration made here has nowhere
+    // to put one. What a rendered column arriving at a running service should mean has not been
+    // worked through: where the value lands for an entity that already holds rows, what a view
+    // drawn before the declaration shows, and how the fold closes the gap. The refusal is an
+    // interim that keeps a half-working path out of a deployment. There is no invariant against a
+    // rendered column declared at a running service, and nothing here settles the question.
+    //
+    // It covers the flag and not the column, so a build column declared `render` cannot be
+    // restated through this route either: the request carries `render = true` and is refused
+    // before the held-name comparison. Restating a column changes nothing, so a caller who does
+    // it loses nothing by being told to stop.
+    if request.render {
+        return Err(refused(format!(
+            "attribute '{name}': `render` is not accepted at a running service. A rendered \
+             value is served from the hot column of the row that carries it, and this route \
+             declares a column against entities rather than rows, so there is nowhere to put \
+             one. What a rendered column declared at a running service should mean has not been \
+             worked through, and this refusal is an interim rather than a rule about rendered \
+             columns (decision 0136's amendment). Declare the column without `render`, or \
+             declare it at a build"
         )));
     }
 
@@ -422,6 +453,12 @@ fn compile(
                 }
                 (_, None) => None,
             };
+            // The two `render` refusals below state the build's rules over a request that
+            // `resolve` has already refused for carrying `render` at all, so neither is reached
+            // from this door. They are kept because this function is the engine's transcription
+            // of `tessera_build::config::compile_attributes` (decision 0091): the build accepts
+            // `render` and refuses these two types, and a transcription missing them would read
+            // as a build rule that does not exist.
             if ty == ScalarType::Text && request.render {
                 return Err(format!(
                     "attribute '{name}': `render` on `text` is refused; the hot column is a \

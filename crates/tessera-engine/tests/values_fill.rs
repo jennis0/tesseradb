@@ -226,7 +226,7 @@ fn settle(engine: &Engine) {
     }
 }
 
-fn declare(engine: &Engine, name: &str, ty: &str, index: bool, render: bool) {
+fn declare(engine: &Engine, name: &str, ty: &str, index: bool) {
     let vocabulary = (ty == "category").then(|| "dept".to_string());
     let width = (ty == "category").then(|| "u8".to_string());
     engine
@@ -238,7 +238,7 @@ fn declare(engine: &Engine, name: &str, ty: &str, index: bool, render: bool) {
             width,
             analyser: None,
             index,
-            render,
+            render: false,
             scope: LayerScope::Entity,
         })
         .unwrap_or_else(|e| panic!("column '{name}' declares: {e}"));
@@ -248,15 +248,15 @@ fn declare(engine: &Engine, name: &str, ty: &str, index: bool, render: bool) {
 ///
 /// `note` is neither indexed nor rendered, so it is blob-resident — the column whose fill on a
 /// flushed entity needs the record stack's per-column claimant read. `tag`, `dept` and `weight`
-/// take entity-space value columns, and `prose` a text layer. `drawn` is `render`, whose value is
-/// served from the row tail and which a values row therefore cannot fill.
+/// take entity-space value columns, and `prose` a text layer. A rendered column is not among them
+/// because `PUT /control/attributes` refuses `render` (decision 0136's amendment); the fixture's
+/// build columns `band` and `score` are the rendered ones the values route meets.
 fn declare_families(engine: &Engine) {
-    declare(engine, "note", "keyword", false, false);
-    declare(engine, "tag", "keyword", true, false);
-    declare(engine, "prose", "text", true, false);
-    declare(engine, "dept", "category", true, false);
-    declare(engine, "weight", "f32", true, false);
-    declare(engine, "drawn", "f32", false, true);
+    declare(engine, "note", "keyword", false);
+    declare(engine, "tag", "keyword", true);
+    declare(engine, "prose", "text", true);
+    declare(engine, "dept", "category", true);
+    declare(engine, "weight", "f32", true);
 }
 
 const FAMILIES: [&str; 5] = ["note", "tag", "prose", "dept", "weight"];
@@ -477,23 +477,51 @@ fn every_family_fills_on_an_entity_that_predates_the_value_and_reads_back() {
     );
 
     // **A `render` column cannot be filled** (`ingest.md` §6.3). Its value is served from the hot
-    // column of the row that carries it, and a values row acquires no row — so `drawn` has
-    // nowhere for the value to land that any reader would answer from, and the batch is refused
-    // rather than acknowledged having stored nothing.
-    let refused = engine
-        .fill_values(values_request(
-            "values-2",
-            &["drawn"],
-            vec![(entity, vec![WalScalar::F32(1.0)])],
-        ))
-        .expect_err("a render-only column is refused");
-    let AcceptError::Exec(ExecError::ValuesRefused { detail }) = refused else {
-        panic!("a row-tail-only column is a ValuesRefused, not {refused:?}");
+    // column of the row that carries it, and a values row acquires no row — so the value has
+    // nowhere to land that any reader would answer from, and the batch is refused rather than
+    // acknowledged having stored nothing.
+    //
+    // **Only a build declares one.** `PUT /control/attributes` refuses `render` as an interim
+    // (decision 0136's amendment), so this guard is unreachable for a column declared at a running
+    // service and fires for the fixture's build columns: `band`, rendered and not indexed, which
+    // has no home at all for a fill, and `score`, rendered and indexed, which has an entity-space
+    // column that would answer one filter route and nothing else.
+    let refused_declaration = engine
+        .declare_attribute(AttributeRequest {
+            name: "drawn".to_string(),
+            title: None,
+            ty: "f32".to_string(),
+            vocabulary: None,
+            width: None,
+            analyser: None,
+            index: false,
+            render: true,
+            scope: LayerScope::Entity,
+        })
+        .expect_err("`render` is not declarable at a running service");
+    let AcceptError::Exec(ExecError::AttributeRefused { detail }) = refused_declaration else {
+        panic!("the interim refusal is an AttributeRefused, not {refused_declaration:?}");
     };
     assert!(
-        detail.contains("column 'drawn'") && detail.contains("`render`"),
-        "the refusal names the column and why: {detail}"
+        detail.contains("`render` is not accepted at a running service"),
+        "{detail}"
     );
+    for column in ["band", "score"] {
+        let refused = engine
+            .fill_values(values_request(
+                "values-2",
+                &[column],
+                vec![(entity, vec![WalScalar::U8(1)])],
+            ))
+            .expect_err("a rendered column is refused");
+        let AcceptError::Exec(ExecError::ValuesRefused { detail }) = refused else {
+            panic!("a row-tail-only column is a ValuesRefused, not {refused:?}");
+        };
+        assert!(
+            detail.contains(&format!("column '{column}'")) && detail.contains("`render`"),
+            "the refusal names the column and why: {detail}"
+        );
+    }
     assert_eq!(
         matching(
             &engine,
@@ -705,8 +733,8 @@ fn a_fill_on_a_flushed_entity_is_read_through_the_claimant_read() {
     let engine = engine_over(&fx);
     // A blob-resident column the *build's* rows already carry, so the entity's first flush writes
     // it a blob row and the fill writes a second one in another layer.
-    declare(&engine, "origin", "keyword", false, false);
-    declare(&engine, "note", "keyword", false, false);
+    declare(&engine, "origin", "keyword", false);
+    declare(&engine, "note", "keyword", false);
     let entity = ingest(
         &engine,
         "points-1",

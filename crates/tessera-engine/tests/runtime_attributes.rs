@@ -24,13 +24,12 @@ use parquet::arrow::ArrowWriter;
 use common::*;
 use tessera_engine::filter::{Endpoint, FilterExpr, FilterOperand, Scalar};
 use tessera_engine::{
-    AcceptError, AttributeRequest, CategoryQuery, ColumnBuf, Engine, ScalarOut, Session,
-    ViewportRequest,
+    AcceptError, AttributeRequest, CategoryQuery, Engine, ScalarOut, Session, ViewportRequest,
 };
 use tessera_lifecycle::command::UnallocatedRow;
 use tessera_lifecycle::wal::WalScalar;
 use tessera_lifecycle::ExecError;
-use tessera_store::read::{open_bundle, ColumnsRef, ScalarSlice};
+use tessera_store::read::open_bundle;
 use tessera_types::layer::LayerScope;
 use tessera_types::{AttrLocalId, EntityId};
 
@@ -293,32 +292,12 @@ fn viewport(engine: &Engine, session: &Session, filter: Option<FilterExpr>) -> V
     ViewportOut {
         ids: out.points.iter().map(|(id, _)| id.raw()).collect(),
         names: out.scalar_names.clone(),
-        scalars: out.points.scalars.clone(),
     }
 }
 
 struct ViewportOut {
     ids: Vec<u64>,
     names: Vec<String>,
-    scalars: Vec<ColumnBuf>,
-}
-
-impl ViewportOut {
-    fn f32_column(&self, name: &str) -> BTreeMap<u64, f32> {
-        let position = self
-            .names
-            .iter()
-            .position(|n| n == name)
-            .unwrap_or_else(|| panic!("the render list carries '{name}': {:?}", self.names));
-        let ColumnBuf::F32(values) = &self.scalars[position] else {
-            panic!("'{name}' is served as f32");
-        };
-        self.ids
-            .iter()
-            .copied()
-            .zip(values.iter().copied())
-            .collect()
-    }
 }
 
 fn leaf(column: &str, operand: FilterOperand) -> FilterExpr {
@@ -364,28 +343,26 @@ fn built_entity(root: &Path, source: u64) -> EntityId {
     EntityId::new(source_to_new_map(root, "v00000")[&source])
 }
 
-/// Every segment's `columns.arrow` under the prefix `CURRENT` names, for a by-name check of one
-/// column's presence.
-fn segments_carrying(root: &Path, column: &str) -> (usize, usize) {
+/// How many of the prefix's partitions hold an entity-space base value file for `column`, over the
+/// number of partitions. A column declared at a running service has no base until a fold writes one
+/// (`ingest.md` §6.3), so this is 0 before the fold and every partition after it.
+fn partitions_with_base(root: &Path, column: &str) -> (usize, usize) {
     let bundle = open_bundle(root).expect("the bundle opens");
     let current: tessera_store::manifest::CurrentPointer =
         serde_json::from_slice(&std::fs::read(root.join("CURRENT")).unwrap()).unwrap();
     let (mut carrying, mut total) = (0, 0);
-    for (phash, partition) in &bundle.partitions {
-        for segment in &partition.manifest.segments {
-            let dir = root
-                .join(&current.prefix)
-                .join("partitions")
-                .join(phash)
-                .join("views")
-                .join(&segment.view)
-                .join("segments")
-                .join(&segment.seg_id);
-            let columns = ColumnsRef::load(&dir.join("columns.arrow")).unwrap();
-            total += 1;
-            if matches!(columns.scalar(column), Some(ScalarSlice::F32(_))) {
-                carrying += 1;
-            }
+    for phash in bundle.partitions.keys() {
+        total += 1;
+        if root
+            .join(&current.prefix)
+            .join("partitions")
+            .join(phash)
+            .join("attrs")
+            .join(column)
+            .join(tessera_filter::VALUES_FILE)
+            .is_file()
+        {
+            carrying += 1;
         }
     }
     (carrying, total)
@@ -396,7 +373,8 @@ fn segments_carrying(root: &Path, column: &str) -> (usize, usize) {
 /// **Every family declares at a running service, rows carry it from the acknowledgement, and an
 /// entity that predates the declaration reads absent on every reader.** The absence is answered
 /// from the segment schema: the record-blob read counter does not move for the older entity,
-/// while it does for one whose row the flush wrote into the blob (decision 0136, R10).
+/// while it does for one whose row the flush wrote into the blob. The render list is the build's
+/// throughout: this route does not accept `render` (decision 0136's amendment).
 #[test]
 fn every_family_declares_at_runtime_and_earlier_entities_read_absent_without_a_blob_read() {
     let fx = fixture();
@@ -405,7 +383,6 @@ fn every_family_declares_at_runtime_and_earlier_entities_read_absent_without_a_b
     let declared = [
         AttributeRequest {
             index: true,
-            render: true,
             ..request("sentiment", "f32")
         },
         AttributeRequest {
@@ -475,18 +452,10 @@ fn every_family_declares_at_runtime_and_earlier_entities_read_absent_without_a_b
     let out = viewport(&engine, &session, None);
     assert_eq!(
         out.names,
-        ["band", "score", "sentiment"],
-        "the render tail is the build's render columns then the runtime one"
+        ["band", "score"],
+        "the render tail is the build's alone: this route does not accept `render`"
     );
-    let sentiment = out.f32_column("sentiment");
-    assert_eq!(sentiment.len(), N_ITEMS as usize + 3);
     let old = built_entity(&fx.root, 0);
-    let old_id = engine.tessera_id_of(old).unwrap().raw();
-    assert_eq!(
-        sentiment[&old_id], 0.0,
-        "a segment written before the declaration serves the type's zero for it"
-    );
-    assert_eq!(sentiment[&engine.tessera_id_of(new[0]).unwrap().raw()], 0.9);
 
     // The drill-down: absent for the older entity, from the schema, with no blob read.
     let reads_before = engine.generation().filter_columns.record_reads();
@@ -620,7 +589,6 @@ fn a_declaration_mid_ingest_pads_earlier_rows_and_neither_panics_nor_fails_the_f
     engine
         .declare_attribute(AttributeRequest {
             index: true,
-            render: true,
             ..request("late", "f32")
         })
         .expect("the declaration is accepted");
@@ -664,19 +632,18 @@ fn a_declaration_mid_ingest_pads_earlier_rows_and_neither_panics_nor_fails_the_f
     flush(&engine);
 
     let session = session(&engine);
-    let out = viewport(&engine, &session, None);
-    let late = out.f32_column("late");
     let id = |e: EntityId| engine.tessera_id_of(e).unwrap().raw();
     assert_eq!(
-        late[&id(before[0])],
-        0.0,
-        "padded with the column's absence"
+        fields_of(&engine, &session, carrying[0])["late"],
+        ScalarOut::F32(0.75)
     );
-    assert_eq!(late[&id(after[0])], 0.0, "padded with the column's absence");
-    assert_eq!(late[&id(carrying[0])], 0.75);
     assert!(
         !fields_of(&engine, &session, before[0]).contains_key("late"),
         "a padded row's absence is an absence, not a zero"
+    );
+    assert!(
+        !fields_of(&engine, &session, after[0]).contains_key("late"),
+        "a row decoded against the earlier schema is padded the same way"
     );
     assert_eq!(
         viewport(&engine, &session, Some(leaf("late", at_least(0.0)))).ids,
@@ -700,7 +667,6 @@ fn a_restart_replays_the_declaration_from_the_log_and_from_the_manifest() {
     engine
         .declare_attribute(AttributeRequest {
             index: true,
-            render: true,
             ..request("sentiment", "f32")
         })
         .expect("the declaration is accepted");
@@ -711,7 +677,6 @@ fn a_restart_replays_the_declaration_from_the_log_and_from_the_manifest() {
         engine
             .declare_attribute(AttributeRequest {
                 index: true,
-                render: true,
                 ..request("sentiment", "f32")
             })
             .expect("an identical redeclaration is accepted"),
@@ -743,10 +708,12 @@ fn a_restart_replays_the_declaration_from_the_log_and_from_the_manifest() {
     let engine = restart(&fx, engine);
     assert_eq!(declared_names(&engine), ["band", "score", "sentiment"]);
     let session = session(&engine);
-    let sentiment = viewport(&engine, &session, None).f32_column("sentiment");
     let id = |e: EntityId| engine.tessera_id_of(e).unwrap().raw();
-    assert_eq!(sentiment[&id(before[0])], 0.0);
-    assert_eq!(sentiment[&id(carrying[0])], 0.6);
+    assert!(!fields_of(&engine, &session, before[0]).contains_key("sentiment"));
+    assert_eq!(
+        fields_of(&engine, &session, carrying[0])["sentiment"],
+        ScalarOut::F32(0.6)
+    );
     assert_eq!(
         viewport(&engine, &session, Some(leaf("sentiment", at_least(0.5)))).ids,
         vec![id(carrying[0])]
@@ -763,7 +730,6 @@ fn the_fold_carries_a_runtime_column_into_the_base() {
     engine
         .declare_attribute(AttributeRequest {
             index: true,
-            render: true,
             ..request("sentiment", "f32")
         })
         .expect("the declaration is accepted");
@@ -785,17 +751,17 @@ fn the_fold_carries_a_runtime_column_into_the_base() {
     );
     flush(&engine);
     assert_eq!(
-        segments_carrying(&fx.root, "sentiment"),
-        (1, 2),
-        "before the fold only the flush's segment carries the column"
+        partitions_with_base(&fx.root, "sentiment"),
+        (0, 1),
+        "before the fold the column has no base and its stack is the flush's extents alone"
     );
 
     fold(&engine);
     assert_eq!(engine.generation().prefix, "v00001");
     assert_eq!(
-        segments_carrying(&fx.root, "sentiment"),
+        partitions_with_base(&fx.root, "sentiment"),
         (1, 1),
-        "the fold's base segment carries the column"
+        "the fold wrote the column's base"
     );
     let folded = open_bundle(&fx.root).unwrap();
     assert_eq!(
@@ -819,8 +785,8 @@ fn the_fold_carries_a_runtime_column_into_the_base() {
     let session = session(&engine);
     let id = engine.tessera_id_of(carrying[0]).unwrap().raw();
     assert_eq!(
-        viewport(&engine, &session, None).f32_column("sentiment")[&id],
-        0.6
+        fields_of(&engine, &session, carrying[0])["sentiment"],
+        ScalarOut::F32(0.6)
     );
     assert_eq!(
         viewport(&engine, &session, Some(leaf("sentiment", at_least(0.5)))).ids,
@@ -919,7 +885,6 @@ fn a_declaration_during_a_fold_survives_the_publication_at_the_same_tail_positio
     engine
         .declare_attribute(AttributeRequest {
             index: true,
-            render: true,
             ..request("before", "f32")
         })
         .expect("the declaration is accepted");
@@ -949,7 +914,6 @@ fn a_declaration_during_a_fold_survives_the_publication_at_the_same_tail_positio
     engine
         .declare_attribute(AttributeRequest {
             index: true,
-            render: true,
             ..request("during", "f32")
         })
         .expect("a declaration during a fold is accepted");
@@ -1010,15 +974,19 @@ fn a_declaration_during_a_fold_survives_the_publication_at_the_same_tail_positio
     flush(&engine);
     let check = |engine: &Engine| {
         let session = session(engine);
-        let out = viewport(engine, &session, None);
-        assert_eq!(out.names, ["band", "score", "before", "during"]);
-        let id = engine.tessera_id_of(during[0]).unwrap().raw();
         assert_eq!(
-            out.f32_column("before")[&id],
-            0.5,
+            viewport(engine, &session, None).names,
+            ["band", "score"],
+            "the render list is the build's alone"
+        );
+        let id = engine.tessera_id_of(during[0]).unwrap().raw();
+        let fields = fields_of(engine, &session, during[0]);
+        assert_eq!(
+            fields["before"],
+            ScalarOut::F32(0.5),
             "each value under its own name"
         );
-        assert_eq!(out.f32_column("during")[&id], 0.75);
+        assert_eq!(fields["during"], ScalarOut::F32(0.75));
         assert_eq!(
             viewport(engine, &session, Some(leaf("during", at_least(0.7)))).ids,
             vec![id]
@@ -1041,7 +1009,6 @@ fn an_identical_redeclaration_is_a_no_op_and_a_differing_one_conflicts() {
     let engine = engine_over(&fx);
     let sentiment = AttributeRequest {
         index: true,
-        render: true,
         ..request("sentiment", "f32")
     };
     assert!(!engine.declare_attribute(sentiment.clone()).unwrap());
@@ -1056,7 +1023,7 @@ fn an_identical_redeclaration_is_a_no_op_and_a_differing_one_conflicts() {
         other => panic!("a differing identity under a held name is a conflict: {other:?}"),
     };
     conflict(AttributeRequest {
-        render: false,
+        index: false,
         ..sentiment.clone()
     });
     conflict(AttributeRequest {
@@ -1072,11 +1039,10 @@ fn an_identical_redeclaration_is_a_no_op_and_a_differing_one_conflicts() {
         engine
             .declare_attribute(AttributeRequest {
                 index: true,
-                render: true,
-                ..request("score", "f32")
+                ..request("sentiment", "f32")
             })
             .unwrap(),
-        "restating a build column identically is the same no-op"
+        "restating a runtime column identically is the same no-op"
     );
 
     let refused = |r: AttributeRequest| match engine.declare_attribute(r) {
@@ -1102,11 +1068,48 @@ fn an_identical_redeclaration_is_a_no_op_and_a_differing_one_conflicts() {
         ..request("band2", "category")
     })
     .contains("stored at u8"));
+    // **`render` is refused for every type, as an interim** (decision 0136's amendment): the
+    // reason is that this route addresses entities rather than rows, so it does not depend on the
+    // type, and the message says the refusal is not a rule about rendered columns.
+    for r in [
+        AttributeRequest {
+            index: true,
+            render: true,
+            ..request("drawn", "f32")
+        },
+        AttributeRequest {
+            vocabulary: Some("dept".to_string()),
+            width: Some("u8".to_string()),
+            render: true,
+            ..request("tag", "category")
+        },
+        AttributeRequest {
+            vocabulary: Some("band".to_string()),
+            width: Some("u8".to_string()),
+            render: true,
+            ..request("band3", "category")
+        },
+        AttributeRequest {
+            render: true,
+            ..request("blurb", "text")
+        },
+    ] {
+        let name = r.name.clone();
+        let detail = refused(r);
+        assert!(
+            detail.contains("`render` is not accepted at a running service")
+                && detail.contains("interim"),
+            "'{name}': {detail}"
+        );
+    }
+    // The build's own rendered column cannot be restated through this route either: the flag is
+    // refused before the held-name comparison.
     assert!(refused(AttributeRequest {
+        index: true,
         render: true,
-        ..request("blurb", "text")
+        ..request("score", "f32")
     })
-    .contains("`render` on `text`"));
+    .contains("`render` is not accepted at a running service"));
     assert!(refused(AttributeRequest {
         scope: LayerScope::Group("nowhere".to_string()),
         ..request("scoped", "i32")

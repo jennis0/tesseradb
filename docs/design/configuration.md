@@ -218,6 +218,10 @@ declarable at a running service**: `PUT /control/attributes` takes this block mi
 acquisition keys (`field`, `source`, `entity_id_field`, `fields`), as JSON (contracts §3.4;
 `ingest.md` §1.3). A category declared there names `width` where no column yet names its
 vocabulary, the build having compiled the vocabulary's width into the columns that name it.
+`render = true` is refused there whatever the type, as an interim: a rendered value is served from
+the hot column of the row that carries it and the route declares a column against entities rather
+than rows, so there is nowhere to put one, and what a rendered column declared at a running
+service should mean has not been worked through (decision 0136's amendment).
 
 | Key | | Value |
 |---|---|---|
@@ -228,7 +232,7 @@ vocabulary, the build having compiled the vocabulary's width into the columns th
 | `entity_id_field` | D | the column this source spells the entity id in; `[defaults].entity_id_field` where absent |
 | `type` | R | `bool`, `u8`…`u64`, `i8`…`i64`, `f32`, `f64`, `timestamp_us`, `text`, `keyword`, `category` |
 | `vocabulary` | R for `category` | names a `[[vocabulary]]`; refused if undeclared |
-| `render` | D `false` | a fixed-width slot in every row of `columns.arrow` |
+| `render` | D `false` | a fixed-width slot in every row of `columns.arrow`. A build declares it; `PUT /control/attributes` refuses it, as an interim (above) |
 | `index` | D `false` | the entity-space search structure |
 | `analyser` | D | `text` only; `unicode` is the default and, today, the only one — see below |
 | `multi` | ⊘ | refused at parse (`per-point-attributes.md` §3.7, records §6) |

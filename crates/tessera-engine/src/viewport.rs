@@ -7534,12 +7534,12 @@ fn resolve_scalars<'a>(
 /// does not describe it.
 ///
 /// **A column a segment's schema does not hold is absent for every row of that segment**
-/// (`ingest.md` §6.3), answered from the schema and never from a blob read. Two states produce
-/// it and a segment cannot tell them apart: a group-scoped family's lane that a segment of the
-/// view was written without (`views.md` §5), and an entity-scoped column declared at a running
-/// service after the segment was written, which a fold gives every segment (decision 0136, R10).
-/// Such a segment's rows take the column's placeholder, the type's zero, exactly what the build
-/// writes into the slot of an entity that has no value, decision 0064's absence for the tail.
+/// (`ingest.md` §6.3), answered from the schema and never from a blob read. The state that
+/// produces it is a group-scoped family's lane that a segment of the view was written without
+/// (`views.md` §5). A column declared at a running service reaches this list from no route:
+/// `PUT /control/attributes` refuses `render`, as an interim (decision 0136's amendment). Such a
+/// segment's rows take the column's placeholder, the type's zero, exactly what the build writes
+/// into the slot of an entity that has no value, decision 0064's absence for the tail.
 fn gather_tile_columns(
     parts: &SelectionParts<'_>,
     rows: &[u32],

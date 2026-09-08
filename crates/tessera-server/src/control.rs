@@ -3426,6 +3426,10 @@ struct AttributeBody {
 /// is the fill rule's "present and identical" (`ingest.md` §1.1) and lets a client repeat the
 /// call. A differing identity under a held name is `409`; a declaration the schema's rules
 /// refuse is `422` saying which rule. A failure means the column does not exist.
+///
+/// **`render = true` is refused, as an interim** (decision 0136's amendment, 2026-09-08). The
+/// field stays on the body so a caller who sends it is told why rather than having it read as its
+/// default; the refusal and its reason are in `tessera_engine`'s `attributes::resolve`.
 async fn declare_attribute(
     State(state): State<Arc<AppState>>,
     body: Json<AttributeBody>,

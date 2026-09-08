@@ -335,7 +335,7 @@ async fn item(served: &Served, tessera_id: u64) -> Value {
 }
 
 fn sentiment() -> Value {
-    json!({ "name": "sentiment", "type": "f32", "index": true, "render": true })
+    json!({ "name": "sentiment", "type": "f32", "index": true })
 }
 
 fn tag() -> Value {
@@ -362,7 +362,7 @@ async fn the_route_declares_answers_redeclarations_and_refuses_what_the_schema_r
 
     let (status, body) = declare(
         &served,
-        json!({ "name": "sentiment", "type": "f64", "index": true, "render": true }),
+        json!({ "name": "sentiment", "type": "f64", "index": true }),
     )
     .await;
     assert_eq!(status, 409, "a held name under another identity: {body}");
@@ -382,9 +382,33 @@ async fn the_route_declares_answers_redeclarations_and_refuses_what_the_schema_r
             json!({ "name": "tag", "type": "category", "vocabulary": "dept" }),
             "say `width`",
         ),
+        // **`render` is refused for every type, as an interim** (decision 0136's amendment): the
+        // route declares a column against entities rather than rows, so there is nowhere for a
+        // rendered value to land, and what a rendered column declared at a running service should
+        // mean has not been worked through.
+        (
+            json!({ "name": "drawn", "type": "f32", "index": true, "render": true }),
+            "`render` is not accepted at a running service",
+        ),
+        (
+            json!({
+                "name": "shade",
+                "type": "category",
+                "vocabulary": "dept",
+                "width": "u8",
+                "render": true
+            }),
+            "interim",
+        ),
         (
             json!({ "name": "blurb", "type": "text", "render": true }),
-            "`render` on `text`",
+            "`render` is not accepted at a running service",
+        ),
+        // The build's own rendered column cannot be restated through this route either: the flag
+        // is refused before the held-name comparison.
+        (
+            json!({ "name": "score", "type": "f32", "index": true, "render": true }),
+            "`render` is not accepted at a running service",
         ),
     ] {
         let (status, body) = declare(&served, bad.clone()).await;

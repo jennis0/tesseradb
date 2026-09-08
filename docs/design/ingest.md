@@ -670,14 +670,14 @@ the last call, contained against the whole set.
 **A new attribute column declared and back-filled over an existing corpus.**
 
 ```python
-w.declare_attribute({"name": "sentiment", "type": "float32", "index": True, "render": True})
+w.declare_attribute({"name": "sentiment", "type": "float32", "index": True})
 for i, page in enumerate(w.paginate(scores, kind="values")):    # rows: {external_id, sentiment}
     w.values(page, batch_id=f"sentiment-{i}")
 ```
 
 The declaration is one request and is safe to repeat. The column is absent for every entity until
-its page lands; a filter on it matches the filled rows at their flush; the rendered value reaches
-the row tail at the fold (spec §6.3).
+its page lands; a filter on it matches the filled rows at their flush. `render` is not among the
+flags a declaration here may set (§6.3).
 
 ## 4. Performance
 
@@ -952,7 +952,7 @@ recreated, so that every later track lands against one format and none waits on 
 | **T2a artifact record and fill** (built 2026-09-07) | `ArtifactFill` and `ArtifactStore::fill`; the digest comparison; the partitioned `PUT`; late lineage with the layer-scoped walk and the second lineage version; `without_content` | T1 |
 | **T2b generating-set pages** | `rank`, `joining` and `leaving` on `PATCH`; the stored cardinality moved by the page and published only with its operator; the whole re-derivation of an operator whose delta holds a leave; the empty-set floor and the withdrawal it reports; the tick's row-form publication for memberships and generating sets with the shared scratch; the per-record pin; permits and pool resolution for pages; the driver publishes over-cap artifacts and sets as pages and `declined` is empty on every rung | T2a |
 | **T2c exclusion and view identity** (built 2026-09-08) | `excluding` under `max_excluded_per_request`; `view` in the identity on a group-scoped layer | T2a |
-| **T4 attributes** | `PUT /control/attributes`; the manifest home; the schema-answered absence for a `render` column; the tail append and padding for a mid-ingest declaration; the fold's materialisation | T1 |
+| **T4 attributes** | `PUT /control/attributes`; the manifest home; the interim refusal of `render`; the tail append and padding for a mid-ingest declaration; the fold's materialisation | T1 |
 | **T3 values** (built 2026-09-08) | `POST /control/values`; the fill on the executor beside the join arm; the view header and key-in-group check for scoped columns; layer columns on existing entities; the record stack's per-column claimant read and its fold | T4 |
 | **T5 vocabularies** | `PUT /control/vocabularies/{name}`; value pages; the property upsert (`/control/categories`'s debt) | T4's manifest home |
 | **T6 groups and views** | `PUT /control/view_groups/{name}`; `PUT /control/views/{name}` | T4's manifest home |
