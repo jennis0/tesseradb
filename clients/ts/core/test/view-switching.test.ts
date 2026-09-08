@@ -110,8 +110,15 @@ function fakeClock(): Clock & {advance(ms: number): Promise<void>} {
   let now = 0;
   let seq = 0;
   const timers = new Map<number, {at: number; fire: () => void}>();
+  // **Twelve microtask ticks is a budget, and a chain that needs a macrotask turn outruns it.**
+  // The ticks settle a promise chain; anything that resolves on a real turn of the event loop —
+  // and the driver's request path has one — lands after the drain has finished and is attributed
+  // to whichever `advance` runs next, so a held view appears to ask for tiles it never asked for.
+  // That made `does not ask for a stepped-to view whose bands are colour-stale` fail on 2 runs in
+  // 3 under load, and only under load. Yielding once to the macrotask queue closes the window.
   const drain = async () => {
     for (let i = 0; i < 12; i++) await Promise.resolve();
+    await new Promise((resolve) => setImmediate(resolve));
   };
   return {
     now: () => now,
