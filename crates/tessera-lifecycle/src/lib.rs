@@ -36,10 +36,10 @@ pub use alloc::{
     allocator_ceiling, allocator_floor, assign_sorted, high_water_from, low_water_from, Allocator,
     PendingItem,
 };
-pub use buffer::{BufferedItem, DescriptorResolver, IngestBuffer};
+pub use buffer::{BufferedItem, DescriptorResolver, Fill, IngestBuffer};
 pub use command::{
     Ack, AttributeRequest, BatchArtifacts, BatchEdge, BatchMembership, Command, ExecError,
-    MembershipGrown, Receipt, SubmitError, UnallocatedRow,
+    IncomingValues, MembershipGrown, Receipt, SubmitError, UnallocatedRow, ValuesRequest,
 };
 pub use faults::WalMeter;
 pub use membership::{

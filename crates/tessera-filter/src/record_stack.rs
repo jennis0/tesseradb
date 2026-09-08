@@ -2,12 +2,21 @@
 //! `entity → fields` across all of them (`records-and-search.md` §3, §7).
 //!
 //! A flush publishes the blob rows of the entities it created as its own extent — the same
-//! three-file shape as the base — and the layers are **disjoint in entity space** (I9: an
-//! entity is allocated once and its row is written by exactly one layer). Disjointness is what
-//! makes this wrapper five lines of logic rather than a merge: the layer whose has-row bitmap
-//! contains the entity answers, and no other layer can contradict it. Order therefore decides
-//! nothing about correctness; layers are probed base-first only because the base holds the
-//! overwhelming majority of entities.
+//! three-file shape as the base.
+//!
+//! **The layers are disjoint per column, not per entity** (`ingest.md` §1.4, §6.3). An entity
+//! holds a row in the layer that created it, and `POST /control/values` gives it a row in the
+//! layer that filled a column on it later, so two layers may hold a row for one entity. What
+//! cannot happen is two layers holding the same *column* of one entity: the fill rule leaves one
+//! claimant per cell — an absent cell is filled, a cell holding the identical value is a no-op,
+//! and a cell holding a different value refuses the batch — so a column has at most one layer
+//! that claims it and there is nothing for a merge to arbitrate.
+//!
+//! A read therefore takes every layer holding a row for the entity and unions their fields, at a
+//! cost of **one block decode per column claimant**: one for an entity whose columns were all
+//! written by the layer that created it, which is what it paid when this was a first-layer-wins
+//! probe, and one more per later fill. Order still decides nothing about correctness; layers are
+//! probed base-first because the base holds the overwhelming majority of entities.
 //!
 //! The wrapper adds no tolerance the single-layer reader lacks: every layer opens through
 //! [`RecordBlob::open`]'s fail-closed checks, and an entity in no layer is an ordinary absence
@@ -31,8 +40,9 @@ pub struct RecordExtentPaths {
 /// **Layers are `Arc` so a live generation can be extended without reopening the base.** A flush
 /// publishes one more extent; reopening the whole stack for it would remap a base that at 10⁹ is
 /// the largest artefact in the bundle, and the successor generation shares every layer the
-/// predecessor already had. Disjointness by I9 is what makes appending sound: an entity id is
-/// never reused, so no two layers hold the same row and the search order below is a formality.
+/// predecessor already had. Appending is sound because a layer is only ever added: an entity id
+/// is never reused, and the fill rule keeps one claimant per column, so a layer added later can
+/// carry columns of an entity an earlier layer already holds a row for but never the same column.
 pub struct RecordStack {
     layers: Vec<std::sync::Arc<RecordBlob>>,
     /// How many rows [`Self::fields_of`] has decoded from a layer, over this stack's life.
@@ -119,18 +129,37 @@ impl RecordStack {
         self.layers.len()
     }
 
-    /// The blob-resident fields of `entity`, from whichever layer holds its row; `Ok(None)` when
-    /// no layer does — the ordinary case for an entity all of whose fields live in the other two
-    /// homes.
+    /// The blob-resident fields of `entity`, from every layer that claims one of its columns;
+    /// `Ok(None)` when no layer holds a row for it — the ordinary case for an entity all of whose
+    /// fields live in the other two homes.
+    ///
+    /// **One block decode per column claimant** (`ingest.md` §1.4): the layer that created the
+    /// entity, plus one per flush that filled a column on it through `POST /control/values`. The
+    /// first tag wins where two layers name one column, which the fill rule makes unreachable and
+    /// which is here so that a damaged pair answers one value rather than two.
     pub fn fields_of(&self, entity: u32) -> Result<Option<Vec<RecordField>>, RecordError> {
+        let mut merged: Option<Vec<RecordField>> = None;
         for layer in &self.layers {
-            if layer.has_row(entity) {
-                self.reads
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                return layer.fields_of(entity);
+            if !layer.has_row(entity) {
+                continue;
+            }
+            self.reads
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let Some(fields) = layer.fields_of(entity)? else {
+                continue;
+            };
+            match &mut merged {
+                None => merged = Some(fields),
+                Some(held) => {
+                    for field in fields {
+                        if !held.iter().any(|f| f.tag == field.tag) {
+                            held.push(field);
+                        }
+                    }
+                }
             }
         }
-        Ok(None)
+        Ok(merged)
     }
 
     /// The rows of the entities in `wanted`, from whichever layers hold them — the read a caller
@@ -139,20 +168,52 @@ impl RecordStack {
     /// ([`RecordBlob::for_each_row_in`] carries the argument).
     ///
     /// Ascending within a layer and layer by layer across the stack, so a caller wanting one
-    /// global order must impose it. Disjointness (I9) is why that is a presentation question and
-    /// not a correctness one: no two layers hold the same entity, so no entity is visited twice
-    /// whatever the order.
+    /// global order must impose it.
+    ///
+    /// **Each entity is visited exactly once**, which the per-layer walk alone no longer gives:
+    /// an entity a values page filled holds a row in two layers (`ingest.md` §1.4), and visiting
+    /// it twice would hand the caller two partial rows under one identity. The entities in more
+    /// than one layer are taken out of the per-layer walk and answered by [`Self::fields_of`],
+    /// which unions their columns; every other entity keeps the block-amortised walk, so the cost
+    /// on a stack no page has filled is what it was.
     pub fn for_each_row_in(
         &self,
         wanted: &croaring::Bitmap,
         f: &mut dyn FnMut(u32, Vec<RecordField>) -> Result<(), RecordError>,
     ) -> Result<(), RecordError> {
+        let mut seen = croaring::Bitmap::new();
+        let mut shared = croaring::Bitmap::new();
         for layer in &self.layers {
-            layer.for_each_row_in(wanted, &mut |entity, fields| {
+            let mut here = layer.hasrow().clone();
+            here.and_inplace(wanted);
+            let mut again = here.clone();
+            again.and_inplace(&seen);
+            shared.or_inplace(&again);
+            seen.or_inplace(&here);
+        }
+        if shared.is_empty() {
+            for layer in &self.layers {
+                layer.for_each_row_in(wanted, &mut |entity, fields| {
+                    self.reads
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    f(entity, fields)
+                })?;
+            }
+            return Ok(());
+        }
+        let mut alone = wanted.clone();
+        alone.andnot_inplace(&shared);
+        for layer in &self.layers {
+            layer.for_each_row_in(&alone, &mut |entity, fields| {
                 self.reads
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 f(entity, fields)
             })?;
+        }
+        for entity in shared.iter() {
+            if let Some(fields) = self.fields_of(entity)? {
+                f(entity, fields)?;
+            }
         }
         Ok(())
     }

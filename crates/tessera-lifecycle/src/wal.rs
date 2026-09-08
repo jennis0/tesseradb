@@ -475,14 +475,14 @@ pub enum WalRecord {
     /// `body_hash` are the idempotency key, as [`WalRecord::IngestBatch`]'s are. A layer column on
     /// a values row is not carried here: it is a membership join and travels as an
     /// [`WalRecord::ArtifactGrow`] in the same commit.
-    ///
-    /// Not built yet: nothing writes this record, and a replay that meets one refuses to open
-    /// naming track T3 ([`unbuilt_track`]).
     ValuesBatch {
         batch_id: String,
         body_hash: [u8; 32],
-        /// The view header, present where a column below is a group-scoped family and absent
-        /// where every column is entity-scoped (`ingest.md` §1.4).
+        /// The view the batch's fills belong to: the `x-tessera-view` header where the caller
+        /// gave one, and the deployment's only view otherwise. It decides which flush pass writes
+        /// the fills and which view's column of a group-scoped family a scoped cell addresses, so
+        /// it is recorded for every batch and not only for one carrying a scoped column
+        /// (`ingest.md` §1.4). `None` is a record no writer produces.
         view: Option<String>,
         /// The columns the batch carries, by declared name, in the batch's own order. Every row's
         /// values are positional to this list, so a batch may carry any subset of the schema.
@@ -558,13 +558,13 @@ pub struct PlainViewDeclaration {
 /// and refuses to open, naming the track.
 pub fn unbuilt_track(record: &WalRecord) -> Option<(&'static str, &'static str)> {
     match record {
-        WalRecord::ValuesBatch { .. } => Some(("ValuesBatch", "T3")),
         WalRecord::VocabularyDeclare { .. } => Some(("VocabularyDeclare", "T5")),
         WalRecord::ViewGroupCreate { .. } => Some(("ViewGroupCreate", "T6")),
         WalRecord::PlainViewCreate { .. } => Some(("PlainViewCreate", "T6")),
         // Listed rather than caught by a wildcard, so that a variant added later is a decision
         // here and not a default to "built".
         WalRecord::AttributeDeclare { .. }
+        | WalRecord::ValuesBatch { .. }
         | WalRecord::VocabularyMint { .. }
         | WalRecord::IngestBatch { .. }
         | WalRecord::OverlaySnapshot { .. }
@@ -2550,8 +2550,9 @@ mod tests {
             },
         ];
         // The growth's rank and leaving set are applied by `ArtifactStore::grow_set`, the four
-        // fills by `ArtifactStore::fill` and the attribute declaration by
-        // `Executor::declare_attribute`; the rest wait for their tracks.
+        // fills by `ArtifactStore::fill`, the attribute declaration by
+        // `Executor::declare_attribute` and the values batch by `Executor::commit_values`; the
+        // rest wait for their tracks.
         let tracks: Vec<Option<&str>> = records
             .iter()
             .map(|record| unbuilt_track(record).map(|(_, track)| track))
@@ -2564,7 +2565,7 @@ mod tests {
                 None,
                 None,
                 None,
-                Some("T3"),
+                None,
                 None,
                 Some("T5"),
                 Some("T6"),

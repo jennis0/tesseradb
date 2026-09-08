@@ -138,7 +138,8 @@ pub use tessera_store::manifest::Quantisation;
 // for `readyz` and `/control/status`.
 pub use write::{
     AcceptError, ExecutorHealth, ExecutorPosture, ExecutorStartError, ExecutorStats, PendingChange,
-    PublishGeometryError, WriteStage, DENY_DURABILITY_ATTEMPTS, DENY_WINDOW_MAX_ENTRIES,
+    PublishGeometryError, ValuesReceipt, WriteStage, DENY_DURABILITY_ATTEMPTS,
+    DENY_WINDOW_MAX_ENTRIES,
 };
 // The flush's own laps, beside `WriteStage`'s and read by the same status block.
 pub use flush::FlushStage;
@@ -159,6 +160,8 @@ pub use write::{
 // `PUT /control/attributes`' body as the executor resolves it, re-exported so the server sees
 // engine API types only (SA §3).
 pub use tessera_lifecycle::AttributeRequest;
+// `POST /control/values`' body as the executor takes it, re-exported on `AttributeRequest`'s rule.
+pub use tessera_lifecycle::{IncomingValues, ValuesRequest};
 
 /// One immutable, atomically-swappable snapshot of engine state (lifecycle §1.1).
 ///

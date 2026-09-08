@@ -213,6 +213,139 @@ pub(crate) fn record_batch(
         .map_err(|e| ApiError::Contract(format!("ingest body: {e}")))
 }
 
+/// One `POST /control/values` body as one record batch (`ingest.md` §1.2, §1.4).
+///
+/// **The same coercion as the ingest door, over a different column set.** A values row addresses
+/// an entity that exists rather than creating one, so it carries no coordinates and no `access`
+/// list, and exactly one of `external_id` and `tessera_id`; everything after that is a declared
+/// column, a group-scoped family this batch's view may name, or a layer's, and every cell is
+/// coerced by the same functions the ingest door's cells are.
+pub(crate) fn values_record_batch(
+    body: &[u8],
+    columns: &JsonColumns<'_>,
+) -> Result<RecordBatch, ApiError> {
+    let rows = records(body)?;
+    let mut fields: Vec<Field> = Vec::new();
+    let mut arrays: Vec<ArrayRef> = Vec::new();
+    let has = |name: &str| rows.iter().any(|row| row.contains_key(name));
+
+    if has("external_id") {
+        let mut builder = BinaryBuilder::new();
+        for (row, record) in rows.iter().enumerate() {
+            match record.get("external_id") {
+                None | Some(Value::Null) => builder.append_null(),
+                Some(Value::String(text)) => {
+                    let bytes = base64::engine::general_purpose::STANDARD
+                        .decode(text)
+                        .map_err(|_| {
+                            refusal(row, "external_id", "is not base64; an external id is bytes")
+                        })?;
+                    builder.append_value(bytes);
+                }
+                Some(_) => {
+                    return Err(refusal(
+                        row,
+                        "external_id",
+                        "is not a string; an external id is base64",
+                    ))
+                }
+            }
+        }
+        fields.push(Field::new("external_id", DataType::Binary, true));
+        arrays.push(Arc::new(builder.finish()));
+    }
+    // **String-encoded, as it is on `/control/changes`**: a bare JSON number loses a `u64` past
+    // 2⁵³ in every JavaScript client, and a mis-parsed identifier fills the wrong entity.
+    if has("tessera_id") {
+        let mut builder = StringBuilder::new();
+        for (row, record) in rows.iter().enumerate() {
+            match record.get("tessera_id") {
+                None | Some(Value::Null) => builder.append_null(),
+                Some(Value::String(text)) => builder.append_value(text),
+                Some(_) => {
+                    return Err(refusal(
+                        row,
+                        "tessera_id",
+                        "is not a string; a tessera_id is decimal digits in a string, so that a \
+                         64-bit identifier survives a JavaScript client",
+                    ))
+                }
+            }
+        }
+        fields.push(Field::new("tessera_id", DataType::Utf8, true));
+        arrays.push(Arc::new(builder.finish()));
+    }
+    if has("idset") {
+        let mut builder = UInt32Builder::new();
+        for (row, record) in rows.iter().enumerate() {
+            match record.get("idset") {
+                None | Some(Value::Null) => builder.append_null(),
+                other => match integer(other.unwrap_or(&Value::Null), row, "idset")? {
+                    None => builder.append_null(),
+                    Some(value) => builder.append_value(u32::try_from(value).map_err(|_| {
+                        refusal(row, "idset", "is out of range for an identifier set")
+                    })?),
+                },
+            }
+        }
+        fields.push(Field::new("idset", DataType::UInt32, true));
+        arrays.push(Arc::new(builder.finish()));
+    }
+
+    for declared in columns.declared {
+        if !has(&declared.name) {
+            continue;
+        }
+        // **Not `required`**: a values batch carries the subset of the schema the caller has, and
+        // a row of it may leave a column out, which is that cell unfilled rather than a malformed
+        // row. The ingest door's stricter reading is about a row that creates an entity, where a
+        // half-carried column shifts the positional tail.
+        let column = scalar_column(&rows, &declared.name, declared.wire_type(), false)?;
+        fields.push(Field::new(&declared.name, column.data_type().clone(), true));
+        arrays.push(column);
+    }
+    for family in columns.scoped {
+        if !has(&family.name) {
+            continue;
+        }
+        let wire = crate::control::scoped_wire_type(family);
+        let column = scalar_column(&rows, &family.name, wire, false)?;
+        fields.push(Field::new(&family.name, column.data_type().clone(), true));
+        arrays.push(column);
+    }
+
+    let known = |name: &str| {
+        matches!(name, "external_id" | "tessera_id" | "idset")
+            || columns.declared.iter().any(|d| d.name == name)
+            || columns.scoped.iter().any(|f| f.name == name)
+    };
+    let mut layers: Vec<String> = Vec::new();
+    for (row, record) in rows.iter().enumerate() {
+        for name in record.keys() {
+            if known(name) || layers.iter().any(|l| l == name) {
+                continue;
+            }
+            if (columns.layer_of)(name).is_none() {
+                return Err(ApiError::Contract(format!(
+                    "values body: row {row}, column '{name}' is neither in \
+                     MANIFEST.declared_scalars, nor a group-scoped family whose key set holds \
+                     this batch's view, nor the name of a registered layer (contracts §2.2, \
+                     `views.md` §5). An undeclared column is refused rather than dropped"
+                )));
+            }
+            layers.push(name.clone());
+        }
+    }
+    for name in &layers {
+        let column = membership_column(&rows, name)?;
+        fields.push(Field::new(name, column.data_type().clone(), true));
+        arrays.push(column);
+    }
+
+    RecordBatch::try_new(Arc::new(Schema::new(fields)), arrays)
+        .map_err(|e| ApiError::Contract(format!("values body: {e}")))
+}
+
 /// The body's records: a JSON array of objects, or one object per line.
 fn records(body: &[u8]) -> Result<Vec<Map<String, Value>>, ApiError> {
     let text = std::str::from_utf8(body)

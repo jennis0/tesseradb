@@ -2847,6 +2847,85 @@ impl WritePath {
             }
         }
 
+        // **The values batches, into the buffer's fill map** (`ingest.md` §1.4). Replayed here
+        // rather than in `tessera-lifecycle`'s pass because a values record names its columns and
+        // resolving a name to a position needs the served schema — the build's declarations plus
+        // every runtime one above, which is what `served` now is.
+        //
+        // **A batch whose cells a flush already wrote is re-buffered and writes nothing.** The
+        // WAL member holding it is reclaimed on its own schedule, so a replay meets records the
+        // flush has consumed; `plan_flush` applies the fill rule to every fill against the
+        // flushed homes and drops the cells already held, which is what keeps one claimant per
+        // column without a second durable record of what has been written.
+        for (record, position) in records.iter().zip(wal.replayed_positions()) {
+            let WalRecord::ValuesBatch {
+                view,
+                columns,
+                rows,
+                ..
+            } = record
+            else {
+                continue;
+            };
+            // A record with no view names no flush pass to write its cells; no writer produces
+            // one, and reading it as some view's would put a group-scoped cell in the wrong
+            // column.
+            let Some(view) = view else {
+                return Err(EngineError::Malformed(
+                    "the WAL carries a values batch naming no view, which no writer produces; \
+                     this node does not open"
+                        .to_string(),
+                ));
+            };
+            let families = scoped_families_of_view(&served, view);
+            for row in rows {
+                let mut scalars: Vec<WalScalar> = vec![WalScalar::Null; served.declared_scalars.len()];
+                let mut scoped: Vec<WalScalar> = vec![WalScalar::Null; families.len()];
+                let mut any = false;
+                for (at, name) in columns.iter().enumerate() {
+                    let Some(value) = row.values.get(at) else {
+                        continue;
+                    };
+                    if matches!(value, WalScalar::Null) {
+                        continue;
+                    }
+                    if let Some(position) =
+                        served.declared_scalars.iter().position(|d| &d.name == name)
+                    {
+                        scalars[position] = value.clone();
+                        any = true;
+                        continue;
+                    }
+                    if let Some(position) = families.iter().position(|f| &f.name == name) {
+                        scoped[position] = value.clone();
+                        any = true;
+                        continue;
+                    }
+                    // A column the served schema no longer carries. The values are unreadable
+                    // rather than wrong — nothing can say which column they belong to — so the
+                    // open is refused rather than the cells dropped.
+                    return Err(EngineError::Malformed(format!(
+                        "the WAL carries a values batch naming column '{name}', which this \
+                         deployment's schema does not declare; this node does not open"
+                    )));
+                }
+                if !any {
+                    continue;
+                }
+                buffer.fill(
+                    row.entity_id,
+                    tessera_lifecycle::Fill {
+                        view: view.clone(),
+                        scalars,
+                        scoped,
+                        wal_pos: Some(*position),
+                    },
+                    |value| matches!(value, WalScalar::Null),
+                );
+                buffer.set_fill_wal_pos(row.entity_id, *position);
+            }
+        }
+
         let established_inverse: FxHashMap<EntityId, Vec<u8>> = established
             .iter()
             .map(|(ext, ent)| (*ent, ext.clone()))
@@ -3365,6 +3444,32 @@ impl WritePath {
             Ok(other) => {
                 unreachable!("a DeclareAttribute command answers AttributeDeclared, not {other:?}")
             }
+            Err(e) => Err(AcceptError::Exec(e)),
+        }
+    }
+
+    /// Fill attribute values on entities that already exist (`POST /control/values`,
+    /// `ingest.md` §1.4), and answer what the batch did.
+    pub(crate) fn fill_values(
+        &self,
+        request: tessera_lifecycle::ValuesRequest,
+    ) -> Result<ValuesReceipt, AcceptError> {
+        let receipt = self.handle()?.submit(Command::Values {
+            request: Box::new(request),
+        })?;
+        match receipt.outcome {
+            Ok(Ack::ValuesFilled {
+                filled,
+                held,
+                joined,
+                minted,
+            }) => Ok(ValuesReceipt {
+                filled,
+                held,
+                joined,
+                minted,
+            }),
+            Ok(other) => unreachable!("a Values command answers ValuesFilled, not {other:?}"),
             Err(e) => Err(AcceptError::Exec(e)),
         }
     }
@@ -10195,6 +10300,353 @@ impl Executor {
     }
 }
 
+/// What one accepted `POST /control/values` batch did (`ingest.md` §1.4). Every count is bounded
+/// by the caller's own request and names no entity and no value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ValuesReceipt {
+    pub filled: u64,
+    pub held: u64,
+    pub joined: u64,
+    pub minted: u64,
+}
+
+/// What one values batch's fill rule produced: the cells to hold until the flush writes them, and
+/// the counts the acknowledgement carries.
+struct PlannedFills {
+    fills: Vec<(EntityId, tessera_lifecycle::Fill)>,
+    filled: u64,
+    held: u64,
+}
+
+/// Where one of a values batch's named columns lands in a row's two positional spaces.
+enum ValuesColumn {
+    /// A position in `MANIFEST.declared_scalars`, the space a buffered row's `scalars` is
+    /// positional against.
+    Entity(usize),
+    /// A position in the view's group-scoped families, the space its `scoped` list is positional
+    /// against (`views.md` §5).
+    Scoped(usize),
+}
+
+/// Apply the fill rule to one values batch (`ingest.md` §1.1, §1.4), producing the cells nothing
+/// holds and refusing on the first cell that is held differently.
+///
+/// **Three sources, in the order a cell is claimed.** The entity's own buffered row, the cells an
+/// earlier values batch filled and no flush has written yet, and the flushed homes — the same
+/// three the join arm reads, plus the unflushed fills, which exist only on this route. A cell
+/// this pass leaves absent has no claimant in any of them, which is what makes the extents
+/// disjoint per column when the flush writes them.
+///
+/// **A row index, a column name and a key reach the caller; nothing else does.** No entity id, no
+/// external id and no value on either side (**I10**, `ingest.md` §1.4).
+fn plan_fills(
+    generation: &Generation,
+    request: &tessera_lifecycle::ValuesRequest,
+) -> Result<PlannedFills, ExecError> {
+    let manifest = &generation.bundle.manifest;
+    let declared = &manifest.declared_scalars;
+    let families = scoped_families_of_view(manifest, &request.view);
+    let owner_view = scoped_owner_view_of(manifest, &request.view);
+    // The cell's key, for a refusal — the half of the owner view id a caller spelled, never the
+    // owning group, which a sharing group's caller has no business learning from a refusal
+    // (`settle_joins`' rule).
+    let key = owner_view
+        .split_once(tessera_store::GROUP_SEPARATOR)
+        .map(|(_, key)| key)
+        .unwrap_or(owner_view.as_str())
+        .to_string();
+
+    // One resolution per batch, not per row. A name in neither space is refused here as well as
+    // at the door: the door reads the served schema of a generation this pass may have moved past.
+    // **A `render` column cannot be filled** (`ingest.md` §6.3). A fill acquires no row, and a
+    // rendered column is served from the hot column of the row that carries it — both to a tile
+    // and to a filter leaf, which takes the row route wherever the column reaches the tail. So a
+    // fill has nowhere to put the value that any reader would answer from, and acknowledging one
+    // would store a cell nothing serves. Refused rather than dropped, naming the remedy.
+    //
+    // This is narrower than spec §6.3's R10, which reads a back-filled `render` value as
+    // filterable where `index` was declared; the built filter takes the row route for such a
+    // column, so the promise is not one this route can keep.
+    let row_tail_only = |d: &tessera_store::manifest::DeclaredScalar| d.render;
+    let mut columns = Vec::with_capacity(request.columns.len());
+    for name in &request.columns {
+        if let Some(position) = declared.iter().position(|d| &d.name == name) {
+            if row_tail_only(&declared[position]) {
+                return Err(ExecError::ValuesRefused {
+                    detail: format!(
+                        "column '{name}' is declared `render`, so its value is served from the \
+                         hot column of the row that carries it. A values row acquires no row, so \
+                         there is nowhere for the value to land that a tile or a filter would \
+                         read: re-ingest the point, or declare the column without `render` \
+                         (`ingest.md` §6.3)"
+                    ),
+                });
+            }
+            columns.push(ValuesColumn::Entity(position));
+            continue;
+        }
+        if let Some(position) = families.iter().position(|f| &f.name == name) {
+            if row_tail_only(&crate::session::declared_of_scoped(&families[position])) {
+                return Err(ExecError::ValuesRefused {
+                    detail: format!(
+                        "group-scoped column '{name}' is declared `render`, so its value is \
+                         served from the hot column of the row that carries it, and a values row \
+                         acquires no row (`ingest.md` §6.3)"
+                    ),
+                });
+            }
+            columns.push(ValuesColumn::Scoped(position));
+            continue;
+        }
+        return Err(ExecError::ValuesRefused {
+            detail: format!(
+                "column '{name}' is neither in MANIFEST.declared_scalars nor a group-scoped \
+                 family whose key set holds view '{}' (`views.md` §5). Declare the column, or \
+                 name the view whose key addresses the cell",
+                request.view
+            ),
+        });
+    }
+
+    let mut fills = Vec::with_capacity(request.rows.len());
+    let mut filled = 0u64;
+    let mut held_count = 0u64;
+    for (index, row) in request.rows.iter().enumerate() {
+        let entity = row.entity;
+        if generation.overlay.is_deleted(entity) {
+            return Err(ExecError::ValuesRefused {
+                detail: format!(
+                    "row {index} names an entity this deployment has deleted. A deletion is not \
+                     undone by a fill (decision 0047): the item is re-ingested, which allocates a \
+                     fresh entity"
+                ),
+            });
+        }
+        let buffered = generation.buffer.get(entity);
+        // The cells an earlier batch filled and no flush has written. Read as a claimant beside
+        // the other two: a cell filled at the last tick is held, not absent.
+        let pending = generation
+            .buffer
+            .fills()
+            .find(|(held, _)| **held == entity)
+            .map(|(_, fill)| fill);
+        // Read at most once for this row, and only if a blob-resident column asks.
+        let mut blob = crate::session::BlobRow::default();
+        // **Absence in a fill's tails is `WalScalar::Null` for every family, a category
+        // included.** A category's own spelling of absence is the reserved code (decision 0064),
+        // which the flush's gather maps `Null` onto — and using it here would make a merge of two
+        // fills unable to tell an unfilled category cell from a filled one, the reserved code
+        // being an ordinary `u8` to any predicate over the value alone.
+        let mut scalars: Vec<WalScalar> = vec![WalScalar::Null; declared.len()];
+        let mut scoped: Vec<WalScalar> = vec![WalScalar::Null; families.len()];
+        let mut any = false;
+
+        for (position, column) in columns.iter().enumerate() {
+            let Some(supplied) = row.values.get(position) else {
+                continue;
+            };
+            match column {
+                ValuesColumn::Entity(at) => {
+                    let d = &declared[*at];
+                    if crate::session::scalar_is_absent(supplied, d) {
+                        continue;
+                    }
+                    let stored = buffered
+                        .and_then(|item| item.scalars.get(*at).cloned())
+                        .or_else(|| pending.and_then(|fill| fill.scalars.get(*at).cloned()))
+                        .or_else(|| {
+                            crate::session::flushed_scalar_of(generation, entity, *at, &mut blob)
+                        })
+                        .filter(|value| !crate::session::scalar_is_absent(value, d));
+                    match stored {
+                        None => {
+                            scalars[*at] = supplied.clone();
+                            filled += 1;
+                            any = true;
+                        }
+                        Some(stored) if stored == *supplied => held_count += 1,
+                        Some(_) => {
+                            return Err(ExecError::ValueConflict {
+                                detail: format!(
+                                    "row {index} supplies a value for column '{}' that this \
+                                     deployment already holds a different one for. An \
+                                     entity-scoped attribute is one value per entity, so a values \
+                                     row fills a cell that is absent, restates the value held, or \
+                                     is refused; changing it is a delete plus a re-ingest \
+                                     (decision 0047, `ingest.md` §1.1)",
+                                    d.name
+                                ),
+                            })
+                        }
+                    }
+                }
+                ValuesColumn::Scoped(at) => {
+                    let family = &families[*at];
+                    let d = crate::session::declared_of_scoped(family);
+                    if crate::session::scalar_is_absent(supplied, &d) {
+                        continue;
+                    }
+                    // Every buffered row of the entity whose view addresses this same key — the
+                    // cell's own rows, not the entity's own row, which is a different question
+                    // (`settle_joins`' scoped arm).
+                    let stored = generation
+                        .buffer
+                        .rows_of(entity)
+                        .filter(|item| scoped_owner_view_of(manifest, &item.view) == owner_view)
+                        .find_map(|item| item.scoped.get(*at).cloned())
+                        .or_else(|| {
+                            pending
+                                .filter(|fill| {
+                                    scoped_owner_view_of(manifest, &fill.view) == owner_view
+                                })
+                                .and_then(|fill| fill.scoped.get(*at).cloned())
+                        })
+                        .or_else(|| {
+                            crate::session::flushed_scoped_of(generation, entity, family, &owner_view)
+                        })
+                        .filter(|value| !crate::session::scalar_is_absent(value, &d));
+                    // **A `text` family past a flush is refused rather than compared**
+                    // (`views.md` §5): the column stores a dictionary, postings and a presence
+                    // bitmap and no value per entity, so there is nothing to compare a supplied
+                    // string against, and admitting it would write a second text layer stamped
+                    // with the same view that `match` unions across. Occupancy is asked instead.
+                    if stored.is_none()
+                        && family.arrow_type == ScalarType::Text
+                        && crate::session::flushed_scoped_text_present(
+                            generation,
+                            entity,
+                            family,
+                            &owner_view,
+                        )
+                    {
+                        return Err(ExecError::ValueConflict {
+                            detail: format!(
+                                "row {index} supplies a value for group-scoped column '{}', and \
+                                 this deployment already holds prose for key '{key}'. A `text` \
+                                 family's stored value cannot be compared once it has flushed, so \
+                                 a cell that holds prose takes no second one, equal or not \
+                                 (views §5)",
+                                family.name
+                            ),
+                        });
+                    }
+                    match stored {
+                        None => {
+                            scoped[*at] = supplied.clone();
+                            filled += 1;
+                            any = true;
+                        }
+                        Some(stored) if stored == *supplied => held_count += 1,
+                        Some(_) => {
+                            return Err(ExecError::ValueConflict {
+                                detail: format!(
+                                    "row {index} supplies a value for group-scoped column '{}' \
+                                     that this deployment already holds a different one for under \
+                                     key '{key}'. A scoped value is addressed by (attribute, key) \
+                                     and is one value per cell, so a values row fills a cell that \
+                                     is absent, restates the value held, or is refused \
+                                     (views §5, `ingest.md` §1.1)",
+                                    family.name
+                                ),
+                            })
+                        }
+                    }
+                }
+            }
+        }
+        if any {
+            fills.push((
+                entity,
+                tessera_lifecycle::Fill {
+                    view: request.view.clone(),
+                    scalars,
+                    scoped,
+                    wal_pos: None,
+                },
+            ));
+        }
+    }
+    Ok(PlannedFills {
+        fills,
+        filled,
+        held: held_count,
+    })
+}
+
+/// The growth records one values batch's layer columns produce (`ingest.md` §1.4).
+///
+/// **A key no artifact holds refuses the batch.** A values batch allocates nothing and creates
+/// nothing, so there is no minting arm here: the caller publishes the artifact and then names it.
+fn values_growth_records(
+    memberships: &[tessera_lifecycle::ResolvedMembership],
+    rows: &[tessera_lifecycle::IncomingValues],
+) -> Result<Vec<WalRecord>, String> {
+    use std::collections::BTreeMap;
+    // Ordered, so the records a batch appends do not depend on hash iteration order: two nodes
+    // replaying one log must read the same sequence.
+    let mut by_level: BTreeMap<(&str, u32), BTreeMap<u32, croaring::Bitmap>> = BTreeMap::new();
+    for join in memberships {
+        let Some(ordinal) = join.ordinal else {
+            return Err(format!(
+                "column '{}' names the key '{}', which no artifact of level {} holds. A values \
+                 batch creates nothing (`ingest.md` §1.4): publish the artifact, then name it",
+                join.layer, join.key, join.level
+            ));
+        };
+        let joining = by_level
+            .entry((join.layer.as_str(), join.level))
+            .or_default()
+            .entry(ordinal)
+            .or_default();
+        for row in &join.rows {
+            let Some(entity) = rows.get(*row as usize) else {
+                return Err(format!(
+                    "column '{}' names row {row}, which this batch does not carry",
+                    join.layer
+                ));
+            };
+            // Entity space is `u32` by I9, so the narrowing is total.
+            joining.add(entity.entity.raw() as u32);
+        }
+    }
+    Ok(by_level
+        .into_iter()
+        .filter_map(|((layer, level), ordinals)| {
+            tessera_lifecycle::membership::growth_record(
+                layer,
+                level,
+                ordinals.iter().map(|(ordinal, joining)| (*ordinal, joining)),
+            )
+        })
+        .collect())
+}
+
+/// How many of one growth record's joining members the artifacts do not already hold — read
+/// **before** the record is applied, which is the only time the difference exists.
+fn new_members_of(record: &WalRecord, store: &tessera_lifecycle::ArtifactStore) -> u64 {
+    let WalRecord::ArtifactGrow {
+        layer,
+        level,
+        growth,
+    } = record
+    else {
+        return 0;
+    };
+    growth
+        .iter()
+        .map(|delta| {
+            let Some(joining) = tessera_lifecycle::membership::deserialise_members(&delta.joining)
+            else {
+                return 0;
+            };
+            match store.get(layer, *level, delta.ordinal) {
+                Some(record) => joining.andnot_cardinality(&record.members),
+                None => 0,
+            }
+        })
+        .sum()
+}
+
 /// Settle every joining row of one batch, whose join-ness `established_collisions` has just decided
 /// (`views.md` §4, §5; decision 0116) — the **join rule**'s three arms, and then the completion an
 /// accepted join owes.
@@ -11592,6 +12044,7 @@ impl Executor {
             Command::DeclareAttribute { request } => {
                 self.commit_attribute_declare(*request, respond)
             }
+            Command::Values { request } => self.commit_values(*request, respond),
             Command::PublishArtifacts {
                 layer,
                 level,
@@ -12425,6 +12878,205 @@ impl Executor {
     /// An identical redeclaration answers the existing identity with nothing appended; a
     /// differing one is a conflict (`ingest.md` §1.1). A failed append means the column does not
     /// exist, on the layer registration's rule.
+    /// `POST /control/values` — fill attribute values on entities that already exist
+    /// (`ingest.md` §1.4).
+    ///
+    /// **It allocates nothing and creates no row.** Every entity was resolved at the boundary, so
+    /// this pass adds cells to entities that have them and members to artifacts that hold them; a
+    /// subject that does not exist refused the batch before it was submitted (`ingest.md` §1.6).
+    ///
+    /// **The fill rule is evaluated here and nowhere else** (`ingest.md` §1.1), beside the join
+    /// arm and for its reason (decision 0116): the sources are the commit-window buffer, the
+    /// unflushed fills and the flushed homes, and only this thread moves any of them. An absent
+    /// cell takes the value, a cell holding the identical value is a no-op, and a cell holding a
+    /// different value refuses the whole batch with a `409` naming the column and the key and
+    /// never the held value.
+    ///
+    /// **One append, one fsync, one apply.** The values record and the growth records its layer
+    /// columns produced are made durable together, so there is no state in which a cell is filled
+    /// and its membership is not (write-path §7.3).
+    fn commit_values(&mut self, request: tessera_lifecycle::ValuesRequest, respond: Responder) {
+        let started = std::time::Instant::now();
+        let generation = self.generation.load_full();
+
+        // **The batch-id replay check, on the executor** ([`BatchState`]'s rule). A values batch
+        // allocates nothing, so a replay has no ids to hand back; a byte-identical retry runs the
+        // pass below and finds every cell held identically, which is the fill rule's own no-op.
+        if let Some((held_hash, _)) = self.live.accepted_batch(&request.batch_id) {
+            if held_hash != request.body_hash {
+                self.ack_failed(
+                    &respond,
+                    ExecError::BatchConflict {
+                        batch_id: request.batch_id.clone(),
+                    },
+                );
+                self.health.note_work_refused();
+                return;
+            }
+        }
+
+        let planned = match plan_fills(&generation, &request) {
+            Ok(planned) => planned,
+            Err(e) => {
+                self.ack_failed(&respond, e);
+                self.health.note_work_refused();
+                return;
+            }
+        };
+        // **A layer column on a values row is a membership join** (`ingest.md` §1.4), taking the
+        // growth route's own record. A key no artifact holds is refused rather than minted: a
+        // values batch creates nothing, and minting from one would make a typo a permanent object
+        // on the one route whose rule is that it allocates nothing.
+        let (memberships, _) = match self.resolve_memberships(&request.artifacts) {
+            Ok(resolved) => resolved,
+            Err(detail) => {
+                self.ack_failed(&respond, ExecError::LayerRefused { detail });
+                self.health.note_work_refused();
+                return;
+            }
+        };
+        let growth = match values_growth_records(&memberships, &request.rows) {
+            Ok(records) => records,
+            Err(detail) => {
+                self.ack_failed(&respond, ExecError::ValuesRefused { detail });
+                self.health.note_work_refused();
+                return;
+            }
+        };
+        // Read beside the preparation and **before** the apply, on `growth_receipt`'s rule:
+        // afterwards every joining member is a member and how many were new is gone.
+        let joined = self.live.with_artifacts(|store| {
+            growth
+                .iter()
+                .map(|record| new_members_of(record, store))
+                .sum::<u64>()
+        });
+
+        let values_record = WalRecord::ValuesBatch {
+            batch_id: request.batch_id.clone(),
+            body_hash: request.body_hash,
+            view: Some(request.view.clone()),
+            columns: request.columns.clone(),
+            rows: request
+                .rows
+                .iter()
+                .map(|row| tessera_lifecycle::wal::ValuesRow {
+                    entity_id: row.entity,
+                    values: row.values.clone(),
+                })
+                .collect(),
+        };
+        // The level version each growth record is the delta against, read before the apply moves
+        // it — `commit_growth`'s rule.
+        let before: Vec<u64> = growth
+            .iter()
+            .map(|record| match record {
+                WalRecord::ArtifactGrow { layer, level, .. } => self
+                    .live
+                    .with_artifacts(|store| store.level_version(layer, *level)),
+                _ => 0,
+            })
+            .collect();
+        // The position **before** each append is where the record lands, and the values record's
+        // is what pins the log until the flush writes its cells (`ingest.md` §1.4).
+        let values_position = self.wal.position();
+        let mut positions = Vec::with_capacity(growth.len());
+        let appended = self.wal.append(&values_record).and_then(|()| {
+            growth.iter().try_for_each(|record| {
+                positions.push(self.wal.position());
+                self.wal.append(record)
+            })
+        });
+        if let Err(e) = appended.and_then(|()| self.wal.fsync()) {
+            tracing::error!(
+                error = %e,
+                "ALARM: a values batch could not be made durable; no cell was filled and no \
+                 membership grew"
+            );
+            respond.fail(ExecError::Wal(e));
+            self.health.note_work_refused();
+            return;
+        }
+        self.observe_wal();
+
+        // The growth applies through the artifact store's own path, exactly as a page on the
+        // growth route does, and is held in the log at its record until the fold rewrites the
+        // level.
+        let mut refused_per_record: Vec<Vec<usize>> = vec![Vec::new(); growth.len()];
+        let undecodable = self.live.with_publication_state(|_, store, _| {
+            growth
+                .iter()
+                .zip(&positions)
+                .zip(refused_per_record.iter_mut())
+                .map(|((record, position), refused)| {
+                    store.apply_reporting(record, *position, refused)
+                })
+                .sum::<usize>()
+        });
+        if undecodable > 0 {
+            // Unreachable in practice — these bytes were serialised from a live bitmap moments ago
+            // — and alarmed rather than asserted, on `commit_growth`'s rule.
+            tracing::error!(
+                count = undecodable,
+                "ALARM: a values batch's membership growth did not survive its own round trip"
+            );
+        }
+        for ((record, at), refused) in growth.iter().zip(&before).zip(&refused_per_record) {
+            self.hold_delta(record, *at, refused);
+        }
+
+        // **The cells reach the buffer's fill map**, which is what the next flush writes into the
+        // family's entity-space extent and the record blob (`ingest.md` §6.3). The map is cloned
+        // with the buffer, on the immutable-snapshot rule every generation is built by.
+        let mut buffer = (*generation.buffer).clone();
+        for (entity, fill) in planned.fills {
+            buffer.fill(entity, fill, |value| matches!(value, WalScalar::Null));
+            buffer.set_fill_wal_pos(entity, values_position);
+        }
+        self.health
+            .buffered_items
+            .store(buffer.len(), Ordering::SeqCst);
+        let next = Generation {
+            prefix: generation.prefix.clone(),
+            // **Unmoved**: no row moved and no segment was published. What moved is the buffer's
+            // fill map, which no permutation and no mask reads.
+            segments_version: generation.segments_version,
+            watermark: generation.watermark,
+            bundle: Arc::clone(&generation.bundle),
+            dict: Arc::clone(&generation.dict),
+            postings: Arc::clone(&generation.postings),
+            fragments: Arc::clone(&generation.fragments),
+            external_index: Arc::clone(&generation.external_index),
+            delta_postings: generation.delta_postings.clone(),
+            overlay_version: generation.overlay_version,
+            overlay: Arc::clone(&generation.overlay),
+            buffer: Arc::new(buffer),
+            vocabularies: Arc::clone(&generation.vocabularies),
+            filter_columns: Arc::clone(&generation.filter_columns),
+            suggest: Arc::clone(&generation.suggest),
+            denied: Arc::clone(&generation.denied),
+        };
+        let published = self.publish(next, started);
+        // A values batch allocates no entity, so the index records none: the batch id and the
+        // body hash are the whole of what a retry is answered off.
+        self.live
+            .record_accepted_batch(request.batch_id.clone(), request.body_hash, Vec::new());
+        // A growth above its level's high-water is published by the next tail pack, on
+        // `commit_growth`'s mechanism.
+        if !growth.is_empty() {
+            self.deny_dirty = true;
+        }
+        respond.ack(
+            Ack::ValuesFilled {
+                filled: planned.filled,
+                held: planned.held,
+                joined,
+                minted: 0,
+            },
+            &published,
+        );
+    }
+
     fn commit_attribute_declare(
         &mut self,
         request: tessera_lifecycle::AttributeRequest,
@@ -14545,10 +15197,22 @@ impl Executor {
         // `check_manifest_publishable`, and the fragment test above — and all three want a
         // coordinate that strictly advances. Single-view behaviour is unchanged: ids are issued
         // monotonically, so `entity_hi + 1` was already above the live value there.
-        manifest.watermark = completed.watermark.max(manifest.watermark + 1);
-        manifest.entity_id_high_water = manifest
-            .entity_id_high_water
-            .max(completed.entity_id_high_water);
+        // A values-only publication has no segment and so no entity high-water of its own; it
+        // still advances the watermark, because it publishes extents a resident fragment must be
+        // rebuilt past (`ingest.md` §1.4).
+        manifest.watermark = completed
+            .segment
+            .as_ref()
+            .map(|s| s.watermark)
+            .unwrap_or(0)
+            .max(manifest.watermark + 1);
+        manifest.entity_id_high_water = manifest.entity_id_high_water.max(
+            completed
+                .segment
+                .as_ref()
+                .map(|s| s.entity_id_high_water)
+                .unwrap_or(0),
+        );
         // **The row-less half of the same obligation.** A flush is the routine publication, so it
         // is where a registration made since the last one stops depending on the WAL surviving:
         // rotation reclaims `LayerCreate`, and without this the mark and the registry go with it.
@@ -14584,10 +15248,14 @@ impl Executor {
                 manifest.scoped_columns.push(entry);
             }
         }
-        manifest.segments.push(completed.descriptor);
-        manifest.deltas.push(completed.tier_path);
-        manifest.external_id_runs.push(completed.external_id_run);
-        manifest.locator_extents.push(completed.locator_extent);
+        // The segment's own four manifest lists, taken together or not at all: a values-only
+        // publication wrote none of the files they name (`ingest.md` §1.4).
+        if let Some(segment) = &completed.segment {
+            manifest.segments.push(segment.descriptor.clone());
+            manifest.deltas.push(segment.tier_path.clone());
+            manifest.external_id_runs.push(segment.external_id_run.clone());
+            manifest.locator_extents.push(segment.locator_extent.clone());
+        }
         manifest.files.extend(completed.files);
         if let Some(extent) = completed.dict_extent {
             manifest.dict_extents.push(extent);
@@ -14681,7 +15349,6 @@ impl Executor {
             .health
             .flush_lap(crate::flush::FlushStage::Commit, *mark);
 
-        let seg_id = completed.segment.seg_id.clone();
         // Stamped with the flush's own incarnation for `Manifest::with_scoped_columns`, which
         // publishes a pair only where it is the live one (decision 0115).
         let scoped_columns: Vec<(String, String, tessera_types::view::ViewIncarnation)> = completed
@@ -14689,23 +15356,56 @@ impl Executor {
             .iter()
             .map(|(column, view)| (column.clone(), view.clone(), completed.incarnation))
             .collect();
-        let next_bundle = match live.bundle.with_segment(
-            &completed.partition,
-            &completed.view,
-            completed.segment,
-            completed.extent,
-            tessera_store::read::PublishedManifest {
-                manifest,
-                n: manifest_n,
-            },
-        ) {
-            Ok(bundle) => bundle,
-            Err(e) => {
-                // The row space moved under this flush — another publication landed between the
-                // plan and here. Discarded, not forced: forcing would put the segment at a
-                // `row_base` that is no longer the end of row space, aliasing rows.
-                tracing::warn!(error = %e, "discarding a completed flush that no longer rebases");
-                return false;
+        let published = tessera_store::read::PublishedManifest {
+            manifest,
+            n: manifest_n,
+        };
+        // **A values-only publication substitutes the manifest and leaves the row space alone**
+        // (`ingest.md` §1.4). It wrote no segment, so there is nothing to rebase and nothing that
+        // could fail to; what it publishes is the value extents its manifest now names.
+        let (seg_id, shape_pieces, tier, tier_tally, next_bundle) = match completed.segment {
+            None => {
+                let bundle = match live.bundle.with_manifest(&completed.partition, published) {
+                    Ok(bundle) => bundle,
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            "discarding a completed values-only flush whose partition this bundle                              no longer carries"
+                        );
+                        return false;
+                    }
+                };
+                (None, Vec::new(), None, None, bundle)
+            }
+            Some(segment) => {
+                let seg_id = segment.segment.seg_id.clone();
+                let bundle = match live.bundle.with_segment(
+                    &completed.partition,
+                    &completed.view,
+                    segment.segment,
+                    segment.extent,
+                    published,
+                ) {
+                    Ok(bundle) => bundle,
+                    Err(e) => {
+                        // The row space moved under this flush — another publication landed
+                        // between the plan and here. Discarded, not forced: forcing would put the
+                        // segment at a `row_base` that is no longer the end of row space, aliasing
+                        // rows.
+                        tracing::warn!(
+                            error = %e,
+                            "discarding a completed flush that no longer rebases"
+                        );
+                        return false;
+                    }
+                };
+                (
+                    Some(seg_id),
+                    segment.shape_pieces,
+                    Some(segment.tier),
+                    Some(segment.tier_tally),
+                    bundle,
+                )
             }
         };
         // **And the family's own list gains the view this flush wrote a base for**
@@ -14730,7 +15430,6 @@ impl Executor {
         // describes them. So a piece is taken where its level is the one now held, and the
         // segment is resolved again against the current level where the two differ — one segment,
         // on this thread, in the window a shape publication and a flush overlap.
-        let shape_pieces = completed.shape_pieces;
         *mark = self
             .health
             .flush_lap(crate::flush::FlushStage::ShapesInstall, *mark);
@@ -14746,6 +15445,11 @@ impl Executor {
             // entity outright would lose a row that is in no segment and no buffer (`views.md`
             // §4).
             buffer.remove_in_view(*entity, &completed.view);
+        }
+        // The fills this flush wrote, on the same rule and by entity: a fill is held per entity,
+        // and the pass that wrote it took every cell it carried (`ingest.md` §1.4).
+        for entity in &completed.filled {
+            buffer.remove_fill(*entity);
         }
         // **The gauge follows the buffer here too.** A flush is the other place occupancy changes,
         // and until it was stated here the figure only ever came down at the next apply — so a
@@ -14765,7 +15469,7 @@ impl Executor {
             .unwrap_or(live.watermark);
         let segments_version = live.segments_version + 1;
         let mut delta_postings = live.delta_postings.clone();
-        delta_postings.push(completed.tier);
+        delta_postings.extend(tier);
 
         // **Rebuilt against the segment this flush just added**, which is what gives a suppressed
         // or deleted item its place in the mask the moment it acquires a row: until now it was
@@ -14784,16 +15488,21 @@ impl Executor {
         // range; a spatial level takes the segment's resolution the pool produced above; both on
         // this thread, against the whole-level projection the alternative puts on the next
         // request.
+        //
+        // A values-only publication added no rows, so it extends no form: `seg_id` is `None` and
+        // the row space it publishes is the one it found (`ingest.md` §1.4).
         if let (Some(previous), Some(space)) = (
             view_row_space(&live.bundle, &completed.partition, &completed.view),
             view_row_space(&next_bundle, &completed.partition, &completed.view),
         ) {
-            let segment = next_bundle
-                .partitions
-                .get(&completed.partition)
-                .and_then(|p| p.views.get(&completed.view))
-                .and_then(|v| v.segments.iter().find(|s| s.seg_id == seg_id))
-                .map(|s| s.as_ref());
+            let segment = seg_id.as_ref().and_then(|seg_id| {
+                next_bundle
+                    .partitions
+                    .get(&completed.partition)
+                    .and_then(|p| p.views.get(&completed.view))
+                    .and_then(|v| v.segments.iter().find(|s| &s.seg_id == seg_id))
+                    .map(|s| s.as_ref())
+            });
             self.live.with_artifacts(|store| {
                 let rows_of = |layer: &str, level: u32| {
                     self.segment_rows_of(
@@ -14869,7 +15578,9 @@ impl Executor {
             .fetch_add(completed.consumed.len() as u64, Ordering::Relaxed);
         // The drain sample the buffer-occupancy 429 is derived from (ingest §4.2).
         self.health.record_flush_published(completed.consumed.len());
-        self.health.record_tier_fragmentation(completed.tier_tally);
+        if let Some(tally) = tier_tally {
+            self.health.record_tier_fragmentation(tally);
+        }
         *mark = self.health.flush_lap(crate::flush::FlushStage::Swap, *mark);
 
         self.rotate_wal();
@@ -15558,6 +16269,7 @@ mod dispatch_rules_tests {
         };
         crate::flush::FlushPlan {
             items: vec![(EntityId::new(oldest), item)],
+            fills: Vec::new(),
         }
     }
 

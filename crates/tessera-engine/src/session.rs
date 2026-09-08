@@ -3519,6 +3519,19 @@ impl Engine {
         self.write.declare_attribute(request)
     }
 
+    /// Fill attribute values on entities that already exist (`POST /control/values`;
+    /// `ingest.md` §1.4). Nothing is allocated and no row is created: every cell that is absent
+    /// takes the supplied value, one that already holds it is a no-op, and one that holds a
+    /// different value refuses the whole batch.
+    ///
+    /// Blocking — a tokio handler must call this inside `spawn_blocking`.
+    pub fn fill_values(
+        &self,
+        request: tessera_lifecycle::ValuesRequest,
+    ) -> std::result::Result<crate::write::ValuesReceipt, crate::write::AcceptError> {
+        self.write.fill_values(request)
+    }
+
     /// Create a view of a view group while the service runs (`views.md` §3.2, decision 0108).
     ///
     /// **Almost nothing is validated here**, on `register_layer`'s rule: whether the key is free

@@ -247,6 +247,35 @@ pub struct IngestBuffer {
     items: FxHashMap<EntityId, Arc<Vec<Arc<BufferedItem>>>>,
     /// Rows, not entities: what the occupancy bound counts and what a flush consumes.
     rows: usize,
+    /// The cells an accepted `POST /control/values` batch filled and no flush has written yet
+    /// (`ingest.md` §1.4), keyed by the entity they fill.
+    ///
+    /// **A second map rather than a row in `items`, because a fill is not a row.** It carries no
+    /// geometry, no label and no external id: it creates nothing and names an entity that exists,
+    /// so every entity-space walk over this buffer must go on answering with the entity's own row
+    /// and every "is this entity already in this view" arm must go on saying what it said. What a
+    /// fill is for is the two homes a flush writes from the buffer — the family's entity-space
+    /// extent and the record blob — and those read it through [`Self::fills`].
+    fills: FxHashMap<EntityId, Arc<Fill>>,
+}
+
+/// One entity's unflushed filled cells (`ingest.md` §1.4): the values a `POST /control/values`
+/// batch supplied for cells nothing held, waiting for the flush that writes them into the
+/// family's entity-space extent and the record blob.
+///
+/// `scalars` and `scoped` are positional exactly as [`BufferedItem`]'s are, and every cell the
+/// fill rule dropped — one nothing supplied, or one a held value already equalled — is the
+/// absence of its family, so a flush writes a slot for none of them.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Fill {
+    /// The view the batch named, which decides which flush pass writes this fill and which view's
+    /// column of a group-scoped family `scoped` addresses.
+    pub view: String,
+    pub scalars: Vec<WalScalar>,
+    pub scoped: Vec<WalScalar>,
+    /// The WAL position of the `ValuesBatch` record this arrived in — what pins the log until the
+    /// flush writes the cells, on [`BufferedItem::wal_pos`]'s rule.
+    pub wal_pos: Option<u64>,
 }
 
 impl IngestBuffer {
@@ -254,6 +283,7 @@ impl IngestBuffer {
         IngestBuffer {
             items: FxHashMap::default(),
             rows: 0,
+            fills: FxHashMap::default(),
         }
     }
 
@@ -327,16 +357,76 @@ impl IngestBuffer {
     ///
     /// `Some(None)` is impossible by construction; the outer `Option` is emptiness and the inner
     /// answer is "one of them is unknown, so reclaim nothing".
+    ///
+    /// **A fill pins the log too**, for the reason a row does: the `ValuesBatch` record is the
+    /// only copy of the values until the flush writes them into the family's extent and the
+    /// record blob (`ingest.md` §1.4).
     pub fn oldest_wal_pos(&self) -> Option<Option<u64>> {
-        if self.items.is_empty() {
+        if self.items.is_empty() && self.fills.is_empty() {
             return None;
         }
         Some(
             self.items
                 .values()
                 .flat_map(|rows| rows.iter())
-                .try_fold(u64::MAX, |acc, item| item.wal_pos.map(|p| acc.min(p))),
+                .map(|item| item.wal_pos)
+                .chain(self.fills.values().map(|fill| fill.wal_pos))
+                .try_fold(u64::MAX, |acc, pos| pos.map(|p| acc.min(p))),
         )
+    }
+
+    /// Record one accepted values batch's cells for `entity`, merging with any this entity
+    /// already holds unflushed.
+    ///
+    /// **Merged rather than replaced.** Two batches may fill different columns of one entity
+    /// between two ticks, and the fill rule has already refused any cell either of them holds — so
+    /// a cell carrying a value in the held fill keeps it, and one that is absent there takes this
+    /// batch's. The `view` of the first fill stands: a later batch naming another view supplies
+    /// entity-scoped cells, which belong to no view, and a group-scoped cell it names has already
+    /// been refused where the two views address one key.
+    pub fn fill(&mut self, entity: EntityId, fill: Fill, absent: impl Fn(&WalScalar) -> bool) {
+        match self.fills.get_mut(&entity) {
+            None => {
+                self.fills.insert(entity, Arc::new(fill));
+            }
+            Some(held) => {
+                let held = Arc::make_mut(held);
+                merge_cells(&mut held.scalars, fill.scalars, &absent);
+                merge_cells(&mut held.scoped, fill.scoped, &absent);
+                held.wal_pos = match (held.wal_pos, fill.wal_pos) {
+                    (Some(a), Some(b)) => Some(a.min(b)),
+                    _ => None,
+                };
+            }
+        }
+    }
+
+    /// Stamp the WAL position of the record a fill arrived in, on [`Self::set_wal_pos`]'s terms.
+    pub fn set_fill_wal_pos(&mut self, entity: EntityId, wal_pos: u64) {
+        if let Some(fill) = self.fills.get_mut(&entity) {
+            let fill = Arc::make_mut(fill);
+            fill.wal_pos = Some(match fill.wal_pos {
+                Some(held) => held.min(wal_pos),
+                None => wal_pos,
+            });
+        }
+    }
+
+    /// Every unflushed fill, with the entity it fills — the flush's second walk beside
+    /// [`Self::rows`], scoped to one view by the caller.
+    pub fn fills(&self) -> impl Iterator<Item = (&EntityId, &Fill)> {
+        self.fills.iter().map(|(entity, fill)| (entity, &**fill))
+    }
+
+    /// Drop one entity's fill — what a flush's publication does with exactly the fills it wrote.
+    pub fn remove_fill(&mut self, entity: EntityId) {
+        self.fills.remove(&entity);
+    }
+
+    /// How many entities hold an unflushed fill. Diagnostic, and the flush's "is there anything to
+    /// do" test beside [`Self::len`].
+    pub fn fill_count(&self) -> usize {
+        self.fills.len()
     }
 
     /// Remove one item — **what a flush's publication does with exactly the entities it
@@ -441,7 +531,27 @@ impl IngestBuffer {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.items.is_empty()
+        self.items.is_empty() && self.fills.is_empty()
+    }
+}
+
+/// Take `supplied`'s value into every cell of `held` that is absent, widening `held` where the
+/// supplied list is longer — the shape a declaration between two batches leaves.
+fn merge_cells(
+    held: &mut Vec<WalScalar>,
+    supplied: Vec<WalScalar>,
+    absent: &impl Fn(&WalScalar) -> bool,
+) {
+    if held.len() < supplied.len() {
+        held.resize(supplied.len(), WalScalar::Null);
+    }
+    for (position, value) in supplied.into_iter().enumerate() {
+        if absent(&value) {
+            continue;
+        }
+        if absent(&held[position]) {
+            held[position] = value;
+        }
     }
 }
 

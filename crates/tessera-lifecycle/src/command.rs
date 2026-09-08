@@ -309,6 +309,59 @@ pub enum Command {
         level: u32,
         joins: Vec<crate::membership::IncomingGrowth>,
     },
+    /// An accepted `POST /control/values` batch: attribute values for entities that already
+    /// exist, filled per cell under the fill rule (`ingest.md` §1.1, §1.4).
+    ///
+    /// **The comparison travels unmade**, on [`Command::Ingest`]'s rule and the join arm's
+    /// (decision 0116): whether a cell is absent, holds the identical value or holds a different
+    /// one is read from the buffer and the flushed homes, which only the executor may move
+    /// between a check and an apply. A handler that compared first could be overtaken by the
+    /// window that writes the cell and would then fill it twice.
+    ///
+    /// **Entities, not identifiers.** The handler resolves each row's `external_id` or inverts
+    /// its `tessera_id` at the boundary, on [`Command::Change`]'s rule, so no blinded identifier
+    /// reaches the executor or the log (**I10**).
+    ///
+    /// It rides the bounded, sheddable lane ([`Command::is_never_shed`]): a values batch refused
+    /// for load is backpressure and the caller retries, nothing having been filled.
+    ///
+    /// **Boxed** so one large variant does not set the size of every command in the queue, on
+    /// [`Command::RegisterLayer`]'s rule.
+    Values { request: Box<ValuesRequest> },
+}
+
+/// One accepted `POST /control/values` batch as it reaches the executor (`ingest.md` §1.4).
+///
+/// **Columns are named, and a row's values are positional against that list.** A values batch
+/// carries whichever subset of the schema the caller has, in the caller's own order, so a
+/// positional tail against the whole declared order would make the wire depend on a schema the
+/// caller may not have read. The executor resolves each name once per batch — to a position in
+/// the declared scalar tail, or to one of the view's group-scoped families — and the log carries
+/// the same named form, so a replay resolves it the same way.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ValuesRequest {
+    pub batch_id: String,
+    pub body_hash: [u8; 32],
+    /// The view this batch's fills belong to: the `x-tessera-view` header where one was given,
+    /// and the deployment's only view otherwise. It decides which flush pass writes the fills and
+    /// which view's column of a group-scoped family a scoped cell addresses.
+    pub view: String,
+    /// The declared column names this batch carries, in the caller's order.
+    pub columns: Vec<String>,
+    /// One row per entity, values positional against `columns`.
+    pub rows: Vec<IncomingValues>,
+    /// The artifacts this batch's rows named in a column named for a layer (`ingest.md` §1.4): a
+    /// membership join for an entity that exists, resolved and grown in the same commit as the
+    /// cells, so there is no state in which a value is filled and its membership is not. Empty
+    /// for a batch that named none.
+    pub artifacts: BatchArtifacts,
+}
+
+/// One row of a [`ValuesRequest`]: the entity the values fill, already resolved, and its cells.
+#[derive(Debug, Clone, PartialEq)]
+pub struct IncomingValues {
+    pub entity: EntityId,
+    pub values: Vec<crate::wal::WalScalar>,
 }
 
 impl Command {
@@ -526,6 +579,21 @@ pub enum Ack {
     /// here either: `joined` is bounded by the caller's own list, so it says nothing about the
     /// members they did not send.
     MembershipsGrown { grown: Vec<MembershipGrown> },
+    /// A values batch was applied (`ingest.md` §1.4). The counts are the batch's own, bounded by
+    /// the caller's own request, and name no entity and no value.
+    ValuesFilled {
+        /// Cells that were absent and now hold the supplied value.
+        filled: u64,
+        /// Cells that already held the identical value, which the fill rule accepts with no
+        /// effect. Reported so a pipeline resending a page sees that it changed nothing.
+        held: u64,
+        /// Members this batch's layer columns added to artifacts that did not already hold them,
+        /// on [`MembershipGrown::joined`]'s terms.
+        joined: u64,
+        /// How many artifacts this batch's layer columns created, on [`Ack::Ingested`]'s
+        /// `minted` terms.
+        minted: u64,
+    },
 }
 
 /// One join's receipt inside [`Ack::MembershipsGrown`].
@@ -698,6 +766,22 @@ pub enum ExecError {
     /// is one the caller cannot have under another identity, since a column's width and
     /// placement are baked into every row (`per-point-attributes.md` §2.2).
     AttributeConflict { detail: String },
+    /// A values row supplied a cell this deployment already holds a different value for
+    /// (`ingest.md` §1.1, §1.4) → **409**, the batch without effect.
+    ///
+    /// **Evaluated on the serial writer**, on [`Self::JoinRefused`]'s rule and beside it: the
+    /// sources it reads are the commit-window buffer and the flushed homes, and only the executor
+    /// moves either.
+    ///
+    /// **A rendered string, and it reaches the caller** — a row index and a column name, and for
+    /// a group-scoped column the key the cell is addressed by. It names **no held value**
+    /// (`ingest.md` §1.4), no entity id and no external id (**I10**).
+    ValueConflict { detail: String },
+    /// A values row named a subject that does not exist, or one this batch cannot fill →
+    /// **422**, the batch without effect. Separate from [`Self::ValueConflict`] because the
+    /// remedy differs: a conflicting cell is one the caller may not have, and an unresolved id is
+    /// one the caller ingests first (`ingest.md` §1.6).
+    ValuesRefused { detail: String },
 }
 
 impl std::fmt::Display for ExecError {
@@ -722,6 +806,8 @@ impl std::fmt::Display for ExecError {
             | ExecError::AttributeRefused { detail }
             | ExecError::AttributeConflict { detail }
             | ExecError::ViewUnknown { detail }
+            | ExecError::ValueConflict { detail }
+            | ExecError::ValuesRefused { detail }
             | ExecError::JoinRefused { detail } => write!(f, "{detail}"),
         }
     }

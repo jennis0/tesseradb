@@ -180,7 +180,7 @@ in the next, and only viewers wait for the tick.
 | Kind | What a client sends (one record) | Route | Commit | Pagination units | Idempotency |
 |---|---|---|---|---|---|
 | **Point** | id, coordinates, labels, attribute values, one key or list per layer column | `POST /control/ingest` | the commit window's fsync | `max_batch_rows` 10,000; `max_batch_bytes` | batch id + body hash within the WAL retention window; a supplied external id refuses a duplicate (`409`) |
-| **Attribute values for an existing entity** ⊘ | id, attribute columns, layer columns; no coordinates; the view header where a group-scoped column is carried | `POST /control/values` (spec §1.4) | the commit window's fsync | `max_batch_rows`; `max_batch_bytes` | batch id + hash; the fill rule per cell |
+| **Attribute values for an existing entity** | id, attribute columns, layer columns; no coordinates; the view header where a group-scoped column is carried | `POST /control/values` (spec §1.4) | the commit window's fsync | `max_batch_rows`; `max_batch_bytes` | batch id + hash; the fill rule per cell |
 | **Membership** | the point's layer column, or a page of `members` per artifact | ingest, values, or `PATCH /control/layers/{name}/artifacts` | on the ingest and values routes, the window's fsync (artifacts-from-points §6.2); on `PATCH`, its own append and fsync on the executor | `max_members_per_request` ⊘; `max_body_bytes` | set join: a retry adds nothing (`joined: 0`) |
 | **Generating set of content *k*** ⊘ | a page of members at `rank: k`, `joining` and `leaving`; `leaving` resolves a deleted item, which is its purpose (spec §1.5) | the same `PATCH` | its own append and fsync | as membership; the only route by which a set changes | set join and leave; a retry is a no-op |
 | **Artifact record** | key, and on a group-scoped layer `view`; `parent`, `attached_to`, shape, content values; a first page of members and generating sets | `PUT /control/layers/{name}/artifacts` creates; `PATCH` fills | its own append and fsync; ordinals claimed contiguously | `max_artifacts_per_request` ⊘; `max_body_bytes` | a held key with identical parts is accepted with no effect (spec §1.5) |
@@ -247,7 +247,7 @@ then discarded (contracts §3.4, r65). So a column declared over an existing cor
 filled, which is the third of the owner's three cases and a reach gap under decisions 0091 and
 0134.
 
-`POST /control/values` ⊘ takes a batch of `(external_id | tessera_id, …attribute columns, …layer
+`POST /control/values` takes a batch of `(external_id | tessera_id, …attribute columns, …layer
 columns)` over entities that exist. Per cell it applies the fill rule: an absent cell takes the
 value; a cell holding the same value is a no-op; a cell holding a different value is a `409`
 naming the column and the id, and the batch has no effect. That is the comparison the join arm
@@ -261,15 +261,38 @@ base and one extent per flush, and today an entity's record is read from the one
 its row. Under the values kind an entity can hold a row in more than one layer: the layer that
 created it and the layer that filled a column later. The fill rule leaves **a column held by at
 most one layer per entity**, and the per-column presence extents the flush already writes
-(spec §6.3) say which. ⊘ The record stack therefore locates, per column, the layer that claims it
+(spec §6.3) say which. The record stack therefore locates, per column, the layer that claims it
 and reads that block. The cost at drill-down is one block decode per column claimant, which for an
 entity with no filled column is the one decode it pays today; the fold folds the layers into one
-row again. It is owned by T3 (spec §8). A `text` cell that has flushed is compared against the
-block its claimant holds.
+row again. A `text` cell that has flushed is compared against the block its claimant holds.
 
 Why a route and not a mode of `/control/ingest` (spec §10, R2): a points batch allocates entities
 and needs a view; a values batch allocates nothing and names a view only for a scoped column.
 Elasticsearch makes the same distinction as an explicit `update` action beside `index` (spec §3).
+
+**Built 2026-09-08 (T3).** `POST /control/values` takes a batch of rows in JSON by default and
+Arrow by content type, each row naming its entity by `external_id` or by `tessera_id` with its
+idset, resolved at the boundary so the executor and the log see entities alone. The fill rule runs
+on the serial writer beside the join arm (`plan_fills`), against three sources in the order a cell
+is claimed: the entity's own buffered row, the cells an earlier values batch filled and no flush
+has written, and the flushed homes. A cell nothing holds is filled, one holding the identical value
+is counted and dropped, and one holding a different value refuses the batch with a `409` naming the
+column and, for a group-scoped cell, the key. A scoped column may be named only where the batch
+carried the view header and the view's key is in the attribute's group's key set. A layer column is
+a membership join through the growth route's own record, appended and fsynced with the values
+record so no cell is durable without its membership; a key no artifact holds refuses the batch,
+because a values batch mints nothing. The cells wait in the buffer's fill map, which the flush
+writes into the family's entity-space extent, the text layer and the record blob; a tick whose only
+work is fills publishes those and no segment, a fill having no row for one to hold. Two pagination
+units are published under `limits.values`.
+
+**A `render` column is refused rather than filled**, which is narrower than spec §6.3's R10. A
+rendered column's value is served from the hot column of the row that carries it — to a tile, to
+the drill-down, and to a filter leaf, which takes the row route wherever the column reaches the
+tail — and a values row acquires no row. The value would be stored in entity space and answered by
+nobody, so the route refuses and names the remedy. R10's reading, that a back-filled `render`
+value is filterable where `index` was declared, is not one this route can keep while the filter
+resolves such a column from the row.
 
 ### 1.5 The artifact and its parts
 
@@ -406,7 +429,7 @@ each complete in itself.
 | Route | Records per request | Bytes per request | Also |
 |---|---|---|---|
 | `/control/ingest` | `max_batch_rows` 10,000 (the commit window's size, so no client picks the sort scope) | `max_batch_bytes` 16 MiB, ceiling 64 MiB | |
-| `/control/values` ⊘ | `max_batch_rows` | `max_batch_bytes` | |
+| `/control/values` | `max_batch_rows` | `max_batch_bytes` | |
 | `/control/layers/{name}/artifacts` `PUT` | `max_artifacts_per_request` 10,000 | `max_body_bytes` (`publish_max_body_bytes`, 64 MiB) | `max_shape_vertices` 10⁶; `max_excluded_per_request` 10⁶, enforced per artifact's list (spec §2.3) |
 | the same, `PATCH` | `max_members_per_request` 5,000,000, the sum over the page's artifacts | `max_body_bytes` | |
 | `/control/vocabularies/{name}/values` ⊘ | `max_values_per_request` | `max_body_bytes` | |
@@ -424,7 +447,7 @@ bound what one connection holds.
 `max_artifacts_per_request`, `max_members_per_request` and `max_excluded_per_request`
 (configuration §1); every count and byte cap of the routes that exist enforced at the published
 value as a `422` naming the unit; and the driver reads every limit it sizes a request by from the
-block. The rows for `/control/values` and the vocabulary values route wait on their routes.
+block. The `/control/values` row was added at T3; the vocabulary values route waits on its own.
 
 ### 2.2 Why no kind needs a multi-part upload
 
@@ -776,9 +799,18 @@ the fold a back-filled `render` value is filterable where `index` was declared a
 **Built 2026-09-07 (T4).** The declaration route, the manifest home and its replay, the tail
 append with padding at the window close and the flush, the schema-answered absence on the render
 tail, the row-route filter, the drill-down and the categories vocabulary, and the fold's
-materialisation of the column's base. The record blob's per-column claimant read (spec §1.4) is
-T3's and is not built: a runtime column's blob-resident value is read from the extent that holds
-the entity's row, which before T3 is the row that created the entity.
+materialisation of the column's base.
+
+**Built 2026-09-08 (T3), the record blob's per-column claimant read** (spec §1.4, spec §10 ruling
+7). `RecordStack` reads a column from every layer that holds a row for the entity and unions their
+fields, first tag winning where two name one column — which the fill rule makes unreachable and
+which is there so a damaged pair answers one value rather than two. The cost is one block decode
+per column claimant: one for an entity whose columns the creating layer wrote, and one more per
+flush that filled a column on it. The many-row read takes the entities that lie in more than one
+layer out of its per-layer walk and answers them through the merged read, so each is visited once
+and a stack no page has filled pays what it paid before. The layers are therefore **disjoint per
+column and not per entity**: an entity holds a row in the layer that created it and another in
+each layer that filled a column on it, and the fill rule leaves one claimant per cell.
 
 ## 7. Migration and contracts
 
@@ -875,7 +907,7 @@ recreated, so that every later track lands against one format and none waits on 
 | **T2b generating-set pages** | `rank`, `joining` and `leaving` on `PATCH`; the stored cardinality moved by the page and published only with its operator; the whole re-derivation of an operator whose delta holds a leave; the empty-set floor and the withdrawal it reports; the tick's row-form publication for memberships and generating sets with the shared scratch; the per-record pin; permits and pool resolution for pages; the driver publishes over-cap artifacts and sets as pages and `declined` is empty on every rung | T2a |
 | **T2c exclusion and view identity** (built 2026-09-08) | `excluding` under `max_excluded_per_request`; `view` in the identity on a group-scoped layer | T2a |
 | **T4 attributes** | `PUT /control/attributes`; the manifest home; the schema-answered absence for a `render` column; the tail append and padding for a mid-ingest declaration; the fold's materialisation | T1 |
-| **T3 values** | `POST /control/values`; the fill on the executor beside the join arm; the view header and key-in-group check for scoped columns; layer columns on existing entities; the record stack's per-column claimant read and its fold | T4 |
+| **T3 values** (built 2026-09-08) | `POST /control/values`; the fill on the executor beside the join arm; the view header and key-in-group check for scoped columns; layer columns on existing entities; the record stack's per-column claimant read and its fold | T4 |
 | **T5 vocabularies** | `PUT /control/vocabularies/{name}`; value pages; the property upsert (`/control/categories`'s debt) | T4's manifest home |
 | **T6 groups and views** | `PUT /control/view_groups/{name}`; `PUT /control/views/{name}` | T4's manifest home |
 | **T7 conformance** | the 0091 equivalence driver over every kind, **defined over served answers** (masked counts, artifact frames, drill-downs per principal), never over bundle bytes; write-path and annotation-write-cycle rewritten | alongside T2a onward |

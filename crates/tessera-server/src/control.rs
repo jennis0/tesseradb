@@ -244,8 +244,15 @@ pub fn router(state: Arc<AppState>) -> Router {
     // inherited so the 422's detail can name a number that is true.
     let changes_route =
         post(changes).layer(axum::extract::DefaultBodyLimit::max(CHANGES_MAX_BODY_BYTES));
+    // **The same two pagination units as `/control/ingest`** (`ingest.md` §2.1): a values row is
+    // a row, and the cost it puts on the executor and on a connection is the same shape, so it
+    // takes the same cap rather than a second key an operator would have to keep in step.
+    let values_route = post(values).layer(axum::extract::DefaultBodyLimit::max(
+        state.ingest_max_batch_bytes,
+    ));
     let router = Router::new()
         .route("/control/ingest", ingest_route)
+        .route("/control/values", values_route)
         .route("/control/changes", changes_route)
         .route("/control/status", get(status))
         .route("/control/flush", post(flush))
@@ -444,6 +451,7 @@ fn layer_frames(
 /// its route table, this constant is the thing to delete.
 pub const CONTROL_PLANE_ROUTES: &[(&str, &str)] = &[
     ("POST", "/control/ingest"),
+    ("POST", "/control/values"),
     ("POST", "/control/changes"),
     ("GET", "/control/status"),
     ("POST", "/control/flush"),
@@ -1361,6 +1369,533 @@ fn parse_ingest_batch(
         artifacts: tally.into_artifacts(),
         padded_columns: padded.len() as u64,
         clipped,
+    })
+}
+
+/// `POST /control/values`' acknowledgement (contracts §3.4).
+#[derive(serde::Serialize)]
+struct ValuesResp {
+    /// Rows this batch carried — what the caller sent, so a client can check its own paging.
+    rows: u64,
+    /// Cells that were absent and now hold the supplied value.
+    filled: u64,
+    /// Cells that already held the identical value, which the fill rule accepts with no effect.
+    held: u64,
+    /// Members this batch's layer columns added to artifacts that did not already hold them.
+    joined: u64,
+}
+
+/// `POST /control/values` — fill attribute values on entities that already exist
+/// (`ingest.md` §1.4).
+///
+/// **It allocates nothing and creates no row**, which is why it is its own route and not a mode of
+/// `/control/ingest` (`ingest.md` §10, R2): a points batch allocates entities and needs a view,
+/// and a values batch allocates nothing and names a view only for a group-scoped column.
+///
+/// **The view header decides which group-scoped families this batch may name.** A batch that gave
+/// none may name none, whatever the deployment's view count, so a scoped column on a viewless
+/// batch takes the undeclared-column refusal — and one that did gets the families whose owning
+/// group's key set holds that view's key, which is the same check the ingest route runs at the
+/// join (contracts §3.4 r68, decision 0116).
+async fn values(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: Result<Bytes, axum::extract::rejection::BytesRejection>,
+) -> Result<Json<ValuesResp>, ApiError> {
+    // The route's byte cap, mapped as `/control/ingest`'s is: a 422 naming the unit, never axum's
+    // untyped 413, and told apart from a connection that failed mid-upload.
+    let body = body.map_err(|rejection| {
+        if rejection.status() == StatusCode::PAYLOAD_TOO_LARGE {
+            ApiError::Contract(format!(
+                "values body exceeds the {}-byte per-batch cap (ingest.ingest_max_batch_bytes); \
+                 refused before decoding, so it cost no queue slot and no WAL append",
+                state.ingest_max_batch_bytes
+            ))
+        } else {
+            ApiError::Contract(
+                "the values request body could not be read to completion — the connection failed \
+                 mid-upload, or the transfer encoding is malformed. This is NOT the per-batch cap; \
+                 nothing was decoded, queued or appended"
+                    .to_string(),
+            )
+        }
+    })?;
+    let batch_id = headers
+        .get("x-tessera-batch-id")
+        .and_then(|v| v.to_str().ok())
+        .ok_or_else(|| ApiError::Contract("missing x-tessera-batch-id header".to_string()))?
+        .to_string();
+    let encoding = body_encoding(&headers)?;
+    let view = match headers.get("x-tessera-view") {
+        None => None,
+        Some(value) => Some(
+            value
+                .to_str()
+                .map_err(|_| {
+                    ApiError::Contract(
+                        "x-tessera-view is not valid UTF-8, so it names no view".to_string(),
+                    )
+                })?
+                .to_string(),
+        ),
+    };
+    let Some(permit) = state.ingest_admission.try_admit() else {
+        tracing::debug!("the ingest admission bound is saturated; answering 429 backpressure");
+        return Err(ApiError::IngestAdmissionBackpressure {
+            retry_after_s: crate::error::admission_retry_after_s(
+                &state.engine.write_executor_stats(),
+            ),
+        });
+    };
+    let resp = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        run_values(&state, encoding, &body, batch_id, view.as_deref())
+    })
+    .await
+    .map_err(map_join_error)??;
+    Ok(Json(resp))
+}
+
+/// The blocking half of `POST /control/values`, run inside `spawn_blocking` on [`run_ingest`]'s
+/// never-gated rule.
+fn run_values(
+    state: &AppState,
+    encoding: BodyEncoding,
+    body: &[u8],
+    batch_id: String,
+    view: Option<&str>,
+) -> Result<ValuesResp, ApiError> {
+    let body_hash: [u8; 32] = Sha256::digest(body).into();
+    let meta = state.engine.meta();
+    // The view the fills belong to: the header where one was given, and the deployment's only
+    // view otherwise, on `/control/ingest`'s rule. It decides which flush pass writes the cells.
+    let resolved = resolve_view(view, &meta)?;
+    let resolved = resolved.id.clone();
+    // **The families this batch may name, and the header is half the answer** (`views.md` §5,
+    // decision 0116). The key is what addresses a scoped cell, so the check is
+    // `EngineMeta::owning_key` exactly as the ingest door's is — and the header is required
+    // beside it, because a batch that named no view has not said which key it is writing.
+    let scoped: Vec<ScopedScalar> = match view {
+        None => Vec::new(),
+        Some(_) => meta
+            .scoped_scalars
+            .iter()
+            .filter(|f| meta.owning_key(&resolved, &f.group).is_some())
+            .cloned()
+            .collect(),
+    };
+    let ParsedValues {
+        columns,
+        rows,
+        artifacts,
+    } = parse_values_batch(
+        encoding,
+        body,
+        &meta.declared_scalars,
+        &scoped,
+        &meta.vocabularies,
+        &|name| state.engine.registered_layer(name).map(|l| l.declaration),
+    )?;
+
+    // The row cap, on `/control/ingest`'s rule and with its cost: the whole decode is spent
+    // before the count is knowable, which is why the byte cap sits on the route.
+    if rows.len() > state.ingest_max_batch_rows {
+        return Err(ApiError::Contract(format!(
+            "values batch has {} rows, exceeding the {}-row per-batch cap \
+             (ingest.ingest_max_batch_rows); refused before the WAL append, so it cost no queue \
+             slot and no record. The body was hashed and decoded in full before this fired — the \
+             row count is not knowable earlier",
+            rows.len(),
+            state.ingest_max_batch_rows
+        )));
+    }
+
+    // **Every entity is resolved here, at the boundary, and the executor sees entities alone**
+    // (**I10**, `Command::Change`'s rule). One batched call per address form: the external half
+    // opens each bundle extent at most once, and the tessera half takes one generation snapshot
+    // for the idset check and every inversion.
+    let mut idsets = rows.iter().filter_map(|row| match &row.address {
+        Address::Tessera { idset, .. } => Some(*idset),
+        Address::External(_) => None,
+    });
+    let mut inverted = match idsets.next() {
+        None => Vec::new().into_iter(),
+        Some(idset) => {
+            if idsets.any(|other| other != idset) {
+                return Err(ApiError::Contract(
+                    "one batch carries two different idsets; there is one per deployment, so this \
+                     list was assembled from a state that never existed"
+                        .to_string(),
+                ));
+            }
+            let ids: Vec<TesseraId> = rows
+                .iter()
+                .filter_map(|row| match &row.address {
+                    Address::Tessera { id, .. } => Some(*id),
+                    Address::External(_) => None,
+                })
+                .collect();
+            let resolved = state
+                .engine
+                .resolve_tessera_ids(&ids, idset)
+                .map_err(crate::error::map_engine_error)?;
+            if let Some(position) = resolved.iter().position(|e| e.is_none()) {
+                return Err(ApiError::Unknown(format!(
+                    "tessera_id at tessera-addressed position {position} names nothing this \
+                     deployment issued"
+                )));
+            }
+            resolved.into_iter()
+        }
+    };
+    let keys: Vec<Vec<u8>> = rows
+        .iter()
+        .filter_map(|row| match &row.address {
+            Address::External(key) => Some(key.clone()),
+            Address::Tessera { .. } => None,
+        })
+        .collect();
+    let mut external = state
+        .engine
+        .resolve_external_ids(&keys)
+        .map_err(map_store_error)?
+        .into_iter();
+
+    let mut request_rows = Vec::with_capacity(rows.len());
+    for (index, row) in rows.into_iter().enumerate() {
+        // **A subject that does not exist refuses the batch** (`ingest.md` §1.6): a values batch
+        // creates nothing, so an id nothing holds is the caller's ordering mistake and the remedy
+        // is to ingest the point first. Named by position, never by the id itself, which the
+        // caller supplied and this body would otherwise echo back for every unknown key.
+        let entity = match &row.address {
+            Address::Tessera { .. } => inverted
+                .next()
+                .flatten()
+                .expect("every tessera_id resolved above"),
+            Address::External(_) => external.next().flatten().ok_or_else(|| {
+                ApiError::Contract(format!(
+                    "row {index} names an external id this deployment does not hold. A values \
+                     batch fills entities that exist and creates none, so the point is ingested \
+                     first (`ingest.md` §1.6)"
+                ))
+            })?,
+        };
+        request_rows.push(tessera_engine::IncomingValues {
+            entity,
+            values: row.values,
+        });
+    }
+
+    let accepted = request_rows.len() as u64;
+    let receipt = state
+        .engine
+        .fill_values(tessera_engine::ValuesRequest {
+            batch_id,
+            body_hash,
+            view: resolved,
+            columns,
+            rows: request_rows,
+            artifacts,
+        })
+        .map_err(|e| {
+            tracing::error!("a values batch was refused by the write executor");
+            map_accept_error(e)
+        })?;
+    Ok(ValuesResp {
+        rows: accepted,
+        filled: receipt.filled,
+        held: receipt.held,
+        joined: receipt.joined,
+    })
+}
+
+/// One decoded `POST /control/values` batch, before its addresses are resolved.
+struct ParsedValues {
+    /// The declared and group-scoped column names this batch carries, in the order every row's
+    /// values are positional against.
+    columns: Vec<String>,
+    rows: Vec<ParsedValuesRow>,
+    artifacts: BatchArtifacts,
+}
+
+/// One values row: how it names its entity, and its cells.
+struct ParsedValuesRow {
+    address: Address,
+    values: Vec<WalScalar>,
+}
+
+/// Decode one `POST /control/values` body (`ingest.md` §1.2, §1.4), in whichever encoding carried
+/// it, into named columns and rows.
+///
+/// **The same rules as the ingest door, minus the ones about creating an entity.** A values row
+/// carries no coordinates and no `access` list, and names its entity by exactly one of
+/// `external_id` and `tessera_id`; a declared column present at the wrong type refuses the batch,
+/// an undeclared name refuses it, and a layer column is a membership join.
+///
+/// **A group-scoped column is nameable only where `scoped` holds its family**, which the caller
+/// resolves from the batch's own view header — so a batch that named no view meets the
+/// undeclared-column refusal for one, and so does a batch whose view's key is in no scope
+/// (`views.md` §5, decision 0116).
+fn parse_values_batch(
+    encoding: BodyEncoding,
+    body: &[u8],
+    declared: &[DeclaredScalar],
+    scoped: &[ScopedScalar],
+    vocabularies: &Vocabularies,
+    layer_of: &dyn Fn(&str) -> Option<tessera_types::layer::LayerDeclaration>,
+) -> Result<ParsedValues, ApiError> {
+    let batches: Box<dyn Iterator<Item = Result<arrow::record_batch::RecordBatch, ApiError>>> =
+        match encoding {
+            BodyEncoding::Arrow => {
+                let cursor = std::io::Cursor::new(body);
+                let reader =
+                    arrow::ipc::reader::StreamReader::try_new(cursor, None).map_err(|e| {
+                        ApiError::Contract(format!(
+                            "values body is not a valid Arrow IPC stream: {e}"
+                        ))
+                    })?;
+                Box::new(reader.map(|batch| {
+                    batch.map_err(|e| {
+                        ApiError::Contract(format!("values body: arrow decode error: {e}"))
+                    })
+                }))
+            }
+            BodyEncoding::Json => Box::new(std::iter::once(
+                crate::ingest_json::values_record_batch(
+                    body,
+                    &crate::ingest_json::JsonColumns {
+                        // A values row carries no coordinates, so the axis names name nothing it
+                        // may hold; the two spellings below are refused as undeclared like any
+                        // other name, which is what a values row naming a coordinate is.
+                        x_name: "",
+                        y_name: "",
+                        declared,
+                        scoped,
+                        layer_of,
+                    },
+                ),
+            )),
+        };
+
+    let mut rows: Vec<ParsedValuesRow> = Vec::new();
+    let mut columns: Vec<String> = Vec::new();
+    let mut tally = MembershipTally::default();
+    for batch in batches {
+        let batch = batch?;
+        let schema = batch.schema();
+        let offset = rows.len();
+
+        // Which of the schema's names this batch's cells are, in one order for every row.
+        let carried: Vec<&DeclaredScalar> = declared
+            .iter()
+            .filter(|d| batch.column_by_name(&d.name).is_some())
+            .collect();
+        let carried_scoped: Vec<&ScopedScalar> = scoped
+            .iter()
+            .filter(|f| batch.column_by_name(&f.name).is_some())
+            .collect();
+        let names: Vec<String> = carried
+            .iter()
+            .map(|d| d.name.clone())
+            .chain(carried_scoped.iter().map(|f| f.name.clone()))
+            .collect();
+        if rows.is_empty() {
+            columns = names;
+        } else if columns != names {
+            return Err(ApiError::Contract(
+                "values body: two record batches of one stream carry different columns; a batch \
+                 is one column set, so every row's values are positional against one list"
+                    .to_string(),
+            ));
+        }
+
+        // Every other name is a layer's or is refused, on the ingest door's rule.
+        let mut declarations = Vec::new();
+        for field in schema.fields() {
+            let name = field.name().as_str();
+            if matches!(name, "external_id" | "tessera_id" | "idset")
+                || declared.iter().any(|d| d.name == name)
+                || scoped.iter().any(|f| f.name == name)
+            {
+                continue;
+            }
+            let Some(declaration) = layer_of(name) else {
+                return Err(ApiError::Contract(format!(
+                    "values body: column '{name}' is neither in MANIFEST.declared_scalars, nor a \
+                     group-scoped family whose key set holds this batch's view, nor the name of a \
+                     registered layer (contracts §2.2, `views.md` §5). An undeclared column is \
+                     refused rather than dropped"
+                )));
+            };
+            declarations.push((name.to_string(), declaration));
+        }
+        let mut memberships: Vec<MembershipColumn> = Vec::new();
+        for (name, declaration) in &declarations {
+            let column = batch
+                .column_by_name(name)
+                .expect("the column was found in this batch's own schema");
+            memberships.push(membership_column(name, column, declaration)?);
+        }
+
+        // A column present at the wrong type refuses the batch, on the ingest door's rule: a value
+        // decoded against the wrong declaration is a wrong value stored with no error anywhere.
+        for d in &carried {
+            let col = batch
+                .column_by_name(&d.name)
+                .expect("the column was found above");
+            let expected = d.wire_type();
+            if batch.num_rows() > 0 && scalar_at(col.as_ref(), 0, expected).is_none() {
+                return Err(ApiError::Contract(format!(
+                    "values body: column '{}' is {:?}, but MANIFEST.declared_scalars declares it \
+                     {} (contracts §2.6); refused rather than dropped",
+                    d.name,
+                    col.data_type(),
+                    expected.arrow_type_name()
+                )));
+            }
+        }
+        for f in &carried_scoped {
+            let col = batch
+                .column_by_name(&f.name)
+                .expect("the column was found above");
+            let expected = scoped_wire_type(f);
+            if batch.num_rows() > 0 && scalar_at(col.as_ref(), 0, expected).is_none() {
+                return Err(ApiError::Contract(format!(
+                    "values body: column '{}' is {:?}, but it is a group-scoped attribute \
+                     declared {} (views §5); refused rather than dropped",
+                    f.name,
+                    col.data_type(),
+                    expected.arrow_type_name()
+                )));
+            }
+        }
+
+        let ext = optional_binary_col(&batch, "external_id")?;
+        let tessera = match batch.column_by_name("tessera_id") {
+            None => None,
+            Some(col) => Some(
+                col.as_any()
+                    .downcast_ref::<arrow::array::StringArray>()
+                    .ok_or_else(|| {
+                        ApiError::Contract(
+                            "values body: column 'tessera_id' is present but not utf8; a \
+                             tessera_id is decimal digits in a string"
+                                .to_string(),
+                        )
+                    })?,
+            ),
+        };
+        let idset = match batch.column_by_name("idset") {
+            None => None,
+            Some(col) => Some(
+                col.as_any()
+                    .downcast_ref::<arrow::array::UInt32Array>()
+                    .ok_or_else(|| {
+                        ApiError::Contract(
+                            "values body: column 'idset' is present but not uint32".to_string(),
+                        )
+                    })?,
+            ),
+        };
+
+        for i in 0..batch.num_rows() {
+            for column in &memberships {
+                tally.read(column, i, offset)?;
+            }
+            let external = match &ext {
+                Some(arr) if !arr.is_null(i) => Some(arr.value(i).to_vec()),
+                _ => None,
+            };
+            let named = match &tessera {
+                Some(arr) if !arr.is_null(i) => Some(arr.value(i)),
+                _ => None,
+            };
+            let address = match (external, named) {
+                (Some(_), Some(_)) => {
+                    return Err(ApiError::Contract(format!(
+                        "values body: row {} names both an external_id and a tessera_id; a row \
+                         names its entity exactly one way",
+                        rows.len()
+                    )))
+                }
+                (None, None) => {
+                    return Err(ApiError::Contract(format!(
+                        "values body: row {} names no entity; a values row carries an \
+                         external_id, or a tessera_id with its idset (`ingest.md` §1.4)",
+                        rows.len()
+                    )))
+                }
+                (Some(external), None) => {
+                    if external.len() > EXTERNAL_ID_MAX_LEN {
+                        return Err(ApiError::Contract(format!(
+                            "external id is {} bytes, exceeding the {EXTERNAL_ID_MAX_LEN}-byte \
+                             cap (contracts §1); refused rather than truncated",
+                            external.len()
+                        )));
+                    }
+                    Address::External(external)
+                }
+                (None, Some(named)) => {
+                    let id = named.parse::<u64>().map_err(|_| {
+                        ApiError::Contract(format!(
+                            "values body: row {}'s tessera_id is not decimal digits",
+                            rows.len()
+                        ))
+                    })?;
+                    // **Required with a `tessera_id`, refused without it** — `/control/changes`'s
+                    // rule, and it guards the same thing: an identifier's meaning depends on the
+                    // set it was minted under, and a rotation would otherwise silently redirect
+                    // the fill onto another entity.
+                    let Some(set) = idset.as_ref().filter(|arr| !arr.is_null(i)) else {
+                        return Err(ApiError::Contract(format!(
+                            "values body: row {} names a tessera_id with no idset; the \
+                             identifier set is required beside one, from `/v1/meta`",
+                            rows.len()
+                        )));
+                    };
+                    Address::Tessera {
+                        id: TesseraId::new(id),
+                        idset: set.value(i),
+                    }
+                }
+            };
+
+            let mut values = Vec::with_capacity(columns.len());
+            for d in &carried {
+                let col = batch
+                    .column_by_name(&d.name)
+                    .expect("the column was found above");
+                values.push(match d.vocabulary.as_deref() {
+                    Some(vocabulary) => category_code(col.as_ref(), i, d, vocabulary, vocabularies)?,
+                    None if col.is_null(i) => WalScalar::Null,
+                    None => scalar_at(col.as_ref(), i, d.wire_type())
+                        .expect("every declared column's type was checked above"),
+                });
+            }
+            for f in &carried_scoped {
+                let col = batch
+                    .column_by_name(&f.name)
+                    .expect("the column was found above");
+                values.push(match f.vocabulary.as_deref() {
+                    Some(vocabulary) => category_code(
+                        col.as_ref(),
+                        i,
+                        &scoped_as_declared(f),
+                        vocabulary,
+                        vocabularies,
+                    )?,
+                    None if col.is_null(i) => WalScalar::Null,
+                    None => scalar_at(col.as_ref(), i, scoped_wire_type(f))
+                        .expect("every scoped column's type was checked above"),
+                });
+            }
+            rows.push(ParsedValuesRow { address, values });
+        }
+    }
+    Ok(ParsedValues {
+        columns,
+        rows,
+        artifacts: tally.into_artifacts(),
     })
 }
 
@@ -4729,6 +5264,14 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::V
         "limits": {
             "ingest": {
                 "route": "POST /control/ingest",
+                "max_batch_rows": state.ingest_max_batch_rows,
+                "max_batch_bytes": state.ingest_max_batch_bytes,
+            },
+            // The two units the values route publishes (`ingest.md` §2.1, §1.4). They are the
+            // ingest route's own numbers, not a second pair of keys: a values row is a row, and
+            // the cost it puts on the executor and on a connection is the same shape.
+            "values": {
+                "route": "POST /control/values",
                 "max_batch_rows": state.ingest_max_batch_rows,
                 "max_batch_bytes": state.ingest_max_batch_bytes,
             },
