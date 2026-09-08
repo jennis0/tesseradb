@@ -54,7 +54,7 @@ fn declaration(name: &str, kind: HierarchyKind) -> LayerDeclaration {
 }
 
 /// A layer declaring one supplied content that needs no generating set, so a content can be
-/// filled without a set page (track T2b).
+/// filled on its own.
 fn described(name: &str) -> LayerDeclaration {
     let mut d = declaration(name, HierarchyKind::Flat);
     d.content.supplied = vec![SuppliedContent {
@@ -221,6 +221,7 @@ fn a_lineage_fill_moves_the_lineage_and_a_growth_does_not() {
             ],
         )
         .unwrap();
+    tick(&engine);
     assert_eq!(
         served(&engine, "clusters/tree"),
         vec![("child".to_string(), 200), ("root".to_string(), 300)],
@@ -236,6 +237,7 @@ fn a_lineage_fill_moves_the_lineage_and_a_growth_does_not() {
         )
         .expect("a growth");
     assert_eq!((grown[0].joined, grown[0].filled), (100, 0));
+    tick(&engine);
     assert_eq!(
         served(&engine, "clusters/tree"),
         vec![("child".to_string(), 300), ("root".to_string(), 300)],
@@ -254,6 +256,7 @@ fn a_lineage_fill_moves_the_lineage_and_a_growth_does_not() {
         .grow_memberships("clusters/tree".into(), 0, vec![fill.clone()])
         .expect("a lineage fill");
     assert_eq!((filled[0].joined, filled[0].filled), (0, 1));
+    tick(&engine);
     assert_eq!(
         served(&engine, "clusters/tree"),
         vec![("child".to_string(), 300)],
@@ -363,6 +366,7 @@ fn a_content_fill_serves_a_withheld_artifact_and_outlives_the_log() {
             .grow_memberships("topics/a".into(), 0, vec![fill.clone()])
             .expect("a content fill");
         assert_eq!(filled[0].filled, 1);
+        tick(&engine);
         let row = served_row(&engine, "topics/a", "t0").expect("served once filled");
         assert_eq!(row.content, vec!["shipping".to_string()]);
         assert_eq!(row.masked_count, 100);

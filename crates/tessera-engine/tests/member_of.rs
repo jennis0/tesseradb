@@ -169,6 +169,7 @@ impl Fixture {
                 vec![IncomingArtifact::from_entities(Some(key.into()), entities)],
             )
             .unwrap();
+        tick(&self.engine);
         let session = self.engine.authorise(&full_coverage_credential()).unwrap();
         let served = self
             .engine

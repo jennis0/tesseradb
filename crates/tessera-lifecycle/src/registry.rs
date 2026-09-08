@@ -221,6 +221,23 @@ pub enum RegistryError {
     /// apply after the batch was acknowledged; refused before anything is appended, naming the
     /// key. A key repeated with members alone is a join twice and stays lawful.
     RepeatedKey { layer: String, key: String },
+    /// A page named entities leaving a **membership** (`ingest.md` §10, R7). A membership never
+    /// shrinks: the routes by which a member leaves one are write-path §5.4's two removal rules,
+    /// and a second route would re-expose items a suppression or a deletion took out. The one set
+    /// a page may shrink is a generating set, named by its rank.
+    MembershipShrink { layer: String, key: String },
+    /// A page named a rank the artifact holds no content at (`ingest.md` §1.1). Ranks are
+    /// positions in the artifact's ranked contents, so a page past the last one names a content
+    /// between two that does not exist, or one a withdrawal removed.
+    NoSuchContent {
+        layer: String,
+        key: String,
+        rank: u16,
+    },
+    /// One row carried a set page and a fixed part. A row moves one set or fills fixed parts; a
+    /// content supplied beside its own set is a publication, which is the route that takes the two
+    /// together (`ingest.md` §1.5).
+    SetBesidePart { layer: String, key: String },
 }
 
 /// **No artifact is about to exist** — the `pending` answer every caller but the ingest route's
@@ -257,12 +274,69 @@ pub struct PreparedPut {
 /// What [`LayerRegistry::prepare_grow`] prepared for one `PATCH` batch.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PreparedGrow {
-    /// The members joining, or `None` where nothing was joining.
+    /// The set deltas — members joining a membership, and members joining or leaving a generating
+    /// set — or `None` where no row moved a set.
     pub growth: Option<WalRecord>,
     /// One [`WalRecord::ArtifactFill`] per fixed part filled.
     pub fills: Vec<WalRecord>,
     /// Per join in the caller's order, how many of its parts were filled.
     pub filled: Vec<u64>,
+    /// `(the row's position in the batch, the rank withdrawn)` for every page that emptied a
+    /// content's generating set (`ingest.md` §1.1). The content record is removed by the same
+    /// delta, and the acknowledgement reports it beside the key so the caller knows to supply the
+    /// content again.
+    pub withdrawn: Vec<(usize, u16)>,
+}
+
+/// One page of a generating set, checked against the set the record holds and turned into the
+/// delta that moves it (`ingest.md` §1.1).
+///
+/// **The cardinality is computed here, from the set the store holds, and travels in the record**:
+/// the page says which entities join and leave, and the number the executor publishes beside the
+/// operator at the tick is the one this derived. Deriving it at apply instead would let a replay
+/// against a differently-repaired set publish a pair that was never derived together.
+///
+/// `None` where the page changes nothing — an entry already in the state the record asks for is a
+/// no-op — and no record is owed for it. **A page that empties the set withdraws the content**,
+/// which the delta itself carries: cardinality zero is the withdrawal, and nothing else records it
+/// (decision 0107's rule, and 0135's amendment putting the set in the caller's hands).
+#[allow(clippy::too_many_arguments)]
+fn prepare_set_page(
+    layer_name: &str,
+    level: u32,
+    ordinal: u32,
+    rank: u16,
+    join: &crate::membership::IncomingGrowth,
+    store: &ArtifactStore,
+    withdrawn: &mut Vec<(usize, u16)>,
+    index: usize,
+) -> Result<Option<crate::wal::MembershipGrowth>, RegistryError> {
+    let content = store
+        .get(layer_name, level, ordinal)
+        .and_then(|record| record.contents.get(rank as usize))
+        .ok_or_else(|| RegistryError::NoSuchContent {
+            layer: layer_name.to_string(),
+            key: join.key.clone(),
+            rank,
+        })?;
+    // Joins before leaves, which is the order the store applies them in and the order that makes
+    // a paged replacement safe (`ingest.md` §1.1, §2.2).
+    let mut next = content.generated_from.clone();
+    next.or_inplace(&join.joining);
+    next.andnot_inplace(&join.leaving);
+    if next == content.generated_from {
+        return Ok(None);
+    }
+    let cardinality = next.cardinality();
+    if cardinality == 0 {
+        withdrawn.push((index, rank));
+    }
+    Ok(Some(crate::wal::MembershipGrowth {
+        ordinal,
+        joining: crate::membership::serialise_members(&join.joining),
+        leaving: crate::membership::serialise_members(&join.leaving),
+        set: crate::wal::GrownSet::GeneratingSet { rank, cardinality },
+    }))
 }
 
 /// What [`LayerRegistry::check_edge`] found.
@@ -497,6 +571,24 @@ impl std::fmt::Display for RegistryError {
                  spells its membership by exclusion. An exclusion is complemented once, against \
                  the entities that existed at that moment, so a second one would mean a different \
                  set rather than the same one; name the members joining instead (ingest.md §1.3)"
+            ),
+            RegistryError::MembershipShrink { layer, key } => write!(
+                f,
+                "{layer}: the page for {key} names members leaving and no rank. A membership \
+                 never shrinks (ingest.md §10, R7); name the rank of a content to page its \
+                 generating set, or delete the members through /control/changes"
+            ),
+            RegistryError::NoSuchContent { layer, key, rank } => write!(
+                f,
+                "{layer}: the artifact keyed {key} holds no content at rank {rank}, so there is \
+                 no generating set to page. A content is supplied at publication or filled by \
+                 PATCH before its set is paged (ingest.md §1.5)"
+            ),
+            RegistryError::SetBesidePart { layer, key } => write!(
+                f,
+                "{layer}: the row for {key} names a rank and carries a fixed part. A row pages one \
+                 set or fills fixed parts; supply a content and its set together at publication \
+                 (ingest.md §1.5)"
             ),
             RegistryError::Alloc(e) => write!(f, "{e}"),
         }
@@ -839,8 +931,8 @@ impl LayerRegistry {
     /// [`WalRecord::ArtifactFill`], a part held identically is accepted with no effect, and a part
     /// held differently refuses the whole batch naming the part
     /// ([`RegistryError::PartConflict`]). The membership is a set part and joins by an
-    /// [`WalRecord::ArtifactGrow`]; a generating set is compared by bitmap equality, since a set
-    /// page is track T2b's. A held key resolves to its existing ordinal, so a new artifact naming
+    /// [`WalRecord::ArtifactGrow`]; a generating set is compared by bitmap equality, a set changing
+    /// only by a page at its rank. A held key resolves to its existing ordinal, so a new artifact naming
     /// it as a parent or as an attachment target lands on that ordinal, and no second artifact is
     /// ever minted under a held key. The new keys go through [`prepare_publish`]'s own body.
     ///
@@ -1019,11 +1111,11 @@ impl LayerRegistry {
                 &pending,
                 &mut batch_edges,
             )?;
-            // A generating set is compared by equality, never joined: a set page is track T2b's,
-            // and until then a re-`PUT` says the set it said before or refuses. A set beside a
-            // content the artifact does not hold is refused for the same reason: a content fill
-            // carries no set, and dropping one the caller supplied would serve the content
-            // against a set they did not declare.
+            // A generating set is compared by equality, never joined: a set changes by a page at
+            // its rank (`ingest.md` §1.1), so a re-`PUT` says the set it said before or refuses. A
+            // set beside a content the artifact does not hold is refused for the same reason: a
+            // content fill carries no set, and dropping one the caller supplied would serve the
+            // content against a set they did not declare.
             for (rank, content) in artifact.contents.iter().enumerate() {
                 match record.contents.get(rank) {
                     Some(held) if held.generated_from != content.generated_from => {
@@ -1040,9 +1132,10 @@ impl LayerRegistry {
                             layer: layer_name.to_string(),
                             detail: format!(
                                 "the artifact keyed {key}: content[{rank}] is a fill and carries \
-                                 a generating set, and a content fill cannot carry one until the \
-                                 set page exists (ingest.md §8, T2b); a content and its set are \
-                                 supplied together on a new artifact's publication"
+                                 a generating set, and a content fill carries none (ingest.md \
+                                 §1.5); a content and its set are supplied together on a new \
+                                 artifact's publication, and the set moves afterwards by a page \
+                                 at its rank"
                             ),
                         });
                     }
@@ -1282,10 +1375,10 @@ impl LayerRegistry {
                 .any(|s| s.require_member_visibility.requires_all_members())
             {
                 return Err(refuse_content(format!(
-                    "content[{rank}] is a fill, and a content fill cannot carry a generating set \
-                     until the set page exists (ingest.md §8, T2b); this layer's content \
-                     requires every member visible, so a content and its set are supplied \
-                     together on a new artifact's publication"
+                    "content[{rank}] is a fill, and a content fill carries no generating set \
+                     (ingest.md §1.5); this layer's content requires every member visible, so a \
+                     content and its set are supplied together on a new artifact's publication, \
+                     and the set moves afterwards by a page at its rank"
                 )));
             }
             if store.content_row_is_packed(layer_name, level, ordinal) {
@@ -1994,8 +2087,40 @@ impl LayerRegistry {
             });
         }
         let mut batch_edges = BTreeMap::new();
-        for join in incoming {
+        let mut withdrawn = Vec::new();
+        for (index, join) in incoming.iter().enumerate() {
             let ordinal = self.resolve_growth_key(layer_name, level, &join.key, store)?;
+            if let Some(rank) = join.rank {
+                if !join.parts.is_empty() {
+                    return Err(RegistryError::SetBesidePart {
+                        layer: layer_name.to_string(),
+                        key: join.key.clone(),
+                    });
+                }
+                filled.push(0);
+                if let Some(delta) = prepare_set_page(
+                    layer_name,
+                    level,
+                    ordinal,
+                    rank,
+                    join,
+                    store,
+                    &mut withdrawn,
+                    index,
+                )? {
+                    growth.push(delta);
+                }
+                continue;
+            }
+            // **A membership never shrinks** (`ingest.md` §10, R7), refused before any part is
+            // compared so that a caller who meant a generating set is told which spelling they
+            // wanted rather than having their joins applied and their leaves dropped.
+            if !join.leaving.is_empty() {
+                return Err(RegistryError::MembershipShrink {
+                    layer: layer_name.to_string(),
+                    key: join.key.clone(),
+                });
+            }
             let parts = self.prepare_fills(
                 layer_name,
                 level,
@@ -2017,12 +2142,22 @@ impl LayerRegistry {
             if join.joining.is_empty() {
                 continue;
             }
-            growth.push((ordinal, &join.joining));
+            growth.push(crate::wal::MembershipGrowth {
+                ordinal,
+                joining: crate::membership::serialise_members(&join.joining),
+                leaving: Vec::new(),
+                set: crate::wal::GrownSet::Membership,
+            });
         }
         Ok(PreparedGrow {
-            growth: crate::membership::growth_record(layer_name, level, growth),
+            growth: (!growth.is_empty()).then(|| WalRecord::ArtifactGrow {
+                layer: layer_name.to_string(),
+                level,
+                growth,
+            }),
             fills,
             filled,
+            withdrawn,
         })
     }
 
@@ -3487,7 +3622,7 @@ mod tests {
     // ---- The fill rule (`ingest.md` §1.1, §1.5; decision 0136 R3, R4, R5) ----------------------
 
     /// A layer declaring one supplied content that needs no generating set, so a content can be
-    /// filled without a set page (track T2b).
+    /// filled on its own.
     fn described(name: &str) -> LayerDeclaration {
         let mut d = declaration(name);
         d.content.supplied = vec![tessera_types::layer::SuppliedContent {
@@ -3889,10 +4024,11 @@ mod tests {
     }
 
     /// **A content fill on a layer whose content requires every member visible is refused**: a
-    /// fill carries no generating set, and the set page is track T2b's. The refusal is the one a
-    /// publication with an empty set draws.
+    /// fill carries no generating set, a set moving only by a page at its rank, and a content
+    /// served on an empty set is served to everyone. The refusal is the one a publication with an
+    /// empty set draws.
     #[test]
-    fn a_content_fill_needing_a_generating_set_is_refused_until_the_set_page_exists() {
+    fn a_content_fill_needing_a_generating_set_is_refused() {
         let mut reg = LayerRegistry::new();
         let mut store = ArtifactStore::new();
         let mut alloc = Allocator::new(0);
@@ -3910,7 +4046,7 @@ mod tests {
             .prepare_grow("topics/all", 0, &[join], &store)
             .unwrap_err();
         assert!(
-            matches!(&refused, RegistryError::Content { detail, .. } if detail.contains("cannot carry a generating set")),
+            matches!(&refused, RegistryError::Content { detail, .. } if detail.contains("carries no generating set")),
             "{refused}"
         );
     }
@@ -4027,7 +4163,7 @@ mod tests {
     }
 
     /// **A generating set beside a content fill is refused**, whatever the layer's requirement:
-    /// a fill carries no set until the set page exists, and dropping one the caller supplied
+    /// a fill carries no set, a set moving by a page at its rank, and dropping one the caller supplied
     /// would serve the content against a set they did not declare. The same set on a new key is
     /// the publication's own `422`, so the two doors agree.
     #[test]
@@ -4050,7 +4186,7 @@ mod tests {
             .prepare_put("topics/t", 0, &[with_set], &store, &mut alloc)
             .unwrap_err();
         assert!(
-            matches!(&refused, RegistryError::Content { detail, .. } if detail.contains("cannot carry one until the set page exists")),
+            matches!(&refused, RegistryError::Content { detail, .. } if detail.contains("a content fill carries none")),
             "{refused:?}"
         );
         assert!(store.get("topics/t", 0, 0).unwrap().contents.is_empty());

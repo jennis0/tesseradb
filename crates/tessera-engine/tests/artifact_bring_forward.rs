@@ -28,6 +28,7 @@ use tessera_types::EntityId;
 
 const WHOLE_MAP: [f64; 4] = [0.0, 0.0, 1000.0, 1000.0];
 const LAYER: &str = "clusters/a";
+const LABELS: &str = "topics/a";
 
 /// **No existence criterion**, as in the fold's and the growth's own cases: these assertions are
 /// about what a count *is*, and a criterion would turn a wrong count into an absence, which is the
@@ -56,6 +57,21 @@ fn declaration(name: &str, layout: Option<ServingLayout>) -> LayerDeclaration {
         layout,
         shape: None,
     }
+}
+
+/// The same layer declaring one supplied content, so its artifacts carry generating sets and a
+/// page at a rank has something to move.
+fn label_declaration(name: &str) -> LayerDeclaration {
+    let mut declaration = declaration(name, None);
+    declaration.content = ContentDeclaration {
+        computed: Vec::new(),
+        supplied: vec![tessera_types::layer::SuppliedContent {
+            name: "label".into(),
+            ty: "text".into(),
+            require_member_visibility: tessera_types::layer::SuppliedRequirement::All,
+        }],
+    };
+    declaration
 }
 
 /// The same layer with an **open** value set, so a batch naming a key no artifact holds mints one.
@@ -101,6 +117,12 @@ impl Fixture {
         let map = source_to_new_map(&self.root, "v00000");
         source_ids.map(|s| EntityId::new(map[&s])).collect()
     }
+
+    /// The corpus entities behind a list of source ids, for the sets a page names.
+    fn ids(&self, source_ids: &[u64]) -> Vec<EntityId> {
+        let map = source_to_new_map(&self.root, "v00000");
+        source_ids.iter().map(|s| EntityId::new(map[s])).collect()
+    }
 }
 
 fn artifacts_of(engine: &Engine) -> Vec<ArtifactOut> {
@@ -125,6 +147,11 @@ fn served(engine: &Engine) -> Vec<(String, u64)> {
     out
 }
 
+/// A publication and the tick that publishes its delta into the level's row forms.
+///
+/// **Two moments** (`ingest.md` §1.3): the acknowledgement means durable, and the write reaches
+/// what a viewer is served at the next publication. Every assertion here is about what is served,
+/// so the tick belongs in the helper rather than in each test.
 fn publish(engine: &Engine, key: &str, members: Vec<EntityId>) {
     engine
         .publish_artifacts(
@@ -133,6 +160,7 @@ fn publish(engine: &Engine, key: &str, members: Vec<EntityId>) {
             vec![IncomingArtifact::from_entities(Some(key.into()), members)],
         )
         .expect("a publication into a registered layer");
+    tick(engine);
 }
 
 fn grow(engine: &Engine, key: &str, members: Vec<EntityId>) {
@@ -143,6 +171,56 @@ fn grow(engine: &Engine, key: &str, members: Vec<EntityId>) {
             vec![IncomingGrowth::from_entities(key.into(), members)],
         )
         .expect("points joining an artifact that exists is an ordinary write");
+    tick(engine);
+}
+
+/// Publish one artifact carrying a content per generating set given, and tick.
+fn publish_labelled(
+    engine: &Engine,
+    fx: &Fixture,
+    key: &str,
+    members: Vec<EntityId>,
+    sets: &[Vec<u64>],
+) {
+    let contents: Vec<tessera_lifecycle::membership::IncomingContent> = sets
+        .iter()
+        .enumerate()
+        .map(|(rank, sources)| {
+            tessera_lifecycle::membership::IncomingContent::new(
+                vec![format!("{key} label {rank}")],
+                fx.ids(sources),
+            )
+        })
+        .collect();
+    engine
+        .publish_artifacts(
+            LABELS.into(),
+            0,
+            vec![IncomingArtifact::with_content(
+                Some(key.into()),
+                members,
+                contents,
+            )],
+        )
+        .expect("a publication carrying contents and their sets");
+    tick(engine);
+}
+
+/// One page of one content's generating set, and the tick that publishes it.
+fn page(engine: &Engine, fx: &Fixture, key: &str, rank: u16, joining: Vec<u64>, leaving: Vec<u64>) {
+    engine
+        .grow_memberships(
+            LABELS.into(),
+            0,
+            vec![IncomingGrowth::page_of_entities(
+                key.into(),
+                Some(rank),
+                fx.ids(&joining),
+                fx.ids(&leaving),
+            )],
+        )
+        .expect("a page of a generating set");
+    tick(engine);
 }
 
 /// One ingested point, under a batch key used once — a second ingest under a key already seen is
@@ -217,6 +295,7 @@ fn ingest_naming(engine: &Engine, batch: &str, names: &[&str]) -> u64 {
             },
         )
         .expect("points naming artifacts of an open layer are an ordinary write");
+    tick(engine);
     minted
 }
 
@@ -713,8 +792,13 @@ fn form_of(engine: &Engine, layer: &str) -> Vec<String> {
             .column()
             .map(|column| column.declared_size(ordinal).to_string())
             .unwrap_or_else(|| "-".to_string());
+        // **The pair, not the operator alone** (`ingest.md` §1.1): a containment test reads each
+        // generating set beside the cardinality it was derived with, so a differential that
+        // compared only the sets would pass a form whose cardinalities came from another version.
+        let sizes = rows.records().declared_sizes(ordinal);
         out.push(format!(
-            "{ordinal}: rows={membership} extent={:?} generating={generating:?} declared={declared}",
+            "{ordinal}: rows={membership} extent={:?} generating={generating:?} sizes={sizes:?} \
+             declared={declared}",
             rows.index().extent(ordinal)
         ));
     }
@@ -809,6 +893,10 @@ fn an_amended_form_equals_one_built_from_scratch() {
         // and after the publication.
         let builds = engine.artifact_cache_builds().0;
         let merged = merge(&engine);
+        // **No second merge**, so that what follows is the writes and nothing else: the ticks that
+        // publish them would otherwise take the merge policy's next chance and renumber rows the
+        // comparison below holds fixed.
+        engine.set_merge_for_test(false);
         let after_merge = form_of(&engine, LAYER);
         assert_eq!(
             served(&engine),
@@ -871,4 +959,77 @@ fn an_amended_form_equals_one_built_from_scratch() {
             }
         }
     }
+}
+
+/// **A level whose generating sets are paged is maintained into the form a build produces.**
+///
+/// The differential above moves memberships; this one moves the other set an artifact carries. A
+/// page of joins is unioned into the served operator, a page holding a leave re-derives that
+/// operator from entity truth, and a page that empties a set withdraws the content and moves every
+/// rank above it — three arms, one structure, compared against the level projected from scratch
+/// over the same records: operator for operator and cardinality for cardinality
+/// (`ingest.md` §1.1, §4.1).
+#[test]
+fn a_paged_generating_set_is_maintained_into_the_form_a_build_produces() {
+    let fx = fixture();
+    let engine = fx.open();
+    engine.register_layer(label_declaration(LABELS)).unwrap();
+
+    // Two artifacts, one carrying two ranked contents so a withdrawal has a rank above it to move.
+    publish_labelled(
+        &engine,
+        &fx,
+        "t0",
+        fx.members(0..100),
+        &[(0..40).collect(), (0..80).collect()],
+    );
+    publish_labelled(
+        &engine,
+        &fx,
+        "t1",
+        fx.members(100..200),
+        &[(100..140).collect()],
+    );
+    let warm = served(&engine);
+    assert_eq!(
+        warm,
+        vec![("t0".to_string(), 100), ("t1".to_string(), 100)],
+        "both are served before anything is paged"
+    );
+
+    // Joins alone: unioned into the operator that is served.
+    page(&engine, &fx, "t0", 1, (80..90).collect(), Vec::new());
+    // A leave: the operator re-derived whole.
+    page(&engine, &fx, "t1", 0, (140..150).collect(), (100..110).collect());
+    // A page that empties rank 0 of `t0`, which withdraws it and moves rank 1 down to 0.
+    page(&engine, &fx, "t0", 0, Vec::new(), (0..40).collect());
+
+    let maintained_answers = served(&engine);
+    let maintained = form_of(&engine, LABELS);
+
+    engine.forget_artifact_forms_for_test(LABELS);
+    let rebuilt_answers = served(&engine);
+    let rebuilt = form_of(&engine, LABELS);
+
+    assert_eq!(
+        maintained_answers, rebuilt_answers,
+        "a viewer is told the same thing by the two forms"
+    );
+    assert_eq!(
+        maintained.len(),
+        rebuilt.len(),
+        "the two forms cover the same ordinals"
+    );
+    for (amended, built) in maintained.iter().zip(&rebuilt) {
+        assert_eq!(
+            amended, built,
+            "the maintained form and the built one describe different levels"
+        );
+    }
+    assert!(
+        maintained[1].contains("sizes=[90]"),
+        "t0 kept one content — the rank above the withdrawn one, moved down to rank 0 and holding \
+         the eighty it was published with plus the ten its own page joined — {}",
+        maintained[1]
+    );
 }

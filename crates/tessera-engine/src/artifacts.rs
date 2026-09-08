@@ -348,11 +348,11 @@ impl ArtifactRecords {
         }
         self.attachments[idx] = record.attached_to.clone();
         self.parents[idx] = record.parents.clone();
-        self.declared[idx] = record
-            .contents
-            .iter()
-            .map(|v| v.generated_from.cardinality())
-            .collect();
+        // **The set's stored cardinality, moved by the page that joined or left it** (`ingest.md`
+        // §1.1), rather than a count taken of the set here. The two agree — a page carries the
+        // number the delta produces and the store refuses one that disagrees — and reading the
+        // stored one is what makes the pair this form publishes the pair the page moved.
+        self.declared[idx] = record.contents.iter().map(|v| v.cardinality).collect();
     }
 
     /// What the artifact at `ordinal` hangs from, if it hangs from anything.
@@ -370,6 +370,13 @@ impl ArtifactRecords {
         self.parents
             .get(ordinal as usize)
             .map_or(&[], Vec::as_slice)
+    }
+
+    /// **Public for the differential**, on [`MembershipRows::generating`]'s reason: the pair a
+    /// containment test reads is the operator and this number, and a test that compared only the
+    /// operator would pass a form whose cardinalities came from another version of the set.
+    pub fn declared_sizes(&self, ordinal: u32) -> &[u64] {
+        self.declared(ordinal)
     }
 
     /// `|G|` per rank, entity space. Empty for a hole and for an artifact with no contents alike —
@@ -451,6 +458,20 @@ impl MembershipRows {
             self.generating.resize_with(idx + 1, Vec::new);
         }
         self.rows[idx] = Some(Arc::new(Bitmap::new()));
+        self.generating[idx] = record
+            .contents
+            .iter()
+            .map(|v| space.project_base(&v.generated_from))
+            .collect();
+    }
+
+    /// One artifact's generating sets projected again from the record — the tick's whole arm,
+    /// where a page held a leave or a fill changed which contents the artifact has. The
+    /// membership is left where it is: neither route touches it.
+    fn project_generating(&mut self, idx: usize, record: &ArtifactRecord, space: &RowSpace) {
+        if idx >= self.generating.len() {
+            return;
+        }
         self.generating[idx] = record
             .contents
             .iter()
@@ -969,6 +990,56 @@ impl ArtifactRows {
         self.records.put(idx, record);
         self.membership.put_resolved(idx, record, rows, space);
         self.membership.get(ordinal).cloned().unwrap_or_default()
+    }
+
+    /// **One generating set unioned with the entities a page joined to it** — the fast arm of the
+    /// tick's publication, for a page holding no leave (`ingest.md` §1.1, §4.1).
+    ///
+    /// Base rows, as a generating set's are (`MembershipRows::put`): a set whose members reach
+    /// outside the base projects short and can never be contained, which is the direction this
+    /// must fail in and is unchanged by a join arriving here rather than at a build.
+    ///
+    /// `false` where the ordinal is a hole or holds no content at that rank — neither is damage: a
+    /// fold retires an artifact and withdraws a content, and a page prepared before one is a page
+    /// the store applied to nothing.
+    fn grow_generating(
+        &mut self,
+        ordinal: u32,
+        rank: u16,
+        joining: &Bitmap,
+        space: &RowSpace,
+    ) -> bool {
+        let Some(sets) = self.membership.generating.get_mut(ordinal as usize) else {
+            return false;
+        };
+        let Some(set) = sets.get_mut(rank as usize) else {
+            return false;
+        };
+        set.or_inplace(&space.project_base(joining));
+        true
+    }
+
+    /// **One artifact's records entry read again, and its operators re-derived where a page held a
+    /// leave** — the whole arm of the tick's publication (`ingest.md` §1.1, §4.1).
+    ///
+    /// The records entry is always taken, because it carries the stored cardinality a page moved
+    /// and the fixed parts a fill supplied; the operators are re-projected from entity truth where
+    /// `whole` says so. The membership is untouched: neither a page nor a fill changes it.
+    fn refresh_sets(
+        &mut self,
+        ordinal: u32,
+        record: &ArtifactRecord,
+        space: &RowSpace,
+        whole: bool,
+    ) {
+        let idx = ordinal as usize;
+        if idx >= self.records.len() {
+            return;
+        }
+        self.records.put(idx, record);
+        if whole {
+            self.membership.project_generating(idx, record, space);
+        }
     }
 
     /// **Every artifact's membership extended by the extents this form does not yet cover** — what
@@ -1581,6 +1652,23 @@ struct ProjectionKey {
     live: u64,
 }
 
+impl ProjectionKey {
+    /// Whether a form held under this key answers for `wanted` — the level as last published,
+    /// which may be up to a tick behind the store (`ingest.md` §1.3, §10 ruling 6).
+    ///
+    /// Every term but the level version is an equality: a form under another prefix, of another
+    /// view, or of an attribute predicate whose value column the geometry has moved, describes
+    /// something else. The level version is a floor, because the deltas the store has taken since
+    /// reach the form at the tick and until then the form is what was published — stale in the
+    /// direction that understates.
+    fn stale_form_of(&self, wanted: &ProjectionKey) -> bool {
+        self.prefix == wanted.prefix
+            && self.view == wanted.view
+            && self.live == wanted.live
+            && self.level_version <= wanted.level_version
+    }
+}
+
 /// One row-space projection per `(view, layer, level)`, rebuilt when its [`ProjectionKey`] moves.
 ///
 /// **Costly to build and therefore never built on a request that can reuse one.**
@@ -1631,18 +1719,58 @@ struct IndexKey {
     level_version: u64,
 }
 
-/// **What one accepted write did to a level**, in the form [`ArtifactProjections::bring_forward`]
-/// applies to the row forms already held for it.
+/// **What one accepted write did to a level**, held by the executor until the next flush tick and
+/// applied to the level's row forms there ([`ArtifactProjections::publish`], `ingest.md` §1.3 and
+/// §10, ruling 6).
 ///
 /// Entity space and a delta, exactly as the log record carries it — a row-space set would be a
 /// frozen projection, and this is applied once per view over that view's own row space.
-pub enum LevelDelta<'a> {
-    /// `(ordinal, the entities joining)` — a `WalRecord::ArtifactGrow` decoded, which is the same
-    /// delta `ArtifactStore::grow` applied to the records.
-    Grown(&'a [(u32, Bitmap)]),
+///
+/// **`before` is the level version this write followed**, and it is what lets a form be brought
+/// from wherever it stands to the store's present: the deltas of an interval carry consecutive
+/// versions, so a form at version *v* takes the ones from *v* on and none of the ones it already
+/// holds.
+#[derive(Debug)]
+pub struct LevelDelta {
+    pub before: u64,
+    pub kind: DeltaKind,
+}
+
+/// The four shapes a [`LevelDelta`] takes, one per route by which artifact state enters.
+#[derive(Debug)]
+pub enum DeltaKind {
+    /// One `WalRecord::ArtifactGrow` decoded: `(ordinal, the entities joining)` per membership
+    /// it grew, which is the same delta `ArtifactStore::grow` applied to the records, and one page
+    /// per generating set it moved. One record carries both because one record moves the level's
+    /// version once.
+    Grown {
+        joins: Vec<(u32, Bitmap)>,
+        pages: Vec<SetPage>,
+    },
     /// The ordinals a publication claimed. The records themselves are read back from the store,
     /// which has already applied them.
-    Published(&'a [u32]),
+    Published(Vec<u32>),
+    /// The ordinals a fill changed. A fill supplies a fixed part — a parent list, an attachment, a
+    /// shape or a content's values — so what the form takes from it is the record again, not rows:
+    /// the membership is untouched and the ordinal's records entry and generating sets are read
+    /// from the store.
+    Filled(Vec<u32>),
+}
+
+/// One page of one content's generating set, as the row forms take it (`ingest.md` §1.1).
+#[derive(Debug)]
+pub struct SetPage {
+    pub ordinal: u32,
+    pub rank: u16,
+    /// The entities joining. Unioned into the served operator where the page holds no leave.
+    pub joining: Bitmap,
+    /// **Whether this page re-derives the artifact's operators whole from entity truth**, which a
+    /// page holding any leave does and a page of joins alone does not (`ingest.md` §1.1, §4.1). A
+    /// union cannot express a leave, and a cardinality moved down against an operator that still
+    /// holds the leaver is a pair that was never derived together. A page that empties the set
+    /// withdraws the content, which moves every rank above it, and that is re-derived for the same
+    /// reason.
+    pub whole: bool,
 }
 
 /// **Where the rows of a write's delta come from**, per level — what
@@ -2060,16 +2188,23 @@ impl ArtifactProjections {
             .map(|held| Arc::clone(&held.rows))
     }
 
-    /// File `held` under `address` unless what is there is at a later segments version, or at
-    /// the same one and a later level version — see [`Held::at`]; the second term is the same
-    /// straddle on a level publication's path, where `bring_forward` re-filed the form at the
-    /// version the write moved the level to and a build that loaded the version before finishes
-    /// afterwards. Between two forms at one coordinate the newer insert wins, which is the
-    /// replace-on-mismatch rule the map has always had.
+    /// File `held` under `address` unless what is there is later on **either** term — the segments
+    /// version its rows were brought to, or the level version its records describe (see
+    /// [`Held::at`]).
+    ///
+    /// Both terms are straddles of the same kind: a request builds a form against the generation
+    /// and the level version it loaded, and finishes after a flush has extended, a merge has
+    /// rebased or a tick has published onto the form it means to replace. Inserted on the tuple
+    /// alone, a build that straddled a flush would replace a form five level versions ahead of it
+    /// with one at a newer segments version — and since a form behind the store is *served* rather
+    /// than rebuilt (`ingest.md` §1.3), the level's masked counts would go backwards for the next
+    /// reader. A form that is later on one term and earlier on the other is therefore kept out,
+    /// and what it built is discarded; the flush or the tick that follows brings the standing form
+    /// forward, and a form neither can bring forward is dropped there and built again.
     fn insert_newest(&self, address: LevelAddress, held: Held) {
         let mut cached = self.cached.lock().unwrap_or_else(|e| e.into_inner());
         if cached.get(&address).is_some_and(|standing| {
-            (standing.at, standing.key.level_version) > (held.at, held.key.level_version)
+            standing.at > held.at || standing.key.level_version > held.key.level_version
         }) {
             return;
         }
@@ -2155,14 +2290,36 @@ impl ArtifactProjections {
             .retain(|(_, held, held_level), _| held != layer || *held_level != level);
     }
 
-    /// **Apply an accepted write to the row form already held for one `(view, layer, level)`**,
-    /// instead of leaving the next request to build the level again.
+    /// **Publish the row form of one `(view, layer, level)` from the deltas accumulated since the
+    /// last publication** — the flush tick's work, and the only moment a served form changes
+    /// (`ingest.md` §1.3, §10 ruling 6).
     ///
-    /// A growth or a publication moves the level's version, so the held form misses on its key and
-    /// the whole level is projected on whichever request arrives next — 94 to 177 s at rung 3,
-    /// inside a request, against a 60 s stream deadline
-    /// (`2026-09-03-post-flush-artifact-frames.md`). The delta that produced the miss is small and
-    /// this is where it is known, so it is applied here and the key is moved with it.
+    /// A growth, a page, a publication or a fill moves the level's version, and a form rebuilt at
+    /// each of them costs 94 to 177 s at rung 3, inside a request, against a 60 s stream deadline
+    /// (`2026-09-03-post-flush-artifact-frames.md`). The deltas that produced the moves are small
+    /// and this is where they are known, so the interval's are applied together and the key is
+    /// moved with them. A request builds no form: one whose deltas are not yet published is served
+    /// as last published, up to a tick stale, and a member not yet in an operator is not counted,
+    /// so a count can only understate ([`Self::get_or_build`]).
+    ///
+    /// **Three arms, priced in the line this logs** (`ingest.md` §4.1). A membership join and a
+    /// generating-set page of joins alone are unioned into the served operator, which is the same
+    /// set the projection would have produced. A page holding any leave re-derives that
+    /// `(artifact, view)` operator whole from entity truth, because a union cannot express a leave
+    /// and a cardinality moved down against an operator that still holds the leaver is a pair that
+    /// was never derived together. A fill re-derives the ordinal's records entry and its operators,
+    /// the membership being untouched by one.
+    ///
+    /// **The stored cardinality is published with the operator it was derived with.** Every
+    /// ordinal a page or a fill touched has its declared sizes read from the store here, in the
+    /// same pass that writes its operators, so the pair a containment test reads is the pair one
+    /// moment produced (**I3**; `ingest.md` §1.1, §6.2).
+    ///
+    /// **A level whose delta moved a generating set gives up its containment partition.** The
+    /// partition answers *does this principal's terms reach every member of G* from an expression
+    /// composed at a level version; a set that has since grown makes that answer one about a
+    /// smaller set, which passes for a principal who does not hold the new member. The level then
+    /// serves containment on the masked-count route, which asks `M_auth` itself and is exact.
     ///
     /// **Derived from the level's own records and the view's row space, both authoritative, and
     /// held per `(view, layer, level)`** — nothing per principal, exactly as a built form is
@@ -2170,15 +2327,15 @@ impl ArtifactProjections {
     /// and the tile index and column derived here are derived rather than re-adopted, because the
     /// fold's files describe the level as it was.
     ///
-    /// **`before` is the level's version as it stood when the delta was prepared.** A held form at
-    /// any other version has missed a write this cannot reconstruct, so it is dropped and the next
-    /// request builds — the state this exists to avoid, said at `warn` because it is the expensive
-    /// path returning rather than a fault.
+    /// **A form at a version no delta here follows has missed a write this cannot reconstruct**,
+    /// so it is dropped and the next request builds — said at `warn` because it is the expensive
+    /// path returning rather than a fault. A form already at or beyond the last delta's version
+    /// was built from the store after those writes and is left where it is.
     ///
     /// Nothing is held for most `(view, layer, level)` triples and this then does nothing, which is
     /// the ordinary case for a layer no request has reached.
     #[allow(clippy::too_many_arguments)]
-    pub fn bring_forward(
+    pub fn publish(
         &self,
         prefix: &str,
         view: &str,
@@ -2186,8 +2343,7 @@ impl ArtifactProjections {
         level: u32,
         store: &ArtifactStore,
         space: &RowSpace,
-        delta: &LevelDelta<'_>,
-        before: u64,
+        deltas: &[LevelDelta],
         source: Option<&DeltaRows<'_>>,
     ) {
         // **An attribute predicate has no delta to take.** Its members are the rows carrying a
@@ -2216,24 +2372,30 @@ impl ArtifactProjections {
         else {
             return;
         };
-        // **`before + 1`, never the store's current version.** Every route that changes a level's
-        // records bumps it exactly once (`ArtifactStore::bump`'s four callers), so the version this
-        // delta produces is the one it followed plus one — and reading the store instead is wrong
-        // wherever more than one record has already been applied. A window carrying a mint *and* a
-        // growth on one level applies both before either is brought forward, so the store is at
-        // `before + 2` when the first delta arrives: stamping that would file a form holding one
-        // delta under the version of two, and the second delta would then find a mismatch and drop
-        // the form it was about to complete.
-        let now = before + 1;
+        // **The deltas this form has not taken**, which is those at or after the version it
+        // stands at. The interval's deltas carry consecutive versions — every route that changes a
+        // level's records bumps it exactly once (`ArtifactStore::bump`'s callers) — so a form at
+        // version *v* is completed by the run beginning at *v*, and a form built from the store
+        // mid-interval takes only what landed after its build.
+        let pending: Vec<&LevelDelta> = deltas
+            .iter()
+            .filter(|delta| delta.before >= key.level_version)
+            .collect();
+        let now = pending
+            .last()
+            .map_or(key.level_version, |delta| delta.before + 1);
         // **Every term that would make the amendment describe something other than what is held.**
-        // A form from another prefix or another version has missed a write; a form whose rows are
-        // not rows of this row space is the merge case [`ArtifactRows::covers`] argues. Each is a
-        // form that *should* have been brought forward and was not, which is why each is said at
-        // `warn`: it is the whole-level projection returning to the request path.
+        // A form from another prefix or at a version no delta follows has missed a write; a form
+        // whose rows are not rows of this row space is the merge case [`ArtifactRows::covers`]
+        // argues. Each is a form that *should* have been published and was not, which is why each
+        // is said at `warn`: it is the whole-level projection returning to the request path.
         let reason = if key.prefix != prefix {
             Some("the form was projected under another prefix")
-        } else if key.level_version != before {
-            Some("the form is at a level version this delta does not follow")
+        } else if pending
+            .first()
+            .is_some_and(|delta| delta.before != key.level_version)
+        {
+            Some("the form is at a level version these deltas do not follow")
         } else if !(rows.covers(space) && rows.extends_to(space)) {
             // **Exactly this row space, not merely one it can answer for.** The amendment sizes
             // the tile index and the column to `space`, so a form holding rows above what `space`
@@ -2251,9 +2413,18 @@ impl ArtifactProjections {
                 level,
                 view = %view,
                 reason,
-                "a level's held row form could not be brought forward and is dropped; the next \
+                "a level's held row form could not be published and is dropped; the next \
                  request naming this level projects it whole"
             );
+            return;
+        }
+        if pending.is_empty() {
+            // The form was built from the store after every delta held here. Nothing to apply, and
+            // it goes back where it was.
+            self.cached
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(map_key, Held { key, at, rows });
             return;
         }
 
@@ -2266,51 +2437,122 @@ impl ArtifactProjections {
         let shared = Arc::strong_count(&rows) > 1;
         let amended = Arc::make_mut(&mut rows);
         let cloned_ms = started.elapsed().as_millis() as u64;
-        // **The rows this delta gave each artifact**, gathered as the membership takes them, so the
-        // column is amended at exactly those and the pack is never rewritten. Empty on an
+        // **The rows these deltas gave each artifact**, gathered as the membership takes them, so
+        // the column is amended at exactly those and the pack is never rewritten. Empty on an
         // artifact-major level, which has no column to amend.
         let row_major = amended.layout.is_row_major();
         let mut added: Vec<(u32, u32)> = Vec::new();
-        match delta {
-            LevelDelta::Grown(joins) => {
-                for (ordinal, joining) in *joins {
-                    let fresh = amended.grow_rows(*ordinal, joining, space);
-                    if row_major {
-                        added.extend(fresh.iter().map(|row| (row, *ordinal)));
-                    }
-                }
-            }
-            LevelDelta::Published(ordinals) => {
-                for ordinal in *ordinals {
-                    if let Some(record) = store.get(layer, level, *ordinal) {
-                        let fresh = match source {
-                            DeltaRows::Projected => amended.publish_at(*ordinal, record, space),
-                            DeltaRows::Resolved(rows) => {
-                                amended.publish_resolved(*ordinal, record, rows(*ordinal), space)
-                            }
-                        };
+        // The three arms of `ingest.md` §4.1, counted for the line below: sets unioned into the
+        // served operator, operators re-derived whole, and ordinals published.
+        let mut unions = 0u64;
+        let mut published = 0u64;
+        // Ordinals whose records entry is read again — a fill's parts, and the stored cardinality
+        // a page moved — and those whose operators are re-derived from entity truth.
+        let mut refresh: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
+        let mut rederive: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
+        let mut sets_moved = false;
+        for delta in &pending {
+            match &delta.kind {
+                DeltaKind::Grown { joins, pages } => {
+                    for (ordinal, joining) in joins {
+                        let fresh = amended.grow_rows(*ordinal, joining, space);
+                        unions += 1;
                         if row_major {
                             added.extend(fresh.iter().map(|row| (row, *ordinal)));
+                        }
+                    }
+                    sets_moved |= !pages.is_empty();
+                    for page in pages {
+                        refresh.insert(page.ordinal);
+                        if page.whole {
+                            rederive.insert(page.ordinal);
+                            continue;
+                        }
+                        // A join alone: the same set the projection would have produced, reached
+                        // by one union over the page's own members. Base rows, as a generating
+                        // set's are (`MembershipRows::put`).
+                        if amended.grow_generating(page.ordinal, page.rank, &page.joining, space) {
+                            unions += 1;
+                        }
+                    }
+                }
+                DeltaKind::Filled(ordinals) => {
+                    for ordinal in ordinals {
+                        match source {
+                            DeltaRows::Projected => {
+                                refresh.insert(*ordinal);
+                                rederive.insert(*ordinal);
+                            }
+                            // **A spatial level's membership is its shape**, so a fill that
+                            // supplied one gives the artifact rows it did not have. The ordinal is
+                            // re-placed from the resolution the caller made over every live
+                            // segment, which is the arm a publication into such a level takes.
+                            DeltaRows::Resolved(rows) => {
+                                if let Some(record) = store.get(layer, level, *ordinal) {
+                                    published += 1;
+                                    let fresh = amended.publish_resolved(
+                                        *ordinal,
+                                        record,
+                                        rows(*ordinal),
+                                        space,
+                                    );
+                                    if row_major {
+                                        added.extend(fresh.iter().map(|row| (row, *ordinal)));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                DeltaKind::Published(ordinals) => {
+                    for ordinal in ordinals {
+                        if let Some(record) = store.get(layer, level, *ordinal) {
+                            published += 1;
+                            let fresh = match source {
+                                DeltaRows::Projected => amended.publish_at(*ordinal, record, space),
+                                DeltaRows::Resolved(rows) => amended.publish_resolved(
+                                    *ordinal,
+                                    record,
+                                    rows(*ordinal),
+                                    space,
+                                ),
+                            };
+                            if row_major {
+                                added.extend(fresh.iter().map(|row| (row, *ordinal)));
+                            }
                         }
                     }
                 }
             }
         }
+        // **The operator and the cardinality beside it, from one read of the store.** A
+        // re-derivation projects the artifact's sets again; a refresh alone takes the declared
+        // sizes the pages moved. Both read the record as it stands now, which is what makes the
+        // pair a containment test reads a pair one moment produced.
+        for ordinal in &refresh {
+            if let Some(record) = store.get(layer, level, *ordinal) {
+                amended.refresh_sets(*ordinal, record, space, rederive.contains(ordinal));
+            }
+        }
         let lost = amended.amend_derived(&added, total_rows(space));
         amended.covering(space);
-        // **What the write cost the executor thread**, which is the whole point of applying a delta
-        // rather than projecting the level: `cloned_ms` is the copy a concurrent reader forces (see
-        // above), `elapsed_ms` the amendment and the tile index beside it. Operator plane only —
-        // counts and durations, naming no artifact and no principal.
+        // **What the interval cost the executor thread**, which is the whole point of applying
+        // deltas rather than projecting the level: `cloned_ms` is the copy a concurrent reader
+        // forces (see above), `elapsed_ms` the amendment and the tile index beside it. Operator
+        // plane only — counts and durations, naming no artifact and no principal.
         tracing::info!(
             layer = %layer,
             level,
             view = %view,
+            deltas = pending.len(),
+            unions,
+            rederived = rederive.len(),
+            published,
             rows_added = added.len(),
             cloned = shared,
             cloned_ms,
             elapsed_ms = started.elapsed().as_millis() as u64,
-            "a level's held row form took a write's delta"
+            "a level's row forms are published from the deltas since the last tick"
         );
         if lost {
             self.fallbacks
@@ -2323,16 +2565,37 @@ impl ArtifactProjections {
                  artifact-major. Every answer is unchanged; the layout is not"
             );
         }
-        // **The containment partition is carried over untouched, and that is exact.** It is
-        // composed from the level's records at a version and answers per `(ordinal, rank)`; a
-        // growth changes no content's generating set, and a publication only appends ordinals,
-        // which `ContainmentAnswers::covers` reports as uncovered and sends to the masked-count
-        // route — the route that asks `M_auth` itself.
+        // **A publication carries the containment partition over; a page of a generating set takes
+        // it away.** The partition is composed from the level's records at a version and answers
+        // per `(ordinal, rank)`. A membership join changes no set, and a publication only appends
+        // ordinals, which `ContainmentAnswers::covers` reports as uncovered and sends to the
+        // masked-count route. A page *does* change a set: against a set that has since grown the
+        // partition's answer is one about a smaller set, which passes for a principal who does not
+        // hold the new member. So the level gives the structure up and serves containment on the
+        // masked-count route, which asks `M_auth` itself.
+        if sets_moved && amended.partition.is_some() {
+            amended.partition = None;
+            tracing::info!(
+                layer = %layer,
+                level,
+                view = %view,
+                "a generating set moved, so this level's containment partition is dropped and \
+                 containment is answered from the mask"
+            );
+        }
         let key = ProjectionKey {
             level_version: now,
             ..key
         };
-        self.insert_newest(map_key, Held { key, at, rows });
+        // **Filed rather than offered.** This runs on the executor, which holds the newest of both
+        // versions: the form came out of the map a moment ago at the live row space, and the
+        // deltas are every write the store has taken. A build that straddled this publication
+        // describes fewer records over no newer a row space, so there is nothing here for
+        // [`Self::insert_newest`] to protect.
+        self.cached
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(map_key, Held { key, at, rows });
     }
 
     /// **Extend every stored level's held form in one view by the segment a flush has published.**
@@ -2619,9 +2882,19 @@ impl ArtifactProjections {
             // form describes this level's records; [`ArtifactRows::covers`] says its rows are rows
             // of this row space — which the key cannot, because a flush and a merge move no term
             // of it. See that method for why the row space is not simply a fourth term here: a
-            // flush *brings the form forward* rather than invalidating it, so a form whose rows
-            // are one segment short is a form to extend and not one to rebuild.
-            if held.key == key && held.rows.covers(space) {
+            // flush *extends the form* rather than invalidating it, so a form whose rows are one
+            // segment short is a form to extend and not one to rebuild.
+            //
+            // **The level version is a floor and not an equality** (`ingest.md` §1.3, §10 ruling
+            // 6). A write moves the version and the form takes the delta at the next tick, so
+            // between the two the held form is the level as last published: a request is served
+            // that, up to a tick stale, rather than building the level again on the request path.
+            // What it costs is a member not yet in an operator, which is not counted — a count
+            // understates and never the reverse — and a containment test reads the operator and
+            // the cardinality this form published together. Every other term of the key is an
+            // equality: a form under another prefix, or of another view, or of an attribute
+            // predicate whose value column the geometry has moved, describes something else.
+            if held.key.stale_form_of(&key) && held.rows.covers(space) {
                 return Arc::clone(&held.rows);
             }
         }

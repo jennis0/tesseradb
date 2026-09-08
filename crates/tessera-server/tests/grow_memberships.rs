@@ -106,6 +106,8 @@ async fn publish(server: &TestServer, key: &str, body_members: Vec<String>) -> S
     let status = resp.status().as_u16();
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(status, 201, "{body}");
+    // Durable at the acknowledgement, served from the next publication (`ingest.md` §1.3).
+    tick(server).await;
     body["artifacts"][0]["tessera_id"]
         .as_str()
         .expect("a publication answers an identifier")
@@ -123,7 +125,12 @@ async fn grow_raw(server: &TestServer, body: serde_json::Value) -> (u16, serde_j
         .await
         .unwrap();
     let status = resp.status().as_u16();
-    (status, resp.json().await.unwrap_or(serde_json::Value::Null))
+    let body = resp.json().await.unwrap_or(serde_json::Value::Null);
+    if status < 300 {
+        // Durable at the acknowledgement, served from the next publication (`ingest.md` §1.3).
+        tick(server).await;
+    }
+    (status, body)
 }
 
 /// Grow under external addressing, one or more artifacts.
@@ -614,7 +621,8 @@ async fn tessera_addressing_grows_under_the_current_idset_and_refuses_a_stale_on
     assert_eq!(status, 422, "{body}");
 }
 
-/// The body is keys, members and the fixed parts (`ingest.md` §1.5). A field outside that set, a
+/// The body is keys, the rank a row pages, the members joining and leaving, and the fixed parts
+/// (`ingest.md` §1.1, §1.5). A field outside that set, a
 /// missing key and a batch naming nothing are each refused at decoding; a part this layer cannot
 /// hold — a shape on a layer declaring none, content on a layer declaring none, a parent on a flat
 /// layer, an attachment into an undeclared layer — is refused by the engine, the whole batch
@@ -641,7 +649,7 @@ async fn a_growth_body_carries_keys_members_and_the_fixed_parts_and_nothing_else
     }
     let (status, body) = grow(
         &server,
-        json!([{ "key": "a", "members": members(10..20), "leaving": [] }]),
+        json!([{ "key": "a", "members": members(10..20), "excluded": [] }]),
     )
     .await;
     assert_eq!(status, 422, "a field outside the body: {body}");

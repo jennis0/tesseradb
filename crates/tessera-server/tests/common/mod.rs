@@ -652,6 +652,33 @@ pub async fn authorise(server: &TestServer, terms: &[&str]) -> serde_json::Value
     }
 }
 
+/// **Force a tick and wait for it** — the moment a level's row forms are published from the deltas
+/// accumulated since the last one (`ingest.md` §1.3, §10 ruling 6).
+///
+/// A write is durable at its acknowledgement and visible at the next publication, so a test that
+/// writes on the control plane and then reads what a viewer is served puts this between the two.
+/// `POST /control/flush` pulls the tick's deadline forward; a tick against an empty buffer
+/// publishes the row forms and flushes nothing.
+pub async fn tick(server: &TestServer) {
+    let before = server.state.engine.write_executor_stats().ticks;
+    let resp = server
+        .client
+        .post(server.control_url("/control/flush"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 202);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while server.state.engine.write_executor_stats().ticks == before {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the tick that publishes the row forms never ran"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+}
+
 /// `POST /v1/items/{tessera_id}` with no body fields set (no pin, no idset).
 pub async fn post_item(server: &TestServer, token: &str, tessera_id: u64) -> reqwest::Response {
     server

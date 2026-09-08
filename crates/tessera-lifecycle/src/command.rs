@@ -540,6 +540,14 @@ pub struct MembershipGrown {
     /// How many of the fixed parts the join carried were absent and are now held (`ingest.md`
     /// §1.5). A part held identically counts nothing, on `joined`'s rule.
     pub filled: u64,
+    /// How many of the leaving members a generating-set page took out of it, on `joined`'s rule
+    /// and bounded by the caller's own list. Zero on a membership row: a membership never shrinks
+    /// (`ingest.md` §10, R7).
+    pub left: u64,
+    /// The rank this page emptied, where it emptied one. The content record is removed by the same
+    /// delta and does not return when the set refills; the caller supplies it again
+    /// (`ingest.md` §1.1). `None` on every other row.
+    pub withdrawn: Option<u16>,
 }
 
 /// `PUT /control/attributes`' body as the executor resolves it: the `[[attribute]]` block minus

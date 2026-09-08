@@ -3872,6 +3872,8 @@ impl Engine {
                     tessera_id,
                     joined: receipt.joined,
                     filled: receipt.filled,
+                    left: receipt.left,
+                    withdrawn: receipt.withdrawn,
                 })
             })
             .collect()
@@ -3962,6 +3964,11 @@ pub struct GrownMembership {
     /// How many of the fixed parts the join carried were absent and are now held
     /// (`ingest.md` §1.5).
     pub filled: u64,
+    /// How many of the leaving members a generating-set page took out of it.
+    pub left: u64,
+    /// The rank this page emptied, where it emptied one: the content is withdrawn and the caller
+    /// supplies it again (`ingest.md` §1.1).
+    pub withdrawn: Option<u16>,
 }
 
 /// What [`Engine::put_artifacts`] answers: the identifiers in the caller's order and the batch's

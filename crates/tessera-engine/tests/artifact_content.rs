@@ -891,6 +891,7 @@ fn a_publication_after_the_table_is_built_rebuilds_it() {
             )],
         )
         .unwrap();
+    tick(&engine);
 
     let after = artifacts_of(&engine, &full_coverage_credential());
     assert_eq!(after.len(), 3);

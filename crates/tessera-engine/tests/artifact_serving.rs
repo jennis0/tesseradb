@@ -438,6 +438,7 @@ fn a_publication_reaches_the_next_viewport_through_the_projection_cache() {
             )],
         )
         .unwrap();
+    tick(&engine);
     assert_eq!(artifacts_of(&engine, &full_coverage_credential()).len(), 1);
 
     // The projection for this level is now cached. A second batch must invalidate it: a cache that
@@ -453,6 +454,7 @@ fn a_publication_reaches_the_next_viewport_through_the_projection_cache() {
             )],
         )
         .unwrap();
+    tick(&engine);
     let after = artifacts_of(&engine, &full_coverage_credential());
     assert_eq!(after.len(), 2);
     assert_eq!(after[1].masked_count, 100);

@@ -456,6 +456,18 @@ pub struct IncomingGrowth {
     /// The entities joining. Empty is a no-op rather than a refusal: nothing joining is a thing a
     /// caller can honestly say, and it discloses nothing.
     pub joining: Bitmap,
+    /// The entities leaving, on `joining`'s terms and applied after it (`ingest.md` §1.1).
+    ///
+    /// **Only a generating set may shrink.** A membership never does (`ingest.md` §10, R7), so a
+    /// non-empty set here with `rank` absent refuses the batch.
+    pub leaving: Bitmap,
+    /// Which of the artifact's sets this row moves: `None` the membership, `Some(k)` the
+    /// generating set of the content at rank *k* (`ingest.md` §1.1, §1.5).
+    ///
+    /// **A row moves one set and fills no fixed part.** A set page and a fixed part in one row
+    /// would be a content supplied beside its own set, which the publication route is the place
+    /// for; a row carrying both is refused.
+    pub rank: Option<u16>,
     /// The fixed parts supplied for the artifact; every field empty on a growth that only joins.
     pub parts: FixedParts,
 }
@@ -464,9 +476,10 @@ pub struct IncomingGrowth {
 /// the parent list, the attachment, the shape, and each content's values at its rank.
 ///
 /// A content here carries values and no generating set: the set is a set part and travels as a
-/// growth at the same rank ([`crate::wal::GrownSet::GeneratingSet`], track T2b). Until that
-/// lands, a content on a layer whose content requires every member visible has no set to be
-/// tested against and is refused, as a publication carrying an empty set is.
+/// page at the same rank ([`crate::wal::GrownSet::GeneratingSet`]). A content on a layer whose
+/// content requires every member visible therefore has no set to be tested against and is
+/// refused, as a publication carrying an empty set is; such a content and its set are supplied
+/// together at publication.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct FixedParts {
     /// The parents, each named by the parent's own key, on [`IncomingArtifact::parent_keys`]'s
@@ -498,6 +511,27 @@ impl IncomingGrowth {
         IncomingGrowth {
             key,
             joining: bitmap_of_entities(joining),
+            leaving: Bitmap::new(),
+            rank: None,
+            parts: FixedParts::default(),
+        }
+    }
+
+    /// A page of one set: the entities joining it and the entities leaving it, at the content's
+    /// rank or, with no rank, the membership (`ingest.md` §1.1). A membership never shrinks, so a
+    /// page with no rank and entities leaving is refused at `LayerRegistry::prepare_grow`, which
+    /// is where the caller is told which spelling they wanted.
+    pub fn page_of_entities(
+        key: String,
+        rank: Option<u16>,
+        joining: impl IntoIterator<Item = EntityId>,
+        leaving: impl IntoIterator<Item = EntityId>,
+    ) -> Self {
+        IncomingGrowth {
+            key,
+            joining: bitmap_of_entities(joining),
+            leaving: bitmap_of_entities(leaving),
+            rank,
             parts: FixedParts::default(),
         }
     }
@@ -1509,16 +1543,6 @@ impl ArtifactStore {
     ) -> usize {
         let mut refused = 0;
         for grown in growth {
-            // A leave, or a delta to a generating set, has no apply path until T2b (`ingest.md`
-            // §1.1, §8). Refused and counted on the fill's argument: the replay refuses to open
-            // before it reaches here (`crate::wal::unbuilt_track`), and applying the joins of
-            // such a record while passing over its leaves would serve a set nobody declared.
-            if !grown.leaving.is_empty()
-                || matches!(grown.set, crate::wal::GrownSet::GeneratingSet { .. })
-            {
-                refused += 1;
-                continue;
-            }
             // Damage is a refusal, not an empty delta, on the publication's argument: a growth
             // decoded short is an acked join that silently did not happen, and the artifact then
             // serves the count it had before — which nothing distinguishes from a criterion it
@@ -1527,7 +1551,36 @@ impl ArtifactStore {
                 refused += 1;
                 continue;
             };
-            self.grow(layer, level, grown.ordinal, &joining);
+            let Some(leaving) = deserialise_leaving(&grown.leaving) else {
+                refused += 1;
+                continue;
+            };
+            match grown.set {
+                crate::wal::GrownSet::Membership => {
+                    // A membership never shrinks (`ingest.md` §10, R7). The route refuses a
+                    // leaving set before it appends, so one here is a record written by a binary
+                    // that did not hold the rule, and applying the joins while passing over the
+                    // leaves would serve a set nobody declared.
+                    if !leaving.is_empty() {
+                        refused += 1;
+                        continue;
+                    }
+                    self.grow(layer, level, grown.ordinal, &joining);
+                }
+                crate::wal::GrownSet::GeneratingSet { rank, cardinality } => {
+                    if !self.grow_set(
+                        layer,
+                        level,
+                        grown.ordinal,
+                        rank,
+                        &joining,
+                        &leaving,
+                        cardinality,
+                    ) {
+                        refused += 1;
+                    }
+                }
+            }
         }
         // **Held from here until a whole rewrite covers it, and `mark_published` does not release
         // it.** The append-only packer starts at the level's high-water and a grown record sits
@@ -1577,6 +1630,68 @@ impl ArtifactStore {
             return;
         };
         record.members.to_mut().or_inplace(joining);
+    }
+
+    /// **The one way a generating set changes**, taken by the live page and by replay alike
+    /// (`ingest.md` §1.1). `false` says the record disagreed with what the log recorded, which the
+    /// caller counts as damage.
+    ///
+    /// **Joins before leaves**, within this one delta: a page naming an entity in both ends with
+    /// it out of the set, which is the order `ingest.md` §1.1 states and the order that makes a
+    /// paged replacement safe (spec §2.2 — every intermediate set is a superset of the old and
+    /// the new).
+    ///
+    /// **The cardinality is recomputed and checked, never taken on trust.** The number in the
+    /// record is the one the executor derived when it prepared the page; if the set this record
+    /// names no longer produces it, the operator published at the next tick and the cardinality
+    /// beside it were derived from two different sets, and a containment test over the pair would
+    /// be a test nobody made. Refusing leaves the set as it was, which fails containment closed.
+    ///
+    /// **A delta that empties the set withdraws the content** (`ingest.md` §1.1): the entry
+    /// leaves the artifact's ranked list, and a content the caller wants back is supplied again.
+    /// An empty set is contained in every mask, so a content retained on one would serve to every
+    /// principal reaching the artifact — decision 0107's rule, re-made at the caller's door.
+    /// Withdrawal is [`withdraw_content_of_retired_members`]'s disposition and shifts the ranks
+    /// above it down, as the fold's does.
+    ///
+    /// **An ordinal naming no record, and a rank naming no content, change nothing** and are not
+    /// damage: the first is a hole a fold left, on [`Self::grow`]'s rule, and the second is a
+    /// content that same fold withdrew.
+    #[allow(clippy::too_many_arguments)]
+    fn grow_set(
+        &mut self,
+        layer: &str,
+        level: u32,
+        ordinal: u32,
+        rank: u16,
+        joining: &Bitmap,
+        leaving: &Bitmap,
+        cardinality: u64,
+    ) -> bool {
+        let Some(record) = self
+            .levels
+            .get_mut(&(layer.to_string(), level))
+            .and_then(|slots| slots.get_mut(ordinal as usize))
+            .and_then(Option::as_mut)
+        else {
+            return true;
+        };
+        let Some(content) = record.contents.get_mut(rank as usize) else {
+            return true;
+        };
+        let mut next = content.generated_from.clone();
+        next.or_inplace(joining);
+        next.andnot_inplace(leaving);
+        if next.cardinality() != cardinality {
+            return false;
+        }
+        if cardinality == 0 {
+            record.contents.remove(rank as usize);
+            return true;
+        }
+        content.generated_from = next;
+        content.cardinality = cardinality;
+        true
     }
 
     /// Replace one artifact's membership with the **same** membership held somewhere else — the
@@ -2675,6 +2790,18 @@ pub fn growth_record<'a>(
         level,
         growth,
     })
+}
+
+/// A growth's **leaving** set, where no bytes at all is the empty set.
+///
+/// The membership route writes no bytes rather than the serialisation of an empty bitmap
+/// (`ingest.md` §10, R7: a membership never shrinks), so the two spellings of *nothing leaves*
+/// have to read alike. Bytes that are neither are damage, on [`deserialise_members`]'s rule.
+pub fn deserialise_leaving(bytes: &[u8]) -> Option<Bitmap> {
+    if bytes.is_empty() {
+        return Some(Bitmap::new());
+    }
+    deserialise_members(bytes)
 }
 
 /// The inverse, refusing bytes that are not a bitmap.

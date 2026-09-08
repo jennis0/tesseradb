@@ -106,7 +106,12 @@ async fn put(
         .await
         .unwrap();
     let status = resp.status().as_u16();
-    (status, resp.json().await.unwrap_or(serde_json::Value::Null))
+    let body = resp.json().await.unwrap_or(serde_json::Value::Null);
+    if status < 300 {
+        // Durable at the acknowledgement, served from the next publication (`ingest.md` §1.3).
+        tick(server).await;
+    }
+    (status, body)
 }
 
 async fn patch(
@@ -123,7 +128,12 @@ async fn patch(
         .await
         .unwrap();
     let status = resp.status().as_u16();
-    (status, resp.json().await.unwrap_or(serde_json::Value::Null))
+    let body = resp.json().await.unwrap_or(serde_json::Value::Null);
+    if status < 300 {
+        // Durable at the acknowledgement, served from the next publication (`ingest.md` §1.3).
+        tick(server).await;
+    }
+    (status, body)
 }
 
 /// The layer's served rows for the broad principal, by key.
@@ -439,5 +449,82 @@ async fn a_key_repeated_in_one_batch_with_a_fixed_part_is_422_at_both_routes() {
             ("b".to_string(), 10),
             ("k".to_string(), 20)
         ]
+    );
+}
+
+/// **A page of a generating set on the wire** (`ingest.md` §1.1; contracts §3.4): `rank` names the
+/// content whose set moves, `members` join it and `leaving` leave it, joins before leaves; the
+/// acknowledgement reports both counts, and the page that empties the set reports the rank it
+/// withdrew beside the key.
+#[tokio::test]
+async fn a_page_moves_a_generating_set_and_the_ack_reports_what_it_did() {
+    let tmp = TempDir::new().unwrap();
+    let server = serve(&tmp).await;
+    let mut declaration = declaration(TOPICS, true, "flat");
+    declaration["content"]["supplied"][0]["require_member_visibility"] = json!("all");
+    register(&server, declaration).await;
+
+    let (status, body) = put(
+        &server,
+        TOPICS,
+        json!([{
+            "key": "t0",
+            "members": members(0..100),
+            "content": [{ "values": ["a label"], "generated_from": members(0..10) }]
+        }]),
+    )
+    .await;
+    assert_eq!(status, 201, "{body}");
+    assert_eq!(served(&server, TOPICS).await, vec![("t0".to_string(), 100)]);
+
+    // Joins and leaves in one page, one member in both lists: joins first, so it leaves.
+    let (status, body) = patch(
+        &server,
+        TOPICS,
+        json!([{ "key": "t0", "rank": 0, "members": members(10..15), "leaving": members(5..12) }]),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["artifacts"][0]["joined"], 5, "{body}");
+    assert_eq!(
+        body["artifacts"][0]["left"], 7,
+        "counted against the set the joins have already entered: {body}"
+    );
+    assert!(body["artifacts"][0].get("withdrawn").is_none(), "{body}");
+
+    // **A membership never shrinks** (R7): the same page without a rank is refused.
+    let (status, body) = patch(
+        &server,
+        TOPICS,
+        json!([{ "key": "t0", "leaving": members(0..1) }]),
+    )
+    .await;
+    assert_eq!(status, 422, "{body}");
+    assert!(body.to_string().contains("never shrinks"), "{body}");
+
+    // A rank the artifact holds no content at is refused, and so is a set beside a fixed part.
+    let (status, body) = patch(
+        &server,
+        TOPICS,
+        json!([{ "key": "t0", "rank": 3, "members": members(20..21) }]),
+    )
+    .await;
+    assert_eq!(status, 422, "{body}");
+    assert!(body.to_string().contains("no content at rank 3"), "{body}");
+
+    // The page that empties the set: the content is withdrawn, the ack names the rank and the key,
+    // and the artifact is withheld because its layer declares supplied content it now lacks.
+    let (status, body) = patch(
+        &server,
+        TOPICS,
+        json!([{ "key": "t0", "rank": 0, "leaving": members(0..15) }]),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["artifacts"][0]["withdrawn"], 0, "{body}");
+    assert_eq!(body["artifacts"][0]["key"], "t0", "{body}");
+    assert!(
+        served(&server, TOPICS).await.is_empty(),
+        "an artifact with none of the content its layer declares is withheld whole"
     );
 }

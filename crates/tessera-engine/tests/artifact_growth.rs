@@ -182,7 +182,11 @@ fn publish(
     ids[0]
 }
 
-/// Points join `c0`.
+/// Points join `c0`, and the tick that publishes the join into the level's row forms.
+///
+/// **The two are separate moments** (`ingest.md` §1.3): the acknowledgement means durable and the
+/// join reaches what a viewer is served at the next publication. Every assertion below is about
+/// what is served, so the tick is here rather than in each test.
 fn grow(fx: &Fixture, engine: &Engine, sources: std::ops::Range<u64>) {
     engine
         .grow_memberships(
@@ -194,6 +198,7 @@ fn grow(fx: &Fixture, engine: &Engine, sources: std::ops::Range<u64>) {
             )],
         )
         .expect("points joining an artifact that exists is an ordinary write");
+    tick(engine);
 }
 
 /// Request a flush and block until it has published — what gives an ingested point a base row, and

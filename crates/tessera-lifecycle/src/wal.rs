@@ -558,13 +558,6 @@ pub struct PlainViewDeclaration {
 /// and refuses to open, naming the track.
 pub fn unbuilt_track(record: &WalRecord) -> Option<(&'static str, &'static str)> {
     match record {
-        WalRecord::ArtifactGrow { growth, .. }
-            if growth.iter().any(|g| {
-                !g.leaving.is_empty() || matches!(g.set, GrownSet::GeneratingSet { .. })
-            }) =>
-        {
-            Some(("ArtifactGrow with a leaving set or a rank", "T2b"))
-        }
         WalRecord::ValuesBatch { .. } => Some(("ValuesBatch", "T3")),
         WalRecord::VocabularyDeclare { .. } => Some(("VocabularyDeclare", "T5")),
         WalRecord::ViewGroupCreate { .. } => Some(("ViewGroupCreate", "T6")),
@@ -603,8 +596,7 @@ pub struct MembershipGrowth {
     /// The entities leaving, CRoaring portable, on `joining`'s terms. Empty on every record the
     /// membership route writes: a membership never shrinks (`ingest.md` §10, R7), and the one set
     /// that may is a generating set, changed only by a page at its rank. Within one record joins
-    /// apply before leaves (`ingest.md` §1.1). Not built yet: a record carrying a non-empty set
-    /// refuses at replay naming T2b ([`unbuilt_track`]).
+    /// apply before leaves (`ingest.md` §1.1).
     pub leaving: Vec<u8>,
     /// Which of the artifact's sets this delta moves.
     pub set: GrownSet,
@@ -621,8 +613,13 @@ pub enum GrownSet {
     /// The generating set of the content at `rank`, with the set's **stored cardinality** after
     /// this delta (`ingest.md` §1.1): the number the executor publishes beside the set's row-space
     /// operator at the tick, so that a containment test reads a pair derived together and never
-    /// a cardinality from one version of the set against an operator from another. Not built yet:
-    /// refused at replay naming T2b ([`unbuilt_track`]).
+    /// a cardinality from one version of the set against an operator from another.
+    ///
+    /// **The number is checked against the delta at replay.** The set the delta produces is
+    /// recomputed from the record the growth names, and a cardinality that disagrees with it is
+    /// damage: applying the delta under the recorded number would publish an operator and a
+    /// cardinality that were never derived together
+    /// (`ArtifactStore::grow_set`).
     GeneratingSet { rank: u16, cardinality: u64 },
 }
 
@@ -852,7 +849,8 @@ pub struct PublishedContent {
     pub generated_from: Vec<u8>,
     /// The generating set's **stored cardinality** (`ingest.md` §1.1), `generated_from`'s at
     /// publication and thereafter moved only by a page at this content's rank
-    /// ([`GrownSet::GeneratingSet`]). Read by T2b, which publishes it beside the set's operator.
+    /// ([`GrownSet::GeneratingSet`]). The executor publishes it beside the set's operator at the
+    /// tick, and a decode checks it against the set it travels with.
     pub cardinality: u64,
 }
 
@@ -2551,8 +2549,9 @@ mod tests {
                 }),
             },
         ];
-        // The four fills are track T2a's and are applied (`ArtifactStore::fill`); the attribute
-        // declaration is T4's and is applied (`Executor::declare_attribute`); the rest wait.
+        // The growth's rank and leaving set are applied by `ArtifactStore::grow_set`, the four
+        // fills by `ArtifactStore::fill` and the attribute declaration by
+        // `Executor::declare_attribute`; the rest wait for their tracks.
         let tracks: Vec<Option<&str>> = records
             .iter()
             .map(|record| unbuilt_track(record).map(|(_, track)| track))
@@ -2560,7 +2559,7 @@ mod tests {
         assert_eq!(
             tracks,
             [
-                Some("T2b"),
+                None,
                 None,
                 None,
                 None,

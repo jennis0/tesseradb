@@ -98,6 +98,18 @@ content does not return when the set refills; the caller re-supplies it. 0107's 
 stands: an empty declared set under a content is a state that serves nothing, and a content with
 no set does not exist.
 
+**Built 2026-09-08 (T2b).** A `PATCH` row naming `rank` moves that content's generating set:
+`members` join it, `leaving` leaves it, and the store applies joins before leaves within the page
+(`ArtifactStore::grow_set`, the one method the live page and replay share). `leaving` with no rank
+is refused — a membership never shrinks. The cardinality the delta produces is computed where the
+page is prepared and travels in the growth record, and a replay whose recomputed set disagrees with
+it refuses the delta rather than publishing a pair that was never derived together. A page that
+empties a set removes the content record, moves the ranks above it down as the fold's withdrawal
+does, and the acknowledgement names the rank beside the caller's key; a later page at that rank
+names no content and is refused, which is the content not returning when the set refills. The
+containment test reads the operator and the cardinality the executor published together at the
+tick, both taken from one read of the store.
+
 **Creating an entity is not monotone; only filling is.** A point page allocates an entity for
 every row it carries, so a page re-sent under a fresh batch id creates a second entity for every
 row that carries no external id, and is refused `409` per duplicate id for every row that does.
@@ -212,6 +224,17 @@ yet in the operator is not counted, so a count can only understate, and the mask
 against the request's own generation as today (I1, I11). This is the same one-moment rule as a
 point's flush, and it is why the visible column above has one value.
 
+**Built 2026-09-08 (T2b)** for memberships, generating sets and fills. The executor holds each
+accepted write's delta against the level version it followed and applies the run of them to every
+held row form at the tick, in every view the generation carries: a membership join and a page of
+joins alone are unioned into the served operator, a page holding any leave and a fill re-derive
+that artifact's operators from entity truth, and every ordinal a page or a fill touched has its
+stored cardinalities read from the store in the same pass. A request builds a form only where none
+is held; one held at an earlier level version is served as it stands. A level whose delta moved a
+generating set gives up its containment partition and answers containment from the mask, which is
+exact: the partition's expression was composed against the set as it was, and against a set that
+has since grown it would answer about a smaller one. The flush and the merge arms are unchanged.
+
 ### 1.4 The values kind
 
 A build reads attribute files by entity id and joins them to points that were read from another
@@ -319,9 +342,10 @@ content row is already in a durable extent is refused, because the record blob h
 entity until the per-column read (§1.4, T3); a first content on an artifact that has none is
 written beside the level's tail whichever side of the high-water the artifact sits. A fill pins
 the log as a growth does, until the fold rewrites the level; a content's values pin it until the
-content extent naming them is durable, since the fold carries content extents forward. A fill
-drops the level's held row form and the next request projects the level again; the delta
-amendment a growth takes is not built for fills.
+content extent naming them is durable, since the fold carries content extents forward. A fill's
+delta reaches the level's row forms at the tick as a growth's does (§1.3): the ordinal it changed
+has its records entry and its operators read from the store again, the membership being untouched
+by a fill.
 
 **Deletion, and the repair the caller makes.** Under decision 0135's amendment there is one
 behaviour when a member of a generating set is deleted, and the set page is the caller's only
@@ -603,6 +627,10 @@ step and the flush, per record, and the flush is the term at every scale measure
 | the fold | every operator re-derived whole | as the fold's artifact pass today | the fold's own budget |
 | artifact records and fills | per artifact: key and parent resolution, the cycle walk, a content digest | modelled; kilobytes each | negligible against the pages |
 | declarations | one WAL append and one fsync | modelled by analogy with the deny ack's 3.2 ms quiescent | one per declaration |
+
+**Built 2026-09-08 (T2b):** the three row-form arms above run at the tick and the line the
+executor logs prices them — the deltas taken, the sets unioned, the operators re-derived, the
+ordinals published, the rows added, and the copy a concurrent reader forces.
 
 Two things the model says that a loader should know. **The base grows under a long load**, and the
 stages that scale with it (`plan`, `compose`, `drop_superseded`) rose 3× to 10× per row between

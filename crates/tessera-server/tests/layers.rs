@@ -1287,6 +1287,9 @@ async fn a_shape_published_into_a_warm_level_is_served() {
     )
     .await;
     assert_eq!(status, 201, "{body}");
+    // The publication is durable at its acknowledgement and reaches the level's row forms at the
+    // next tick (`ingest.md` §1.3).
+    tick(&server).await;
 
     let after = viewport_artifacts(&server, &["0"], json!({})).await.expect("served");
     let mut keys: Vec<(String, bool)> = after

@@ -882,11 +882,16 @@ fn merge(engine: &Engine, at: (f64, f64)) -> Vec<(f64, f64)> {
         );
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
+    // **No second merge**: the ticks that publish what follows would otherwise take the merge
+    // policy's next chance and renumber rows the caller is holding fixed.
+    engine.set_merge_for_test(false);
     vec![at; 5]
 }
 
 /// Publish one more box into the box layer at run time, as `/control/artifacts` would: no
 /// members, the canonical shape in the record.
+/// A box published into the spatial level, and the tick that publishes its resolution into the
+/// level's held form (`ingest.md` §1.3).
 fn publish_box(engine: &Engine, key: &str, bbox: [f64; 4]) -> tessera_spatial::shape::Shape {
     let canonical = canonical_box(bbox);
     let shape = tessera_lifecycle::membership::ArtifactShapes::new(vec![(
@@ -901,6 +906,7 @@ fn publish_box(engine: &Engine, key: &str, bbox: [f64; 4]) -> tessera_spatial::s
     engine
         .publish_artifacts(LAYER.into(), 0, vec![artifact])
         .expect("a shape publishes into a spatial layer");
+    tick(engine);
     canonical
 }
 

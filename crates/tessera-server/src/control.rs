@@ -3265,11 +3265,14 @@ fn grow_body_from_arrow(body: &[u8]) -> Result<GrowBody, ApiError> {
                      it grows"
                 )));
             }
-            // The Arrow form carries members and no fixed part (`ingest.md` §1.5): a part is
-            // object-shaped and travels on the JSON form.
+            // The Arrow form carries members joining a membership, and no fixed part and no set
+            // page (`ingest.md` §1.5): a part is object-shaped and a page names a rank, and both
+            // travel on the JSON form.
             artifacts.push(GrowingArtifactBody {
                 key: keys.value(row).to_string(),
+                rank: None,
                 members: entries(row)?,
+                leaving: Vec::new(),
                 parent: Vec::new(),
                 attached_to: None,
                 content: Vec::new(),
@@ -4165,19 +4168,30 @@ struct GrowBody {
     artifacts: Vec<GrowingArtifactBody>,
 }
 
-/// One artifact of a `PATCH`: the key, the members joining, and the fixed parts the caller
-/// supplies (`ingest.md` §1.5). Every part is optional; a row carrying only a key names the
-/// artifact and changes nothing.
+/// One artifact of a `PATCH`: the key, the set the row moves, the members joining and leaving it,
+/// and the fixed parts the caller supplies (`ingest.md` §1.1, §1.5). Every part is optional; a row
+/// carrying only a key names the artifact and changes nothing.
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct GrowingArtifactBody {
     /// The key the artifact was published under. One the level does not hold refuses the batch;
     /// nothing is minted on this verb, whatever the layer's value set says.
     key: String,
+    /// **Which set this row moves**: absent the membership, present the generating set of the
+    /// content at that rank (`ingest.md` §1.1). A row naming a rank carries members and no fixed
+    /// part, and a rank the artifact holds no content at refuses the batch.
+    #[serde(default)]
+    rank: Option<u16>,
     /// The members joining, addressed as [`IncomingArtifactBody::members`] are. Empty names the
     /// artifact and adds nothing, which is accepted and answers `joined: 0`.
     #[serde(default)]
     members: Vec<String>,
+    /// The members leaving, at the same addresses and applied after the joins (`ingest.md` §1.1).
+    /// **Only a generating set may shrink**: this with no `rank` refuses the batch, a membership
+    /// never shrinking (`ingest.md` §10, R7). A page that empties a set withdraws the content and
+    /// the acknowledgement says so.
+    #[serde(default)]
+    leaving: Vec<String>,
     /// The parents, each by the parent's own key, on [`IncomingArtifactBody::parent`]'s terms.
     /// Filled on an artifact that holds none; identical on one that holds them; `409` otherwise.
     #[serde(default)]
@@ -4187,7 +4201,7 @@ struct GrowingArtifactBody {
     attached_to: Option<AttachmentBody>,
     /// Contents by rank: each fills the content at its rank, or is identical to it, or is `409`.
     /// A content here carries values and no generating set (the set is a page at the rank, track
-    /// T2b), so on a layer whose content requires every member visible it is refused.
+    /// at the rank), so on a layer whose content requires every member visible it is refused.
     #[serde(default)]
     content: Vec<ContentFillBody>,
     /// The shape, in its layer's kind's field, on [`IncomingArtifactBody::bbox`]'s terms; absent
@@ -4348,8 +4362,18 @@ async fn grow_memberships(
         }
     }
 
-    let widths: Vec<usize> = artifacts.iter().map(|a| a.members.len()).collect();
-    let flat: Vec<&String> = artifacts.iter().flat_map(|a| a.members.iter()).collect();
+    // **A row's members and its leaving members are one list at the boundary**, resolved in one
+    // pass and walked back in the order they were flattened: the two are addresses of the same
+    // kind and a page that named an entity in both must resolve it to one entity (`ingest.md`
+    // §1.1). The joins come first in each row, which is the order they are applied in.
+    let widths: Vec<usize> = artifacts
+        .iter()
+        .map(|a| a.members.len() + a.leaving.len())
+        .collect();
+    let flat: Vec<&String> = artifacts
+        .iter()
+        .flat_map(|a| a.members.iter().chain(a.leaving.iter()))
+        .collect();
     // The record count (ingest §2.1): members summed over the page's artifacts, before any
     // address is resolved.
     if flat.len() > state.max_members_per_request {
@@ -4374,6 +4398,19 @@ async fn grow_memberships(
         .map(|(artifact, shape)| {
             let members: Vec<tessera_types::EntityId> =
                 entities.by_ref().take(artifact.members.len()).collect();
+            let leaving: Vec<tessera_types::EntityId> =
+                entities.by_ref().take(artifact.leaving.len()).collect();
+            if artifact.rank.is_some() || !leaving.is_empty() {
+                // A row naming a rank pages that content's set; a row naming members leaving and
+                // no rank is refused on the executor, which is where the caller is told that a
+                // membership never shrinks (`ingest.md` §10, R7). Neither carries a fixed part.
+                return tessera_lifecycle::IncomingGrowth::page_of_entities(
+                    artifact.key,
+                    artifact.rank,
+                    members,
+                    leaving,
+                );
+            }
             let mut join = tessera_lifecycle::IncomingGrowth::from_entities(artifact.key, members);
             join.parts = tessera_lifecycle::FixedParts {
                 parent_keys: artifact.parent,
@@ -4408,12 +4445,20 @@ async fn grow_memberships(
         .iter()
         .zip(keys)
         .map(|(receipt, key)| {
-            serde_json::json!({
+            let mut row = serde_json::json!({
                 "key": key,
                 "tessera_id": receipt.tessera_id.raw().to_string(),
                 "joined": receipt.joined,
                 "filled": receipt.filled,
-            })
+                "left": receipt.left,
+            });
+            // **The withdrawal is reported with the rank and the key** (`ingest.md` §1.1): the
+            // page emptied that content's generating set, the content record is gone, and it does
+            // not return when the set refills.
+            if let Some(rank) = receipt.withdrawn {
+                row["withdrawn"] = serde_json::json!(rank);
+            }
+            row
         })
         .collect();
     let mut body = serde_json::json!({ "artifacts": artifacts });

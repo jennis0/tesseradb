@@ -681,6 +681,7 @@ fn a_growth_that_lands_after_the_folds_pack_pins_the_log_again() {
             grown.join().unwrap();
         });
 
+        tick(&engine);
         assert_eq!(
             count_of(&engine, "c0"),
             Some(320),
@@ -1049,8 +1050,15 @@ fn a_window_that_could_not_append_leaves_neither_the_rows_nor_the_joins() {
 // -------------------------------------------------------------------------------------------
 
 /// **A reader never sees a membership part-grown.** One thread serves the viewport while another
-/// ingests, publishes and grows; every count the reader takes is one of the values a completed
-/// growth leaves, never a value between two of them, and it never goes backwards.
+/// ingests, publishes, grows and ticks; every count the reader takes is one of the values a
+/// completed growth leaves, never a value between two of them, and never a value above what the
+/// writer has accepted.
+///
+/// **It may repeat a value the reader has already passed, and that is the tick's own rule**
+/// (`ingest.md` §1.3). A request is served the level's form as last published; a request whose row
+/// space moved under it builds instead, and reads the store. So a reader that straddles a flush
+/// can take a fresher count from a build and the published count again afterwards. Both understate
+/// the store and neither overstates it, which is the direction the staleness is allowed in.
 ///
 /// The only genuinely racing case in this file, and bounded rather than timed: a fixed number of
 /// rounds, each a whole growth of ten, so a torn read is a count that is not a multiple of ten
@@ -1097,8 +1105,8 @@ fn a_reader_sees_the_membership_move_forward_through_whole_growths_only() {
                     "a growth was read half-applied: {count}"
                 );
                 assert!(
-                    count >= last.0 && served.len() >= last.1,
-                    "freshness went backwards: {:?} then {:?}",
+                    served.len() >= last.1,
+                    "a served artifact went away: {:?} then {:?}",
                     last,
                     (count, served.len())
                 );
@@ -1133,6 +1141,10 @@ fn a_reader_sees_the_membership_move_forward_through_whole_growths_only() {
                     )],
                 )
                 .expect("a publication beside the growth");
+            // **The round's writes reach the reader at the round's tick**, which is the moment a
+            // row form takes them (`ingest.md` §1.3). Without it the reader would overlap a
+            // publisher that publishes nothing and assert about one state.
+            tick(&engine);
             // **The reader must actually overlap the writer or its assertions never run**, and a
             // round is three windows on an idle executor — fast enough that a loaded box could
             // finish the whole loop inside one viewport. A pause per round is what makes the
@@ -1142,6 +1154,7 @@ fn a_reader_sees_the_membership_move_forward_through_whole_growths_only() {
         stop.store(true, Ordering::Relaxed);
     });
 
+    tick(&engine);
     assert_eq!(
         count_of(&engine, "c0"),
         Some(300 + ROUNDS * STEP),

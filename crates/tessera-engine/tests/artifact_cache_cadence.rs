@@ -119,10 +119,13 @@ fn node(
     artifact
 }
 
+/// A publication and the tick that publishes its delta into the level's row forms — two moments,
+/// the acknowledgement meaning durable and the tick meaning served (`ingest.md` §1.3).
 fn publish(engine: &Engine, layer: &str, artifacts: Vec<IncomingArtifact>) {
     engine
         .publish_artifacts(layer.into(), 0, artifacts)
         .expect("the publication is accepted");
+    tick(engine);
 }
 
 fn artifacts_of(engine: &Engine) -> Vec<ArtifactOut> {
@@ -224,12 +227,14 @@ fn a_write_to_one_layer_leaves_another_layers_row_form_alone() {
             )],
         )
         .expect("points joining an artifact that exists is an ordinary write");
+    tick(&engine);
 
     assert_eq!(
         served(&engine, "clusters/a"),
         vec![("a0".to_string(), 150)],
-        "the growth is in the very next request — a level whose version did not move would go on \
-         serving the count it had before, which nothing distinguishes from a smaller membership"
+        "the growth is in the first request after the tick that published it — a form the tick \
+         had not reached would go on serving the count it had before, which nothing distinguishes \
+         from a smaller membership"
     );
     assert_eq!(
         engine.artifact_cache_builds().0,
@@ -610,6 +615,7 @@ fn a_write_re_derives_the_shape_it_moved() {
             )],
         )
         .expect("points joining an artifact that exists is an ordinary write");
+    tick(&engine);
     let after = hull_of(&engine);
     assert_ne!(
         before, after,

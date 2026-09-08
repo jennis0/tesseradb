@@ -495,6 +495,7 @@ fn the_two_layouts_answer_identically() {
                     )],
                 )
                 .unwrap();
+            tick(engine);
         }
         // **The growth is deliberately a membership over the whole corpus**, so a level pinned to
         // a label column stops partitioning and falls back — the second half of the pin's refusal,
@@ -782,6 +783,7 @@ fn the_masked_count_cache_is_bounded_and_a_deny_is_not_outlived() {
             vec![labelled(&fx, "grown", (2..400).collect(), vec![9, 18, 27])],
         )
         .unwrap();
+    tick(&engine);
     let grown = ask(&engine);
     assert!(
         grown.contains_key(&Some("grown".to_string())),
@@ -1028,6 +1030,7 @@ fn a_column_the_level_has_moved_past_is_recomposed_rather_than_adopted() {
             )],
         )
         .unwrap();
+    tick(&engine);
     let grown = sweep(&engine);
     drop(engine);
 
