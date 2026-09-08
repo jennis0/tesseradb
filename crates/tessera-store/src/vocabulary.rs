@@ -660,6 +660,12 @@ impl Vocabularies {
     /// the previous manifest held. That asymmetry is the whole reason `vocabulary_extensions` is
     /// carried forward where `deny` is restated: `deny` must be able to shrink and a binding must
     /// not.
+    ///
+    /// **The title travels with the binding.** This is the only path by which a value bound
+    /// between builds reaches a manifest, and [`fold_extensions_into`] copies what it finds
+    /// verbatim into the next `MANIFEST.vocabularies` — so a title dropped here is a title the
+    /// fold destroys, in a value set whose keys and codes survive. A discovered value has no
+    /// title and carries `None`, which is what it had before.
     pub fn extensions_beyond(
         &self,
         vocabularies: &[ManifestVocabulary],
@@ -675,9 +681,9 @@ impl Vocabularies {
                 .bindings()
                 .filter(|(key, _)| !built.contains(key))
                 .map(|(key, code)| ManifestVocabularyValue {
+                    title: minter.title_of(key).map(str::to_string),
                     key: key.to_string(),
                     code,
-                    title: None,
                 })
                 .collect();
             if !values.is_empty() {
@@ -713,8 +719,21 @@ pub fn fold_extensions_into(
             continue;
         };
         for value in &extension.values {
-            if !vocabulary.values.iter().any(|held| held.key == value.key) {
-                vocabulary.values.push(value.clone());
+            match vocabulary
+                .values
+                .iter_mut()
+                .find(|held| held.key == value.key)
+            {
+                // **A title is filled and never overwritten.** A value the table already carries
+                // keeps its key and its code — that is the verbatim rule — and the one thing an
+                // extension can add to it is a presentation title it did not have, which is what
+                // a page onto a build-declared vocabulary supplies (`ingest.md` §1.3).
+                Some(held) => {
+                    if held.title.is_none() {
+                        held.title = value.title.clone();
+                    }
+                }
+                None => vocabulary.values.push(value.clone()),
             }
         }
     }
@@ -1061,6 +1080,68 @@ mod tests {
             matches!(err, SeedError::ExtensionWithoutVocabulary { .. }),
             "{err}"
         );
+    }
+
+    /// **A title travels with its binding, at both ends of the extension path.**
+    ///
+    /// `extensions_beyond` is the only route by which a value bound between builds reaches a
+    /// manifest, and `fold_extensions_into` is what copies it into the next
+    /// `MANIFEST.vocabularies` before the rotation reclaims the record it came from. A title
+    /// dropped at either end is a title the fold destroys while keeping the key and the code — the
+    /// value survives and the name a client draws does not, with nothing to notice.
+    #[test]
+    fn an_extension_carries_a_title_and_the_fold_fills_it_onto_a_held_value() {
+        let mut minter = minter(ScalarType::U16);
+        let alpha = minter.mint("alpha").unwrap().code();
+        let beta = minter.mint("beta").unwrap().code();
+        minter.fill_title("alpha", "Alpha".to_string());
+        let mut live = Vocabularies::default();
+        live.insert(minter);
+
+        // Nothing built, so both bindings are extensions and the titled one carries its title.
+        let extensions = live.extensions_beyond(&[]);
+        assert_eq!(extensions.len(), 1);
+        let carried: Vec<(&str, u32, Option<&str>)> = extensions[0]
+            .values
+            .iter()
+            .map(|v| (v.key.as_str(), v.code, v.title.as_deref()))
+            .collect();
+        assert_eq!(
+            carried,
+            [("alpha", alpha, Some("Alpha")), ("beta", beta, None)]
+        );
+
+        // The fold: a value the table already holds without a title gains one, and every key and
+        // code is untouched.
+        let mut table = vec![ManifestVocabulary {
+            name: "departments".to_string(),
+            kind: VocabularyKind::Declared,
+            visibility: Visibility::Derived,
+            width: "u16".to_string(),
+            values: vec![ManifestVocabularyValue {
+                key: "alpha".to_string(),
+                code: alpha,
+                title: None,
+            }],
+            reserved: Vec::new(),
+        }];
+        fold_extensions_into(&mut table, &extensions);
+        let folded: Vec<(&str, u32, Option<&str>)> = table[0]
+            .values
+            .iter()
+            .map(|v| (v.key.as_str(), v.code, v.title.as_deref()))
+            .collect();
+        assert_eq!(
+            folded,
+            [("alpha", alpha, Some("Alpha")), ("beta", beta, None)],
+            "the held value keeps its code and gains the title the page supplied"
+        );
+
+        // And a title the table already holds is never overwritten: the fold moves bindings, it
+        // does not settle a disagreement about a name.
+        table[0].values[0].title = Some("Authored".to_string());
+        fold_extensions_into(&mut table, &extensions);
+        assert_eq!(table[0].values[0].title.as_deref(), Some("Authored"));
     }
 
     /// The fold moves bindings between homes and must not change one. A code that came back

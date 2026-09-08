@@ -2672,7 +2672,12 @@ impl WritePath {
             let compiled = crate::vocabularies::compile_record(declaration);
             match vocabularies.get_mut(&compiled.name) {
                 Some(minter) => {
-                    if minter.kind() != compiled.kind || minter.visibility() != compiled.visibility
+                    // Kind, visibility and the code space's width: the whole of what
+                    // `crate::vocabularies::resolve` compares at the door, less the reserved list,
+                    // which a minter holds as spent codes rather than as a list.
+                    if minter.kind() != compiled.kind
+                        || minter.visibility() != compiled.visibility
+                        || minter.width().arrow_type_name() != compiled.width
                     {
                         return Err(EngineError::Malformed(format!(
                             "the WAL declares vocabulary '{}' with an identity the manifests do \
@@ -8175,6 +8180,13 @@ impl Executor {
                     .retain(|f| !scoped_since_plan.contains(&f.name.as_str()));
             }
         }
+        // **Every live binding, with its title, into the table this fold writes**
+        // (`ingest.md` §1.3). A vocabulary declared at a running service carries its declaration
+        // in the served manifest and its values in its minter, and the extensions folded in below
+        // are a second path to the same bindings; taking them from the minters here makes the
+        // written table complete whichever path fed it, and the merge is a union so neither can
+        // drop one.
+        crate::vocabularies::merge_live_values(&mut bundle_manifest, &live.vocabularies);
         bundle_manifest.entity_id_high_water = plan.entity_bound;
         bundle_manifest.files = completed.files.clone();
         // **The extensions fold in verbatim, and verbatim is the whole rule** (§3.3). Every binding
@@ -14550,10 +14562,6 @@ impl Executor {
             // the roster's rule: a declaration or a page that landed since the manifest was
             // cloned would otherwise be dropped, and a rotation makes that permanent.
             manifest.vocabularies = self.live.vocabularies_for_publication(&live.vocabularies);
-        // And the view groups and plain views, on the same rule (`ingest.md` §1.3).
-        let (groups, plain_views) = self.live.view_declarations_for_publication();
-        manifest.groups = groups;
-        manifest.plain_views = plain_views;
             // And the view groups and plain views declared at a running service, on the roster's
             // rule (`ingest.md` §1.3). A group's roster is `manifest.views` above, restated from
             // the live roster; what these carry is the group's own half and the plain views.
@@ -16075,6 +16083,11 @@ impl Executor {
         manifest.scoped_attributes = scoped_attributes;
         // And the runtime vocabularies with their values, on the same rule (`ingest.md` §1.3).
         manifest.vocabularies = self.live.vocabularies_for_publication(&live.vocabularies);
+        // And the view groups and plain views, on the same rule (`ingest.md` §1.3). A group's
+        // roster is `manifest.views` above; what these carry is the group's own half.
+        let (groups, plain_views) = self.live.view_declarations_for_publication();
+        manifest.groups = groups;
+        manifest.plain_views = plain_views;
         // **And the group-scoped columns this flush gave a view its first of** (`views.md` §5).
         // Carried forward and appended to, never restated: the list is what a *restart* recovers
         // `scoped_scalars[..].views` from, and a render-only family writes no extent for the

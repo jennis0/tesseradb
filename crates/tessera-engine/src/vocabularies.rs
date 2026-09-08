@@ -15,8 +15,12 @@
 //!
 //! **A value's properties are supplied once.** A page restating a value it already holds
 //! identically does nothing, a title on a value that has none fills it, and a title differing
-//! from the one held is a `409` — the three arms of `ingest.md` §1.1's monotone rule, and what
-//! `per-point-attributes.md` §2.2's row for amending a value's properties now states.
+//! from the one held is a `409` — the three arms of `ingest.md` §1.1's monotone rule.
+//!
+//! ⊘ **`per-point-attributes.md` §2.2 and §5 promise an *upsert* of a held property** — "properties
+//! are upserted without a rebuild, so recolouring a legend never touches the build path" — and
+//! this refuses one. The two cannot both stand, and which does is an owner ruling rather than a
+//! choice for this module; the documents carry the marker at the claim.
 //!
 //! **The rules are the build's, transcribed**, on `crate::attributes`' argument: a declaration
 //! the build accepts and this route refuses, or the reverse, is a feature that works at one door
@@ -205,11 +209,55 @@ pub(crate) fn resolve(
 }
 
 /// Two declarations of one name, compared on everything but the value set.
+///
+/// **`reserved` is compared as a set.** It is a set of retired codes and nothing reads an order
+/// into it, so a build that wrote `[7, 3]` and a request that writes `[3, 7]` declare one
+/// vocabulary; comparing the two lists as written would answer `409` to a caller who resent their
+/// own declaration.
 fn same_identity(held: &ManifestVocabulary, compiled: &ManifestVocabulary) -> bool {
     held.kind == compiled.kind
         && held.visibility == compiled.visibility
         && held.width == compiled.width
-        && held.reserved == compiled.reserved
+        && normalised(&held.reserved) == normalised(&compiled.reserved)
+}
+
+/// A `reserved` list as a set: ascending, without repeats.
+fn normalised(reserved: &[u32]) -> Vec<u32> {
+    let mut out = reserved.to_vec();
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
+/// Merge every live binding into the manifest's own vocabulary table, filling a title the table
+/// lacks — what a fold writes into the next `MANIFEST.json` (`ingest.md` §1.3).
+///
+/// **A union, never a substitution.** The minters are seeded from every durable home a binding
+/// lives in, so they are a superset of the table; taking them *instead* would still be a
+/// derivation, and a derivation that missed a binding would recolour every row carrying its code.
+/// Adding to what the table holds cannot do that. It is the fold's answer to a vocabulary
+/// declared at a running service, whose served table entry carries the declaration and whose
+/// values live in its minter until a publication reads them.
+pub(crate) fn merge_live_values(manifest: &mut Manifest, vocabularies: &Vocabularies) {
+    for vocabulary in &mut manifest.vocabularies {
+        let Some(minter) = vocabularies.get(&vocabulary.name) else {
+            continue;
+        };
+        for value in values_with_titles(minter) {
+            match vocabulary
+                .values
+                .iter_mut()
+                .find(|held| held.key == value.key)
+            {
+                Some(held) => {
+                    if held.title.is_none() {
+                        held.title = value.title;
+                    }
+                }
+                None => vocabulary.values.push(value),
+            }
+        }
+    }
 }
 
 /// The record the log carries for a declaration: the compiled identity, and the values the

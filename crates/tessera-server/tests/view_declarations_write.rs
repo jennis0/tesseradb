@@ -256,7 +256,10 @@ async fn ingest(served: &Served, batch_id: &str, view: &str, rows: &[(&str, f32,
 }
 
 async fn flush(served: &Served) {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    // 120 s, the fold helper's patience below, rather than the 60 s the older files use: a tick
+    // is 90 s by default and this box runs several test binaries at once, so the shorter deadline
+    // fails on load rather than on an answer.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
     loop {
         let before = served.server.state.engine.write_executor_stats().flushes;
         let resp = served
@@ -271,7 +274,11 @@ async fn flush(served: &Served) {
         while served.server.state.engine.write_executor_stats().flushes == before {
             assert!(
                 std::time::Instant::now() < deadline,
-                "the flush never published"
+                "the flush never published: {} rows buffered, {} flushes, {} failures, {} flushable",
+                served.server.state.engine.buffered_items(),
+                served.server.state.engine.write_executor_stats().flushes,
+                served.server.state.engine.write_executor_stats().flush_failures,
+                served.server.state.engine.write_executor_stats().flushable_items,
             );
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
@@ -586,6 +593,89 @@ async fn a_gate_is_one_label_or_a_list_on_both_routes() {
         ids.contains(&"gated_many"),
         "a list gate is satisfied where the principal holds one of its labels: {ids:?}"
     );
+
+    // **And the half that matters**: a principal holding none of a gate's terms cannot see the
+    // view exists, and a request naming it is the 404 an unknown name is (`views.md` §6). The
+    // fixture's principal `1` holds term `1` and not term `0`.
+    let outside = authorise(&served.server, &["1"][..]).await["token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let resp = served
+        .server
+        .client
+        .get(served.server.viewer_url("/v1/meta"))
+        .bearer_auth(&outside)
+        .send()
+        .await
+        .unwrap();
+    let meta: Value = resp.json().await.unwrap();
+    let ids: Vec<&str> = meta["views"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v["id"].as_str().unwrap())
+        .collect();
+    assert!(
+        !ids.contains(&"gated_one"),
+        "a gate-failed view is absent from /v1/meta: {ids:?}"
+    );
+    assert!(
+        ids.contains(&"gated_many"),
+        "and one whose list names a term this principal does hold is not: {ids:?}"
+    );
+    let resp = served
+        .server
+        .client
+        .post(served.server.viewer_url("/v1/viewport"))
+        .bearer_auth(&outside)
+        .json(&json!({
+            "view": "gated_one", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 200
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status().as_u16(),
+        404,
+        "a request naming a gate-failed view is the 404 an unknown name is"
+    );
+}
+
+/// **`point_visibility.default` goes through the plugin**, on the gate's rule: it is given to
+/// every point that carries no label of its own (decision 0133), so a label the plugin cannot
+/// read would put those points in no principal's mask, and the refusal belongs at the
+/// declaration rather than at every batch. `inherited` and the empty string are the build's own
+/// two refusals, transcribed.
+#[tokio::test]
+async fn a_point_default_is_measured_against_the_plugin_on_both_routes() {
+    let served = serve().await;
+
+    // The plugin arm is exercised by no case here: this fixture's plugin reads every non-empty
+    // label as a term, so a label it *cannot* read has no spelling. What the two cases below
+    // cover is the pair the build refuses too, and the plugin call itself is the one
+    // `check_gate_labels` makes, on the same descriptors.
+    for (default, reason) in [("", "is empty"), ("inherited", "is refused")] {
+        let mut view = embedding();
+        view["point_visibility"] = json!({ "default": default });
+        let (status, body) = declare_view(&served, "bad_default", view).await;
+        assert_eq!(status, 422, "{default:?}: {body}");
+        assert!(
+            body["detail"].as_str().unwrap().contains(reason),
+            "{default:?}: {body}"
+        );
+
+        let mut group = quarter();
+        group["point_visibility"] = json!({ "default": default });
+        let (status, body) = declare_group(&served, "bad_default", group).await;
+        assert_eq!(status, 422, "{default:?} on a group: {body}");
+    }
+
+    // A label the plugin reads, and `public`, are both accepted.
+    let mut labelled = embedding();
+    labelled["point_visibility"] = json!({ "default": "0" });
+    assert_eq!(declare_view(&served, "labelled", labelled).await.0, 201);
+    assert_eq!(declare_view(&served, "public_default", embedding()).await.0, 201);
 }
 
 /// **Both declarations survive a restart and a fold** (`ingest.md` §1.3): from the log alone

@@ -190,7 +190,7 @@ in the next, and only viewers wait for the tick.
 | **View group** (built 2026-09-08, T6) | the `[[view_group]]` block minus roster and source | `PUT /control/view_groups/{name}` | its own append and fsync | one request; its views follow one by one | as above |
 | **Plain view** (built 2026-09-08, T6) | the `[[view]]` block minus source | `PUT /control/views/{name}` | its own append and fsync | one request | as above |
 | **Vocabulary** (built 2026-09-08, T5) | the `[[vocabulary]]` block minus source; values inline where they fit | `PUT /control/vocabularies/{name}` | its own append and fsync | the declaration, then pages of values | as above |
-| **Vocabulary values** (built 2026-09-08, T5) | a page of `{key, title?}`; never a code | `PATCH /control/vocabularies/{name}/values` | one `VocabularyDeclare` per page, one fsync | `max_values_per_request` ⊘; `max_body_bytes` | append-only; an identical value is a no-op; a property the deployment does not hold is filled and one it holds differently is a `409`, never an amendment of key, code or title |
+| **Vocabulary values** (built 2026-09-08, T5) | a page of `{key, title?}`; never a code | `PATCH /control/vocabularies/{name}/values` | one `VocabularyDeclare` per page, one fsync | `max_values_per_request` ⊘; `max_body_bytes` | append-only; an identical value is a no-op; a different property on a held key is an upsert of properties, never of key or code — ⊘ **built as a fill and a refusal, not an upsert**: a property this deployment does not hold is filled and one it holds differently is a `409` (2026-09-08). With the owner |
 | **Attribute column** (built 2026-09-07, T4) | the `[[attribute]]` block minus acquisition keys | `PUT /control/attributes` | its own append and fsync | one request | as above |
 | **Suppress, delete, unsuppress** | `{id, op}` | `POST /control/changes` | the deny window | about 10⁴ per request; `max_body_bytes` | each op idempotent |
 
@@ -222,7 +222,12 @@ rather than read past — and each is drawn at the width the declaration named a
 same fsync as the value. **A page is one `VocabularyDeclare` record, not a run of
 `VocabularyMint`s**: a value's title is part of what the page acknowledges and a mint record
 carries none, so a page recorded as mints would come back from a restart with its bindings and
-without the names a client draws. The runtime declarations are the segments manifest's
+without the names a client draws. A title travels the same way past the fold: it rides the
+binding into `vocabulary_extensions`, and the fold both copies it into the next
+`MANIFEST.vocabularies` and fills it onto a value the table already carried without one — which is
+what a page onto a *build-declared* vocabulary supplies. ⊘ **A title the deployment already holds
+is not amended** but refused (`per-point-attributes.md` §2.2 and §5 promise an upsert; the
+question is with the owner). The runtime declarations are the segments manifest's
 `vocabularies` list, restated from the live state at every publication with each value as the live
 minter holds it; a restart appends them to `MANIFEST.vocabularies` before the widths are read off
 the columns that name them, and the fold writes them into the next `MANIFEST.json` and leaves the

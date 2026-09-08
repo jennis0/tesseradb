@@ -24,9 +24,19 @@ use tessera_build::{build, BuildArgs};
 
 const N: u64 = 40;
 
-/// One rendered `f32` at the build and **no vocabulary at all**, so every vocabulary below is one
-/// the running service declared.
+/// One rendered `f32`, and one **build-declared** vocabulary — the case a page's title has to
+/// survive a fold into `MANIFEST.vocabularies` for. `public`, so `/v1/categories` publishes its
+/// values as authored rather than filtering them by what a principal can see, which is what lets
+/// a test read a title back at all. Every other vocabulary below is one the running service
+/// declared.
 const SCHEMA_TOML: &str = r#"
+[[vocabulary]]
+name       = "built"
+width      = "u8"
+value_set  = "closed"
+visibility = "public"
+values     = ["seed"]
+
 [[attribute]]
 name   = "score"
 type   = "f32"
@@ -207,6 +217,16 @@ fn severity() -> Value {
 
 /// The whole value set the server currently holds, by key, as `/v1/categories` pages it.
 async fn categories(served: &Served, column: &str) -> Vec<(String, u64)> {
+    titled(served, column)
+        .await
+        .into_iter()
+        .map(|(key, code, _)| (key, code))
+        .collect()
+}
+
+/// The same, with each value's **title** — the property a page supplies and every durable home
+/// has to carry, or a fold destroys the names a client draws while keeping the codes.
+async fn titled(served: &Served, column: &str) -> Vec<(String, u64, Option<String>)> {
     let token = authorise(&served.server, &["0", "1"][..]).await["token"]
         .as_str()
         .unwrap()
@@ -238,6 +258,7 @@ async fn categories(served: &Served, column: &str) -> Vec<(String, u64)> {
             (
                 v["key"].as_str().unwrap().to_string(),
                 v["code"].as_u64().unwrap(),
+                v["title"].as_str().map(str::to_string),
             )
         })
         .collect()
@@ -313,7 +334,10 @@ async fn ingest(served: &Served, batch_id: &str, body: Vec<u8>) -> (u16, Value) 
 }
 
 async fn flush(served: &Served) {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    // 120 s, the fold helper's patience below, rather than the 60 s the older files use: a tick
+    // is 90 s by default and this box runs several test binaries at once, so the shorter deadline
+    // fails on load rather than on an answer.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
     loop {
         let before = served.server.state.engine.write_executor_stats().flushes;
         let resp = served
@@ -619,6 +643,71 @@ async fn a_declared_category_column_uses_a_runtime_vocabularys_values() {
     );
 }
 
+/// **A page onto a vocabulary the *build* declared survives a fold** (`ingest.md` §1.3). Its
+/// bindings reach a manifest by one path only — `vocabulary_extensions`, folded into the next
+/// `MANIFEST.vocabularies` — and the fold rotates the log, so a title the extension drops is a
+/// title nothing holds afterwards while every key keeps its code.
+#[tokio::test]
+async fn a_page_onto_a_build_declared_vocabulary_keeps_its_titles_past_a_fold() {
+    let served = serve().await;
+    assert_eq!(
+        declare_attribute(
+            &served,
+            json!({ "name": "built", "type": "category", "vocabulary": "built",
+                    "width": "u8", "index": true }),
+        )
+        .await
+        .0,
+        201
+    );
+    let (status, body) = page(
+        &served,
+        "built",
+        json!([{ "key": "alpha", "title": "Alpha" }, { "key": "beta" }]),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["added"], 2);
+    let before = titled(&served, "built").await;
+    assert_eq!(
+        before
+            .iter()
+            .map(|(key, _, title)| (key.as_str(), title.as_deref()))
+            .collect::<Vec<_>>(),
+        [("alpha", Some("Alpha")), ("beta", None), ("seed", None)],
+        "the build's own value keeps its place beside the page's"
+    );
+
+    // A row, so the flush has something to publish and the fold something to fold.
+    let (status, body) = ingest(&served, "rows", batch(&[("b1", 1.0, None)], false)).await;
+    assert_eq!(status, 200, "{body}");
+    flush(&served).await;
+    fold(&served).await;
+    assert_eq!(
+        titled(&served, "built").await,
+        before,
+        "the fold folds the extension into MANIFEST.vocabularies with its titles"
+    );
+    let served = restart(served).await;
+    assert_eq!(
+        titled(&served, "built").await,
+        before,
+        "and MANIFEST.json is the only copy left once the fold has rotated the log"
+    );
+
+    // A title on a value the folded table already carries without one is still a fill.
+    let (status, body) = page(&served, "built", json!([{ "key": "beta", "title": "Beta" }])).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["added"], 0);
+    assert!(
+        titled(&served, "built")
+            .await
+            .iter()
+            .any(|(key, _, title)| key == "beta" && title.as_deref() == Some("Beta")),
+        "a title fills onto a folded value"
+    );
+}
+
 /// **The declaration and its values survive a restart and a fold** (`ingest.md` §1.3): from the
 /// log alone before any publication, from the segments manifest after one, and from
 /// `MANIFEST.json` after the fold that writes them there.
@@ -646,15 +735,21 @@ async fn a_declaration_and_its_values_survive_a_restart_and_a_fold() {
         .0,
         201
     );
-    let before = categories(&served, "severity").await;
+    let before = titled(&served, "severity").await;
     assert_eq!(before.len(), 3);
+    assert!(
+        before
+            .iter()
+            .any(|(key, _, title)| key == "medium" && title.as_deref() == Some("Medium")),
+        "the page's title is served: {before:?}"
+    );
 
     // Replayed from the log, nothing having been published yet.
     let served = restart(served).await;
     assert_eq!(
-        categories(&served, "severity").await,
+        titled(&served, "severity").await,
         before,
-        "every key keeps the code it was assigned"
+        "every key keeps the code it was assigned and the title it was given"
     );
     assert_eq!(
         declare(&served, "severity", severity()).await.0,
@@ -672,17 +767,23 @@ async fn a_declaration_and_its_values_survive_a_restart_and_a_fold() {
     flush(&served).await;
     let served = restart(served).await;
     assert_eq!(
-        categories(&served, "severity").await,
+        titled(&served, "severity").await,
         before,
         "carried by the segments manifest"
     );
 
-    // Folded into `MANIFEST.json`, then replayed from it.
+    // Folded into `MANIFEST.json`, then replayed from it. **The fold is the step a title is lost
+    // at if any home drops it**: the log rotates, so `MANIFEST.vocabularies` is the only copy
+    // left, and it is written from the live minters and from `vocabulary_extensions`.
     fold(&served).await;
-    assert_eq!(categories(&served, "severity").await, before);
+    assert_eq!(
+        titled(&served, "severity").await,
+        before,
+        "the fold in this process run keeps every title"
+    );
     let served = restart(served).await;
     assert_eq!(
-        categories(&served, "severity").await,
+        titled(&served, "severity").await,
         before,
         "carried by MANIFEST.json"
     );

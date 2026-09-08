@@ -2073,6 +2073,17 @@ pub const HONOURED_STATE: &[&str] = &[
     // holds, when a key is a view's only address and is never reused (`views.md` §3.2, §3.4).
     "views",
     "dead_view_incarnations",
+    // **Every declaration made while the service ran** (`ingest.md` §1.3, §6.3), on the roster's
+    // argument and with the same consequence: a reader carrying these and ignoring them would
+    // serve a bundle as though the column, the vocabulary, the group or the view had never been
+    // declared — the column's values read as absent for every entity, a row's code explained by
+    // no key, and a request naming the view a 404. Each arrived with the code that reads it
+    // (`Engine::open` merges them into the manifest before anything reads the schema).
+    "attributes",
+    "scoped_attributes",
+    "vocabularies",
+    "groups",
+    "plain_views",
 ];
 
 /// The subset of state fields a manifest carries **because a deny was accepted** (contracts
@@ -2167,6 +2178,11 @@ impl SegmentsManifest {
                 "dead_view_incarnations",
                 !self.dead_view_incarnations.is_empty(),
             ),
+            ("attributes", !self.attributes.is_empty()),
+            ("scoped_attributes", !self.scoped_attributes.is_empty()),
+            ("vocabularies", !self.vocabularies.is_empty()),
+            ("groups", !self.groups.is_empty()),
+            ("plain_views", !self.plain_views.is_empty()),
         ]
         .into_iter()
         .filter(|(name, carried)| *carried && !HONOURED_STATE.contains(name))
@@ -2439,6 +2455,11 @@ mod tests {
                 "layer_tombstones",
                 "views",
                 "dead_view_incarnations",
+                "attributes",
+                "scoped_attributes",
+                "vocabularies",
+                "groups",
+                "plain_views",
             ],
             "deltas: `build_fragment_with_deltas` unions every live tier into a fragment. \
              deny/tombstones: the loader seeds the initial overlay from them and WAL replay \
@@ -2455,7 +2476,13 @@ mod tests {
              view created while the service ran survive the rotation that reclaims its \
              `ViewCreate` record; a reader carrying them and ignoring them would 404 every \
              request naming such a view and would admit a create on a key a live or tombstoned \
-             view already holds"
+             view already holds. attributes/scoped_attributes/vocabularies/groups/plain_views: \
+             `Engine::open` merges each into the bundle's own manifest before anything reads the \
+             schema, the roster or the vocabulary table, and replays the WAL over the top — which \
+             is what makes a declaration made while the service ran survive the rotation that \
+             reclaims its record (`ingest.md` §1.3, §6.3); a reader carrying them and ignoring \
+             them would serve the column absent for every entity, a row's code explained by no \
+             key, and a 404 for every request naming the view"
         );
     }
 
