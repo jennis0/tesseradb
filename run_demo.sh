@@ -17,6 +17,8 @@
 #                                 # its ports, its credentials, its disclosure floor, unrewritten
 #   ./run_demo.sh --bundle PATH --terms GB,FR,DE [--ranks R.json] [--label 'Name'] [--prose name]
 #                                 # …whose dictionary is its own, not the fixtures' 0..200
+#   ./run_demo.sh --deployment D/tessera.toml --terms-file D/terms.txt --ranks D/ranks.json
+#                                 # …whose keys carry commas, so the list is one term per line
 #   ./run_demo.sh --no-viewer     # servers only (for curl, the golden capture, the smoke script)
 #   ./run_demo.sh --rebuild       # discard and rebuild the demo bundles
 #
@@ -197,10 +199,15 @@ scales=()
 # could be right for all of them; the bundle's own terms have to be named.
 #
 #   --terms  a comma-separated candidate list, or `lo..hi`
+#   --terms-file  the same list, one term per line — the form to use when a key may carry a comma.
+#            Rung 5's candidates are publisher names and 70 of its 474 hold one ("Royal Botanic
+#            Gardens, Kew"), which a comma-joined list splits into fragments that name nothing, so
+#            the principal measures empty and the map is blank with nothing to say why
 #   --ranks  `[{term, pairs}]`, most-covering first — what composes the sparse/medium/heavy
 #            coverage principals, which is the whole of what "switch principal" demonstrates once
 #            a dictionary is large enough that any single term is a sliver
 terms_override=''
+terms_file_override=''
 ranks_override=''
 # What the picker calls this bundle. Without it the entry is the bundle's absolute path, which is
 # what the operator typed rather than what the corpus is.
@@ -216,6 +223,7 @@ while [[ $# -gt 0 ]]; do
     --bundle)     bundle_override="$2"; shift 2 ;;
     --deployment) deployment_override="$2"; shift 2 ;;
     --terms)      terms_override="$2"; shift 2 ;;
+    --terms-file) terms_file_override="$2"; shift 2 ;;
     --ranks)      ranks_override="$2"; shift 2 ;;
     --label)      label_override="$2"; shift 2 ;;
     --prose)      prose_override="$2"; shift 2 ;;
@@ -234,6 +242,15 @@ done
 if [[ -n "$ranks_override" ]]; then
   [[ -f "$ranks_override" ]] || { echo "no such ranks file: $ranks_override" >&2; exit 1; }
   ranks_override="$(cd "$(dirname "$ranks_override")" && pwd)/$(basename "$ranks_override")"
+fi
+# `--terms-file` is resolved here for the reason `--ranks` is: the measurement loop runs from
+# `clients/ts`, so a relative path stops resolving under it.
+if [[ -n "$terms_file_override" ]]; then
+  if [[ -n "$terms_override" ]]; then
+    echo "--terms and --terms-file name the candidate list twice" >&2; exit 2
+  fi
+  [[ -f "$terms_file_override" ]] || { echo "no such terms file: $terms_file_override" >&2; exit 1; }
+  terms_file_override="$(cd "$(dirname "$terms_file_override")" && pwd)/$(basename "$terms_file_override")"
 fi
 
 # `1b` is deliberately NOT in the default set, and the reason is the served side rather than the
@@ -685,7 +702,7 @@ for scale in "${scales[@]}"; do
   terms="${terms_override:-0..200}"
   # An overridden term list means an overridden dictionary, so the demo fixtures' ranking is not
   # merely unhelpful for it — it names terms this bundle does not have.
-  ranks="${ranks_override:-$([[ -n "$terms_override" ]] && echo '' || echo "$RANKS")}"
+  ranks="${ranks_override:-$([[ -n "$terms_override$terms_file_override" ]] && echo '' || echo "$RANKS")}"
   if [[ -n "$(notebook_dir_of "$scale")" ]]; then
     ranks="$DEMO/presets/$scale.term-ranks.json"
     terms="$(python3 - "$(notebook_dir_of "$scale")/points.parquet" "$ranks" <<'CANDIDATES'
@@ -700,10 +717,20 @@ print(",".join(r["term"] for r in ranked))
 CANDIDATES
 )"
   fi
+  # An array rather than a command substitution: a candidate list holds institution names, and an
+  # unquoted expansion would split each one at its spaces into terms the dictionary does not hold.
+  # An `if` rather than `test && assign`: under `set -e` a false test is a failing list and would
+  # end the run.
+  if [[ -n "$terms_file_override" ]]; then
+    terms_args=(--terms-file "$terms_file_override")
+  else
+    terms_args=(--terms "$terms")
+  fi
   node scripts/measure-principals.mjs \
     --viewer "http://127.0.0.1:$(viewer_of "$scale")" \
     --session "http://127.0.0.1:$(session_of "$scale")" \
-    --terms "$terms" --out "$DEMO/presets/$scale.json" \
+    "${terms_args[@]}" \
+    --out "$DEMO/presets/$scale.json" \
     $([[ -f "$ranks" ]] && echo --ranks "$ranks")
 done
 

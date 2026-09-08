@@ -9,6 +9,9 @@
 //     --viewer http://127.0.0.1:37585 --session http://127.0.0.1:49303 --terms 0..200 \
 //     [--ranks <pairs>.term-ranks.json] [--out PATH]
 //
+// `--terms-file PATH` is `--terms` for a corpus whose keys carry commas: one term per line, blank
+// lines skipped.
+//
 // Re-run it per fixture: the term dictionary differs between bundles, so presets measured against
 // 2m4 are meaningless against 1e8. That is what `--out` is for — the demo serves several bundles at
 // once, and each needs its own measured list.
@@ -26,7 +29,7 @@
 //
 // Note it decodes only the TILE stream, which is the response's first frame — so this script needs
 // none of core's frame walking beyond one header, and stays plain JS.
-import {writeFile} from 'node:fs/promises';
+import {readFile, writeFile} from 'node:fs/promises';
 import {dirname, join} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {tableFromIPC} from 'apache-arrow';
@@ -41,13 +44,26 @@ const session = args.session ?? 'http://127.0.0.1:49303';
 const cred = process.env.TESSERA_SESSION_CRED;
 if (!cred) throw new Error('set TESSERA_SESSION_CRED');
 
-const spec = args.terms ?? '0..200';
-const candidates = spec.includes('..')
-  ? (() => {
+// **A comma delimits the list and a term is under no obligation to avoid one.** `--terms-file`
+// takes one term per line instead, which a key cannot contain: rung 5's candidates are publisher
+// names, and 70 of its 474 carry a comma — "Royal Botanic Gardens, Kew" — so a comma-joined list
+// splits them into fragments naming nothing, and the principal measures empty with no error. The
+// same hazard on the ingest wire was ruled the other way for the same reason (decision 0129: the
+// wire carries a list, taken verbatim). `--terms` keeps the `lo..hi` form and the plain list.
+if (args.terms && args['terms-file']) {
+  throw new Error('--terms and --terms-file both name the candidate list; pass one');
+}
+const candidates = args['terms-file']
+  ? (await readFile(args['terms-file'], 'utf8'))
+      .split('\n')
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0)
+  : (() => {
+      const spec = args.terms ?? '0..200';
+      if (!spec.includes('..')) return spec.split(',');
       const [lo, hi] = spec.split('..').map(Number);
       return Array.from({length: hi - lo + 1}, (_, i) => String(lo + i));
-    })()
-  : spec.split(',');
+    })();
 
 async function authorise(terms) {
   const r = await fetch(`${session}/session/authorise`, {
