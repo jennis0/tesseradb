@@ -2855,8 +2855,8 @@ impl WritePath {
         // **A batch whose cells a flush already wrote is re-buffered and writes nothing.** The
         // WAL member holding it is reclaimed on its own schedule, so a replay meets records the
         // flush has consumed; `plan_flush` applies the fill rule to every fill against the
-        // flushed homes and drops the cells already held, which is what keeps one claimant per
-        // column without a second durable record of what has been written.
+        // flushed homes, drops the cells already held, and names the fill consumed anyway — so
+        // the next tick removes it and it stops pinning the log.
         for (record, position) in records.iter().zip(wal.replayed_positions()) {
             let WalRecord::ValuesBatch {
                 view,
@@ -2878,10 +2878,13 @@ impl WritePath {
                 ));
             };
             let families = scoped_families_of_view(&served, view);
+            let owner_view = scoped_owner_view_of(&served, view);
             for row in rows {
-                let mut scalars: Vec<WalScalar> = vec![WalScalar::Null; served.declared_scalars.len()];
+                let mut scalars: Vec<WalScalar> =
+                    vec![WalScalar::Null; served.declared_scalars.len()];
                 let mut scoped: Vec<WalScalar> = vec![WalScalar::Null; families.len()];
-                let mut any = false;
+                let mut any_entity = false;
+                let mut any_scoped = false;
                 for (at, name) in columns.iter().enumerate() {
                     let Some(value) = row.values.get(at) else {
                         continue;
@@ -2893,12 +2896,12 @@ impl WritePath {
                         served.declared_scalars.iter().position(|d| &d.name == name)
                     {
                         scalars[position] = value.clone();
-                        any = true;
+                        any_entity = true;
                         continue;
                     }
                     if let Some(position) = families.iter().position(|f| &f.name == name) {
                         scoped[position] = value.clone();
-                        any = true;
+                        any_scoped = true;
                         continue;
                     }
                     // A column the served schema no longer carries. The values are unreadable
@@ -2909,20 +2912,31 @@ impl WritePath {
                          deployment's schema does not declare; this node does not open"
                     )));
                 }
-                if !any {
-                    continue;
+                if any_entity {
+                    buffer.fill(
+                        row.entity_id,
+                        tessera_lifecycle::Fill {
+                            view: view.clone(),
+                            scalars,
+                            wal_pos: Some(*position),
+                        },
+                        |value| matches!(value, WalScalar::Null),
+                    );
+                    buffer.set_fill_wal_pos(row.entity_id, *position);
                 }
-                buffer.fill(
-                    row.entity_id,
-                    tessera_lifecycle::Fill {
-                        view: view.clone(),
-                        scalars,
-                        scoped,
-                        wal_pos: Some(*position),
-                    },
-                    |value| matches!(value, WalScalar::Null),
-                );
-                buffer.set_fill_wal_pos(row.entity_id, *position);
+                if any_scoped {
+                    buffer.fill_scoped(
+                        row.entity_id,
+                        owner_view.clone(),
+                        tessera_lifecycle::ScopedFill {
+                            view: view.clone(),
+                            scoped,
+                            wal_pos: Some(*position),
+                        },
+                        |value| matches!(value, WalScalar::Null),
+                    );
+                    buffer.set_scoped_fill_wal_pos(row.entity_id, &owner_view, *position);
+                }
             }
         }
 
@@ -3462,12 +3476,10 @@ impl WritePath {
                 filled,
                 held,
                 joined,
-                minted,
             }) => Ok(ValuesReceipt {
                 filled,
                 held,
                 joined,
-                minted,
             }),
             Ok(other) => unreachable!("a Values command answers ValuesFilled, not {other:?}"),
             Err(e) => Err(AcceptError::Exec(e)),
@@ -10307,13 +10319,16 @@ pub struct ValuesReceipt {
     pub filled: u64,
     pub held: u64,
     pub joined: u64,
-    pub minted: u64,
 }
 
 /// What one values batch's fill rule produced: the cells to hold until the flush writes them, and
 /// the counts the acknowledgement carries.
 struct PlannedFills {
+    /// The entity-scoped cells, one entry per entity.
     fills: Vec<(EntityId, tessera_lifecycle::Fill)>,
+    /// The group-scoped cells, one entry per `(entity, owner view)` — the address a scoped value
+    /// has, and never the entity alone (`views.md` §5).
+    scoped_fills: Vec<(EntityId, String, tessera_lifecycle::ScopedFill)>,
     filled: u64,
     held: u64,
 }
@@ -10358,15 +10373,26 @@ fn plan_fills(
 
     // One resolution per batch, not per row. A name in neither space is refused here as well as
     // at the door: the door reads the served schema of a generation this pass may have moved past.
-    // **A `render` column cannot be filled** (`ingest.md` §6.3). A fill acquires no row, and a
-    // rendered column is served from the hot column of the row that carries it — both to a tile
-    // and to a filter leaf, which takes the row route wherever the column reaches the tail. So a
-    // fill has nowhere to put the value that any reader would answer from, and acknowledging one
-    // would store a cell nothing serves. Refused rather than dropped, naming the remedy.
+    // **A `render` column cannot be filled** (`ingest.md` §6.3). A fill acquires no row, so it
+    // never reaches the hot column, and the hot column is the only home a tile and the drill-down
+    // read a rendered value from. Two shapes, refused for two reasons:
     //
-    // This is narrower than spec §6.3's R10, which reads a back-filled `render` value as
-    // filterable where `index` was declared; the built filter takes the row route for such a
-    // column, so the promise is not one this route can keep.
+    // - **`render` alone** — not `index`, and not a `derived` category — has *no home at all*
+    //   for a fill: `owes_value_column` is false, so there is no entity-space column, and
+    //   `blob_resident` is false because the column renders, so there is no blob row either. The
+    //   value would be acknowledged and stored nowhere.
+    // - **`render` with `index`**, and a rendered `derived` category, *do* have an entity-space
+    //   column, so a fill would be stored and would answer a filter that took the entity route.
+    //   It would still draw absent on every tile and at the drill-down, and answer nothing to a
+    //   filter whose request made the row route cheaper — which is a per-request cost choice
+    //   (decision 0068, `FilterColumns::leaf_space`'s `prefer_row`), not a property of the
+    //   column. One column answering two ways depending on the shape of the request is the
+    //   reason this is refused rather than half-served.
+    //
+    // Narrower than spec §6.3's R10, which reads a back-filled `render` value as filterable where
+    // `index` was declared. That much is true of the entity route; what R10 does not say is that
+    // the value is drawn nowhere until the fold, and the refusal is what keeps the two surfaces
+    // from disagreeing in the meantime.
     let row_tail_only = |d: &tessera_store::manifest::DeclaredScalar| d.render;
     let mut columns = Vec::with_capacity(request.columns.len());
     for name in &request.columns {
@@ -10374,10 +10400,11 @@ fn plan_fills(
             if row_tail_only(&declared[position]) {
                 return Err(ExecError::ValuesRefused {
                     detail: format!(
-                        "column '{name}' is declared `render`, so its value is served from the \
-                         hot column of the row that carries it. A values row acquires no row, so \
-                         there is nowhere for the value to land that a tile or a filter would \
-                         read: re-ingest the point, or declare the column without `render` \
+                        "column '{name}' is declared `render`, and a rendered value is drawn \
+                         from the hot column of the row that carries it. A values row acquires no \
+                         row, so the value would be drawn on no tile and at no drill-down — and \
+                         where the column is not also `index` it would be stored nowhere at all. \
+                         Re-ingest the point, or declare the column without `render` \
                          (`ingest.md` §6.3)"
                     ),
                 });
@@ -10389,9 +10416,9 @@ fn plan_fills(
             if row_tail_only(&crate::session::declared_of_scoped(&families[position])) {
                 return Err(ExecError::ValuesRefused {
                     detail: format!(
-                        "group-scoped column '{name}' is declared `render`, so its value is \
-                         served from the hot column of the row that carries it, and a values row \
-                         acquires no row (`ingest.md` §6.3)"
+                        "group-scoped column '{name}' is declared `render`, and a rendered value \
+                         is drawn from the hot column of the row that carries it, which a values \
+                         row does not acquire (`ingest.md` §6.3)"
                     ),
                 });
             }
@@ -10409,6 +10436,7 @@ fn plan_fills(
     }
 
     let mut fills = Vec::with_capacity(request.rows.len());
+    let mut scoped_fills = Vec::new();
     let mut filled = 0u64;
     let mut held_count = 0u64;
     for (index, row) in request.rows.iter().enumerate() {
@@ -10424,12 +10452,10 @@ fn plan_fills(
         }
         let buffered = generation.buffer.get(entity);
         // The cells an earlier batch filled and no flush has written. Read as a claimant beside
-        // the other two: a cell filled at the last tick is held, not absent.
-        let pending = generation
-            .buffer
-            .fills()
-            .find(|(held, _)| **held == entity)
-            .map(|(_, fill)| fill);
+        // the other two: a cell filled at the last tick is held, not absent. **A lookup, not a
+        // scan** — this is asked once per row and a batch runs to `max_batch_rows`.
+        let pending = generation.buffer.fill_of(entity);
+        let pending_scoped = generation.buffer.scoped_fill_of(entity, &owner_view);
         // Read at most once for this row, and only if a blob-resident column asks.
         let mut blob = crate::session::BlobRow::default();
         // **Absence in a fill's tails is `WalScalar::Null` for every family, a category
@@ -10439,7 +10465,8 @@ fn plan_fills(
         // being an ordinary `u8` to any predicate over the value alone.
         let mut scalars: Vec<WalScalar> = vec![WalScalar::Null; declared.len()];
         let mut scoped: Vec<WalScalar> = vec![WalScalar::Null; families.len()];
-        let mut any = false;
+        let mut any_entity = false;
+        let mut any_scoped = false;
 
         for (position, column) in columns.iter().enumerate() {
             let Some(supplied) = row.values.get(position) else {
@@ -10451,18 +10478,33 @@ fn plan_fills(
                     if crate::session::scalar_is_absent(supplied, d) {
                         continue;
                     }
+                    // **Each source is asked for a *held* value, not for a slot** — the shape
+                    // `settle_joins` reads its arms in. A buffered row that carries the position
+                    // and holds the column's absence answers `Some(absence)`, so a chain that
+                    // short-circuited on `Some` would stop there and never reach the pending fill
+                    // or the flushed home: a cell already filled would read as absent, be filled
+                    // a second time, and the second value would be dropped at the merge after
+                    // being acknowledged.
+                    let held = |value: WalScalar| {
+                        (!crate::session::scalar_is_absent(&value, d)).then_some(value)
+                    };
                     let stored = buffered
                         .and_then(|item| item.scalars.get(*at).cloned())
-                        .or_else(|| pending.and_then(|fill| fill.scalars.get(*at).cloned()))
+                        .and_then(held)
+                        .or_else(|| {
+                            pending
+                                .and_then(|fill| fill.scalars.get(*at).cloned())
+                                .and_then(held)
+                        })
                         .or_else(|| {
                             crate::session::flushed_scalar_of(generation, entity, *at, &mut blob)
-                        })
-                        .filter(|value| !crate::session::scalar_is_absent(value, d));
+                                .and_then(held)
+                        });
                     match stored {
                         None => {
                             scalars[*at] = supplied.clone();
                             filled += 1;
-                            any = true;
+                            any_entity = true;
                         }
                         Some(stored) if stored == *supplied => held_count += 1,
                         Some(_) => {
@@ -10488,23 +10530,29 @@ fn plan_fills(
                     }
                     // Every buffered row of the entity whose view addresses this same key — the
                     // cell's own rows, not the entity's own row, which is a different question
-                    // (`settle_joins`' scoped arm).
+                    // (`settle_joins`' scoped arm). Each source answers a *held* value on the
+                    // entity-scoped arm's rule: `find_map` over the slot alone would stop at the
+                    // first row that carries the position, absence included, and an entity with
+                    // two buffered rows under one key would then hide a value the second holds.
+                    let held = |value: WalScalar| {
+                        (!crate::session::scalar_is_absent(&value, &d)).then_some(value)
+                    };
                     let stored = generation
                         .buffer
                         .rows_of(entity)
                         .filter(|item| scoped_owner_view_of(manifest, &item.view) == owner_view)
-                        .find_map(|item| item.scoped.get(*at).cloned())
+                        .find_map(|item| item.scoped.get(*at).cloned().and_then(held))
                         .or_else(|| {
-                            pending
-                                .filter(|fill| {
-                                    scoped_owner_view_of(manifest, &fill.view) == owner_view
-                                })
+                            pending_scoped
                                 .and_then(|fill| fill.scoped.get(*at).cloned())
+                                .and_then(held)
                         })
                         .or_else(|| {
-                            crate::session::flushed_scoped_of(generation, entity, family, &owner_view)
-                        })
-                        .filter(|value| !crate::session::scalar_is_absent(value, &d));
+                            crate::session::flushed_scoped_of(
+                                generation, entity, family, &owner_view,
+                            )
+                            .and_then(held)
+                        });
                     // **A `text` family past a flush is refused rather than compared**
                     // (`views.md` §5): the column stores a dictionary, postings and a presence
                     // bitmap and no value per entity, so there is nothing to compare a supplied
@@ -10534,7 +10582,7 @@ fn plan_fills(
                         None => {
                             scoped[*at] = supplied.clone();
                             filled += 1;
-                            any = true;
+                            any_scoped = true;
                         }
                         Some(stored) if stored == *supplied => held_count += 1,
                         Some(_) => {
@@ -10554,12 +10602,22 @@ fn plan_fills(
                 }
             }
         }
-        if any {
+        if any_entity {
             fills.push((
                 entity,
                 tessera_lifecycle::Fill {
                     view: request.view.clone(),
                     scalars,
+                    wal_pos: None,
+                },
+            ));
+        }
+        if any_scoped {
+            scoped_fills.push((
+                entity,
+                owner_view.clone(),
+                tessera_lifecycle::ScopedFill {
+                    view: request.view.clone(),
                     scoped,
                     wal_pos: None,
                 },
@@ -10568,6 +10626,7 @@ fn plan_fills(
     }
     Ok(PlannedFills {
         fills,
+        scoped_fills,
         filled,
         held: held_count,
     })
@@ -13033,6 +13092,12 @@ impl Executor {
             buffer.fill(entity, fill, |value| matches!(value, WalScalar::Null));
             buffer.set_fill_wal_pos(entity, values_position);
         }
+        for (entity, owner_view, fill) in planned.scoped_fills {
+            buffer.fill_scoped(entity, owner_view.clone(), fill, |value| {
+                matches!(value, WalScalar::Null)
+            });
+            buffer.set_scoped_fill_wal_pos(entity, &owner_view, values_position);
+        }
         self.health
             .buffered_items
             .store(buffer.len(), Ordering::SeqCst);
@@ -13071,7 +13136,6 @@ impl Executor {
                 filled: planned.filled,
                 held: planned.held,
                 joined,
-                minted: 0,
             },
             &published,
         );
@@ -15370,7 +15434,8 @@ impl Executor {
                     Err(e) => {
                         tracing::warn!(
                             error = %e,
-                            "discarding a completed values-only flush whose partition this bundle                              no longer carries"
+                            "discarding a completed values-only flush whose partition this bundle \
+                             no longer carries"
                         );
                         return false;
                     }
@@ -15446,10 +15511,15 @@ impl Executor {
             // §4).
             buffer.remove_in_view(*entity, &completed.view);
         }
-        // The fills this flush wrote, on the same rule and by entity: a fill is held per entity,
-        // and the pass that wrote it took every cell it carried (`ingest.md` §1.4).
+        // The fills this flush's plan consumed, on the same rule. **Every fill it looked at**,
+        // not only the ones it wrote: a fill a restart re-buffered after its own flush writes
+        // nothing and must still leave the buffer, or it pins the log at its `ValuesBatch` record
+        // for ever (`ingest.md` §1.4).
         for entity in &completed.filled {
             buffer.remove_fill(*entity);
+        }
+        for (entity, owner_view) in &completed.filled_scoped {
+            buffer.remove_scoped_fill(*entity, owner_view);
         }
         // **The gauge follows the buffer here too.** A flush is the other place occupancy changes,
         // and until it was stated here the figure only ever came down at the next apply — so a
@@ -16270,6 +16340,8 @@ mod dispatch_rules_tests {
         crate::flush::FlushPlan {
             items: vec![(EntityId::new(oldest), item)],
             fills: Vec::new(),
+            consumed_fills: Vec::new(),
+            consumed_scoped_fills: Vec::new(),
         }
     }
 

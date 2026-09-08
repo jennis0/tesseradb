@@ -247,34 +247,60 @@ pub struct IngestBuffer {
     items: FxHashMap<EntityId, Arc<Vec<Arc<BufferedItem>>>>,
     /// Rows, not entities: what the occupancy bound counts and what a flush consumes.
     rows: usize,
-    /// The cells an accepted `POST /control/values` batch filled and no flush has written yet
-    /// (`ingest.md` §1.4), keyed by the entity they fill.
+    /// The **entity-scoped** cells an accepted `POST /control/values` batch filled and no flush
+    /// has written yet (`ingest.md` §1.4), keyed by the entity they fill.
     ///
     /// **A second map rather than a row in `items`, because a fill is not a row.** It carries no
     /// geometry, no label and no external id: it creates nothing and names an entity that exists,
     /// so every entity-space walk over this buffer must go on answering with the entity's own row
     /// and every "is this entity already in this view" arm must go on saying what it said. What a
-    /// fill is for is the two homes a flush writes from the buffer — the family's entity-space
-    /// extent and the record blob — and those read it through [`Self::fills`].
+    /// fill is for is the homes a flush writes from the buffer — the family's entity-space
+    /// structure, the text layer and the record blob — and those read it through [`Self::fills`].
+    ///
+    /// One entry per entity, because an entity-scoped value belongs to the entity and to no view.
     fills: FxHashMap<EntityId, Arc<Fill>>,
+    /// The **group-scoped** cells of the same batches, keyed by `(entity, owner view)`.
+    ///
+    /// **Not by entity, because a scoped value is not the entity's** (`views.md` §5): its address
+    /// is `(attribute → its group, key)`, so one entity may hold an unflushed cell under two keys
+    /// of one group and under the keys of two different groups at once. Keyed by entity alone,
+    /// the second would overwrite the first — and a second *group*'s values would be merged
+    /// positionally against the first group's family list, putting a value in another family's
+    /// slot. The owner view is what makes each cell's list its own: every entry under one key
+    /// resolves to one owning group, so `scoped` is positional against that group's
+    /// `scoped_scalars` and against nothing else.
+    scoped_fills: FxHashMap<(EntityId, String), Arc<ScopedFill>>,
 }
 
-/// One entity's unflushed filled cells (`ingest.md` §1.4): the values a `POST /control/values`
-/// batch supplied for cells nothing held, waiting for the flush that writes them into the
-/// family's entity-space extent and the record blob.
+/// One entity's unflushed **entity-scoped** filled cells (`ingest.md` §1.4): the values a
+/// `POST /control/values` batch supplied for cells nothing held, waiting for the flush that writes
+/// them into the family's entity-space structure and the record blob.
 ///
-/// `scalars` and `scoped` are positional exactly as [`BufferedItem`]'s are, and every cell the
-/// fill rule dropped — one nothing supplied, or one a held value already equalled — is the
-/// absence of its family, so a flush writes a slot for none of them.
+/// `scalars` is positional exactly as [`BufferedItem::scalars`] is, and every cell the fill rule
+/// dropped — one nothing supplied, or one a held value already equalled — is `WalScalar::Null`,
+/// so a flush writes a slot for none of them.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Fill {
-    /// The view the batch named, which decides which flush pass writes this fill and which view's
-    /// column of a group-scoped family `scoped` addresses.
+    /// The view the batch named. An entity-scoped value belongs to no view; what this decides is
+    /// which flush pass writes the cells, the entity-space extents and the record blob being
+    /// written once per pass and named for no view.
     pub view: String,
     pub scalars: Vec<WalScalar>,
-    pub scoped: Vec<WalScalar>,
     /// The WAL position of the `ValuesBatch` record this arrived in — what pins the log until the
     /// flush writes the cells, on [`BufferedItem::wal_pos`]'s rule.
+    pub wal_pos: Option<u64>,
+}
+
+/// One `(entity, owner view)` cell's unflushed **group-scoped** values (`views.md` §5).
+///
+/// `scoped` is positional against the owning group's `scoped_scalars`, which the owner view in
+/// the key determines.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ScopedFill {
+    /// The view the batch named — the door, where the key is the address. It decides which flush
+    /// pass writes the cells, and that pass resolves it to the owner view the key names.
+    pub view: String,
+    pub scoped: Vec<WalScalar>,
     pub wal_pos: Option<u64>,
 }
 
@@ -284,6 +310,7 @@ impl IngestBuffer {
             items: FxHashMap::default(),
             rows: 0,
             fills: FxHashMap::default(),
+            scoped_fills: FxHashMap::default(),
         }
     }
 
@@ -362,7 +389,7 @@ impl IngestBuffer {
     /// only copy of the values until the flush writes them into the family's extent and the
     /// record blob (`ingest.md` §1.4).
     pub fn oldest_wal_pos(&self) -> Option<Option<u64>> {
-        if self.items.is_empty() && self.fills.is_empty() {
+        if self.items.is_empty() && self.fills.is_empty() && self.scoped_fills.is_empty() {
             return None;
         }
         Some(
@@ -371,19 +398,19 @@ impl IngestBuffer {
                 .flat_map(|rows| rows.iter())
                 .map(|item| item.wal_pos)
                 .chain(self.fills.values().map(|fill| fill.wal_pos))
+                .chain(self.scoped_fills.values().map(|fill| fill.wal_pos))
                 .try_fold(u64::MAX, |acc, pos| pos.map(|p| acc.min(p))),
         )
     }
 
-    /// Record one accepted values batch's cells for `entity`, merging with any this entity
-    /// already holds unflushed.
+    /// Record one accepted values batch's **entity-scoped** cells for `entity`, merging with any
+    /// this entity already holds unflushed.
     ///
     /// **Merged rather than replaced.** Two batches may fill different columns of one entity
     /// between two ticks, and the fill rule has already refused any cell either of them holds — so
     /// a cell carrying a value in the held fill keeps it, and one that is absent there takes this
-    /// batch's. The `view` of the first fill stands: a later batch naming another view supplies
-    /// entity-scoped cells, which belong to no view, and a group-scoped cell it names has already
-    /// been refused where the two views address one key.
+    /// batch's. The `view` of the first fill stands: an entity-scoped value belongs to no view,
+    /// and what the field decides is only which pass writes the cells.
     pub fn fill(&mut self, entity: EntityId, fill: Fill, absent: impl Fn(&WalScalar) -> bool) {
         match self.fills.get_mut(&entity) {
             None => {
@@ -392,11 +419,28 @@ impl IngestBuffer {
             Some(held) => {
                 let held = Arc::make_mut(held);
                 merge_cells(&mut held.scalars, fill.scalars, &absent);
+                held.wal_pos = oldest_of(held.wal_pos, fill.wal_pos);
+            }
+        }
+    }
+
+    /// Record one accepted values batch's **group-scoped** cells for the `(entity, owner view)`
+    /// cell they address, on [`Self::fill`]'s merge rule (`views.md` §5).
+    pub fn fill_scoped(
+        &mut self,
+        entity: EntityId,
+        owner_view: String,
+        fill: ScopedFill,
+        absent: impl Fn(&WalScalar) -> bool,
+    ) {
+        match self.scoped_fills.get_mut(&(entity, owner_view.clone())) {
+            None => {
+                self.scoped_fills.insert((entity, owner_view), Arc::new(fill));
+            }
+            Some(held) => {
+                let held = Arc::make_mut(held);
                 merge_cells(&mut held.scoped, fill.scoped, &absent);
-                held.wal_pos = match (held.wal_pos, fill.wal_pos) {
-                    (Some(a), Some(b)) => Some(a.min(b)),
-                    _ => None,
-                };
+                held.wal_pos = oldest_of(held.wal_pos, fill.wal_pos);
             }
         }
     }
@@ -405,28 +449,61 @@ impl IngestBuffer {
     pub fn set_fill_wal_pos(&mut self, entity: EntityId, wal_pos: u64) {
         if let Some(fill) = self.fills.get_mut(&entity) {
             let fill = Arc::make_mut(fill);
-            fill.wal_pos = Some(match fill.wal_pos {
-                Some(held) => held.min(wal_pos),
-                None => wal_pos,
-            });
+            fill.wal_pos = Some(oldest_of(fill.wal_pos, Some(wal_pos)).unwrap_or(wal_pos));
         }
     }
 
-    /// Every unflushed fill, with the entity it fills — the flush's second walk beside
-    /// [`Self::rows`], scoped to one view by the caller.
+    /// [`Self::set_fill_wal_pos`] for one scoped cell.
+    pub fn set_scoped_fill_wal_pos(&mut self, entity: EntityId, owner_view: &str, wal_pos: u64) {
+        if let Some(fill) = self.scoped_fills.get_mut(&(entity, owner_view.to_string())) {
+            let fill = Arc::make_mut(fill);
+            fill.wal_pos = Some(oldest_of(fill.wal_pos, Some(wal_pos)).unwrap_or(wal_pos));
+        }
+    }
+
+    /// Every unflushed entity-scoped fill, with the entity it fills — the flush's second walk
+    /// beside [`Self::rows`], scoped to one view by the caller.
     pub fn fills(&self) -> impl Iterator<Item = (&EntityId, &Fill)> {
         self.fills.iter().map(|(entity, fill)| (entity, &**fill))
     }
 
-    /// Drop one entity's fill — what a flush's publication does with exactly the fills it wrote.
+    /// Every unflushed group-scoped fill, with the `(entity, owner view)` cell it fills.
+    pub fn scoped_fills(&self) -> impl Iterator<Item = (&(EntityId, String), &ScopedFill)> {
+        self.scoped_fills.iter().map(|(key, fill)| (key, &**fill))
+    }
+
+    /// This entity's unflushed entity-scoped cells, or `None` where it holds none — **a lookup,
+    /// not a scan**: the fill rule asks this once per row of a batch, and a batch is capped at
+    /// `max_batch_rows`.
+    pub fn fill_of(&self, entity: EntityId) -> Option<&Fill> {
+        self.fills.get(&entity).map(|fill| &**fill)
+    }
+
+    /// This `(entity, owner view)` cell's unflushed values, on [`Self::fill_of`]'s terms.
+    pub fn scoped_fill_of(&self, entity: EntityId, owner_view: &str) -> Option<&ScopedFill> {
+        // The key is borrowed as a pair, which `FxHashMap` cannot look up without owning the
+        // string; the allocation is one per row per scoped column and is what keys the cell by
+        // its address rather than by the entity.
+        self.scoped_fills
+            .get(&(entity, owner_view.to_string()))
+            .map(|fill| &**fill)
+    }
+
+    /// Drop one entity's entity-scoped fill — what a flush's publication does with exactly the
+    /// fills its plan consumed.
     pub fn remove_fill(&mut self, entity: EntityId) {
         self.fills.remove(&entity);
     }
 
-    /// How many entities hold an unflushed fill. Diagnostic, and the flush's "is there anything to
-    /// do" test beside [`Self::len`].
+    /// Drop one `(entity, owner view)` cell's fill, on [`Self::remove_fill`]'s terms.
+    pub fn remove_scoped_fill(&mut self, entity: EntityId, owner_view: &str) {
+        self.scoped_fills.remove(&(entity, owner_view.to_string()));
+    }
+
+    /// How many unflushed fills this buffer holds, entity-scoped and scoped together.
+    /// Diagnostic, and the flush's "is there anything to do" test beside [`Self::len`].
     pub fn fill_count(&self) -> usize {
-        self.fills.len()
+        self.fills.len() + self.scoped_fills.len()
     }
 
     /// Remove one item — **what a flush's publication does with exactly the entities it
@@ -531,7 +608,16 @@ impl IngestBuffer {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.items.is_empty() && self.fills.is_empty()
+        self.items.is_empty() && self.fills.is_empty() && self.scoped_fills.is_empty()
+    }
+}
+
+/// The older of two WAL positions, and `None` where either is unknown — `None` meaning "not
+/// known" rather than zero, on [`BufferedItem::wal_pos`]'s rule.
+fn oldest_of(held: Option<u64>, supplied: Option<u64>) -> Option<u64> {
+    match (held, supplied) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        _ => None,
     }
 }
 

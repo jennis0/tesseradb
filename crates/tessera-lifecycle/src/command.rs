@@ -589,10 +589,11 @@ pub enum Ack {
         held: u64,
         /// Members this batch's layer columns added to artifacts that did not already hold them,
         /// on [`MembershipGrown::joined`]'s terms.
+        ///
+        /// **No count of artifacts created sits beside it**, unlike [`Ack::Ingested`]'s `minted`:
+        /// a values batch creates nothing, and a layer key no artifact holds refuses it
+        /// (`ingest.md` §1.4).
         joined: u64,
-        /// How many artifacts this batch's layer columns created, on [`Ack::Ingested`]'s
-        /// `minted` terms.
-        minted: u64,
     },
 }
 

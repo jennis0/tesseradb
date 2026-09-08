@@ -3298,6 +3298,17 @@ impl Engine {
         self.write.health().buffered_items.load(Ordering::SeqCst)
     }
 
+    /// Unflushed `POST /control/values` fills the buffer holds (`ingest.md` §1.4), entity-scoped
+    /// and group-scoped together.
+    ///
+    /// **Test- and operator-facing, and what says whether a fill is still pinning the log.** A
+    /// fill holds its `ValuesBatch` record against rotation until the flush that writes its cells
+    /// consumes it, so a figure that never falls after a restart is the pin that would not
+    /// release ([`IngestBuffer::oldest_wal_pos`]).
+    pub fn buffered_fills(&self) -> usize {
+        self.generation().buffer.fill_count()
+    }
+
     /// Request a flush. **Accepted at any time, executed promptly** (contracts §3.4): the flag
     /// pulls the tick's deadline forward and the doorbell wakes an idle executor, so the flush
     /// runs at the next loop iteration — through the one tick path, with everything a tick

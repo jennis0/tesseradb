@@ -379,7 +379,20 @@ pub(crate) struct FlushPlan {
     /// the value passes alone — the family's entity-space extent, the text layer and the record
     /// blob. Kept beside `items` rather than in it because the segment's entity range is `items`'
     /// ends, and an old entity's fill in that list would claim a range the segment does not have.
+    ///
+    /// An entity holding both an entity-scoped and a scoped fill under this view appears twice,
+    /// each row carrying one tail's values and the other's absence, so no pass sees one entity's
+    /// cell twice.
     pub(crate) fills: Vec<(EntityId, BufferedItem)>,
+    /// Every entity-scoped fill of this view the plan looked at, written or not — what the
+    /// publication removes from the buffer, on `consumed`'s rule.
+    ///
+    /// **Wider than `fills`, and that is the whole of it.** A restart re-buffers fills a flush has
+    /// already written; those write nothing and are absent from `fills`, and a fill that is never
+    /// consumed pins the log at its `ValuesBatch` record for ever.
+    pub(crate) consumed_fills: Vec<EntityId>,
+    /// The same for the group-scoped fills, by the `(entity, owner view)` cell they address.
+    pub(crate) consumed_scoped_fills: Vec<(EntityId, String)>,
 }
 
 impl FlushPlan {
@@ -510,21 +523,40 @@ pub(crate) fn plan_flush(
         .map(|(entity, item)| (*entity, item.clone()))
         .collect();
     // **The cells an accepted values batch filled** (`ingest.md` §1.4), which acquire no geometry
-    // and are written into the family's entity-space extent and the record blob alone. A deleted
-    // entity is excluded here for the reason a row is: the two homes are what a fill reaches, and
-    // writing one for an entity the overlay denies would give a deletion something to leave
-    // behind.
-    let mut fills: Vec<(EntityId, BufferedItem)> = generation
-        .buffer
-        .fills()
-        .filter(|(entity, fill)| fill.view == view && !is_deleted(&generation.overlay, **entity))
-        .map(|(entity, fill)| (*entity, fill_as_item(generation, *entity, fill)))
-        .filter(|(_, item)| {
-            item.scalars.iter().any(|v| !matches!(v, WalScalar::Null))
-                || item.scoped.iter().any(|v| !matches!(v, WalScalar::Null))
-        })
-        .collect();
-    if items.is_empty() && fills.is_empty() {
+    // and are written into the family's entity-space structure, the text layer and the record
+    // blob alone. A deleted entity is excluded here for the reason a row is: those homes are what
+    // a fill reaches, and writing one for an entity the overlay denies would give a deletion
+    // something to leave behind.
+    //
+    // **Every fill this pass looks at is consumed, and only the ones with a cell left to write
+    // are written.** A restart re-buffers fills the flush has already written; `fill_as_item`
+    // drops the cells the flushed homes hold, and an emptied fill still enters `consumed` — a
+    // fill that was written and never consumed would pin the log at its `ValuesBatch` record for
+    // ever, since `IngestBuffer::oldest_wal_pos` counts fills.
+    let mut consumed_fills: Vec<EntityId> = Vec::new();
+    let mut consumed_scoped_fills: Vec<(EntityId, String)> = Vec::new();
+    let mut fills: Vec<(EntityId, BufferedItem)> = Vec::new();
+    for (entity, fill) in generation.buffer.fills() {
+        if fill.view != view || is_deleted(&generation.overlay, *entity) {
+            continue;
+        }
+        consumed_fills.push(*entity);
+        let item = entity_fill_as_item(generation, *entity, fill);
+        if item.scalars.iter().any(|v| !matches!(v, WalScalar::Null)) {
+            fills.push((*entity, item));
+        }
+    }
+    for ((entity, owner_view), fill) in generation.buffer.scoped_fills() {
+        if fill.view != view || is_deleted(&generation.overlay, *entity) {
+            continue;
+        }
+        consumed_scoped_fills.push((*entity, owner_view.clone()));
+        let item = scoped_fill_as_item(generation, *entity, owner_view, fill);
+        if item.scoped.iter().any(|v| !matches!(v, WalScalar::Null)) {
+            fills.push((*entity, item));
+        }
+    }
+    if items.is_empty() && consumed_fills.is_empty() && consumed_scoped_fills.is_empty() {
         return Err(NoFlush::NothingToFlush);
     }
     // **The arity is this generation's, and a row buffered under an earlier one is padded here**
@@ -541,9 +573,14 @@ pub(crate) fn plan_flush(
     // `write_flush_segment` requires and what makes the extent dense; the fills are sorted for
     // the same reason one step out, [`FlushPlan::value_rows`] merging the two ascending runs.
     items.sort_unstable_by_key(|(entity, _)| entity.raw());
-    fills.sort_unstable_by_key(|(entity, _)| entity.raw());
+    fills.sort_by_key(|(entity, _)| entity.raw());
 
-    Ok(FlushPlan { items, fills })
+    Ok(FlushPlan {
+        items,
+        fills,
+        consumed_fills,
+        consumed_scoped_fills,
+    })
 }
 
 /// One unflushed fill as the value passes read it: a row with the cells still owed and nothing
@@ -559,7 +596,7 @@ pub(crate) fn plan_flush(
 /// claimant on one column, which the extent composition refuses and the record blob would answer
 /// two rows for. The fill rule refused any cell held *differently* when the batch was accepted, so
 /// what is dropped here is exactly a restatement of what is stored.
-fn fill_as_item(
+fn entity_fill_as_item(
     generation: &Generation,
     entity: EntityId,
     fill: &tessera_lifecycle::Fill,
@@ -580,7 +617,18 @@ fn fill_as_item(
             scalars[at] = WalScalar::Null;
         }
     }
-    let owner_view = crate::write::scoped_owner_view_of(manifest, &fill.view);
+    fill_item(&fill.view, scalars, Vec::new(), fill.wal_pos)
+}
+
+/// One `(entity, owner view)` cell's unflushed values as the scoped value pass reads them, on
+/// [`entity_fill_as_item`]'s rule and dropping a cell the owner view's column already holds.
+fn scoped_fill_as_item(
+    generation: &Generation,
+    entity: EntityId,
+    owner_view: &str,
+    fill: &tessera_lifecycle::ScopedFill,
+) -> BufferedItem {
+    let manifest = &generation.bundle.manifest;
     let families = crate::write::scoped_families_of_view(manifest, &fill.view);
     let mut scoped = fill.scoped.clone();
     for (at, family) in families.iter().enumerate() {
@@ -591,23 +639,35 @@ fn fill_as_item(
         if crate::session::scalar_is_absent(value, &declared) {
             continue;
         }
-        let held = crate::session::flushed_scoped_of(generation, entity, family, &owner_view)
+        let held = crate::session::flushed_scoped_of(generation, entity, family, owner_view)
             .is_some_and(|held| !crate::session::scalar_is_absent(&held, &declared))
-            || crate::session::flushed_scoped_text_present(generation, entity, family, &owner_view);
+            || crate::session::flushed_scoped_text_present(generation, entity, family, owner_view);
         if held {
             scoped[at] = WalScalar::Null;
         }
     }
+    fill_item(&fill.view, Vec::new(), scoped, fill.wal_pos)
+}
+
+/// The row shape both fills take. One of the two tails is empty: an entity-scoped fill writes no
+/// scoped cell and a scoped fill writes no entity-scoped one, so an entity holding both is two
+/// rows of the plan and each pass sees a value in exactly one of them.
+fn fill_item(
+    view: &str,
+    scalars: Vec<WalScalar>,
+    scoped: Vec<WalScalar>,
+    wal_pos: Option<u64>,
+) -> BufferedItem {
     BufferedItem {
         terms: Vec::new(),
-        view: fill.view.clone(),
+        view: view.to_string(),
         join: false,
         x: 0.0,
         y: 0.0,
         scalars,
         scoped,
         external_id: None,
-        wal_pos: fill.wal_pos,
+        wal_pos,
     }
 }
 
@@ -722,9 +782,13 @@ pub(crate) struct CompletedFlush {
     /// range: the rebase removes these from the *then-current* buffer, whatever arrived while the
     /// flush ran (§1.2).
     pub(crate) consumed: Vec<EntityId>,
-    /// The entities whose fills this flush wrote, removed from the buffer's fill map at
-    /// publication on `consumed`'s rule (`ingest.md` §1.4).
+    /// The entity-scoped fills this flush's plan consumed, removed from the buffer at publication
+    /// on `consumed`'s rule (`ingest.md` §1.4) — every fill the plan looked at, not only the ones
+    /// with a cell left to write, so a fill a restart re-buffered after its flush stops pinning
+    /// the log.
     pub(crate) filled: Vec<EntityId>,
+    /// The same for the group-scoped fills, by the `(entity, owner view)` cell they address.
+    pub(crate) filled_scoped: Vec<(EntityId, String)>,
     /// The row space this flush gave the plan's rows, or `None` where it had none to give.
     ///
     /// **A values-only tick publishes no segment** (`ingest.md` §1.4). A fill acquires no
@@ -855,7 +919,8 @@ fn execute_flush_stages(
     mark: &mut StageMark,
 ) -> Result<CompletedFlush, FlushFailed> {
     let consumed: Vec<EntityId> = plan.items.iter().map(|(entity, _)| *entity).collect();
-    let filled: Vec<EntityId> = plan.fills.iter().map(|(entity, _)| *entity).collect();
+    let filled = plan.consumed_fills.clone();
+    let filled_scoped = plan.consumed_scoped_fills.clone();
 
     // ---- promotion (§3.2) -------------------------------------------------------------------
     //
@@ -1141,9 +1206,10 @@ fn execute_flush_stages(
     // row ranges; the rows in boundary cells are tested one by one over their exact stored
     // position, with each cell's edges derived once for this segment. A panic here fails the
     // flush whole, exactly as a segment write would: nothing is published and the buffer stands.
+    // A values-only flush wrote no segment and so resolves nothing: a fill acquires no row, and a
+    // shape level's membership is over rows.
     let mut shape_pieces = Vec::with_capacity(ctx.shapes.len());
-    for level in ctx.shapes.iter().filter(|_| segment.is_some()) {
-        let segment = segment.as_ref().expect("filtered on the segment being present");
+    for (level, segment) in ctx.shapes.iter().zip(segment.iter().cycle()) {
         let (rows, cost) = level.resolve(segment);
         tracing::info!(
             layer = %level.layer,
@@ -1188,6 +1254,7 @@ fn execute_flush_stages(
         view: ctx.view,
         consumed,
         filled,
+        filled_scoped,
         segment,
         dict_extent,
         filter_extents,

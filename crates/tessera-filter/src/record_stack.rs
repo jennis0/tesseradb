@@ -174,24 +174,20 @@ impl RecordStack {
     /// an entity a values page filled holds a row in two layers (`ingest.md` §1.4), and visiting
     /// it twice would hand the caller two partial rows under one identity. The entities in more
     /// than one layer are taken out of the per-layer walk and answered by [`Self::fields_of`],
-    /// which unions their columns; every other entity keeps the block-amortised walk, so the cost
-    /// on a stack no page has filled is what it was.
+    /// which unions their columns; every other entity keeps the block-amortised walk.
+    ///
+    /// **Every bitmap built here is bounded by `wanted`**, never by a layer's own has-row, which
+    /// is entity-space-sized and would put a 10⁹-entity clone on each drill-down and each
+    /// artifact-frame read. A single-layer stack — every bundle that has ingested no values page
+    /// — skips the overlap pass outright and costs exactly what it did.
     pub fn for_each_row_in(
         &self,
         wanted: &croaring::Bitmap,
         f: &mut dyn FnMut(u32, Vec<RecordField>) -> Result<(), RecordError>,
     ) -> Result<(), RecordError> {
-        let mut seen = croaring::Bitmap::new();
-        let mut shared = croaring::Bitmap::new();
-        for layer in &self.layers {
-            let mut here = layer.hasrow().clone();
-            here.and_inplace(wanted);
-            let mut again = here.clone();
-            again.and_inplace(&seen);
-            shared.or_inplace(&again);
-            seen.or_inplace(&here);
-        }
-        if shared.is_empty() {
+        let walk = |wanted: &croaring::Bitmap,
+                    f: &mut dyn FnMut(u32, Vec<RecordField>) -> Result<(), RecordError>|
+         -> Result<(), RecordError> {
             for layer in &self.layers {
                 layer.for_each_row_in(wanted, &mut |entity, fields| {
                     self.reads
@@ -199,17 +195,29 @@ impl RecordStack {
                     f(entity, fields)
                 })?;
             }
-            return Ok(());
+            Ok(())
+        };
+        if self.layers.len() < 2 {
+            return walk(wanted, f);
+        }
+        let mut seen = croaring::Bitmap::new();
+        let mut shared = croaring::Bitmap::new();
+        for layer in &self.layers {
+            // `wanted` first, so the intersection is the size of the caller's set and the layer's
+            // own bitmap is only read.
+            let mut here = wanted.clone();
+            here.and_inplace(layer.hasrow());
+            let mut again = here.clone();
+            again.and_inplace(&seen);
+            shared.or_inplace(&again);
+            seen.or_inplace(&here);
+        }
+        if shared.is_empty() {
+            return walk(wanted, f);
         }
         let mut alone = wanted.clone();
         alone.andnot_inplace(&shared);
-        for layer in &self.layers {
-            layer.for_each_row_in(&alone, &mut |entity, fields| {
-                self.reads
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                f(entity, fields)
-            })?;
-        }
+        walk(&alone, f)?;
         for entity in shared.iter() {
             if let Some(fields) = self.fields_of(entity)? {
                 f(entity, fields)?;

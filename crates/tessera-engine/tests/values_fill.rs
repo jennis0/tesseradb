@@ -575,6 +575,125 @@ fn an_identical_value_is_a_no_op_and_a_different_one_is_refused() {
     );
 }
 
+/// **The fill rule reads past a buffered row that holds the column's absence** (`ingest.md`
+/// §1.1). An entity ingested without a column carries the position and holds absence in it, so a
+/// source chain that stopped at the first row *carrying the slot* would never reach the pending
+/// fill or the flushed home: the second fill of one cell would read as absent, be answered `200
+/// filled 1`, and then be dropped at the merge. Both arms are exercised while the entity is still
+/// buffered, which is where the absent slot exists.
+#[test]
+fn a_buffered_row_holding_an_absent_cell_does_not_hide_a_pending_fill() {
+    let fx = fixture();
+    let engine = engine_over(&fx);
+    declare_families(&engine);
+    // Ingested and **not** flushed: the entity's own row is in the buffer, carrying every
+    // declared position and holding absence in the runtime ones.
+    let entity = ingest(
+        &engine,
+        "points-1",
+        vec![row("subject", &engine, build_columns("mid", 4.0))],
+    )[0];
+
+    let first = engine
+        .fill_values(values_request(
+            "values-1",
+            &["tag"],
+            vec![(entity, vec![WalScalar::Utf8("alpha".to_string())])],
+        ))
+        .expect("the first fill is accepted");
+    assert_eq!(first.filled, 1);
+
+    // The buffered row still holds the column's absence, and the pending fill holds the value.
+    let refused = engine
+        .fill_values(values_request(
+            "values-2",
+            &["tag"],
+            vec![(entity, vec![WalScalar::Utf8("beta".to_string())])],
+        ))
+        .expect_err("the pending fill is a claimant, so a different value is refused");
+    let AcceptError::Exec(ExecError::ValueConflict { detail }) = refused else {
+        panic!("a cell an unflushed fill holds is a ValueConflict, not {refused:?}");
+    };
+    assert!(detail.contains("column 'tag'"), "{detail}");
+
+    // And the identical value is the no-op, not a second fill of one cell.
+    let again = engine
+        .fill_values(values_request(
+            "values-3",
+            &["tag"],
+            vec![(entity, vec![WalScalar::Utf8("alpha".to_string())])],
+        ))
+        .expect("a restatement is accepted");
+    assert_eq!(again.filled, 0, "a restatement fills nothing");
+    assert_eq!(again.held, 1);
+
+    // One claimant reaches the extent, so the value the first fill supplied is the one served.
+    flush(&engine);
+    let session = session_of(&engine);
+    let id = engine.tessera_id_of(entity).unwrap().raw();
+    assert_eq!(
+        matching(&engine, &session, leaf("tag", keyword("alpha"))),
+        vec![id]
+    );
+    assert_eq!(
+        matching(&engine, &session, leaf("tag", keyword("beta"))),
+        Vec::<u64>::new(),
+        "the refused value reached nothing"
+    );
+}
+
+/// **A buffered row that holds a value is a claimant too** — the same arm, from the other side:
+/// a batch that ingested the column and a values batch that supplies a different one for it
+/// disagree, and the fill rule refuses rather than writing a second cell.
+#[test]
+fn a_buffered_row_holding_a_value_refuses_a_different_fill_and_dedupes_an_equal_one() {
+    let fx = fixture();
+    let engine = engine_over(&fx);
+    declare_families(&engine);
+    let entity = ingest(
+        &engine,
+        "points-1",
+        vec![{
+            let mut row = row("subject", &engine, build_columns("mid", 4.0));
+            // note, tag, prose, dept, weight, drawn — `tag` carried, the rest absent.
+            row.scalars.push(WalScalar::Null);
+            row.scalars.push(WalScalar::Utf8("alpha".to_string()));
+            row
+        }],
+    )[0];
+
+    let refused = engine
+        .fill_values(values_request(
+            "values-1",
+            &["tag"],
+            vec![(entity, vec![WalScalar::Utf8("beta".to_string())])],
+        ))
+        .expect_err("the buffered row holds the cell");
+    assert!(matches!(
+        refused,
+        AcceptError::Exec(ExecError::ValueConflict { .. })
+    ));
+
+    let again = engine
+        .fill_values(values_request(
+            "values-2",
+            &["tag"],
+            vec![(entity, vec![WalScalar::Utf8("alpha".to_string())])],
+        ))
+        .expect("a restatement is accepted");
+    assert_eq!(again.filled, 0);
+    assert_eq!(again.held, 1);
+
+    // The buffered row is the one claimant: the flush writes one slot, not two.
+    flush(&engine);
+    let session = session_of(&engine);
+    let id = engine.tessera_id_of(entity).unwrap().raw();
+    assert_eq!(
+        matching(&engine, &session, leaf("tag", keyword("alpha"))),
+        vec![id]
+    );
+}
+
 /// **A fill on an entity whose blob row has already flushed is read** (`ingest.md` §1.4, decision
 /// 0136 ruling 7). The entity holds a row in the layer that created it and another in the layer
 /// the fill wrote, so a first-layer-wins probe would answer the first row alone and the filled
@@ -740,10 +859,23 @@ fn a_restart_replays_a_values_batch_and_writes_its_cells_once() {
         Some(&ScalarOut::Utf8("a private note".to_string()))
     );
 
-    // Restarted again, with the record still in the log and its cells now in extents. The flush
-    // that follows must write nothing rather than a second claimant for each column.
+    assert_eq!(
+        engine.buffered_fills(),
+        0,
+        "the flush consumed the fills it wrote"
+    );
+
+    // Restarted again. Whether the record is still in the log is the rotation's business — the
+    // fill released its pin above, so the member may already be reclaimed — and either way the
+    // tick that follows must leave no fill behind: one re-buffered after its own flush writes
+    // nothing, and a fill that is never consumed pins its `ValuesBatch` record for ever.
     let engine = restart(&fx, engine);
     settle(&engine);
+    assert_eq!(
+        engine.buffered_fills(),
+        0,
+        "a replayed fill whose cells are written is consumed rather than left pinning the log"
+    );
     let session = session_of(&engine);
     assert_eq!(
         matching(&engine, &session, leaf("tag", keyword("alpha"))),

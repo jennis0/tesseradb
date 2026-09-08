@@ -1535,17 +1535,16 @@ fn run_values(
                     Address::External(_) => None,
                 })
                 .collect();
-            let resolved = state
+            // **An identifier that names nothing is not refused here.** The idset check is —
+            // it decides for the whole batch, before a single identifier is inverted (decision
+            // 0025) — but an unheld id is answered by the row loop below, so both addressing
+            // arms give one status and count rows in one space: the batch's own, rather than a
+            // position inside whichever subsequence the row happened to fall in.
+            state
                 .engine
                 .resolve_tessera_ids(&ids, idset)
-                .map_err(crate::error::map_engine_error)?;
-            if let Some(position) = resolved.iter().position(|e| e.is_none()) {
-                return Err(ApiError::Unknown(format!(
-                    "tessera_id at tessera-addressed position {position} names nothing this \
-                     deployment issued"
-                )));
-            }
-            resolved.into_iter()
+                .map_err(crate::error::map_engine_error)?
+                .into_iter()
         }
     };
     let keys: Vec<Vec<u8>> = rows
@@ -1565,20 +1564,21 @@ fn run_values(
     for (index, row) in rows.into_iter().enumerate() {
         // **A subject that does not exist refuses the batch** (`ingest.md` §1.6): a values batch
         // creates nothing, so an id nothing holds is the caller's ordering mistake and the remedy
-        // is to ingest the point first. Named by position, never by the id itself, which the
-        // caller supplied and this body would otherwise echo back for every unknown key.
-        let entity = match &row.address {
-            Address::Tessera { .. } => inverted
-                .next()
-                .flatten()
-                .expect("every tessera_id resolved above"),
-            Address::External(_) => external.next().flatten().ok_or_else(|| {
-                ApiError::Contract(format!(
-                    "row {index} names an external id this deployment does not hold. A values \
-                     batch fills entities that exist and creates none, so the point is ingested \
-                     first (`ingest.md` §1.6)"
-                ))
-            })?,
+        // is to ingest the point first. Named by the batch's own row index, never by the id
+        // itself, which the caller supplied and this body would otherwise echo back for every
+        // unknown key — and **one status and one index space for both address forms**, so a
+        // caller reading the refusal does not have to know which of the two subsequences their
+        // row fell in.
+        let held = match &row.address {
+            Address::Tessera { .. } => inverted.next().flatten(),
+            Address::External(_) => external.next().flatten(),
+        };
+        let Some(entity) = held else {
+            return Err(ApiError::Contract(format!(
+                "row {index} names an identifier this deployment does not hold. A values batch \
+                 fills entities that exist and creates none, so the point is ingested first \
+                 (`ingest.md` §1.6)"
+            )));
         };
         request_rows.push(tessera_engine::IncomingValues {
             entity,

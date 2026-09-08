@@ -286,13 +286,32 @@ writes into the family's entity-space extent, the text layer and the record blob
 work is fills publishes those and no segment, a fill having no row for one to hold. Two pagination
 units are published under `limits.values`.
 
-**A `render` column is refused rather than filled**, which is narrower than spec §6.3's R10. A
-rendered column's value is served from the hot column of the row that carries it — to a tile, to
-the drill-down, and to a filter leaf, which takes the row route wherever the column reaches the
-tail — and a values row acquires no row. The value would be stored in entity space and answered by
-nobody, so the route refuses and names the remedy. R10's reading, that a back-filled `render`
-value is filterable where `index` was declared, is not one this route can keep while the filter
-resolves such a column from the row.
+**A `render` column is refused rather than filled**, and this is narrower than spec §6.3's R10.
+A fill acquires no row, so it never reaches the hot column — and the hot column is the only home a
+tile and the drill-down read a rendered value from. Two shapes, refused for two different reasons.
+A column declared `render` and not `index`, and not a `derived` category, has **no home at all**
+for a fill: it owes no entity-space value column, and it is not blob-resident precisely because it
+renders, so the value would be acknowledged and stored nowhere. A column declared `render` **and**
+`index`, and a rendered `derived` category, do have an entity-space column, so a fill would be
+stored and would answer a filter that took the entity route — and would still draw absent on every
+tile and at every drill-down, and answer nothing to a filter whose request made the row route
+cheaper, which is a per-request cost choice (decision 0068) and not a property of the column. One
+column answering two ways depending on the shape of the request is why this is refused rather than
+half-served.
+
+What R10 says is true of the entity route: a back-filled `render` value where `index` was declared
+is filterable. What it does not say is that the value is drawn nowhere until the fold. **The owner
+has not ruled on the gap** and the refusal is what holds the two surfaces together in the
+meantime; the alternatives are to serve the value to filters and not to tiles, or to let a fill
+write the row tail, which would make a values row a row.
+
+**A values batch under one view may fill a group-scoped cell on an entity that holds no row in
+that view.** The address of a scoped value is `(attribute → its group, key)` and never the view
+(decision 0116), so the cell exists as soon as the key does, whatever rows the entity has: the
+fill is admissible and the value is served under every view of that key. What the entity does not
+gain is a row — a values batch creates none — so the value is answered wherever a filter or a
+drill-down reaches the entity through some other view, and is drawn on this view's map only if the
+entity acquires a row in it by an ordinary ingest.
 
 ### 1.5 The artifact and its parts
 
@@ -795,6 +814,14 @@ answered from the segment's schema**, the reader taking null for a `render` colu
 and never opening a blob to find out, and the fold, which rewrites every segment, writes it. Until
 the fold a back-filled `render` value is filterable where `index` was declared and not drawn
 (spec §10, R10); `/v1/meta` says which state the column is in.
+
+**`POST /control/values` refuses a `render` column rather than leaving it in that state**
+(spec §1.4). A fill reaches no hot column, so the value is drawn nowhere; where `index` is not
+declared either, the column owes no entity-space value column and is not blob-resident, so the
+value is stored nowhere at all. R10 as written accepts filterable-and-undrawn, and whether that is
+the state it intends is **owed a ruling**: the alternatives to the refusal are to serve such a
+value to filters and not to tiles, or to let a fill write the row tail, which would make a values
+row a row.
 
 **Built 2026-09-07 (T4).** The declaration route, the manifest home and its replay, the tail
 append with padding at the window close and the flush, the schema-answered absence on the render
