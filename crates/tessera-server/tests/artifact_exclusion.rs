@@ -435,6 +435,21 @@ async fn a_second_exclusion_on_a_held_key_is_a_conflict() {
         "{body}"
     );
 
+    // A record names one spelling or the other. Neither is a refusal — `members` is optional
+    // only where `excluding` is given — and an empty `members` list is the artifact whose
+    // membership holds nobody, which is a state a record has always been able to publish.
+    let (status, body) = put(&server, LAYER, json!([{ "key": "c0" }])).await;
+    assert_eq!(status, 422, "{body}");
+    assert!(
+        body["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("neither `members` nor `excluding`"),
+        "{body}"
+    );
+    let (status, body) = put(&server, LAYER, json!([{ "key": "c0", "members": [] }])).await;
+    assert_eq!(status, 201, "an empty membership is a real state: {body}");
+
     // A membership has one spelling: both on one row is refused at decoding.
     let (status, body) = put(
         &server,

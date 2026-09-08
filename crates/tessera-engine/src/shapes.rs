@@ -178,6 +178,15 @@ impl ShapeLevel {
         let mut decode_ns = 0u128;
         let mut decompose_ns = 0u128;
         for ordinal in 0..ordinals as u32 {
+            // **A shape belongs to one view of its group** (`views.md` §3.5): an artifact of
+            // another view is left a hole here rather than decomposed into this view's row
+            // space, which would give one quarter's polygon a membership and a masked count on
+            // every quarter's map. An entity-scoped layer's records are drawn in every view it
+            // names and pass this.
+            if !store.drawn_in_view(layer, level, ordinal, crate::artifacts::view_key(view)) {
+                shapes.push(None);
+                continue;
+            }
             let held = store
                 .shape_of(layer, level, ordinal)
                 .and_then(|shapes| shapes.for_view(view))
@@ -622,7 +631,13 @@ impl PersistedPieces<'_> {
     /// The persisted decompositions of one level at `version`, or nothing — with the refusal
     /// said — where the prefix holds none, holds one for another version, or holds one that will
     /// not read.
-    fn held_entries(&self, view: &str, layer: &str, level: u32, version: u64) -> Vec<Option<HeldEntry>> {
+    fn held_entries(
+        &self,
+        view: &str,
+        layer: &str,
+        level: u32,
+        version: u64,
+    ) -> Vec<Option<HeldEntry>> {
         let Some(prefix_dir) = self.prefix_dir else {
             return Vec::new();
         };
@@ -678,7 +693,8 @@ impl PersistedPieces<'_> {
             .iter()
             .find(|e| same_level(&e.view, &e.layer, e.level) && e.seg_id == segment.seg_id)
         {
-            if extent.level_version != level.level_version || extent.row_count != segment.row_count {
+            if extent.level_version != level.level_version || extent.row_count != segment.row_count
+            {
                 tracing::warn!(
                     layer = %level.layer,
                     level = level.level,
@@ -798,9 +814,17 @@ impl PersistedPieces<'_> {
 ///
 /// A hole is an ordinal the level holds no artifact at (`store.level` yields no record); an
 /// artifact the column labels no row with is an empty membership, which is a different fact.
-fn invert_column(column: &RowColumn, level: &ShapeLevel, store: &ArtifactStore) -> Vec<Option<Bitmap>> {
+fn invert_column(
+    column: &RowColumn,
+    level: &ShapeLevel,
+    store: &ArtifactStore,
+) -> Vec<Option<Bitmap>> {
     let mut rows: Vec<Option<Bitmap>> = vec![None; level.shapes.len()];
-    for (ordinal, _) in store.level(&level.layer, level.level) {
+    for (ordinal, _) in store.level_in_view(
+        &level.layer,
+        level.level,
+        crate::artifacts::view_key(&level.view),
+    ) {
         if let Some(slot) = rows.get_mut(ordinal as usize) {
             *slot = Some(Bitmap::new());
         }

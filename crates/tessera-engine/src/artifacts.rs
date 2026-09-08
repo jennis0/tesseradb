@@ -2495,9 +2495,11 @@ impl ArtifactProjections {
             let started = std::time::Instant::now();
             let amended = Arc::make_mut(&mut rows);
             let (lo, hi, added, rows_taken) = match source {
-                SegmentRows::Projected => {
-                    amended.rebase_span(store.level(layer, *level), next, start)
-                }
+                SegmentRows::Projected => amended.rebase_span(
+                    store.level_in_view(layer, *level, view_key(view)),
+                    next,
+                    start,
+                ),
                 SegmentRows::Resolved(piece) => amended.rebase_span_resolved(&piece, next, start),
             };
             let lost = amended.rebase_derived(lo, hi, &added, total_rows(next));
@@ -2654,8 +2656,12 @@ impl ArtifactProjections {
         // composed over the assembled form instead.
         if let Some(PredicateSource::Spatial(spatial)) = predicate {
             let (joined, assembly) = spatial.level.assemble(spatial.segments);
+            // **A spatial level is filtered by view exactly as an enumerated one is**
+            // (`ArtifactStore::level_in_view`, `views.md` §3.5): a shape belongs to one view of
+            // its group, and one resolved into every view's row space would draw a polygon
+            // published into one quarter on every quarter's map, with a real masked count.
             let built = ArtifactRows::build_resolved(
-                store.level(layer, level),
+                store.level_in_view(layer, level, view_key(view)),
                 joined,
                 spatial.total_rows,
                 space,
@@ -2945,6 +2951,11 @@ impl ArtifactProjections {
         // it stands for, and `code_of_key` is the inverse of the rule the mint used to write it.
         // A key that does not resolve is skipped rather than guessed at — its rows then belong to
         // nobody, which understates and never over-states.
+        // **Unfiltered by view, and it cannot reach a group-scoped layer**: this is a
+        // predicate layer's column, and a predicate layer's artifacts are derived from a value
+        // column rather than published — `LayerRegistry::prepare_derive` names no view, so a
+        // group-scoped layer of this kind refuses every artifact and holds none (`ingest.md`
+        // §1.5).
         let mut ordinal_of_code: std::collections::BTreeMap<u32, u32> =
             std::collections::BTreeMap::new();
         let mut ordinals = 0u32;

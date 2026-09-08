@@ -22,11 +22,15 @@ use serde_json::json;
 use tempfile::TempDir;
 use tessera_build::{build, BuildArgs, GroupDescriptor, GroupViewDescriptor, Quantisation};
 
-/// The group's two views, each drawn over the whole corpus so that a membership means the same
-/// thing in both and the counts differ only by what the caller published.
+/// The group's two views. **q1 draws the whole corpus and q2 its first half**, so a per-view
+/// answer — the complement of an exclusion, above all — is a different number in each and a
+/// route that took the wrong view's entities is caught by the count rather than by nothing.
 const KEYS: [&str; 2] = ["q1", "q2"];
+/// How many of the corpus's entities have a row in each view, by position in [`KEYS`].
+const IN_VIEW: [u64; 2] = [ITEMS, ITEMS / 2];
 const SCOPED: &str = "clusters/quarterly";
 const PLAIN: &str = "clusters/whole";
+const SHAPES: &str = "regions/quarterly";
 const ITEMS: u64 = 400;
 
 fn member(source_id: u64) -> String {
@@ -38,13 +42,13 @@ fn members(range: std::ops::Range<u64>) -> Vec<String> {
     range.map(member).collect()
 }
 
-fn write_points(path: &Path, offset: f64) {
+fn write_points(path: &Path, offset: f64, ids: std::ops::Range<u64>) {
     let schema = Arc::new(Schema::new(vec![
         Field::new("entity_id", DataType::UInt64, false),
         Field::new("x", DataType::Float64, false),
         Field::new("y", DataType::Float64, false),
     ]));
-    let ids: Vec<u64> = (0..ITEMS).collect();
+    let ids: Vec<u64> = ids.collect();
     let xs: Vec<f64> = ids
         .iter()
         .map(|e| ((e * 7) % 900) as f64 + offset)
@@ -64,9 +68,9 @@ fn write_points(path: &Path, offset: f64) {
     w.close().unwrap();
 }
 
-/// A two-view group over one corpus: every entity has a row in each view, so an artifact of one
-/// view could be projected into the other's row space — which is exactly the mistake `view` in
-/// the identity prevents.
+/// A two-view group over one corpus: every entity of q2 has a row in q1 as well, so an artifact
+/// of one view could be projected into the other's row space — which is exactly the mistake
+/// `view` in the identity prevents.
 fn build_group(dir: &Path) -> std::path::PathBuf {
     let pairs = dir.join("pairs.parquet");
     write_pairs_n(&pairs, ITEMS);
@@ -75,7 +79,7 @@ fn build_group(dir: &Path) -> std::path::PathBuf {
         .enumerate()
         .map(|(slot, key)| {
             let points = dir.join(format!("{key}.parquet"));
-            write_points(&points, slot as f64 * 10.0);
+            write_points(&points, slot as f64 * 10.0, 0..IN_VIEW[slot]);
             tessera_build::ViewArgs {
                 visibility: None,
                 view_id: format!("quarter:{key}"),
@@ -532,4 +536,103 @@ async fn a_group_scoped_level_survives_a_fold_and_a_reopen_with_its_views() {
     assert_eq!(status, 200, "{body}");
     assert_eq!(body["created"], 0, "{body}");
     assert_eq!(body["artifacts"][0]["tessera_id"], q1, "{body}");
+}
+
+/// A shape layer scoped to the group: its membership is the rows inside the box, resolved per
+/// view, which is the route a stored membership does not take.
+fn spatial_declaration(name: &str) -> serde_json::Value {
+    json!({
+        "name": name,
+        "title": name,
+        "views": KEYS.iter().map(|k| format!("quarter:{k}")).collect::<Vec<_>>(),
+        "membership": "spatial",
+        "shape": { "kind": "bbox" },
+        "visibility": null,
+        "artifact_visibility": { "field": null, "default": "inherited" },
+        "require_member_visibility": null,
+        "hierarchy": { "kind": "flat", "prune_children": false },
+        "content": { "computed": [], "supplied": [] },
+        "depends_on": [],
+        "levels": [],
+        "scope": { "group": "quarter" }
+    })
+}
+
+/// **A spatial level is per view too** (`views.md` §3.5): a shape published into one view of a
+/// group has no membership and no count on another view of the same group. The three spatial row
+/// forms — the resolved build, the shape level's decomposition and the inverted column — each
+/// read the level, and one that read it whole would give a polygon published into q2 a real,
+/// nonzero masked count on q1's map.
+#[tokio::test]
+async fn a_shape_published_into_one_view_is_drawn_on_no_other() {
+    let tmp = TempDir::new().unwrap();
+    let server = serve(&tmp).await;
+    register(&server, spatial_declaration(SHAPES)).await;
+
+    // One box over the whole extent, published into q2 alone. Every row of both views is inside
+    // it, so a form built over the wrong view's records would count them.
+    let (status, body) = put(
+        &server,
+        SHAPES,
+        json!([{ "key": "everywhere", "view": "q2", "members": [], "bbox": [0.0, 0.0, 1000.0, 1000.0] }]),
+    )
+    .await;
+    assert_eq!(status, 201, "{body}");
+
+    assert_eq!(
+        served(&server, "quarter:q2", SHAPES).await,
+        vec![("everywhere".to_string(), IN_VIEW[1])],
+        "the shape resolves over its own view's rows"
+    );
+    assert_eq!(
+        served(&server, "quarter:q1", SHAPES).await,
+        Vec::new(),
+        "and is drawn on no other view of the group"
+    );
+
+    // The same after a fold, which rebuilds the level's forms from the packed records.
+    flush_and_fold(&server).await;
+    assert_eq!(
+        served(&server, "quarter:q1", SHAPES).await,
+        Vec::new(),
+        "the fold's rebuild keeps the shape in its own view"
+    );
+    assert!(
+        !served(&server, "quarter:q2", SHAPES).await.is_empty(),
+        "and keeps it in that one"
+    );
+}
+
+/// **An exclusion on a group-scoped layer complements against its own view's entities**
+/// (`ingest.md` §2.3): the artifact names a view's key and the generation holds view ids, so the
+/// key is resolved against the layer's declared views — q2 holds half the corpus, and its
+/// complement is that half less the list rather than the whole corpus or nothing at all.
+#[tokio::test]
+async fn a_group_scoped_exclusion_complements_against_its_own_views_entities() {
+    let tmp = TempDir::new().unwrap();
+    let server = serve(&tmp).await;
+    register(&server, declaration(SCOPED, Some("quarter"), "flat")).await;
+
+    let (status, body) = put(
+        &server,
+        SCOPED,
+        json!([
+            { "key": "rest", "view": "q1", "excluding": members(0..3) },
+            { "key": "rest", "view": "q2", "excluding": members(0..3) },
+        ]),
+    )
+    .await;
+    assert_eq!(status, 201, "{body}");
+    assert_eq!(body["created"], 2, "{body}");
+
+    assert_eq!(
+        served(&server, "quarter:q1", SCOPED).await,
+        vec![("rest".to_string(), IN_VIEW[0] - 3)],
+        "q1's complement is q1's entities less the three named"
+    );
+    assert_eq!(
+        served(&server, "quarter:q2", SCOPED).await,
+        vec![("rest".to_string(), IN_VIEW[1] - 3)],
+        "q2's is its own half, not the corpus and not nothing"
+    );
 }

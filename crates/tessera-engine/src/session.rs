@@ -3652,46 +3652,49 @@ impl Engine {
         //
         // **The refusal reports a count and a position, never an entity id** (I10): the detail is
         // forwarded to the caller as the 422 body, and an entity id in it would cross the boundary.
-        // **A view no view of this bundle answers to is refused** (`ingest.md` §1.5). The view is
-        // part of the identity on a group-scoped layer, and an artifact stamped with a key the
-        // roster does not hold is drawn nowhere: a publication the operator asked for, acked, and
-        // then silently visible to no one. The roster the generation carries is the build's views
-        // plus every view created while the service ran (`views.md` §3.2), so the check sees a
-        // view created a moment ago; a view is compared by its own key, which is what an artifact
-        // names and what a group's several layouts share.
+        // **A view the layer's own group has no key for is refused** (`ingest.md` §1.5,
+        // `views.md` §3.5), in the words the build refuses the same row in
+        // (`tessera-build/src/layers.rs`): an artifact belongs to one view of the group its layer
+        // is scoped to, and a key nobody declared is an artifact drawn nowhere — a publication
+        // the operator asked for, acked, and then visible to no one. The group's roster is the
+        // generation's, which is the build's views plus every view created while the service ran
+        // (`views.md` §3.2), so a view created a moment ago passes.
         //
-        // The refusal names the view and the keys the bundle holds — operator-plane names, on the
-        // control plane, which decision 0024 puts outside the register's viewer scope.
+        // The refusal names the group's keys — operator-plane names on the control plane, which
+        // decision 0024 puts outside the register's viewer scope.
         {
-            let generation = self.generation();
             let named: std::collections::BTreeSet<&str> = artifacts
                 .iter()
                 .filter_map(|artifact| artifact.view.as_deref())
                 .collect();
             if !named.is_empty() {
-                let manifest = &generation.bundle.manifest;
-                let known: std::collections::BTreeSet<&str> = manifest
-                    .views
-                    .iter()
-                    .map(|view| crate::artifacts::view_key(&view.id))
-                    .chain(
-                        manifest
-                            .groups
-                            .iter()
-                            .flat_map(|group| group.views.iter().map(|view| view.key.as_str())),
-                    )
-                    .collect();
-                if let Some(unknown) = named.iter().find(|view| !known.contains(**view)) {
-                    return Err(crate::write::AcceptError::Exec(
-                        tessera_lifecycle::ExecError::LayerRefused {
-                            detail: format!(
-                                "this batch names the view '{unknown}', which no view of this \
-                                 bundle answers to; an artifact stamped with it would be drawn \
-                                 nowhere. The keys held are: {}",
-                                known.iter().copied().collect::<Vec<_>>().join(", ")
-                            ),
-                        },
-                    ));
+                let scope = self
+                    .registered_layer(&layer)
+                    .and_then(|registered| registered.declaration.scope.group().map(String::from));
+                if let Some(group) = scope {
+                    let generation = self.generation();
+                    let keys: Vec<&str> = generation
+                        .bundle
+                        .manifest
+                        .groups
+                        .iter()
+                        .filter(|held| held.name == group)
+                        .flat_map(|held| held.views.iter().map(|view| view.key.as_str()))
+                        .collect();
+                    if let Some(unknown) = named.iter().find(|view| !keys.contains(*view)) {
+                        return Err(crate::write::AcceptError::Exec(
+                            tessera_lifecycle::ExecError::LayerRefused {
+                                detail: format!(
+                                    "this batch names view '{unknown}', which group '{group}' \
+                                     has no such key for. Its keys are: {}. An artifact belongs \
+                                     to one view and its keys are unique per (layer, view), so a \
+                                     key nobody declared is a refusal rather than an artifact \
+                                     drawn nowhere (views §3.5)",
+                                    keys.join(", ")
+                                ),
+                            },
+                        ));
+                    }
                 }
             }
         }

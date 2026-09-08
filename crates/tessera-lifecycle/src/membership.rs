@@ -1103,10 +1103,16 @@ impl ArtifactStore {
         view: Option<&str>,
         key: &str,
     ) -> Option<u32> {
+        // Probed without allocating: the map is keyed by `Option<String>` and `Option<&str>`
+        // does not borrow as one, so the view level is found by comparing what it holds — a
+        // level holds one bucket per view, which is a handful, and the nested shape exists
+        // precisely so a lookup allocates nothing (see the field's note).
         self.keys
             .get(layer)?
             .get(&level)?
-            .get(&view.map(str::to_string))?
+            .iter()
+            .find(|(held, _)| held.as_deref() == view)?
+            .1
             .get(key)
             .copied()
     }
@@ -1121,10 +1127,10 @@ impl ArtifactStore {
         view: Option<&str>,
         key: &str,
     ) -> Vec<String> {
-        let Some(levels) = self.keys.get(layer).and_then(|l| l.get(&level)) else {
+        let Some(by_view) = self.keys.get(layer).and_then(|held| held.get(&level)) else {
             return Vec::new();
         };
-        levels
+        by_view
             .iter()
             .filter(|(held, _)| held.as_deref() != view)
             .filter(|(_, keys)| keys.contains_key(key))
@@ -1644,6 +1650,14 @@ impl ArtifactStore {
     ) -> impl Iterator<Item = (u32, &'a ArtifactRecord)> {
         self.level(layer, level)
             .filter(move |(_, record)| record.view.as_deref().is_none_or(|own| own == view))
+    }
+
+    /// Is the artifact at `ordinal` drawn in `view` — every record of an entity-scoped layer,
+    /// and on a group-scoped one only its own view's ([`Self::level_in_view`], `views.md` §3.5)?
+    /// A hole is drawn nowhere.
+    pub fn drawn_in_view(&self, layer: &str, level: u32, ordinal: u32, view: &str) -> bool {
+        self.get(layer, level, ordinal)
+            .is_some_and(|record| record.view.as_deref().is_none_or(|own| own == view))
     }
 
     /// Every artifact of every level of one layer, as `(level, ordinal, record)`.

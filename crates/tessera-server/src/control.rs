@@ -3453,8 +3453,13 @@ struct IncomingArtifactBody {
     /// External ids are base64 on the same rule `/control/changes` follows — they are bytes, not
     /// text — and identifiers are strings because a bare JSON number loses a `u64` past 2⁵³ in
     /// every JavaScript client, silently.
+    ///
+    /// **Optional only where `excluding` is given** (`ingest.md` §2.3), and absent is not empty:
+    /// an empty list is an artifact whose membership holds nobody, which is a real state and the
+    /// one a record has always been able to publish, where a record carrying neither field names
+    /// no membership at all and is refused.
     #[serde(default)]
-    members: Vec<String>,
+    members: Option<Vec<String>>,
     /// **The membership spelled by exclusion**: the entities it leaves out, addressed exactly as
     /// `members` is (`ingest.md` §2.3). Beside `members` on one row is a `422` — a membership has
     /// one spelling.
@@ -3839,6 +3844,20 @@ async fn publish_artifacts(
         )));
     }
 
+    // **A membership has one spelling and a row carries one of them** (`ingest.md` §2.3):
+    // `members` is optional only where `excluding` is given, so a row with neither is the refusal
+    // it was before the exclusion form existed rather than an accepted empty artifact.
+    for (index, artifact) in artifacts.iter().enumerate() {
+        if artifact.members.is_none() && artifact.excluding.is_none() {
+            return Err(ApiError::Contract(format!(
+                "artifact {index} of this publication carries neither `members` nor `excluding`. \
+                 A record names the members its membership holds, or the entities it leaves out \
+                 (ingest.md §2.3); an artifact whose membership holds nobody is published with an \
+                 empty `members` list"
+            )));
+        }
+    }
+
     // **The exclusion bound, and the one-spelling rule** (`ingest.md` §2.3). A list over the
     // published bound is refused naming the limit and the remedy — the inclusion spelling, which
     // pages — because what must fit one request is the list: the complement is taken against the
@@ -3848,7 +3867,7 @@ async fn publish_artifacts(
         let Some(excluding) = artifact.excluding.as_ref() else {
             continue;
         };
-        if !artifact.members.is_empty() {
+        if artifact.members.is_some() {
             return Err(ApiError::Contract(format!(
                 "artifact {index} of this publication carries both `members` and `excluding`. A \
                  membership has one spelling: name the members it holds, or the entities it \
@@ -3998,7 +4017,7 @@ async fn publish_artifacts(
     let widths: Vec<usize> = artifacts
         .iter()
         .map(|a| {
-            a.members.len()
+            a.members.as_ref().map_or(0, |m| m.len())
                 + a.excluding.as_ref().map_or(0, |e| e.len())
                 + a.content
                     .iter()
@@ -4011,6 +4030,7 @@ async fn publish_artifacts(
         .flat_map(|a| {
             a.members
                 .iter()
+                .flatten()
                 .chain(a.excluding.iter().flatten())
                 .chain(a.content.iter().flat_map(|v| v.generated_from.iter()))
         })
@@ -4031,8 +4051,10 @@ async fn publish_artifacts(
         .into_iter()
         .zip(shapes)
         .map(|(artifact, shape)| {
-            let members: Vec<tessera_types::EntityId> =
-                entities.by_ref().take(artifact.members.len()).collect();
+            let members: Vec<tessera_types::EntityId> = entities
+                .by_ref()
+                .take(artifact.members.as_ref().map_or(0, |m| m.len()))
+                .collect();
             let excluded: Option<Vec<tessera_types::EntityId>> = artifact
                 .excluding
                 .as_ref()

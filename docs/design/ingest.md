@@ -192,9 +192,13 @@ required on a group-scoped layer and refused on an entity-scoped one, part of th
 scope, and carried in the publication record so a replay lands the artifact in the view it was
 acked in, and in the packed extent's blob so a fold and a reopen land it there too
 (`bundle_format` 8, spec §7.1). The growth route addresses no group-scoped layer, carrying no
-view. A view no view of the bundle answers to is refused rather than acked and drawn nowhere: the
-roster the generation carries is the build's views plus every view created since, so the check
-sees a view created a moment ago.
+view. A view the layer's own group has no key for is refused rather than acked and drawn
+nowhere, in the words the build refuses the same row in; the roster read is the generation's,
+which is the build's views plus every view created since, so a view created a moment ago passes.
+**A group-scoped level is filtered by view wherever a row form is built** — the projection, the
+flush's extension, the merge's rebase, and a spatial level's resolution, decomposition and
+inverted column alike — so an artifact of one view has no membership and no count on another
+view of its group.
 
 **A level under continuous paging.** An artifact's served forms, its row-space membership operator
 per view, its generating-set operators and its lineage, are derivatives of the store. Under a
@@ -455,7 +459,9 @@ that the object has a smaller spelling or is already bounded elsewhere (spec §1
   **Built 2026-09-08 (T2c)**: the list is refused over the bound with a `422` naming the limit and
   the inclusion spelling; the complement is one `andnot` on the executor over the view's entities
   — every entity holding a row in the view or buffered for it, deleted entities excluded — and its
-  size is logged. `members` and `excluding` on one row is a `422`. **Which view**, since an
+  size is logged. `members` and `excluding` on one row is a `422`, and so is a record carrying
+  neither: `members` is optional only where `excluding` is given, an empty list being the
+  membership that holds nobody. **Which view**, since an
   entity-scoped layer is drawn on several: the artifact's own on a group-scoped layer, where it
   belongs to one; the union of the layer's declared views otherwise, that being the corpus the
   layer is drawn over. On a single-view corpus the union is the whole entity space, which is what

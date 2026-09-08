@@ -552,7 +552,6 @@ fn sibling_ordinal(
 /// The refusal a parent key that this level holds **in another view** deserves, or `None` where
 /// no view holds it and the key is simply missing (`views.md` §3.5).
 fn crossing(
-    registry: &LayerRegistry,
     layer_name: &str,
     level: u32,
     view: Option<&str>,
@@ -560,7 +559,10 @@ fn crossing(
     parent_key: &str,
     store: &ArtifactStore,
 ) -> Option<RegistryError> {
-    let _ = registry;
+    // **Every level up to this one**, because a tiered layer's parent sits at a coarser level:
+    // a key held at a coarser level in another view is reported as the crossing it is, which is
+    // what the caller has to act on either way — the parent they named is in a set this artifact
+    // is not drawn beside.
     let mut held_in: Vec<String> = (0..=level)
         .flat_map(|at| store.views_holding_key(layer_name, at, view, parent_key))
         .collect();
@@ -2344,7 +2346,7 @@ impl LayerRegistry {
             // — refused rather than reinterpreted, since a tiered layer's whole guarantee is that
             // lineage never runs against the levels.
             return found.ok_or_else(|| {
-                crossing(self, layer_name, level, view, child_key, parent_key, store)
+                crossing(layer_name, level, view, child_key, parent_key, store)
                     .unwrap_or_else(missing)
             });
         }
@@ -2356,7 +2358,7 @@ impl LayerRegistry {
                     .map(|ordinal| crate::wal::ParentRef { level, ordinal })
             })
             .ok_or_else(|| {
-                crossing(self, layer_name, level, view, child_key, parent_key, store)
+                crossing(layer_name, level, view, child_key, parent_key, store)
                     .unwrap_or_else(missing)
             })
     }

@@ -90,10 +90,10 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use tessera_authz::postings::{PostingRef, PostingsReader};
 use tessera_lifecycle::membership::ArtifactStore;
 use tessera_plugin::Plugin;
-use tessera_store::membership::ContainmentPack;
 use tessera_store::derived::{
     compose_containment, generating_entities, PostingSlice, SignatureIndex,
 };
+use tessera_store::membership::ContainmentPack;
 use tessera_types::TermId;
 
 /// Whether a bundle's declared data plugin is the builtin one, and so whether authorisation is
@@ -182,6 +182,10 @@ impl ContainmentPartition {
         level: u32,
         postings: &PostingsReader,
     ) -> io::Result<Self> {
+        // **Unfiltered by view, and correctly so**: the partition is addressed by ordinal and
+        // rank and is not per row, so an entry for an artifact of another view of the group is
+        // never asked about — the row form a request tests against holds that view's ordinals
+        // alone (`ArtifactStore::level_in_view`, `views.md` §3.5).
         let contents = |visit: &mut dyn FnMut(u32, &[&Bitmap])| {
             for (ordinal, record) in store.level(layer, level) {
                 let generating: Vec<&Bitmap> =

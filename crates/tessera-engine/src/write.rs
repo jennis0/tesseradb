@@ -5224,6 +5224,11 @@ fn dangling_entities(generation: &Generation, views: &[String]) -> Vec<EntityId>
 /// its entity can contribute to no count again — publishing a membership that named one would be
 /// refused a statement later — where a suppression is a live member temporarily outside every
 /// mask, which the inclusion spelling would have named and this one keeps.
+/// **The cost is a walk of the view's rows**, on the executor loop, once per publication that
+/// carries an exclusion: a row→entity inversion per row, or a `row_of` per entity where the view
+/// publishes no inversion table. It is accepted — the bound on the *list* is what makes the
+/// operation admissible at all, and the complement cannot be taken before the whole list is in
+/// (`ingest.md` §2.3) — and it is stated here so it is not rediscovered as a surprise.
 fn view_entities(generation: &Generation, views: &[String]) -> croaring::Bitmap {
     let mut entities = croaring::Bitmap::new();
     for view in views {
@@ -11775,16 +11780,6 @@ impl Executor {
         mut incoming: Vec<IncomingArtifact>,
         respond: Responder,
     ) {
-        // **The complement, taken here and nowhere else** (`ingest.md` §2.3): a membership spelled
-        // by exclusion is materialised on the executor, against the view's entity set as it stands
-        // at this step, *before* the record is written — so the log, the store and every read path
-        // carry the inclusion the other spelling would have produced, and no serving path can
-        // evaluate a complement against a viewer's mask, which would disclose the existence of
-        // items outside it (`annotation-write-cycle.md` §6.1).
-        if let Err(detail) = self.materialise_exclusions(&layer, &mut incoming) {
-            respond.fail(ExecError::LayerRefused { detail });
-            return;
-        }
         // Read before the record is applied, because it is what says a held row form is the form
         // this publication follows — see [`Self::bring_artifacts_forward`].
         let before = self
@@ -11794,6 +11789,21 @@ impl Executor {
         // holds is compared under the fill rule and resolves to its existing ordinal, and only the
         // keys it does not hold are published. The answer is up to three kinds of record, in the
         // order they are appended and applied.
+        // **The complement, taken here and nowhere else** (`ingest.md` §2.3): a membership spelled
+        // by exclusion is materialised on the executor, against the view's entity set as it stands
+        // at this step, *before* the record is written — so the log, the store and every read path
+        // carry the inclusion the other spelling would have produced, and no serving path can
+        // evaluate a complement against a viewer's mask, which would disclose the existence of
+        // items outside it (`annotation-write-cycle.md` §6.1).
+        //
+        // **The held-key refusal is taken first**: an exclusion on a key the level holds is a
+        // `409` ([`RegistryError::ExclusionOnHeldKey`], which `prepare_put` makes below over the
+        // same store), and the walk of the view's entities is the most expensive thing this route
+        // does — so the refusal spends nothing, as every other refusal on this path does not.
+        if let Err(e) = self.materialise_exclusions(&layer, level, &mut incoming) {
+            respond.fail(e);
+            return;
+        }
         let prepared = self.live.with_publication_state(|registry, store, alloc| {
             registry.prepare_put(&layer, level, &incoming, store, alloc)
         });
@@ -11926,14 +11936,39 @@ impl Executor {
     fn materialise_exclusions(
         &self,
         layer: &str,
+        level: u32,
         incoming: &mut [IncomingArtifact],
-    ) -> Result<(), String> {
+    ) -> Result<(), ExecError> {
         if !incoming.iter().any(|a| a.excluding.is_some()) {
             return Ok(());
         }
         let Some(registered) = self.live.registered_layer(layer) else {
             // The registry refuses the unknown layer a statement later, in its own words.
             return Ok(());
+        };
+        // The `409` before the walk. The rule is the registry's and `prepare_put` states it over
+        // the same store index a moment later; what is here is the order, so that a repeat of a
+        // publication the level already holds costs a key lookup rather than a view's rows.
+        let held = self.live.with_artifacts(|store| {
+            incoming
+                .iter()
+                .filter(|artifact| artifact.excluding.is_some())
+                .filter_map(|artifact| Some((artifact, artifact.key.as_deref()?)))
+                .find(|(artifact, key)| {
+                    store
+                        .ordinal_of_key(layer, level, artifact.view.as_deref(), key)
+                        .is_some()
+                })
+                .map(|(_, key)| key.to_string())
+        });
+        if let Some(key) = held {
+            return Err(refusal_of(
+                tessera_lifecycle::RegistryError::ExclusionOnHeldKey {
+                    layer: layer.to_string(),
+                    level,
+                    key,
+                },
+            ));
         };
         let generation = self.generation.load_full();
         let mut sets: std::collections::HashMap<Option<String>, croaring::Bitmap> =
@@ -11944,8 +11979,18 @@ impl Executor {
             };
             let view = artifact.view.clone();
             let entities = sets.entry(view.clone()).or_insert_with(|| {
+                // **The artifact names a view's *key* and the generation holds view *ids***
+                // (`quarter:q1`; `views.md` §3.1), so the key is resolved against the layer's own
+                // declared views rather than used as an id — which matched nothing and made every
+                // group-scoped complement empty.
                 let views: Vec<String> = match &view {
-                    Some(view) => vec![view.clone()],
+                    Some(key) => registered
+                        .declaration
+                        .views
+                        .iter()
+                        .filter(|id| crate::artifacts::view_key(id) == key)
+                        .cloned()
+                        .collect(),
                     None => registered.declaration.views.clone(),
                 };
                 view_entities(&generation, &views)
