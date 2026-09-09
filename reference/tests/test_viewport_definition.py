@@ -230,11 +230,18 @@ def test_theta_cut_with_no_occupied_tile_is_a_zero_cut():
 
 
 def test_n_occ_is_the_number_of_occupied_tiles_at_this_depth():
-    """`N_occ(d)` is θ's second anchor, read off the buckets §7.1's counts come from (§7.2 r62).
+    """`N_occ(d)` is θ's second anchor, taken over the buckets §7.1's counts come from (§7.2 r62).
 
     The ten-row fixture at depth 1 under the default mask: whichever tiles its visible rows fall
-    in, the count of distinct ones is what θ scales by, and it is a property of `(mask, view,
+    in, the number of distinct ones is what θ scales by, and it is a property of `(mask, view,
     depth)` alone — never of a request's bbox, which is what keeps θ from moving on a pan.
+
+    **The anchor is a sketch estimate, and at this size the estimate is the count.** A
+    HyperLogLog's linear-counting branch is exact for a handful of distinct values against 2¹⁴
+    registers, so the equality below is a real assertion about the definition rather than a
+    tolerance dressed as one — and it would fail immediately if the sketch were fed rows rather
+    than tiles, or a request's tiles rather than the view's. `oracle/occupancy.py` carries the
+    estimate's accuracy at scale.
 
     Kills: counting rows rather than tiles; counting a request's tiles; counting tiles that hold
     only rows the mask excludes.
@@ -243,7 +250,8 @@ def test_n_occ_is_the_number_of_occupied_tiles_at_this_depth():
     assert selection.n_occ == len(selection.rows_by_tile)
     assert selection.n_occ == len({t for t, rows in selection.rows_by_tile.items() if rows})
     assert all(selection.visible_count(t) > 0 for t in selection.rows_by_tile)
-    # Deeper cannot be coarser: every occupied tile has an occupied child.
+    # Deeper cannot be coarser: every occupied tile has an occupied child, and the ladder's
+    # running maximum is what carries that through an estimate.
     deeper = viewport.Selection(_StubBundle(ROWS), DEFAULT_MASK, VIEW, 2)
     assert deeper.n_occ >= selection.n_occ
 

@@ -106,6 +106,7 @@ of its own items have been denied, which Appendix C admits nowhere. The composit
 from __future__ import annotations
 
 from . import morton
+from . import occupancy
 from .bundle import Bundle
 
 
@@ -136,10 +137,11 @@ def theta_cut(v_total: int, m_target: int, n_occ: int) -> int | None:
     **Where the independence between the two implementations now sits.** It was in the arithmetic:
     §7.2 stated θ as a recurrence and this module wrote one where the engine wrote a shift. The
     closed form has no recurrence left to differ over, so the two now compute one expression. What
-    is independent is `N_occ(d)` itself, and by more than a rewriting: [`Selection`] recomputes each
-    row's tile from the source geometry and counts the buckets, where the engine gallops the stored
-    Morton column. A build that wrote a wrong Morton column fails that comparison rather than
-    passing it.
+    is independent is `N_occ(d)`'s **input**: [`Selection`] recomputes each row's tile from the
+    source geometry, where the engine gallops the stored Morton column. A build that wrote a wrong
+    Morton column fails that comparison rather than passing it. The sketch that turns that tile set
+    into a number is a transcription of the engine's and is not independent of it —
+    `oracle/occupancy.py` says so, and says why the differential is exact anyway.
 
     **The rounding and the zero case are the spec's, not this module's** *(r24, `188d961`)*. Both
     were unstated until that revision and both are observable — the differential demands exact
@@ -209,19 +211,35 @@ class Selection:
             if entities[row] in mask:
                 self.rows_by_tile.setdefault(codes[row] >> shift, []).append(row)
 
+        # `N_occ(d)`, resolved on first use and kept. The sketch is a pass over the tile set and
+        # `served_rows` asks for the anchor once per tile; recomputing it per tile would be the
+        # same answer at a hundred times the cost.
+        self._n_occ: int | None = None
+
     @property
     def n_occ(self) -> int:
-        """`N_occ(d)` — how many depth-*d* tiles hold at least one row this mask admits.
+        """`N_occ(d)` — θ's second anchor (§7.2 r62): how many depth-*d* tiles hold at least one
+        row this mask admits, **estimated** by the same sketch the engine uses.
 
-        θ's second anchor (§7.2 r62). A bucket exists here exactly when a visible row fell in that
-        tile, so the count of buckets **is** the definition, over the whole view and over the
-        composed mask.
+        A bucket exists in `rows_by_tile` exactly when a visible row fell in that tile, so the
+        bucket keys **are** `N_occ(d)`'s input set, over the whole view and over the composed
+        mask. What this property does not do is take `len` of them. `oracle/occupancy.py` says
+        why: the engine estimates the count with a HyperLogLog rather than counting it, because
+        §7.2 needs θ monotone in depth and I2 needs it computed inside the mask, and neither needs
+        it exact. The served set depends on θ, so this side must reproduce the estimate bit for
+        bit or the differential would have to move to a tolerance — which would be a weaker
+        guarantee than the suite has.
 
         **Over the view, never over a request's tiles.** θ is viewport-invariant, so this counts
         every occupied tile in the view and not the ones a bbox happens to name. Narrowing it to a
         request would make θ move on a pan.
+
+        The whole ladder `0..=depth` is built, not just this depth, because the running maximum
+        that makes θ monotone is over the rungs at and below the one asked for.
         """
-        return len(self.rows_by_tile)
+        if self._n_occ is None:
+            self._n_occ = occupancy.ladder(self.rows_by_tile.keys(), self.depth)[self.depth]
+        return self._n_occ
 
     # -- §7.1 -----------------------------------------------------------------------------------
 

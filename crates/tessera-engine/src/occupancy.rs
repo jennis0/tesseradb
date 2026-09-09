@@ -1,8 +1,13 @@
 //! `N_occ(d)` — how many depth-*d* tiles hold at least one row this session may see.
 //!
 //! Design §7.2 anchors the selection threshold at `θ_d = m_target · N_occ(d) / V_total`. This
-//! module counts `N_occ(d)`; [`EffectiveMask::visible_total`] counts `V_total`, and
-//! [`crate::select::Threshold::at_depth`] turns the pair into a cut point.
+//! module **estimates** `N_occ(d)` with a [`TileSketch`]; [`EffectiveMask::visible_total`] counts
+//! `V_total` exactly, and [`crate::select::Threshold::at_depth`] turns the pair into a cut point.
+//!
+//! **PROVISIONAL — this is `probe/nocc-sketch`, not a shipped arm.** The sketch replaces an exact
+//! count that three branches were written to make fast. Whether it should is
+//! `probes/2026-09-09-nocc-sketch`'s question and the owner's ruling; nothing here is settled and
+//! decision 0137 has not been amended.
 //!
 //! # It is a composed quantity, and I2 requires it
 //!
@@ -20,15 +25,42 @@
 //! of what the viewer typed and move the frontier down. The call site takes the anchor before the
 //! filter is evaluated.
 //!
-//! # Two properties the design rests on
+//! # Why an estimate is enough, and what it is not enough for
+//!
+//! §7.2 asks two things of `N_occ`, and exactness is neither of them. It must be **monotone in
+//! depth**, because that is what the nesting proof turns into θ non-decreasing and so into a zoom
+//! that does not drop the marks its parent drew. And it must be computed **inside the viewer's
+//! mask**, because θ is a disclosure surface (below). A relative error of 1% moves the mean marks
+//! per occupied tile from `m_target` to `0.99 m_target`; even 20% would move 16 marks to 13 or 19,
+//! which is not a difference a viewer can see.
+//!
+//! What it costs is **the observability of a single tile**. `N_occ` was exact, so a suppression
+//! that emptied one tile lowered it by exactly one and a test could assert that. Under a sketch it
+//! does not: `n_occ_falls_when_a_suppression_empties_a_tile` now empties a fifth of the view's
+//! tiles to assert the same property. The property — the anchor is composed, not pre-overlay — is
+//! unchanged and still asserted; the resolution at which it can be asserted is not.
+//!
+//! # Three properties, and where each comes from
 //!
 //! **Monotone in depth.** Every occupied depth-*d* tile has at least one occupied child, and
-//! children of distinct parents are distinct tiles, so `N_occ(d+1) >= N_occ(d)`. §7.2's nesting
-//! proof needs θ non-decreasing in depth and gets it from that structure. Nothing here clamps or
-//! carries a running maximum: a clamp would hide a counting bug rather than prevent one.
+//! children of distinct parents are distinct tiles, so `N_occ(d+1) >= N_occ(d)` — of the *true*
+//! quantity. Two adjacent *estimates* of it need not obey that, and where `N_occ` barely grows
+//! between two depths a 1% error either way can invert them. [`OccupancyLadder`] therefore carries
+//! a **running maximum** across depths: `at(d)` is the largest rung at or below *d*. That is
+//! structural rather than hopeful, and it errs in the safe direction — the owner's ruling is that
+//! serving more marks than the formula asks is not a problem and serving fewer is.
 //!
-//! **`N_occ(d) <= min(4^d, |mask|)`.** There are only `4^d` tiles at depth *d*, and a tile is
-//! counted only when a visible row falls in it.
+//! **`N_occ(d) <= 4^d`.** There are only `4^d` tiles at depth *d*, so the estimate is clamped there
+//! before the running maximum. This is what makes the shallow rungs *exact*: depth 0 is one tile
+//! whatever the data does, and the ladder answers 1 rather than the sketch's 1-or-2.
+//!
+//! **Deterministic.** [`SKETCH_SEED`] is a constant, the mixer is SplitMix64's finalizer, and every
+//! step of the estimator is integer arithmetic — no float, so no libm and no summation order for
+//! two processes to disagree over. `reference/oracle/occupancy.py` is the same arithmetic in
+//! Python, pinned vector for vector by
+//! `the_ladder_matches_the_python_oracle_vector_for_vector` here and
+//! `test_the_ladder_matches_the_engine_vector_for_vector` there, which is what keeps
+//! `conformance/tests/test_i7_selection.py` an exact differential rather than one within a band.
 //!
 //! # The walk, and the two routes that were measured and rejected
 //!
@@ -64,7 +96,6 @@
 
 use std::ops::Range;
 
-use croaring::Bitmap;
 use tessera_store::read::SegmentData;
 
 use crate::compose::EffectiveMask;
@@ -148,7 +179,11 @@ impl<F: FnMut(u64)> Walk<'_, F> {
 ///
 /// `row_base` is where this segment's rows begin in the view's row space, which is the space the
 /// mask is over; `segment.morton` is indexed segment-locally.
-fn for_each_occupied_tile(
+///
+/// **Public so a measurement prices an accumulator over the identical walk.**
+/// `tessera-bench`'s `occupancy_segments` compares this arm against the ones it replaced, and a
+/// transcription of the walk in the harness would compare two walks rather than two accumulators.
+pub fn for_each_occupied_tile(
     mask: &EffectiveMask,
     segment: &SegmentData,
     row_base: u32,
@@ -174,8 +209,144 @@ fn for_each_occupied_tile(
     }
 }
 
-/// `N_occ(depth)` over the whole view: how many depth-`depth` tiles hold at least one row visible
-/// to this mask.
+/// `N_occ(d)` for every depth `0..=depth`, from one walk.
+///
+/// **Approximate, and deliberately so.** Each depth's answer is a [`TileSketch`] estimate rather
+/// than a count, with a relative standard error of `1.04 / sqrt(2^SKETCH_PRECISION)`. §7.2 needs θ
+/// monotone in depth and I2 needs it computed inside the mask; neither needs it exact, and a 20%
+/// error moves the mean marks per occupied tile from `m_target` to `0.8 m_target`.
+///
+/// **Monotone by construction, not by hope.** [`Self::at`] is a running maximum over the depths at
+/// or below the one asked for, so no pair of adjacent depths can invert however the estimates fall.
+/// Serving more marks than the formula asks for is harmless; serving fewer breaks nesting.
+///
+/// **`counts[d] <= 4^d`.** There are only `4^d` tiles at depth *d*, so the estimate is clamped
+/// there before the running maximum — which is what makes the shallow depths exact rather than
+/// merely close (`N_occ(0)` is 1 for any non-empty view, and the sketch alone would answer 1 or 2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OccupancyLadder {
+    counts: [u64; 17],
+    /// Each depth's estimate **before** the running maximum, clamped to `4^d`. Kept so the
+    /// monotonicity claim above is measurable rather than asserted: `tessera-bench`'s
+    /// `occupancy_sketch` counts the inversions this array has and the one [`Self::at`] answers
+    /// from does not.
+    raw: [u64; 17],
+    depth: u8,
+}
+
+impl OccupancyLadder {
+    /// `N_occ(depth)`. Panics above the depth this ladder was filled to, which is a programming
+    /// error rather than a data one: a walk at depth *d* cannot answer for a deeper tile grid.
+    pub fn at(&self, depth: u8) -> u64 {
+        assert!(
+            depth <= self.depth,
+            "this ladder was filled to depth {} and was asked for depth {depth}",
+            self.depth
+        );
+        self.counts[depth as usize]
+    }
+
+    /// The deepest depth this ladder answers for.
+    pub fn depth(&self) -> u8 {
+        self.depth
+    }
+
+    /// `N_occ(depth)` as the sketch estimated it, before the running maximum. For measurement
+    /// only — nothing on the request path may read this, because nothing guarantees it is
+    /// monotone.
+    pub fn raw_at(&self, depth: u8) -> u64 {
+        self.raw[depth as usize]
+    }
+}
+
+/// `N_occ(d)` for every `d` in `0..=depth`, from **one** walk of the mask and the Morton column.
+///
+/// # One walk fills every depth at or below it
+///
+/// A walk at depth *d* emits that depth's occupied tiles ascending; the depth-*d'* tile holding one
+/// of them is `tile >> 2(d - d')`, so the shallower ladder is a function of the same emissions and
+/// costs no second pass over the mask. `N_occ` is memoised per `(session, view, depth)` and paid on
+/// the first request at each new depth, so a session that reaches depth *d* by any route other than
+/// stepping down through every level pays one walk rather than one per level.
+///
+/// **It is filled lazily and never eagerly.** A session that only ever looks at depth 6 walks at
+/// depth 6; nothing here walks at 16 on its behalf.
+///
+/// # The emissions ascend, so a shallower tile changes only occasionally
+///
+/// Hashing all 17 depths per emission would make this slower than the sort it replaces. It does not
+/// have to: within a segment the emissions ascend, so the depth-*d'* ancestor changes exactly
+/// `N_occ_s(d')` times, and the total sketch updates are `Σ_{d' <= d} N_occ_s(d')` rather than
+/// `(d + 1) · N_occ_s(d)`. The descent below compares against the last ancestor seen at each depth
+/// and **stops at the first match**: ancestors nest, so a depth whose ancestor is unchanged
+/// guarantees every shallower depth is unchanged too.
+///
+/// The last-seen array is deliberately **not** reset between segments. A repeat is idempotent in a
+/// sketch, so carrying it across a segment boundary can only save an update, never lose one — and
+/// where two segments' walks meet on the same tile it saves the whole descent.
+pub fn occupied_tiles_ladder(
+    mask: &EffectiveMask,
+    segments: &[(&SegmentData, u32)],
+    depth: u8,
+) -> OccupancyLadder {
+    occupied_tiles_ladder_with_precision(mask, segments, depth, SKETCH_PRECISION)
+}
+
+/// [`occupied_tiles_ladder`] at an arbitrary sketch precision. The engine takes
+/// [`SKETCH_PRECISION`]; `tessera-bench`'s `occupancy_sketch` sweeps this to choose it.
+pub fn occupied_tiles_ladder_with_precision(
+    mask: &EffectiveMask,
+    segments: &[(&SegmentData, u32)],
+    depth: u8,
+    precision: u32,
+) -> OccupancyLadder {
+    debug_assert!(depth <= 16, "the grid is 2^16 x 2^16, so depth 16 is the deepest");
+    // **One flat plane, not a `Vec` of sketches.** The inner loop indexes it once per update; a
+    // vector of vectors costs a second dependent load and a second bounds check on the hottest
+    // instruction in the walk, and measured 1.9x this at depth 16.
+    let stride = 1usize << precision;
+    let mut plane = vec![0u8; stride * (depth as usize + 1)];
+    // `u64::MAX` is not a tile index at any depth, so it is a sound "nothing seen yet".
+    let mut last = [u64::MAX; 17];
+
+    for (segment, row_base) in segments {
+        for_each_occupied_tile(mask, segment, *row_base, depth, |tile| {
+            let mut d = depth;
+            loop {
+                let ancestor = tile >> (2 * u32::from(depth - d));
+                if ancestor == last[d as usize] {
+                    break;
+                }
+                last[d as usize] = ancestor;
+                let (index, rank) = register_of(ancestor, precision);
+                let slot = &mut plane[d as usize * stride + index];
+                if rank > *slot {
+                    *slot = rank;
+                }
+                if d == 0 {
+                    break;
+                }
+                d -= 1;
+            }
+        });
+    }
+
+    let mut counts = [0u64; 17];
+    let mut raw = [0u64; 17];
+    let mut running = 0u64;
+    for d in 0..=depth as usize {
+        // `4^d`, which is `2^32` at depth 16 and so needs the `u64`.
+        let ceiling = 1u64 << (2 * d as u32);
+        let estimate = estimate_registers(&plane[d * stride..(d + 1) * stride], precision).min(ceiling);
+        raw[d] = estimate;
+        running = running.max(estimate);
+        counts[d] = running;
+    }
+    OccupancyLadder { counts, raw, depth }
+}
+
+/// `N_occ(depth)` over the whole view: an estimate of how many depth-`depth` tiles hold at least
+/// one row visible to this mask.
 ///
 /// **Never restricted to a viewport.** θ is viewport-invariant (§7.2), so this takes the view's
 /// whole row space exactly as `V_total` does. A bbox or a zoom reaching this would make θ move on
@@ -183,32 +354,204 @@ fn for_each_occupied_tile(
 ///
 /// `segments` is the view's segments with their row bases, in the order
 /// `viewport::segments_with_row_bases` returns them.
+///
+/// This discards the shallower rungs [`occupied_tiles_ladder`] filled on the way. Callers that
+/// memoise — the request path does — should take the ladder and keep them.
 pub fn occupied_tiles(mask: &EffectiveMask, segments: &[(&SegmentData, u32)], depth: u8) -> u64 {
-    debug_assert!(depth <= 16, "the grid is 2^16 x 2^16, so depth 16 is the deepest");
-    match segments {
-        [] => 0,
-        // One segment: its codes ascend, so the walk already emits each tile once and a counter is
-        // the whole accumulator.
-        [(segment, row_base)] => {
-            let mut count = 0u64;
-            for_each_occupied_tile(mask, segment, *row_base, depth, |_| count += 1);
-            count
-        }
-        // More than one: a tile can hold rows from several segments, and `N_occ` counts tiles
-        // rather than per-segment shares of them. The union is taken over tile indices, which are
-        // below `4^16 = 2^32` and so are `u32`s — the same set arithmetic the rest of the engine
-        // uses, and O(containers) rather than O(tiles) in memory.
-        many => {
-            let mut union = Bitmap::new();
-            for (segment, row_base) in many {
-                for_each_occupied_tile(mask, segment, *row_base, depth, |tile| {
-                    debug_assert!(tile < 1 << 32, "a depth-{depth} tile index exceeds u32");
-                    union.add(tile as u32);
-                });
-            }
-            union.cardinality()
+    occupied_tiles_ladder(mask, segments, depth).at(depth)
+}
+
+// ------------------------------------------------------------------------------------------
+// The sketch
+// ------------------------------------------------------------------------------------------
+
+/// `log2` of the register count. 2¹⁴ registers of one byte is **16 KiB per depth**, 272 KiB for a
+/// whole depth-16 ladder, and a relative standard error of `1.04 / sqrt(2^14)` = **0.81%**.
+///
+/// The register array is the arm's whole memory bound and it is a constant: it does not move with
+/// the depth, the segment count, the corpus size or the mask.
+pub const SKETCH_PRECISION: u32 = 14;
+
+/// The additive constant SplitMix64 stirs into an input before its finalizer.
+///
+/// **Fixed, never randomised.** `N_occ` is memoised per `(session, view, generation, depth)` and
+/// two processes serving the same bundle must answer the same number for the same mask, so a
+/// per-process seed — `RandomState`'s, or any `HashMap` default — would make θ a function of which
+/// server answered. The conformance differential reproduces this hash in Python and compares the
+/// served set exactly; a randomised hasher would end that.
+const SKETCH_SEED: u64 = 0x9E37_79B9_7F4A_7C15;
+
+/// SplitMix64's finalizer: a bijection on `u64` with full avalanche.
+///
+/// A bijection rather than a hash with collisions, which is what a cardinality sketch wants: the
+/// tile indices at one depth are distinct by construction, so the register a tile lands in is
+/// decided by the mixing alone.
+#[inline]
+const fn mix64(z: u64) -> u64 {
+    let z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    let z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
+/// A HyperLogLog over tile indices: constant memory, one pass, and **mergeable by taking the
+/// maximum per register**, which is exactly the union.
+///
+/// That last property is why the multi-segment case stops being a special case. A tile can hold
+/// rows in several segments and `N_occ` counts tiles rather than per-segment shares of them, so an
+/// exact accumulator has to combine the segments' emissions — by a Roaring union, a sort, or a
+/// direct-mapped bitset, each with its own memory and its own crossover. Adding the same tile
+/// twice to a sketch is idempotent, so one sketch fed by every segment *is* the union and there is
+/// nothing to choose between.
+///
+/// # Every arithmetic step is integer, so the answer is bit-identical everywhere
+///
+/// A `u64` per `(mask, view, generation, depth)` must not depend on the libm a process linked or
+/// the order a summation happened to take. The estimator below therefore uses no floating point at
+/// all: the harmonic sum is an exact `u128` in units of `2^-RANK_MAX`, α is an exact rational, and
+/// the small-range branch's logarithm is a fixed-point series in `Q32` using only integer
+/// multiplication, shifts and truncating division. `reference/oracle/viewport.py` is the same
+/// arithmetic in Python, and `conformance/tests/test_i7_selection.py` compares the served set
+/// exactly rather than to a tolerance.
+#[derive(Debug, Clone)]
+pub struct TileSketch {
+    precision: u32,
+    registers: Vec<u8>,
+}
+
+impl Default for TileSketch {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl TileSketch {
+    /// A sketch at [`SKETCH_PRECISION`].
+    pub fn new() -> Self {
+        Self::with_precision(SKETCH_PRECISION)
+    }
+
+    /// A sketch at an arbitrary precision. `tessera-bench` sweeps this; the engine takes
+    /// [`SKETCH_PRECISION`].
+    pub fn with_precision(precision: u32) -> Self {
+        assert!(
+            (7..=18).contains(&precision),
+            "α_m's closed form is stated for m >= 128 and the register array must stay small"
+        );
+        Self {
+            precision,
+            registers: vec![0u8; 1usize << precision],
         }
     }
+
+    /// Record one tile index.
+    #[inline]
+    pub fn add(&mut self, tile: u64) {
+        let (index, rank) = register_of(tile, self.precision);
+        let slot = &mut self.registers[index];
+        if rank > *slot {
+            *slot = rank;
+        }
+    }
+
+    /// The estimated number of distinct tiles recorded.
+    pub fn estimate(&self) -> u64 {
+        estimate_registers(&self.registers, self.precision)
+    }
+
+    /// The register array's size in bytes — the arm's whole memory bound.
+    pub fn bytes(&self) -> usize {
+        self.registers.len()
+    }
+}
+
+/// Which register a tile index lands in, and the rank it proposes for it.
+///
+/// The top `precision` bits of the hash choose the register and the run of zeros below them is the
+/// rank. `| 1 << (precision - 1)` caps the run at `64 - precision`, so a hash whose low bits are
+/// all zero produces the largest rank a register can hold rather than one it cannot.
+#[inline]
+fn register_of(tile: u64, precision: u32) -> (usize, u8) {
+    let h = mix64(tile.wrapping_add(SKETCH_SEED));
+    let index = (h >> (64 - precision)) as usize;
+    let rank = ((h << precision) | (1u64 << (precision - 1))).leading_zeros() as u8 + 1;
+    (index, rank)
+}
+
+/// `α_m · 2³²`, exactly, by integer arithmetic.
+///
+/// `α_m = 0.7213 / (1 + 1.079/m)`, so `α_m · 2³² = 7213 · m · 2³² / (10 · (1000m + 1079))`,
+/// rounded to nearest. Written this way rather than as an `f64` literal so the constant is the
+/// same in Rust and in the Python oracle without either transcribing the other's rounding.
+fn alpha_q32(precision: u32) -> u128 {
+    let m = 1u128 << precision;
+    let num = 7213u128 * m * (1u128 << 32);
+    let den = 10u128 * (1000 * m + 1079);
+    (2 * num + den) / (2 * den)
+}
+
+/// The estimated number of distinct values behind one register array.
+///
+/// **A histogram of the ranks, not a pass of `u128` shifts.** There are at most `64 - precision + 1`
+/// distinct rank values, so counting them into a small array that stays in L1 and combining
+/// afterwards turns `2^precision` wide shift-adds into `2^precision` byte increments — measured
+/// 4.6x faster at precision 14, and the estimator runs once per depth on the request path.
+fn estimate_registers(registers: &[u8], precision: u32) -> u64 {
+    let rank_max = 64 - precision + 1;
+    let mut hist = [0u32; 65];
+    for &r in registers {
+        hist[r as usize] += 1;
+    }
+    // `Σ_j 2^-M[j]`, in units of `2^-rank_max` so every term is an exact integer. The sum is at
+    // most `m · 2^rank_max = 2^65`, which is why it is a `u128`.
+    let mut inv: u128 = 0;
+    for (rank, &count) in hist.iter().enumerate().take(rank_max as usize + 1) {
+        inv += u128::from(count) << (rank_max - rank as u32);
+    }
+    let zeros = u64::from(hist[0]);
+
+    // `E = α_m · m² / Σ 2^-M[j]`, which with the scaling above is
+    // `(α_m · 2³²) · 2^(2·precision) · 2^rank_max / (2³² · inv)` = `α_q32 · 2^(precision+33) / inv`.
+    let m = 1u128 << precision;
+    let raw = (alpha_q32(precision) << (precision + 33)) / inv;
+
+    // **Linear counting below 2.5m**, which is where HyperLogLog's estimator is biased and where a
+    // register array with empty slots has a better one available: with `V` of `m` registers still
+    // empty, `m · ln(m/V)` is the balls-into-bins estimate.
+    if zeros > 0 && raw <= (5 * m) / 2 {
+        let ln_ratio_q32 = u64::from(precision) * LN2_Q32 - ln_q32(zeros);
+        return ((m as u64) * ln_ratio_q32) >> 32;
+    }
+    // No large-range correction: the hash is 64 bits wide, so the `2^32/30` threshold a 32-bit
+    // HyperLogLog needs is unreachable here.
+    raw as u64
+}
+
+/// `ln 2 · 2³²`, rounded to nearest.
+const LN2_Q32: u64 = 2_977_044_472;
+
+/// `ln(v) · 2³²` for `v >= 1`, by integer arithmetic alone.
+///
+/// `v = 2^k · f` with `f` in `[1, 2)`, so `ln v = k · ln 2 + ln f`, and `ln f = 2 · atanh(z)` for
+/// `z = (f − 1) / (f + 1)` in `[0, 1/3]`. The series `z + z³/3 + z⁵/5 + …` loses a factor of nine
+/// per term there, so twenty terms are far past `Q32`'s last bit; the count is fixed rather than
+/// tested against zero so the loop is the same shape in both implementations.
+fn ln_q32(v: u64) -> u64 {
+    debug_assert!(v >= 1, "ln is taken of a register count, which is at least one here");
+    let k = u64::from(63 - v.leading_zeros());
+    let one = 1u128 << 32;
+    // `f` in Q32, in `[2³², 2³³)`.
+    let f = (u128::from(v) << 32) >> k;
+    let z = ((f - one) << 32) / (f + one);
+    let z2 = (z * z) >> 32;
+    let mut term = z;
+    let mut acc = z;
+    let mut i = 3u128;
+    while i <= 41 {
+        term = (term * z2) >> 32;
+        acc += term / i;
+        i += 2;
+    }
+    k * LN2_Q32 + (2 * acc) as u64
 }
 
 /// What `N_occ(d)` is a function of: the composed mask, the view's row space, and the depth.
@@ -257,5 +600,151 @@ impl crate::single_flight::CacheWeight for OccupiedTiles {
         // The value is a `u64`; the per-entry floor the cache applies is what actually bounds the
         // entry count, and it is the honest charge for a key holding a view name.
         std::mem::size_of::<u64>() as u64
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// **`ln_q32` is a logarithm**, to a tolerance far finer than anything downstream can see.
+    ///
+    /// Floating point appears here and nowhere in the estimator: this test is the check that the
+    /// integer series reproduces the function, not part of the answer.
+    #[test]
+    fn the_fixed_point_logarithm_matches_the_real_one() {
+        for v in [1u64, 2, 3, 5, 7, 16, 100, 1023, 4096, 16383, 16384, 65535] {
+            let got = ln_q32(v) as f64 / 4_294_967_296.0;
+            let want = (v as f64).ln();
+            assert!(
+                (got - want).abs() < 1e-8,
+                "ln({v}): fixed point {got}, real {want}"
+            );
+        }
+    }
+
+    /// **α_m by integer arithmetic is α_m.**
+    #[test]
+    fn the_alpha_constant_is_the_closed_form() {
+        for precision in 7..=18u32 {
+            let m = (1u64 << precision) as f64;
+            let want = 0.7213 / (1.0 + 1.079 / m);
+            let got = alpha_q32(precision) as f64 / 4_294_967_296.0;
+            assert!((got - want).abs() < 1e-9, "precision {precision}: {got} vs {want}");
+        }
+    }
+
+    /// **The estimate tracks the cardinality across five orders of magnitude**, including the
+    /// linear-counting range and the crossover into the raw estimator.
+    ///
+    /// The tolerance is five standard errors of a 2¹⁴-register sketch (0.81% each), widened to a
+    /// floor of two below a hundred distinct values where the linear-counting estimate rounds.
+    #[test]
+    fn the_sketch_estimates_a_known_cardinality() {
+        for n in [0u64, 1, 2, 10, 100, 1_000, 10_000, 40_000, 100_000, 1_000_000] {
+            let mut sketch = TileSketch::new();
+            // Strided rather than dense, so the input is not one contiguous block: the tile
+            // indices a walk emits are neither.
+            for i in 0..n {
+                sketch.add(i.wrapping_mul(0x9E37_79B9).wrapping_add(7));
+            }
+            let got = sketch.estimate();
+            let slack = (n as f64 * 0.0406).max(2.0);
+            assert!(
+                (got as f64 - n as f64).abs() <= slack,
+                "n = {n}: estimated {got}, tolerance ±{slack:.1}"
+            );
+        }
+    }
+
+    /// **Adding a tile twice is adding it once**, which is what makes one sketch fed by every
+    /// segment the union of the segments' tile sets rather than a sum of their sizes.
+    #[test]
+    fn the_sketch_is_idempotent_and_order_blind() {
+        let mut once = TileSketch::new();
+        let mut twice = TileSketch::new();
+        for i in 0..5_000u64 {
+            once.add(i * 13);
+        }
+        for i in (0..5_000u64).rev() {
+            twice.add(i * 13);
+            twice.add(i * 13);
+        }
+        assert_eq!(once.estimate(), twice.estimate());
+        assert_eq!(once.registers, twice.registers);
+    }
+
+    /// **The same input gives the same registers**, in this process and in any other: the seed is
+    /// a constant and the hash is not `RandomState`'s.
+    #[test]
+    fn the_sketch_is_deterministic() {
+        let mut a = TileSketch::new();
+        let mut b = TileSketch::new();
+        for i in 0..1_000u64 {
+            a.add(i);
+            b.add(i);
+        }
+        assert_eq!(a.registers, b.registers);
+        // The literal is the point: a thousand distinct tiles estimate to 994 here and to 994
+        // in `reference/oracle/viewport.py`, on every box and in every process.
+        assert_eq!(a.estimate(), 994, "a thousand distinct tiles is a fixed answer");
+    }
+
+    /// **The cross-language vectors.** `reference/oracle/occupancy.py` asserts these same three
+    /// lists in `reference/tests/test_occupancy_sketch.py`, which is what makes
+    /// `conformance/tests/test_i7_selection.py` an exact differential rather than one within a
+    /// band. A change to the seed, the mixer, the estimator, the ceiling or the running maximum
+    /// moves these numbers, and the two sides fail together rather than drifting apart.
+    #[test]
+    fn the_ladder_matches_the_python_oracle_vector_for_vector() {
+        let cases: [(&str, Vec<u64>, [u64; 17]); 3] = [
+            (
+                "small",
+                (0..37u64).map(|i| i * 0x0001_0001).collect(),
+                [1, 1, 1, 1, 1, 1, 3, 10, 37, 37, 37, 37, 37, 37, 37, 37, 37],
+            ),
+            (
+                "mid",
+                (0..5_000u64)
+                    .map(|i| i.wrapping_mul(2_654_435_761) % (1u64 << 32))
+                    .collect(),
+                [
+                    1, 4, 16, 63, 253, 1020, 3858, 5017, 5017, 5017, 5017, 5017, 5017, 5017, 5017,
+                    5017, 5017,
+                ],
+            ),
+            (
+                "big",
+                (0..250_000u64)
+                    .map(|i| i.wrapping_mul(48_271) % (1u64 << 32))
+                    .collect(),
+                [
+                    1, 4, 16, 63, 253, 1020, 4079, 16333, 65536, 156628, 253239, 253239, 253239,
+                    253239, 253239, 253239, 253239,
+                ],
+            ),
+        ];
+        let stride = 1usize << SKETCH_PRECISION;
+        for (name, tiles, want) in cases {
+            let mut plane = vec![0u8; stride * 17];
+            for &tile in &tiles {
+                for d in 0..=16usize {
+                    let ancestor = tile >> (2 * (16 - d) as u32);
+                    let (index, rank) = register_of(ancestor, SKETCH_PRECISION);
+                    let slot = &mut plane[d * stride + index];
+                    if rank > *slot {
+                        *slot = rank;
+                    }
+                }
+            }
+            let mut running = 0u64;
+            for (d, expected) in want.iter().enumerate() {
+                let estimate =
+                    estimate_registers(&plane[d * stride..(d + 1) * stride], SKETCH_PRECISION)
+                        .min(1u64 << (2 * d as u32));
+                running = running.max(estimate);
+                assert_eq!(running, *expected, "{name}, depth {d}");
+            }
+        }
     }
 }

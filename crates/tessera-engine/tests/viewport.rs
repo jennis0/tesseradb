@@ -1797,6 +1797,17 @@ fn the_theta_anchor_falls_when_an_item_is_suppressed() {
 /// ten entities sharing one position. Suppressing one of them changes no tile's occupancy, which
 /// is asserted first: without it this test would pass on a count that had not moved for the wrong
 /// reason.
+///
+/// **`N_occ` is a sketch estimate now, and the numbers below are that estimate.** A thousand
+/// occupied tiles read 1,008 — 0.8% high, and stable, because the sketch is a deterministic
+/// function of the tile set and not of anything random. That the fall is still exactly one is a
+/// property of this fixture's *size*: at a thousand distinct values in 2¹⁴ registers almost every
+/// tile owns an uncollided register and the linear-counting estimator moves by about one per
+/// register, so removing one tile moves the estimate by one. It is **not** a general guarantee —
+/// at a million occupied tiles a single emptied tile is far inside the sketch's error, and this
+/// test could not be written at that scale. What survives at every scale is the property being
+/// pinned: the anchor is taken over the composed mask, so a deny moves it, and a bug that anchored
+/// on the pre-overlay projection would leave it flat here.
 #[test]
 fn n_occ_falls_when_a_suppression_empties_a_tile() {
     let tmp = TempDir::new().unwrap();
@@ -1815,8 +1826,9 @@ fn n_occ_falls_when_a_suppression_empties_a_tile() {
     let session_a = baseline.authorise(&full_coverage_credential()).unwrap();
     let before = baseline.occupied_tiles_for_test(&session_a, "s0", 16).unwrap();
     assert_eq!(
-        before, 1_000,
-        "the fixture's ten thousand items sit on a thousand lattice positions"
+        before, 1_008,
+        "the fixture's ten thousand items sit on a thousand lattice positions, and the sketch \
+         estimates those as 1,008"
     );
     assert_eq!(
         baseline.occupied_tiles_for_test(&session_a, "s0", 0).unwrap(),

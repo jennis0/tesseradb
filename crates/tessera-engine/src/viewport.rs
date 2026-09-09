@@ -5047,12 +5047,33 @@ impl Engine {
             fragment_identity: identity.fragment_identity,
             fragment_watermark: identity.fragment_watermark,
         };
-        let build = || {
-            crate::occupancy::OccupiedTiles(crate::occupancy::occupied_tiles(mask, segments, depth))
-        };
-        match self.occupancy.get_or_derive(key, None, |_| build()) {
+        if let crate::single_flight::Peek::Ready(hit) = self.occupancy.peek(&key) {
+            return hit.0;
+        }
+        // The whole ladder from one walk, and every rung below this one memoised on the way.
+        // `crate::occupancy::occupied_tiles_ladder` explains why the shallower rungs are free once
+        // the deepest has been walked; what this loop adds is that they are *kept*, so a session
+        // that reaches a depth and then zooms out pays nothing for the way back.
+        //
+        // **Each rung's value is the same however it was reached.** The depth-`d'` sketch is a
+        // function of the depth-`d'` occupied tile set alone, and the ancestors of the depth-`d`
+        // tiles are exactly that set, so a rung filled by a walk at 16 and the same rung filled by
+        // a walk at 6 hold identical registers and answer identically. Without that the memo would
+        // be answering from whichever depth happened to be requested first.
+        let ladder = crate::occupancy::occupied_tiles_ladder(mask, segments, depth);
+        for rung in 0..depth {
+            let mut rung_key = key.clone();
+            rung_key.depth = rung;
+            let _ = self.occupancy.get_or_derive(rung_key, None, |_| {
+                crate::occupancy::OccupiedTiles(ladder.at(rung))
+            });
+        }
+        match self
+            .occupancy
+            .get_or_derive(key, None, |_| crate::occupancy::OccupiedTiles(ladder.at(depth)))
+        {
             Ok(entry) => entry.0,
-            Err(crate::single_flight::Building) => build().0,
+            Err(crate::single_flight::Building) => ladder.at(depth),
         }
     }
 
