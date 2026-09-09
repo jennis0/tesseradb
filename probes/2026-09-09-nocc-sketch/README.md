@@ -57,7 +57,14 @@ The two sketch columns that matter are **"one sketch per depth"** and **"ladder,
 
 **"Refilled at every depth"** is the naive policy — rebuild the whole ladder on every miss — and it is a loss at every cell measured. It is in the table because it is what "one walk fills every depth below it" costs if the memo is not consulted first, and it is three to five times the deepest rung's emissions.
 
-The full sweep — 1, 2, 4, 8, 16, 64, 256 and 512 segments, three split shapes, both corpora, and a 5%-visible mask — is in the JSON beside this file.
+The full sweep — 1, 2, 4, 8, 16, 64, 256 and 512 segments, three split shapes, both corpora, and a 5%-visible mask — is in the JSON beside this file. Against the tiered arm, over all 64 (corpus, split, S) cells:
+
+| | worst bound (one sketch per depth) | best bound (ladder, deepest first) |
+|---|---|---|
+| one segment (8 cells) | **0.61× to 0.88×** — the sketch loses at every one | 0.97× to 5.04× |
+| two or more (56 cells) | 0.79× to 2.54× | 0.99× to 6.15× |
+
+At one segment the walk emits each tile once and a counter *is* the accumulator, so the sketch is paying a hash for something that was free. Above one segment the accumulator has real work to do and the sketch's has none. The ladder's best bound is at or above parity at 62 of the 64 cells; the two below it — `treeoflife-1m` contiguous at 4 segments (0.99×) and at one (0.97×) — are the split shape that makes the segments' tile sets nearly disjoint, which is the accumulator's easiest case and is kept as a bound rather than as the expected one. Under decision 0091 a live view accumulates a segment per flush, so one segment is a freshly built bundle and nothing else.
 
 ### Accuracy
 
@@ -84,7 +91,7 @@ Peak live bytes during the call, the maximum over each whole sweep.
 | corpus | union | tiered | exact ladder | sketch ladder |
 |---|---|---|---|---|
 | `treeoflife-1m` | 3.35 MB | 8.19 MB | 23.6 MB | **279 kB** |
-| `geonames` | 22.1 MB | 92.6 MB | 263 MB | **279 kB** |
+| `geonames` | 22.1 MB | 93.2 MB | 264 MB | **279 kB** |
 
 The sketch's 279 kB is `17 × 2^14` bytes and is the same number at every segment count, every depth and both corpora. Nothing in the arm grows with the data.
 
@@ -104,10 +111,20 @@ Bit-exactness is bought by using **no floating point at all**: the harmonic sum 
 
 **The exact ladder is a real alternative and is faster below about 64 segments.** It is the same one walk with seventeen exact accumulators, and it beats the sketch ladder at 1 to 16 segments on `treeoflife-1m` and at 1 segment on `geonames`. What it costs is memory: 23.6 MB and 263 MB peak, against 279 kB, at a depth the client chooses on every request.
 
+## Three normative statements this contradicts, and one it does not
+
+**Architecture §7.2 forbids the running maximum, in terms.** *(r62)*: "No implementation may clamp θ or carry a running maximum over depth: a clamp would conceal a miscount rather than prevent one." That sentence is right about an exact count — a fall in `N_occ` between two depths can only be a bug. It is the reverse under an estimate: the fall measured here is estimator noise over a quantity that grew by less than the sketch's error, and nothing about the walk is wrong. But the prohibition is normative and `architecture.md` wins any conflict, so **this is an owner ruling, not an implementation choice**, and this branch is in breach of the specification until it is made.
+
+**The oracle's independence is not what r62 says it is.** *(r62)*: "The reference oracle counts `N_occ` by bucketing every row's recomputed tile, where the engine gallops the stored Morton column, so the differential's independence moves from the arithmetic to the count." Under a sketch the oracle no longer counts — it transcribes the engine's estimator, exactly. What stays independent is the *tile set*: `Selection` recomputes each row's tile from the source geometry where the engine gallops the stored column, so a build that wrote a wrong Morton column still fails. What is no longer independent is turning that set into a number. `oracle/occupancy.py` says so at the top rather than leaving the claim to stand.
+
+**Contracts §0 and Appendix C's C18 survive, and by a stronger argument than before.** Both rest on `N_occ(d)` being solvable for through the published `theta_target_marks` and being exactly what counting a full-extent depth-*d* request's non-empty tiles already returns. Under a sketch the solved-for quantity is an *estimate* of a number §7.1 discloses exactly, so the client learns strictly less than it could learn in one call. Decision 0023's test is met a fortiori.
+
+**§7.2's "tightening at every depth, never a loosening" survives** because the ladder clamps each rung to `4^d` before anything else. `N_occ(d) <= 4^d` still holds exactly, so no viewer is served more marks than the `4^d` progression gave, which is what that paragraph claims.
+
 ## What was not measured
 
 * **The request path.** Every figure here is `occupancy_sketch`, not `/v1/viewport`. The `theta_occupancy_ns` trailer figure for the exact walk (1.55–2.21 ms first request at a depth, 1–3 µs after) has not been retaken on this arm.
 * **The adaptive fill policy as code.** The engine's ladder fills `0..=d` unconditionally and the memo keeps every rung; the "one sketch per depth" bound is measured as a separate route rather than produced by that policy. Implementing the policy would land a session between the two bounds rather than at the naive column.
 * **Corpora beyond two.** `treeoflife-1m` and `geonames`. Nothing at 2.33 × 10⁸ or 3.65 × 10⁹ rows.
-* **Contention.** The box carried other work throughout (a second session's test binary at 130% CPU for part of the run, and two running deployments). The harness takes the minimum of three calls and prices every route against the same mask in the same process, so the *ratios* are sound; the absolute milliseconds are upper bounds. Repeating one cell across two runs of the same configuration differed by up to 15%.
+* **Contention.** The box carried other work throughout — two running deployments, another session's test binary at 130% CPU, and this branch's own `cargo test --workspace` during the `geonames` interleave, contiguous and sparse runs. The harness takes the minimum of three calls and prices every route against the same mask in the same process, so the *ratios* are sound; the absolute milliseconds are upper bounds, and the three `geonames` runs above are the most affected. Two runs of the same one-segment configuration (`tol-flush` and `tol-contiguous`, where one segment is the same layout) differed by 15%.
 * **Precision below 12 or above 14.** Only those two were swept.

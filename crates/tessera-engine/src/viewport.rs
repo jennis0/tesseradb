@@ -5060,6 +5060,10 @@ impl Engine {
         // tiles are exactly that set, so a rung filled by a walk at 16 and the same rung filled by
         // a walk at 6 hold identical registers and answer identically. Without that the memo would
         // be answering from whichever depth happened to be requested first.
+        // **This makes the memo up to seventeen entries per `(session, view, generation)` where it
+        // was one per depth actually visited.** The value is a `u64` and the cost is the cache's
+        // per-entry floor over a key holding a view name, so the byte bound absorbs it; what it
+        // buys is that the deepest walk a session makes is the only one it makes.
         let ladder = crate::occupancy::occupied_tiles_ladder(mask, segments, depth);
         for rung in 0..depth {
             let mut rung_key = key.clone();

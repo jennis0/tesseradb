@@ -45,10 +45,17 @@
 //! **Monotone in depth.** Every occupied depth-*d* tile has at least one occupied child, and
 //! children of distinct parents are distinct tiles, so `N_occ(d+1) >= N_occ(d)` — of the *true*
 //! quantity. Two adjacent *estimates* of it need not obey that, and where `N_occ` barely grows
-//! between two depths a 1% error either way can invert them. [`OccupancyLadder`] therefore carries
+//! between two depths a 1% error either way can invert them; one measured cell does
+//! (`treeoflife-1m` under a 5% mask, depths 14 to 15, 0.33%). [`OccupancyLadder`] therefore carries
 //! a **running maximum** across depths: `at(d)` is the largest rung at or below *d*. That is
-//! structural rather than hopeful, and it errs in the safe direction — the owner's ruling is that
-//! serving more marks than the formula asks is not a problem and serving fewer is.
+//! structural rather than hopeful, and it errs in the safe direction — serving more marks than the
+//! formula asks is harmless where serving fewer breaks nesting.
+//!
+//! **Architecture §7.2 r62 forbids exactly this**, in terms: "No implementation may clamp θ or
+//! carry a running maximum over depth: a clamp would conceal a miscount rather than prevent one."
+//! That is right about an exact count, where a fall between depths can only be a bug, and it is the
+//! reverse under an estimate. **It is an owner ruling to reverse, and it has not been made**, so
+//! this branch is in breach of the specification and is a probe rather than a candidate.
 //!
 //! **`N_occ(d) <= 4^d`.** There are only `4^d` tiles at depth *d*, so the estimate is clamped there
 //! before the running maximum. This is what makes the shallow rungs *exact*: depth 0 is one tile
