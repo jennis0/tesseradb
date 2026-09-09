@@ -1122,7 +1122,9 @@ fn read_members(
     // `None` where the entry named no artifact.
     let mut entries: Vec<Option<usize>> = Vec::new();
     let mut said_level_is_ignored = false;
-    for batch in batches(path)? {
+    // **Decoded ahead, on one other thread, in file order** ([`batches_ahead`]). The row loop below
+    // stays serial: it mints into the plan, and the mint order is the file's.
+    for batch in batches_ahead(path, READ_AHEAD_BATCHES)? {
         let batch = batch?;
         let key = member_keys(path, &batch, fields, layer, declaration)?;
         let level = optional_u32(path, &batch, LEVEL)?;
@@ -1607,26 +1609,51 @@ pub fn publish(
         order.extend(batched.keys().filter(|(layer, _)| *layer == name).copied());
     }
 
-    // One artifact's bytes and one artifact's entities, reused across every level — what makes the
-    // publication's residency a level of Roaring bitmaps plus the largest single artifact, rather
-    // than a level of entity vectors beside them.
-    let mut scratch: Vec<u8> = Vec::new();
-    let mut buf: Vec<u64> = Vec::new();
     for address in order {
         let (layer, level) = address;
         let artifacts = batched
             .remove(&address)
             .expect("every address came from the map a statement ago");
-        let mut incoming = Vec::with_capacity(artifacts.len());
-        for (key, index) in artifacts {
-            incoming.push(incoming_artifact(
-                key,
-                &mut resolved[index],
-                index,
-                &table,
-                &mut scratch,
-                &mut buf,
-            )?);
+        // **The bodies come out of the plan in key order, and the memberships are read and encoded
+        // in parallel.** An artifact's bitmap is a function of its own extent of the member table
+        // and of nothing else, so there is no state between two of them; the cost is the read, the
+        // sort and the Roaring append, which is 6.3 s of `gbif-240p`'s publication
+        // (`probes/2026-09-09-layers-cost/README.md`).
+        //
+        // **`prepare_publish` still sees the level in key order.** An ordinal is identity under I9
+        // and it is assigned off the order the level is handed over in, so the parallel pass is
+        // indexed and its results are collected in the order `artifacts` holds — build in
+        // parallel, publish in order. The refusals are sequenced the same way, so which artifact a
+        // malformed extent is reported against is the level's order rather than the scheduler's.
+        let bodies: Vec<PublishableBody> = artifacts
+            .iter()
+            .map(|(_, index)| resolved[*index].take_body())
+            .collect();
+        let built: Vec<Result<IncomingArtifact>> = artifacts
+            .par_iter()
+            .zip(bodies)
+            // One artifact's bytes and one artifact's entities per task, reused across the
+            // artifacts in it — what keeps the publication's residency a level of Roaring bitmaps
+            // plus the largest single artifact per thread, rather than a level of entity vectors
+            // beside them.
+            .map_init(
+                || (Vec::<u8>::new(), Vec::<u64>::new()),
+                |(scratch, buf), ((key, index), body)| {
+                    incoming_artifact(
+                        key,
+                        body,
+                        &resolved[*index].members,
+                        *index,
+                        &table,
+                        scratch,
+                        buf,
+                    )
+                },
+            )
+            .collect();
+        let mut incoming = Vec::with_capacity(built.len());
+        for artifact in built {
+            incoming.push(artifact?);
         }
         let record = registry
             .prepare_publish(
@@ -2044,6 +2071,17 @@ fn verify_dependencies(plan: &LayerPlan) -> Result<()> {
 /// An edge naming a key in another level is therefore an unknown key here, and refuses.
 type Address = (String, u32, String);
 
+/// The buffers one containment pass reads a membership through: the extent's raw bytes, and the
+/// members they decode to. Held by the task rather than by the parent, so the pass allocates once
+/// per unit the work is split into and not once per artifact.
+#[derive(Default)]
+struct HierarchyBuffers {
+    parent_bytes: Vec<u8>,
+    parent_buf: Vec<u64>,
+    child_bytes: Vec<u8>,
+    child_buf: Vec<u64>,
+}
+
 fn verify_hierarchies(
     declarations: &[LayerDeclaration],
     index_of: &BTreeMap<Address, usize>,
@@ -2196,100 +2234,121 @@ fn verify_hierarchies(
         }
     }
 
-    let mut violations = Vec::new();
-    let mut coverage = Vec::new();
-    // **Two memberships resident, and never more**: the parent whose children are being walked,
-    // and the child being walked. Both are read from the merged table into buffers this loop owns
-    // and reuses, so a pass over a hierarchy of 10⁵ artifacts allocates a handful of times.
-    let mut parent_bytes: Vec<u8> = Vec::new();
-    let mut parent_buf: Vec<u64> = Vec::new();
-    let mut child_bytes: Vec<u8> = Vec::new();
-    let mut child_buf: Vec<u64> = Vec::new();
-    for (address, children) in &children_of {
-        let (layer, level, parent_key) = *address;
-        let parent_index = index_of[*address];
-        load_members(
-            &resolved[parent_index],
-            parent_index,
-            table,
-            &mut parent_bytes,
-            &mut parent_buf,
-        )?;
-        // **The parent's distinct members, in order** — the merge sorted them, so this is a
-        // run-skip rather than a sort. It replaces a `HashSet<u64>` per parent, which for a
-        // country-level division holding 2×10⁷ points was a ~300 MB table built and torn down, with
-        // a second one beside it for what the children covered. The dedup is in place because the
-        // buffer is this loop's own: nothing else is reading it, and the largest membership at the
-        // Overture rung is 73.6×10⁶ entries, which a copy would be 589 MB of.
-        parent_buf.dedup();
-        let held: &[u64] = &parent_buf;
-        // One bit per distinct member, so `covered.len()` becomes a popcount: 2.5 MB where the
-        // second `HashSet` was 300 MB, and the counts it feeds are identical by construction.
-        let mut covered = vec![0u64; held.len().div_ceil(64)];
-        let mut covered_count = 0u64;
-
-        for child_address in children {
-            let child_index = index_of[*child_address];
+    // **One parent per task, and every result taken back in the parents' own order.** A parent's
+    // pass reads the merged member table and the resolved artifacts, and writes only the records
+    // for that parent — there is no state between two parents to share. The map is indexed and
+    // rayon's collect is ordered, so the violations and the coverage come back in the key order
+    // `children_of` iterated in, and what a build prints does not move with the scheduler.
+    //
+    // ⊘ **Collecting `Result` directly.** Rayon keeps whichever error was stored first in time, so
+    // a corpus with two unreadable extents would name a different one on different runs. The
+    // results are collected and sequenced afterwards instead, which names the first in key order —
+    // the one the serial pass named.
+    let parents: Vec<(&&Address, &Vec<&Address>)> = children_of.iter().collect();
+    let per_parent: Vec<Result<(Vec<ContainmentViolation>, SplitCoverage)>> = parents
+        .into_par_iter()
+        // **Two memberships resident per task, and never more**: the parent whose children are
+        // being walked, and the child being walked. The buffers are the task's rather than the
+        // parent's, so a pass over a hierarchy of 10⁵ artifacts allocates a handful of times as the
+        // serial pass did, and the peak is a set of them per thread rather than one.
+        .map_init(HierarchyBuffers::default, |scratch, (address, children)| {
+            let (layer, level, parent_key) = *address;
+            let parent_index = index_of[*address];
             load_members(
-                &resolved[child_index],
-                child_index,
+                &resolved[parent_index].members,
+                parent_index,
                 table,
-                &mut child_bytes,
-                &mut child_buf,
+                &mut scratch.parent_bytes,
+                &mut scratch.parent_buf,
             )?;
-            let (_, child_level, child_key) = *child_address;
-            let mut escaping = 0u64;
-            // **Galloping from a cursor**, both sides being sorted: a child whose members sit in
-            // one region of the parent's finds them in a few probes each rather than a full
-            // binary search, and the walk is cache-resident where the hash table was not.
-            let mut cursor = 0usize;
-            for member in child_buf.iter().copied() {
-                if cursor < held.len() && held[cursor] > member {
-                    cursor = 0;
-                }
-                let mut step = 1usize;
-                while cursor + step < held.len() && held[cursor + step] <= member {
-                    step *= 2;
-                }
-                let hi = (cursor + step).min(held.len());
-                match held[cursor..hi].binary_search(&member) {
-                    Ok(offset) => {
-                        let at = cursor + offset;
-                        cursor = at;
-                        let (word, bit) = (at / 64, at % 64);
-                        if covered[word] >> bit & 1 == 0 {
-                            covered[word] |= 1u64 << bit;
-                            covered_count += 1;
+            // **The parent's distinct members, in order** — the merge sorted them, so this is a
+            // run-skip rather than a sort. It replaces a `HashSet<u64>` per parent, which for a
+            // country-level division holding 2×10⁷ points was a ~300 MB table built and torn down,
+            // with a second one beside it for what the children covered. The dedup is in place
+            // because the buffer is this task's own: nothing else is reading it, and the largest
+            // membership at the Overture rung is 73.6×10⁶ entries, which a copy would be 589 MB of.
+            scratch.parent_buf.dedup();
+            let held: &[u64] = &scratch.parent_buf;
+            // One bit per distinct member, so `covered.len()` becomes a popcount: 2.5 MB where the
+            // second `HashSet` was 300 MB, and the counts it feeds are identical by construction.
+            let mut covered = vec![0u64; held.len().div_ceil(64)];
+            let mut covered_count = 0u64;
+            let mut violations = Vec::new();
+
+            for child_address in children {
+                let child_index = index_of[*child_address];
+                load_members(
+                    &resolved[child_index].members,
+                    child_index,
+                    table,
+                    &mut scratch.child_bytes,
+                    &mut scratch.child_buf,
+                )?;
+                let (_, child_level, child_key) = *child_address;
+                let mut escaping = 0u64;
+                // **Galloping from a cursor**, both sides being sorted: a child whose members sit
+                // in one region of the parent's finds them in a few probes each rather than a full
+                // binary search, and the walk is cache-resident where the hash table was not.
+                let mut cursor = 0usize;
+                for member in scratch.child_buf.iter().copied() {
+                    if cursor < held.len() && held[cursor] > member {
+                        cursor = 0;
+                    }
+                    let mut step = 1usize;
+                    while cursor + step < held.len() && held[cursor + step] <= member {
+                        step *= 2;
+                    }
+                    let hi = (cursor + step).min(held.len());
+                    match held[cursor..hi].binary_search(&member) {
+                        Ok(offset) => {
+                            let at = cursor + offset;
+                            cursor = at;
+                            let (word, bit) = (at / 64, at % 64);
+                            if covered[word] >> bit & 1 == 0 {
+                                covered[word] |= 1u64 << bit;
+                                covered_count += 1;
+                            }
+                        }
+                        // Reported, not refused: the tree is real, its rollup guarantee is not.
+                        Err(offset) => {
+                            cursor = (cursor + offset).min(held.len().saturating_sub(1));
+                            escaping += 1;
                         }
                     }
-                    // Reported, not refused: the tree is real, its rollup guarantee is not.
-                    Err(offset) => {
-                        cursor = (cursor + offset).min(held.len().saturating_sub(1));
-                        escaping += 1;
-                    }
+                }
+                if escaping > 0 {
+                    violations.push(ContainmentViolation {
+                        layer: layer.clone(),
+                        // The **child's** level, which is the one an operator needs to find it; for
+                        // a nested layer it is the parent's too, and for a tiered one it is not.
+                        level: *child_level,
+                        child: child_key.clone(),
+                        parent: parent_key.clone(),
+                        escaping_members: escaping,
+                    });
                 }
             }
-            if escaping > 0 {
-                violations.push(ContainmentViolation {
-                    layer: layer.clone(),
-                    // The **child's** level, which is the one an operator needs to find it; for a
-                    // nested layer it is the parent's too, and for a tiered one it is not.
-                    level: *child_level,
-                    child: child_key.clone(),
-                    parent: parent_key.clone(),
-                    escaping_members: escaping,
-                });
-            }
-        }
 
-        coverage.push(SplitCoverage {
-            layer: layer.clone(),
-            level: *level,
-            parent: parent_key.clone(),
-            children: children.len() as u32,
-            members: held.len() as u64,
-            stray_members: held.len() as u64 - covered_count,
-        });
+            Ok((
+                violations,
+                SplitCoverage {
+                    layer: layer.clone(),
+                    level: *level,
+                    parent: parent_key.clone(),
+                    children: children.len() as u32,
+                    members: held.len() as u64,
+                    stray_members: held.len() as u64 - covered_count,
+                },
+            ))
+        })
+        .collect();
+
+    let mut violations = Vec::new();
+    let mut coverage = Vec::with_capacity(per_parent.len());
+    for parent in per_parent {
+        let (escaped, covered) = parent?;
+        violations.extend(escaped);
+        coverage.push(covered);
     }
 
     detect_cycles(index_of, resolved, &kind_of)?;
@@ -2507,6 +2566,33 @@ fn resolve_artifact(
     })
 }
 
+/// What an artifact carries into the publication beyond its membership.
+///
+/// **Moved out of the plan before the memberships are read**, which is what lets the read and the
+/// encode run over the plan rather than through it ([`publish`]): everything here is a `Vec` or an
+/// `Option` the resolution already built, so taking it is a move rather than work.
+struct PublishableBody {
+    view: Option<String>,
+    contents: Vec<IncomingContent>,
+    attached_to: Option<IncomingAttachment>,
+    parent_keys: Vec<String>,
+    shape: Option<ArtifactShapes>,
+}
+
+impl ResolvedArtifact {
+    /// Move this artifact's body out, leaving the membership where it is. The artifact is published
+    /// once, so what is left behind is read by nothing.
+    fn take_body(&mut self) -> PublishableBody {
+        PublishableBody {
+            view: self.view.take(),
+            contents: std::mem::take(&mut self.contents),
+            attached_to: self.attached_to.take(),
+            parent_keys: std::mem::take(&mut self.parent_keys),
+            shape: self.shape.take(),
+        }
+    }
+}
+
 /// The same artifact as the registry takes it. A membership is a list of entities by this point,
 /// so there is nothing here to decide.
 ///
@@ -2516,24 +2602,24 @@ fn resolve_artifact(
 /// leaves this module.
 fn incoming_artifact(
     key: &str,
-    artifact: &mut ResolvedArtifact,
+    body: PublishableBody,
+    members: &ResolvedMembers,
     index: usize,
     table: &spill::MemberTable,
     scratch: &mut Vec<u8>,
     buf: &mut Vec<u64>,
 ) -> Result<IncomingArtifact> {
-    load_members(artifact, index, table, scratch, buf)?;
-    let members = buf.iter().copied().map(EntityId::new);
-    let contents = std::mem::take(&mut artifact.contents);
-    let mut result = match artifact.attached_to.take() {
-        None => IncomingArtifact::with_content(Some(key.to_string()), members, contents),
+    load_members(members, index, table, scratch, buf)?;
+    let entities = buf.iter().copied().map(EntityId::new);
+    let mut result = match body.attached_to {
+        None => IncomingArtifact::with_content(Some(key.to_string()), entities, body.contents),
         Some(attached_to) => {
-            IncomingArtifact::attached(Some(key.to_string()), members, contents, attached_to)
+            IncomingArtifact::attached(Some(key.to_string()), entities, body.contents, attached_to)
         }
     };
-    result.parent_keys = std::mem::take(&mut artifact.parent_keys);
-    result.shape = artifact.shape.take();
-    result.view = artifact.view.take();
+    result.parent_keys = body.parent_keys;
+    result.shape = body.shape;
+    result.view = body.view;
     Ok(result)
 }
 
@@ -2543,13 +2629,13 @@ fn incoming_artifact(
 /// `scratch` is the caller's byte buffer for the table's extent, reused across artifacts so a pass
 /// over a level costs one allocation and not one per artifact.
 fn load_members(
-    artifact: &ResolvedArtifact,
+    members: &ResolvedMembers,
     index: usize,
     table: &spill::MemberTable,
     scratch: &mut Vec<u8>,
     buf: &mut Vec<u64>,
 ) -> Result<()> {
-    match &artifact.members {
+    match members {
         ResolvedMembers::Table => table.read_into(index, scratch, buf),
         ResolvedMembers::Inline(ids) => {
             buf.clear();
@@ -2795,6 +2881,96 @@ pub(crate) fn batches(
         .build()
         .map_err(|e| BuildError::parquet(path, e))?;
     Ok(reader.map(move |batch| batch.map_err(|e| BuildError::arrow(path, e))))
+}
+
+/// How many decoded batches the read-ahead may hold beyond the one each side is working on.
+///
+/// A batch is the parquet reader's own default of 1,024 rows, which on the member file's shape is
+/// ~120 kB of Arrow: an entity per row and a list of three keys beside it. Thirty-two of them is a
+/// few megabytes against a build whose peak is gigabytes. The depth is there to amortise the
+/// handoff and not to buffer the file — a queue one deep trades a futex with the consumer 10⁵ times
+/// over a 10⁸-row file, and the file's own size is bounded by nothing this could hold.
+const READ_AHEAD_BATCHES: usize = 32;
+
+/// [`batches`], decoded on a second thread and handed to the caller in file order.
+///
+/// The decode is ZSTD, and on `gbif-240p` it is 9.1 s in front of a member read whose row loop is
+/// 27 s — one thread's work sitting ahead of another thread's
+/// (`probes/2026-09-09-layers-cost/README.md`). Reading ahead overlaps the two. The queue is
+/// bounded, so the producer runs ahead only as far as [`READ_AHEAD_BATCHES`] and what the read
+/// holds is a constant rather than the file.
+///
+/// **The caller sees the batches in file order, and each error at the batch that raised it**, so
+/// nothing the row loop does with them moves. The order is not only an output question: a member
+/// key that misses the roster mints an artifact, and which key mints first is the file's order
+/// ([`read_members`]).
+///
+/// **A panic in the decode ends the build.** The queue closing is what the caller reads as the end
+/// of the file, and a producer that died mid-file closes it the same way — so the iterator joins
+/// the thread when the queue closes and resumes the panic there. Without that, a decode that died
+/// would publish a bundle carrying the members it managed to read, with the count of them as the
+/// only trace.
+fn batches_ahead(path: &Path, depth: usize) -> Result<ReadAhead> {
+    let (sender, receiver) = std::sync::mpsc::sync_channel(depth);
+    let owned = path.to_path_buf();
+    let producer = std::thread::Builder::new()
+        .name("member-decode".to_string())
+        .spawn(move || match batches(&owned) {
+            // The open and the footer read happen on this thread too, so their refusal travels the
+            // queue like any other and the caller reads it where it happened: first.
+            Err(e) => {
+                let _ = sender.send(Err(e));
+            }
+            Ok(reader) => {
+                for batch in reader {
+                    if sender.send(batch).is_err() {
+                        break;
+                    }
+                }
+            }
+        })
+        .map_err(|e| BuildError::io(path, e))?;
+    Ok(ReadAhead {
+        receiver: Some(receiver),
+        producer: Some(producer),
+    })
+}
+
+/// The consumer half of [`batches_ahead`].
+struct ReadAhead {
+    /// Dropped when the queue ends or the caller stops early, which is what tells the producer to
+    /// stop decoding.
+    receiver: Option<std::sync::mpsc::Receiver<Result<arrow::record_batch::RecordBatch>>>,
+    producer: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Iterator for ReadAhead {
+    type Item = Result<arrow::record_batch::RecordBatch>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if let Some(batch) = self.receiver.as_ref().and_then(|queue| queue.recv().ok()) {
+            return Some(batch);
+        }
+        self.receiver = None;
+        if let Some(producer) = self.producer.take() {
+            if let Err(panic) = producer.join() {
+                std::panic::resume_unwind(panic);
+            }
+        }
+        None
+    }
+}
+
+impl Drop for ReadAhead {
+    /// A caller that stopped early — a refusal in the row loop — closes the queue and waits for the
+    /// producer to notice it. The join's result is dropped here: the caller is already carrying the
+    /// error worth reporting, and raising a second panic while one unwinds aborts the process.
+    fn drop(&mut self) {
+        self.receiver = None;
+        if let Some(producer) = self.producer.take() {
+            let _ = producer.join();
+        }
+    }
 }
 
 /// Every column the batch carries, for a refusal to spell out.
@@ -3996,5 +4172,183 @@ mod tests {
             receipts.iter().map(|r| r.count).sum::<u64>(),
             "every pair the runs held came out of the cascade"
         );
+    }
+
+    /// The read-ahead's whole contract: the same batches, in the same order, however deep the queue
+    /// is. The depth of one is the case where every handoff blocks, which is where an ordering
+    /// mistake would show.
+    #[test]
+    fn a_read_ahead_yields_the_file_s_batches_in_the_file_s_order() {
+        use arrow::array::UInt64Array;
+        use arrow::datatypes::{DataType, Field, Schema};
+        use std::sync::Arc;
+
+        let temp = tempfile::tempdir().expect("a scratch directory");
+        let path = temp.path().join("rows.parquet");
+        let schema = Arc::new(Schema::new(vec![Field::new("entity", DataType::UInt64, false)]));
+        let mut writer = parquet::arrow::ArrowWriter::try_new(
+            File::create(&path).expect("create the file"),
+            schema.clone(),
+            None,
+        )
+        .expect("open the writer");
+        // Several row groups of several batches each, so the queue fills and drains more than once.
+        for group in 0..4u64 {
+            let values: Vec<u64> = (0..5_000).map(|row| group * 5_000 + row).collect();
+            let batch = arrow::record_batch::RecordBatch::try_new(
+                schema.clone(),
+                vec![Arc::new(UInt64Array::from(values))],
+            )
+            .expect("a batch");
+            writer.write(&batch).expect("write the batch");
+            writer.flush().expect("close the row group");
+        }
+        writer.close().expect("close the file");
+
+        let read = |rows: Vec<arrow::record_batch::RecordBatch>| -> Vec<u64> {
+            rows.iter()
+                .flat_map(|batch| {
+                    typed::<UInt64Array>(&path, batch.column(0), "entity")
+                        .expect("a u64 column")
+                        .iter()
+                        .map(|v| v.expect("no nulls"))
+                        .collect::<Vec<u64>>()
+                })
+                .collect()
+        };
+        let serial: Vec<arrow::record_batch::RecordBatch> =
+            batches(&path).unwrap().map(|b| b.unwrap()).collect();
+        assert_eq!(read(serial.clone()), (0..20_000).collect::<Vec<u64>>());
+        for depth in [1usize, 2, READ_AHEAD_BATCHES] {
+            let ahead: Vec<arrow::record_batch::RecordBatch> = batches_ahead(&path, depth)
+                .unwrap()
+                .map(|b| b.unwrap())
+                .collect();
+            assert_eq!(
+                ahead.iter().map(|b| b.num_rows()).collect::<Vec<usize>>(),
+                serial.iter().map(|b| b.num_rows()).collect::<Vec<usize>>(),
+                "queue depth {depth} changed the batch boundaries"
+            );
+            assert_eq!(read(ahead), read(serial.clone()), "queue depth {depth}");
+        }
+    }
+
+    /// **The containment pass reports its findings in the parents' order, whatever order the
+    /// parents were walked in.** Each parent's pass runs on whichever thread rayon gives it, so a
+    /// result appended as it finished would put the violations and the coverage in an order that
+    /// changed between two builds of the same corpus. Enough parents that the work is split several
+    /// ways, and the same call repeated, because a scheduling fault shows on some runs and not on
+    /// others.
+    #[test]
+    fn the_containment_pass_reports_in_the_parents_order_and_not_the_schedulers() {
+        let declaration: LayerDeclaration = serde_json::from_value(serde_json::json!({
+            "name": "clusters/a",
+            "views": ["world"],
+            "visibility": null,
+            "artifact_visibility": { "field": null, "default": "inherited" },
+            "require_member_visibility": null,
+            "hierarchy": { "kind": "nested", "prune_children": false },
+            "membership": "enumerated",
+        }))
+        .expect("the fixture declaration is well-formed");
+
+        let parents = 240usize;
+        let mut index_of: BTreeMap<Address, usize> = BTreeMap::new();
+        let mut resolved: Vec<ResolvedArtifact> = Vec::new();
+        let body = |members: Vec<u64>, parent_keys: Vec<String>| ResolvedArtifact {
+            view: None,
+            members: ResolvedMembers::Inline(members),
+            contents: Vec::new(),
+            attached_to: None,
+            parent_keys,
+            shape: None,
+        };
+        for parent in 0..parents {
+            let member = parent as u64 * 10;
+            index_of.insert(
+                ("clusters/a".to_string(), 0, format!("p{parent:03}")),
+                resolved.len(),
+            );
+            resolved.push(body(vec![member], Vec::new()));
+            index_of.insert(
+                ("clusters/a".to_string(), 0, format!("c{parent:03}")),
+                resolved.len(),
+            );
+            // One member the parent holds and one it does not, so every parent has exactly one
+            // violation to report and exactly one covered member.
+            resolved.push(body(
+                vec![member, 1_000_000 + parent as u64],
+                vec![format!("p{parent:03}")],
+            ));
+        }
+        let table = spill::MemberTable::empty(resolved.len());
+
+        let expected: Vec<(String, String)> = (0..parents)
+            .map(|parent| (format!("p{parent:03}"), format!("c{parent:03}")))
+            .collect();
+        for attempt in 0..5 {
+            let (violations, coverage, _) = verify_hierarchies(
+                std::slice::from_ref(&declaration),
+                &index_of,
+                &resolved,
+                &table,
+            )
+            .expect("the fixture hierarchy is well-formed");
+            assert_eq!(
+                violations
+                    .iter()
+                    .map(|v| (v.parent.clone(), v.child.clone()))
+                    .collect::<Vec<(String, String)>>(),
+                expected,
+                "attempt {attempt}: the violations are not in the parents' order"
+            );
+            assert!(
+                violations.iter().all(|v| v.escaping_members == 1),
+                "attempt {attempt}: each child escapes its parent by one member"
+            );
+            assert_eq!(
+                coverage.iter().map(|c| c.parent.clone()).collect::<Vec<String>>(),
+                expected.iter().map(|(parent, _)| parent.clone()).collect::<Vec<String>>(),
+                "attempt {attempt}: the coverage is not in the parents' order"
+            );
+            assert!(
+                coverage.iter().all(|c| c.members == 1 && c.stray_members == 0),
+                "attempt {attempt}: each parent's one member is covered by its child"
+            );
+        }
+    }
+
+    /// A caller that stops before the file ends closes the queue, and the producer notices: the
+    /// drop returns rather than waiting for a file it will never finish handing over.
+    #[test]
+    fn a_read_ahead_dropped_part_way_stops_its_producer() {
+        use arrow::array::UInt64Array;
+        use arrow::datatypes::{DataType, Field, Schema};
+        use std::sync::Arc;
+
+        let temp = tempfile::tempdir().expect("a scratch directory");
+        let path = temp.path().join("rows.parquet");
+        let schema = Arc::new(Schema::new(vec![Field::new("entity", DataType::UInt64, false)]));
+        let mut writer = parquet::arrow::ArrowWriter::try_new(
+            File::create(&path).expect("create the file"),
+            schema.clone(),
+            None,
+        )
+        .expect("open the writer");
+        let values: Vec<u64> = (0..200_000).collect();
+        writer
+            .write(
+                &arrow::record_batch::RecordBatch::try_new(
+                    schema.clone(),
+                    vec![Arc::new(UInt64Array::from(values))],
+                )
+                .expect("a batch"),
+            )
+            .expect("write the batch");
+        writer.close().expect("close the file");
+
+        let mut ahead = batches_ahead(&path, 1).unwrap();
+        assert!(ahead.next().is_some(), "the first batch arrives");
+        drop(ahead);
     }
 }

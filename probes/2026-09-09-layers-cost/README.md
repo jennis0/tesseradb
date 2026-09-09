@@ -269,3 +269,33 @@ remaining distance and both change the shape of a pass rather than its schedulin
   `assignment` moved by 30% and more between runs of the same binary on this box, which is why the
   headline table gives a range rather than a figure and why the whole-build number is the least
   reliable one in it.
+
+## The three scheduling parallelisations, taken (2026-09-09, later the same day)
+
+The first three rows of the table above are implemented; nothing else is. **Measured** on
+`gbif-240p`, alternating main/branch/main/branch so that drift in machine state hits both arms, on
+a box shared with other sessions — the load at each build's start is given because it varies and
+the build sizes its memory budget off free memory.
+
+| round | | `layers` | the artifact pass | all stages |
+|---|---|---|---|---|
+| 1 | main, load 5.83 | 110.58 s | 57.80 s | 405.97 s |
+| 1 | branch, load 2.21 | **62.58 s** | 40.46 s | **313.96 s** |
+| 2 | main, load 3.66 | 116.94 s | 73.87 s | 485.35 s |
+| 2 | branch, load 4.48 | **58.67 s** | 34.41 s | **350.39 s** |
+
+`layers` is halved — ×0.57 and ×0.50 — and round 2's branch ran at a *higher* load than its own
+control and still won, so the win is not a scheduling artefact. Over three pairs taken today main
+holds 110–117 s and the branch 59–63 s. All stages together fall about a quarter.
+
+⊘ **The artifact pass is not attributable and no claim is made for it.** None of the three changes
+touch it, and across six builds it ranged 34.4 to 84.6 s with no pattern — it is the stage this box
+measures least reproducibly. An 84.6 s reading in an earlier pair looked like a 61% regression and
+was the top of that spread.
+
+⊘ **The gain is larger under contention than the model predicted** (×0.77 modelled, ×0.53 measured),
+because the control degrades under load where the parallel form has slack to absorb it. On an idle
+box the gap would be smaller, and no idle-box pair was taken.
+
+**Byte-identical**, checked on the full 102,592,404-row corpus: only `CURRENT` and `MANIFEST.json`
+differ, and the manifest only in `created_at`, compared field by field.
