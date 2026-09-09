@@ -15,6 +15,13 @@
 //! - **More than one bucket.** `project` partitions row space into 2²²-row buckets and stamps each
 //!   into a reused bit array. A fixture below that width exercises exactly one bucket, so the reuse
 //!   — and the clearing between buckets that the reuse depends on — never runs.
+//! - **Both emits.** A bucket holding few rows has its containers read through the mark array, over
+//!   the words that hold something; a bucket holding many has each container's whole 1,024 words
+//!   read. The choice is per bucket, so both run inside one projection over a mask whose density
+//!   differs between buckets.
+//! - **A reused `ProjectScratch`.** `project_with` carries the stamp and its marks between calls
+//!   and does not re-zero them, which holds only while every emit clears what it wrote — so a
+//!   scratch driven through several masks must answer what a fresh one answers.
 //! - **Sentinels and out-of-bound entities**, which are skipped rather than erred.
 //! - **Any ambient rayon pool, or none.** The crate owns no pool and `project` no longer asks one
 //!   for anything, so what these pin is that it is indifferent to what it is called inside.
@@ -32,6 +39,7 @@ use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
 use rand::{Rng, SeedableRng};
 
+use tessera_store::permutation::ProjectScratch;
 use tessera_store::write::write_permutation;
 use tessera_store::Permutation;
 use tessera_types::EntityId;
@@ -277,5 +285,81 @@ fn a_projection_spanning_several_buckets_matches_the_serial_reference() {
             let got = project_with_threads(&perm, &mask, threads);
             assert_bitmaps_equal(&got, &expected, &format!("{label}, {threads} threads"));
         }
+    }
+}
+
+/// **Both emits inside one call**, which the two arms above cannot reach: each of them is dense or
+/// sparse throughout, and the choice is made per bucket. Here bucket 0 holds a third of its rows and
+/// bucket 1 holds a few hundred, so the whole-container emit runs and then the mark-following one
+/// runs over the same stamp.
+#[test]
+fn a_mask_dense_in_one_bucket_and_sparse_in_the_next_matches_the_serial_reference() {
+    const BUCKET_ROWS: u64 = 1 << 22;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let n = BUCKET_ROWS * 2 + 5_000;
+    // Row `i` holds entity `i`, so which bucket an entity lands in is its own id — which is what
+    // lets the mask below be written as two ranges of differing density.
+    let entities: Vec<EntityId> = (0..n).map(EntityId::new).collect();
+    let perm = build_permutation(dir.path(), &entities, n);
+
+    let mut mask = Bitmap::new();
+    for e in (0..BUCKET_ROWS).step_by(3) {
+        mask.add(e as u32);
+    }
+    for e in (BUCKET_ROWS..BUCKET_ROWS * 2).step_by(5_000) {
+        mask.add(e as u32);
+    }
+    let expected = serial_project(&perm, &mask);
+    assert!(
+        expected.cardinality() > BUCKET_ROWS / 4,
+        "sanity: the first bucket must be dense enough for the whole-container emit"
+    );
+    for threads in [1, 4] {
+        let got = project_with_threads(&perm, &mask, threads);
+        assert_bitmaps_equal(&got, &expected, &format!("mixed density, {threads} threads"));
+    }
+}
+
+/// **A scratch reused across masks answers what a fresh one answers.** `project_with` sizes and
+/// zeroes the stamp and its marks once and relies on each emit clearing every word it wrote; a
+/// residue left behind would add rows to the next projection, which is a mask too wide.
+///
+/// The three masks below are chosen to take the two emits in both orders and to leave the second
+/// one's containers overlapping the first's, which is where a residue would show.
+#[test]
+fn a_reused_scratch_projects_what_a_fresh_one_does() {
+    const BUCKET_ROWS: u64 = 1 << 22;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let n = BUCKET_ROWS + 5_000;
+    let entities: Vec<EntityId> = (0..n).map(EntityId::new).collect();
+    let perm = build_permutation(dir.path(), &entities, n);
+
+    let mut sparse = Bitmap::new();
+    for e in (0..n).step_by(5_000) {
+        sparse.add(e as u32);
+    }
+    let mut dense = Bitmap::new();
+    for e in (0..n).step_by(3) {
+        dense.add(e as u32);
+    }
+    let mut narrow = Bitmap::new();
+    narrow.add_range(0..1_000);
+
+    let mut scratch = ProjectScratch::default();
+    for (label, mask) in [
+        ("sparse", &sparse),
+        ("dense", &dense),
+        ("sparse again", &sparse),
+        ("narrow", &narrow),
+        ("dense again", &dense),
+    ] {
+        let expected = serial_project(&perm, mask);
+        let got = perm.project_with(mask, &mut scratch);
+        assert_bitmaps_equal(&got, &expected, &format!("reused scratch, {label}"));
+        assert_eq!(
+            got.cardinality(),
+            perm.project(mask).cardinality(),
+            "reused scratch, {label}: a reused scratch and a fresh one project the same rows"
+        );
     }
 }

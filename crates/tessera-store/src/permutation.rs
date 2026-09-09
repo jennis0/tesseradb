@@ -65,7 +65,7 @@ use std::sync::Arc;
 
 use memmap2::Mmap;
 
-use tessera_roaring::{Sink, WORDS};
+use tessera_roaring::{Sink, BLOCK, WORDS};
 use tessera_types::{EntityId, RowId, ROW_ABSENT};
 
 use crate::error::{Result, StoreError};
@@ -128,16 +128,98 @@ pub(crate) fn pages_for(bound: u64) -> u64 {
 /// boundary that fell inside a container would split a payload across two of them.
 const BUCKET_SHIFT: u32 = 22;
 
+/// `u64` words in one bucket's bit array — 2²² rows, 512 KB.
+const STAMP_WORDS: usize = (1usize << BUCKET_SHIFT) / 64;
+
+/// Roaring containers in one bucket. [`BUCKET_SHIFT`] is chosen so this is a whole number.
+const CONTAINERS_PER_BUCKET: usize = (1usize << BUCKET_SHIFT) / BLOCK;
+
+/// `u64` words in the mark array, one bit per word of the stamp.
+const MARK_WORDS: usize = STAMP_WORDS / 64;
+
+/// Mark words covering one container's 1,024 stamp words.
+const MARKS_PER_CONTAINER: usize = WORDS / 64;
+
+/// Rows in a bucket below which the emit reads only the stamp words that hold something.
+///
+/// **The two emits produce the same containers and differ in what they cost.** Reading a
+/// container's whole 1,024 words costs the same whether it holds 30,000 rows or three: a popcount
+/// over 8 KB, a second pass to write the members out, and an 8 KB wipe. Following the marks instead
+/// costs 16 words, plus one read and one clear of each word that holds a row, so it is cheaper
+/// while a container's rows occupy under about a thousand of its words.
+///
+/// A bucket under this many rows averages fewer than one row per stamp word, so every container in
+/// it is far inside that region. A session's mask is orders of magnitude above it — a quarter of
+/// 10⁹ rows is a million rows per bucket — and takes the whole-container emit unchanged.
+const SPARSE_BUCKET_ROWS: usize = STAMP_WORDS;
+
 /// The buffers [`Permutation::project_with`] reuses between calls.
 ///
-/// A 512 KB stamp and one `Vec` per bucket. They hold nothing between calls — `project_with`
-/// clears them on entry — so a `Default` one and a reused one give byte-identical results; what
-/// reuse saves is the allocation and the zeroing, which at one projection per artifact is the
-/// dominant cost of the artifact pass rather than a rounding error.
+/// A 512 KB stamp, an 8 KB mark array over it, one `Vec` per bucket and one member run. They carry
+/// no information between calls — the row buckets and the member run are cleared where they are
+/// filled, and the stamp and its marks are all-zero on both entry and exit — so a `Default` one and
+/// a reused one give byte-identical results; what reuse saves is the allocation and the zeroing,
+/// which at one projection per artifact is the dominant cost of the artifact pass rather than a
+/// rounding error.
 #[derive(Default)]
 pub struct ProjectScratch {
     buckets: Vec<Vec<u32>>,
     stamp: Vec<u64>,
+    marks: Vec<u64>,
+    members: Vec<u32>,
+}
+
+/// Stamp one bucket's rows and emit the containers they landed in, reading only the stamp words
+/// that hold one — [`Permutation::project_with`]'s emit for a bucket under [`SPARSE_BUCKET_ROWS`].
+///
+/// The mark array carries one bit per stamp word, so a container's members are read in one pass
+/// over the words that hold them rather than three over all 1,024. Both arrays are cleared as they
+/// are read, which is what leaves them zero for the next call.
+///
+/// The containers this stages are the ones the whole-container emit would have staged, with the
+/// same keys, the same cardinalities and the same ascending members: [`Sink::push_members`] writes
+/// the array payload [`Sink::push_block`] writes below the array threshold, and stamps the words
+/// itself above it.
+fn emit_sparse(
+    sink: &mut Sink,
+    stamp: &mut [u64],
+    marks: &mut [u64],
+    members: &mut Vec<u32>,
+    rows: &[u32],
+    base: u32,
+) {
+    let mut occupied: u64 = 0;
+    for &row in rows {
+        let offset = row - base;
+        let word = (offset >> 6) as usize;
+        stamp[word] |= 1u64 << (offset & 63);
+        marks[word >> 6] |= 1u64 << (word & 63);
+        occupied |= 1u64 << (offset >> 16);
+    }
+    for container in 0..CONTAINERS_PER_BUCKET {
+        if occupied & (1u64 << container) == 0 {
+            continue;
+        }
+        members.clear();
+        let words_at = container * WORDS;
+        let marks_at = container * MARKS_PER_CONTAINER;
+        for slot in 0..MARKS_PER_CONTAINER {
+            let mut marked = std::mem::replace(&mut marks[marks_at + slot], 0);
+            while marked != 0 {
+                let word = slot * 64 + marked.trailing_zeros() as usize;
+                marked &= marked - 1;
+                let mut bits = std::mem::replace(&mut stamp[words_at + word], 0);
+                let low = (word as u32) * 64;
+                while bits != 0 {
+                    members.push(low + bits.trailing_zeros());
+                    bits &= bits - 1;
+                }
+            }
+        }
+        let key = u16::try_from((base >> 16) + container as u32)
+            .expect("a row below 2^32 has a container key below 2^16");
+        sink.push_members(key, members);
+    }
 }
 
 /// Entity IDs decoded from the mask at a time.
@@ -594,15 +676,37 @@ impl Permutation {
             }
         }
 
+        // **Zeroed when it is sized and not again**, because both emits below clear every word they
+        // set. The whole-container one fills each occupied container as it stages it; the sparse
+        // one clears each stamp word and each mark word as it reads them. A scratch that has been
+        // through a projection therefore comes back all-zero, and re-zeroing it is 512 KB of stores
+        // on every call — the whole of a projection's cost for the small memberships an artifact
+        // level is mostly made of (`probes/2026-09-09-layers-cost/`).
         let stamp = &mut scratch.stamp;
-        stamp.clear();
-        stamp.resize((1usize << BUCKET_SHIFT) / 64, 0);
+        if stamp.len() != STAMP_WORDS {
+            stamp.clear();
+            stamp.resize(STAMP_WORDS, 0);
+        }
+        let marks = &mut scratch.marks;
+        if marks.len() != MARK_WORDS {
+            marks.clear();
+            marks.resize(MARK_WORDS, 0);
+        }
+        let members = &mut scratch.members;
+        debug_assert!(
+            stamp.iter().chain(marks.iter()).all(|word| *word == 0),
+            "both emits clear each word they write, so the stamp and its marks are zero on entry"
+        );
         let mut sink = Sink::new();
         for (index, rows) in buckets.iter().enumerate() {
             if rows.is_empty() {
                 continue;
             }
             let base = (index as u32) << BUCKET_SHIFT;
+            if rows.len() < SPARSE_BUCKET_ROWS {
+                emit_sparse(&mut sink, stamp, marks, members, rows, base);
+                continue;
+            }
             // Which of the bucket's 64 containers hold anything. One `u64` covers them exactly,
             // which is what lets the emit below skip the empty ones without scanning their words.
             let mut occupied: u64 = 0;
@@ -613,12 +717,12 @@ impl Permutation {
             }
             // Emitted and cleared in the same pass, container by container. Clearing *here* rather
             // than in a second loop is worth stating: the container's words are in cache because
-            // the popcount just read them, and only the occupied ones are touched at all — so a
-            // sparse bucket pays for what it used, while a dense one pays a sequential 8 KB wipe.
-            // The alternative that looks frugal — re-walking each bucket's rows and zeroing the word
-            // each sits in — is O(rows) rather than O(width), which sounds better and is 250 million
-            // scattered writes at 10⁹ against 122 MB of sequential ones. Also not separately
-            // measured, and stated as reasoning rather than as a result.
+            // the popcount just read them, and only the occupied ones are touched at all, so the
+            // bucket pays a sequential 8 KB wipe per container it filled. The alternative that
+            // looks frugal — re-walking each bucket's rows and zeroing the word each sits in — is
+            // O(rows) rather than O(width), which sounds better and is 250 million scattered writes
+            // at 10⁹ against 122 MB of sequential ones. Also not separately measured, and stated as
+            // reasoning rather than as a result.
             for (container, words) in stamp.chunks_exact_mut(WORDS).enumerate() {
                 if occupied & (1u64 << container) == 0 {
                     continue;

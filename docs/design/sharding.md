@@ -286,8 +286,10 @@ only the dropped incarnation's.
 Measured (`probes/2026-09-04-epoch-shard-projection/`): `Permutation::project` is linear in rows
 from 10⁸ upward; a line fitted over 10⁷ to 4×10⁸ predicts the recorded 1,277 ms at 10⁹ within 1%.
 Eight leaf projections per token, against one, cost 1.10× the resident memory and 1.4× the build
-time; the fixed cost per call is about 10 µs, the 512 KB stamp clear `project_with` pays on every
-call.
+time; the fixed cost per call measured about 10 µs, most of it a 512 KB stamp clear. ⊘ **That figure
+has not been re-taken.** `project_with` no longer clears the stamp on every call — the emit leaves it
+zero, so it is zeroed once when it is sized (`probes/2026-09-09-layers-cost/`) — so a leaf's fixed
+cost is lower than 10 µs by an amount nothing here measures.
 
 Modelled at the target from that fit and from bitset density: a principal at 25% coverage over
 10¹¹ rows holds about 25 GB of leaf and projection per view, whatever the seal size, and pays about
