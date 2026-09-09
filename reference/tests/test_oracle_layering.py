@@ -28,6 +28,7 @@ PYPROJECT = ORACLE.parent / "pyproject.toml"
 # handed, not an import of a driver.
 DEFINITIONAL = (
     "viewport",
+    "occupancy",
     "mask",
     "morton",
     "identity",

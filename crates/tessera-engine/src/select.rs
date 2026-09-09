@@ -129,11 +129,14 @@ impl Threshold {
     /// property is pinned by `the_theta_anchor_falls_when_an_item_is_suppressed` and
     /// `n_occ_falls_when_a_suppression_empties_a_tile`.
     ///
-    /// **θ is monotone in depth without a clamp.** Every occupied depth-*d* tile has at least one
-    /// occupied child and children of distinct parents are distinct, so `N_occ` is non-decreasing
-    /// in depth and so is θ. §7.2's nesting proof needs that and gets it from the structure of the
-    /// grid; a running maximum over depth would hide a counting bug rather than prevent one, and
-    /// there is none here.
+    /// **θ is monotone in depth, and the clamp that makes it so lives in
+    /// [`crate::occupancy::OccupancyLadder`], not here.** Every occupied depth-*d* tile has at
+    /// least one occupied child and children of distinct parents are distinct, so the *true*
+    /// `N_occ` is non-decreasing in depth. `N_occ` is now estimated rather than counted, and two
+    /// adjacent estimates of a quantity that barely grows between two depths can invert; the
+    /// ladder carries a running maximum across depths so `n_occ` arrives here already
+    /// non-decreasing. This function takes one depth's anchor and must not re-derive the property
+    /// — there is nothing here that could.
     ///
     /// **The saturation test comes before the shift, and that is what replaces the old
     /// `leading_zeros` guard.** θ_d ≥ 1 exactly when `m_target · N_occ >= V_total`, and answering

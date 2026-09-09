@@ -1797,6 +1797,16 @@ fn the_theta_anchor_falls_when_an_item_is_suppressed() {
 /// ten entities sharing one position. Suppressing one of them changes no tile's occupancy, which
 /// is asserted first: without it this test would pass on a count that had not moved for the wrong
 /// reason.
+///
+/// **A one-tile fall is assertable because this fixture is single-segment**, which is the counted
+/// route (`occupancy::occupied_tiles_ladder`). Above one segment `N_occ` is estimated and a single
+/// emptied tile is inside the estimator's error at any interesting scale, so no test at that shape
+/// could assert this. What survives either way is the property being pinned: the anchor is taken
+/// over the composed mask, so a deny moves it, and a bug that anchored on the pre-overlay
+/// projection would leave it flat here.
+///
+/// **No background fill runs here** (`crate::stage`), because it is spawned by a *viewport* and
+/// this test takes the anchor directly. The numbers below are what the anchor's own route computed.
 #[test]
 fn n_occ_falls_when_a_suppression_empties_a_tile() {
     let tmp = TempDir::new().unwrap();
@@ -1867,6 +1877,110 @@ fn n_occ_falls_when_a_suppression_empties_a_tile() {
          N_occ is counted over the pre-overlay projection and the I2 argument in occupancy.rs is \
          void"
     );
+}
+
+/// **One walk per session per generation, not one per depth** — `crate::stage`.
+///
+/// θ's `N_occ(d)` anchor is memoised per depth, so before the background fill a session paid a
+/// fresh walk of its mask and the Morton column at every new depth it visited. Three assertions,
+/// and they are three different claims.
+///
+/// **The fill happens, and it happens off the request.** The first viewport walks once for itself;
+/// the fill then walks once more and takes the ladder to `stage::BACKGROUND_DEPTH`. Two walks for
+/// a session that goes on to visit every depth up to 12.
+///
+/// **The rungs it filled are the numbers a request would have computed.** A rung filled by one walk
+/// at depth 12 must equal the same rung filled by a walk at that rung's own depth, or the memo
+/// would be answering from whichever depth happened to come first. The comparison is against a
+/// second engine over the same bundle with the fill switched off, so the right-hand side is the
+/// request path's own walk and not a transcription of it.
+///
+/// **Depth 13 is above the ceiling**, so it still walks — the lazy extension the fill deliberately
+/// does not cover.
+#[test]
+fn the_background_fill_takes_the_ladder_to_twelve_in_one_walk_off_the_request() {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+
+    let filled = open_engine(
+        &bundle_root,
+        &tmp.path().join("cache_filled"),
+        &tmp.path().join("wal_filled.log"),
+    );
+    let session = filled.authorise(&full_coverage_credential()).unwrap();
+    assert_eq!(
+        filled.occupancy_walks(),
+        0,
+        "authorising takes no anchor and must walk nothing"
+    );
+
+    filled
+        .viewport(
+            &session,
+            ViewportRequest::new("s0", 3, [0.0, 0.0, 1000.0, 1000.0], 8),
+        )
+        .unwrap();
+
+    // The fill runs on the pool, so this waits for it rather than assuming it has finished. A
+    // sleep would assert on scheduling; polling the count the engine already keeps does not.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while filled.occupancy_stages_in_flight() > 0 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the background ladder fill did not settle"
+        );
+        std::thread::yield_now();
+    }
+    assert_eq!(
+        filled.occupancy_walks(),
+        2,
+        "the request's own walk at depth 3, and the fill's one walk to depth 12"
+    );
+
+    let unfilled = open_engine(
+        &bundle_root,
+        &tmp.path().join("cache_plain"),
+        &tmp.path().join("wal_plain.log"),
+    );
+    unfilled.set_occupancy_stage_for_test(false);
+    let plain_session = unfilled.authorise(&full_coverage_credential()).unwrap();
+
+    for depth in [0u8, 3, 6, 9, 12] {
+        assert_eq!(
+            filled.occupied_tiles_for_test(&session, "s0", depth).unwrap(),
+            unfilled
+                .occupied_tiles_for_test(&plain_session, "s0", depth)
+                .unwrap(),
+            "depth {depth}: the filled rung disagrees with the walk a request would have made"
+        );
+    }
+    assert_eq!(
+        filled.occupancy_walks(),
+        2,
+        "every rung to 12 was already there: reading five of them walked nothing"
+    );
+
+    assert_eq!(
+        filled.occupied_tiles_for_test(&session, "s0", 13).unwrap(),
+        unfilled
+            .occupied_tiles_for_test(&plain_session, "s0", 13)
+            .unwrap()
+    );
+    assert_eq!(
+        filled.occupancy_walks(),
+        3,
+        "depth 13 is above the ceiling, so it is walked on demand as it always was"
+    );
+
+    // Revoking takes any fill still running with it: `prune_token` cancels first and drops the
+    // entry, so nothing is left working on behalf of a session that no longer exists.
+    filled.prune_token(session.token_id);
+    assert_eq!(filled.occupancy_stages_in_flight(), 0);
 }
 
 /// **The equality `GET /v1/meta`'s disclosure argument rests on.**

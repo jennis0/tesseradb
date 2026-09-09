@@ -19,7 +19,9 @@ use tempfile::TempDir;
 
 use tessera_authz::{write_postings, FragmentCache, PostingsReader};
 use tessera_engine::compose::{compose, EffectiveMask, RowProjection};
-use tessera_engine::occupancy::occupied_tiles;
+use tessera_engine::occupancy::{
+    occupied_tiles, occupied_tiles_ladder_with_precision, TileSketch, SKETCH_PRECISION,
+};
 use tessera_engine::select::{
     decode_tier, DecodeTier, SelectParams, Selection, SelectionPart, SelectionParts, Threshold,
 };
@@ -1145,15 +1147,70 @@ fn clustered_points(n: usize, seed: u64) -> Vec<(f32, f32, u64)> {
         .collect()
 }
 
-/// **`N_occ(d)` is exact, non-decreasing in depth, and inside `min(4^d, |mask|)`.**
+/// Every depth-`depth` tile a linear scan finds holding a visible row, across every segment.
+///
+/// **The independent statement of `N_occ`'s input.** It shares no code with the gallop walk: it
+/// reads every row of every segment, asks the mask, and recomputes the tile by a shift. Both
+/// routes below are pinned against it — the counted one by taking `len`, the estimated one by
+/// putting the same set through the same sketch.
+fn tiles_over_segments(
+    mask: &EffectiveMask,
+    segments: &[(&SegmentData, u32)],
+    depth: u8,
+) -> FxHashSet<u64> {
+    let shift = 32 - 2 * u32::from(depth);
+    let mut seen: FxHashSet<u64> = FxHashSet::default();
+    for (seg, row_base) in segments {
+        let base = *row_base;
+        let codes = seg.morton.u32();
+        mask.for_each_visible_run(base..base + seg.row_count, |run| {
+            for row in run.start..run.end {
+                seen.insert(u64::from(codes[(row - base) as usize]) >> shift);
+            }
+        });
+    }
+    seen
+}
+
+/// The ladder the **estimated** route must produce: the linear scan's tile set at each depth, fed
+/// to a fresh sketch, clamped to `4^d`, running maximum applied.
+///
+/// **This is what the multi-segment `occupied_tiles` must equal exactly.** The sketch is a
+/// deterministic function of the tile set, so factoring it out of both sides leaves the gallop
+/// walk pinned against a linear scan as tightly as an exact comparison would — a walk that emitted
+/// one tile too many, too few, or the wrong one gives a different register array and a different
+/// number. What the sketch removes from this comparison is nothing: it is on both sides.
+fn sketched_ladder_oracle(
+    mask: &EffectiveMask,
+    segments: &[(&SegmentData, u32)],
+    depth: u8,
+) -> u64 {
+    let mut running = 0u64;
+    for d in 0..=depth {
+        let mut sketch = TileSketch::new();
+        for tile in tiles_over_segments(mask, segments, d) {
+            sketch.add(tile);
+        }
+        running = running.max(sketch.estimate().min(1u64 << (2 * u32::from(d))));
+    }
+    running
+}
+
+/// **`N_occ(d)` is exact at one segment, non-decreasing in depth, and inside `min(4^d, |mask|)`.**
+///
+/// One segment is the **counted** route (`occupancy::occupied_tiles_ladder`'s predicate): the walk
+/// emits each tile once and ascending, so a counter is the accumulator and the answer is a count
+/// rather than an estimate. `assert_eq` against the linear scan is therefore the right assertion
+/// here and a tolerance would be a weaker one.
 ///
 /// Exactness against the oracle is what the gallop buys: crediting the tile indices a run *spans*
 /// instead — the endpoint arithmetic — over-counts wherever a run's codes are not dense in
 /// tile-index space, which on a clustered corpus is everywhere.
 ///
-/// Monotonicity is the property §7.2's nesting proof takes from the grid rather than from a clamp:
-/// every occupied tile has an occupied child, and children of distinct parents are distinct. It is
-/// asserted rather than argued because nothing else in the tree would notice it failing.
+/// Monotonicity is the property §7.2's nesting proof needs. On this route the grid gives it —
+/// every occupied tile has an occupied child, and children of distinct parents are distinct — and
+/// the ladder's running maximum, which the estimated route needs, never binds. It is asserted
+/// rather than argued because nothing else in the tree would notice it failing.
 #[test]
 fn the_occupied_tile_count_is_exact_monotone_and_bounded() {
     let points = clustered_points(4_000, 0xA11CE);
@@ -1238,12 +1295,89 @@ fn the_occupied_tile_count_is_exact_with_a_composed_mask() {
     }
 }
 
+/// **Above one segment `N_occ` is the sketch of the tile set a linear scan finds** — and three
+/// separate things are asserted, because they fail for different reasons.
+///
+/// **The tile set is exact**, against [`sketched_ladder_oracle`] — the linear scan with the same
+/// sketch on top — and it is asserted with `assert_eq`, not a tolerance. This is what the gallop
+/// buys, and it is the assertion the endpoint arithmetic would break.
+///
+/// **The estimate is close to the count**, against [`tiles_over_segments`]'s own cardinality,
+/// within five standard errors of a 2¹⁴-register sketch and a floor of two for the cases small
+/// enough to round. It is the only tolerance here, and it is what says the estimator is estimating
+/// rather than answering nonsense.
+///
+/// **Monotone and bounded.** The running maximum is what carries §7.2's nesting property through
+/// an estimate, and `N_occ(d) <= 4^d` is exact from the ladder's clamp. `N_occ(d) <= |mask|` is
+/// **not** clamped and holds only to within the sketch's error, so the bound below carries the same
+/// slack: a clamp on the visible total was available and was not taken, so the answer stays a
+/// function of the tile set alone.
+#[test]
+fn the_sketch_route_estimates_the_tile_set_a_linear_scan_finds() {
+    let points = clustered_points(4_000, 0x5EED);
+    let left: Vec<(f32, f32, u64)> = points.iter().copied().filter(|p| p.2 % 3 != 0).collect();
+    let right: Vec<(f32, f32, u64)> = points.iter().copied().filter(|p| p.2 % 3 == 0).collect();
+    let seg_a = segment_of(&left);
+    let seg_b = segment_of(&right);
+    let n = seg_a.row_count() + seg_b.row_count();
+    let segments: Vec<(&SegmentData, u32)> =
+        vec![(&seg_a.data, 0), (&seg_b.data, seg_a.row_count())];
+
+    for (label, visible) in [
+        ("full", (0..n).collect::<Vec<u32>>()),
+        ("two thirds", (0..n).filter(|r| r % 3 != 0).collect()),
+        ("sparse", (0..n).filter(|r| r % 37 == 5).collect()),
+        ("empty", Vec::new()),
+    ] {
+        let (_t, mask) = mask_over(&visible, n);
+        let cardinality = visible.len() as u64;
+        let mut previous = 0u64;
+        for depth in 0..=16u8 {
+            let got = occupied_tiles(&mask, &segments, depth);
+            assert_eq!(
+                got,
+                sketched_ladder_oracle(&mask, &segments, depth),
+                "{label}, depth {depth}: the gallop walk emitted a different tile set from the \
+                 linear scan"
+            );
+
+            let exact = tiles_over_segments(&mask, &segments, depth).len() as u64;
+            let slack = (exact as f64 * 0.0406).max(2.0);
+            assert!(
+                (got as f64 - exact as f64).abs() <= slack,
+                "{label}, depth {depth}: estimated {got} against {exact} occupied tiles, \
+                 tolerance ±{slack:.1}"
+            );
+
+            assert!(
+                got >= previous,
+                "{label}, depth {depth}: N_occ fell from {previous} to {got}"
+            );
+            assert!(
+                got <= 1u64 << (2 * u32::from(depth)),
+                "{label}, depth {depth}: N_occ {got} exceeds the 4^d tiles the grid has"
+            );
+            assert!(
+                (got as f64) <= cardinality as f64 + slack,
+                "{label}, depth {depth}: N_occ {got} exceeds |mask| = {cardinality} by more than \
+                 the sketch's error"
+            );
+            previous = got;
+        }
+    }
+}
+
 /// **A tile is counted once however many segments hold rows in it.**
 ///
 /// The same points are written as one segment and as two, with the second segment's rows based
-/// after the first's. `N_occ` is a count of tiles rather than of per-segment shares of them, so the
-/// two layouts must agree at every depth — summing the segments' own counts would double every
-/// tile the split runs through.
+/// after the first's. `N_occ` counts tiles rather than per-segment shares of them, so the two
+/// layouts must agree at every depth — summing the segments' own counts would double every tile
+/// the split runs through.
+///
+/// **Both sides take the estimated route**, at the engine's own precision, because the two layouts
+/// otherwise differ by the route as well as by the split and the comparison would say nothing. It
+/// is the sketch's idempotence that makes the property hold here: adding a tile twice is adding it
+/// once, which is precisely what an exact accumulator needs a union, a sort or a bitset for.
 #[test]
 fn a_tile_spanning_two_segments_is_counted_once() {
     let points = clustered_points(1_200, 0xC0FFEE);
@@ -1263,15 +1397,23 @@ fn a_tile_spanning_two_segments_is_counted_once() {
     let (_t2, mask_split) = mask_over(&(0..split_rows).collect::<Vec<u32>>(), split_rows);
 
     for depth in 0..=16u8 {
-        let one = occupied_tiles(&mask_whole, &[(&whole.data, 0)], depth);
-        let two = occupied_tiles(
+        let one = occupied_tiles_ladder_with_precision(
+            &mask_whole,
+            &[(&whole.data, 0)],
+            depth,
+            SKETCH_PRECISION,
+        )
+        .at(depth);
+        let two = occupied_tiles_ladder_with_precision(
             &mask_split,
             &[(&seg_a.data, 0), (&seg_b.data, seg_a.row_count())],
             depth,
-        );
+            SKETCH_PRECISION,
+        )
+        .at(depth);
         assert_eq!(
             one, two,
-            "depth {depth}: one segment counted {one} tiles, two segments counted {two}"
+            "depth {depth}: one segment estimated {one} tiles, two segments estimated {two}"
         );
     }
 }
