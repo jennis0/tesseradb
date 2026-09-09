@@ -1,0 +1,4 @@
+# Rung 6 runs on the system `python3`. There is no embedding, no layout and no clustering, so
+# nothing here needs the projection environment the embedding rungs share.
+pyarrow>=15
+numpy>=1.26
