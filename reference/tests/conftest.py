@@ -61,8 +61,8 @@ def server(tmp_path_factory, bundle_root):
     under saturation the oracle's `theta_cut` returns None, `c_theta` becomes `len(visible)`, and the
     differential's point-set comparison degenerates to "serve everything visible" — it would pass
     identically against an engine that anchored theta on the PRE-OVERLAY projection (the I2 breach
-    §7.2 exists to prevent), botched the x4 depth progression, or omitted the threshold clause
-    outright. Use `density_server` for those.
+    §7.2 exists to prevent), counted occupied tiles over the wrong mask, or omitted the threshold
+    clause outright. Use `density_server` for those.
     """
     ensure_cli_built()
     tmp_dir = tmp_path_factory.mktemp("tessera-serve")

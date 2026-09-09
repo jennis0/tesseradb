@@ -782,6 +782,21 @@ pub struct Engine {
     /// when the principal's mask does — which includes every accepted deny. Empty for a deployment
     /// with no row-major level, which is most of them.
     pub(crate) masked_counts: Arc<crate::histogram::MaskedCountCache>,
+    /// `N_occ(d)` per `(session, view, depth)` and generation — §7.2's second θ anchor, memoised
+    /// so a pan at one zoom does not walk the mask again. See [`crate::occupancy`] for the walk
+    /// and [`crate::occupancy::OccupancyKey`] for why each term is in the key.
+    ///
+    /// **Per *session* like the two caches below it**, and for the same reason: `N_occ` is counted
+    /// inside one principal's own composed mask, so an entry is never shared across principals.
+    /// Superseded generations age out under the byte bound rather than being pruned at a swap: an
+    /// entry is a `u64` under a key naming its generation, so a stale one is unreachable rather
+    /// than wrong.
+    pub(crate) occupancy: Arc<
+        crate::single_flight::SingleFlightCache<
+            crate::occupancy::OccupancyKey,
+            crate::occupancy::OccupiedTiles,
+        >,
+    >,
     /// One artifact's derived centroid, box and hull, per principal — see
     /// [`crate::derived_cache::DerivedCache`]. Per *session* like the histograms beside it and for
     /// the same reason: the values are functions of the principal's own visible members, so an
@@ -1783,6 +1798,7 @@ impl Engine {
             artifact_projections: Arc::clone(&artifact_projections),
             shapes: Arc::clone(&shapes),
             masked_counts: Arc::new(crate::histogram::MaskedCountCache::default()),
+            occupancy: Arc::new(crate::single_flight::SingleFlightCache::new(u64::MAX)),
             derived_geometry: Arc::new(crate::derived_cache::DerivedCache::default()),
             suggest_sets: Arc::new(crate::suggest_set::SuggestSets::default()),
             lineages: Arc::new(crate::cut::Lineages::new()),
@@ -2368,6 +2384,7 @@ impl Engine {
         // target: a masked-count histogram is ~4 B per artifact, 40 MB at 10⁷, and a revoked
         // session's is pinned by nothing else.
         self.masked_counts.prune_token(token_id);
+        self.occupancy.retain_keys(|key| key.token_id != token_id);
         self.derived_geometry.prune_token(token_id);
         self.suggest_sets.prune_token(token_id);
         self.row_projection_cache.prune_token(token_id)

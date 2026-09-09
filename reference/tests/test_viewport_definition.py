@@ -112,11 +112,11 @@ def selection() -> viewport.Selection:
     return viewport.Selection(_StubBundle(ROWS), DEFAULT_MASK, VIEW, 1)
 
 
-# -- theta_cut: §7.2's recurrence, arithmetic done here -----------------------------------------
+# -- theta_cut: §7.2's product, arithmetic done here --------------------------------------------
 
 
-def test_theta_cut_p0_is_the_floored_quotient():
-    """`P_0 = ⌊m_target · 2⁶⁴ / V_total⌋` — §7.2 ("`P_0` **floors**", r24).
+def test_theta_cut_floors_the_quotient():
+    """`P_d = ⌊m_target · N_occ · 2⁶⁴ / V_total⌋` — §7.2 ("`P_d` **floors**", r24/r62).
 
     Working: 2⁶⁴ = 18446744073709551616, and 18446744073709551616 / 3 = 6148914691236517205.33…,
     so the floor is 6148914691236517205 and a ceiling would be …206. The two differ, which is the
@@ -124,66 +124,87 @@ def test_theta_cut_p0_is_the_floored_quotient():
 
     Kills: rounding up; rounding to nearest; `round()` in place of `//`.
     """
-    assert viewport.theta_cut(3, 1, 0) == 6148914691236517205
+    assert viewport.theta_cut(3, 1, 1) == 6148914691236517205
     assert TWO_64 // 3 == 6148914691236517205  # the same arithmetic, spelled out
 
 
-def test_theta_cut_depth_zero_is_p0_itself():
-    """`P_0` is the depth-0 cut — the recurrence starts at *d* = 0 (§7.2).
+def test_theta_cut_at_one_occupied_tile_is_the_depth_zero_anchor():
+    """Depth 0 is one tile whatever the corpus does, so `N_occ(0) = 1` (§7.2 r62).
 
-    Working: V_total = 8, m_target = 1, so P_0 = 2⁶⁴/8 = 2⁶¹ = 2305843009213693952.
+    Working: V_total = 8, m_target = 1, so P_0 = 1·1·2⁶⁴/8 = 2⁶¹ = 2305843009213693952. This is
+    where the occupied-tile anchor and the `4^d` progression it replaced agree exactly, and the
+    agreement is not a coincidence: both say "one tile, `m_target` marks".
 
-    Kills: an off-by-one that applies the ×4 once before returning depth 0.
+    Kills: an anchor that multiplies by `N_occ` where the definition divides, or that treats the
+    single depth-0 tile as `4^0 = 1` by a different route and gets a different number.
     """
-    assert viewport.theta_cut(8, 1, 0) == 1 << 61
+    assert viewport.theta_cut(8, 1, 1) == 1 << 61
     assert (1 << 61) == 2305843009213693952
 
 
-def test_theta_cut_quadruples_once_per_depth():
-    """`P_{d+1} = 4·P_d` — §7.2's progression, one factor of four per depth.
+def test_theta_cut_tracks_the_occupied_tile_count_not_four_per_depth():
+    """`θ_d = m_target · N_occ(d) / V_total` — the count of occupied tiles, and nothing else.
 
-    Working: V_total = 1024, m_target = 1 gives P_0 = 2⁶⁴/2¹⁰ = 2⁵⁴. Then P_1 = 2⁵⁶,
-    P_2 = 2⁵⁸, P_3 = 2⁶⁰ — each a factor of four, not of two, and applied `depth` times rather
-    than `depth - 1`.
+    Working: V_total = 1024, m_target = 1. A **space-filling** corpus has `N_occ(d) = 4^d`, and
+    there the cut reproduces the progression this anchor replaced exactly: 2⁵⁴, 2⁵⁶, 2⁵⁸. A
+    **clustered** one at the same depths does not — half the occupied tiles is half the cut, so a
+    level whose points fell into 2 tiles rather than 4 is thresholded at 2⁵⁵.
 
-    Kills: `2·P_d`; `P_0 << depth`; a loop running `depth - 1` or `depth + 1` times.
+    Kills: a cut that still multiplies by four per depth; one that ignores `N_occ` and reads the
+    depth; one that scales by `N_occ` in the denominator.
     """
-    assert viewport.theta_cut(1024, 1, 0) == 1 << 54
-    assert viewport.theta_cut(1024, 1, 1) == 1 << 56
-    assert viewport.theta_cut(1024, 1, 2) == 1 << 58
-    assert viewport.theta_cut(1024, 1, 3) == 1 << 60
+    assert viewport.theta_cut(1024, 1, 1) == 1 << 54
+    assert viewport.theta_cut(1024, 1, 4) == 1 << 56
+    assert viewport.theta_cut(1024, 1, 16) == 1 << 58
+    assert viewport.theta_cut(1024, 1, 2) == 1 << 55
+
+
+def test_theta_cut_floors_once_over_the_whole_product():
+    """The floor is taken over `m_target · N_occ · 2⁶⁴ / V_total`, not over `m_target · 2⁶⁴ /
+    V_total` and then scaled (§7.2 r62).
+
+    Working: at V_total = 1000003, m_target = 16, N_occ = 97 the two orders differ by 59 — small,
+    and the differential demands exact equality, so it is a failure rather than a rounding
+    difference.
+
+    Kills: an implementation that keeps a depth-0 anchor and multiplies it up, which is the natural
+    transcription of the progression this replaced.
+    """
+    assert viewport.theta_cut(1000003, 16, 97) == (16 * 97 * TWO_64) // 1000003
+    assert viewport.theta_cut(1000003, 16, 97) != ((16 * TWO_64) // 1000003) * 97
 
 
 def test_theta_cut_saturates_rather_than_clamping():
     """θ ≥ 1 is a *state*, not the largest representable cut (§7.2; `viewport.SATURATED`).
 
-    Working: V_total = 4, m_target = 1 gives P_0 = 2⁶². One depth later the recurrence would form
-    4·2⁶² = 2⁶⁴, which is outside the identity space, so depth 1 is saturated. A clamp to 2⁶⁴ − 1
-    would wrongly exclude the single identity 2⁶⁴ − 1, and a clamp to 2⁶⁴ would compare as a value
-    where the definition has no value — hence `None` and not a number.
+    Working: V_total = 4, m_target = 1 and one occupied tile gives 2⁶². Four occupied tiles would
+    form 4·2⁶² = 2⁶⁴, which is outside the identity space, so that case is saturated. A clamp to
+    2⁶⁴ − 1 would wrongly exclude the single identity 2⁶⁴ − 1, and a clamp to 2⁶⁴ would compare as
+    a value where the definition has no value — hence `None` and not a number.
 
-    Kills: returning `2**64 - 1`; returning `2**64`; testing saturation after the multiply and so
-    admitting one depth too many.
+    Kills: returning `2**64 - 1`; returning `2**64`; a saturation test that admits one tile too
+    many.
     """
-    assert viewport.theta_cut(4, 1, 0) == 1 << 62
-    assert viewport.theta_cut(4, 1, 1) is viewport.SATURATED
+    assert viewport.theta_cut(4, 1, 1) == 1 << 62
+    assert viewport.theta_cut(4, 1, 4) is viewport.SATURATED
     assert viewport.theta_cut(4, 1, 9) is viewport.SATURATED
 
 
-def test_theta_cut_saturates_at_p0_when_the_target_reaches_the_total():
-    """`P_0 ≥ 2⁶⁴` is already saturated at depth 0 (§7.2's "saturating").
+def test_theta_cut_saturates_when_the_target_reaches_the_total():
+    """`P_d ≥ 2⁶⁴` is saturated (§7.2's "saturating").
 
-    Working: m_target = 16 marks wanted out of V_total = 16 visible is 16·2⁶⁴/16 = 2⁶⁴ exactly —
-    the first anchor that admits everything. At V_total = 17 the same target does not saturate.
+    Working: m_target = 16 marks wanted in each of one occupied tile, out of V_total = 16 visible,
+    is 16·2⁶⁴/16 = 2⁶⁴ exactly — the first anchor that admits everything. At V_total = 17 the same
+    target does not saturate.
 
     Kills: a saturation test written `>` rather than `>=`.
     """
-    assert viewport.theta_cut(16, 16, 0) is viewport.SATURATED
-    assert viewport.theta_cut(17, 16, 0) == (16 * TWO_64) // 17
+    assert viewport.theta_cut(16, 16, 1) is viewport.SATURATED
+    assert viewport.theta_cut(17, 16, 1) == (16 * TWO_64) // 17
 
 
 def test_theta_cut_is_saturated_when_nothing_is_visible():
-    """`P_0` is **saturated** when `V_total = 0` (§7.2, r24 — normative, not implementation detail).
+    """`P_d` is **saturated** when `V_total = 0` (§7.2, r24 — normative, not implementation detail).
 
     A negative total cannot arise; §7.2 does not specify one, and the module folds it here rather
     than inventing a fourth behaviour, which this case records as the behaviour under test.
@@ -191,9 +212,40 @@ def test_theta_cut_is_saturated_when_nothing_is_visible():
     Kills: a `ZeroDivisionError`; returning 0, which is the *strictest* possible cut and would
     serve the floor only.
     """
+    assert viewport.theta_cut(0, 16, 1) is viewport.SATURATED
     assert viewport.theta_cut(0, 16, 0) is viewport.SATURATED
-    assert viewport.theta_cut(0, 16, 5) is viewport.SATURATED
-    assert viewport.theta_cut(-1, 16, 0) is viewport.SATURATED
+    assert viewport.theta_cut(-1, 16, 1) is viewport.SATURATED
+
+
+def test_theta_cut_with_no_occupied_tile_is_a_zero_cut():
+    """`N_occ = 0` is a view with nothing visible in it, where the product is zero.
+
+    A zero cut admits no identity, which is the strictest threshold there is — and it thins
+    nothing, because a view with no occupied tile emits no tile. The saturated answer belongs to
+    `V_total = 0`, which is the state that cannot be divided by, and the two must not be confused.
+
+    Kills: a saturation test that treats a zero product as "admits everything".
+    """
+    assert viewport.theta_cut(1000, 16, 0) == 0
+
+
+def test_n_occ_is_the_number_of_occupied_tiles_at_this_depth():
+    """`N_occ(d)` is θ's second anchor, read off the buckets §7.1's counts come from (§7.2 r62).
+
+    The ten-row fixture at depth 1 under the default mask: whichever tiles its visible rows fall
+    in, the count of distinct ones is what θ scales by, and it is a property of `(mask, view,
+    depth)` alone — never of a request's bbox, which is what keeps θ from moving on a pan.
+
+    Kills: counting rows rather than tiles; counting a request's tiles; counting tiles that hold
+    only rows the mask excludes.
+    """
+    selection = viewport.Selection(_StubBundle(ROWS), DEFAULT_MASK, VIEW, 1)
+    assert selection.n_occ == len(selection.rows_by_tile)
+    assert selection.n_occ == len({t for t, rows in selection.rows_by_tile.items() if rows})
+    assert all(selection.visible_count(t) > 0 for t in selection.rows_by_tile)
+    # Deeper cannot be coarser: every occupied tile has an occupied child.
+    deeper = viewport.Selection(_StubBundle(ROWS), DEFAULT_MASK, VIEW, 2)
+    assert deeper.n_occ >= selection.n_occ
 
 
 # -- §7.1: the tile's exact masked count ---------------------------------------------------------

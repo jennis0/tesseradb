@@ -69,12 +69,13 @@ THETA_TARGET_MARKS = 16
 # The point-level overlay test's case, depth and perturbation. Three constraints, and they pull
 # against each other:
 #
-# * **θ must be live, not saturated.** θ_d = m_target·4^d / V_total, so the case and the depth must
-#   satisfy `m_target·4^d < V_total` or the threshold clause admits everything and both defects
-#   this module exists to catch become invisible. `cross_lo`'s 3,750 entities at depth 3 give
-#   θ_3 ≈ 0.27 — about 16 marks in a tile of ~59 visible, which is the design's own operating
-#   point. The same case at depth 4 saturates (16·256 > 3,750), which is why the depth is stated
-#   here rather than inherited from `DEPTH` above.
+# * **θ must be live, not saturated.** θ_d = m_target·N_occ(d) / V_total, so the case and the depth
+#   must satisfy `m_target·N_occ(d) < V_total` or the threshold clause admits everything and both
+#   defects this module exists to catch become invisible. `cross_lo`'s 3,750 entities at depth 3
+#   occupy well under the 64 tiles an even spread would, which keeps θ_3 near the design's own
+#   operating point of ~16 marks in a tile; the same case saturates a few levels deeper, which is
+#   why the depth is stated here rather than inherited from `DEPTH` above. The oracle recomputes
+#   `N_occ` per case, so the figure is not pinned here.
 # * **the anchor must move enough to be observable.** An anchor error is a proportional error in
 #   every tile's mark count, so a 5% perturbation leaves most tiles serving identical sets and the
 #   comparison is nearly blind to the pre-overlay anchor. Denying ~64% takes V_total from 3,750 to

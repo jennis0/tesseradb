@@ -28,7 +28,9 @@ const STAGE_FIELDS = [
   'row_projection_built',
   'theta_anchor_ns',
   'underlay_ns',
-  'underlay_cells_evaluated'
+  'underlay_cells_evaluated',
+  'shape_guard_fired',
+  'theta_occupancy_ns'
 ] as const;
 
 const INTERESTING = ['count_ns', 'select_ns', 'gather_ns', 'arrow_serialise_ns', 'total_ns'];

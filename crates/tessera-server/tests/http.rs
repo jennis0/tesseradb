@@ -753,7 +753,7 @@ async fn stage_timing_header_respects_the_compile_gate_and_carries_no_identifier
         // before it are unchanged.
         assert_eq!(
             fields.len(),
-            23,
+            24,
             "stage header field count is a contract with the bench harnesses: {text}"
         );
         for f in &fields {
