@@ -11,13 +11,18 @@ Design §7.2 anchored the selection threshold as `P_0 = m_target · 2⁶⁴ / V_
 viewer's visible items spread over about `4^d` occupied tiles at depth *d*, which makes the mean
 occupied tile draw `m_target` marks at every depth.
 
-That assumption is false on every corpus measured. Occupied tiles grow **2.0–3.4× per level**, not
-4× (measured 2026-09-09 on `treeoflife` at 2.33 × 10⁸ rows, `treeoflife-1m`, `geonames` and
-`medcpt-10m-abs`). Marks per occupied tile therefore climb with depth instead of holding at
-`m_target`, and the cap (`k_max_marks`, 500) saturates every tile from depth 4–6 downward. On
-`treeoflife` at depth 12, θ had reached 1.15 — saturated — and **289 of 289 tiles** in a dense view
-drew exactly the cap while their true visible counts spanned **4,958 to 336,047**. A viewer sees
-the tile grid rather than the density: square artefacts with straight axis-aligned seams.
+That assumption fails past the shallowest depths on every corpus measured. Occupied tiles grow by
+**at most 4× and typically 2.0–3.5× per level** (measured 2026-09-09 on `treeoflife` at 2.33 × 10⁸
+rows, `treeoflife-1m`, `geonames` and `medcpt-10m-abs`; ratios at full coverage span 1.64–4.00;
+[probe](../../probes/2026-09-09-theta-occupancy-anchor/README.md)). The full 4× occurs only where
+the data really is space-filling — `geonames` holds it to depth 3 and `treeoflife-1m` to depth 1 —
+and every corpus falls below it from depth 4 down. That is the shape of the correction rather than
+an exception to it: where `N_occ(d) = 4^d` the new anchor reproduces the old one exactly. Marks
+per occupied tile therefore climb with depth instead of holding at `m_target`, and the cap
+(`k_max_marks`, 500) saturates every tile from depth 4–6 downward. On `treeoflife` at depth 12, θ
+had reached 1.15 — saturated — and **289 of 289 tiles** in a dense view drew exactly the cap while
+their true visible counts spanned **4,958 to 336,047**. A viewer sees the tile grid rather than
+the density: square artefacts with straight axis-aligned seams.
 
 §7.2 predicted this failure and priced it as an accepted residual, in a paragraph that named the
 occupied-cell count `O_d` and gave the inflation as `m_target · 4^d / O_d`.
@@ -102,9 +107,19 @@ smaller corpora, and a fitted factor overshoots badly exactly where the cap then
 
 ## What it changed
 
-Measured effect on `treeoflife` at 2.33 × 10⁸ rows, depth 12, the dense view above: capped tiles
-fall from **289 of 289** to **25 of 289**, and the spread of per-tile sampling rates falls from
-**49×** to **1.77×**.
+On `treeoflife` at 2.33 × 10⁸ rows, depth 12, the dense view above: capped tiles fall from
+**289 of 289** to **25 of 289**, and the spread of per-tile sampling rates falls from **49×** to
+**1.77×**.
+
+**That pair is reconstructed from measured responses, not measured from a run of this code**, and
+the reconstruction is exact rather than modelled: `served(T)` is a `tessera_id`-order prefix, so
+truncating a tile's measured 500 served identities at the new cut yields precisely the set the new
+anchor serves, and a tile whose whole prefix falls below the cut is capped under both. What is
+**not** measured is this implementation's own behaviour and cost at 2.33 × 10⁸ rows — that corpus
+was mid-rebuild when the change landed, so the in-situ figures are `treeoflife-1m` only. The walk
+is random-access over a Morton column that reaches ~932 MB at 2.33 × 10⁸ rows, where every cost
+figure here was taken with the column resident, so the cost does **not** carry across and wants
+measuring directly before it is relied on.
 
 `clients/ts/core/src/budget.ts` needs no change. Its average-model fallback assumes
 `marks ≈ m_target × tiles`; this decision is what makes that assumption true on a clustered corpus.

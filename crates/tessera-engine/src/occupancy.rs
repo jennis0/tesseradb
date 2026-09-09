@@ -232,8 +232,8 @@ pub fn occupied_tiles(mask: &EffectiveMask, segments: &[(&SegmentData, u32)], de
 ///   can empty a tile. The response to a deny is at accept, so the correction may not wait for a
 ///   refresh.
 /// - **the fragment's identity and watermark** — a session may be served a one-generation-stale
-///   projection ([decision 0044](../../../docs/decisions/0044-stale-serve-for-one-generation.md)),
-///   so two requests at one `segments_version` can compose against different fragments.
+///   projection (decision 0044), so two requests at one `segments_version` can compose against
+///   different fragments.
 ///
 /// **The attribute filter is not a term and must not become one**: θ is anchored on the unfiltered
 /// composed mask (**I12**), so there is no filtered variant of this quantity to key.
