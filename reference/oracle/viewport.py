@@ -138,10 +138,11 @@ def theta_cut(v_total: int, m_target: int, n_occ: int) -> int | None:
     §7.2 stated θ as a recurrence and this module wrote one where the engine wrote a shift. The
     closed form has no recurrence left to differ over, so the two now compute one expression. What
     is independent is `N_occ(d)`'s **input**: [`Selection`] recomputes each row's tile from the
-    source geometry, where the engine gallops the stored Morton column. A build that wrote a wrong
-    Morton column fails that comparison rather than passing it. The sketch that turns that tile set
-    into a number is a transcription of the engine's and is not independent of it —
-    `oracle/occupancy.py` says so, and says why the differential is exact anyway.
+    source geometry and counts the distinct ones, where the engine gallops the stored Morton
+    column. A build that wrote a wrong Morton column fails that comparison rather than passing it.
+    Above one segment the engine estimates that count instead, and this side transcribes the
+    estimator rather than deriving it — `oracle/occupancy.py` says so, and says why no bundle this
+    oracle opens takes that route.
 
     **The rounding and the zero case are the spec's, not this module's** *(r24, `188d961`)*. Both
     were unstated until that revision and both are observable — the differential demands exact
@@ -211,34 +212,38 @@ class Selection:
             if entities[row] in mask:
                 self.rows_by_tile.setdefault(codes[row] >> shift, []).append(row)
 
-        # `N_occ(d)`, resolved on first use and kept. The sketch is a pass over the tile set and
+        # `N_occ(d)`, resolved on first use and kept. The ladder is a pass over the tile set and
         # `served_rows` asks for the anchor once per tile; recomputing it per tile would be the
         # same answer at a hundred times the cost.
         self._n_occ: int | None = None
 
     @property
     def n_occ(self) -> int:
-        """`N_occ(d)` — θ's second anchor (§7.2 r62): how many depth-*d* tiles hold at least one
-        row this mask admits, **estimated** by the same sketch the engine uses.
+        """`N_occ(d)` — θ's second anchor (§7.2 r63): how many depth-*d* tiles hold at least one
+        row this mask admits.
 
         A bucket exists in `rows_by_tile` exactly when a visible row fell in that tile, so the
-        bucket keys **are** `N_occ(d)`'s input set, over the whole view and over the composed
-        mask. What this property does not do is take `len` of them. `oracle/occupancy.py` says
-        why: the engine estimates the count with a HyperLogLog rather than counting it, because
-        §7.2 needs θ monotone in depth and I2 needs it computed inside the mask, and neither needs
-        it exact. The served set depends on θ, so this side must reproduce the estimate bit for
-        bit or the differential would have to move to a tolerance — which would be a weaker
-        guarantee than the suite has.
+        bucket keys **are** `N_occ(d)`'s input set, over the whole view and over the composed mask.
+        Turning that set into a number is `oracle/occupancy.py`'s job and not this property's,
+        because the engine has two routes for it and the differential must take the same one: a
+        **count** at one segment, a sketch estimate above it.
+
+        **`segments=1` is a fact about this oracle's bundles, not an assumption.**
+        `oracle/bundle.py` opens exactly one segment per view — `bundle.segment(view_id)` is
+        singular — so the counted route is the one that runs here, and `occupancy.ladder` is handed
+        the segment count rather than being told which route to take.
 
         **Over the view, never over a request's tiles.** θ is viewport-invariant, so this counts
         every occupied tile in the view and not the ones a bbox happens to name. Narrowing it to a
         request would make θ move on a pan.
 
-        The whole ladder `0..=depth` is built, not just this depth, because the running maximum
-        that makes θ monotone is over the rungs at and below the one asked for.
+        The whole ladder `0..=depth` is built, not just this depth, because the `4^d` ceiling and
+        the running maximum that make θ monotone are over the rungs at and below the one asked for.
         """
         if self._n_occ is None:
-            self._n_occ = occupancy.ladder(self.rows_by_tile.keys(), self.depth)[self.depth]
+            self._n_occ = occupancy.ladder(self.rows_by_tile.keys(), self.depth, segments=1)[
+                self.depth
+            ]
         return self._n_occ
 
     # -- §7.1 -----------------------------------------------------------------------------------

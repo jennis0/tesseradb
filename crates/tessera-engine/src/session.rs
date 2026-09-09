@@ -942,7 +942,11 @@ pub struct Engine {
     /// The property it makes testable — that a flush does not cost every session a full rebuild —
     /// is a correctness-shaped one for a deployment's latency, and a test that only runs under a
     /// feature flag is a test that does not run.
-    pub(crate) full_projection_builds: AtomicU64,
+    pub(crate) full_projection_builds: Arc<AtomicU64>,
+    /// **The occupancy stage** — see [`crate::stage`]. θ's `N_occ(d)` anchor is memoised per depth
+    /// and was therefore paid on the first request at each new depth; this is what pays it at
+    /// authorise instead, on the pool, cancellably.
+    pub(crate) stage: crate::stage::StageDeps,
 }
 
 /// Every deny disposition the bundle's side-manifests carry, as overlay operations.
@@ -1785,6 +1789,17 @@ impl Engine {
         let fold_paused = Arc::new(AtomicBool::new(false));
         let fold_publication_paused = Arc::new(AtomicBool::new(false));
         let merge_publication_paused = Arc::new(AtomicBool::new(false));
+        let occupancy = Arc::new(crate::single_flight::SingleFlightCache::new(u64::MAX));
+        let full_projection_builds = Arc::new(AtomicU64::new(0));
+        let stage = crate::stage::StageDeps {
+            full_projection_builds: Arc::clone(&full_projection_builds),
+            generation: Arc::clone(&generation),
+            cache: Arc::clone(&row_projection_cache),
+            occupancy: Arc::clone(&occupancy),
+            pool: Arc::clone(&pool),
+            enabled: Arc::new(AtomicBool::new(true)),
+            in_flight: Arc::new(std::sync::Mutex::new(FxHashMap::default())),
+        };
 
         let engine = Engine {
             generation: Arc::clone(&generation),
@@ -1798,7 +1813,7 @@ impl Engine {
             artifact_projections: Arc::clone(&artifact_projections),
             shapes: Arc::clone(&shapes),
             masked_counts: Arc::new(crate::histogram::MaskedCountCache::default()),
-            occupancy: Arc::new(crate::single_flight::SingleFlightCache::new(u64::MAX)),
+            occupancy: Arc::clone(&occupancy),
             derived_geometry: Arc::new(crate::derived_cache::DerivedCache::default()),
             suggest_sets: Arc::new(crate::suggest_set::SuggestSets::default()),
             lineages: Arc::new(crate::cut::Lineages::new()),
@@ -1826,7 +1841,8 @@ impl Engine {
             fold_paused: Arc::clone(&fold_paused),
             fold_publication_paused: Arc::clone(&fold_publication_paused),
             merge_publication_paused: Arc::clone(&merge_publication_paused),
-            full_projection_builds: AtomicU64::new(0),
+            full_projection_builds: Arc::clone(&full_projection_builds),
+            stage,
         };
 
         // **Every level's row form, built before this engine serves a request** — the same rule
@@ -1897,6 +1913,30 @@ impl Engine {
     #[doc(hidden)]
     pub fn set_background_refresh_for_test(&self, enabled: bool) {
         self.refresh_enabled.store(enabled, Ordering::SeqCst);
+    }
+
+    /// Turn the authorise-time occupancy stage off, so a request computes `N_occ` itself.
+    ///
+    /// **A test hook, gated so it cannot exist in a shipped build**, on
+    /// [`Self::set_background_refresh_for_test`]'s argument exactly. A test asserting what a
+    /// *request* computed — that the anchor is the composed figure, that a suppression moves it —
+    /// would otherwise be answered from a rung a background task filled, and would go on passing
+    /// with the request path removed. It must be set **before** the session authorises, which is
+    /// when the stage starts.
+    #[cfg(feature = "fault-injection")]
+    #[doc(hidden)]
+    pub fn set_occupancy_stage_for_test(&self, enabled: bool) {
+        self.stage.enabled.store(enabled, Ordering::SeqCst);
+    }
+
+    /// How many authorise-time occupancy stages are still running — see [`crate::stage`].
+    ///
+    /// **A test hook**, on [`Self::set_background_refresh_for_test`]'s argument: a test that wants
+    /// the staged rungs in place polls this rather than sleeping on a guess about the pool.
+    #[cfg(feature = "fault-injection")]
+    #[doc(hidden)]
+    pub fn occupancy_stages_in_flight(&self) -> usize {
+        self.stage.in_flight()
     }
 
     /// Drop one vocabulary's suggestion index from the live generation — the fault state
@@ -2198,6 +2238,20 @@ impl Engine {
             .as_secs();
         let expires_at = now + self.config.token_max_lifetime_secs;
 
+        // **The occupancy stage starts here, and this call does not wait for it** — see
+        // `crate::stage`. θ's `N_occ(d)` anchor is a function of the composed mask, the view and
+        // the depth, and of nothing a request supplies, so the first request at each depth is
+        // where it happened to be paid rather than where it has to be.
+        self.stage.spawn(crate::stage::SessionStage {
+            token_id,
+            satisfied: satisfied.clone(),
+            satisfied_sorted: Arc::clone(&satisfied_sorted),
+            auth_data_hash,
+            segments_version_at_authorise: generation.segments_version,
+            fragment: Arc::clone(&fragment),
+            visible_views: Arc::clone(&visible_views),
+        });
+
         Ok(Session {
             token,
             token_id,
@@ -2380,6 +2434,11 @@ impl Engine {
     /// `revoke_prunes_the_token` asserts on. See `RowProjectionCache::prune_token` for why this is
     /// memory hygiene rather than a disclosure control, and for the cost of the pass.
     pub fn prune_token(&self, token_id: u64) -> usize {
+        // **First, and before anything is dropped.** A stage still running for this token would
+        // otherwise re-publish the very projection and occupancy entries this call is removing —
+        // the residue would be bounded and benign, but it would also be work done on behalf of a
+        // session that no longer exists.
+        self.stage.cancel(token_id);
         // **Both per-session caches**, and the second one is not optional hygiene at the campaign's
         // target: a masked-count histogram is ~4 B per artifact, 40 MB at 10⁷, and a revoked
         // session's is pinned by nothing else.

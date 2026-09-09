@@ -1,13 +1,14 @@
 //! `N_occ(d)` — how many depth-*d* tiles hold at least one row this session may see.
 //!
-//! Design §7.2 anchors the selection threshold at `θ_d = m_target · N_occ(d) / V_total`. This
-//! module **estimates** `N_occ(d)` with a [`TileSketch`]; [`EffectiveMask::visible_total`] counts
-//! `V_total` exactly, and [`crate::select::Threshold::at_depth`] turns the pair into a cut point.
+//! Design §7.2 anchors the selection threshold at `θ_d = m_target · N_occ(d) / V_total`.
+//! [`EffectiveMask::visible_total`] counts `V_total` exactly, and
+//! [`crate::select::Threshold::at_depth`] turns the pair into a cut point.
 //!
-//! **PROVISIONAL — this is `probe/nocc-sketch`, not a shipped arm.** The sketch replaces an exact
-//! count that three branches were written to make fast. Whether it should is
-//! `probes/2026-09-09-nocc-sketch`'s question and the owner's ruling; nothing here is settled and
-//! decision 0137 has not been amended.
+//! **One segment counts `N_occ(d)`; two or more estimate it with a [`TileSketch`]**
+//! ([decision 0138](../../../docs/decisions/0138-n-occ-is-a-sketch-above-one-segment-and-is-staged-off-first-paint.md)).
+//! [`occupied_tiles_ladder`] owns that predicate and gives the measurement behind it. A freshly
+//! built bundle has one segment per view and so does every conformance fixture; a live deployment
+//! accumulates one per flush and so is estimating within a publication or two of opening.
 //!
 //! # It is a composed quantity, and I2 requires it
 //!
@@ -34,32 +35,39 @@
 //! per occupied tile from `m_target` to `0.99 m_target`; even 20% would move 16 marks to 13 or 19,
 //! which is not a difference a viewer can see.
 //!
-//! What it costs is **the observability of a single tile**. `N_occ` was exact, so a suppression
-//! that emptied one tile lowered it by exactly one and a test could assert that. Under a sketch it
-//! does not: `n_occ_falls_when_a_suppression_empties_a_tile` now empties a fifth of the view's
-//! tiles to assert the same property. The property — the anchor is composed, not pre-overlay — is
-//! unchanged and still asserted; the resolution at which it can be asserted is not.
+//! What the estimate costs is **the observability of a single tile**, and it costs it only where
+//! the estimate runs. `N_occ` is exact at one segment, so a suppression that empties one tile
+//! lowers it by exactly one and `n_occ_falls_when_a_suppression_empties_a_tile` asserts that on a
+//! single-segment fixture. Above one segment no such assertion could be written at scale: at a
+//! million occupied tiles one emptied tile is far inside the sketch's error. The property — the
+//! anchor is composed, not pre-overlay — is unchanged; the resolution at which it can be asserted
+//! moves with the route.
 //!
 //! # Three properties, and where each comes from
 //!
 //! **Monotone in depth.** Every occupied depth-*d* tile has at least one occupied child, and
 //! children of distinct parents are distinct tiles, so `N_occ(d+1) >= N_occ(d)` — of the *true*
-//! quantity. Two adjacent *estimates* of it need not obey that, and where `N_occ` barely grows
-//! between two depths a 1% error either way can invert them; one measured cell does
-//! (`treeoflife-1m` under a 5% mask, depths 14 to 15, 0.33%). [`OccupancyLadder`] therefore carries
-//! a **running maximum** across depths: `at(d)` is the largest rung at or below *d*. That is
-//! structural rather than hopeful, and it errs in the safe direction — serving more marks than the
-//! formula asks is harmless where serving fewer breaks nesting.
+//! quantity, which is what the counted route returns. Two adjacent *estimates* of it need not obey
+//! that, and where `N_occ` barely grows between two depths a 1% error either way can invert them:
+//! sixteen measured cells do (`treeoflife-1m` under a 5% mask, depths 14 to 15, where the raw
+//! estimate falls 50,352 → 50,187, a 0.33% step —
+//! `probes/2026-09-09-nocc-sketch`). [`OccupancyLadder`] therefore carries a **running maximum**
+//! across depths: `at(d)` is the largest rung at or below *d*, and after it those sixteen
+//! inversions are zero. That is structural rather than hopeful, and it errs in the safe direction —
+//! serving more marks than the formula asks is harmless where serving fewer breaks nesting.
 //!
-//! **Architecture §7.2 r62 forbids exactly this**, in terms: "No implementation may clamp θ or
-//! carry a running maximum over depth: a clamp would conceal a miscount rather than prevent one."
-//! That is right about an exact count, where a fall between depths can only be a bug, and it is the
-//! reverse under an estimate. **It is an owner ruling to reverse, and it has not been made**, so
-//! this branch is in breach of the specification and is a probe rather than a candidate.
+//! Architecture §7.2 forbade exactly this until r63 — "No implementation may clamp θ or carry a
+//! running maximum over depth" — a sentence written for an exact count, where a fall between
+//! depths can only be a bug. Under an estimate it is false, and r63 deletes it rather than
+//! qualifying it (owner ruling, 2026-09-09): monotonicity now comes from the running maximum, and
+//! the miscount the sentence feared is caught by the differential and by
+//! `the_occupied_tile_count_is_the_sketch_of_the_right_tiles_monotone_and_bounded`, which pins the
+//! walk's emissions against a linear scan.
 //!
-//! **`N_occ(d) <= 4^d`.** There are only `4^d` tiles at depth *d*, so the estimate is clamped there
-//! before the running maximum. This is what makes the shallow rungs *exact*: depth 0 is one tile
-//! whatever the data does, and the ladder answers 1 rather than the sketch's 1-or-2.
+//! **`N_occ(d) <= 4^d`.** There are only `4^d` tiles at depth *d*, so a rung is clamped there
+//! before the running maximum. This is what makes the shallow rungs *exact* on the estimated
+//! route: depth 0 is one tile whatever the data does, and the ladder answers 1 rather than the
+//! sketch's 1-or-2.
 //!
 //! **Deterministic.** [`SKETCH_SEED`] is a constant, the mixer is SplitMix64's finalizer, and every
 //! step of the estimator is integer arithmetic — no float, so no libm and no summation order for
@@ -268,27 +276,36 @@ pub fn for_each_occupied_tile(
 
 /// `N_occ(d)` for every depth `0..=depth`, from one walk.
 ///
-/// **Approximate, and deliberately so.** Each depth's answer is a [`TileSketch`] estimate rather
-/// than a count, with a relative standard error of `1.04 / sqrt(2^SKETCH_PRECISION)`. §7.2 needs θ
-/// monotone in depth and I2 needs it computed inside the mask; neither needs it exact, and a 20%
-/// error moves the mean marks per occupied tile from `m_target` to `0.8 m_target`.
+/// **Exact at one segment, estimated above it** — see [`occupied_tiles_ladder`] for the predicate
+/// and the measurement behind it. Either way [`Self::at`] answers the same three properties, and
+/// the two below hold whichever route filled the rungs.
 ///
 /// **Monotone by construction, not by hope.** [`Self::at`] is a running maximum over the depths at
 /// or below the one asked for, so no pair of adjacent depths can invert however the estimates fall.
-/// Serving more marks than the formula asks for is harmless; serving fewer breaks nesting.
+/// Serving more marks than the formula asks for is harmless; serving fewer breaks nesting. On the
+/// exact route the maximum never binds — `N_occ` is non-decreasing in depth by the structure of
+/// the grid — and it is applied anyway rather than branched around, so the tail of this
+/// computation is one piece of code with one set of properties.
 ///
-/// **`counts[d] <= 4^d`.** There are only `4^d` tiles at depth *d*, so the estimate is clamped
-/// there before the running maximum — which is what makes the shallow depths exact rather than
-/// merely close (`N_occ(0)` is 1 for any non-empty view, and the sketch alone would answer 1 or 2).
+/// **`counts[d] <= 4^d`.** There are only `4^d` tiles at depth *d*, so a rung is clamped there
+/// before the running maximum — which is what makes the shallow depths exact on the sketch route
+/// rather than merely close (`N_occ(0)` is 1 for any non-empty view, and the sketch alone would
+/// answer 1 or 2). On the exact route it never binds either, for the same reason it is kept.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OccupancyLadder {
     counts: [u64; 17],
-    /// Each depth's estimate **before** the running maximum, clamped to `4^d`. Kept so the
+    /// Each depth's rung **before** the running maximum, clamped to `4^d`. Kept so the
     /// monotonicity claim above is measurable rather than asserted: `tessera-bench`'s
     /// `occupancy_sketch` counts the inversions this array has and the one [`Self::at`] answers
     /// from does not.
     raw: [u64; 17],
     depth: u8,
+    /// Whether the rungs are counts rather than estimates — the one-segment route.
+    ///
+    /// **A fact about how this ladder was filled, not a mode anything selects.** It exists so a
+    /// test can assert which route ran, and so a measurement can say which number it is quoting;
+    /// no request-path branch reads it, because θ's three properties are the same either way.
+    exact: bool,
 }
 
 impl OccupancyLadder {
@@ -308,7 +325,12 @@ impl OccupancyLadder {
         self.depth
     }
 
-    /// `N_occ(depth)` as the sketch estimated it, before the running maximum. For measurement
+    /// Whether these rungs are exact counts — see the field.
+    pub fn is_exact(&self) -> bool {
+        self.exact
+    }
+
+    /// `N_occ(depth)` as the route produced it, before the running maximum. For measurement
     /// only — nothing on the request path may read this, because nothing guarantees it is
     /// monotone.
     pub fn raw_at(&self, depth: u8) -> u64 {
@@ -341,16 +363,99 @@ impl OccupancyLadder {
 /// The last-seen array is deliberately **not** reset between segments. A repeat is idempotent in a
 /// sketch, so carrying it across a segment boundary can only save an update, never lose one — and
 /// where two segments' walks meet on the same tile it saves the whole descent.
+///
+/// # One segment counts; two or more estimate
+///
+/// **The predicate is `segments.len() == 1` and it is the whole of the route choice.** At one
+/// segment the walk emits each tile once and ascending, so the descent's "the ancestor changed"
+/// test fires exactly `N_occ(d')` times at each depth and a **counter is the accumulator** — the
+/// exact answer costs an increment where the sketch costs a mix, an index and a compare. Measured
+/// over all seventeen rungs at one segment: 12.5 ms exact against 24.8 ms sketched over 10⁶ rows,
+/// and 129 ms against 189 over 1.35 × 10⁷ (`probes/2026-09-09-nocc-sketch`, both corpora, whole
+/// mask). Across that probe's eight one-segment cells the sketch lost at every one, by 0.61× to
+/// 0.88×.
+///
+/// Above one segment the counter stops being available at all: a tile can hold rows in several
+/// segments, the walks are per segment, and counting "the ancestor changed" would count a shared
+/// tile once per segment that holds it. That is what the union, the sort and the direct-mapped
+/// bitset the three earlier arms carried all existed to do, and it is the case the sketch removes:
+/// adding a tile twice to a sketch is adding it once, so one sketch fed by every segment *is* the
+/// union with nothing to choose between.
+///
+/// **θ therefore changes character across a flush**, from a count to an estimate at the first
+/// publication that gives a view its second segment. That is accepted rather than tolerated: θ
+/// already moves on every flush — `V_total` moves, and `N_occ` itself moves as new rows occupy new
+/// tiles — and the memo is keyed on `segments_version`, so no session ever sees the two routes'
+/// answers for one generation. What the boundary costs is that a deployment's θ carries the
+/// sketch's error only while it is multi-segment, which is every live deployment and no freshly
+/// built bundle.
+///
+/// **Every conformance fixture and every demo corpus is single-segment**, so the route the
+/// differential exercises is the exact one; `reference/oracle/occupancy.py` says where that leaves
+/// the estimator's coverage.
 pub fn occupied_tiles_ladder(
     mask: &EffectiveMask,
     segments: &[(&SegmentData, u32)],
     depth: u8,
 ) -> OccupancyLadder {
-    occupied_tiles_ladder_with_precision(mask, segments, depth, SKETCH_PRECISION)
+    if segments.len() == 1 {
+        occupied_tiles_ladder_exact(mask, segments, depth)
+    } else {
+        occupied_tiles_ladder_with_precision(mask, segments, depth, SKETCH_PRECISION)
+    }
 }
 
-/// [`occupied_tiles_ladder`] at an arbitrary sketch precision. The engine takes
-/// [`SKETCH_PRECISION`]; `tessera-bench`'s `occupancy_sketch` sweeps this to choose it.
+/// `N_occ(d)` for every `d` in `0..=depth`, **counted**, from one walk of a single segment.
+///
+/// # Sound only at one segment, and the caller is what makes it so
+///
+/// One segment's walk emits ascending and without repetition ([`Walk::visit_run`] carries the last
+/// tile across runs and across chunks), so at each depth the ancestor changes exactly once per
+/// distinct depth-*d* tile and the increments below are that depth's tile count. Two segments break
+/// it in both directions — a tile split across segments would be counted twice, and the last-seen
+/// array carried across a boundary would drop a tile the second segment re-enters — which is why
+/// [`occupied_tiles_ladder`] and not this function owns the predicate.
+///
+/// **Public so a measurement prices the two accumulators over the identical walk**, exactly as
+/// [`for_each_occupied_tile`] is. It asserts its own precondition rather than trusting a caller,
+/// because the failure is a wrong number rather than a crash.
+pub fn occupied_tiles_ladder_exact(
+    mask: &EffectiveMask,
+    segments: &[(&SegmentData, u32)],
+    depth: u8,
+) -> OccupancyLadder {
+    debug_assert!(depth <= 16, "the grid is 2^16 x 2^16, so depth 16 is the deepest");
+    assert_eq!(
+        segments.len(),
+        1,
+        "the counted route is sound at one segment only; `occupied_tiles_ladder` owns the predicate"
+    );
+    let mut counted = [0u64; 17];
+    // `u64::MAX` is not a tile index at any depth, so it is a sound "nothing seen yet".
+    let mut last = [u64::MAX; 17];
+    let (segment, row_base) = segments[0];
+    for_each_occupied_tile(mask, segment, row_base, depth, |tile| {
+        let mut d = depth;
+        loop {
+            let ancestor = tile >> (2 * u32::from(depth - d));
+            if ancestor == last[d as usize] {
+                break;
+            }
+            last[d as usize] = ancestor;
+            counted[d as usize] += 1;
+            if d == 0 {
+                break;
+            }
+            d -= 1;
+        }
+    });
+    finish_ladder(counted, depth, true)
+}
+
+/// [`occupied_tiles_ladder`]'s **sketch** route at an arbitrary precision, whatever the segment
+/// count. The engine takes [`SKETCH_PRECISION`] and only above one segment; `tessera-bench`'s
+/// `occupancy_sketch` sweeps this to choose it, and prices it at one segment against the counted
+/// route above.
 pub fn occupied_tiles_ladder_with_precision(
     mask: &EffectiveMask,
     segments: &[(&SegmentData, u32)],
@@ -390,18 +495,38 @@ pub fn occupied_tiles_ladder_with_precision(
         });
     }
 
+    let mut estimated = [0u64; 17];
+    for (d, rung) in estimated.iter_mut().enumerate().take(depth as usize + 1) {
+        *rung = estimate_registers(&plane[d * stride..(d + 1) * stride], precision);
+    }
+    finish_ladder(estimated, depth, false)
+}
+
+/// The `4^d` ceiling and the running maximum, applied to raw rungs from either route.
+///
+/// **One tail for both routes**, so the two properties θ's nesting proof reads off a ladder —
+/// `N_occ(d) <= 4^d` and non-decreasing in depth — are established in one place and hold whether
+/// the rungs were counted or estimated. On the counted route neither step ever binds; it is not
+/// branched around, because a tail that behaved differently by route would be two sets of
+/// properties to keep true rather than one.
+fn finish_ladder(raw_rungs: [u64; 17], depth: u8, exact: bool) -> OccupancyLadder {
     let mut counts = [0u64; 17];
     let mut raw = [0u64; 17];
     let mut running = 0u64;
     for d in 0..=depth as usize {
         // `4^d`, which is `2^32` at depth 16 and so needs the `u64`.
         let ceiling = 1u64 << (2 * d as u32);
-        let estimate = estimate_registers(&plane[d * stride..(d + 1) * stride], precision).min(ceiling);
-        raw[d] = estimate;
-        running = running.max(estimate);
+        let rung = raw_rungs[d].min(ceiling);
+        raw[d] = rung;
+        running = running.max(rung);
         counts[d] = running;
     }
-    OccupancyLadder { counts, raw, depth }
+    OccupancyLadder {
+        counts,
+        raw,
+        depth,
+        exact,
+    }
 }
 
 /// `N_occ(depth)` over the whole view: an estimate of how many depth-`depth` tiles hold at least
@@ -758,6 +883,36 @@ mod tests {
         // The literal is the point: a thousand distinct tiles estimate to 994 here and to 994
         // in `reference/oracle/viewport.py`, on every box and in every process.
         assert_eq!(a.estimate(), 994, "a thousand distinct tiles is a fixed answer");
+    }
+
+    /// **The `4^d` ceiling and the running maximum are the tail of both routes**, and this pins
+    /// them where the ladder's own walk cannot reach: raw rungs supplied directly.
+    ///
+    /// The middle case is an inversion — a deeper rung reading lower than a shallower one, which
+    /// the estimator produces where `N_occ` grows by less than its error and which
+    /// `probes/2026-09-09-nocc-sketch` measured at sixteen cells. The last is a rung above the
+    /// `4^d` tiles the grid has, which only an estimate can produce.
+    #[test]
+    fn the_tail_clamps_to_the_grid_and_never_lets_a_rung_fall() {
+        let mut raw = [0u64; 17];
+        raw[..5].copy_from_slice(&[1, 4, 16, 64, 256]);
+        let plain = finish_ladder(raw, 4, false);
+        assert_eq!((0..=4).map(|d| plain.at(d)).collect::<Vec<_>>(), vec![1, 4, 16, 64, 256]);
+
+        let mut inverted = [0u64; 17];
+        inverted[..5].copy_from_slice(&[1, 4, 16, 50, 49]);
+        let held = finish_ladder(inverted, 4, false);
+        assert_eq!(held.at(4), 50, "the running maximum holds the deeper rung at the shallower");
+        assert_eq!(held.raw_at(4), 49, "and the raw rung still records the inversion");
+
+        let mut over = [0u64; 17];
+        over[..3].copy_from_slice(&[2, 9, 400]);
+        let clamped = finish_ladder(over, 2, false);
+        assert_eq!(
+            (0..=2).map(|d| clamped.at(d)).collect::<Vec<_>>(),
+            vec![1, 4, 16],
+            "no rung may exceed the 4^d tiles depth d has"
+        );
     }
 
     /// **The cross-language vectors.** `reference/oracle/occupancy.py` asserts these same three

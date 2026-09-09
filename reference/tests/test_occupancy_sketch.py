@@ -1,12 +1,18 @@
-"""Known-answer tests for `oracle.occupancy` — the sketch behind θ's second anchor.
+"""Known-answer tests for `oracle.occupancy` — θ's second anchor, and the sketch it takes above one
+segment.
 
 **The vectors at the bottom are the contract.** `crates/tessera-engine/src/occupancy.rs`'s
 `the_ladder_matches_the_python_oracle_vector_for_vector` asserts the same three lists over the same
-three inputs. That pair is what makes `conformance/tests/test_i7_selection.py` an exact
-differential: the served set depends on θ, θ depends on `N_occ(d)`, and `N_occ(d)` is an estimate,
-so the two implementations must produce the *same* estimate rather than two estimates within a
-band. A change to the seed, the mixer, the estimator, the `4^d` ceiling or the running maximum
-moves these numbers, and both sides fail together.
+three inputs. They are what keeps the two implementations of the estimator from drifting: the
+served set depends on θ, θ depends on `N_occ(d)`, and above one segment `N_occ(d)` is an estimate,
+so two processes serving one bundle must produce the *same* estimate rather than two within a band.
+A change to the seed, the mixer, the estimator, the `4^d` ceiling or the running maximum moves
+these numbers, and both sides fail together.
+
+**They are checked here rather than through the differential.** Every bundle the oracle opens has
+one segment per view, so `Selection.n_occ` takes the counted route and
+`conformance/tests/test_i7_selection.py` compares two exact counts. These vectors are the whole of
+the estimator's cross-language coverage until a fixture carries two segments.
 
 The cases above them check the pieces against answers that are not the other implementation's:
 `ln_q32` against `math.log`, `alpha_q32` against its closed form, and the estimator against
@@ -75,7 +81,7 @@ def test_the_ladder_is_monotone_and_bounded_by_the_grid():
     in and drops marks the parent tile drew.
     """
     tiles = [(i * 2_654_435_761) % (1 << 32) for i in range(50_000)]
-    rungs = occ.ladder(tiles, 16)
+    rungs = occ.sketch_ladder(tiles, 16)
     assert rungs == sorted(rungs), "the running maximum must leave no inversion"
     for d, value in enumerate(rungs):
         assert value <= 4**d, f"depth {d}: {value} exceeds the {4**d} tiles the grid has"
@@ -108,4 +114,28 @@ def test_the_ladder_matches_the_engine_vector_for_vector(name):
     wrong answer here, but as a conformance differential that has to be relaxed to a tolerance.
     """
     tiles, want = CROSS_LANGUAGE_VECTORS[name]
-    assert occ.ladder(tiles, 16) == want
+    assert occ.sketch_ladder(tiles, 16) == want
+    # And through the predicate, which is what the engine and `Selection` actually call: two
+    # segments is the estimated route and one is the counted one, so a predicate written the wrong
+    # way round fails here rather than only in a deployment.
+    assert occ.ladder(tiles, 16, segments=2) == want
+    assert occ.ladder(tiles, 16, segments=1) == occ.exact_ladder(tiles, 16)
+
+
+def test_the_counted_route_is_the_distinct_count_at_every_rung():
+    """One segment counts rather than estimating, and the count is the distinct ancestor set.
+
+    The engine reaches these numbers by counting how many times the depth-*d* ancestor changes
+    along an ascending walk; this side takes `len` of a set. The two agree because within one
+    segment an ascending walk visits each distinct ancestor exactly once — which is the whole of
+    why the counted route is available at one segment and at no other.
+
+    Kills: a counted route that summed per-segment counts, or that lost the `4^d` ceiling at the
+    shallow rungs where a real corpus saturates it.
+    """
+    tiles = [(i * 48_271) % (1 << 32) for i in range(20_000)]
+    rungs = occ.exact_ladder(tiles, 16)
+    assert rungs == [len({t >> (2 * (16 - d)) for t in tiles}) for d in range(17)]
+    assert rungs == sorted(rungs), "a count is non-decreasing in depth by the structure of the grid"
+    for d, value in enumerate(rungs):
+        assert value <= 4**d, f"depth {d}: {value} exceeds the {4**d} tiles the grid has"
