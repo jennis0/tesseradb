@@ -1130,6 +1130,10 @@ fn fingerprint(bytes: &[u8]) -> u64 {
 /// Appends one **text run**: a sorted, distinct term stream with each term's ascending entity
 /// list, spilled by one worker of the text index's chunk pass and consumed once by its merge.
 ///
+/// **The keyword column's dictionary pass spills the same file** (`pipeline.rs`), with a key for a
+/// term and a row for an entity: the two passes differ in what they merge the stream into and in
+/// nothing this writer sees.
+///
 /// **On disk:** no header, then one record per term —
 /// `varint(shared) ‖ varint(suffix_len) ‖ suffix ‖ varint(count) ‖ varint(entity₀) ‖
 /// varint(entityᵢ − entityᵢ₋₁)…`. `shared` is the term's common prefix with its predecessor *in
