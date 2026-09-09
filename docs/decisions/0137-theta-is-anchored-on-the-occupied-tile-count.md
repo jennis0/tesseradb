@@ -107,19 +107,20 @@ smaller corpora, and a fitted factor overshoots badly exactly where the cap then
 
 ## What it changed
 
-On `treeoflife` at 2.33 × 10⁸ rows, depth 12, the dense view above: capped tiles fall from
-**289 of 289** to **25 of 289**, and the spread of per-tile sampling rates falls from **49×** to
-**1.77×**.
+Measured against this implementation on `treeoflife` at 2.33 × 10⁸ rows, depth 12, the dense view
+above (289 tiles, true visible counts spanning **5,159 to 252,262**): capped tiles fall from
+**289 of 289** to **25 of 289**, and the spread of per-tile sampling rates falls from **48.9×** to
+**5.19×**. Over the 264 tiles the cap no longer binds on, the spread is **1.77×** — quote that
+figure only against the same subset; the 48.9× is over all 289. The old figure is exact rather than
+re-measured: under the `4^d` anchor every tile served exactly the cap, so its all-tiles spread is
+`max(visible) / min(visible)` by arithmetic.
 
-**That pair is reconstructed from measured responses, not measured from a run of this code**, and
-the reconstruction is exact rather than modelled: `served(T)` is a `tessera_id`-order prefix, so
-truncating a tile's measured 500 served identities at the new cut yields precisely the set the new
-anchor serves, and a tile whose whole prefix falls below the cut is capped under both. What is
-**not** measured is this implementation's own behaviour and cost at 2.33 × 10⁸ rows — that corpus
-was mid-rebuild when the change landed, so the in-situ figures are `treeoflife-1m` only. The walk
-is random-access over a Morton column that reaches ~932 MB at 2.33 × 10⁸ rows, where every cost
-figure here was taken with the column resident, so the cost does **not** carry across and wants
-measuring directly before it is relied on.
+**The walk's cost at that scale, measured the same day**: 33–183 ms for the full principal and
+36–83 ms for a 0.9% principal, across depths 4 to 16, one-off per `(session, depth)` behind the
+memo. That is a wall-clock delta between a cold and a warm request over HTTP, so it is an upper
+bound including any other per-depth cold state, not the `theta_occupancy_ns` stage timer. Against
+1.6–2.2 ms on `treeoflife-1m` it is sublinear in a 233× larger corpus: the concern that a ~932 MB
+Morton column would punish the walk's random access did not materialise.
 
 `clients/ts/core/src/budget.ts` needs no change. Its average-model fallback assumes
 `marks ≈ m_target × tiles`; this decision is what makes that assumption true on a clustered corpus.

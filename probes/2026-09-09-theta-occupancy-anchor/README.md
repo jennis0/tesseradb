@@ -30,13 +30,25 @@ Corpus `treeoflife`, 2.33 × 10⁸ rows, view `bioclip`, `m_target` = 16, `k_max
 
 The cap binds from depth 6 for the full principal, depth 5 for a 9.3% principal and depth 4 for a 0.9% one — the sparsest principal saturates earliest. At depth 12, θ had reached **1.15**: saturated, so the threshold clause was inert and `m(T) = min(cap, |vis(T)|)` unconditionally.
 
-A 16 × 16-tile view at depth 12 over the densest region, before and after:
+A 16 × 16-tile view at depth 12 over the densest region, before and after. The *after* column is
+**measured against the merged implementation** (2026-09-09, server on the rebuilt 2.33 × 10⁸-row
+bundle); the *before* column is exact rather than re-measured, since under the `4^d` anchor every
+tile served exactly the cap:
 
 | | old anchor | occupied-tile anchor |
 |---|---|---|
 | tiles at the cap | 289 / 289 | 25 / 289 |
-| spread of per-tile sampling rates | 49× | 1.77× |
+| spread of sampling rates, all 289 tiles | 48.9× | 5.19× |
+| spread over the 264 uncapped tiles | — | 1.77× |
 | marks served | 144,500 | 60,002 |
+
+True visible counts across those 289 tiles span 5,159 to 252,262. **Quote the 1.77× only against the
+uncapped subset**: an earlier draft of this probe compared it against the 48.9× all-tiles figure,
+which is not like for like. The capped tail is what separates them, and it is the tail the cap is
+there to hold.
+
+The reconstruction described above predicted the capped count (25 of 289) and the marks served
+(60,002) exactly, which is the check that it was a sound method rather than a lucky one.
 
 Whole-world at depth 8 the new anchor lands at 16.4 / 16.2 / 17.5 mean marks per occupied tile for the 0.9% / 9.3% / full principals against a target of 16, so the anchor calibrates. Nesting was checked by reconstruction over depths 10 → 12: **14,122 marks, 0 popped out**.
 
@@ -55,9 +67,30 @@ Five routes for computing `N_occ(d)` inside the mask were profiled on `treeoflif
 
 The bench binary that produced the route tables was left uncommitted in the `probe/nocc-cost` worktree and is not preserved here.
 
+## Cost at 2.33 × 10⁸ rows
+
+Measured 2026-09-09 against the merged implementation, as the wall-clock delta between a cold and a
+warm request at the same depth and bbox — so an **upper bound** on the walk including any other
+per-depth cold state, not the `theta_occupancy_ns` stage timer, which needs a `bench-timing` build.
+
+| depth | 4 | 6 | 8 | 10 | 12 | 14 | 16 |
+|---|---|---|---|---|---|---|---|
+| full principal | 36 | 33 | 37 | 35 | 53 | 183 | 165 |
+| 0.9% principal | 38 | 40 | 83 | 36 | 36 | 38 | 38 |
+
+Milliseconds, one-off per `(session, depth)` behind the memo. Against 1.6–2.2 ms on `treeoflife-1m`
+this is sublinear in a 233× larger corpus: **the concern that a ~932 MB Morton column would punish
+the walk's random access did not materialise.** A first attempt put depth 9 at ~827 ms; that was an
+artefact of comparing a cold and a warm request whose responses differed in size, and is not the
+walk.
+
 ## What still needs measuring
 
-- **This implementation's own cost at 2.33 × 10⁸ rows.** The in-situ figures in decision 0137 are `treeoflife-1m` only (walk 1.6–2.2 ms cold, 1.2–2.9 µs warm behind the memo, against a 14–157 ms request). Every route figure was taken with the Morton column resident — 4–54 MB on those corpora, ~932 MB at 2.33 × 10⁸ — and the walk is random-access where the linear oracle is sequential, so the ranking between them may invert on a cold column. Nothing here carries across.
-- **The before/after pair in the table above** was reconstructed, not run. Re-take it against the implementation once a server is up on the rebuilt corpus.
-- The driver scripts were not preserved. The occupancy ladder no longer needs them: the branch adds `Engine::occupied_tiles_for_test` (feature `fault-injection`) and a `theta_occupancy_ns` trailer field, which is a better route to the same numbers.
-- `data/ladder/treeoflife` was rebuilt on 2026-09-08/09, so these figures describe the previous build of that corpus.
+- **The multi-segment arm.** Every figure here comes from single-segment corpora, which take a
+  counter path that allocates nothing. Under [decision 0091](../../docs/decisions/0091-build-is-ingest-into-an-empty-database.md)
+  a live view is multi-segment, so the arm that builds a Roaring union over tile indices — bounded
+  at ~512 MB at depth 16 — is the deployed one and has no measurement behind it.
+- **The `theta_occupancy_ns` stage timer**, which would separate the walk from the rest of a cold
+  request rather than bounding it.
+- The driver scripts were not preserved. The occupancy ladder no longer needs them: `Engine::occupied_tiles_for_test`
+  (feature `fault-injection`) and the `theta_occupancy_ns` trailer field are a better route.
