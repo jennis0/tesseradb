@@ -9,10 +9,11 @@ order, which is why the file order below is numeric on the zero-padded index and
 directory's own lexicographic listing (`train-00010` before `train-00002` would misnumber every
 row after it).
 
-**GBIF** is 8,369 parts, `occurrence.parquet/NNNNNN` with no suffix, ~212k rows each, one row group
-apiece, `gbifid` a plain digit-string column (`probes/2026-09-02-rung-4-share-reads/README.md`
-measured the sibling OpenAlex join's cost model — small projected columns over SMB, not a whole-file
-read).
+**GBIF** is 8,369 parts, `occurrence.parquet/NNNNNN` with no suffix, one row group apiece and
+between 26,717 and 1,039,405 rows each, `gbifid` a plain digit-string column
+(`probes/2026-09-02-rung-4-share-reads/README.md` measured the sibling OpenAlex join's cost model —
+small projected columns over SMB, not a whole-file read). The snapshot is rung 6's corpus and
+`test_corpora/gbif/sources.py` is where its constants live.
 """
 
 from __future__ import annotations
@@ -24,7 +25,6 @@ from ..common.paths import ladder, staged
 RUNG = "treeoflife"
 
 TREEOFLIFE_DATASET, TREEOFLIFE_VINTAGE = "treeoflife-200m", "2026-08-27"
-GBIF_DATASET, GBIF_VINTAGE = "gbif", "2026-06-01"
 
 #: 233,055,986 across 666 files, 350,000 rows each bar the last (interface.md).
 FILE_COUNT = 666
@@ -84,9 +84,16 @@ def treeoflife_files() -> list[Path]:
 
 
 def gbif_parts() -> list[Path]:
-    """The 8,369 GBIF parts, in directory order (the id has no meaning as a sort key)."""
-    base = staged(GBIF_DATASET, GBIF_VINTAGE) / "occurrence.parquet"
-    return sorted(p for p in base.iterdir() if p.is_file())
+    """The 8,369 GBIF parts, in directory order (the id has no meaning as a sort key).
+
+    The occurrence snapshot is rung 6's corpus and rung 5 joins against it, so the listing that
+    decides part order lives there and this reads it. Imported here rather than at module scope:
+    the join track loads this module for the TreeOfLife constants alone, and a rung it is not
+    running should not be on that path.
+    """
+    from ..gbif.sources import parts
+
+    return parts()
 
 
 def rung() -> Path:
