@@ -191,21 +191,23 @@ The figures, the sequence that produces each, and how to re-take them are in
 `treeoflife`, 2.33 × 10⁸ rows, `bioclip`, full-coverage principal (all 474 `publisher` terms), a
 1,024-tile window centred on the densest depth-6 tile, response-trailer stage timings, 2026-09-09.
 **One session zooming in from depth 3 to 16 and back out**, which is what the fill is for. `walk`
-is `theta_occupancy_ns`; medians of three runs without the fill and two with it.
+is `theta_occupancy_ns`; medians of three runs without the fill and of two with it. The box carried
+another session's `tessera build` throughout, so these are upper bounds; before and after were taken
+minutes apart on it.
 
 | depth | walk, before | walk, after |
 |---|---|---|
-| 3 (the session's first request) | 36 ms | 36 ms |
-| 4 | 35 ms | **0** |
-| 6 | 36 ms | **0** |
-| 8 | 40 ms | **0** |
-| 10 | 39 ms | **0** |
-| 12 | 68 ms | **0** |
-| 13 | 99 ms | 92 ms |
-| 16 | 201 ms | 209 ms |
+| 3 (the session's first request) | 36.9 ms | 36.0 ms |
+| 4 | 35.3 ms | **0** |
+| 6 | 36.2 ms | **0** |
+| 8 | 39.8 ms | **0** |
+| 10 | 39.0 ms | **0** |
+| 12 | 67.5 ms | **0** |
+| 13 | 99.2 ms | 108.8 ms |
+| 16 | 201.0 ms | 269.1 ms |
 
-**Zooming from 3 to 12 costs one walk instead of six: 36 ms against 218 ms.** A depth-12 request
-falls from 183–193 ms to 118–135 ms in total. Depths 13 and 16 are above the ceiling and walk on
+**Zooming from 3 to 12 costs one walk instead of six: 36 ms against 255 ms, a 219 ms saving.** A
+depth-12 request falls from 188 ms to 128 ms in total. Depths 13 and 16 are above the ceiling and walk on
 demand, unchanged. Zooming back out was already free — one walk fills every rung below it — and
 still is.
 

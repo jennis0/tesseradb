@@ -49,24 +49,24 @@ is one plus the number of steps. It shares no code with the engine's walk or wit
 
 `treeoflife`, `bioclip`, full coverage, the window above. **One session zooming in from depth 3 to
 16 and back out** — what a viewer does, and what a request-triggered fill covers. `walk` is
-`theta_occupancy_ns`; medians of three runs with the fill off and two with it on.
+`theta_occupancy_ns`; medians of three runs with the fill off and of two with it on.
 
 | depth | walk, fill off | walk, fill on | total, fill off | total, fill on |
 |---|---|---|---|---|
-| 3 *(the session's first request)* | 36 | 36 | 1 290 | 2 954 † |
-| 4 | 35 | **0** | 266 | 240 |
-| 6 | 36 | **0** | 265 | 228 |
-| 8 | 40 | **0** | 339 | 283 |
-| 10 | 39 | **0** | 400 | 369 |
-| 12 | 68 | **0** | 188 | 121 |
-| 13 | 99 | 92 | 167 | 160 |
-| 16 | 201 | 209 | 212 | 221 |
+| 3 *(the session's first request)* | 36.9 | 36.0 | 1 290 | 2 295 † |
+| 4 | 35.3 | **0** | 266 | 226 |
+| 6 | 36.2 | **0** | 265 | 234 |
+| 8 | 39.8 | **0** | 339 | 283 |
+| 10 | 39.0 | **0** | 400 | 389 |
+| 12 | 67.5 | **0** | 188 | 128 |
+| 13 | 99.2 | 108.8 | 167 | 178 |
+| 16 | 201.0 | 269.1 | 212 | 281 |
 
-† the first request also builds the row projection, which is 0.96–2.7 s here and is not what this
-row is about; the walk beside it is.
+† the first request also builds the row projection — 0.96 s to 2.7 s, run to run, and the whole of
+the difference in that row. The walk beside it is what this table is about.
 
-**Zooming from 3 to 12 costs one walk instead of six: 36 ms against 218 ms.** Depths 13 and 16 are
-above `stage::BACKGROUND_DEPTH` and walk on demand, unchanged. Zooming back out was already free —
+**Zooming from 3 to 12 costs one walk instead of six: 36 ms against 255 ms, a 219 ms saving.**
+Depths 13 and 16 are above `stage::BACKGROUND_DEPTH` and walk on demand, unchanged. Zooming back out was already free —
 one walk fills every rung below it — and still is. The runs are in `trajectory-filled.json` and
 `trajectory-unfilled.json` beside this file.
 

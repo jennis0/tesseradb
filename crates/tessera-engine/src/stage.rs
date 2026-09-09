@@ -60,8 +60,9 @@
 //! ## What it deliberately does not cover
 //!
 //! **The very first request at a session's shallowest depth still walks**, because nothing has
-//! composed that session's mask before it. At 2.33 × 10⁸ that is a measured 33 ms of an 840 ms cold
-//! request. Everything after it — the zoom in to 12, the zoom back out — is free.
+//! composed that session's mask before it. At 2.33 × 10⁸ that is a measured 36 ms of a 1.3 s cold
+//! request. Everything after it is free: a session zooming from depth 3 to 12 pays that one walk
+//! where it paid six, 36 ms against 255 ms, and the zoom back out was already free.
 //!
 //! **The rungs go stale on every publication.** [`crate::occupancy::OccupancyKey`] carries
 //! `segments_version`, `overlay_version` and the fragment's identity and watermark, so a flush
