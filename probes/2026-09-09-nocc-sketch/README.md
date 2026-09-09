@@ -21,7 +21,7 @@ Status: measurements taken 2026-09-09 on branch `probe/nocc-sketch`. **Not norma
 
 An **exact ladder** rides beside them: the same one walk and the same ancestor descent, with seventeen exact accumulators behind it instead of seventeen sketches. It is the sketch's real competitor for the fill-every-shallower-rung claim, which is orthogonal to whether the count is exact.
 
-Accuracy is against `exact_ladder`, a linear scan over every visible row that shares no code with the walk or the sketch, cross-checked at `--oracle` against a full hash-set scan.
+Accuracy is against `exact_ladder`, a linear scan over every visible row that shares no code with the walk or the sketch. `exact_ladder` is itself checked against a third route — a full `FxHashSet` scan per depth — under `--oracle`, which was run over `treeoflife-1m` at 3 × 10⁵ rows across 1, 4 and 16 segments at depths 0, 3, 6, 9, 12, 15 and 16 — the two agreed at every cell — and **not** over the sweeps below, where it would have dominated the run time.
 
 Corpora: `treeoflife-1m` (`bioclip` view, 10⁶ rows) and `geonames` (`bundle-final`, 1.35 × 10⁷ rows), read as `morton.u32` directly — no deployment is opened.
 
@@ -29,7 +29,7 @@ Corpora: `treeoflife-1m` (`bioclip` view, 10⁶ rows) and `geonames` (`bundle-fi
 
 ### What a session pays for the whole ladder
 
-The sum over all seventeen depths, whole mask, milliseconds, minimum of three timed calls.
+The sum over all seventeen depths, milliseconds, minimum of three timed calls. Whole mask except the rows marked "5% mask".
 
 | corpus, split | S | union | tiered | one sketch per depth | ladder, deepest first | ladder, refilled at every depth |
 |---|---|---|---|---|---|---|
