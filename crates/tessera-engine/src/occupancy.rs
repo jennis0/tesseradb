@@ -125,8 +125,9 @@
 //! request at depth *d* walks once and fills every rung `0..=d` that is not already memoised. A
 //! session that jumps to its deepest zoom and works outwards pays the right-hand column — one
 //! walk for the whole ladder. One that steps down a level at a time finds every shallower rung
-//! already filled and pays the left — one walk per level, with only that level's sketch to
-//! update. Nothing walks eagerly: a session that only ever looks at depth 6 walks at depth 6.
+//! already filled and pays the left — one walk per level, with only that level's sketch to update.
+//! [`crate::stage`] then takes the whole of that off a session's first paint by walking to depth 12
+//! at authorise; above 12 a request still walks for itself.
 //!
 //! **The ladder is not free, and where the walk is the whole cost it does not pay.** Filling every
 //! rung costs `Σ_{d' <= d} N_occ(d')` sketch updates, which on these corpora is three to five
@@ -136,28 +137,35 @@
 //! over 10⁶ rows at 512 segments, 1286 against 1094 over 1.35 × 10⁷. That is why the fill is
 //! against the memo rather than unconditional.
 //!
-//! **Accuracy.** Over 272 cells — both corpora, 1 to 512 flush segments, every depth 0 to 16 —
-//! the estimate's absolute relative error has a **median of 0.47% and a maximum of 2.04%**
-//! (`treeoflife-1m`, one segment, depth 3: 49 occupied tiles read as 48). θ scales linearly with
-//! `N_occ`, so 2.04% is 2.04% of θ: a `m_target` of 16 marks per occupied tile becomes 15.7. At
-//! precision 12 — 4 kB a rung instead of 16 — the same cells give a median of 0.96% and a maximum
-//! of 4.08%. **No inversion appeared at any cell**, before the running maximum or after it, which
-//! is a reason to keep the maximum rather than to drop it: it costs nothing and the property it
-//! guarantees is not one to leave to a measurement.
+//! **Accuracy, and why the register count is 2¹⁴.** Over 9,792 cells — both corpora, three split
+//! shapes, 1 to 512 segments, a 5% mask, every depth 0 to 16 — the estimate's absolute relative
+//! error has a **median of 0.323%, a p90 of 1.562% and a maximum of 2.041%** (`treeoflife-1m`, one
+//! segment, depth 3: 49 occupied tiles read as 48). θ scales linearly with `N_occ`, so 2.041% is
+//! 2.041% of θ: a `m_target` of 16 marks per occupied tile becomes 15.67. Precision 12 — 4 kB a
+//! rung instead of 16, and 68 kB a ladder instead of 272 — was swept beside it and **declined**: it
+//! is 9% faster (a median 0.913× at 45 of 56 multi-segment cells, the cache argument holding), but
+//! it doubles the error to 4.082% and takes the raw inversions from 16 to 96, and with the ladder
+//! staged off the request path (see [`crate::stage`]) a 9% saving on the walk buys nothing a
+//! viewer can see.
+//!
+//! **Sixteen cells invert before the running maximum and none after it.** They are the one cell at
+//! every segment count — `treeoflife-1m` under a 5% mask, depths 14 to 15, where the raw estimate
+//! falls 50,352 → 50,187, a 0.33% step under a 0.81% standard error. The maximum is what §7.2's
+//! nesting proof rests on now, not a belt-and-braces guard against a miscount.
 //!
 //! **Memory.** The register plane is `(d + 1) · 2^SKETCH_PRECISION` bytes and nothing else grows:
-//! a measured peak of **279 kB at depth 16, at every segment count and on both corpora**. Against
-//! it, over the same sweep, the union reached 3.35 MB and 22.1 MB, the tiered arm 8.19 MB and
-//! 92.6 MB, and an exact ladder — the same one walk, with seventeen exact accumulators behind it —
-//! 23.6 MB and 263 MB. That last is the trade in one line: the exact ladder is available and is
-//! faster at one segment (12.5 ms and 129 ms), and it costs three orders of magnitude more memory
-//! at a depth the client chooses on every request.
+//! a measured peak of **278,528 bytes at depth 16, at every segment count and on both corpora**,
+//! which differ by 13.5× in rows. Against it, over the same sweep, the union reached 3.35 MB and
+//! 22.1 MB, the tiered arm 8.19 MB and 92.6 MB, and a ladder of seventeen exact accumulators behind
+//! the same walk 23.6 MB and 263 MB — all three of which grow with the data. The counted route's
+//! whole state is two `[u64; 17]` arrays, 272 bytes.
 //!
-//! **Before the sketch**, measured end to end through the response trailer's `theta_occupancy_ns`
-//! against `treeoflife-1m` with the exact walk (1.05 × 10⁶ rows, 744,241 of them visible, full
-//! extent, 2026-09-09): 1.55–2.21 ms for the first request at a depth and 1–3 µs for every request
-//! after it, the memo being the whole of the difference. That measurement has not been retaken on
-//! this arm.
+//! **The walk, at the scale that matters**, measured end to end through the response trailer's
+//! `theta_occupancy_ns` against `treeoflife` (2.33 × 10⁸ rows, one segment, so the counted route;
+//! full coverage, 2026-09-09): **33 ms at depth 3, 63 ms at 12 and 191 ms at 16** for the first
+//! request at a depth, against a warm request's 216–313 ms in total. Staged, a first request at
+//! depth 3 to 12 pays none of it. `probes/2026-09-09-nocc-stage` carries the breakdown and the
+//! projection to 3.65 × 10⁹.
 
 use std::ops::Range;
 
@@ -348,8 +356,10 @@ impl OccupancyLadder {
 /// the first request at each new depth, so a session that reaches depth *d* by any route other than
 /// stepping down through every level pays one walk rather than one per level.
 ///
-/// **It is filled lazily and never eagerly.** A session that only ever looks at depth 6 walks at
-/// depth 6; nothing here walks at 16 on its behalf.
+/// **Nothing here walks eagerly, and one thing outside here does.** A request at depth 6 walks at
+/// depth 6 and this function walks at 16 on nobody's behalf. [`crate::stage`] fills rungs `0..=6`
+/// and then `0..=12` in the background at authorise, so that the walk is not on a first paint;
+/// above 12 the ladder is still extended on demand, by this function, from a request.
 ///
 /// # The emissions ascend, so a shallower tile changes only occasionally
 ///

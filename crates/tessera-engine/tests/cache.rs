@@ -52,6 +52,14 @@ fn open_with(config: EngineConfig, tmp: &TempDir, bundle_root: &Path) -> Engine 
     engine
         .start_write_executor(8)
         .expect("the executor starts once");
+    // **The authorise-time occupancy stage is off for every test in this file** (`crate::stage`).
+    // These tests drive the cache by *requests* — a round-robin under a bound that holds one entry,
+    // so every read is a miss and every miss a rebuild — and a background task that builds each
+    // session's projection at authorise turns those misses into hits, leaving the bound never
+    // enforced and nothing evicted. What the stage does to a bound this tight is worth saying
+    // rather than hiding: it builds entries a biting bound then evicts before their session ever
+    // reads them, which is wasted pool time and is why `crate::stage` records the pressure it adds.
+    engine.set_occupancy_stage_for_test(false);
     engine
 }
 
