@@ -1,0 +1,311 @@
+{
+ "sampled_rows": 81681686,
+ "scale": 44.74061221018381,
+ "seconds": 70.7,
+ "columns": {
+  "kingdom": {
+   "distinct_in_sample": 9,
+   "null_fraction": 0.0,
+   "top": [
+    [
+     "Animalia",
+     2809414577
+    ],
+    [
+     "Plantae",
+     518244694
+    ],
+    [
+     "Bacteria",
+     134181480
+    ],
+    [
+     "Chromista",
+     80594083
+    ],
+    [
+     "Fungi",
+     52383069
+    ],
+    [
+     "incertae sedis",
+     31558104
+    ],
+    [
+     "Archaea",
+     24077384
+    ],
+    [
+     "Protozoa",
+     4017080
+    ]
+   ]
+  },
+  "phylum": {
+   "distinct_in_sample": 201,
+   "null_fraction": 0.013238047020723842,
+   "top": [
+    [
+     "Chordata",
+     2313453660
+    ],
+    [
+     "Tracheophyta",
+     495448815
+    ],
+    [
+     "Arthropoda",
+     376693852
+    ],
+    [
+     "Mollusca",
+     75696283
+    ],
+    [
+     "Proteobacteria",
+     52685157
+    ],
+    [
+     "None",
+     48378292
+    ],
+    [
+     "Ochrophyta",
+     32569689
+    ],
+    [
+     "Basidiomycota",
+     27480041
+    ]
+   ]
+  },
+  "class": {
+   "distinct_in_sample": 557,
+   "null_fraction": 0.03957327717255987,
+   "top": [
+    [
+     "Aves",
+     2138854540
+    ],
+    [
+     "Magnoliopsida",
+     372509666
+    ],
+    [
+     "Insecta",
+     328070739
+    ],
+    [
+     "None",
+     144620091
+    ],
+    [
+     "Liliopsida",
+     90180117
+    ],
+    [
+     "Mammalia",
+     70904295
+    ],
+    [
+     "Gastropoda",
+     58050139
+    ],
+    [
+     "Alphaproteobacteria",
+     33660017
+    ]
+   ]
+  },
+  "family": {
+   "distinct_in_sample": 11502,
+   "null_fraction": 0.03683426661883549,
+   "top": [
+    [
+     "Anatidae",
+     177354694
+    ],
+    [
+     "None",
+     134610408
+    ],
+    [
+     "Corvidae",
+     112839447
+    ],
+    [
+     "Passerellidae",
+     102408979
+    ],
+    [
+     "Fringillidae",
+     96584422
+    ],
+    [
+     "Picidae",
+     89550527
+    ],
+    [
+     "Columbidae",
+     87922953
+    ],
+    [
+     "Paridae",
+     75872427
+    ]
+   ]
+  },
+  "species": {
+   "distinct_in_sample": 463351,
+   "null_fraction": 0.1101254325235157,
+   "top": [
+    [
+     "None",
+     402452141
+    ],
+    [
+     "Zenaida macroura",
+     28173879
+    ],
+    [
+     "Cardinalis cardinalis",
+     28118579
+    ],
+    [
+     "Corvus brachyrhynchos",
+     28000509
+    ],
+    [
+     "Turdus migratorius",
+     27361658
+    ],
+    [
+     "Sturnus vulgaris",
+     26838461
+    ],
+    [
+     "Anas platyrhynchos",
+     26425371
+    ],
+    [
+     "Passer domesticus",
+     25754799
+    ]
+   ]
+  },
+  "basisofrecord": {
+   "distinct_in_sample": 9,
+   "null_fraction": 0.0,
+   "top": [
+    [
+     "HUMAN_OBSERVATION",
+     2827833168
+    ],
+    [
+     "PRESERVED_SPECIMEN",
+     380026133
+    ],
+    [
+     "MATERIAL_SAMPLE",
+     269655920
+    ],
+    [
+     "OBSERVATION",
+     104862644
+    ],
+    [
+     "MACHINE_OBSERVATION",
+     41854976
+    ],
+    [
+     "OCCURRENCE",
+     22391334
+    ],
+    [
+     "MATERIAL_CITATION",
+     3114483
+    ],
+    [
+     "FOSSIL_SPECIMEN",
+     2447579
+    ]
+   ]
+  },
+  "countrycode": {
+   "distinct_in_sample": 251,
+   "null_fraction": 0.01566930192895377,
+   "top": [
+    [
+     "US",
+     1248070964
+    ],
+    [
+     "AU",
+     320302024
+    ],
+    [
+     "FR",
+     206302363
+    ],
+    [
+     "NL",
+     187801091
+    ],
+    [
+     "CA",
+     187440481
+    ],
+    [
+     "SE",
+     185587996
+    ],
+    [
+     "GB",
+     169402364
+    ],
+    [
+     "NO",
+     83829590
+    ]
+   ]
+  },
+  "year": {
+   "distinct_in_sample": 377,
+   "null_fraction": 0.03664034309967601,
+   "top": [
+    [
+     "2023",
+     321009552
+    ],
+    [
+     "2024",
+     301281000
+    ],
+    [
+     "2022",
+     255983591
+    ],
+    [
+     "2021",
+     222443031
+    ],
+    [
+     "2020",
+     204570230
+    ],
+    [
+     "2019",
+     182943871
+    ],
+    [
+     "2018",
+     165302245
+    ],
+    [
+     "2017",
+     159400421
+    ]
+   ]
+  }
+ }
+}
