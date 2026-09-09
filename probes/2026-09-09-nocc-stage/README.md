@@ -1,8 +1,8 @@
-# Staging `N_occ`'s ladder off first paint
+# `N_occ`'s ladder, off the request path
 
 Status: measurements taken 2026-09-09 on `perf/nocc-sketch-land`, against `data/ladder/treeoflife`
 (2.33 × 10⁸ rows, one segment per view). **Not normative.** [Decision
-0138](../../docs/decisions/0138-n-occ-is-a-sketch-above-one-segment-and-is-staged-off-first-paint.md)
+0138](../../docs/decisions/0138-n-occ-is-a-sketch-above-one-segment-and-its-ladder-is-filled-in-the-background.md)
 is what this supports; re-run a figure before relying on it. The 3.65 × 10⁹ section is **arithmetic
 over measured scaling, not a measurement** — it says so at every number, and
 [Re-running against GBIF](#re-running-against-gbif) is how to replace it with one.
@@ -10,8 +10,15 @@ over measured scaling, not a measurement** — it says so at every number, and
 ## What was asked
 
 θ's second anchor `N_occ(d)` was memoised per depth and therefore paid on the first request at each
-new depth — a measured 33–213 ms at 2.33 × 10⁸ rows. The question was what a first paint actually
-spends, and what moving the walk to authorise buys.
+new depth — a measured 33–213 ms at 2.33 × 10⁸ rows. Two questions: what a first paint actually
+spends, and what moving the walk off a request buys.
+
+**Two placements were measured.** The one that landed fills the ladder from a *request*, which
+covers every depth after a session's first. The one that did not fills it at *authorise*, which
+covers the first as well — and, because `N_occ` needs the composed mask and so the row projection,
+takes the projection build off the first request too. It is not landed for the three reasons under
+[Filling at authorise](#filling-at-authorise-measured-and-not-landed), each of which is a ruling
+rather than an implementation choice.
 
 ## Method
 
@@ -38,11 +45,40 @@ the same box within minutes of each other, so the difference is sound.
 the column is in Morton order, so the tile index is non-decreasing along it and the distinct count
 is one plus the number of steps. It shares no code with the engine's walk or with the sketch.
 
-## First paint, before and after
+## What landed: one walk per session, not one per depth
 
-Milliseconds, medians. *Before* is the same binary with the authorise-time stage off (3 reps);
-*after* is with it on (5 reps). "Gap" is the delay between authorise returning and the first
-viewport.
+`treeoflife`, `bioclip`, full coverage, the window above. **One session zooming in from depth 3 to
+16 and back out** — what a viewer does, and what a request-triggered fill covers. `walk` is
+`theta_occupancy_ns`; medians of three runs with the fill off and two with it on.
+
+| depth | walk, fill off | walk, fill on | total, fill off | total, fill on |
+|---|---|---|---|---|
+| 3 *(the session's first request)* | 36 | 36 | 1 290 | 2 954 † |
+| 4 | 35 | **0** | 266 | 240 |
+| 6 | 36 | **0** | 265 | 228 |
+| 8 | 40 | **0** | 339 | 283 |
+| 10 | 39 | **0** | 400 | 369 |
+| 12 | 68 | **0** | 188 | 121 |
+| 13 | 99 | 92 | 167 | 160 |
+| 16 | 201 | 209 | 212 | 221 |
+
+† the first request also builds the row projection, which is 0.96–2.7 s here and is not what this
+row is about; the walk beside it is.
+
+**Zooming from 3 to 12 costs one walk instead of six: 36 ms against 218 ms.** Depths 13 and 16 are
+above `stage::BACKGROUND_DEPTH` and walk on demand, unchanged. Zooming back out was already free —
+one walk fills every rung below it — and still is. The runs are in `trajectory-filled.json` and
+`trajectory-unfilled.json` beside this file.
+
+## Filling at authorise: measured, and not landed
+
+Filling the ladder at authorise takes the walk off a session's **first** request as well. Because
+`N_occ` must be counted over the composed mask, doing so means building the row projection at
+authorise — which takes that off the first request too.
+
+Milliseconds, medians, one fresh session per row. *Before* is the same binary with the
+authorise-time stage off (3 reps); *after* is with it on (5 reps). "Gap" is the delay between
+authorise returning and the first viewport.
 
 | depth | before, 1 s gap | after, 1 s gap | before: projection wait | before: walk |
 |---|---|---|---|---|
@@ -57,18 +93,9 @@ viewport.
 
 **At depths 3 to 12 the cold first request pays neither.** Its `row_projection_ns` and
 `theta_occupancy_ns` are both zero and its total is what the *second* request at the same depth
-costs — 285 ms against a warm 313 ms at depth 3, inside the run-to-run spread. Depths 13 and 16 are
-above the staged ceiling and still pay the walk lazily, which is the design.
+costs — 285 ms against a warm 313 ms at depth 3, inside the run-to-run spread.
 
-**The walk was never the largest term at this scale.** Before staging, a cold first request at
-depth 3 spent 592 ms waiting for the row projection, 33 ms on the walk and 216 ms on the tile
-sweep. The walk is 4% of a cold request at depth 3 and 24% at depth 16 — but it is 13% of what the
-same request costs *warm* at depth 3 and 95% at depth 16, which is the comparison that matters once
-the projection is off the path.
-
-### How long a gap the stage needs
-
-At 2.33 × 10⁸ rows, `treeoflife`'s two views:
+**The gap has to be about a second at this scale**, for `treeoflife`'s two views:
 
 | gap | projection wait | walk |
 |---|---|---|
@@ -77,12 +104,41 @@ At 2.33 × 10⁸ rows, `treeoflife`'s two views:
 | 1 s | **0** | **0** (to depth 12) |
 | 2, 3, 5 s | 0 | 0 (to depth 12) |
 
-**At a zero gap the stage buys nothing on the first request.** The request arrives while the stage
-is still building the projection and waits for it through the single flight — the same wall time it
-would have spent building it itself — and then pays its own walk because the stage has not reached
-the ladder. Everything is bought on the second request. A browser leaves a gap of roughly this
-order; a load generator that authorises and immediately requests does not, and will measure the
-zero-gap row.
+At a zero gap it buys nothing on the first request: the request arrives while the projection is
+still building and waits for it through the single flight — the same wall time it would have spent
+building it itself. A browser leaves a gap of roughly this order; a load generator that authorises
+and immediately requests does not, and will measure the zero-gap row.
+
+### Why it is not landed
+
+**Decision 0044's rung-2 stale serve reaches a session's first request.** The stage leaves a
+resident row-projection entry at the generation it ran under, so after one flush a session's first
+ever request is served from it rather than built at the live generation, and can miss the items of
+the flush that just happened. That is sound and self-corrects within one refresh round — 0044
+accepts exactly this for established sessions — but extending it to *establishment* is a freshness
+change. Seven ingest and join tests assert the freshness it removes; `views_write`'s
+`a_known_external_id_joins_a_second_view_and_is_placed_in_each` is the clearest: it authorises,
+ingests into a second view, flushes, and reads, and under the stage it reads the pre-flush row
+space.
+
+**`Engine::authorise` can be refused `FragmentBuilding` by background work.** The stage brings a
+fragment forward when the generation has moved past the session's own, and a concurrent authorise
+on the same canonical key is refused rather than blocked. That refusal already exists; it used to
+mean *another caller wants this*.
+
+**A session that authorises and never views pays a full `Permutation::project` per visible view**,
+and under a row-projection bound that holds fewer entries than there are sessions the stage builds
+entries the bound evicts before their session reads them (`cache.rs`'s
+`an_undersized_bound_does_not_livelock` stops evicting at all with the stage on, because its
+round-robin's misses become hits).
+
+### The walk was never the largest term in a cold first paint
+
+Before any of this, a cold first request at depth 3 spent 592 ms waiting for the row projection,
+33 ms on the walk and 216 ms on the tile sweep. The walk is 4% of a cold request at depth 3 and 24%
+at depth 16 — but it is 13% of what the same request costs *warm* at depth 3 and 95% at depth 16,
+which is the comparison that matters for every request after the first, and the one the landed fill
+addresses.
 
 ## The ladder, exactly
 
@@ -119,8 +175,9 @@ rather than re-measured.
 | per-cell time ratio 2¹²/2¹⁴ | — | median **0.913**, 45 of 56 below 1.0 |
 
 **Recommendation: keep 2¹⁴.** 2¹² is 9% faster and the cache argument behind that holds — about
-1.5 rungs are touched per emitted tile, and 68 kB sits closer than 272 kB. But the walk is no
-longer on a request's critical path, so 9% of it buys nothing a viewer can see, and what 2¹² spends
+1.5 rungs are touched per emitted tile, and 68 kB sits closer than 272 kB. But the walk is now paid
+once per session rather than once per depth, so 9% of it buys nothing a viewer can see, and what 2¹²
+spends
 to get it is θ's accuracy: double the error, and six times as many rungs where the running maximum
 has to hold a fallen estimate up rather than serve the estimator's own answer. Neither error is
 visible — θ is linear in `N_occ`, so 2.041% moves the mean occupied tile from 16 marks to 15.67 and
@@ -144,10 +201,10 @@ emission term, which the grid bounds at depth 12 and does not usefully bound at 
 per emitted tile implied by the depth-12 and depth-16 measurements, `4^12` emissions is 0.27 s and
 `4^16` is 69 s.
 
-**So the staged fill to depth 12 is projected at ≈3 s of pool time per view per session**, against
-~0.1 s today. That is the number to check first when GBIF lands: it is what a session that
-authorises and never views would waste, and it is why the cap to move if it proves too much is
-12 → 10, not 12 → 16 — depth 10 is where the walk stops touching every page.
+**So the background fill to depth 12 is projected at ≈3 s of pool time per session per view**,
+against ~0.1 s today. That is the number to check first when GBIF lands, and it is why the cap to
+move if it proves too much is 12 → 10, not 12 → 16 — depth 10 is where the walk stops touching every
+page.
 
 ### Risk 1 — the sketch's memory must be flat, and is
 
@@ -179,9 +236,10 @@ Residency is the real risk, not the pattern: 14.6 GB of Morton column inside a b
 larger still, on a 47 GB box. The 4.89 GB/s above is a page-cache rate; a column read from disk at,
 say, 500 MB/s makes the same pass 29 s.
 
-**Shallower rungs probe the column far less**, which is what makes the two-stage split worth having:
-the depth-6 stage touches at most `4^6` boundaries — a few megabytes of cache lines however large
-the corpus — and lands the rungs first paint reads before the depth-12 stage starts its pass.
+**Shallower rungs probe the column far less.** A walk at depth 6 touches at most `4^6` boundaries —
+a few megabytes of cache lines however large the corpus — where a walk at 12 touches every page.
+That is the lever if the fill proves too expensive at 3.65 × 10⁹: the ceiling, not the register
+count.
 
 ### Risk 3 — row ids are `u32` and 3.65 × 10⁹ is 85% of that space
 
@@ -224,9 +282,13 @@ reference/.venv/bin/python probes/2026-09-09-nocc-stage/first_paint.py \
   --reps 5 --settle 1 --json after.json
 ```
 
+Add `--trajectory` for one session's zoom path — the landed fill's own case — instead of a fresh
+session per depth.
+
 For the *before* column, set `crate::stage::StageDeps::enabled` to `false` at construction and
 rebuild; there is deliberately no configuration key for it (`Engine::set_occupancy_stage_for_test`
-is the in-process hook and is `fault-injection`-gated).
+is the in-process hook and is `fault-injection`-gated). `Engine::occupancy_walks` counts every walk
+a process has made and is the cheaper check where an embedder is available.
 
 ## What was not measured
 
@@ -235,6 +297,6 @@ is the in-process hook and is `fault-injection`-gated).
   the counted route. The sketch's cost at that scale would need the corpus re-dealt into segments,
   which `occupancy_sketch` does by rebuilding the fixture in memory — 9 GB of `TilerItem` at this
   row count, which the box could not spare beside another session's build.
-* **A multi-view or multi-session stage under load.** One session at a time, two views.
+* **A multi-view or multi-session fill under load.** One session at a time.
 * **The refresh path.** The rungs go stale on every publication and nothing warms them there; that
   is decision 0138's stated non-coverage, not a measurement gap.

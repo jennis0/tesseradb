@@ -3132,6 +3132,19 @@ impl Engine {
             ),
         };
         probe.lap(|t| &mut t.theta_occupancy_ns);
+        // **The rest of the ladder, on the pool, after this request has its own rung** — see
+        // `crate::stage`. This request walked at `zoom` and kept every rung below it; the fill
+        // takes the ladder the rest of the way to `stage::BACKGROUND_DEPTH`, so a session's zoom
+        // to depth 12 and its zoom back out cost nothing. Spawned here rather than at authorise
+        // because `N_occ` is counted over the composed mask, which needs the row projection this
+        // request has just resolved and which no session has before its first request.
+        //
+        // **Only where the anchor was taken.** A filtered request saturates θ and consults neither
+        // anchor (above), so it has no reason to warm one; the next unfiltered request spawns the
+        // fill for itself.
+        if req.filter.is_none() && zoom < crate::stage::BACKGROUND_DEPTH {
+            self.spawn_ladder_fill(&mask_identity, view, session, &generation, &geometry);
+        }
         let params = SelectParams {
             k_min: self.config.k_min,
             // The client may ask for less than the overplot ceiling; it may not ask for more.
@@ -5013,6 +5026,45 @@ impl Engine {
         }
     }
 
+    /// Take this session's ladder the rest of the way to [`crate::stage::BACKGROUND_DEPTH`], on
+    /// the pool — see [`crate::stage`] for what that buys and where it stops.
+    ///
+    /// **The memo is peeked here, on the request thread, before anything is spawned.** In the
+    /// steady state — every request after the fill has run — this is one hash lookup and nothing
+    /// else: no pool task, no lock, no clone of a term set. The fill peeks the same key again for
+    /// itself, because between this peek and its own the memo can only have gained entries.
+    fn spawn_ladder_fill(
+        &self,
+        identity: &crate::histogram::MaskIdentity,
+        view: &str,
+        session: &Session,
+        generation: &Arc<crate::Generation>,
+        geometry: &Arc<crate::cache::SessionGeometry>,
+    ) {
+        let deepest = crate::occupancy::OccupancyKey {
+            token_id: identity.token_id,
+            view: view.to_string(),
+            depth: crate::stage::BACKGROUND_DEPTH,
+            segments_version: identity.segments_version,
+            overlay_version: identity.overlay_version,
+            fragment_identity: identity.fragment_identity,
+            fragment_watermark: identity.fragment_watermark,
+        };
+        if matches!(
+            self.occupancy.peek(&deepest),
+            crate::single_flight::Peek::Ready(_)
+        ) {
+            return;
+        }
+        self.stage.spawn(session.token_id, || crate::stage::LadderTask {
+            token_id: session.token_id,
+            view: view.to_string(),
+            satisfied: session.satisfied.clone(),
+            generation: Arc::clone(generation),
+            geometry: Arc::clone(geometry),
+        });
+    }
+
     /// `N_occ(depth)` for this session and view — θ's second anchor (§7.2), memoised.
     ///
     /// **Evaluated per requested depth, never for all seventeen.** A session touches a handful of
@@ -5064,6 +5116,7 @@ impl Engine {
         // was one per depth actually visited.** The value is a `u64` and the cost is the cache's
         // per-entry floor over a key holding a view name, so the byte bound absorbs it; what it
         // buys is that the deepest walk a session makes is the only one it makes.
+        self.occupancy_walks.fetch_add(1, Ordering::Relaxed);
         let ladder = crate::occupancy::occupied_tiles_ladder(mask, segments, depth);
         for rung in 0..depth {
             let mut rung_key = key.clone();

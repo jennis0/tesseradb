@@ -5,7 +5,7 @@
 //! [`crate::select::Threshold::at_depth`] turns the pair into a cut point.
 //!
 //! **One segment counts `N_occ(d)`; two or more estimate it with a [`TileSketch`]**
-//! ([decision 0138](../../../docs/decisions/0138-n-occ-is-a-sketch-above-one-segment-and-is-staged-off-first-paint.md)).
+//! ([decision 0138](../../../docs/decisions/0138-n-occ-is-a-sketch-above-one-segment-and-its-ladder-is-filled-in-the-background.md)).
 //! [`occupied_tiles_ladder`] owns that predicate and gives the measurement behind it. A freshly
 //! built bundle has one segment per view and so does every conformance fixture; a live deployment
 //! accumulates one per flush and so is estimating within a publication or two of opening.

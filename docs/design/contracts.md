@@ -2,7 +2,7 @@
 
 **Status:** Draft r92 — **the second solved-for quantity is an estimate above one segment**
 (r92, 2026-09-09, **owner ruling**;
-[decision 0138](../decisions/0138-n-occ-is-a-sketch-above-one-segment-and-is-staged-off-first-paint.md),
+[decision 0138](../decisions/0138-n-occ-is-a-sketch-above-one-segment-and-its-ladder-is-filled-in-the-background.md),
 design §7.2 r63). r91's argument is unchanged and is strengthened at one point: the engine counts
 `N_occ(d)` where a view has one segment and estimates it with a HyperLogLog above that, so what a
 client recovers by dividing out `theta_target_marks` is an *estimate* of a number §7.1 already

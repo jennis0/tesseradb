@@ -50,6 +50,9 @@ ap.add_argument("--settle", type=float, default=0.0,
                 help="seconds between authorise and the first viewport")
 ap.add_argument("--depths", default="3,4,6,8,10,12,13,16")
 ap.add_argument("--json", default=None)
+ap.add_argument("--trajectory", action="store_true",
+                help="one session walking a zoom trajectory instead of a fresh session per depth: "
+                     "what a viewer actually does, and what the background ladder fill covers")
 ap.add_argument("--window-tiles", type=int, default=32,
                 help="the window's side in tiles; 32x32 = 1,024, the order a budgeted client asks "
                      "for (B / m_target, clients/ts/core/src/budget.ts)")
@@ -112,6 +115,30 @@ def window(depth):
 
 for depth in DEPTHS:  # warm the page cache at every depth this run will measure
     viewport(warm, depth, window(depth))
+
+if args.trajectory:
+    # **One session, every depth in order** — a viewer zooming in and back out. The first request
+    # walks for itself and the background fill (`crates/tessera-engine/src/stage.rs`) takes the
+    # ladder to its ceiling behind it, so every later request inside that ceiling should show a
+    # zero walk. `--settle` is applied between requests, as the fill's head start.
+    print(f"{'depth':>5} {'N_occ':>9} {'proj_ms':>8} {'walk_ms':>8} {'sweep_ms':>9} {'total_ms':>9}",
+          flush=True)
+    traj = []
+    s = authorise()
+    meta(s["token"])
+    for depth in DEPTHS + list(reversed(DEPTHS[:-1])):
+        _t, st = viewport(s["token"], depth, window(depth))
+        sweep = st["count_ns"] + st["select_ns"] + st["gather_ns"]
+        traj.append({"depth": depth, **st, "sweep_ns": sweep})
+        print(f"{depth:>5} {st['tiles_nonempty']:>9} {st['row_projection_ns']/1e6:>8.1f} "
+              f"{st['theta_occupancy_ns']/1e6:>8.1f} {sweep/1e6:>9.1f} "
+              f"{st['total_ns']/1e6:>9.1f}", flush=True)
+        if args.settle:
+            time.sleep(args.settle)
+    if args.json:
+        with open(args.json, "w") as f:
+            json.dump({"settle": args.settle, "view": args.view, "trajectory": traj}, f, indent=1)
+    sys.exit(0)
 
 rows = []
 print(f"{'depth':>5} {'rep':>3} {'N_occ':>9} {'tiles':>6} {'proj_ms':>8} {'built':>5} "

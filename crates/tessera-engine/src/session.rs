@@ -942,10 +942,18 @@ pub struct Engine {
     /// The property it makes testable — that a flush does not cost every session a full rebuild —
     /// is a correctness-shaped one for a deployment's latency, and a test that only runs under a
     /// feature flag is a test that does not run.
-    pub(crate) full_projection_builds: Arc<AtomicU64>,
+    pub(crate) full_projection_builds: AtomicU64,
+    /// Walks of the mask and the Morton column that resolved a rung of `N_occ`'s ladder — the
+    /// observable behind [`Engine::occupancy_walks`].
+    ///
+    /// **Unconditional, not `bench-timing`-gated**, on [`Self::full_projection_builds`]' argument:
+    /// the claim this change makes is that a session pays one walk per `(view, generation)` and not
+    /// one per depth it visits, and the way that claim is found to be wrong in a deployment is a
+    /// counter that climbs with requests rather than with publications.
+    pub(crate) occupancy_walks: Arc<AtomicU64>,
     /// **The occupancy stage** — see [`crate::stage`]. θ's `N_occ(d)` anchor is memoised per depth
-    /// and was therefore paid on the first request at each new depth; this is what pays it at
-    /// authorise instead, on the pool, cancellably.
+    /// and was therefore paid on the first request at each new depth; this is what fills the rest
+    /// of the ladder on the pool once one request has, cancellably.
     pub(crate) stage: crate::stage::StageDeps,
 }
 
@@ -1790,11 +1798,9 @@ impl Engine {
         let fold_publication_paused = Arc::new(AtomicBool::new(false));
         let merge_publication_paused = Arc::new(AtomicBool::new(false));
         let occupancy = Arc::new(crate::single_flight::SingleFlightCache::new(u64::MAX));
-        let full_projection_builds = Arc::new(AtomicU64::new(0));
+        let occupancy_walks = Arc::new(AtomicU64::new(0));
         let stage = crate::stage::StageDeps {
-            full_projection_builds: Arc::clone(&full_projection_builds),
-            generation: Arc::clone(&generation),
-            cache: Arc::clone(&row_projection_cache),
+            walks: Arc::clone(&occupancy_walks),
             occupancy: Arc::clone(&occupancy),
             pool: Arc::clone(&pool),
             enabled: Arc::new(AtomicBool::new(true)),
@@ -1841,7 +1847,8 @@ impl Engine {
             fold_paused: Arc::clone(&fold_paused),
             fold_publication_paused: Arc::clone(&fold_publication_paused),
             merge_publication_paused: Arc::clone(&merge_publication_paused),
-            full_projection_builds: Arc::clone(&full_projection_builds),
+            full_projection_builds: AtomicU64::new(0),
+            occupancy_walks: Arc::clone(&occupancy_walks),
             stage,
         };
 
@@ -1915,24 +1922,24 @@ impl Engine {
         self.refresh_enabled.store(enabled, Ordering::SeqCst);
     }
 
-    /// Turn the authorise-time occupancy stage off, so a request computes `N_occ` itself.
+    /// Turn the background occupancy fill off, so a request computes every rung itself.
     ///
     /// **A test hook, gated so it cannot exist in a shipped build**, on
     /// [`Self::set_background_refresh_for_test`]'s argument exactly. A test asserting what a
     /// *request* computed — that the anchor is the composed figure, that a suppression moves it —
     /// would otherwise be answered from a rung a background task filled, and would go on passing
-    /// with the request path removed. It must be set **before** the session authorises, which is
-    /// when the stage starts.
+    /// with the request path removed. It must be set **before** the viewport that would spawn the
+    /// fill, which is any request that takes θ's anchor below `stage::BACKGROUND_DEPTH`.
     #[cfg(feature = "fault-injection")]
     #[doc(hidden)]
     pub fn set_occupancy_stage_for_test(&self, enabled: bool) {
         self.stage.enabled.store(enabled, Ordering::SeqCst);
     }
 
-    /// How many authorise-time occupancy stages are still running — see [`crate::stage`].
+    /// How many background occupancy fills are still running — see [`crate::stage`].
     ///
     /// **A test hook**, on [`Self::set_background_refresh_for_test`]'s argument: a test that wants
-    /// the staged rungs in place polls this rather than sleeping on a guess about the pool.
+    /// the filled rungs in place polls this rather than sleeping on a guess about the pool.
     #[cfg(feature = "fault-injection")]
     #[doc(hidden)]
     pub fn occupancy_stages_in_flight(&self) -> usize {
@@ -2238,20 +2245,6 @@ impl Engine {
             .as_secs();
         let expires_at = now + self.config.token_max_lifetime_secs;
 
-        // **The occupancy stage starts here, and this call does not wait for it** — see
-        // `crate::stage`. θ's `N_occ(d)` anchor is a function of the composed mask, the view and
-        // the depth, and of nothing a request supplies, so the first request at each depth is
-        // where it happened to be paid rather than where it has to be.
-        self.stage.spawn(crate::stage::SessionStage {
-            token_id,
-            satisfied: satisfied.clone(),
-            satisfied_sorted: Arc::clone(&satisfied_sorted),
-            auth_data_hash,
-            segments_version_at_authorise: generation.segments_version,
-            fragment: Arc::clone(&fragment),
-            visible_views: Arc::clone(&visible_views),
-        });
-
         Ok(Session {
             token,
             token_id,
@@ -2434,9 +2427,9 @@ impl Engine {
     /// `revoke_prunes_the_token` asserts on. See `RowProjectionCache::prune_token` for why this is
     /// memory hygiene rather than a disclosure control, and for the cost of the pass.
     pub fn prune_token(&self, token_id: u64) -> usize {
-        // **First, and before anything is dropped.** A stage still running for this token would
-        // otherwise re-publish the very projection and occupancy entries this call is removing —
-        // the residue would be bounded and benign, but it would also be work done on behalf of a
+        // **First, and before anything is dropped.** A ladder fill still running for this token
+        // would otherwise re-publish the very occupancy entries this call is removing — the
+        // residue would be bounded and benign, but it would also be work done on behalf of a
         // session that no longer exists.
         self.stage.cancel(token_id);
         // **Both per-session caches**, and the second one is not optional hygiene at the campaign's
@@ -2895,6 +2888,19 @@ impl Engine {
     /// which is the failure write-path §4.6 names. See `RowProjectionCache::get_or_derive`.
     pub fn full_projection_builds(&self) -> u64 {
         self.full_projection_builds.load(Ordering::Relaxed)
+    }
+
+    /// How many walks of the mask and the Morton column this engine has made to resolve a rung of
+    /// θ's occupied-tile anchor — see [`crate::occupancy`] and [`crate::stage`].
+    ///
+    /// **The number to watch is walks per session per publication**, and it should be one per view.
+    /// One walk fills every rung at or below the depth it ran at, and the background fill takes it
+    /// to `stage::BACKGROUND_DEPTH`, so a session that pans and zooms inside that range should move
+    /// this only when the geometry or the overlay does. A deployment where it climbs with request
+    /// volume is one where the memo is missing — the key carries the fragment's watermark, so a
+    /// flush per request would do it.
+    pub fn occupancy_walks(&self) -> u64 {
+        self.occupancy_walks.load(Ordering::Relaxed)
     }
 
     /// Whether the external-id sidecar has opened any extent (or its locator) yet — exposed for

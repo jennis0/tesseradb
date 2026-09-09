@@ -884,14 +884,6 @@ fn an_unknown_id_and_an_invisible_one_are_indistinguishable() {
 /// constructs a `RowProjection` (the cached artefact that costs 9.5-19.3s at 10^9), for an unknown
 /// id or an
 /// invisible one, on a session that has never drawn a viewport.
-///
-/// **The authorise-time occupancy stage is off**, because it builds a projection per visible view
-/// and would answer the count below on `Engine::item`'s behalf. What the stage changes is when a
-/// session's projection is built, not whether the drill-down builds one: the claim here is about
-/// `Engine::item`'s own cost, which is why this measures it with nothing else running rather than
-/// asserting a number the stage would have to be subtracted from. C4's work-indistinguishability
-/// standard is unaffected either way — the stage runs per session, uniformly, before any id is
-/// presented, so it cannot differ by which id is asked for.
 #[test]
 fn the_item_path_never_constructs_a_row_projection() {
     let tmp = TempDir::new().unwrap();
@@ -907,7 +899,6 @@ fn the_item_path_never_constructs_a_row_projection() {
         &tmp.path().join("cache"),
         &tmp.path().join("wal.log"),
     );
-    engine.set_occupancy_stage_for_test(false);
     let session = engine.authorise(&full_coverage_credential()).unwrap();
     assert_eq!(
         engine.row_projection_cache_len(),
@@ -1814,9 +1805,8 @@ fn the_theta_anchor_falls_when_an_item_is_suppressed() {
 /// over the composed mask, so a deny moves it, and a bug that anchored on the pre-overlay
 /// projection would leave it flat here.
 ///
-/// **The authorise-time stage is off** (`crate::stage`), so the two numbers below are what a
-/// *request* computed. With it on they would be the same numbers read from a rung a pool task
-/// filled, and this test would go on passing with the request path's own walk removed.
+/// **No background fill runs here** (`crate::stage`), because it is spawned by a *viewport* and
+/// this test takes the anchor directly. The numbers below are what the anchor's own route computed.
 #[test]
 fn n_occ_falls_when_a_suppression_empties_a_tile() {
     let tmp = TempDir::new().unwrap();
@@ -1832,7 +1822,6 @@ fn n_occ_falls_when_a_suppression_empties_a_tile() {
         &tmp.path().join("cache_a"),
         &tmp.path().join("wal_a.log"),
     );
-    baseline.set_occupancy_stage_for_test(false);
     let session_a = baseline.authorise(&full_coverage_credential()).unwrap();
     let before = baseline.occupied_tiles_for_test(&session_a, "s0", 16).unwrap();
     assert_eq!(
@@ -1866,7 +1855,6 @@ fn n_occ_falls_when_a_suppression_empties_a_tile() {
     let wal_one = tmp.path().join("wal_one.log");
     suppress(&wal_one, &cohort[..1]);
     let one_gone = open_engine(&bundle_root, &tmp.path().join("cache_one"), &wal_one);
-    one_gone.set_occupancy_stage_for_test(false);
     let session_one = one_gone.authorise(&full_coverage_credential()).unwrap();
     assert_eq!(
         one_gone
@@ -1879,7 +1867,6 @@ fn n_occ_falls_when_a_suppression_empties_a_tile() {
     let wal_all = tmp.path().join("wal_all.log");
     suppress(&wal_all, &cohort);
     let cell_gone = open_engine(&bundle_root, &tmp.path().join("cache_all"), &wal_all);
-    cell_gone.set_occupancy_stage_for_test(false);
     let session_all = cell_gone.authorise(&full_coverage_credential()).unwrap();
     assert_eq!(
         cell_gone
@@ -1892,25 +1879,26 @@ fn n_occ_falls_when_a_suppression_empties_a_tile() {
     );
 }
 
-/// **The stage pays `N_occ` at authorise, and pays it correctly** — `crate::stage`.
+/// **One walk per session per generation, not one per depth** — `crate::stage`.
 ///
-/// Two assertions, and they are the two halves of the claim.
+/// θ's `N_occ(d)` anchor is memoised per depth, so before the background fill a session paid a
+/// fresh walk of its mask and the Morton column at every new depth it visited. Three assertions,
+/// and they are three different claims.
 ///
-/// **The work happens before the first request.** With the stage on and nothing yet asked of the
-/// engine, the session's row projection is resident and was built — which is the establishment
-/// work the first request used to do on the requester's own thread, and which the `N_occ` walk
-/// needs before it can run at all.
+/// **The fill happens, and it happens off the request.** The first viewport walks once for itself;
+/// the fill then walks once more and takes the ladder to `stage::BACKGROUND_DEPTH`. Two walks for
+/// a session that goes on to visit every depth up to 12.
 ///
-/// **Every staged rung is the number the request path would have computed.** A rung filled by one
-/// walk at depth 12 must equal the same rung filled by a walk at that rung's own depth, or the
-/// memo would be answering from whichever depth happened to come first. The comparison is against
-/// a second engine over the same bundle with the stage off, so the right-hand side is the request
-/// path's own walk and not a transcription of it.
+/// **The rungs it filled are the numbers a request would have computed.** A rung filled by one walk
+/// at depth 12 must equal the same rung filled by a walk at that rung's own depth, or the memo
+/// would be answering from whichever depth happened to come first. The comparison is against a
+/// second engine over the same bundle with the fill switched off, so the right-hand side is the
+/// request path's own walk and not a transcription of it.
 ///
-/// Depth 13 is included deliberately: it is **above** `stage::BACKGROUND_DEPTH`, so it is the rung
-/// the stage does not fill and the request extends the ladder to lazily, exactly as before.
+/// **Depth 13 is above the ceiling**, so it still walks — the lazy extension the fill deliberately
+/// does not cover.
 #[test]
-fn the_authorise_stage_fills_the_ladder_with_the_numbers_a_request_would_have_computed() {
+fn the_background_fill_takes_the_ladder_to_twelve_in_one_walk_off_the_request() {
     let tmp = TempDir::new().unwrap();
     let bundle_root = tmp.path().join("bundle");
     build_fixture(
@@ -1919,59 +1907,80 @@ fn the_authorise_stage_fills_the_ladder_with_the_numbers_a_request_would_have_co
         &tmp.path().join("pairs.parquet"),
     );
 
-    let staged = open_engine(
+    let filled = open_engine(
         &bundle_root,
-        &tmp.path().join("cache_staged"),
-        &tmp.path().join("wal_staged.log"),
+        &tmp.path().join("cache_filled"),
+        &tmp.path().join("wal_filled.log"),
     );
-    let session = staged.authorise(&full_coverage_credential()).unwrap();
+    let session = filled.authorise(&full_coverage_credential()).unwrap();
+    assert_eq!(
+        filled.occupancy_walks(),
+        0,
+        "authorising takes no anchor and must walk nothing"
+    );
 
-    // The stage runs on the pool, so this waits for it rather than assuming it has finished. A
+    filled
+        .viewport(
+            &session,
+            ViewportRequest::new("s0", 3, [0.0, 0.0, 1000.0, 1000.0], 8),
+        )
+        .unwrap();
+
+    // The fill runs on the pool, so this waits for it rather than assuming it has finished. A
     // sleep would assert on scheduling; polling the count the engine already keeps does not.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-    while staged.occupancy_stages_in_flight() > 0 {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while filled.occupancy_stages_in_flight() > 0 {
         assert!(
             std::time::Instant::now() < deadline,
-            "the authorise stage did not settle"
+            "the background ladder fill did not settle"
         );
         std::thread::yield_now();
     }
-    assert!(
-        staged.row_projection_cache_len() > 0,
-        "the stage must have resolved the session's geometry, which is what N_occ is counted over"
-    );
-    assert!(
-        staged.full_projection_builds() > 0,
-        "and on a cold session it is the stage that builds it, not the first request"
+    assert_eq!(
+        filled.occupancy_walks(),
+        2,
+        "the request's own walk at depth 3, and the fill's one walk to depth 12"
     );
 
-    let unstaged = open_engine(
+    let unfilled = open_engine(
         &bundle_root,
         &tmp.path().join("cache_plain"),
         &tmp.path().join("wal_plain.log"),
     );
-    unstaged.set_occupancy_stage_for_test(false);
-    let plain_session = unstaged.authorise(&full_coverage_credential()).unwrap();
-    assert_eq!(
-        unstaged.occupancy_stages_in_flight(),
-        0,
-        "the stage is off, so nothing may be running"
-    );
+    unfilled.set_occupancy_stage_for_test(false);
+    let plain_session = unfilled.authorise(&full_coverage_credential()).unwrap();
 
-    for depth in [0u8, 3, 6, 12, 13] {
+    for depth in [0u8, 3, 6, 9, 12] {
         assert_eq!(
-            staged.occupied_tiles_for_test(&session, "s0", depth).unwrap(),
-            unstaged
+            filled.occupied_tiles_for_test(&session, "s0", depth).unwrap(),
+            unfilled
                 .occupied_tiles_for_test(&plain_session, "s0", depth)
                 .unwrap(),
-            "depth {depth}: the staged rung disagrees with the walk a request would have made"
+            "depth {depth}: the filled rung disagrees with the walk a request would have made"
         );
     }
+    assert_eq!(
+        filled.occupancy_walks(),
+        2,
+        "every rung to 12 was already there: reading five of them walked nothing"
+    );
 
-    // Revoking takes the session's stage with it: `prune_token` cancels first and drops the entry,
-    // so nothing is left running on behalf of a session that no longer exists.
-    staged.prune_token(session.token_id);
-    assert_eq!(staged.occupancy_stages_in_flight(), 0);
+    assert_eq!(
+        filled.occupied_tiles_for_test(&session, "s0", 13).unwrap(),
+        unfilled
+            .occupied_tiles_for_test(&plain_session, "s0", 13)
+            .unwrap()
+    );
+    assert_eq!(
+        filled.occupancy_walks(),
+        3,
+        "depth 13 is above the ceiling, so it is walked on demand as it always was"
+    );
+
+    // Revoking takes any fill still running with it: `prune_token` cancels first and drops the
+    // entry, so nothing is left working on behalf of a session that no longer exists.
+    filled.prune_token(session.token_id);
+    assert_eq!(filled.occupancy_stages_in_flight(), 0);
 }
 
 /// **The equality `GET /v1/meta`'s disclosure argument rests on.**
@@ -2121,11 +2130,6 @@ fn concurrent_same_key_viewports_are_all_served_off_one_build() {
         &tmp.path().join("cache"),
         &tmp.path().join("wal.log"),
     ));
-    // **The authorise-time stage is off**, because it resolves the same key these racers race for
-    // and would win: sixteen threads would then cost *zero* builds, which is a stronger result
-    // than this test is entitled to claim and says nothing about the single-flight it exists to
-    // pin. See `crate::stage`.
-    engine.set_occupancy_stage_for_test(false);
 
     // A fresh session -> a fresh `token_id` -> a cache key this engine has never built
     // (`Session::token_id` is a process-lifetime monotone counter — see `Engine::authorise`).
