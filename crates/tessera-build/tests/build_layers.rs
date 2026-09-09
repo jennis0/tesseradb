@@ -35,19 +35,34 @@ fn extent() -> Bounds {
     }
 }
 
-fn write_points(path: &Path) {
+/// The source ids the fixture's items carry, in ordinal order: `ids[ordinal]` is the id of the
+/// item the build gives that ordinal. Everything else about an item — its coordinates, its terms,
+/// which artifacts hold it — is written from the ordinal, so two id tables describe the same
+/// corpus and must produce the same entities.
+fn dense_ids() -> Vec<u64> {
+    (0..N_ITEMS).collect()
+}
+
+/// The same items under ids that leave gaps: 250 of them over `[3, 1746]`. The build's contiguity
+/// test (`ids_last - ids_first + 1 == count`) fails on this table, so the member join resolves by
+/// binary search rather than by subtraction.
+fn gapped_ids() -> Vec<u64> {
+    (0..N_ITEMS).map(|ordinal| ordinal * 7 + 3).collect()
+}
+
+fn write_points_over(path: &Path, ids: &[u64]) {
     let schema = Arc::new(Schema::new(vec![
         Field::new("entity_id", DataType::UInt64, false),
         Field::new("x", DataType::Float64, false),
         Field::new("y", DataType::Float64, false),
     ]));
-    let ids: Vec<u64> = (0..N_ITEMS).collect();
-    let xs: Vec<f64> = ids.iter().map(|e| ((e * 37) % 1000) as f64).collect();
-    let ys: Vec<f64> = ids.iter().map(|e| ((e * 53) % 1000) as f64).collect();
+    let ordinals = 0..ids.len() as u64;
+    let xs: Vec<f64> = ordinals.clone().map(|o| ((o * 37) % 1000) as f64).collect();
+    let ys: Vec<f64> = ordinals.map(|o| ((o * 53) % 1000) as f64).collect();
     let batch = RecordBatch::try_new(
         schema.clone(),
         vec![
-            Arc::new(UInt64Array::from(ids)),
+            Arc::new(UInt64Array::from(ids.to_vec())),
             Arc::new(Float64Array::from(xs)),
             Arc::new(Float64Array::from(ys)),
         ],
@@ -59,15 +74,19 @@ fn write_points(path: &Path) {
 }
 
 fn write_pairs(path: &Path) {
+    write_pairs_over(path, &dense_ids());
+}
+
+fn write_pairs_over(path: &Path, ids: &[u64]) {
     let schema = Arc::new(Schema::new(vec![
         Field::new("entity_id", DataType::UInt64, false),
         Field::new("term_id", DataType::UInt32, false),
     ]));
     let mut entities = Vec::new();
     let mut terms = Vec::new();
-    for e in 0..N_ITEMS {
-        entities.push(e);
-        terms.push((e % 5) as u32);
+    for (ordinal, &id) in ids.iter().enumerate() {
+        entities.push(id);
+        terms.push((ordinal % 5) as u32);
     }
     let batch = RecordBatch::try_new(
         schema.clone(),
@@ -227,21 +246,30 @@ fn write_members_rows(path: &Path, rows: &[(&str, Option<u32>, u64)]) {
 }
 
 fn cluster_member_rows(members_of_first_cluster: &[u64]) -> Vec<(&'static str, Option<u32>, u64)> {
+    cluster_member_rows_over(&dense_ids(), members_of_first_cluster)
+}
+
+/// `c-0000` over the ids given, and `c-0001` over ten items named through `ids`, so that the
+/// second cluster holds the same *items* under whichever id table the fixture was written with.
+fn cluster_member_rows_over(
+    ids: &[u64],
+    members_of_first_cluster: &[u64],
+) -> Vec<(&'static str, Option<u32>, u64)> {
     let mut rows: Vec<(&str, Option<u32>, u64)> = members_of_first_cluster
         .iter()
         .map(|&m| ("c-0000", None, m))
         .collect();
-    rows.extend((100..110u64).map(|m| ("c-0001", None, m)));
+    rows.extend(ids[100..110].iter().map(|&m| ("c-0001", None, m)));
     rows
 }
 
 fn topic_member_rows(members_of_first_cluster: &[u64]) -> Vec<(&'static str, Option<u32>, u64)> {
     let mut rows = Vec::new();
-    for &m in members_of_first_cluster {
+    for (position, &m) in members_of_first_cluster.iter().enumerate() {
         rows.push(("l-0000", None, m));
         // Rank 0 was generated from the whole cluster; rank 1 from a third of it.
         rows.push(("l-0000", Some(0), m));
-        if m % 3 == 0 {
+        if position % 3 == 0 {
             rows.push(("l-0000", Some(1), m));
         }
     }
@@ -264,20 +292,26 @@ impl Inputs {
 }
 
 fn inputs() -> Inputs {
+    inputs_over(&dense_ids())
+}
+
+/// The fixture over a chosen id table. Every member names an item through `ids`, so the corpus
+/// described is the same one whatever the table is.
+fn inputs_over(ids: &[u64]) -> Inputs {
     let tmp = tempfile::TempDir::new().unwrap();
     let dir = tmp.path().to_path_buf();
     let points = dir.join("points.parquet");
     let pairs = dir.join("pairs.parquet");
     let config = dir.join("config.toml");
-    write_points(&points);
-    write_pairs(&pairs);
+    write_points_over(&points, ids);
+    write_pairs_over(&pairs, ids);
     std::fs::write(&config, format!("{VIEW_TOML}{LAYERS_TOML}")).unwrap();
     write_clusters(&dir.join("clusters.parquet"));
     write_topics(&dir.join("topics.parquet"));
-    let members: Vec<u64> = (0..30).collect();
+    let members: Vec<u64> = ids[..30].to_vec();
     write_members_rows(
         &dir.join("clusters_members.parquet"),
-        &cluster_member_rows(&members),
+        &cluster_member_rows_over(ids, &members),
     );
     write_members_rows(
         &dir.join("topics_members.parquet"),
@@ -452,6 +486,58 @@ fn both_build_paths_place_the_same_layers_on_the_same_entities() {
             assert_eq!(one, other, "the artifact content in {file} differs");
         }
     }
+}
+
+/// **A member lands on the same entity whether the source ids are contiguous or gapped.** The
+/// join from a member's source id to its ordinal is a subtraction where the build's ids span
+/// exactly their own count and a binary search where they do not, and the two are separate code
+/// holding the id array for different lengths of time. What fixes the entity a member reaches is
+/// signature order and geometry, and the id table moves neither, so the two builds must publish
+/// the same memberships byte for byte.
+#[test]
+fn contiguous_and_gapped_source_ids_place_a_member_on_the_same_entity() {
+    let contiguous = inputs_over(&dense_ids());
+    let gapped = inputs_over(&gapped_ids());
+    let contiguous_out = contiguous.dir.join("bundle");
+    let gapped_out = gapped.dir.join("bundle");
+    run(&contiguous, &contiguous_out).expect("a build over contiguous ids succeeds");
+    run(&gapped, &gapped_out).expect("a build over gapped ids succeeds");
+
+    let a = manifest_of(&contiguous_out);
+    let b = manifest_of(&gapped_out);
+    assert_eq!(a.layers, b.layers);
+    assert_eq!(a.membership_extents, b.membership_extents);
+    assert!(!a.membership_extents.is_empty());
+    // The entity is in the Roaring blob and nowhere in the descriptor, exactly as in the
+    // comparison of the two build paths above.
+    for extent in &a.membership_extents {
+        let one = std::fs::read(contiguous_out.join("v00000").join(&extent.path)).unwrap();
+        let other = std::fs::read(gapped_out.join("v00000").join(&extent.path)).unwrap();
+        assert_eq!(
+            one, other,
+            "the packed memberships of {} differ",
+            extent.layer
+        );
+    }
+}
+
+/// **An id between two the build assigned is not a member of anything.** It falls inside the id
+/// range, so the subtraction the contiguous path uses would answer with an ordinal and hand the
+/// artifact some other item's entity. The gapped table is what makes the search the resolver, and
+/// its answer for an id it does not hold is the refusal every unknown member gets.
+#[test]
+fn a_member_in_a_gap_between_source_ids_refuses_the_build() {
+    let ids = gapped_ids();
+    let absent = ids[1] + 1;
+    let inputs = inputs_over(&ids);
+    write_members_rows(
+        &inputs.at("clusters_members.parquet"),
+        &cluster_member_rows_over(&ids, &[ids[0], ids[1], absent]),
+    );
+    let out = inputs.dir.join("bundle");
+    let err = run(&inputs, &out).expect_err("an id in a gap is not a member");
+    let message = format!("{err}");
+    assert!(message.contains(&format!("{absent}")), "{message}");
 }
 
 /// **A member the build did not assign refuses the build.** Dropping it instead would move both

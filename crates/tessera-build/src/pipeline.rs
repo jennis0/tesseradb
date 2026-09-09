@@ -1137,7 +1137,9 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
 
     // `source_ids` is **held** past this point rather than dropped and re-read: pass one unions
     // several files, so recovering it later would be one re-read per view against anchors that
-    // would each have to be carried anyway. 8 B/item, released at step 8c with the layer join.
+    // would each have to be carried anyway. 8 B/item. Step 8c releases it: before the layer join
+    // where the ids are contiguous, since the join reads only their first value and their count
+    // there, and after it where they are not.
     drop(term_keys);
     drop(term_ids);
     drop(row_counts);
@@ -1150,7 +1152,15 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
     // ordinal space, so per-batch sort+dedup of the packed relation equals the historical
     // global sort+dedup (a duplicate pair shares its ordinal, hence its batch), and one batch
     // covering everything reproduces the pre-batching assignment exactly.
-    let mut entity_of_ordinal: Vec<u32> = vec![0; n as usize];
+    //
+    // **File-backed**, which is [`spill::MappedArray`]'s case exactly: written once at a scattered
+    // index by the walk below, read once at a scattered index by every pass after it, never
+    // sorted. 0.87 GiB at rung 5's 2.33×10⁸ items and 13.2 GiB at the GBIF rung's 3.54×10⁹
+    // (modelled, items × 4 B), alive from here to the last view's permutation. `entities` is the
+    // assignment walk's writable binding; every reader after the walk takes the shared slice
+    // bound below.
+    let mut entity_map = spill::MappedU32::zeroed(tmp.path(), "entity-of-ordinal.u32", n as usize)?;
+    let entities = entity_map.as_mut_slice();
     // Exact per-term post-dedup counts, accumulated as bands are emitted; drives the band
     // sweep's offsets. u32 is sound (a term's entities are distinct, so count <= n < 2^32).
     let mut term_counts: Vec<u32> = vec![0; term_count as usize];
@@ -1259,7 +1269,7 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
         // unconditional sortedness check later re-verifies exactly this property from disk.
         for (position, rec) in recs.iter().enumerate() {
             let entity = (entity_base + position as u64) as u32;
-            entity_of_ordinal[rec.ordinal as usize] = entity;
+            entities[rec.ordinal as usize] = entity;
             let local = (rec.ordinal as u64 - ordinal_lo) as usize;
             let sig = &packed[starts[local] as usize..starts[local + 1] as usize];
             // **The label is the entity's, not the row's** (`views.md` §7): every view holding
@@ -1315,6 +1325,15 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
             "batches assigned {entity_base} entities for {n} items"
         )));
     }
+    // The assignment walk is the only writer, so the mapping is read-only from here on and the
+    // passes below take it as the plain `&[u32]` they always did.
+    let entity_of_ordinal = entity_map.as_slice();
+    // The two ordinal-space counters of the label-agreement identity (`views.md` §7) have served
+    // their only reader, the check inside the walk above. 4 B/item each, so releasing them here
+    // rather than at the end of the build takes 1.74 GiB off rung 5 and 26.4 GiB off the GBIF rung
+    // (modelled, items × 8 B) across every stage from the postings write to the last segment.
+    drop(distinct_of_ordinal);
+    drop(appearances);
     // The anchor's Morton geometry has served its one reader — the sort's tiebreak — and is
     // released here rather than at the end of the build. At 10⁹ that is 8 GB of dirty mapped
     // pages returned before the band sweep and the postings write start competing for page
@@ -1513,7 +1532,7 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
         args,
         n,
         &source_ids,
-        &entity_of_ordinal,
+        entity_of_ordinal,
         &mut minters,
         &scratch,
         tmp.path(),
@@ -1532,7 +1551,7 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
         &partition_dir,
         n,
         &source_ids,
-        &entity_of_ordinal,
+        entity_of_ordinal,
         &mut minters,
         &scratch,
     )?;
@@ -1544,9 +1563,9 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
     timer.end(BuildStage::AttributeTail, n);
 
     // ---- 8c. layers and their artifacts ------------------------------------------------
-    // Resolved here for the reason the attribute tail is: this is where the two structures that
-    // turn a source id into the entity this build assigned it are both still alive. A member is
-    // named by source id, exactly as the pairs file's ids are.
+    // Resolved here for the reason the attribute tail is: this is where what turns a source id
+    // into the entity this build assigned it is still alive. A member is named by source id,
+    // exactly as the pairs file's ids are.
     //
     // **Its own stage boundary**, so an observer can say how much of the peak is here: the member
     // tables are read whole and the published memberships stay resident, and this ran unattributed
@@ -1559,64 +1578,88 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
         .map(|v| tessera_store::derived::ViewFrame::new(&v.view_id, v.projection, v.extent))
         .collect();
     let mut published_layers = if args.layers.is_empty() {
+        drop(source_ids);
         crate::layers::PublishedLayers::default()
     } else {
-        {
-            let mut plan = crate::layers::read(
-                &args.layers,
-                &args.layer_inputs,
-                &args.scoped_layers,
-                // **A frame per view, never the anchor's for all of them** (decision 0111): a
-                // shape layer is canonicalised in each view it is drawn in, against that view's
-                // own projection and extent, so a layer spanning frames stores a different
-                // canonical form under each view's name.
-                &view_frames,
-                tessera_types::layer::DEFAULT_MAX_SHAPE_VERTICES,
-                // The build's own `.build-tmp/`, which the member spill writes its runs into —
-                // still open here, and swept by the `close` below whether this stage succeeds or
-                // not.
-                tmp.path(),
-                args.memory_budget.unwrap_or_else(detect_memory_budget),
-            )?;
-            crate::report_shapes(&plan.shape_reports);
-            // **A contiguous id range makes the search a subtraction**, and whether it is
-            // contiguous is checked rather than assumed. `source_ids` is sorted and free of
-            // duplicates, so a range spanning exactly its own length can only be
-            // `ids_first + i` at every `i` — the fast path is provably the same answer, not a
-            // convention about how a caller numbers its rows.
+        let mut plan = crate::layers::read(
+            &args.layers,
+            &args.layer_inputs,
+            &args.scoped_layers,
+            // **A frame per view, never the anchor's for all of them** (decision 0111): a
+            // shape layer is canonicalised in each view it is drawn in, against that view's
+            // own projection and extent, so a layer spanning frames stores a different
+            // canonical form under each view's name.
+            &view_frames,
+            tessera_types::layer::DEFAULT_MAX_SHAPE_VERTICES,
+            // The build's own `.build-tmp/`, which the member spill writes its runs into —
+            // still open here, and swept by the `close` below whether this stage succeeds or
+            // not.
+            tmp.path(),
+            args.memory_budget.unwrap_or_else(detect_memory_budget),
+        )?;
+        crate::report_shapes(&plan.shape_reports);
+        let derived = crate::layers::predicate_artifact_keys(
+            &args.layers,
+            &args.schema,
+            &minters,
+            &|index| distinct_codes(attributes_by_entity[index].iter()),
+        )?;
+        let prefix_dir = args.out.join(crate::PREFIX);
+        // **A contiguous id range makes the search a subtraction**, and whether it is
+        // contiguous is checked rather than assumed. `source_ids` is sorted and free of
+        // duplicates, so a range spanning exactly its own length can only be `ids_first + i` at
+        // every `i` — the fast path is provably the same answer, not a convention about how a
+        // caller numbers its rows.
+        //
+        // It is worth the branch because this closure runs **once per member entry**: a
+        // lineage list per point at the Overture rung is 3×10⁸ of them, and a binary search
+        // into 74M sorted `u64` is ~27 dependent cache misses where the subtraction is one.
+        let ordinals = source_ids.len() as u64;
+        if ids_last - ids_first + 1 == ordinals {
+            // **The array goes before the publication on this path, not after it.** The
+            // subtraction reads the first id and the count and never an element, so the 8 B/item
+            // would be dead weight beside what the publication does hold: the member tables it
+            // reads whole, the artifact allocator, and the memberships that stay resident. That
+            // is 1.74 GiB at rung 5's 2.33×10⁸ items and 26.4 GiB at the GBIF rung's 3.54×10⁹
+            // (modelled, items × 8 B). The ladder's corpora number their rows from zero, so this
+            // is the ordinary path.
             //
-            // It is worth the branch because this closure runs **once per member entry**: a
-            // lineage list per point at the Overture rung is 3×10⁸ of them, and a binary search
-            // into 74M sorted `u64` is ~27 dependent cache misses where the subtraction is one.
-            let dense = ids_last - ids_first + 1 == source_ids.len() as u64;
+            // Two closures rather than one with a branch inside: a single closure would capture
+            // `source_ids` on both paths, and the borrow would hold the array across the call.
+            drop(source_ids);
             crate::layers::publish(
                 &mut plan,
                 &|source| {
-                    let ordinal = if dense {
-                        source
-                            .checked_sub(ids_first)
-                            .filter(|o| (*o as usize) < source_ids.len())
-                            .map(|o| o as usize)
-                    } else {
-                        source_ids.binary_search(&source).ok()
-                    };
-                    ordinal.map(|ordinal| entity_of_ordinal[ordinal] as u64)
+                    source
+                        .checked_sub(ids_first)
+                        .filter(|ordinal| *ordinal < ordinals)
+                        .map(|ordinal| entity_of_ordinal[ordinal as usize] as u64)
                 },
                 n,
-                &args.out.join(crate::PREFIX),
+                &prefix_dir,
                 crate::PHASH,
                 &view_ids,
-                &crate::layers::predicate_artifact_keys(
-                    &args.layers,
-                    &args.schema,
-                    &minters,
-                    &|index| distinct_codes(attributes_by_entity[index].iter()),
-                )?,
+                &derived,
             )?
+        } else {
+            let published = crate::layers::publish(
+                &mut plan,
+                &|source| {
+                    source_ids
+                        .binary_search(&source)
+                        .ok()
+                        .map(|ordinal| entity_of_ordinal[ordinal] as u64)
+                },
+                n,
+                &prefix_dir,
+                crate::PHASH,
+                &view_ids,
+                &derived,
+            )?;
+            drop(source_ids);
+            published
         }
     };
-
-    drop(source_ids);
 
     crate::write_containment_report(&args.out, &published_layers)?;
 
@@ -1905,7 +1948,7 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
         });
     }
     drop(geometry);
-    drop(entity_of_ordinal);
+    drop(entity_map);
     // The spill directory closes **here**: every view's ordinal-space geometry and every
     // entity-space scatter are dropped by this point, so the tree is unbusy.
     tmp.close()?;
