@@ -2374,11 +2374,13 @@ fn write_scoped_columns(
 ) -> Result<(Vec<PathBuf>, Vec<ScopedRenderColumn>)> {
     let mut paths = Vec::new();
     let mut render_columns: Vec<ScopedRenderColumn> = Vec::new();
-    // The text pass's budget, derived once for the build rather than per column, exactly as the
-    // entity-scoped pass derives it: the plan bounds the transient a tokenise holds, and it is a
-    // function of the machine rather than of which column is being indexed.
+    // The text and keyword passes' budgets, derived once for the build rather than per column,
+    // exactly as the entity-scoped pass derives them: a plan bounds the transient one column's
+    // pass holds, and both are a function of the machine rather than of which column is indexed.
     let text_plan =
         TextIndexPlan::for_budget(args.memory_budget.unwrap_or_else(detect_memory_budget));
+    let keyword_plan =
+        KeywordDictPlan::for_budget(args.memory_budget.unwrap_or_else(detect_memory_budget));
     for family in &args.scoped_attributes {
         let attribute = &family.attribute;
         // **What `render` buys, and the one place it still does not reach.** The build's own
@@ -2468,6 +2470,7 @@ fn write_scoped_columns(
                 &presence_path,
                 attribute,
                 &column.values,
+                keyword_plan,
             )?;
             fsync_file(&values_path)?;
             paths.push(values_path);
@@ -2799,6 +2802,7 @@ pub(crate) fn write_filter_postings(
         prose,
         POSTINGS_BAND_ROWS,
         TextIndexPlan::for_budget(memory_budget),
+        KeywordDictPlan::for_budget(memory_budget),
     )
 }
 
@@ -2826,6 +2830,7 @@ fn write_filter_postings_banded(
     prose: &[crate::prose::OpenProse],
     band_rows: usize,
     text_plan: TextIndexPlan,
+    keyword_plan: KeywordDictPlan,
 ) -> Result<(Vec<PathBuf>, TextIndexCost)> {
     let mut paths = Vec::new();
     let mut text = TextIndexCost::default();
@@ -2868,8 +2873,14 @@ fn write_filter_postings_banded(
         // record without its accelerator rather than an accelerator with no record.
         let values_path = column_dir.join("values.arrow");
         let presence_path = column_dir.join("presence.roaring");
-        let written =
-            write_column_values(&column_dir, &values_path, &presence_path, attribute, values)?;
+        let written = write_column_values(
+            &column_dir,
+            &values_path,
+            &presence_path,
+            attribute,
+            values,
+            keyword_plan,
+        )?;
         fsync_file(&values_path)?;
         paths.push(values_path);
         // The dictionary is not an accelerator and the ordering above does not apply to it: a
@@ -3183,6 +3194,7 @@ fn write_column_values(
     presence_path: &Path,
     attribute: &crate::config::Attribute,
     values: &EntityColumn,
+    keyword_plan: KeywordDictPlan,
 ) -> Result<WrittenColumn> {
     let mut presence = Presence::default();
     let mut dict = None;
@@ -3203,41 +3215,15 @@ fn write_column_values(
     // spend — the empty string is one a corpus may legitimately hold — so absence arrives as
     // `ScalarValue::Null` and the empty string arrives as itself.
     if attribute.ty == ScalarType::Keyword {
-        let present_values = keyword_values(attribute, values, &mut presence)?;
-        // The distinct key set, sorted — the dictionary's contents and, by position, the ordinals
-        // the column stores. `sort_unstable` is sound where a stable sort would not be, because
-        // the elements compared are the keys themselves: equal elements are indistinguishable, and
-        // `dedup` then leaves one of each.
-        let mut keys: Vec<&str> = present_values.clone();
-        keys.sort_unstable();
-        keys.dedup();
-        let dict_path = column_dir.join(tessera_filter::DICT_FILE);
-        tessera_filter::write_sorted_dict(&dict_path, keys.iter().copied())
-            .map_err(|e| BuildError::io(&dict_path, std::io::Error::from(e)))?;
-        dict = Some(dict_path);
-
-        // The ordinal is the key's position in the sorted distinct set, which is exactly the
-        // ordinal the writer assigned it: `SortedDictWriter::push` returns positions in the order
-        // it is fed, and it was fed this vector. Searching rather than threading the writer's
-        // return values through keeps that equality checkable in one line instead of resting on
-        // two loops staying in step.
-        let mut held: Vec<u32> = Vec::new();
-        for text in present_values {
-            let ordinal = keys.binary_search(&text).map_err(|_| {
-                BuildError::Invalid(format!(
-                    "attribute '{}': the value {text:?} is absent from the dictionary built from \
-                     it — the ordinal column would name a different value's key",
-                    attribute.name
-                ))
-            })?;
-            held.push(ordinal as u32);
-            if held.len() >= VALUE_CHUNK {
-                push!(Codes::U32(std::mem::take(&mut held).into()));
-            }
-        }
-        if !held.is_empty() {
-            push!(Codes::U32(held.into()));
-        }
+        dict = Some(write_keyword_column(
+            column_dir,
+            values_path,
+            attribute,
+            values,
+            &mut presence,
+            &mut writer,
+            keyword_plan,
+        )?);
     } else if attribute.vocabulary.is_some() {
         let mut held: Vec<u32> = Vec::new();
         for (entity, value) in values.iter().enumerate() {
@@ -3340,12 +3326,13 @@ impl Presence {
     }
 }
 
-/// One keyword column's present values, in entity order, with `presence` told which entities carry
-/// one.
+/// Visit one keyword column's present values in entity order, as `(row, value)`, with `presence`
+/// told which entities carry one. Returns how many rows carry a value.
 ///
-/// Separate from the ordinal emit so that the pass which decides *presence* is the pass which
-/// decides *slots*: the k-th set bit's value is at slot k (filter-index §2.1), and the vector this
-/// returns is the slot sequence, so the two cannot come to disagree about an absent entity.
+/// **The row is the value's slot, not the entity id**: the k-th set bit's value is at slot k
+/// (filter-index §2.1). The pass that decides *presence* is therefore the pass that decides
+/// *slots*, and both come out of this one walk, so the two cannot come to disagree about an absent
+/// entity.
 ///
 /// **A keyword's values arrive as [`ScalarValue::Utf8`]**, because that is what the wire carries
 /// (records §7) — the type names the storage, not the value in flight.
@@ -3356,17 +3343,18 @@ impl Presence {
 /// produce it — and the dictionary has no key for it either. A points file is not the ingest plane
 /// and has no upstream check, so the refusal is here, naming the column and the entity a build
 /// operator has to go and fix.
-fn keyword_values<'a>(
+fn for_each_keyword<'a>(
     attribute: &crate::config::Attribute,
     values: &'a EntityColumn,
     presence: &mut Presence,
-) -> Result<Vec<&'a str>> {
-    let mut out = Vec::new();
+    visit: &mut dyn FnMut(u32, &'a str) -> Result<()>,
+) -> Result<u64> {
+    let mut rows = 0u64;
     // Absent runs are skipped a word at a time; absence itself is what [`Presence`] reads out of
     // the gaps this leaves.
     for entity in values.present_entities() {
-        // Borrowed, not read through `value_at`: this collects one `&str` per entity across the
-        // whole column, so cloning here would be a second copy of every keyword in the corpus.
+        // Borrowed, not read through `value_at`: this visits one `&str` per entity across the
+        // whole column, so copying here would be a second copy of every keyword in the corpus.
         let Some(text) = values.str_at(entity) else {
             return Err(BuildError::Invalid(format!(
                 "attribute '{}' is declared `keyword` but carries {:?}",
@@ -3382,10 +3370,386 @@ fn keyword_values<'a>(
                 attribute.name
             )));
         }
+        // **A row is addressed by a `u32` in the run files below**, so a column with more rows
+        // than that is refused here rather than wrapping into another row's ordinal. Entity ids
+        // are `u32` and a row exists only where an entity does, so this is reachable only at the
+        // very top of entity space.
+        let row = u32::try_from(rows).map_err(|_| {
+            BuildError::Invalid(format!(
+                "attribute '{}': more than {} rows carry a value, which is more than the \
+                 dictionary pass addresses a row with",
+                attribute.name,
+                u32::MAX
+            ))
+        })?;
         presence.present(entity as u32);
-        out.push(text);
+        visit(row, text)?;
+        rows += 1;
     }
-    Ok(out)
+    Ok(rows)
+}
+
+/// How one indexed keyword column's dictionary pass is sized: the present rows one chunk sorts
+/// before it spills a run.
+///
+/// **The same share of the build's memory budget the text pass takes** — [`TEXT_BUDGET_SHARE`],
+/// under the same [`TEXT_BUDGET_MIN`] and [`TEXT_BUDGET_MAX`] clamp — and for the reason that
+/// share is what it is: both run inside the entity-order tail `residency.rs` models, with every
+/// declared column resident beside them, so each is a transient on top of the build's largest
+/// resident set rather than a stage with the machine to itself.
+///
+/// Where the two differ is the divisor. The text pass divides its allowance by the thread count
+/// because `threads` workers accumulate at once; this pass is one walk of entity space in row
+/// order, so one chunk is live and the allowance is that chunk. It is not parallelised: the values
+/// are reached through the column's entity-indexed offsets, so a worker over an entity range reads
+/// the arena in the same scattered order a single walk does, and what a second worker would add is
+/// a second scatter over the same file rather than a second stream.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct KeywordDictPlan {
+    chunk_rows: usize,
+}
+
+/// The floor on a chunk, so a tiny `--memory-budget` cannot derive a plan that spills a run every
+/// few rows and then cascades them all back together.
+const KEYWORD_MIN_CHUNK_ROWS: usize = 1 << 12;
+
+impl KeywordDictPlan {
+    /// The plan a build's memory budget derives.
+    pub(crate) fn for_budget(budget: u64) -> KeywordDictPlan {
+        let allowance = (budget / TEXT_BUDGET_SHARE).clamp(TEXT_BUDGET_MIN, TEXT_BUDGET_MAX);
+        let chunk_rows = (allowance as usize / KEYWORD_ROW_BYTES).max(KEYWORD_MIN_CHUNK_ROWS);
+        KeywordDictPlan { chunk_rows }
+    }
+
+    /// An explicit plan, for the tests that must force several runs and a cascade out of a corpus
+    /// small enough to assert over.
+    #[cfg(test)]
+    fn explicit(chunk_rows: usize) -> KeywordDictPlan {
+        KeywordDictPlan {
+            chunk_rows: chunk_rows.max(1),
+        }
+    }
+}
+
+/// What one buffered row costs: its entry in the array the chunk sorts, and its place in the
+/// scratch a key's rows are gathered into. The figure [`KeywordDictPlan`] divides the budget by.
+const KEYWORD_ROW_BYTES: usize =
+    std::mem::size_of::<KeywordPair>() + std::mem::size_of::<u32>();
+
+/// One present row's key and the row it sits at.
+///
+/// **The key's first bytes are carried beside the reference so that most comparisons never reach
+/// the arena.** A key is a `&str` into a mapped arena of the whole column — 8.0 GB for rung 5's
+/// `uuid` — so a sort that dereferences both sides of every comparison is the random access over
+/// that file this pass exists to remove. The first eight bytes read big-endian and zero-padded
+/// order two keys exactly as their bytes do: where the padded prefixes differ, the keys differ the
+/// same way at the same position, a key shorter than the other padding with the zeros that make
+/// "shorter is less" true. So [`keyword_key_order`] reads the arena only to separate two keys that
+/// agree in their first eight characters.
+///
+/// **The reference is held here rather than in a side array the sort indexes into.** Holding a
+/// position instead would take the sorted element from 28 bytes to 12, and it measured slower:
+/// the sorted array's order bears no relation to the side array's, so every key read after the
+/// sort is a random access into it — 2×10⁷ of them over 320 MB — and over 2×10⁷ distinct keys that
+/// was 13.45 s against 10.12 s (`probes/2026-09-08-keyword-spill/`).
+#[derive(Clone, Copy)]
+struct KeywordPair<'a> {
+    prefix: u64,
+    text: &'a str,
+    row: u32,
+}
+
+/// The key's first eight bytes, big-endian and zero-padded — see [`KeywordPair`].
+fn keyword_prefix(text: &str) -> u64 {
+    let bytes = text.as_bytes();
+    let take = bytes.len().min(8);
+    let mut head = [0u8; 8];
+    head[..take].copy_from_slice(&bytes[..take]);
+    u64::from_be_bytes(head)
+}
+
+/// Order two pairs by key, and by key alone.
+///
+/// **The row is not a tiebreak, and leaving it out is what keeps a low-cardinality column cheap.**
+/// A tiebreak makes every element distinct, which defeats the equal-element partitioning an
+/// introsort does: a column of two dozen codes would pay a full `n log n` over every row to
+/// separate rows that were in order to begin with. What it costs instead is that a key's rows come
+/// out of the sort in no order, so [`KeywordChunk::spill`] sorts each key's own rows — a `u32`
+/// sort over one key's rows, which is also what
+/// [`crate::spill::TextRunWriter::push_entity`] demands: strictly ascending within a record.
+fn keyword_key_order(a: &KeywordPair<'_>, b: &KeywordPair<'_>) -> std::cmp::Ordering {
+    a.prefix
+        .cmp(&b.prefix)
+        .then_with(|| a.text.as_bytes().cmp(b.text.as_bytes()))
+}
+
+/// One chunk of present rows, buffered in row order and sorted by key at the spill.
+struct KeywordChunk<'a> {
+    pairs: Vec<KeywordPair<'a>>,
+    /// One key's rows, gathered and sorted for the run writer.
+    rows: Vec<u32>,
+}
+
+impl<'a> KeywordChunk<'a> {
+    fn with_capacity(rows: usize) -> KeywordChunk<'a> {
+        KeywordChunk {
+            pairs: Vec::with_capacity(rows),
+            rows: Vec::new(),
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.pairs.len()
+    }
+
+    fn push(&mut self, row: u32, text: &'a str) {
+        self.pairs.push(KeywordPair {
+            prefix: keyword_prefix(text),
+            text,
+            row,
+        });
+    }
+
+    /// Sort by key and write the chunk out as one run, leaving the buffer empty.
+    fn spill(
+        &mut self,
+        column_dir: &Path,
+        seq: &mut usize,
+        receipts: &mut Vec<spill::SpillReceipt>,
+    ) -> Result<()> {
+        if self.pairs.is_empty() {
+            return Ok(());
+        }
+        self.pairs.sort_unstable_by(keyword_key_order);
+
+        let path = column_dir.join(format!("keyword-run-{seq:05}.spill"));
+        let mut writer = spill::TextRunWriter::create(&path)?;
+        let mut start = 0usize;
+        while start < self.pairs.len() {
+            let head = self.pairs[start];
+            let mut end = start + 1;
+            while end < self.pairs.len()
+                && self.pairs[end].prefix == head.prefix
+                && self.pairs[end].text == head.text
+            {
+                end += 1;
+            }
+            self.rows.clear();
+            self.rows
+                .extend(self.pairs[start..end].iter().map(|pair| pair.row));
+            self.rows.sort_unstable();
+            let count = u32::try_from(self.rows.len()).map_err(|_| {
+                BuildError::Invalid(format!(
+                    "keyword run {}: the key {:?} is carried by more rows than a u32 can count",
+                    path.display(),
+                    head.text
+                ))
+            })?;
+            writer.begin(head.text.as_bytes(), count)?;
+            for &row in self.rows.iter() {
+                writer.push_entity(row)?;
+            }
+            start = end;
+        }
+        receipts.push(writer.finish()?);
+        // Cleared rather than replaced, where the text pass's accumulator is replaced: this
+        // buffer's capacity *is* the plan's budget, so keeping it is what the next chunk wants.
+        self.pairs.clear();
+        *seq += 1;
+        Ok(())
+    }
+}
+
+/// Where the merge scatters each row's ordinal, under the column's own directory and unlinked when
+/// the array is released.
+const KEYWORD_ORDINAL_SCRATCH: &str = "keyword-ordinals.scratch";
+
+/// One indexed keyword column's dictionary and its ordinal values file. Returns the dictionary's
+/// path.
+///
+/// # The shape: chunk, spill, merge, scatter
+///
+/// **The dictionary used to be built whole in memory**: a `&str` per present row, cloned, sorted
+/// and deduplicated into the distinct key set, with each row's ordinal then found by binary search
+/// over it. That was 32 bytes per row of resident memory with nothing to bound it — 7.46 GB over
+/// rung 5's 2.33×10⁸ `uuid` rows, and modelled to exhaust a 47 GB box somewhere above 3.5×10⁸ —
+/// and its search was ~28 probes per row, each dereferencing into a random offset of an 8.0 GB
+/// arena. It ran at 175×10³ rows/s where the same corpus's 2.4×10⁵-key `scientific_name` column,
+/// whose key set stays in cache, ran an order of magnitude faster.
+///
+/// So the pass has the text index's shape, with a fourth step the text index does not need:
+///
+/// 1. **Chunk.** The present rows are walked once in row order and buffered as
+///    `(key, row)` pairs, [`KeywordDictPlan`] rows at a time.
+/// 2. **Spill.** A full chunk is sorted by key and written out as a **sorted run**
+///    ([`crate::spill::TextRunWriter`], the same run format and the same receipt the text index
+///    spills) — each distinct key once, front-coded, with the ascending rows carrying it. So the
+///    pass's residency is the plan, whatever the corpus, and the run count grows instead of the
+///    peak.
+/// 3. **Cascade**, where a corpus produced more runs than one merge may hold file descriptors for
+///    ([`RUN_MERGE_FAN_IN`]).
+/// 4. **Merge.** The runs are merged k-way on the key. Each distinct key is pushed once to
+///    [`tessera_filter::SortedDictWriter`], which streams the dictionary and holds only its
+///    restart table, and the ordinal it returns is written to every row the merge then drains for
+///    that key.
+/// 5. **Scatter.** The ordinals leave the merge in key order and the values file needs them in row
+///    order, so the merge writes them into a `u32` array addressed by row, and the values file is
+///    then that array read front to back in [`VALUE_CHUNK`] slices.
+///
+/// **The array is a [`crate::spill::MappedArray`] and not a `Vec`**, which is the whole of what
+/// keeps step 5 from putting back the ceiling steps 1 to 4 removed: 4 bytes per present row is
+/// 932 MB at rung 5 and 12 GB at 3×10⁹, and as anonymous memory that is a figure a machine must
+/// simply have. Mapped, it is page cache the kernel evicts under pressure — the argument
+/// `MappedArray` was added for, and the same file-backed scratch the geometry pass and every
+/// declared column already use. The alternative considered was a second external sort: spill
+/// `(row, ordinal)` and merge it back into row order. It is bounded too, and it costs a second
+/// spill of 8 bytes per row, a sort and a merge, to avoid a scatter over a file the box holds.
+///
+/// **The output is a function of the corpus alone, never of the plan.** The dictionary is the
+/// sorted distinct key set and a row's ordinal is its key's position in it; neither depends on
+/// where a chunk boundary fell.
+/// [`tests::chunking_the_keyword_column_does_not_change_its_bytes`] is the assertion.
+///
+/// # What is checked, and why each check is here
+///
+/// **The ordinal is the key's position in the sorted distinct set.** The merge yields each
+/// distinct key once, ascending, and pushes it to the dictionary writer, so the ordinal the writer
+/// returns *is* that position — and it is asserted against the count of keys pushed rather than
+/// assumed from the two staying in step. An ordinal naming another key's value has no symptom: it
+/// recolours a map, and every count it feeds stays plausible (`tessera_filter::dict`).
+///
+/// **Every row that went in came back out.** Each run verifies its own count and anchor as it is
+/// read; what no single run can see is that the *set* of runs is whole, so the run counts are
+/// summed against the rows the walk visited before the merge, and the rows the merge drained are
+/// counted against them after it. A run file lost between the spill and the merge would otherwise
+/// be a values file whose tail rows all read ordinal 0 — the first key's, and a legal one.
+fn write_keyword_column(
+    column_dir: &Path,
+    values_path: &Path,
+    attribute: &crate::config::Attribute,
+    values: &EntityColumn,
+    presence: &mut Presence,
+    writer: &mut ValueColumnWriter,
+    plan: KeywordDictPlan,
+) -> Result<PathBuf> {
+    // ---- 1 and 2. the chunk pass, spilling sorted runs ---------------------------------------
+    let mut receipts: Vec<spill::SpillReceipt> = Vec::new();
+    let mut seq = 0usize;
+    // Sized to the plan up front, or to the column where it is smaller.
+    let mut chunk = KeywordChunk::with_capacity(plan.chunk_rows.min(values.len()));
+    let rows = for_each_keyword(attribute, values, presence, &mut |row, text| {
+        chunk.push(row, text);
+        if chunk.len() >= plan.chunk_rows {
+            chunk.spill(column_dir, &mut seq, &mut receipts)?;
+        }
+        Ok(())
+    })?;
+    chunk.spill(column_dir, &mut seq, &mut receipts)?;
+    drop(chunk);
+
+    // ---- 3. the cascade, where a column produced more runs than one merge may hold open ------
+    let receipts = cascade_sorted_runs(column_dir, "keyword", receipts)?;
+
+    // ---- 4. the merge: the dictionary, and each row's ordinal ---------------------------------
+    let dict_path = column_dir.join(tessera_filter::DICT_FILE);
+    let mut ordinals =
+        spill::MappedArray::<u32>::zeroed(column_dir, KEYWORD_ORDINAL_SCRATCH, rows as usize)?;
+    merge_keyword_runs(
+        &dict_path,
+        attribute,
+        &receipts,
+        rows,
+        ordinals.as_mut_slice(),
+    )?;
+    for receipt in &receipts {
+        std::fs::remove_file(&receipt.path).map_err(|e| BuildError::io(&receipt.path, e))?;
+    }
+
+    // ---- 5. the values file, in row order ----------------------------------------------------
+    for slice in ordinals.as_slice().chunks(VALUE_CHUNK) {
+        writer
+            .push(&Codes::U32(slice.to_vec().into()))
+            .map_err(|e| BuildError::io(values_path, e))?;
+    }
+    Ok(dict_path)
+}
+
+/// Merge the sorted runs into the dictionary, writing each row's ordinal into `ordinals`. Returns
+/// the distinct keys written.
+///
+/// The two guards are [`write_keyword_column`]'s to explain; this is where they are made.
+fn merge_keyword_runs(
+    dict_path: &Path,
+    attribute: &crate::config::Attribute,
+    receipts: &[spill::SpillReceipt],
+    rows: u64,
+    ordinals: &mut [u32],
+) -> Result<u64> {
+    let spilled: u64 = receipts.iter().map(|receipt| receipt.count).sum();
+    if spilled != rows {
+        return Err(BuildError::Invalid(format!(
+            "attribute '{}': the keyword runs hold {spilled} rows where the column has {rows} — a \
+             run file is missing or was not merged, and the rows it held would take the first \
+             key's ordinal",
+            attribute.name
+        )));
+    }
+
+    let dict_file = std::fs::File::create(dict_path).map_err(|e| BuildError::io(dict_path, e))?;
+    let mut dict = tessera_filter::SortedDictWriter::new(std::io::BufWriter::new(dict_file))
+        .map_err(|e| BuildError::io(dict_path, std::io::Error::from(e)))?;
+    let mut merge = TextRunMerge::open(receipts)?;
+    let mut keys = 0u64;
+    let mut emitted = 0u64;
+    // The selected key, copied out of the merge so that the rows it carries may be drained while
+    // the messages below still name it. One copy per distinct key, not per row.
+    let mut selected: Vec<u8> = Vec::new();
+    while merge.next_term()? {
+        selected.clear();
+        selected.extend_from_slice(merge.term());
+        let key = std::str::from_utf8(&selected).map_err(|e| {
+            BuildError::Invalid(format!(
+                "attribute '{}': a merged key is not UTF-8 ({e}) — the column holds `&str`, so \
+                 this is a corrupted run rather than a corpus value",
+                attribute.name
+            ))
+        })?;
+        let ordinal = dict
+            .push(key)
+            .map_err(|e| BuildError::io(dict_path, std::io::Error::from(e)))?;
+        if ordinal as u64 != keys {
+            return Err(BuildError::Invalid(format!(
+                "attribute '{}': the key {key:?} was written at dictionary ordinal {ordinal} and \
+                 is the {keys}th distinct key of the merge — the values file would name another \
+                 key's value",
+                attribute.name
+            )));
+        }
+        keys += 1;
+        merge.drain(&mut |row| {
+            let slot = ordinals.get_mut(row as usize).ok_or_else(|| {
+                BuildError::Invalid(format!(
+                    "attribute '{}': the key {key:?} is carried by row {row}, which is past the \
+                     {rows} rows the column has",
+                    attribute.name
+                ))
+            })?;
+            *slot = ordinal;
+            emitted += 1;
+            Ok(())
+        })?;
+    }
+    dict.finish()
+        .map_err(|e| BuildError::io(dict_path, std::io::Error::from(e)))?;
+
+    if emitted != rows {
+        return Err(BuildError::Invalid(format!(
+            "attribute '{}': the keyword merge yielded {emitted} rows where the column has \
+             {rows} — the rows it did not yield would take the first key's ordinal",
+            attribute.name
+        )));
+    }
+    Ok(keys)
 }
 
 /// Values pushed to the column writer at a time. The writer spools each chunk as it arrives, so
@@ -3647,7 +4011,7 @@ impl TextIndexPlan {
 ///    chunk. So a worker's residency is the budget whatever the documents are, and the run count
 ///    grows instead of the peak.
 /// 3. **Cascade**, where there are more runs than one merge may hold file descriptors for
-///    ([`TEXT_MERGE_FAN_IN`]). Groups of runs are merged into intermediate runs, in order, until
+///    ([`RUN_MERGE_FAN_IN`]). Groups of runs are merged into intermediate runs, in order, until
 ///    what is left fits in one merge. Nothing but a very large corpus reaches this.
 /// 4. **Merge.** The runs are merged k-way on the term, and each merged term's entity lists are
 ///    concatenated in run order. That is what makes the entity lists ascending *for free*: chunks
@@ -3823,7 +4187,7 @@ fn write_text_index(
     let receipts: Vec<spill::SpillReceipt> = receipts.into_iter().flatten().collect();
 
     // ---- 2. the cascade, where a corpus produced more runs than one merge may hold open ------
-    let receipts = cascade_text_runs(column_dir, receipts)?;
+    let receipts = cascade_sorted_runs(column_dir, "text", receipts)?;
 
     // ---- 3. the merge: one sorted term stream into both files -------------------------------
     let dict_path = column_dir.join(tessera_filter::DICT_FILE);
@@ -4043,11 +4407,12 @@ impl TextRunMerge {
     /// Feed the selected term's entities to `sink`, ascending, checking the ascent as it goes.
     ///
     /// The check is over the *merged* list, not each run's: a run's own ascent is the writer's
-    /// business, and what could go wrong here is the merge. It is also what catches an entity
-    /// carried by two runs — which cannot happen, because an entity has exactly one live arena
-    /// record and one window holds it, and is exactly the failure a silent `>=` would hide.
-    /// `encode_posting` re-checks the slice path, but the bitmap path has no such check to make —
-    /// a `Bitmap` is a set — which is why the test lives here rather than there.
+    /// business, and what could go wrong here is the merge. It is also what catches a position
+    /// carried by two runs — which cannot happen in either caller, because a text entity has
+    /// exactly one live arena record and one window holds it, and a keyword row is visited once by
+    /// one walk — and is exactly the failure a silent `>=` would hide. `encode_posting` re-checks
+    /// the slice path, but the bitmap path has no such check to make — a `Bitmap` is a set — which
+    /// is why the test lives here rather than there.
     fn drain(&mut self, sink: &mut impl FnMut(u32) -> Result<()>) -> Result<()> {
         self.heads.clear();
         for i in 0..self.selected.len() {
@@ -4061,8 +4426,8 @@ impl TextRunMerge {
             if let Some(previous) = last {
                 if entity <= previous {
                     return Err(BuildError::Invalid(format!(
-                        "text run merge: entity {entity} does not ascend past {previous} — one \
-                         entity's document reached two runs"
+                        "run merge: {entity} does not ascend past {previous} — two runs carry \
+                         the same entity for one term, or the same row for one key"
                     )));
                 }
             }
@@ -4076,13 +4441,14 @@ impl TextRunMerge {
     }
 }
 
-/// Runs opened at once by one merge.
+/// Runs opened at once by one merge — the text index's and the keyword column's alike, both
+/// spilling the same run format.
 ///
 /// **A merge holds a file descriptor per run, and the run count is a function of the corpus.** A
 /// worker spills whenever its budget fills, so a corpus far larger than memory produces far more
 /// runs than a process may hold open — which would be `EMFILE` at hour two on exactly the corpus
 /// this whole shape exists to make buildable. Above the cap the runs are merged in passes: groups
-/// of [`TEXT_MERGE_FAN_IN`] into one intermediate run each, until what is left fits in one merge.
+/// of [`RUN_MERGE_FAN_IN`] into one intermediate run each, until what is left fits in one merge.
 /// An intermediate run is written by the same writer as a worker's, so the cascade adds a pass and
 /// not a format.
 ///
@@ -4093,21 +4459,24 @@ impl TextRunMerge {
 /// groups in parallel would buy a fraction of a rare path at the cost of multiplying the very
 /// descriptor count the cap exists to hold down — `threads × fan-in` is not a number this can
 /// bound on a machine whose core count it does not know.
-const TEXT_MERGE_FAN_IN: usize = 128;
+const RUN_MERGE_FAN_IN: usize = 128;
 
-/// Reduce `receipts` to at most [`TEXT_MERGE_FAN_IN`] runs, deleting each pass's inputs as it goes.
+/// Reduce `receipts` to at most [`RUN_MERGE_FAN_IN`] runs, deleting each pass's inputs as it goes.
+/// `family` names the intermediate files, so two column families cascading in one directory cannot
+/// collide.
 ///
 /// Groups are taken in order and each group merges in order, so the entity ordering the final
 /// merge relies on survives every pass.
-fn cascade_text_runs(
+fn cascade_sorted_runs(
     column_dir: &Path,
+    family: &str,
     mut receipts: Vec<spill::SpillReceipt>,
 ) -> Result<Vec<spill::SpillReceipt>> {
     let mut pass = 0usize;
-    while receipts.len() > TEXT_MERGE_FAN_IN {
-        let mut merged = Vec::with_capacity(receipts.len().div_ceil(TEXT_MERGE_FAN_IN));
-        for (group, runs) in receipts.chunks(TEXT_MERGE_FAN_IN).enumerate() {
-            let path = column_dir.join(format!("text-merge-{pass:02}-{group:05}.spill"));
+    while receipts.len() > RUN_MERGE_FAN_IN {
+        let mut merged = Vec::with_capacity(receipts.len().div_ceil(RUN_MERGE_FAN_IN));
+        for (group, runs) in receipts.chunks(RUN_MERGE_FAN_IN).enumerate() {
+            let path = column_dir.join(format!("{family}-merge-{pass:02}-{group:05}.spill"));
             let mut merge = TextRunMerge::open(runs)?;
             let mut writer = spill::TextRunWriter::create(&path)?;
             while merge.next_term()? {
@@ -5516,6 +5885,202 @@ mod tests {
                 tessera_authz::postings::PostingRef::Roaring(view) => view.iter().collect(),
             };
             assert_eq!(&got, entities, "term {term:?} carries the wrong entities");
+        }
+    }
+
+    /// The corpus both keyword tests read. Every shape the dictionary pass has to survive: keys
+    /// shorter than the eight bytes [`KeywordPair`] compares on, keys agreeing in exactly those
+    /// eight and differing after them, a key that is a proper prefix of another, a key carried by
+    /// a seventh of the corpus, keys carried by exactly one entity, a non-ASCII key, and absent
+    /// runs.
+    const N_KEYWORD: usize = 300;
+
+    fn keyword_fixture_key(entity: usize) -> ScalarValue {
+        if entity.is_multiple_of(11) {
+            // Non-ASCII, and its ordinal is decided by its bytes like every other key's.
+            return ScalarValue::Utf8("ünïcode-ключ".to_string());
+        }
+        match entity % 7 {
+            // Absence, every seventh entity and so never aligned to the 64-entity words
+            // presence is stored in.
+            3 => ScalarValue::Null,
+            0 => ScalarValue::Utf8("a".to_string()),
+            1 => ScalarValue::Utf8("ab".to_string()),
+            // A proper prefix of the keys below it, and a key of exactly eight bytes.
+            2 => ScalarValue::Utf8("prefix-".to_string()),
+            4 => ScalarValue::Utf8(format!("prefix-{:04}", entity % 5)),
+            5 => ScalarValue::Utf8("12345678".to_string()),
+            // Distinct per entity, and all of them agreeing in their first eight characters.
+            _ => ScalarValue::Utf8(format!("uuid-000{entity:05}")),
+        }
+    }
+
+    fn keyword_fixture_attribute() -> crate::config::Attribute {
+        crate::config::Attribute {
+            name: "key".to_string(),
+            field: None,
+            title: None,
+            ty: ScalarType::Keyword,
+            analyser: None,
+            vocabulary: None,
+            value_set: None,
+            index: true,
+            render: false,
+        }
+    }
+
+    fn keyword_fixture_column(scratch: &crate::column::ColumnScratch) -> EntityColumn {
+        EntityColumn::from_values(
+            scratch,
+            ScalarType::Keyword,
+            (0..N_KEYWORD).map(keyword_fixture_key),
+            "key",
+        )
+        .expect("typed column")
+    }
+
+    /// The distinct keys of the fixture, sorted — the dictionary the pass owes, derived here the
+    /// way the pass no longer may: whole, in memory, from the corpus.
+    fn keyword_fixture_keys() -> Vec<String> {
+        let mut keys: Vec<String> = (0..N_KEYWORD)
+            .filter_map(|entity| match keyword_fixture_key(entity) {
+                ScalarValue::Utf8(key) => Some(key),
+                _ => None,
+            })
+            .collect();
+        keys.sort();
+        keys.dedup();
+        keys
+    }
+
+    /// The chunk sizes both keyword tests run under. `1` spills a run per row and cascades — 257
+    /// runs over a fan-in of 128 — and `4_096` is one chunk for the whole column; the rest divide
+    /// the corpus, and do not, and align to the 64-entity words presence is stored in, and do not.
+    const KEYWORD_CHUNKS: [usize; 7] = [1, 2, 3, 7, 64, 300, 4_096];
+
+    /// **The chunking must not be observable in the artefacts.** A chunk boundary is a place one
+    /// buffer's rows end and the next one's begin, so a column emitted in one chunk and the same
+    /// column emitted in chunks of three have to be the same three files. That is what makes
+    /// [`KeywordDictPlan`] a memory knob rather than a format decision, and it is what an
+    /// off-by-one at a boundary fails: a key whose rows split across two runs and lost half of
+    /// them changes only the bytes.
+    #[test]
+    fn chunking_the_keyword_column_does_not_change_its_bytes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let scratch_dir = tempfile::tempdir().expect("tempdir");
+        let scratch = crate::column::ColumnScratch::new(scratch_dir.path());
+        let attribute = keyword_fixture_attribute();
+        let values = keyword_fixture_column(&scratch);
+
+        let mut emitted: Vec<[Vec<u8>; 3]> = Vec::new();
+        for (k, chunk_rows) in KEYWORD_CHUNKS.into_iter().enumerate() {
+            let column_dir = dir.path().join(format!("plan-{k}"));
+            std::fs::create_dir_all(&column_dir).expect("column dir");
+            let values_path = column_dir.join("values.arrow");
+            let presence_path = column_dir.join(tessera_filter::PRESENCE_FILE);
+            let written = write_column_values(
+                &column_dir,
+                &values_path,
+                &presence_path,
+                &attribute,
+                &values,
+                KeywordDictPlan::explicit(chunk_rows),
+            )
+            .expect("keyword column");
+            assert!(written.presence, "the fixture has absent entities");
+            let dict_path = written.dict.expect("a keyword column owes a dictionary");
+            // The three artefacts and nothing else: every run this plan spilled, every
+            // intermediate its cascade wrote, and the ordinal scratch are all gone.
+            let mut left: Vec<String> = std::fs::read_dir(&column_dir)
+                .expect("read dir")
+                .map(|e| e.expect("entry").file_name().to_string_lossy().into_owned())
+                .filter(|name| {
+                    name != "values.arrow"
+                        && name != tessera_filter::PRESENCE_FILE
+                        && name != tessera_filter::DICT_FILE
+                })
+                .collect();
+            left.sort();
+            assert!(left.is_empty(), "chunk {chunk_rows} left {left:?} behind");
+            emitted.push([
+                std::fs::read(&dict_path).expect("dict"),
+                std::fs::read(&values_path).expect("values"),
+                std::fs::read(&presence_path).expect("presence"),
+            ]);
+        }
+        let first = emitted.first().expect("at least one plan").clone();
+        for (k, files) in emitted.iter().enumerate().skip(1) {
+            assert_eq!(files[0], first[0], "chunk plan {k}'s dictionary differs");
+            assert_eq!(files[1], first[1], "chunk plan {k}'s values differ");
+            assert_eq!(files[2], first[2], "chunk plan {k}'s presence differs");
+        }
+    }
+
+    /// And the column says what the corpus says: the dictionary is the sorted distinct key set,
+    /// and every entity's ordinal names its own key — read back through the readers that will
+    /// serve them, under every chunking, so what is asserted is the merge's output and not one
+    /// chunk's buffer.
+    #[test]
+    fn the_keyword_column_names_every_entity_s_own_key() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let scratch_dir = tempfile::tempdir().expect("tempdir");
+        let scratch = crate::column::ColumnScratch::new(scratch_dir.path());
+        let attribute = keyword_fixture_attribute();
+        let values = keyword_fixture_column(&scratch);
+        let expected = keyword_fixture_keys();
+
+        for chunk_rows in KEYWORD_CHUNKS {
+            let column_dir = dir.path().join(format!("chunk-{chunk_rows}"));
+            std::fs::create_dir_all(&column_dir).expect("column dir");
+            let values_path = column_dir.join("values.arrow");
+            let presence_path = column_dir.join(tessera_filter::PRESENCE_FILE);
+            write_column_values(
+                &column_dir,
+                &values_path,
+                &presence_path,
+                &attribute,
+                &values,
+                KeywordDictPlan::explicit(chunk_rows),
+            )
+            .expect("keyword column");
+
+            let dict = tessera_filter::SortedDict::open(
+                &column_dir.join(tessera_filter::DICT_FILE),
+                tessera_filter::Access::Read,
+            )
+            .expect("the dictionary opens");
+            assert_eq!(dict.len() as usize, expected.len(), "chunk {chunk_rows}");
+            let mut scratch_key = Vec::new();
+            for (ordinal, key) in expected.iter().enumerate() {
+                assert_eq!(
+                    dict.key_of(ordinal as u32, &mut scratch_key)
+                        .expect("the key resolves"),
+                    key,
+                    "chunk {chunk_rows}: ordinal {ordinal}"
+                );
+            }
+
+            let column = tessera_filter::ValueColumn::open(
+                &values_path,
+                Some(&presence_path),
+                tessera_filter::Access::Read,
+            )
+            .expect("the value column opens");
+            for entity in 0..N_KEYWORD {
+                let ordinal = column.value_of(entity as u32).map(|value| value.raw());
+                match keyword_fixture_key(entity) {
+                    ScalarValue::Utf8(key) => {
+                        let ordinal = ordinal.expect("a present entity has a value");
+                        assert_eq!(
+                            dict.key_of(ordinal, &mut scratch_key)
+                                .expect("the key resolves"),
+                            key,
+                            "chunk {chunk_rows}: entity {entity}"
+                        );
+                    }
+                    _ => assert_eq!(ordinal, None, "chunk {chunk_rows}: entity {entity}"),
+                }
+            }
         }
     }
 
