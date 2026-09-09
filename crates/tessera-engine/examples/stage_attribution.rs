@@ -5,7 +5,8 @@
 //! `bench-timing` feature's per-request [`tessera_engine::StageTimings`] rather than inference.
 //!
 //! **Method.** `StageTimings`' serial-prefix fields (`generation_resolve_ns` through
-//! `tile_ranges_ns`, plus `theta_anchor_ns`) keep their wall-clock meaning at every
+//! `tile_ranges_ns`, plus `theta_anchor_ns` and `theta_occupancy_ns`) keep their wall-clock
+//! meaning at every
 //! `compute_threads` (`timing.rs`'s doc) — none of that work runs inside `pool.install`. Their
 //! sum is therefore directly comparable between the two thread configurations. What is NOT
 //! separately timed is the parallel section itself (`Probe::skip()` deliberately discards its
@@ -157,6 +158,7 @@ struct Sums {
     row_projection_ns: u128,
     compose_ns: u128,
     theta_anchor_ns: u128,
+    theta_occupancy_ns: u128,
     tiles_for_bbox_ns: u128,
     tile_ranges_ns: u128,
     total_ns: u128,
@@ -254,6 +256,7 @@ fn main() {
             sums.row_projection_ns += t.row_projection_ns as u128;
             sums.compose_ns += t.compose_ns as u128;
             sums.theta_anchor_ns += t.theta_anchor_ns as u128;
+            sums.theta_occupancy_ns += t.theta_occupancy_ns as u128;
             sums.tiles_for_bbox_ns += t.tiles_for_bbox_ns as u128;
             sums.tile_ranges_ns += t.tile_ranges_ns as u128;
             sums.total_ns += t.total_ns as u128;
@@ -273,6 +276,7 @@ fn main() {
             + avg(sums.row_projection_ns)
             + avg(sums.compose_ns)
             + avg(sums.theta_anchor_ns)
+            + avg(sums.theta_occupancy_ns)
             + avg(sums.tiles_for_bbox_ns)
             + avg(sums.tile_ranges_ns);
         let avg_total = avg(sums.total_ns);
@@ -300,6 +304,10 @@ fn main() {
         println!(
             "    theta_anchor_ns        {:>8}",
             avg(sums.theta_anchor_ns)
+        );
+        println!(
+            "    theta_occupancy_ns     {:>8}",
+            avg(sums.theta_occupancy_ns)
         );
         println!(
             "    tiles_for_bbox_ns      {:>8}",

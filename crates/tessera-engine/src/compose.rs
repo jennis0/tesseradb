@@ -587,7 +587,9 @@ impl EffectiveMask {
     /// `base.cardinality()` alone would let a viewer aggregate mark counts across tiles, solve for
     /// the anchor, difference it against its own summed per-tile `visible` (which §7.1 discloses
     /// exactly), and recover a running estimate of how many of its own items have been denied —
-    /// a count of items *outside* `M_auth`. See [`crate::select::Threshold::anchor`].
+    /// a count of items *outside* `M_auth`. See [`crate::select::Threshold::at_depth`], and
+    /// [`crate::occupancy`] for `N_occ(d)`, θ's second anchor, which takes this rule for the same
+    /// reason.
     ///
     /// **Deliberately the same arithmetic as [`Self::count_range`]**, one term at a time, so the
     /// anchor and the per-tile counts can never disagree about what composition means. Two
@@ -601,7 +603,7 @@ impl EffectiveMask {
     /// §8.4 and **I12**: anchoring the selection threshold on *filtered* counts would make θ a
     /// function of the filter, so the frontier would coarsen as a viewer typed — a filter moving
     /// the frontier down, which I12 forbids. The anchor is the composed mask's own total, filter or
-    /// no filter, and this method is the one `Threshold::anchor` calls.
+    /// no filter, and this method is the one `Threshold::at_depth` takes `V_total` from.
     pub fn visible_total(&self) -> u64 {
         self.base.cardinality() - self.minus.cardinality() + self.plus.cardinality()
     }

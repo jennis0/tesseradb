@@ -9,7 +9,8 @@
 //! inside the mask (I7). It lives in [`crate::select`], which carries the definition, the nesting
 //! argument and the two evaluation routes. This module's job is only to resolve the per-request
 //! parameters (notably θ's anchor, which **must** be the composed visible cardinality — see
-//! [`crate::select::Threshold::anchor`] for the I2 argument) and to gather what selection returns.
+//! [`crate::select::Threshold::at_depth`] for the I2 argument) and to gather what selection
+//! returns.
 //!
 //! **The request is two phases, split at the seam streaming needs** (`streamed-serving.md`):
 //! the **sweep** — count, select and underlay per tile, no gather — and the **emit** — a serial
@@ -3091,26 +3092,53 @@ impl Engine {
             }
         };
 
-        // θ's anchor: the session's **composed** visible cardinality over this view's whole row
-        // space. It must be the composed figure and not `base`'s — see `Threshold::anchor`'s doc
-        // for the I2 argument and the concrete channel the pre-overlay figure opens.
+        // θ's two anchors, both over the session's **composed** mask and this view's whole row
+        // space: `V_total`, the visible cardinality, and `N_occ(zoom)`, the number of depth-`zoom`
+        // tiles holding at least one visible row. Both must be the composed figures and not
+        // `base`'s — see `Threshold::at_depth`'s doc for the I2 argument and the concrete channel
+        // the pre-overlay figures open.
         //
-        // This is viewport-*invariant*: it depends on the session's mask and the generation, never
-        // on `bbox` or `zoom`, so θ does not move when the viewer pans — which is the churn §7.2
-        // forbids. It does move on an overlay swap, which is accepted: swaps are rare against pans,
-        // and because the served set is a `tessera_id` prefix, a small θ move perturbs only the
-        // marks nearest the cut.
+        // Both are viewport-*invariant*: they depend on the session's mask, the view and the
+        // generation, never on `bbox`, so θ does not move when the viewer pans — which is the churn
+        // §7.2 forbids. `N_occ` is a function of the depth, so θ moves on a *zoom*, which is what
+        // makes the mean occupied tile draw `m_target` marks at every depth; nesting survives it
+        // because `N_occ` is non-decreasing in depth, so θ is monotone (§7.2). Both move on an
+        // overlay swap, which is accepted: swaps are rare against pans, and because the served set
+        // is a `tessera_id` prefix, a small θ move perturbs only the marks nearest the cut.
         // D-C checkpoint: before θ's anchor, the second long serial-prefix stage this task guards.
         check_cancelled(&cancel)?;
         let v_total = mask.visible_total();
         probe.lap(|t| &mut t.theta_anchor_ns);
+        let threshold = match req.filter {
+            // §8.5's match-layer count rule: a filtered request serves every match, up to the cap.
+            // The θ threshold clause does not thin a filtered selection, and saturating is how the
+            // definition says "in full": `C_θ = |vis(T)|`, so `served = min(matched, cap)` per
+            // tile, with the cap-many smallest `tessera_id`s when a tile is over — the same prefix
+            // rule as ever, so nesting across zooms is untouched. Neither anchor is walked, both
+            // being inputs to a threshold this request does not consult.
+            //
+            // This is NOT a re-anchor. θ's anchors stay the unfiltered composed mask's, and §5.2 of
+            // `filter-surface.md` forbids anchoring on `M_sel` (a threshold that moved as the
+            // viewer typed). The rule here is the other half of the same section: the anchor never
+            // narrows, and the match layer never samples. Before this, a filtered tile was pushed
+            // through the unfiltered θ odds — a tile narrowed from 4,000 visible to 40 matched drew
+            // ~1% of 40, i.e. the k_min floor — so the map thinned in proportion to the filter's
+            // selectivity instead of showing the matches.
+            Some(_) => Threshold::Saturated,
+            None => Threshold::at_depth(
+                v_total,
+                self.config.theta_target_marks,
+                self.occupied_tiles(&mask_identity, view, &segments, &mask, zoom),
+            ),
+        };
+        probe.lap(|t| &mut t.theta_occupancy_ns);
         let params = SelectParams {
             k_min: self.config.k_min,
             // The client may ask for less than the overplot ceiling; it may not ask for more.
             // Applying it here rather than truncating afterwards is free — the served set is a
             // prefix, so the two agree — and it bounds the selection heap and the output gather.
             cap: k.min(self.config.k_max_marks),
-            threshold: Threshold::anchor(v_total, self.config.theta_target_marks).at_depth(zoom),
+            threshold,
         };
 
         let mut tile_counts = Vec::new();
@@ -3393,28 +3421,6 @@ impl Engine {
         // Reset the clock so the head's construction and delivery are unattributed rather than
         // silently charged to the stage that follows.
         probe.skip();
-
-        // §8.5's match-layer count rule: a filtered request serves every match, up to the cap —
-        // the θ threshold clause does not thin a filtered selection. Saturating the threshold is
-        // how the definition says "in full": `C_θ = |vis(T)|` by construction, so
-        // `served = min(matched, cap)` per tile, with the cap-many smallest `tessera_id`s when a
-        // tile is over — the same prefix rule as ever, so nesting across zooms is untouched.
-        //
-        // This is NOT a re-anchor. θ's anchor stays `visible_total()`, unfiltered, and §5.2 of
-        // `filter-surface.md` forbids anchoring on `M_sel` (a threshold that moved as the viewer
-        // typed). The rule here is the other half of the same section: the anchor never narrows,
-        // and the match layer never samples. Before this, a filtered tile was pushed through the
-        // unfiltered θ odds — a tile narrowed from 4,000 visible to 40 matched drew ~1% of 40,
-        // i.e. the k_min floor — so the map thinned in proportion to the filter's selectivity
-        // instead of showing the matches.
-        let params = if req.filter.is_some() {
-            SelectParams {
-                threshold: Threshold::Saturated,
-                ..params
-            }
-        } else {
-            params
-        };
 
         // D-D/D-F, calibrated: below `SERIAL_FALLBACK_MAX_ROWS`, fold `tile_sweep` in place —
         // same function, same input order, no `pool.install` — since below that line the fan-out's
@@ -5005,6 +5011,89 @@ impl Engine {
             fragment_identity: geometry.fragment.identity,
             fragment_watermark: geometry.fragment.watermark,
         }
+    }
+
+    /// `N_occ(depth)` for this session and view — θ's second anchor (§7.2), memoised.
+    ///
+    /// **Evaluated per requested depth, never for all seventeen.** A session touches a handful of
+    /// depths, and the walk is `O((runs + N_occ(d)) · log)` per depth against the mask and the
+    /// Morton column; computing the whole ladder eagerly costs an order of magnitude more than a
+    /// request needs (`crate::occupancy`'s module doc carries the figures).
+    ///
+    /// The memo's key is [`crate::occupancy::OccupancyKey`], which is the masked-count cache's key
+    /// terms plus the view and the depth: every one of them is a reason the composed mask or the
+    /// row space moved. A key that is being built by another caller is answered by building here
+    /// and not retaining, exactly as a region decomposition whose wait ran out is: the key fixes
+    /// the mask, the view and the depth, so two builders reach the same number and the waste is one
+    /// walk rather than a wrong answer.
+    ///
+    /// **The mask must be the unfiltered composed one.** `N_occ` is an anchor, so a filtered mask
+    /// reaching it would make θ a function of what the viewer typed (**I12**); the call site takes
+    /// both anchors before the filter is evaluated.
+    pub(crate) fn occupied_tiles(
+        &self,
+        identity: &crate::histogram::MaskIdentity,
+        view: &str,
+        segments: &[(&SegmentData, u32)],
+        mask: &crate::compose::EffectiveMask,
+        depth: u8,
+    ) -> u64 {
+        let key = crate::occupancy::OccupancyKey {
+            token_id: identity.token_id,
+            view: view.to_string(),
+            depth,
+            segments_version: identity.segments_version,
+            overlay_version: identity.overlay_version,
+            fragment_identity: identity.fragment_identity,
+            fragment_watermark: identity.fragment_watermark,
+        };
+        let build = || {
+            crate::occupancy::OccupiedTiles(crate::occupancy::occupied_tiles(mask, segments, depth))
+        };
+        match self.occupancy.get_or_derive(key, None, |_| build()) {
+            Ok(entry) => entry.0,
+            Err(crate::single_flight::Building) => build().0,
+        }
+    }
+
+    /// `N_occ(depth)` for one session and view, by the request path's own route.
+    ///
+    /// **A test hook, gated so it cannot exist in a shipped build**, on
+    /// [`Engine::set_background_refresh_for_test`]'s argument. θ's occupied-tile anchor is
+    /// otherwise observable only through mark counts, where a one-tile move is a fraction of one
+    /// mark — so the I2 property that it is the **composed** figure, and not the cached row
+    /// projection's, has no other surface a test can assert on. Composing a second mask in the test
+    /// instead would assert against that transcription rather than against this one.
+    #[cfg(feature = "fault-injection")]
+    #[doc(hidden)]
+    pub fn occupied_tiles_for_test(&self, session: &Session, view: &str, depth: u8) -> Result<u64> {
+        let generation = self.generation.load_full();
+        let view_data = generation
+            .bundle
+            .partitions
+            .values()
+            .find_map(|partition| partition.views.get(view))
+            .ok_or_else(|| EngineError::UnknownView(view.to_string()))?;
+        let mut probe = Probe::new();
+        let geometry =
+            self.session_geometry(session, &generation, view, view_data, &None, &mut probe)?;
+        let denied = generation
+            .denied
+            .get(view)
+            .ok_or_else(|| EngineError::DenyMaskMissing {
+                view: view.to_string(),
+            })?;
+        let mask = compose(
+            &session.satisfied,
+            &generation.overlay,
+            &generation.buffer,
+            Arc::clone(&geometry.projection),
+            &view_data.row_space,
+            denied,
+        );
+        let segments = segments_with_row_bases(view, view_data)?;
+        let mask_identity = self.mask_identity(session, &generation, &geometry);
+        Ok(self.occupied_tiles(&mask_identity, view, &segments, &mask, depth))
     }
 
     /// This level's masked counts, where the level is served row-major and so has no other route to

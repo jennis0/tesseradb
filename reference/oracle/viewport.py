@@ -23,14 +23,18 @@ m(T)      = min(cap, max(min(k_min, cap), C_θ(T)))
 served(T) = the min(m(T), |vis(T)|) smallest members of vis(T) by tessera_id
 ```
 
-with θ anchored on the viewer's own **composed** visible total over the view: `P_0 = ⌊m_target ·
-2⁶⁴ / V_total⌋`, `P_{d+1} = 4·P_d`, saturating — and `V_total` is `|M_auth ∩ rows(view)|`,
-composed *and counted in row space* (r24). Both qualifiers are load-bearing: *composed* is the I2
-requirement below, and *row space* is §11.2's rule that an entity with no row contributes to no
-count whatever `L` says — which under group-commit allocation is the normal steady state of an
-ingesting deployment, not a transient, since a batch is acked and so in `M_auth` for a whole
-commit window before flush gives it rows. [`visible_total`] counts segment rows, which is that
-reading.
+with θ anchored on two quantities of the viewer's own **composed** mask over the view: `P_d =
+⌊m_target · N_occ(d) · 2⁶⁴ / V_total⌋`, saturating. `V_total` is `|M_auth ∩ rows(view)|`, composed
+*and counted in row space* (r24). Both qualifiers matter: *composed* is the I2 requirement below,
+and *row space* is §11.2's rule that an entity with no row contributes to no count whatever `L`
+says — which under group-commit allocation is the normal steady state of an ingesting deployment,
+not a transient, since a batch is acked and so in `M_auth` for a whole commit window before flush
+gives it rows. [`visible_total`] counts segment rows, which is that reading.
+
+`N_occ(d)` is the number of depth-*d* tiles holding at least one row the viewer can see (r62),
+counted over the same composed mask and over the whole view. [`Selection`] already buckets every
+visible row by its depth-*d* tile, so `N_occ(d)` here is the number of buckets — the definition
+read straight off the structure the counts come from.
 
 One clause arrives from outside §7.2: a request carrying a filter evaluates the definition with
 the threshold **saturated** (§8.5's match-layer rule — every match served, up to the cap), which
@@ -116,50 +120,51 @@ this file's job is to look like §7.2.
 """
 
 
-def theta_cut(v_total: int, m_target: int, depth: int) -> int | None:
+def theta_cut(v_total: int, m_target: int, n_occ: int) -> int | None:
     """`P_d` as a cut point over the identity space, or [`SATURATED`].
 
-    §7.2 states θ as a **recurrence**, and this is written as one:
+    §7.2 (r62) states θ at depth *d* as one product over the viewer's own composed mask:
 
-        P_0     = ⌊m_target · 2⁶⁴ / V_total⌋      (r24: floors; saturated when V_total = 0)
-        P_{d+1} = 4 · P_d                          saturating at 2⁶⁴
+        θ_d = m_target · N_occ(d) / V_total
+        P_d = ⌊θ_d · 2⁶⁴⌋                          saturated at θ_d ≥ 1, and when V_total = 0
 
-    The engine (`crates/tessera-engine/src/select.rs`) evaluates the same thing in closed form, as
-    `P_0 << 2d` with a `leading_zeros` overflow test. **The two constructions differ on purpose**
-    (controller ruling, fix round 1): this module's premise is that "a differential between two
-    transcriptions of the same algorithm proves only that copy-paste works", and a transcribed
-    `p0 << (2 * depth)` was exactly that — the same expression, the same saturation test, on both
-    sides. Integer arithmetic makes the recurrence and the shift identical in *result* for every
-    input, so writing them differently costs no false failures and buys a genuinely independent
-    derivation of the one quantity a θ-live differential turns on.
+    Written as the definition writes it: form the whole product, floor once, and answer
+    [`SATURATED`] where the threshold reaches everything. Python's unbounded integers mean no
+    intermediate value has to be checked for width, which is where the engine's construction
+    differs — it must test θ_d ≥ 1 before it forms `numer << 64` so the shift cannot lose a bit.
+
+    **Where the independence between the two implementations now sits.** It was in the arithmetic:
+    §7.2 stated θ as a recurrence and this module wrote one where the engine wrote a shift. The
+    closed form has no recurrence left to differ over, so the two now compute one expression. What
+    is independent is `N_occ(d)` itself, and by more than a rewriting: [`Selection`] recomputes each
+    row's tile from the source geometry and counts the buckets, where the engine gallops the stored
+    Morton column. A build that wrote a wrong Morton column fails that comparison rather than
+    passing it.
 
     **The rounding and the zero case are the spec's, not this module's** *(r24, `188d961`)*. Both
     were unstated until that revision and both are observable — the differential demands exact
     equality, so an implementation that rounded or took a ceiling would disagree on roughly half of
-    all anchors. §7.2 now settles them: `P_0` **floors** (a smaller `P_0` is a stricter threshold,
-    so rounding down errs toward fewer marks, never more, and the floor clause guarantees
-    non-emptiness regardless), and `P_0` is **saturated** when `V_total = 0`. `//` and the
-    `v_total <= 0` branch below are therefore transcriptions of a rule, not this file's choice —
-    which is what they were when the rule was unwritten, and what the fix-round-1 brief still
-    recorded them as. A negative `v_total` is impossible rather than specified; it is folded into
-    the zero branch because a count cannot be negative and this module refuses to invent a fourth
-    behaviour for a state that cannot arise.
+    all anchors. §7.2 settles them: `P_d` **floors** (a smaller `P_d` is a stricter threshold, so
+    rounding down errs toward fewer marks, never more, and the floor clause guarantees
+    non-emptiness regardless), and it is **saturated** when `V_total = 0`. `//` and the
+    `v_total <= 0` branch below are therefore transcriptions of a rule, not this file's choice. A
+    negative `v_total` is impossible rather than specified; it is folded into the zero branch
+    because a count cannot be negative and this module refuses to invent a fourth behaviour for a
+    state that cannot arise.
+
+    **The floor is taken once, over the whole product** (r62). Flooring `m_target · 2⁶⁴ / V_total`
+    first and multiplying by `N_occ` afterwards floors twice and gives a different cut for most
+    inputs; the engine forms the same single product.
 
     `v_total` is the viewer's **composed** visible total over the view, counted in **row space**
-    (r24) — the mask after the overlay diff, not the raw fragment (I2; see the module doc).
+    (r24), and `n_occ` is counted over that same composed mask — the mask after the overlay diff,
+    not the raw fragment (I2; see the module doc).
     """
     if v_total <= 0:
         return SATURATED
-    p_d = (m_target << 64) // v_total
+    p_d = (m_target * n_occ << 64) // v_total
     if p_d >= 1 << 64:
         return SATURATED
-    # `P_{d+1} = 4·P_d`, one depth at a time, testing saturation at each step — §7.2's own
-    # progression rather than its closed form. The test is before the multiply, so no value beyond
-    # the identity space is ever formed (Python would happily form one; the definition would not).
-    for _ in range(depth):
-        if p_d >= (1 << 64) // 4:
-            return SATURATED
-        p_d = 4 * p_d
     return p_d
 
 
@@ -203,6 +208,20 @@ class Selection:
         for row in range(self.segment.row_count):
             if entities[row] in mask:
                 self.rows_by_tile.setdefault(codes[row] >> shift, []).append(row)
+
+    @property
+    def n_occ(self) -> int:
+        """`N_occ(d)` — how many depth-*d* tiles hold at least one row this mask admits.
+
+        θ's second anchor (§7.2 r62). A bucket exists here exactly when a visible row fell in that
+        tile, so the count of buckets **is** the definition, over the whole view and over the
+        composed mask.
+
+        **Over the view, never over a request's tiles.** θ is viewport-invariant, so this counts
+        every occupied tile in the view and not the ones a bbox happens to name. Narrowing it to a
+        request would make θ move on a pan.
+        """
+        return len(self.rows_by_tile)
 
     # -- §7.1 -----------------------------------------------------------------------------------
 
@@ -254,7 +273,7 @@ class Selection:
         identities = self.segment.tessera_id
         rows = sorted(self.rows_by_tile.get(tile, ()), key=lambda row: int(identities[row]))
 
-        cut = SATURATED if filtered else theta_cut(v_total, m_target, self.depth)
+        cut = SATURATED if filtered else theta_cut(v_total, m_target, self.n_occ)
         if cut is None:
             c_theta = len(rows)
         else:
@@ -317,7 +336,7 @@ class Selection:
         identities = self.segment.tessera_id
         ordered = sorted(rows, key=lambda row: int(identities[row]))
 
-        cut = theta_cut(v_total, m_target, self.depth)
+        cut = theta_cut(v_total, m_target, self.n_occ)
         if cut is None:
             c_theta = len(ordered)
         else:

@@ -172,6 +172,9 @@ pub struct Stages {
     /// §7.2's θ anchor. `#[serde(default)]` so runs recorded before this stage existed still parse.
     #[serde(default)]
     pub theta_anchor_ns: u64,
+    /// §7.2's `N_occ(d)` walk — θ's second anchor, zero on a memo hit and for a filtered request.
+    #[serde(default)]
+    pub theta_occupancy_ns: u64,
     pub tiles_for_bbox_ns: u64,
     pub tile_ranges_ns: u64,
     pub count_ns: u64,
@@ -200,6 +203,7 @@ impl Stages {
             row_projection_ns: t.row_projection_ns,
             compose_ns: t.compose_ns,
             theta_anchor_ns: t.theta_anchor_ns,
+            theta_occupancy_ns: t.theta_occupancy_ns,
             tiles_for_bbox_ns: t.tiles_for_bbox_ns,
             tile_ranges_ns: t.tile_ranges_ns,
             count_ns: t.count_ns,

@@ -353,11 +353,15 @@ const DAMPING = 0.5;
 /**
  * Correct `mTarget` toward what the server actually served.
  *
- * The model `marks ≈ m_target · f · 4^d` holds to ~1% for broad principals at full extent and drifts
- * −32%/+14% across viewport fractions, because tile occupancy varies with clustering. On a bimodal
- * field — a gazetteer's empty ocean and saturated land — it does not hold at all, and its correction
- * sat pinned at the 4× clamp while the response ran to 100 MB. That is what {@link countedMarks}
- * replaced it for; what remains here is the fallback for a view no counts describe.
+ * The model `marks ≈ m_target × tiles` is what design §7.2's threshold delivers: θ is anchored on
+ * the occupied-tile count inside the viewer's own mask, so the mean occupied tile draws `m_target`
+ * marks at every depth whatever shape the data has. Reading `tiles` as `f · 4^d` is the part that
+ * assumes an even spread: measured against the earlier `4^d`-progressed threshold it held to ~1%
+ * for broad principals at full extent and drifted −32%/+14% across viewport fractions, and on a
+ * bimodal field — a gazetteer's empty ocean and saturated land — not at all, with its correction
+ * pinned at the 4× clamp while the response ran to 100 MB. That is what {@link countedMarks}
+ * replaced it for; what remains here is the fallback for a view no counts describe, where the
+ * occupied count is exactly what is not known.
  *
  * **It is corrected against its own figure, not against the count-driven one.** The observation
  * carries {@link DepthChoice.averageMarks}, so the ratio measures this model's error even on a

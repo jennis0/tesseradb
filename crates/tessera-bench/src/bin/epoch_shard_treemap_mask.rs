@@ -617,7 +617,16 @@ fn run_depth(args: &Args, case: &Case<'_>, depth: u8, cells: &mut Vec<Cell>) {
     let params = SelectParams {
         k_min: args.k_min,
         cap: args.cap,
-        threshold: Threshold::anchor(case.mask.visible_total(), M_TARGET).at_depth(depth),
+        // θ's occupied-tile anchor (§7.2) takes `N_occ(depth)` from the view's own Morton order,
+        // and this case's identity column is synthetic — its codes are not the view row space's,
+        // so a count over it would mean nothing. `4^depth` is used instead: it is the largest
+        // `N_occ` the grid allows, so this measures the selection at the loosest threshold the
+        // definition can produce, which is the most per-tile work it can be asked for.
+        threshold: Threshold::at_depth(
+            case.mask.visible_total(),
+            M_TARGET,
+            1u64 << (2 * u32::from(depth)),
+        ),
     };
     let segment = case.segment;
     let mask = case.mask;

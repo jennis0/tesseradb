@@ -2065,7 +2065,7 @@ fn stage_header(
     // grouping the rest follows; `tessera_bench::report::Stages` is JSON-by-name and keeps the
     // readable order.
     Some(format!(
-        "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
+        "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
         t.generation_resolve_ns,
         t.stamp_compare_ns,
         t.view_lookup_ns,
@@ -2091,6 +2091,9 @@ fn stage_header(
         // Appended 2026-08-29: how many served artifacts had their shape's vertex budget fire
         // (`polygon-membership.md` §7.2). A counter, after the three trailing fields.
         shape_guard_fired,
+        // Appended with §7.2's occupied-tile anchor: the walk that resolves `N_occ(d)`, separate
+        // from `theta_anchor_ns` because it is the one part of θ that scales with the corpus.
+        t.theta_occupancy_ns,
     ))
 }
 

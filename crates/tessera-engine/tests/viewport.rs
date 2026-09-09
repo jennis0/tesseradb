@@ -1784,6 +1784,91 @@ fn the_theta_anchor_falls_when_an_item_is_suppressed() {
     );
 }
 
+/// **θ's second anchor is composed too: a suppression that empties a tile lowers `N_occ`.**
+///
+/// `N_occ(d)` is the number of depth-*d* tiles holding a row this session can see, and θ scales
+/// with it. It carries the same signal `V_total` does, so it takes the same I2 rule: counted over
+/// the composed mask, never over the cached `RowProjection`, which is `M_auth` before the overlay
+/// diff. Counting there would leave θ scaled by tiles whose only members have been denied, which a
+/// viewer aggregating mark counts can difference against the per-tile `visible` §7.1 discloses.
+///
+/// The fixture puts ten entities on each of a thousand lattice positions (`common::write_points_n`
+/// — `x = 37e mod 1000`, `y = 53e mod 1000`), so emptying a depth-16 tile means suppressing all
+/// ten entities sharing one position. Suppressing one of them changes no tile's occupancy, which
+/// is asserted first: without it this test would pass on a count that had not moved for the wrong
+/// reason.
+#[test]
+fn n_occ_falls_when_a_suppression_empties_a_tile() {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+
+    let baseline = open_engine(
+        &bundle_root,
+        &tmp.path().join("cache_a"),
+        &tmp.path().join("wal_a.log"),
+    );
+    let session_a = baseline.authorise(&full_coverage_credential()).unwrap();
+    let before = baseline.occupied_tiles_for_test(&session_a, "s0", 16).unwrap();
+    assert_eq!(
+        before, 1_000,
+        "the fixture's ten thousand items sit on a thousand lattice positions"
+    );
+    assert_eq!(
+        baseline.occupied_tiles_for_test(&session_a, "s0", 0).unwrap(),
+        1,
+        "depth 0 is one tile whatever the data does"
+    );
+
+    // The ten entities sharing one lattice position, and one of them on its own.
+    let cohort: Vec<u64> = (0..10).map(|i| 5 + i * 1_000).collect();
+    let suppress = |wal_path: &std::path::Path, ids: &[u64]| {
+        let (mut wal, _initial) = Wal::open(wal_path).unwrap();
+        for id in ids {
+            let entity = baseline
+                .resolve_external_id(&id.to_le_bytes())
+                .unwrap()
+                .expect("the source item is established in the bundle");
+            wal.append(&WalRecord::ChangeByEntity {
+                entity_id: entity,
+                op: ChangeOp::Suppress,
+            })
+            .unwrap();
+        }
+        wal.fsync().unwrap();
+    };
+
+    let wal_one = tmp.path().join("wal_one.log");
+    suppress(&wal_one, &cohort[..1]);
+    let one_gone = open_engine(&bundle_root, &tmp.path().join("cache_one"), &wal_one);
+    let session_one = one_gone.authorise(&full_coverage_credential()).unwrap();
+    assert_eq!(
+        one_gone
+            .occupied_tiles_for_test(&session_one, "s0", 16)
+            .unwrap(),
+        before,
+        "nine of the position's ten items are still visible, so its tile is still occupied"
+    );
+
+    let wal_all = tmp.path().join("wal_all.log");
+    suppress(&wal_all, &cohort);
+    let cell_gone = open_engine(&bundle_root, &tmp.path().join("cache_all"), &wal_all);
+    let session_all = cell_gone.authorise(&full_coverage_credential()).unwrap();
+    assert_eq!(
+        cell_gone
+            .occupied_tiles_for_test(&session_all, "s0", 16)
+            .unwrap(),
+        before - 1,
+        "the position's last visible item was suppressed, so N_occ must fall — if it did not, \
+         N_occ is counted over the pre-overlay projection and the I2 argument in occupancy.rs is \
+         void"
+    );
+}
+
 /// **The equality `GET /v1/meta`'s disclosure argument rests on.**
 ///
 /// Publishing `theta_target_marks` is defended on the grounds that solving through it yields only

@@ -204,13 +204,14 @@ pub enum ConfigError {
     /// shift input unbounded is an inconsistent standard rather than a considered exemption.
     UnderlayOffsetTooDeep(u8),
     /// `serve.theta_target_marks = 0`, which anchors θ at `Cut(0)` — a threshold that admits
-    /// **nothing**, at every depth, because `0u64.leading_zeros() == 64` so the per-depth shift
-    /// always "fits". Every non-empty tile would then draw exactly `k_min` marks at every zoom
-    /// forever, with no error raised anywhere: design §7.2's density signal silently gone.
+    /// **nothing**, at every depth. `θ_d = m_target · N_occ(d) / V_total` is zero for every
+    /// occupancy when `m_target` is, so no depth and no corpus shape can lift it. Every non-empty
+    /// tile would draw exactly `k_min` marks at every zoom for ever, with no error raised anywhere:
+    /// design §7.2's density signal gone.
     ///
-    /// This is the *same* silent failure mode `Threshold::at_depth`'s `leading_zeros` check exists to
-    /// prevent, reachable through config instead of through a shift bug — so it is refused in the
-    /// same spirit.
+    /// This is the *same* failure mode `Threshold::at_depth`'s saturation test exists to prevent —
+    /// a cut of zero reached without an error — arriving through config instead of through
+    /// arithmetic, so it is refused in the same spirit.
     ThetaTargetZero,
     /// `serve.compute_threads = 0`: the pool this knob sizes must fill the machine, and a
     /// zero-width pool can run nothing at all. Refused rather than clamped to 1, so a typo cannot
@@ -3569,9 +3570,6 @@ compaction_after_deletions = 9000
         );
     }
 
-    /// `theta_target_marks = 0` anchors θ at a cut admitting nothing, so every tile would draw
-    /// exactly `k_min` at every zoom with no error — the identical silent failure that
-    /// `Threshold::at_depth`'s `leading_zeros` guard prevents, reached through config instead.
     #[test]
     fn an_underlay_offset_deeper_than_the_grid_refuses_to_start() {
         std::env::set_var("TESSERA_TEST_SESSION_CRED", "s");
@@ -3583,6 +3581,10 @@ compaction_after_deletions = 9000
         );
     }
 
+    /// `theta_target_marks = 0` anchors θ at a cut admitting nothing at every depth, so every tile
+    /// would draw exactly `k_min` at every zoom with no error — the failure
+    /// `Threshold::at_depth`'s saturation test prevents in the arithmetic, reached through config
+    /// instead. `N_occ(d)` cannot lift a zero product, so no corpus shape rescues it.
     #[test]
     fn a_zero_theta_target_refuses_to_start() {
         std::env::set_var("TESSERA_TEST_SESSION_CRED", "s");

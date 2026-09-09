@@ -19,6 +19,7 @@ use tempfile::TempDir;
 
 use tessera_authz::{write_postings, FragmentCache, PostingsReader};
 use tessera_engine::compose::{compose, EffectiveMask, RowProjection};
+use tessera_engine::occupancy::occupied_tiles;
 use tessera_engine::select::{
     decode_tier, DecodeTier, SelectParams, Selection, SelectionPart, SelectionParts, Threshold,
 };
@@ -133,6 +134,16 @@ fn mask_over_with(
     let denied = tessera_engine::denied_rows_of(overlay, &perm);
     let mask = compose(&satisfied, overlay, buffer, base, &perm, &denied);
     (temp, mask)
+}
+
+/// §7.2's θ at one depth, over this fixture's single segment: `N_occ(depth)` counted inside the
+/// mask, exactly as the engine's own call site counts it.
+fn theta_at(mask: &EffectiveMask, seg: &SegmentData, m_target: u64, depth: u8) -> Threshold {
+    Threshold::at_depth(
+        mask.visible_total(),
+        m_target,
+        occupied_tiles(mask, &[(seg, 0)], depth),
+    )
 }
 
 fn params(k_min: usize, cap: usize, threshold: Threshold) -> SelectParams {
@@ -426,15 +437,14 @@ fn a_drawn_mark_is_still_drawn_in_the_child_that_contains_it() {
     let visible: Vec<u32> = (0..seg.row_count()).filter(|r| r % 3 != 0).collect();
     let (_t, mask) = mask_over(&visible, seg.row_count());
 
-    let anchor = Threshold::anchor(visible.len() as u64, 8);
     let cap = 12;
     // Counted and asserted below: without it this test can pass vacuously if the fixture, the mask
     // or the parameters ever drift such that no mark is drawn in a tile that has a populated child.
     let mut checked = 0usize;
 
     for depth in 0..6u8 {
-        let parent_params = params(2, cap, anchor.at_depth(depth));
-        let child_params = params(2, cap, anchor.at_depth(depth + 1));
+        let parent_params = params(2, cap, theta_at(&mask, &seg.data, 8, depth));
+        let child_params = params(2, cap, theta_at(&mask, &seg.data, 8, depth + 1));
 
         // Deduplicate: the loop is over points, but many points share a tile — at depth 0 all 600
         // do. Without this the same tile is re-selected hundreds of times.
@@ -595,7 +605,7 @@ fn selection_matches_the_definition_over_both_internal_branches() {
     // cut with a small cap to force real selection.
     for threshold in [
         Threshold::Saturated,
-        Threshold::anchor(visible.len() as u64, 4).at_depth(3),
+        theta_at(&mask, &seg.data, 4, 3),
     ] {
         for cap in [1usize, 4, 64, 4096] {
             for k_min in [1usize, 2, 6] {
@@ -747,9 +757,8 @@ fn every_served_row_is_visible() {
     let visible: Vec<u32> = (0..seg.row_count()).filter(|r| r % 5 == 1).collect();
     let (_t, mask) = mask_over(&visible, seg.row_count());
 
-    let anchor = Threshold::anchor(visible.len() as u64, 8);
     for depth in 0..5u8 {
-        let p = params(2, 16, anchor.at_depth(depth));
+        let p = params(2, 16, theta_at(&mask, &seg.data, 8, depth));
         for (x, y, _) in points.iter().copied() {
             let tile = tile_of(x, y, depth);
             let range = tile_ranges(&seg.data, &tile);
@@ -1086,4 +1095,208 @@ fn tiered_decode_matches_the_per_value_path_on_all_tiers_routes_and_branches() {
             );
         }
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// §7.2's second θ anchor: `N_occ(d)`, the occupied-tile count inside the mask
+// ---------------------------------------------------------------------------------------------
+
+/// The linear-scan oracle for `N_occ(d)`: one pass over every visible row, counting distinct
+/// depth-`d` Morton prefixes.
+///
+/// Correct without any argument about runs or gallops — the codes ascend with the row id, so a
+/// change of prefix is a new tile — and slow by the same token. It is the baseline
+/// [`occupied_tiles`] is asserted against, and it shares no code with it.
+fn occupied_tiles_oracle(mask: &EffectiveMask, seg: &SegmentData, depth: u8) -> u64 {
+    let codes = seg.morton.u32();
+    let shift = 32 - 2 * u32::from(depth);
+    let mut seen: FxHashSet<u64> = FxHashSet::default();
+    mask.for_each_visible_run(0..seg.row_count, |run| {
+        for row in run.start..run.end {
+            seen.insert(u64::from(codes[row as usize]) >> shift);
+        }
+    });
+    seen.len() as u64
+}
+
+/// Points spread over several clusters plus a scattering, so the occupied-tile count grows well
+/// short of ×4 per level — the shape the whole change exists for.
+fn clustered_points(n: usize, seed: u64) -> Vec<(f32, f32, u64)> {
+    let mut rng = StdRng::seed_from_u64(seed);
+    let centres = [(120.0f32, 200.0f32), (700.0, 640.0), (900.0, 100.0)];
+    (0..n)
+        .map(|i| {
+            let id = rng.gen();
+            if i % 8 == 0 {
+                (
+                    rng.gen_range(0.0f32..1024.0),
+                    rng.gen_range(0.0f32..1024.0),
+                    id,
+                )
+            } else {
+                let (cx, cy) = centres[i % centres.len()];
+                (
+                    (cx + rng.gen_range(-12.0f32..12.0)).clamp(0.0, 1023.9),
+                    (cy + rng.gen_range(-12.0f32..12.0)).clamp(0.0, 1023.9),
+                    id,
+                )
+            }
+        })
+        .collect()
+}
+
+/// **`N_occ(d)` is exact, non-decreasing in depth, and inside `min(4^d, |mask|)`.**
+///
+/// Exactness against the oracle is what the gallop buys: crediting the tile indices a run *spans*
+/// instead — the endpoint arithmetic — over-counts wherever a run's codes are not dense in
+/// tile-index space, which on a clustered corpus is everywhere.
+///
+/// Monotonicity is the property §7.2's nesting proof takes from the grid rather than from a clamp:
+/// every occupied tile has an occupied child, and children of distinct parents are distinct. It is
+/// asserted rather than argued because nothing else in the tree would notice it failing.
+#[test]
+fn the_occupied_tile_count_is_exact_monotone_and_bounded() {
+    let points = clustered_points(4_000, 0xA11CE);
+    let seg = segment_of(&points);
+    let n = seg.row_count();
+
+    for (label, visible) in [
+        ("full", (0..n).collect::<Vec<u32>>()),
+        ("two thirds", (0..n).filter(|r| r % 3 != 0).collect()),
+        ("sparse", (0..n).filter(|r| r % 37 == 5).collect()),
+        ("one row", vec![n / 2]),
+        ("empty", Vec::new()),
+    ] {
+        let (_t, mask) = mask_over(&visible, n);
+        let cardinality = visible.len() as u64;
+        let mut previous = 0u64;
+        for depth in 0..=16u8 {
+            let got = occupied_tiles(&mask, &[(&seg.data, 0)], depth);
+            assert_eq!(
+                got,
+                occupied_tiles_oracle(&mask, &seg.data, depth),
+                "{label}, depth {depth}: the gallop walk disagrees with the linear scan"
+            );
+            assert!(
+                got >= previous,
+                "{label}, depth {depth}: N_occ fell from {previous} to {got}"
+            );
+            let tiles_at_depth = 1u64 << (2 * u32::from(depth));
+            assert!(
+                got <= tiles_at_depth.min(cardinality),
+                "{label}, depth {depth}: N_occ {got} exceeds min(4^d, |mask|)"
+            );
+            previous = got;
+        }
+    }
+}
+
+/// The same, over masks whose overlay diffs are **not** empty — the route
+/// [`EffectiveMask::for_each_visible_run`] takes when it cannot walk `base` in place, and the one
+/// the chunked walk exists to keep bounded.
+#[test]
+fn the_occupied_tile_count_is_exact_with_a_composed_mask() {
+    let points = clustered_points(3_000, 0xB0B);
+    let seg = segment_of(&points);
+    let n = seg.row_count();
+    let visible: Vec<u32> = (0..n).filter(|r| r % 3 != 0).collect();
+
+    let mut overlay = Overlay::new();
+    for &row in visible.iter().step_by(7) {
+        overlay.apply(EntityId::new(u64::from(row)), ChangeOp::Suppress);
+    }
+    let mut buffer = IngestBuffer::default();
+    let vis: FxHashSet<u32> = visible.iter().copied().collect();
+    for row in (0..n).filter(|r| !vis.contains(r)).step_by(5) {
+        buffer.insert_row_with_terms(
+            &tessera_lifecycle::WalRow {
+                external_id: None,
+                entity_id: EntityId::new(u64::from(row)),
+                view: "s0".to_string(),
+                join: false,
+                descriptors: Vec::new(),
+                x: 0.0,
+                y: 0.0,
+                scalars: Vec::new(),
+                scoped: Vec::new(),
+            },
+            vec![TermId::new(0)],
+        );
+    }
+    let (_t, mask) = mask_over_with(&visible, n, &overlay, &buffer);
+    assert!(
+        !mask.diffs_are_empty(),
+        "this test is about the diffs-present route and the mask has no diffs"
+    );
+
+    for depth in 0..=16u8 {
+        assert_eq!(
+            occupied_tiles(&mask, &[(&seg.data, 0)], depth),
+            occupied_tiles_oracle(&mask, &seg.data, depth),
+            "depth {depth}: the gallop walk disagrees with the linear scan under a composed mask"
+        );
+    }
+}
+
+/// **A tile is counted once however many segments hold rows in it.**
+///
+/// The same points are written as one segment and as two, with the second segment's rows based
+/// after the first's. `N_occ` is a count of tiles rather than of per-segment shares of them, so the
+/// two layouts must agree at every depth — summing the segments' own counts would double every
+/// tile the split runs through.
+#[test]
+fn a_tile_spanning_two_segments_is_counted_once() {
+    let points = clustered_points(1_200, 0xC0FFEE);
+    let whole = segment_of(&points);
+    let n = whole.row_count();
+
+    // The split is by geometry rather than by row index, so both segments hold rows in the same
+    // tiles at every depth above the one that separates the clusters.
+    let left: Vec<(f32, f32, u64)> = points.iter().copied().filter(|p| p.2 % 2 == 0).collect();
+    let right: Vec<(f32, f32, u64)> = points.iter().copied().filter(|p| p.2 % 2 == 1).collect();
+    let seg_a = segment_of(&left);
+    let seg_b = segment_of(&right);
+    let split_rows = seg_a.row_count() + seg_b.row_count();
+    assert_eq!(split_rows, n, "the split must not lose a row");
+
+    let (_t1, mask_whole) = mask_over(&(0..n).collect::<Vec<u32>>(), n);
+    let (_t2, mask_split) = mask_over(&(0..split_rows).collect::<Vec<u32>>(), split_rows);
+
+    for depth in 0..=16u8 {
+        let one = occupied_tiles(&mask_whole, &[(&whole.data, 0)], depth);
+        let two = occupied_tiles(
+            &mask_split,
+            &[(&seg_a.data, 0), (&seg_b.data, seg_a.row_count())],
+            depth,
+        );
+        assert_eq!(
+            one, two,
+            "depth {depth}: one segment counted {one} tiles, two segments counted {two}"
+        );
+    }
+}
+
+/// **Occupied tiles grow far short of the ×4 the old anchor assumed.**
+///
+/// The change replaces `4^d` with this count, so a fixture where the two coincide would let the
+/// difference go untested. Pinned as a range rather than a figure: what matters is that the
+/// fixture is clustered enough for the two anchors to disagree.
+#[test]
+fn a_clustered_fixture_grows_well_short_of_four_per_level() {
+    let points = clustered_points(4_000, 0xD00D);
+    let seg = segment_of(&points);
+    let n = seg.row_count();
+    let (_t, mask) = mask_over(&(0..n).collect::<Vec<u32>>(), n);
+
+    let counts: Vec<u64> = (0..=12u8)
+        .map(|d| occupied_tiles(&mask, &[(&seg.data, 0)], d))
+        .collect();
+    let deep = counts[12];
+    assert!(
+        deep < (1u64 << 24) / 100,
+        "N_occ(12) is {deep}, which is within a hundredth of the 4^12 the old anchor assumed — \
+         this fixture is too evenly spread to tell the two apart"
+    );
+    // Depth 0 is one tile whatever the data does, which is where the two anchors coincide.
+    assert_eq!(counts[0], 1);
 }

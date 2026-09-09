@@ -133,9 +133,9 @@ def test_grid_differential_with_theta_live(density_server, oracle_bundle: Bundle
 
     **This is the case that makes the point-set half of the differential mean anything.** Under
     saturation both sides reduce to "serve everything visible", so the comparison cannot distinguish
-    this engine from one that anchors theta on the pre-overlay projection (the I2 breach), gets the
-    x4 depth progression wrong, or drops the threshold clause. Here the oracle computes a real cut
-    from a real anchor and the engine must agree tile by tile.
+    this engine from one that anchors theta on the pre-overlay projection (the I2 breach), counts
+    occupied tiles over the wrong mask, or drops the threshold clause. Here the oracle computes a
+    real cut from two real anchors and the engine must agree tile by tile.
 
     The assertion below (`saw_partial`) is what stops this test quietly reverting to the vacuous
     case if the fixture size, the zoom range or `theta_target_marks` ever drift.

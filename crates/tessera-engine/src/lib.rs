@@ -28,6 +28,7 @@ pub mod histogram;
 pub mod layout;
 pub mod membership_column;
 mod merge;
+pub mod occupancy;
 mod refresh;
 pub mod region;
 pub mod row_column;

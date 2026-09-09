@@ -40,7 +40,8 @@
 /// changes). At `compute_threads > 1` these fields report *aggregate CPU time spent*, not *wall
 /// time elapsed*, and the sum can legitimately exceed the request's own `total_ns` — that is
 /// concurrency showing up in the numbers honestly, not a bug. The serial-prefix fields
-/// (`generation_resolve_ns` through `tile_ranges_ns`, plus `theta_anchor_ns`) and `total_ns` keep
+/// (`generation_resolve_ns` through `tile_ranges_ns`, plus `theta_anchor_ns` and
+/// `theta_occupancy_ns`) and `total_ns` keep
 /// their pre-parallelism meaning unchanged: nothing before the parallel sweep runs concurrently.
 ///
 /// **`rows_in_ranges` and `tiles_resolved` are NOT per-tile counters, and must never become
@@ -102,6 +103,19 @@ pub struct StageTimings {
     /// ever tracks `sigma_visible` or the projection's size, that memoisation has been lost and the
     /// anchor has quietly become a per-viewport scan.
     pub theta_anchor_ns: u64,
+    /// `crate::occupancy::occupied_tiles` — resolving §7.2's `N_occ(d)`, θ's second anchor, once
+    /// per request and zero on a memo hit.
+    ///
+    /// Separated from [`Self::theta_anchor_ns`] because the two have different cost models and the
+    /// claims made for them differ. `V_total` is O(containers in the overlay diffs); this walk is
+    /// O((runs + `N_occ(d)`) · log) over the mask and the Morton column, so it is the one part of
+    /// θ that scales with the corpus. A memo keyed on the mask, the view and the depth
+    /// (`crate::occupancy::OccupancyKey`) is what keeps a pan at one zoom from paying it again, so
+    /// a deployment seeing this stay non-zero across a pan has lost the memo, not the walk.
+    ///
+    /// Zero for a request carrying a filter: §8.5's match-layer rule saturates the threshold, so
+    /// the walk is not taken.
+    pub theta_occupancy_ns: u64,
     /// `tiles_for_bbox` — pure geometry, no data touched. Serial-prefix: computed once, before
     /// the parallel tile sweep, so this keeps its wall-clock meaning at every `compute_threads`.
     pub tiles_for_bbox_ns: u64,
@@ -229,6 +243,7 @@ impl StageTimings {
             + self.tiles_for_bbox_ns
             + self.tile_ranges_ns
             + self.theta_anchor_ns
+            + self.theta_occupancy_ns
             + self.count_ns
             + self.select_ns
             + self.gather_ns

@@ -111,65 +111,53 @@ pub enum Threshold {
 }
 
 impl Threshold {
-    /// Anchor θ at depth 0 from the viewer's own total visible count.
+    /// θ_d as a cut point: `P_d = ⌊m_target · N_occ(d) · 2⁶⁴ / V_total⌋`, saturating at θ_d ≥ 1.
     ///
-    /// `P_0 = m_target · 2⁶⁴ / v_total`, so the *mean* occupied tile at any depth draws `m_target`
-    /// marks: priorities are uniform over the identity space, so `P(id < P) = P / 2⁶⁴` and a tile of
-    /// *n* visible items serves `n · P_d / 2⁶⁴`.
+    /// `n_occ` is `N_occ(d)`, the number of depth-*d* tiles holding at least one row this session
+    /// can see ([`crate::occupancy::occupied_tiles`]). Priorities are uniform over the identity
+    /// space, so `P(id < P_d) = P_d / 2⁶⁴` and a tile of *n* visible items serves `n · θ_d` marks.
+    /// Summed over the occupied tiles that is `V_total · θ_d = m_target · N_occ(d)`, so the mean
+    /// occupied tile draws `m_target` marks at every depth.
     ///
-    /// **`v_total` must be the COMPOSED visible cardinality** — the mask *after* the overlay diff,
-    /// not the cached `RowProjection`'s. This is an I2 requirement, not a preference: the
-    /// pre-overlay projection strictly contains `M_auth` after any accepted delete or suppression,
-    /// so anchoring there would let a viewer aggregate mark counts across tiles, solve for the
-    /// anchor, difference it against its own summed per-tile `visible` (which §7.1 discloses
-    /// exactly), and recover **a running estimate of how many of its own items have been denied**.
-    /// See [`EffectiveMask::visible_total`]; the property is pinned by
-    /// `the_theta_anchor_falls_when_an_item_is_suppressed`.
+    /// **Both factors must come from the COMPOSED mask** — after the overlay diff, not from the
+    /// cached `RowProjection`. This is an I2 requirement, not a preference: the pre-overlay
+    /// projection strictly contains `M_auth` after any accepted delete or suppression, so anchoring
+    /// on it would let a viewer aggregate mark counts across tiles, solve for θ, difference it
+    /// against its own summed per-tile `visible` (which §7.1 discloses exactly), and recover **a
+    /// running estimate of how many of its own items have been denied**. See
+    /// [`EffectiveMask::visible_total`] for `V_total` and [`crate::occupancy`] for `N_occ`; the
+    /// property is pinned by `the_theta_anchor_falls_when_an_item_is_suppressed` and
+    /// `n_occ_falls_when_a_suppression_empties_a_tile`.
     ///
-    /// The `4^d` progression assumes the viewer's items spread over ~`4^d` occupied tiles, which
-    /// clustered corpora violate — so real tiles draw more than `m_target` and a band of mid-range
-    /// depths pins at the cap. Accepted by the owner over both a measured anchor and a
-    /// client-supplied θ; §7.2 carries the worked numbers and the exact extent of the flat region.
-    pub fn anchor(v_total: u64, m_target: u64) -> Self {
+    /// **θ is monotone in depth without a clamp.** Every occupied depth-*d* tile has at least one
+    /// occupied child and children of distinct parents are distinct, so `N_occ` is non-decreasing
+    /// in depth and so is θ. §7.2's nesting proof needs that and gets it from the structure of the
+    /// grid; a running maximum over depth would hide a counting bug rather than prevent one, and
+    /// there is none here.
+    ///
+    /// **The saturation test comes before the shift, and that is what replaces the old
+    /// `leading_zeros` guard.** θ_d ≥ 1 exactly when `m_target · N_occ >= V_total`, and answering
+    /// that first bounds `numer` below `V_total < 2³²` — so `numer << 64` is under 2⁹⁶ and cannot
+    /// lose a bit. The residual case uses `checked_mul` and not `checked_shl`: `checked_shl`
+    /// returns `None` only for a shift at or past the type's width and *wraps* below it, which is
+    /// how the depth-shift form produced `Cut(0)` — `C_θ = 0` in every tile at every depth, every
+    /// tile drawing `k_min` for ever, with no error raised anywhere. Overflow here answers
+    /// `Saturated`, which is the correct answer for a θ that large.
+    pub fn at_depth(v_total: u64, m_target: u64, n_occ: u64) -> Self {
         if v_total == 0 {
             // No visible rows anywhere: every tile is empty and skipped. Saturated is the
             // harmless answer, and avoids a division by zero.
             return Threshold::Saturated;
         }
-        // u128 is required, not defensive: `m_target << 64` does not fit in a u64 at all.
-        let p0 = ((m_target as u128) << 64) / (v_total as u128);
-        if p0 >= 1u128 << 64 {
-            // θ_0 ≥ 1 — the viewer can see no more than `m_target` items in total, so all of them
-            // should be drawn.
-            Threshold::Saturated
-        } else {
-            Threshold::Cut(p0 as u64)
+        let numer = (m_target as u128) * (n_occ as u128);
+        if numer >= v_total as u128 {
+            // θ_d ≥ 1 — this session's expected marks reach everything it can see.
+            return Threshold::Saturated;
         }
-    }
-
-    /// θ_d from θ_0: `P_d = P_0 << 2d`, saturating.
-    ///
-    /// `P_{d+1} = 4·P_d` is what makes the per-tile expectation depth-stable (a child holds ~n/4
-    /// items, so `4θ_d · n/4 = θ_d · n`) and what makes θ monotone in depth, which is what the
-    /// nesting proof's threshold clause needs.
-    ///
-    /// **The overflow test is `leading_zeros`, and this is not a matter of taste.**
-    /// `u64::checked_shl(n)` returns `None` only for `n >= 64`; for `n < 64` it performs a
-    /// *wrapping* shift and silently discards the high bits. So `P_0 = 2⁶³` at depth 1 would yield
-    /// `Some(0)`, i.e. `Cut(0)`, i.e. `C_θ = 0` in every tile at every depth — every tile drawing
-    /// exactly `k_min` marks forever, with no error raised anywhere. There is no `saturating_shl`
-    /// in std to reach for instead.
-    pub fn at_depth(&self, depth: u8) -> Self {
-        match *self {
-            Threshold::Saturated => Threshold::Saturated,
-            Threshold::Cut(p0) => {
-                let shift = 2u32 * depth as u32;
-                if shift >= 64 || p0.leading_zeros() < shift {
-                    Threshold::Saturated
-                } else {
-                    Threshold::Cut(p0 << shift)
-                }
-            }
+        // u128 is required, not defensive: `numer << 64` does not fit in a u64 at all.
+        match numer.checked_mul(1u128 << 64) {
+            Some(scaled) => Threshold::Cut((scaled / v_total as u128) as u64),
+            None => Threshold::Saturated,
         }
     }
 
@@ -721,53 +709,99 @@ impl Selection {
 mod tests {
     use super::*;
 
+    /// θ_d rises with the occupied-tile count and with nothing else.
+    ///
+    /// The old form multiplied by four per depth whatever the data did. The cut now tracks
+    /// `N_occ(d)`: `n` times the occupied tiles is `n` times the cut, up to the one unit per tile
+    /// that flooring the whole product rather than the unit can differ by.
     #[test]
-    fn depth_progression_is_times_four_until_saturation() {
-        let t = Threshold::anchor(1_000_000, 16);
-        let Threshold::Cut(p0) = t else {
-            panic!("expected a cut for v_total=1e6, m_target=16");
+    fn the_cut_is_proportional_to_the_occupied_tile_count() {
+        let v_total = 1_000_000u64;
+        let Threshold::Cut(one) = Threshold::at_depth(v_total, 16, 1) else {
+            panic!("expected a cut at N_occ = 1");
         };
-        for d in 0..5u8 {
-            match t.at_depth(d) {
-                Threshold::Cut(p) => assert_eq!(p, p0 << (2 * d as u32), "depth {d}"),
-                Threshold::Saturated => panic!("depth {d} saturated unexpectedly"),
+        for n_occ in [1u64, 2, 3, 100, 4096] {
+            match Threshold::at_depth(v_total, 16, n_occ) {
+                Threshold::Cut(p) => {
+                    let scaled = one as u128 * n_occ as u128;
+                    assert!(
+                        (p as u128) >= scaled && (p as u128) < scaled + n_occ as u128,
+                        "N_occ={n_occ}: {p} is not {scaled} to within {n_occ}"
+                    );
+                }
+                Threshold::Saturated => panic!("N_occ={n_occ} saturated unexpectedly"),
             }
         }
     }
 
-    /// The `checked_shl` trap. `u64::checked_shl(n)` only fails for `n >= 64`; below that it
-    /// wraps and discards the high bits, so a cut one bit below the boundary would silently
-    /// become `Cut(0)` — every tile drawing exactly `k_min` at every depth, with no error.
+    /// The exactness the design states: `P_d = ⌊m_target · N_occ · 2⁶⁴ / V_total⌋`, floored once.
+    ///
+    /// Computing `⌊m_target · 2⁶⁴ / V_total⌋` first and multiplying by `N_occ` afterwards floors
+    /// twice and disagrees with the reference oracle, which floors once.
     #[test]
-    fn a_cut_one_bit_below_the_boundary_saturates_rather_than_wrapping_to_zero() {
-        for shift in 0..32u32 {
-            let p0 = 1u64 << (63 - shift.min(63));
-            let t = Threshold::Cut(p0);
-            for d in 0..32u8 {
-                let want_saturated = 2 * d as u32 >= 64 || p0.leading_zeros() < 2 * d as u32;
-                match t.at_depth(d) {
-                    Threshold::Saturated => assert!(
-                        want_saturated,
-                        "p0={p0:#x} depth={d}: saturated when a shift would have fitted"
-                    ),
-                    Threshold::Cut(p) => {
-                        assert!(
-                            !want_saturated,
-                            "p0={p0:#x} depth={d}: returned Cut where the shift overflows"
-                        );
-                        assert_ne!(p, 0, "p0={p0:#x} depth={d}: wrapped to Cut(0)");
-                        assert_eq!(p, p0 << (2 * d as u32));
+    fn the_cut_floors_once_over_the_whole_product() {
+        for (v_total, m_target, n_occ) in [
+            (7u64, 1u64, 3u64),
+            (1_000_003, 16, 97),
+            (2_400_000, 16, 1_237),
+            (233_000_000, 16, 1_048_573),
+        ] {
+            let want = (((m_target as u128) * (n_occ as u128)) << 64) / v_total as u128;
+            match Threshold::at_depth(v_total, m_target, n_occ) {
+                Threshold::Cut(p) => assert_eq!(p as u128, want, "{v_total}/{m_target}/{n_occ}"),
+                Threshold::Saturated => panic!("{v_total}/{m_target}/{n_occ} saturated"),
+            }
+        }
+    }
+
+    /// The trap the old `leading_zeros` guard existed for, in its new shape: an arithmetic
+    /// overflow must answer `Saturated` and never a wrapped `Cut(0)` — a zero cut is `C_θ = 0` in
+    /// every tile at every depth, every tile drawing `k_min` for ever, with no error raised.
+    ///
+    /// The saturation test runs before the shift, so no product past 2⁶⁴ is ever formed.
+    #[test]
+    fn a_product_past_the_identity_space_saturates_rather_than_wrapping_to_zero() {
+        for m_target in [1u64, 16, 1 << 40, u64::MAX] {
+            for n_occ in [0u64, 1, 1 << 16, 1 << 32, u64::MAX] {
+                for v_total in [1u64, 17, 1_000_000, u32::MAX as u64] {
+                    let saturates = (m_target as u128) * (n_occ as u128) >= v_total as u128;
+                    match Threshold::at_depth(v_total, m_target, n_occ) {
+                        Threshold::Saturated => assert!(
+                            saturates,
+                            "{v_total}/{m_target}/{n_occ}: saturated where a cut fits"
+                        ),
+                        Threshold::Cut(p) => {
+                            assert!(!saturates, "{v_total}/{m_target}/{n_occ}: cut where θ ≥ 1");
+                            // `N_occ = 0` is a view with nothing visible in it, where a zero cut
+                            // is the arithmetic answer and no tile is emitted to be thinned by it.
+                            // Anywhere else a zero is the wrap this test exists for.
+                            if n_occ > 0 {
+                                assert_ne!(
+                                    p, 0,
+                                    "{v_total}/{m_target}/{n_occ}: wrapped to Cut(0)"
+                                );
+                            }
+                        }
                     }
                 }
             }
         }
     }
 
+    /// `N_occ` is non-decreasing in depth, so θ is too — the nesting proof's threshold clause.
     #[test]
-    fn saturation_is_sticky_across_depths() {
-        let t = Threshold::Saturated;
-        for d in 0..17u8 {
-            assert!(t.at_depth(d).is_saturated(), "depth {d}");
+    fn a_non_decreasing_occupancy_gives_a_non_decreasing_cut() {
+        let v_total = 5_000_000u64;
+        // A measured occupancy ladder's shape: growth well below the 4× the old form assumed.
+        let ladder = [1u64, 4, 13, 41, 130, 410, 1_300, 4_100, 13_000, 41_000];
+        let mut previous = 0u128;
+        for n_occ in ladder {
+            let here = match Threshold::at_depth(v_total, 16, n_occ) {
+                Threshold::Cut(p) => p as u128,
+                Threshold::Saturated => u128::MAX,
+            };
+            assert!(here >= previous, "N_occ={n_occ}: the cut fell");
+            previous = here;
         }
     }
 
@@ -775,14 +809,24 @@ mod tests {
     fn a_viewer_seeing_no_more_than_the_target_is_shown_everything() {
         for v in [0u64, 1, 8, 16] {
             assert!(
-                Threshold::anchor(v, 16).is_saturated(),
+                Threshold::at_depth(v, 16, 1).is_saturated(),
                 "v_total={v} must anchor saturated"
             );
         }
         assert!(
-            !Threshold::anchor(17, 16).is_saturated(),
+            !Threshold::at_depth(17, 16, 1).is_saturated(),
             "v_total just above the target must produce a cut"
         );
+    }
+
+    /// A view with nothing visible in it has no occupied tiles, and the empty product must not
+    /// become a cut of zero: `Cut(0)` and `Saturated` differ in what they admit.
+    #[test]
+    fn an_empty_occupancy_is_a_zero_cut_and_not_a_saturation() {
+        assert_eq!(Threshold::at_depth(1_000, 16, 0), Threshold::Cut(0));
+        // With no visible rows at all there is no tile to draw in, so the answer is the harmless
+        // one and the division is never taken.
+        assert!(Threshold::at_depth(0, 16, 0).is_saturated());
     }
 
     #[test]

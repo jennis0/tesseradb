@@ -141,12 +141,13 @@ def test_i7_selection_differential(
     **saturation** `C_θ = |vis(T)|` for every tile, so `m` collapses to `min(cap, |vis(T)|)` and
     what is under test is the floor, the cap and — crucially — the *ordering*: which items, not how
     many. Under **live θ** the threshold clause does real work and the comparison additionally
-    covers the anchor, the ×4 depth progression, and saturation as a distinct state.
+    covers both anchors — the composed visible total and the occupied-tile count `N_occ(d)` — and
+    saturation as a distinct state.
 
     Running only the saturated configuration was a real gap in the 250k suite's history: it cannot
     distinguish a correct engine from one that anchors θ on the pre-overlay projection (the I2
-    breach §7.2 exists to prevent), botches the ×4 progression, or omits the threshold clause
-    outright.
+    breach §7.2 exists to prevent), counts occupied tiles over the wrong mask, or omits the
+    threshold clause outright.
     """
     server = request.getfixturevalue(
         "catalogue_server" if theta == "saturated" else "catalogue_density_server"

@@ -1195,7 +1195,12 @@ it does not move on a pan, and coupling it to the viewport reintroduces precisel
 So the scheduler's first job is **decoupling requested depth from viewport zoom**. Because
 priority prefixes nest, requesting depth *d* under a shallow view is a superset of the natural
 tile and pops nothing — the same nesting property §8.2 credits for making `best-available`
-refinement look right, doing work in a third place. The arithmetic is `marks ≈ m_target · 4^d`.
+refinement look right, doing work in a third place. The arithmetic is `marks ≈ m_target · N`,
+where `N` is how many of the requested tiles hold anything the viewer can see: design §7.2's
+threshold is anchored on that occupied-tile count, so `m_target` marks per occupied tile is what it
+delivers whatever shape the data has. On an even spread `N` is `f · 4^d` and the old form
+`marks ≈ m_target · f · 4^d` is the same arithmetic; on a clustered corpus `N` is smaller, so a
+given budget is reached at a deeper zoom than that form predicts.
 
 **Two constraints this exposes, neither of which the Potree/Cesium prior art carries**, because
 their budgets are spent against a static local octree rather than a per-request server:
@@ -1306,10 +1311,10 @@ permutation each, one range structure each"*, a consequence of I4.
 
 *1-D (timelines).* A second row space ranked by the temporal quantity; tiles are dyadic
 prefixes, where the prefix property is trivial; density is count per interval; §7.2
-transfers unchanged except that θ's per-depth factor becomes ×2 rather than ×4. The
-actionable consequence is to **generalise the sampler's branching factor**
-rather than hard-code 4, which also makes the client's zoom semantics
-geometry-independent. Keep this distinct from Appendix F, which is the *filter* form of
+transfers unchanged, and with the occupied-tile anchor there is no per-depth factor left to
+generalise: θ is `m_target · N_occ(d) / V_total` and `N_occ` is counted over whatever tiles the
+ordering defines. The branching factor survives only in the tile addressing, which is the client's
+zoom semantics rather than the sampler's. Keep this distinct from Appendix F, which is the *filter* form of
 time; a timeline view is the *ordering* form. The overview strip is not a new verb at
 all — it is §7.1's tile counts over the second ordering.
 
