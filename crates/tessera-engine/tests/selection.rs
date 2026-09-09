@@ -19,7 +19,7 @@ use tempfile::TempDir;
 
 use tessera_authz::{write_postings, FragmentCache, PostingsReader};
 use tessera_engine::compose::{compose, EffectiveMask, RowProjection};
-use tessera_engine::occupancy::occupied_tiles;
+use tessera_engine::occupancy::{occupied_tiles, TileSketch};
 use tessera_engine::select::{
     decode_tier, DecodeTier, SelectParams, Selection, SelectionPart, SelectionParts, Threshold,
 };
@@ -1145,17 +1145,59 @@ fn clustered_points(n: usize, seed: u64) -> Vec<(f32, f32, u64)> {
         .collect()
 }
 
-/// **`N_occ(d)` is exact, non-decreasing in depth, and inside `min(4^d, |mask|)`.**
+/// The ladder a linear scan produces: every visible row's depth-`d` tile for `d` in `0..=depth`,
+/// each depth's distinct set fed to its own sketch, clamped to `4^d`, running maximum applied.
 ///
-/// Exactness against the oracle is what the gallop buys: crediting the tile indices a run *spans*
-/// instead — the endpoint arithmetic — over-counts wherever a run's codes are not dense in
-/// tile-index space, which on a clustered corpus is everywhere.
+/// **This is what `occupied_tiles` must equal exactly.** The sketch is a deterministic function of
+/// the *tile set*, so factoring it out of both sides leaves the gallop walk pinned against a linear
+/// scan as tightly as the old exact comparison pinned it — a walk that emitted one tile too many,
+/// too few, or the wrong one gives a different register array and a different number. What the
+/// sketch removes from this comparison is nothing: it is on both sides.
+fn occupied_tiles_sketch_oracle(mask: &EffectiveMask, seg: &SegmentData, depth: u8) -> u64 {
+    let codes = seg.morton.u32();
+    let mut running = 0u64;
+    for d in 0..=depth {
+        let shift = 32 - 2 * u32::from(d);
+        let mut sketch = TileSketch::new();
+        let mut seen: FxHashSet<u64> = FxHashSet::default();
+        mask.for_each_visible_run(0..seg.row_count, |run| {
+            for row in run.start..run.end {
+                let tile = u64::from(codes[row as usize]) >> shift;
+                if seen.insert(tile) {
+                    sketch.add(tile);
+                }
+            }
+        });
+        running = running.max(sketch.estimate().min(1u64 << (2 * u32::from(d))));
+    }
+    running
+}
+
+/// **`N_occ(d)` is the sketch of the right tile set, non-decreasing in depth, and close to the
+/// truth.**
 ///
-/// Monotonicity is the property §7.2's nesting proof takes from the grid rather than from a clamp:
-/// every occupied tile has an occupied child, and children of distinct parents are distinct. It is
-/// asserted rather than argued because nothing else in the tree would notice it failing.
+/// Three assertions, and they are three different things.
+///
+/// **The tile set is exact**, against [`occupied_tiles_sketch_oracle`] — a linear scan with the
+/// same sketch on top. This is what the gallop buys and it is asserted with `assert_eq`, not with
+/// a tolerance: crediting the tile indices a run *spans* instead — the endpoint arithmetic —
+/// over-counts wherever a run's codes are not dense in tile-index space, which on a clustered
+/// corpus is everywhere, and it would move the register array.
+///
+/// **The estimate is close to the count**, against the hash-set oracle, within five standard
+/// errors of a 2¹⁴-register sketch with a floor of two for the cases small enough to round. This
+/// is the assertion that the sketch is estimating rather than answering nonsense, and it is the
+/// only one here that is a tolerance.
+///
+/// **Monotone and bounded.** `N_occ` is non-decreasing in depth because every occupied tile has an
+/// occupied child and children of distinct parents are distinct — of the true quantity; the ladder
+/// carries a running maximum so the estimate obeys it too, and this asserts the property the
+/// nesting proof needs rather than the mechanism. `N_occ(d) <= 4^d` is exact, from the ladder's
+/// clamp. `N_occ(d) <= |mask|` is **not** clamped and holds only to within the sketch's error,
+/// which is why the bound below carries the same slack — a clamp on the visible total is available
+/// and was not taken, so that the answer stays a function of the tile set alone.
 #[test]
-fn the_occupied_tile_count_is_exact_monotone_and_bounded() {
+fn the_occupied_tile_count_is_the_sketch_of_the_right_tiles_monotone_and_bounded() {
     let points = clustered_points(4_000, 0xA11CE);
     let seg = segment_of(&points);
     let n = seg.row_count();
@@ -1174,17 +1216,31 @@ fn the_occupied_tile_count_is_exact_monotone_and_bounded() {
             let got = occupied_tiles(&mask, &[(&seg.data, 0)], depth);
             assert_eq!(
                 got,
-                occupied_tiles_oracle(&mask, &seg.data, depth),
-                "{label}, depth {depth}: the gallop walk disagrees with the linear scan"
+                occupied_tiles_sketch_oracle(&mask, &seg.data, depth),
+                "{label}, depth {depth}: the gallop walk emitted a different tile set from the \
+                 linear scan"
             );
+
+            let exact = occupied_tiles_oracle(&mask, &seg.data, depth);
+            let slack = (exact as f64 * 0.0406).max(2.0);
+            assert!(
+                (got as f64 - exact as f64).abs() <= slack,
+                "{label}, depth {depth}: estimated {got} against {exact} occupied tiles, \
+                 tolerance ±{slack:.1}"
+            );
+
             assert!(
                 got >= previous,
                 "{label}, depth {depth}: N_occ fell from {previous} to {got}"
             );
-            let tiles_at_depth = 1u64 << (2 * u32::from(depth));
             assert!(
-                got <= tiles_at_depth.min(cardinality),
-                "{label}, depth {depth}: N_occ {got} exceeds min(4^d, |mask|)"
+                got <= 1u64 << (2 * u32::from(depth)),
+                "{label}, depth {depth}: N_occ {got} exceeds the 4^d tiles the grid has"
+            );
+            assert!(
+                (got as f64) <= cardinality as f64 + slack,
+                "{label}, depth {depth}: N_occ {got} exceeds |mask| = {cardinality} by more than \
+                 the sketch's error"
             );
             previous = got;
         }
@@ -1195,7 +1251,7 @@ fn the_occupied_tile_count_is_exact_monotone_and_bounded() {
 /// [`EffectiveMask::for_each_visible_run`] takes when it cannot walk `base` in place, and the one
 /// the chunked walk exists to keep bounded.
 #[test]
-fn the_occupied_tile_count_is_exact_with_a_composed_mask() {
+fn the_occupied_tile_count_is_the_right_tile_set_with_a_composed_mask() {
     let points = clustered_points(3_000, 0xB0B);
     let seg = segment_of(&points);
     let n = seg.row_count();
@@ -1232,8 +1288,9 @@ fn the_occupied_tile_count_is_exact_with_a_composed_mask() {
     for depth in 0..=16u8 {
         assert_eq!(
             occupied_tiles(&mask, &[(&seg.data, 0)], depth),
-            occupied_tiles_oracle(&mask, &seg.data, depth),
-            "depth {depth}: the gallop walk disagrees with the linear scan under a composed mask"
+            occupied_tiles_sketch_oracle(&mask, &seg.data, depth),
+            "depth {depth}: the gallop walk emitted a different tile set from the linear scan \
+             under a composed mask"
         );
     }
 }

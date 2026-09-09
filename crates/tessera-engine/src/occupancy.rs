@@ -87,12 +87,62 @@
 //! Both figures are from the route comparison recorded in
 //! [decision 0137](../../../docs/decisions/0137-theta-is-anchored-on-the-occupied-tile-count.md).
 //!
-//! **What it costs on the request path**, measured end to end through the response trailer's
-//! `theta_occupancy_ns` against `treeoflife-1m` (1.05 × 10⁶ rows, 744,241 of them visible to the
-//! session, full extent, 2026-09-09): **1.55–2.21 ms** for the first request at a depth, and
-//! **1–3 µs** for every request after it, the memo being the whole of the difference. The whole
-//! request took 4.2 ms at depth 0 and 157 ms at depth 9. `V_total` beside it is 0.15–0.67 µs,
-//! which is why the two have separate stage fields.
+//! # What it costs, measured
+//!
+//! `tessera-bench`'s `occupancy_sketch` prices four **complete** routes — walk and accumulator
+//! together — against one mask in one process: `main`'s Roaring union, the tiered branch's
+//! bitset-and-buffer pair, one sketch per requested depth, and this ladder. Each corpus's own
+//! Morton column, re-dealt into 1 to 512 segments as a base plus flush ticks, whole mask, minimum
+//! of three timed calls, 2026-09-09.
+//!
+//! **What a session pays for the whole ladder** — the sum over all seventeen depths, milliseconds:
+//!
+//! | corpus | S | union | tiered | one sketch per depth | this ladder, deepest depth first |
+//! |---|---|---|---|---|---|
+//! | `treeoflife-1m` (10⁶ rows) | 1 | 24.0 | 24.0 | 35.9 | **24.8** |
+//! | | 16 | 60.2 | 36.5 | 36.3 | **25.2** |
+//! | | 512 | 243.9 | 97.5 | 59.7 | **33.0** |
+//! | `geonames` (1.35 × 10⁷ rows) | 1 | 218 | 217 | 263 | **189** |
+//! | | 16 | 427 | 376 | 270 | **185** |
+//! | | 512 | 1685 | 1094 | 515 | **276** |
+//!
+//! **The two sketch columns are the bounds on one policy, and a session lands between them.** A
+//! request at depth *d* walks once and fills every rung `0..=d` that is not already memoised. A
+//! session that jumps to its deepest zoom and works outwards pays the right-hand column — one
+//! walk for the whole ladder. One that steps down a level at a time finds every shallower rung
+//! already filled and pays the left — one walk per level, with only that level's sketch to
+//! update. Nothing walks eagerly: a session that only ever looks at depth 6 walks at depth 6.
+//!
+//! **The ladder is not free, and where the walk is the whole cost it does not pay.** Filling every
+//! rung costs `Σ_{d' <= d} N_occ(d')` sketch updates, which on these corpora is three to five
+//! times the deepest rung's emissions; a walk that fills all seventeen rungs at once therefore
+//! costs about what four walks cost. Filling them **again** at every depth a session visits is
+//! the naive policy and it is a loss at every cell measured — 188 ms against the tiered arm's 97.5
+//! over 10⁶ rows at 512 segments, 1286 against 1094 over 1.35 × 10⁷. That is why the fill is
+//! against the memo rather than unconditional.
+//!
+//! **Accuracy.** Over 272 cells — both corpora, 1 to 512 flush segments, every depth 0 to 16 —
+//! the estimate's absolute relative error has a **median of 0.47% and a maximum of 2.04%**
+//! (`treeoflife-1m`, one segment, depth 3: 49 occupied tiles read as 48). θ scales linearly with
+//! `N_occ`, so 2.04% is 2.04% of θ: a `m_target` of 16 marks per occupied tile becomes 15.7. At
+//! precision 12 — 4 kB a rung instead of 16 — the same cells give a median of 0.96% and a maximum
+//! of 4.08%. **No inversion appeared at any cell**, before the running maximum or after it, which
+//! is a reason to keep the maximum rather than to drop it: it costs nothing and the property it
+//! guarantees is not one to leave to a measurement.
+//!
+//! **Memory.** The register plane is `(d + 1) · 2^SKETCH_PRECISION` bytes and nothing else grows:
+//! a measured peak of **279 kB at depth 16, at every segment count and on both corpora**. Against
+//! it, over the same sweep, the union reached 3.35 MB and 22.1 MB, the tiered arm 8.19 MB and
+//! 92.6 MB, and an exact ladder — the same one walk, with seventeen exact accumulators behind it —
+//! 23.6 MB and 263 MB. That last is the trade in one line: the exact ladder is available and is
+//! faster at one segment (12.5 ms and 129 ms), and it costs three orders of magnitude more memory
+//! at a depth the client chooses on every request.
+//!
+//! **Before the sketch**, measured end to end through the response trailer's `theta_occupancy_ns`
+//! against `treeoflife-1m` with the exact walk (1.05 × 10⁶ rows, 744,241 of them visible, full
+//! extent, 2026-09-09): 1.55–2.21 ms for the first request at a depth and 1–3 µs for every request
+//! after it, the memo being the whole of the difference. That measurement has not been retaken on
+//! this arm.
 
 use std::ops::Range;
 
@@ -181,7 +231,7 @@ impl<F: FnMut(u64)> Walk<'_, F> {
 /// mask is over; `segment.morton` is indexed segment-locally.
 ///
 /// **Public so a measurement prices an accumulator over the identical walk.**
-/// `tessera-bench`'s `occupancy_segments` compares this arm against the ones it replaced, and a
+/// `tessera-bench`'s `occupancy_sketch` compares this arm against the ones it replaced, and a
 /// transcription of the walk in the harness would compare two walks rather than two accumulators.
 pub fn for_each_occupied_tile(
     mask: &EffectiveMask,
@@ -301,9 +351,11 @@ pub fn occupied_tiles_ladder_with_precision(
     precision: u32,
 ) -> OccupancyLadder {
     debug_assert!(depth <= 16, "the grid is 2^16 x 2^16, so depth 16 is the deepest");
-    // **One flat plane, not a `Vec` of sketches.** The inner loop indexes it once per update; a
-    // vector of vectors costs a second dependent load and a second bounds check on the hottest
-    // instruction in the walk, and measured 1.9x this at depth 16.
+    // **One flat plane, not a `Vec` of sketches.** The descent below is the hottest loop in the
+    // walk — it runs `Σ_{d' <= d} N_occ_s(d')` times — and a vector of vectors would pay a second
+    // dependent load and a second bounds check on every one of them. The plane is
+    // `(depth + 1) · 2^precision` bytes, which at [`SKETCH_PRECISION`] is 279 kB for the whole
+    // seventeen-rung ladder and is the arm's entire memory bound.
     let stride = 1usize << precision;
     let mut plane = vec![0u8; stride * (depth as usize + 1)];
     // `u64::MAX` is not a tile index at any depth, so it is a sound "nothing seen yet".
@@ -395,6 +447,11 @@ const fn mix64(z: u64) -> u64 {
 
 /// A HyperLogLog over tile indices: constant memory, one pass, and **mergeable by taking the
 /// maximum per register**, which is exactly the union.
+///
+/// [`occupied_tiles_ladder_with_precision`] does not hold seventeen of these — it holds one flat
+/// register plane and calls [`register_of`] and [`estimate_registers`] directly, for the reason
+/// its own comment gives. This type is what a caller with one depth to count uses, and what the
+/// tests exercise.
 ///
 /// That last property is why the multi-segment case stops being a special case. A tile can hold
 /// rows in several segments and `N_occ` counts tiles rather than per-segment shares of them, so an
@@ -493,8 +550,10 @@ fn alpha_q32(precision: u32) -> u128 {
 ///
 /// **A histogram of the ranks, not a pass of `u128` shifts.** There are at most `64 - precision + 1`
 /// distinct rank values, so counting them into a small array that stays in L1 and combining
-/// afterwards turns `2^precision` wide shift-adds into `2^precision` byte increments — measured
-/// 4.6x faster at precision 14, and the estimator runs once per depth on the request path.
+/// afterwards turns `2^precision` wide shift-adds into `2^precision` byte increments. It matters
+/// because the estimator runs once per rung: a depth-0 call at precision 14 — one rung, so the
+/// estimator and the allocation are nearly the whole of it — fell from 19.5 µs to 7.0 µs when this
+/// replaced the `u128` pass (`occupancy_sketch`, `treeoflife-1m`, 2 × 10⁵ rows, 2026-09-09).
 fn estimate_registers(registers: &[u8], precision: u32) -> u64 {
     let rank_max = 64 - precision + 1;
     let mut hist = [0u32; 65];
@@ -512,18 +571,22 @@ fn estimate_registers(registers: &[u8], precision: u32) -> u64 {
     // `E = α_m · m² / Σ 2^-M[j]`, which with the scaling above is
     // `(α_m · 2³²) · 2^(2·precision) · 2^rank_max / (2³² · inv)` = `α_q32 · 2^(precision+33) / inv`.
     let m = 1u128 << precision;
-    let raw = (alpha_q32(precision) << (precision + 33)) / inv;
+    // Saturating rather than truncating: `inv` bottoms out at `m` (every register at `rank_max`),
+    // which puts `raw` at `α · 2^65` — above `u64` — for a cardinality nothing could reach. The
+    // Python oracle saturates at the same place, and a wrapping `as` there would be a silent
+    // disagreement at the one input that produces it.
+    let raw = u64::try_from((alpha_q32(precision) << (precision + 33)) / inv).unwrap_or(u64::MAX);
 
     // **Linear counting below 2.5m**, which is where HyperLogLog's estimator is biased and where a
     // register array with empty slots has a better one available: with `V` of `m` registers still
     // empty, `m · ln(m/V)` is the balls-into-bins estimate.
-    if zeros > 0 && raw <= (5 * m) / 2 {
+    if zeros > 0 && u128::from(raw) <= (5 * m) / 2 {
         let ln_ratio_q32 = u64::from(precision) * LN2_Q32 - ln_q32(zeros);
         return ((m as u64) * ln_ratio_q32) >> 32;
     }
     // No large-range correction: the hash is 64 bits wide, so the `2^32/30` threshold a 32-bit
     // HyperLogLog needs is unreachable here.
-    raw as u64
+    raw
 }
 
 /// `ln 2 · 2³²`, rounded to nearest.
