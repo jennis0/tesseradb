@@ -209,8 +209,8 @@ pub struct LayerPlan {
 /// index charges its postings on the same rule and for the same reason.
 const MEMBER_ENTRY_BYTES: usize = 16;
 
-/// What one artifact costs the accumulator beyond its members: the hash table's slot, the `Vec`
-/// header, the allocator's rounding on both and the table's load factor. **An estimate erring
+/// What one artifact costs the accumulator beyond its members: its slot in the window, the
+/// allocation its first source takes and the allocator's rounding on both. **An estimate erring
 /// high**, which spills a run early; erring low is the failure a memory bound exists to prevent.
 const MEMBER_ARTIFACT_BYTES: usize = 80;
 
@@ -260,10 +260,14 @@ struct MemberSpill {
     dir: PathBuf,
     budget: usize,
     bytes: usize,
-    /// The open window: artifact index → the sources this window has seen for it. Replaced rather
-    /// than cleared at each spill, because a cleared table keeps its capacity and the next fill
-    /// would count from zero against memory that was never released.
-    open: rustc_hash::FxHashMap<u32, Vec<u64>>,
+    /// The open window: one slot per artifact the plan has minted, holding the sources this window
+    /// has seen for it. Indexed rather than keyed, because the index *is* the artifact's position
+    /// in the plan and this is written once per member entry — 2.95×10⁸ of them over the GBIF
+    /// ladder corpus, where hashing the index cost more than the write it addressed
+    /// (`probes/2026-09-09-layers-cost/`). The slots stay and each one's sources are handed to the
+    /// run at the spill, so what a window holds is released with it; what does not is one empty
+    /// `Vec` header per artifact.
+    open: Vec<Vec<u64>>,
     receipts: Vec<spill::SpillReceipt>,
     seq: usize,
     /// Every pair ever pushed, across every run — what the merge checks itself against and what
@@ -278,7 +282,7 @@ impl MemberSpill {
             dir: dir.to_path_buf(),
             budget: budget.clamp(MEMBER_BUDGET_MIN, MEMBER_BUDGET_MAX) as usize,
             bytes: 0,
-            open: rustc_hash::FxHashMap::default(),
+            open: Vec::new(),
             receipts: Vec::new(),
             seq: 0,
             entries: 0,
@@ -295,17 +299,18 @@ impl MemberSpill {
                  can address",
                 u32::MAX
             ))
-        })?;
-        match self.open.entry(index) {
-            std::collections::hash_map::Entry::Occupied(mut e) => {
-                e.get_mut().push(source);
-                self.bytes += MEMBER_ENTRY_BYTES;
-            }
-            std::collections::hash_map::Entry::Vacant(e) => {
-                e.insert(vec![source]);
-                self.bytes += MEMBER_ARTIFACT_BYTES + MEMBER_ENTRY_BYTES;
-            }
+        })? as usize;
+        if index >= self.open.len() {
+            self.open.resize_with(index + 1, Vec::new);
         }
+        let sources = &mut self.open[index];
+        // Empty is *this window has not seen the artifact yet*, whether it was never seen or its
+        // sources went out with the last run — which is the window the artifact charge belongs to.
+        if sources.is_empty() {
+            self.bytes += MEMBER_ARTIFACT_BYTES;
+        }
+        sources.push(source);
+        self.bytes += MEMBER_ENTRY_BYTES;
         self.entries += 1;
         if self.bytes >= self.budget {
             self.spill()?;
@@ -315,23 +320,22 @@ impl MemberSpill {
 
     /// Write the open window out as one sorted run, leaving the accumulator empty.
     fn spill(&mut self) -> Result<()> {
-        if self.open.is_empty() {
+        if self.bytes == 0 {
             return Ok(());
         }
         let path = self.dir.join(format!("member-run-{:04}.spill", self.seq));
         let mut writer = spill::MemberRunWriter::create(&path)?;
-        let mut order: Vec<u32> = self.open.keys().copied().collect();
-        order.sort_unstable();
-        for index in order {
-            let sources = self
-                .open
-                .get_mut(&index)
-                .expect("every index came from the map a statement ago");
+        // Ascending by artifact index, which the slots already are — the run's own order, taken by
+        // walking the window rather than by sorting a key set out of it.
+        for (index, slot) in self.open.iter_mut().enumerate() {
+            if slot.is_empty() {
+                continue;
+            }
+            let mut sources = std::mem::take(slot);
             sources.sort_unstable();
-            writer.push(index, sources)?;
+            writer.push(index as u32, &sources)?;
         }
         self.receipts.push(writer.finish()?);
-        self.open = rustc_hash::FxHashMap::default();
         self.bytes = 0;
         self.seq += 1;
         Ok(())
@@ -1113,7 +1117,7 @@ fn read_members(
     // whole source has been read, so a conflict is found wherever in the file it sits. Only a
     // `nested` or `tiered` list declares edges; a `dag` list is memberships and never reaches
     // this map (`ListMeaning`, decision 0125).
-    let mut lineage: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+    let mut lineage: Vec<Option<usize>> = Vec::new();
     // Reused across rows rather than allocated per point: one slot per position in the row's list,
     // `None` where the entry named no artifact.
     let mut entries: Vec<Option<usize>> = Vec::new();
@@ -1343,32 +1347,40 @@ fn null_entity(path: &Path, what: &str) -> BuildError {
     ))
 }
 
-/// The edges one row's list declares, folded into the map of what each child's parents are.
+/// The edges one row's list declares, folded into what each child's parent is.
 ///
 /// The adjacency itself is [`parent_edges`]'s — the wire reads the same rule off the same function
 /// — and what is added here is the conflict: **one entry per child, not one per row**, so a cluster
 /// of a hundred thousand points states its parent a hundred thousand times and the second statement
 /// onward is a comparison rather than an insertion.
+///
+/// **One slot per artifact rather than a keyed map.** A child names one parent or the build is
+/// refused, so the record is one index and the artifact's own position in the plan addresses it.
+/// A three-level tiered layer states an edge twice per member row — 1.94×10⁸ edges over the GBIF
+/// ladder corpus — and a `BTreeMap` of that size answers each of them by walking about six nodes
+/// to reach a slot an index reaches in one (`probes/2026-09-09-layers-cost/`).
 fn record_lineage(
     entries: &[Option<usize>],
     plan: &LayerPlan,
-    lineage: &mut BTreeMap<usize, Vec<usize>>,
+    lineage: &mut Vec<Option<usize>>,
     path: &Path,
 ) -> Result<()> {
     for (parent, child) in parent_edges(entries) {
-        let named = lineage.entry(*child).or_default();
-        if named.contains(parent) {
-            continue;
+        if *child >= lineage.len() {
+            lineage.resize(plan.bodies.len().max(*child + 1), None);
         }
-        if !named.is_empty() {
-            return Err(two_parents(
-                path,
-                plan.address_of(*child),
-                &plan.address_of(named[0]).2,
-                &plan.address_of(*parent).2,
-            ));
+        match lineage[*child] {
+            Some(named) if named == *parent => continue,
+            Some(named) => {
+                return Err(two_parents(
+                    path,
+                    plan.address_of(*child),
+                    &plan.address_of(named).2,
+                    &plan.address_of(*parent).2,
+                ))
+            }
+            None => lineage[*child] = Some(*parent),
         }
-        named.push(*parent);
     }
     Ok(())
 }
@@ -1381,28 +1393,30 @@ fn record_lineage(
 /// it.
 fn apply_lineage(
     plan: &mut LayerPlan,
-    lineage: BTreeMap<usize, Vec<usize>>,
+    lineage: Vec<Option<usize>>,
     path: &Path,
 ) -> Result<()> {
     // **Applied in address order, not arena order.** The conflict below is a refusal, and which of
     // several a corpus carries is reported must not depend on the order keys happened to be met —
     // it is the order they sort in, which is what it has always been. One sort of at most one entry
     // per child, against one probe per member row.
-    let mut in_order: Vec<(usize, Vec<usize>)> = lineage.into_iter().collect();
+    let mut in_order: Vec<(usize, usize)> = lineage
+        .into_iter()
+        .enumerate()
+        .filter_map(|(child, parent)| parent.map(|parent| (child, parent)))
+        .collect();
     in_order.sort_by(|a, b| plan.address_of(a.0).cmp(plan.address_of(b.0)));
-    for (child, parents) in in_order {
+    for (child, parent) in in_order {
         let address = plan.address_of(child).clone();
-        for parent in parents {
-            let parent_key = plan.address_of(parent).2.clone();
-            let artifact = &mut plan.bodies[child];
-            if artifact.parent_keys.contains(&parent_key) {
-                continue;
-            }
-            if let Some(declared) = artifact.parent_keys.first() {
-                return Err(two_parents(path, &address, declared, &parent_key));
-            }
-            artifact.parent_keys.push(parent_key);
+        let parent_key = plan.address_of(parent).2.clone();
+        let artifact = &mut plan.bodies[child];
+        if artifact.parent_keys.contains(&parent_key) {
+            continue;
         }
+        if let Some(declared) = artifact.parent_keys.first() {
+            return Err(two_parents(path, &address, declared, &parent_key));
+        }
+        artifact.parent_keys.push(parent_key);
     }
     Ok(())
 }
