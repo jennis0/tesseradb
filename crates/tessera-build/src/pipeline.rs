@@ -17,7 +17,7 @@
 //!
 //! | pass | produces | bounded by |
 //! |---|---|---|
-//! | points ×2 | `source_ids`, sorted — an item's **ordinal** is its index here | 8N |
+//! | points ×2 | `source_ids`, sorted — an item's **ordinal** is its index here | 8N, mapped |
 //! | pairs ×1 | dictionary (streamed), term-lookup arrays, pre-dedup `row_counts`, histogram | 12T + 8T |
 //! | pairs ×1 | resolved `ordinal << 32 \| term` per **batch bucket** (RAM when it fits, spilled otherwise) | plan |
 //! | per batch | sort+dedup the bucket; per-ordinal `starts`; signature sort + refinement; entity ids; **band emit** | plan |
@@ -604,9 +604,6 @@ const BATCH_GRID: u64 = 1 << 24;
 fn plan_build(
     args: &BuildArgs,
     n: u64,
-    // Whether the source ids are a contiguous range — see `residency::entity_order_residency`,
-    // which charges the id vector and the publication's Roaring as exclusive when they are.
-    dense: bool,
     pair_rows: usize,
     row_counts: &[u64],
     histogram: &[u64],
@@ -626,7 +623,7 @@ fn plan_build(
     // The plan below already refuses an infeasible stride, and a budget the operator named is a
     // bound they asked to have enforced. An auto-derived budget is `MemAvailable` damped, so exceeding *that* is the kill
     // this exists to replace.
-    let tail = crate::residency::model(args, n, dense);
+    let tail = crate::residency::model(args, n);
     if tail.total() > budget {
         return Err(BuildError::Invalid(format!(
             "this build's entity-order stages need about {} MiB, over the {} MiB memory budget. \
@@ -682,7 +679,8 @@ fn plan_build(
     // bucket (8 bytes/pair) + recs (16/item — 12 before decision 0073 added the Morton tiebreak
     // to the sort key, and a model left at 12 would plan a batch the loop cannot hold) +
     // starts (4/item) + long bitset (1/8 per item),
-    // beside the loop-wide entity map (4/item over all n), per-term counters (4/term), the
+    // beside the loop-wide distinct-terms-per-ordinal tally (4/item over all n; the
+    // ordinal→entity map beside it is the same width and is a file), per-term counters (4/term), the
     // join-chunk buffer (which scales down with the corpus, so a tiny test budget stays
     // feasible for a tiny corpus) and a fixed slack for band buffers, decoders and allocator.
     const SLACK: u64 = 64 << 20;
@@ -789,9 +787,14 @@ fn plan_build(
     // phases all end before the attribute join opens it. The column figure is `residency.rs`'s
     // own, reused rather than re-derived: a second copy of that arithmetic is how this stops
     // being true again.
+    //
+    // **The sorted source ids are in all three of the first phases**, at 8 B/item: they are
+    // written in pass one and released at the layer publication, which is inside the column
+    // window. The column phase carries them through `tail.mapped()`; the other two add them here.
     let p = pair_rows as u64;
-    let phase_spill = if bucket_in_ram { 0 } else { 8 * p } + (6 * p) / batches.max(1);
-    let phase_bands = 6 * p + 4 * p;
+    let ids = 8 * n;
+    let phase_spill = ids + if bucket_in_ram { 0 } else { 8 * p } + (6 * p) / batches.max(1);
+    let phase_bands = ids + 6 * p + 4 * p;
     // 8 B/item of `x-of-entity`/`y-of-entity`, which outlive the release; 4 B/item of pairs
     // already written as postings.arrow before the window opened.
     let phase_columns = tail.mapped() + 8 * n + 4 * p;
@@ -846,7 +849,11 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
     // every declared column present and empty, every declared layer registered with no artifacts.
     // What is still refused is `extent = "auto"` over no rows, because a frame cannot be fitted to
     // nothing (`config::empty_auto_source`) — and that refusal already names the remedy.
-    let (source_ids, view_anchors) = read_source_ids_union(args)?;
+    // Open here rather than at the bucket sink below, because the first thing under it is the
+    // source ids: `.build-tmp/` is the build's scratch from pass one to the segment write, and
+    // every structure in it is swept by the `close` at the end or by the next build's `create`.
+    let tmp = spill::TmpDir::create(&args.out)?;
+    let (source_ids, view_anchors) = read_source_ids_union(args, tmp.path())?;
     let n = source_ids.len() as u64;
     if n > u32::MAX as u64 {
         return Err(BuildError::Invalid(format!(
@@ -899,14 +906,7 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
     // size is identity-bearing (I9), so it is derived deterministically here, recorded in
     // provenance when it batches, and never silently re-derived on a rebuild (the CLI replays
     // a carried bundle's recorded value).
-    // **The same test the resolver makes**, taken here so the residency model can charge the id
-    // vector and the publication's Roaring as exclusive rather than simultaneous: a range spanning
-    // exactly its own length can only be `first + i` at every `i`.
-    let dense = match (source_ids.first(), source_ids.last()) {
-        (Some(first), Some(last)) => last - first + 1 == source_ids.len() as u64,
-        _ => false,
-    };
-    let plan = plan_build(args, n, dense, pair_rows, &row_counts, &histogram, histogram_shift)?;
+    let plan = plan_build(args, n, pair_rows, &row_counts, &histogram, histogram_shift)?;
     drop(histogram);
     if plan.batches > 1 {
         eprintln!(
@@ -921,7 +921,6 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
     // single-batch path, bit for bit), spilled per batch otherwise. Chunk-order insensitivity
     // ([`join_chunk`]): every bucket is sorted and deduplicated before anything reads it, so
     // the push order never reaches the output.
-    let tmp = spill::TmpDir::create(&args.out)?;
     let mut sink = if plan.bucket_in_ram {
         BucketSink::Ram(Vec::with_capacity(pair_rows))
     } else {
@@ -4893,18 +4892,14 @@ pub(crate) fn render_presence_of(
     any_absent.then_some(present)
 }
 
-/// The selected source ids, in scan order (which is **no particular order** — the decode is
-/// parallel; every consumer sorts), in an exactly-sized allocation.
+/// How many source ids one view selects.
 ///
-/// Counted first and then read: letting a `Vec` double its way to 8 GB would peak at three times
-/// the final size during the last reallocation, which is precisely the kind of transient this
-/// build exists to avoid.
-fn read_source_ids(args: &BuildArgs, view: &crate::ViewArgs) -> Result<Vec<u64>> {
-    let count = match args.limit {
-        // No limit and no selection ⇒ every row is selected ⇒ the metadata row count is exact and
-        // the counting decode is a whole pass over the file for nothing. A form B source's rows
-        // are several views', so the count there is data-dependent like a limit's.
-        None if view.select.is_none() => input::count_point_rows(&view.points)? as usize,
+/// No limit and no selection ⇒ every row is selected ⇒ the metadata row count is exact and the
+/// counting decode is a whole pass over the file for nothing. A form B source's rows are several
+/// views', so the count there is data-dependent like a limit's.
+fn count_source_ids(args: &BuildArgs, view: &crate::ViewArgs) -> Result<usize> {
+    match args.limit {
+        None if view.select.is_none() => Ok(input::count_point_rows(&view.points)? as usize),
         _ => {
             let mut count = 0usize;
             input::scan_points(
@@ -4919,10 +4914,27 @@ fn read_source_ids(args: &BuildArgs, view: &crate::ViewArgs) -> Result<Vec<u64>>
                     ControlFlow::Continue(())
                 },
             )?;
-            count
+            Ok(count)
         }
-    };
-    let mut ids = Vec::with_capacity(count);
+    }
+}
+
+/// One view's selected source ids, written into `slot` in scan order (which is **no particular
+/// order** — the decode is parallel; the caller sorts), and the view's own anchor.
+///
+/// `slot` is exactly what [`count_source_ids`] said this view holds, so the ids go straight into
+/// the union's array and nothing here ever allocates. A scan that does not fill it exactly is a
+/// points file rewritten between the two passes, which is [`input_changed`] rather than a short
+/// or a reallocated array: the count decides where the *next* view's ids start, and a wrong one
+/// would give every item after it another item's ordinal.
+fn read_source_ids_into(
+    args: &BuildArgs,
+    view: &crate::ViewArgs,
+    slot: &mut [u64],
+) -> Result<ViewIdAnchor> {
+    let mut written = 0usize;
+    let mut mixed = 0u64;
+    let mut overran = false;
     input::scan_points(
         &view.points,
         &view.point_fields,
@@ -4931,11 +4943,85 @@ fn read_source_ids(args: &BuildArgs, view: &crate::ViewArgs) -> Result<Vec<u64>>
         args.limit,
         view.select.as_ref(),
         |point| {
-            ids.push(point.source_id);
+            let Some(cell) = slot.get_mut(written) else {
+                // Past the end of the slot: stop the scan rather than decode the rest of a file
+                // whose answer is already a refusal.
+                overran = true;
+                return ControlFlow::Break(());
+            };
+            *cell = point.source_id;
+            mixed = mixed.wrapping_add(mix64(point.source_id));
+            written += 1;
             ControlFlow::Continue(())
         },
     )?;
-    Ok(ids)
+    if overran || written != slot.len() {
+        let then = if overran {
+            format!("more than {written}")
+        } else {
+            written.to_string()
+        };
+        return Err(input_changed(&format!(
+            "view '{}': {} selected {} rows when it was counted and {then} when it was read",
+            view.view_id,
+            view.points.display(),
+            slot.len(),
+        )));
+    }
+    Ok(ViewIdAnchor {
+        rows: written as u64,
+        mixed,
+    })
+}
+
+/// The build's ordinal space: the sorted, duplicate-free source ids, in a file under
+/// `.build-tmp/` rather than on the heap.
+///
+/// **8 bytes an item is the largest single structure the build holds** — 26.0 GiB at the GBIF
+/// rung's 3.50×10⁹ items — and every pass that reads it reads it sequentially: the join's merge
+/// sweep ([`join_chunk`]), the external-id write, and the ordinal walks. The one random reader is
+/// `layers::publish`'s binary search on the sparse path, which is the case
+/// [`spill::MappedArray`] was written for. Mapped, those bytes are page cache the kernel may
+/// evict rather than memory the machine must have, which is what `entity_of_ordinal`, the
+/// declared columns, the member table and the text index's runs each became before it.
+///
+/// The array is allocated at the *pre-deduplication* length, because that is what is known before
+/// the ids are read. The slice is what survived the deduplication, and the file keeps whatever
+/// slack the duplicates left until it is unlinked.
+///
+/// It dereferences to the slice, so every consumer takes `&[u64]` and none of them knows where
+/// the bytes are.
+pub(crate) struct SourceIds {
+    ids: spill::MappedArray<u64>,
+    len: usize,
+}
+
+impl std::ops::Deref for SourceIds {
+    type Target = [u64];
+
+    fn deref(&self) -> &[u64] {
+        &self.ids.as_slice()[..self.len]
+    }
+}
+
+/// Collapse runs of equal values in a sorted slice, returning how many survived — [`Vec::dedup`]
+/// over a slice whose length cannot change.
+///
+/// A value is written only where it moves. A sorted array with no duplicates — every corpus on
+/// the ladder — is therefore read and not written, which for a mapped array is the difference
+/// between dirtying every page of it and dirtying none.
+fn dedup_sorted(values: &mut [u64]) -> usize {
+    let mut written = 0usize;
+    for read in 0..values.len() {
+        if written > 0 && values[written - 1] == values[read] {
+            continue;
+        }
+        if written != read {
+            values[written] = values[read];
+        }
+        written += 1;
+    }
+    written
 }
 
 /// One view's geometry in **ordinal** space, read once in pass one and permuted into entity
@@ -4965,19 +5051,32 @@ struct ViewIdAnchor {
 /// A row is unique per `(external_id, view)` — an id repeated *within* one view's file is the
 /// old duplicate refusal, unchanged, while the same id in two views is the ordinary case and is
 /// what makes an entity's identity, label and attributes shared across the row spaces.
-fn read_source_ids_union(args: &BuildArgs) -> Result<(Vec<u64>, Vec<ViewIdAnchor>)> {
-    let mut union: Vec<u64> = Vec::new();
-    let mut anchors = Vec::with_capacity(args.views.len());
+///
+/// **Every view is counted before any is read**, so the union is one array of the final length
+/// and each view's ids are written into their own segment of it. The construction this replaces
+/// read each view into a vector of its own and concatenated: the concatenation held both copies
+/// while it ran, so the stage's peak was 16 bytes an item where the thing it produces is 8 —
+/// 52.1 GiB at the GBIF rung against a 47 GiB machine, which is the measurement in
+/// `probes/2026-09-10-source-ids-memory/`. Sorting and duplicate-checking each segment in place
+/// leaves the same array the concatenation did, and the whole-array sort below leaves the same
+/// bytes either way.
+fn read_source_ids_union(
+    args: &BuildArgs,
+    tmp: &Path,
+) -> Result<(SourceIds, Vec<ViewIdAnchor>)> {
+    let mut counts = Vec::with_capacity(args.views.len());
     for view in &args.views {
-        let mut ids = read_source_ids(args, view)?;
-        anchors.push(ViewIdAnchor {
-            rows: ids.len() as u64,
-            mixed: ids
-                .iter()
-                .fold(0u64, |acc, &id| acc.wrapping_add(mix64(id))),
-        });
-        ids.par_sort_unstable();
-        if ids.windows(2).any(|w| w[0] == w[1]) {
+        counts.push(count_source_ids(args, view)?);
+    }
+    let total: usize = counts.iter().sum();
+    let mut ids = spill::MappedArray::<u64>::zeroed(tmp, "source-ids.u64", total)?;
+    let mut anchors = Vec::with_capacity(args.views.len());
+    let mut offset = 0usize;
+    for (view, &count) in args.views.iter().zip(&counts) {
+        let segment = &mut ids.as_mut_slice()[offset..offset + count];
+        anchors.push(read_source_ids_into(args, view, segment)?);
+        segment.par_sort_unstable();
+        if segment.windows(2).any(|w| w[0] == w[1]) {
             return Err(BuildError::Invalid(format!(
                 "view '{}': {} contains duplicate entity_id values. A row is unique per (entity, \
                  view) — the same entity in several views is the ordinary case and is several \
@@ -4986,11 +5085,12 @@ fn read_source_ids_union(args: &BuildArgs) -> Result<(Vec<u64>, Vec<ViewIdAnchor
                 view.points.display()
             )));
         }
-        union.extend_from_slice(&ids);
+        offset += count;
     }
-    union.par_sort_unstable();
-    union.dedup();
-    Ok((union, anchors))
+    let all = ids.as_mut_slice();
+    all.par_sort_unstable();
+    let len = dedup_sorted(all);
+    Ok((SourceIds { ids, len }, anchors))
 }
 
 /// Refuse to run unless the configured plugin labels items the way this pipeline assumes.
@@ -6289,6 +6389,35 @@ mod tests {
             };
             assert_eq!(got, expected, "code {code}");
         }
+    }
+
+    /// [`dedup_sorted`] must answer what `Vec::dedup` answers, and must leave the array alone
+    /// wherever nothing moves: the ids it runs over are a mapped file, so a write it does not need
+    /// is a page dirtied for nothing. The second assertion is what checks that.
+    #[test]
+    fn dedup_sorted_answers_vec_dedup_and_writes_only_what_moves() {
+        for case in [
+            vec![],
+            vec![7u64],
+            vec![7, 7],
+            vec![1, 2, 3, 4],
+            vec![1, 1, 2, 3, 3, 3, 9],
+            vec![5, 5, 5, 5],
+            vec![0, u64::MAX],
+        ] {
+            let mut expected = case.clone();
+            expected.dedup();
+            let mut values = case.clone();
+            let len = dedup_sorted(&mut values);
+            assert_eq!(&values[..len], &expected[..], "over {case:?}");
+        }
+
+        // Nothing moves in a run with no duplicates, so nothing past the last survivor is written
+        // either — and every survivor is written where it already was.
+        let mut values: Vec<u64> = (0..64).collect();
+        let before = values.clone();
+        assert_eq!(dedup_sorted(&mut values), 64);
+        assert_eq!(values, before);
     }
 
     /// `join_chunk` must resolve every id that is present (including runs of duplicates, which
