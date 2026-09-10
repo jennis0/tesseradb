@@ -29,21 +29,28 @@
 //! another one. That is the whole of it.
 //!
 //! A **string** column is an entity-indexed [`MappedArray<u64>`] of offsets into a
-//! [`MappedArena`], each offset naming a record: the entity, a `u32` length, then the bytes.
-//! `utf8` and `keyword` columns are stored that way; a `text` column is not.
+//! [`MappedArena`], each offset naming a record: the entity, a `u32` length, then the bytes. A
+//! string column is stored that way when a pass reads it at an entity, and not otherwise.
 //!
-//! # A text column has no storage here
+//! # A column no pass reads at an entity has no storage here
 //!
-//! Prose is the corpus's bytes, and placing it at an entity index is a permutation of the source:
-//! at the 10⁸ PaperSeek rung that is 128 GiB written to a mapping on a 47 GB box and read back at
-//! random. So a `text` column's values are spilled as record-blob extents while the join decodes
-//! them ([`crate::prose`], `build-prose-extents.md`), and its slot here is
-//! [`EntityColumn::prose`]: the length and the presence bits, and no arena. The two consumers —
-//! the text index and the record blob — read the extents.
+//! A string column's characters are a share of the corpus's bytes, and placing them at an entity
+//! index is a permutation of the source: at the 10⁸ PaperSeek rung one `text` column is 128 GiB
+//! written to a mapping on a 47 GB box and read back at random. The arena buys random access by
+//! entity, so a column nothing reaches that way pays for an answer no pass asks for. Its values
+//! are spilled as record-blob extents while the join decodes them ([`crate::extents`],
+//! `build-prose-extents.md`), and its slot here is [`EntityColumn::spilled`]: the presence bits
+//! and the length, and no arena.
 //!
-//! What is left below about the arena is about `keyword` and `utf8` columns. A group-scoped
-//! `text` column is the one exception: it has no blob row (`views.md` §5), so the scoped pass
-//! builds it as an ordinary string column and indexes it from the arena.
+//! **The readers decide which columns those are**, and the rule is stated once, in
+//! [`crate::pipeline::takes_extents`]: a string column with no value column and no `render` slot
+//! is read by the record blob alone, and the blob reads an extent as readily as a column. That is
+//! every bundle-wide `text` column, and every `keyword` or `utf8` column declared with neither
+//! `index` nor `render`.
+//!
+//! What is left below about the arena is about the string columns that keep one. A group-scoped
+//! `text` column is one of them: it has no blob row (`views.md` §5), so the scoped pass builds it
+//! as an ordinary string column and indexes it from the arena.
 //!
 //! # The arena is filled in arrival order
 //!
@@ -311,16 +318,17 @@ impl EntityColumn {
         })
     }
 
-    /// A `text` column's slot: `n` entities, every one absent, and **no arena**.
+    /// A spilled column's slot: `n` entities, every one absent, and **no arena**.
     ///
-    /// The prose of a `text` column is never held in entity order (`build-prose-extents.md`): the
-    /// join spills it as record-blob extents in its own chunks, and the text index and the record
-    /// blob read those. What is left here is the length and the presence bits, so the column keeps
-    /// its place in the declaration-indexed vector every later pass indexes by attribute position.
+    /// A column [`crate::pipeline::takes_extents`] routed is never held in entity order
+    /// (`build-prose-extents.md`): the join spills it as record-blob extents in its own chunks and
+    /// the record blob reads those, a `text` column's token index having read them first. What is
+    /// left here is the length and the presence bits, so the column keeps its place in the
+    /// declaration-indexed vector every later pass indexes by attribute position.
     ///
     /// Nothing marks a presence bit on one of these, so [`Self::str_at`] and [`Self::value_at`]
     /// answer absence at every entity and neither reaches the empty offset array.
-    pub(crate) fn prose(scratch: &ColumnScratch, ty: ScalarType, n: usize) -> Result<Self> {
+    pub(crate) fn spilled(scratch: &ColumnScratch, ty: ScalarType, n: usize) -> Result<Self> {
         Ok(EntityColumn {
             ty,
             data: ColumnData::Utf8(StringColumn::empty()),

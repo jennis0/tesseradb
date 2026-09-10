@@ -1,27 +1,38 @@
-//! A `text` column's prose, spilled as record-blob extents while the join decodes it.
+//! A string column's values, spilled as record-blob extents while the join decodes them.
 //!
-//! # Why the prose is not a column
+//! # Which columns come here
+//!
+//! [`crate::pipeline::takes_extents`] decides, and it decides on the column's **readers**: a
+//! string column that no pass reads at an entity index takes this route, and one that is read at
+//! an entity keeps [`crate::column::EntityColumn`]'s arena. Prose is the case that forced the
+//! route and it is not the only one it fits — a `keyword` column declared with neither `index`
+//! nor `render` is read by the record blob alone, exactly as an unindexed `text` column is.
+//!
+//! # Why an arena is a permutation
 //!
 //! Entity ids are assigned in signature-then-Morton order and an attribute source is read in its
-//! own row order, so placing a value at its entity index is a permutation of the source. Every
-//! other declared family survives that: a fixed-width value is a slot, and a keyword's characters
-//! are a fraction of a corpus's bytes. Prose is the corpus's bytes. At the 10⁸ PaperSeek rung it
-//! is 128 GiB written to a mapping on a 47 GB box, read back once at random by the text index and
-//! once more at random by the record blob.
+//! own row order, so placing a value at its entity index is a permutation of the source. A
+//! fixed-width value survives that, being a slot in an array several passes then read at an
+//! entity. A string column's characters are a share of the corpus's bytes, written once at random
+//! into a mapping and read back at random by every consumer that walks entity space: at the 10⁸
+//! PaperSeek rung one `text` column is 128 GiB of arena on a 47 GB box, and GBIF's
+//! `scientificname` is 5.57 GB of arena and offsets over 125,789,091 occurrences to hand the
+//! record blob 1.63 GB of extents (`probes/2026-09-10-blob-resident-strings/`).
 //!
-//! So it is never permuted. Each chunk the join stages is already sorted by entity — the scatter
-//! into the fixed-width columns needs that — and each chunk of each `text` column is written here
-//! as one **blob extent**: the same three files, the same block format and the same addressing as
-//! the base blob (`records-and-search.md` §3). The text index reads the extents in block windows
-//! and the record blob merges them. Every byte moves sequentially, and the working set is one
-//! chunk plus one block per extent. `docs/design/build-prose-extents.md` carries the design.
+//! So a column with no reader at an entity is never permuted. Each chunk the join stages is
+//! already sorted by entity — the scatter into the fixed-width columns needs that — and each
+//! chunk of each such column is written here as one **blob extent**: the same three files, the
+//! same block format and the same addressing as the base blob (`records-and-search.md` §3). The
+//! record blob merges the extents, and a `text` column's token index reads them in block windows
+//! first. Every byte moves sequentially, and the working set is one chunk plus one block per
+//! extent. `docs/design/build-prose-extents.md` carries the design.
 //!
 //! # An entity written twice
 //!
 //! An attribute source may carry two rows for one entity, and the last one written is the value.
 //! Within a chunk that is the last row of the stable sort, collapsed before the extent is written.
 //! Across chunks the earlier row is in an earlier extent, so the **live set** of extent *i* is its
-//! has-row bitmap less the union of every later extent's ([`OpenProse::live`]). Both readers skip
+//! has-row bitmap less the union of every later extent's ([`OpenExtents::live`]). Both readers skip
 //! a row outside it, so the index holds terms for exactly the values the blob holds.
 
 use std::path::{Path, PathBuf};
@@ -40,9 +51,9 @@ struct ExtentPaths {
     directory: PathBuf,
 }
 
-/// One `text` column's extents, in the order the join wrote them.
+/// One column's extents, in the order the join wrote them.
 #[derive(Debug)]
-pub(crate) struct ProseColumn {
+pub(crate) struct ExtentColumn {
     /// The column's position in the declaration, which is its blob field tag.
     pub(crate) column: usize,
     name: String,
@@ -53,9 +64,9 @@ pub(crate) struct ProseColumn {
     folds: usize,
 }
 
-impl ProseColumn {
+impl ExtentColumn {
     pub(crate) fn new(dir: &Path, column: usize, name: &str) -> Self {
-        ProseColumn {
+        ExtentColumn {
             column,
             name: name.to_string(),
             dir: dir.to_path_buf(),
@@ -71,7 +82,7 @@ impl ProseColumn {
             return Ok(());
         }
         let serial = self.extents.len();
-        let stem = format!("prose-{}-{serial:05}", self.column);
+        let stem = format!("extent-{}-{serial:05}", self.column);
         let paths = ExtentPaths {
             blocks: self.dir.join(format!("{stem}.blocks.bin")),
             hasrow: self.dir.join(format!("{stem}.hasrow.roaring")),
@@ -112,8 +123,8 @@ impl ProseColumn {
     /// intermediates first: **128**.
     ///
     /// What an open extent costs the merge is one uncompressed block, 256 KiB, so 128 of them is
-    /// 32 MB. The cascade above that is a second write of the prose in the group, which is why the
-    /// bound is not tighter: a join chunk is `JOIN_STAGE_BYTES` of staged rows, so a corpus
+    /// 32 MB. The cascade above that is a second write of the group's characters, which is why
+    /// the bound is not tighter: a join chunk is `JOIN_STAGE_BYTES` of staged rows, so a corpus
     /// reaches 128 extents of one column only at ten times the 10⁸ rung's prose.
     pub(crate) const MERGE_FAN_IN: usize = 128;
 
@@ -129,7 +140,7 @@ impl ProseColumn {
             let taken: Vec<ExtentPaths> = self.extents.drain(..).collect();
             let mut folded: Vec<ExtentPaths> = Vec::with_capacity(groups);
             for (group, extents) in taken.chunks(per_group).enumerate() {
-                let stem = format!("prose-{}-fold{}-{group:05}", self.column, self.folds);
+                let stem = format!("extent-{}-fold{}-{group:05}", self.column, self.folds);
                 let out = ExtentPaths {
                     blocks: self.dir.join(format!("{stem}.blocks.bin")),
                     hasrow: self.dir.join(format!("{stem}.hasrow.roaring")),
@@ -170,7 +181,7 @@ impl ProseColumn {
     }
 
     /// Open every extent, mapped, with each one's live set beside it.
-    pub(crate) fn open(&self) -> Result<OpenProse> {
+    pub(crate) fn open(&self) -> Result<OpenExtents> {
         let blobs = open_all(&self.extents)?;
         // Later extents were written later, so a repeated entity's value is the last extent's.
         // Walked backwards, `seen` is the union of every later extent's rows.
@@ -182,7 +193,7 @@ impl ProseColumn {
             seen.or_inplace(blob.hasrow());
             live[i] = mine;
         }
-        Ok(OpenProse {
+        Ok(OpenExtents {
             column: self.column,
             blobs,
             live,
@@ -201,7 +212,7 @@ impl ProseColumn {
 }
 
 /// One column's extents, open, with each one's live set.
-pub(crate) struct OpenProse {
+pub(crate) struct OpenExtents {
     /// The declaration position, which is the field tag the rows carry.
     pub(crate) column: usize,
     pub(crate) blobs: Vec<RecordBlob>,
@@ -210,18 +221,18 @@ pub(crate) struct OpenProse {
 
 /// One window of one extent: a contiguous run of blocks, which is a contiguous run of entities.
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct ProseWindow {
+pub(crate) struct ExtentWindow {
     pub(crate) extent: usize,
     pub(crate) lo: usize,
     pub(crate) hi: usize,
 }
 
-impl OpenProse {
+impl OpenExtents {
     /// At most `target` windows over the extents' blocks, none spanning two extents.
     ///
     /// The text index divides its work by these, exactly as it divided the arena's byte ranges:
     /// a worker reads one window front to back and decompresses a block at a time.
-    pub(crate) fn windows(&self, target: usize) -> Vec<ProseWindow> {
+    pub(crate) fn windows(&self, target: usize) -> Vec<ExtentWindow> {
         let blocks: usize = self.blobs.iter().map(RecordBlob::block_count).sum();
         if blocks == 0 {
             return Vec::new();
@@ -232,7 +243,7 @@ impl OpenProse {
             let mut lo = 0usize;
             while lo < blob.block_count() {
                 let hi = (lo + per_window).min(blob.block_count());
-                windows.push(ProseWindow { extent, lo, hi });
+                windows.push(ExtentWindow { extent, lo, hi });
                 lo = hi;
             }
         }
@@ -245,7 +256,7 @@ impl OpenProse {
     /// here for the same reason the record blob does not write it.
     pub(crate) fn for_each_record_in(
         &self,
-        window: ProseWindow,
+        window: ExtentWindow,
         visit: &mut dyn FnMut(usize, &str) -> Result<()>,
     ) -> Result<()> {
         let blob = &self.blobs[window.extent];
@@ -262,7 +273,7 @@ impl OpenProse {
     }
 }
 
-/// The one field a prose extent's row carries, as a string.
+/// The one field an extent's row carries, as a string.
 fn field_value(fields: &[RecordField], column: usize) -> Result<&str> {
     let tag = column as u16;
     match fields.iter().find(|field| field.tag == tag) {
@@ -271,14 +282,14 @@ fn field_value(fields: &[RecordField], column: usize) -> Result<&str> {
             ..
         }) => Ok(value),
         _ => Err(BuildError::Invalid(format!(
-            "a prose extent's row carries no utf8 value at field tag {tag}; the extent was \
-             written by this build and holds one field per row"
+            "an extent's row carries no utf8 value at field tag {tag}; the extent was written \
+             by this build and holds one field per row"
         ))),
     }
 }
 
 fn record_error(e: tessera_filter::RecordError) -> BuildError {
-    BuildError::Invalid(format!("a prose extent does not read back: {e}"))
+    BuildError::Invalid(format!("an extent does not read back: {e}"))
 }
 
 /// One extent's live rows as a stream the record blob's merge reads.
@@ -289,7 +300,7 @@ pub(crate) struct ExtentRows<'a> {
 
 impl<'a> ExtentRows<'a> {
     /// Every stream of one column's extents, in the order the join wrote them.
-    pub(crate) fn over(open: &'a OpenProse) -> Vec<ExtentRows<'a>> {
+    pub(crate) fn over(open: &'a OpenExtents) -> Vec<ExtentRows<'a>> {
         open.blobs
             .iter()
             .zip(&open.live)
