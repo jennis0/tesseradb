@@ -1874,6 +1874,10 @@ pub(crate) fn build(
     // Accumulated across the views, like the extents beside them: what a scoped layer's artifacts
     // came to in each view is per view or it says nothing (`views.md` §3.5).
     let mut artifact_levels: Vec<crate::artifact_pass::LevelLayoutReport> = Vec::new();
+    // **One counter for the whole prefix.** The artifact pass runs per view and each of its calls
+    // names files from this, so the second view's files cannot be named after the first's — see
+    // `tessera_store::derived::DerivedIndex`.
+    let mut derived_index = tessera_store::derived::DerivedIndex::default();
     for (index, view) in args.views.iter().enumerate() {
         let view_dir = tessera_store::view_path(&partition_dir, &view.view_id);
         let segment_dir = view_dir.join("segments").join(SEG_ID);
@@ -2043,7 +2047,7 @@ pub(crate) fn build(
             crate::PHASH,
             &view.view_id,
             rows_in_view,
-            &plugin.data_plugin_hash(),
+            &mut derived_index,
         );
         published_layers.store = artifact_store;
         crate::artifact_pass::report(&artifact_pass);
@@ -2057,9 +2061,6 @@ pub(crate) fn build(
         published_layers
             .row_column_extents
             .extend(artifact_pass.row_column_extents.iter().cloned());
-        published_layers
-            .containment_extents
-            .extend(artifact_pass.containment_extents.iter().cloned());
         published_layers
             .shape_rows_extents
             .extend(artifact_pass.shape_rows_extents.iter().cloned());
@@ -2083,6 +2084,30 @@ pub(crate) fn build(
             entity_hi: n,
         });
     }
+    // ---- 10c. the containment partitions, once for the prefix ----------------------------
+    //
+    // **Outside the view loop**, because a partition is a function of the level's records and the
+    // prefix's postings and carries no view. Composing it inside the pass would write one identical
+    // file and one manifest entry per view.
+    {
+        let artifact_store = std::mem::take(&mut published_layers.store);
+        let containment = crate::artifact_pass::containment(
+            &artifact_store,
+            &args.out.join(crate::PREFIX),
+            crate::PHASH,
+            &plugin.data_plugin_hash(),
+            &mut derived_index,
+        );
+        published_layers.store = artifact_store;
+        eprintln!("  wrote {} containment partition(s)", containment.len());
+        artifact_paths.extend(
+            containment
+                .iter()
+                .map(|entry| args.out.join(crate::PREFIX).join(&entry.path)),
+        );
+        published_layers.containment_extents.extend(containment);
+    }
+
     drop(geometry);
     drop(entity_map);
     // The spill directory closes **here**: every view's ordinal-space geometry and every
@@ -3231,8 +3256,7 @@ pub(crate) fn blob_resident(
     schema: &crate::config::Schema,
     attribute: &crate::config::Attribute,
 ) -> bool {
-    attribute.ty == ScalarType::Text
-        || (!attribute.render && !postings_are_owed(schema, attribute))
+    attribute.ty == ScalarType::Text || (!attribute.render && !postings_are_owed(schema, attribute))
 }
 
 /// Does this column owe an **entity-space value column**, and the dictionary a keyword's ordinals
@@ -3781,8 +3805,7 @@ impl KeywordDictPlan {
 
 /// What one buffered row costs: its entry in the array the chunk sorts, and its place in the
 /// scratch a key's rows are gathered into. The figure [`KeywordDictPlan`] divides the budget by.
-const KEYWORD_ROW_BYTES: usize =
-    std::mem::size_of::<KeywordPair>() + std::mem::size_of::<u32>();
+const KEYWORD_ROW_BYTES: usize = std::mem::size_of::<KeywordPair>() + std::mem::size_of::<u32>();
 
 /// One present row's key and the row it sits at.
 ///
@@ -5356,10 +5379,7 @@ struct ViewIdAnchor {
 /// `probes/2026-09-10-source-ids-memory/`. Sorting and duplicate-checking each segment in place
 /// leaves the same array the concatenation did, and the whole-array sort below leaves the same
 /// bytes either way.
-fn read_source_ids_union(
-    args: &BuildArgs,
-    tmp: &Path,
-) -> Result<(SourceIds, Vec<ViewIdAnchor>)> {
+fn read_source_ids_union(args: &BuildArgs, tmp: &Path) -> Result<(SourceIds, Vec<ViewIdAnchor>)> {
     let mut counts = Vec::with_capacity(args.views.len());
     for view in &args.views {
         counts.push(count_source_ids(args, view)?);

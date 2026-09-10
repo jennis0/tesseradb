@@ -738,8 +738,32 @@ fn derived_dir(prefix_dir: &Path, partition: &str, kind: &str) -> Option<std::pa
     }
 }
 
+/// The running index each kind's files are named from, carried across every call one publication
+/// makes.
+///
+/// A build files each kind **once per view**. Two calls numbering from zero name the same files,
+/// so the second view's bytes replace the first's while both views' manifest entries stand, each
+/// of them naming whichever view was written last. One counter per kind, advanced by the number of
+/// items every call is given, keeps the index unique across those calls and puts no caller-shaped
+/// string in a path. [`derived_name`] states why a view id may not be one.
+///
+/// A fold files each kind once, with every view's structures in the one vector, so its numbering
+/// is the same either way.
+///
+/// The counters are per kind because the kind is already in the name. One shared counter would
+/// leave gaps in each kind's numbering and say nothing more.
+#[derive(Debug, Default)]
+pub struct DerivedIndex {
+    tile_index: usize,
+    row_column: usize,
+    containment: usize,
+    shape_rows: usize,
+    shape_held: usize,
+}
+
 /// The naming rule every derived file follows: a layer name and a view id are caller-shaped and
-/// never reach a filename; the publication that introduced the file does.
+/// never reach a filename; the publication that introduced the file does, with the position
+/// [`DerivedIndex`] hands out beside it.
 fn derived_name(kind: &str, n: u64, index: usize, extension: &str) -> String {
     format!("{kind}-{n:06}-{index:03}.{extension}")
 }
@@ -749,11 +773,13 @@ fn derived_name(kind: &str, n: u64, index: usize, extension: &str) -> String {
 /// The directory entry itself has to be durable, or a crash leaves a manifest naming a file whose
 /// name was never written — the rule every other publication follows. A directory that will not
 /// fsync drops the whole kind.
+#[allow(clippy::too_many_arguments)]
 fn file_all<T>(
     prefix_dir: &Path,
     partition: &str,
     kind: &str,
     n: u64,
+    next: &mut usize,
     items: Vec<Filed>,
     extension_of: &dyn Fn(&Filed) -> &'static str,
     entry_of: &dyn Fn(&Filed, String) -> T,
@@ -761,12 +787,17 @@ fn file_all<T>(
     if items.is_empty() {
         return Vec::new();
     }
+    // **Advanced before the first write, by every item.** A file that will not be written still
+    // spends its index: an index handed out again after a failure would name the next call's file
+    // after one this call's manifest entry already names.
+    let start = *next;
+    *next += items.len();
     let Some(dir) = derived_dir(prefix_dir, partition, kind) else {
         return Vec::new();
     };
     let mut entries = Vec::with_capacity(items.len());
     for (index, item) in items.iter().enumerate() {
-        let name = derived_name(kind, n, index, extension_of(item));
+        let name = derived_name(kind, n, start + index, extension_of(item));
         if let Err(error) = crate::write_and_fsync(&dir.join(&name), &item.bytes) {
             tracing::warn!(
                 layer = %item.layer,
@@ -795,6 +826,7 @@ pub fn file_tile_indexes(
     prefix_dir: &Path,
     partition: &str,
     n: u64,
+    index: &mut DerivedIndex,
     items: Vec<Filed>,
 ) -> Vec<TileIndexExtent> {
     file_all(
@@ -802,6 +834,7 @@ pub fn file_tile_indexes(
         partition,
         "tile-index",
         n,
+        &mut index.tile_index,
         items,
         &|_| "tsti",
         &|item, path| TileIndexExtent {
@@ -824,6 +857,7 @@ pub fn file_row_columns(
     prefix_dir: &Path,
     partition: &str,
     n: u64,
+    index: &mut DerivedIndex,
     items: Vec<Filed>,
 ) -> Vec<RowColumnExtent> {
     file_all(
@@ -831,6 +865,7 @@ pub fn file_row_columns(
         partition,
         "row-column",
         n,
+        &mut index.row_column,
         items,
         &|item| match item.layout {
             ServingLayout::RowMajorList => "tsll",
@@ -856,6 +891,7 @@ pub fn file_containment(
     prefix_dir: &Path,
     partition: &str,
     n: u64,
+    index: &mut DerivedIndex,
     items: Vec<Filed>,
 ) -> Vec<ContainmentExtent> {
     file_all(
@@ -863,6 +899,7 @@ pub fn file_containment(
         partition,
         "containment",
         n,
+        &mut index.containment,
         items,
         &|_| "tscp",
         &|item, path| ContainmentExtent {
@@ -893,18 +930,22 @@ pub fn file_shape_rows(
     prefix_dir: &Path,
     partition: &str,
     n: u64,
+    index: &mut DerivedIndex,
     items: Vec<FiledShapeRows>,
 ) -> Vec<ShapeRowsExtent> {
     if items.is_empty() {
         return Vec::new();
     }
     let kind = "shape-rows";
+    // [`file_all`]'s rule: every item spends an index, written or not.
+    let start = index.shape_rows;
+    index.shape_rows += items.len();
     let Some(dir) = derived_dir(prefix_dir, partition, kind) else {
         return Vec::new();
     };
     let mut entries = Vec::with_capacity(items.len());
-    for (index, item) in items.iter().enumerate() {
-        let name = derived_name(kind, n, index, "tssr");
+    for (offset, item) in items.iter().enumerate() {
+        let name = derived_name(kind, n, start + offset, "tssr");
         if let Err(error) = crate::write_and_fsync(&dir.join(&name), &item.bytes) {
             tracing::warn!(
                 layer = %item.layer,
@@ -939,6 +980,7 @@ pub fn file_shape_held(
     prefix_dir: &Path,
     partition: &str,
     n: u64,
+    index: &mut DerivedIndex,
     items: Vec<Filed>,
 ) -> Vec<ShapeHeldExtent> {
     file_all(
@@ -946,6 +988,7 @@ pub fn file_shape_held(
         partition,
         "shape-held",
         n,
+        &mut index.shape_held,
         items,
         &|_| "tssh",
         &|item, path| ShapeHeldExtent {
@@ -986,7 +1029,10 @@ pub fn canonical_digest(bytes: &[u8]) -> u64 {
 ///
 /// `canonical` is each ordinal's canonical bytes beside its held form, so the entry carries what
 /// the reader compares against.
-pub fn shape_held_bytes(level_version: u64, shapes: &[(Option<&[u8]>, Option<&HeldShape>)]) -> Vec<u8> {
+pub fn shape_held_bytes(
+    level_version: u64,
+    shapes: &[(Option<&[u8]>, Option<&HeldShape>)],
+) -> Vec<u8> {
     let mut out = Vec::new();
     out.extend_from_slice(SHAPE_HELD_MAGIC);
     out.extend_from_slice(&SHAPE_HELD_VERSION.to_le_bytes());
@@ -1075,7 +1121,9 @@ pub fn read_shape_held(path: &Path, level_version: u64) -> crate::Result<Vec<Opt
     }
     let version = u16::from_le_bytes(take(2)?.try_into().expect("two bytes"));
     if version != SHAPE_HELD_VERSION {
-        return Err(refuse(format!("version {version}, expected {SHAPE_HELD_VERSION}")));
+        return Err(refuse(format!(
+            "version {version}, expected {SHAPE_HELD_VERSION}"
+        )));
     }
     if take(2)? != [0, 0] {
         return Err(refuse("reserved is not 0".into()));
@@ -1115,7 +1163,9 @@ pub fn read_shape_held(path: &Path, level_version: u64) -> crate::Result<Vec<Opt
             let t = take(9)?;
             let depth = t[8];
             if depth > 16 {
-                return Err(refuse(format!("ordinal {ordinal}: a tile at depth {depth}")));
+                return Err(refuse(format!(
+                    "ordinal {ordinal}: a tile at depth {depth}"
+                )));
             }
             interior.push(Tile {
                 prefix: u64_of(&t[0..8]),
@@ -1704,7 +1754,8 @@ fn coarse_tiles(b: tessera_spatial::shape::Bbox) -> impl Iterator<Item = u32> {
     let (x0, x1) = (b.min_x >> shift, b.max_x >> shift);
     let (y0, y1) = (b.min_y >> shift, b.max_y >> shift);
     (y0..=y1).flat_map(move |ty| {
-        (x0..=x1).map(move |tx| tessera_spatial::interleave_bits(tx, ty, SHAPE_INDEX_DEPTH as u8) as u32)
+        (x0..=x1)
+            .map(move |tx| tessera_spatial::interleave_bits(tx, ty, SHAPE_INDEX_DEPTH as u8) as u32)
     })
 }
 
@@ -1898,14 +1949,29 @@ mod derived_tests {
 
         let back = read_shape_rows(&path, 7, "seg-0", 1_000).expect("the form reads back");
         assert_eq!(back.len(), 4);
-        assert_eq!(back[0].as_ref().map(|b| b.to_vec()), Some(vec![1, 2, 3, 900]));
-        assert!(back[1].is_none(), "a hole is a hole, not an empty membership");
+        assert_eq!(
+            back[0].as_ref().map(|b| b.to_vec()),
+            Some(vec![1, 2, 3, 900])
+        );
+        assert!(
+            back[1].is_none(),
+            "a hole is a hole, not an empty membership"
+        );
         assert_eq!(back[2].as_ref().map(Bitmap::cardinality), Some(0));
         assert_eq!(back[3].as_ref().map(Bitmap::cardinality), Some(490));
 
-        assert!(read_shape_rows(&path, 8, "seg-0", 1_000).is_err(), "another level version");
-        assert!(read_shape_rows(&path, 7, "seg-1", 1_000).is_err(), "another segment");
-        assert!(read_shape_rows(&path, 7, "seg-0", 2_000).is_err(), "another row count");
+        assert!(
+            read_shape_rows(&path, 8, "seg-0", 1_000).is_err(),
+            "another level version"
+        );
+        assert!(
+            read_shape_rows(&path, 7, "seg-1", 1_000).is_err(),
+            "another segment"
+        );
+        assert!(
+            read_shape_rows(&path, 7, "seg-0", 2_000).is_err(),
+            "another row count"
+        );
 
         // A row at or past the segment's count is a form written over other rows.
         let wide = shape_rows_bytes(7, "seg-0", 100, &rows);
@@ -1948,7 +2014,10 @@ mod derived_tests {
         assert!(back[1].is_none());
         let entry = back.into_iter().next().unwrap().unwrap();
         assert!(entry.is_of(&bytes));
-        assert!(!entry.is_of(&bytes[..bytes.len() - 1]), "other bytes are another shape");
+        assert!(
+            !entry.is_of(&bytes[..bytes.len() - 1]),
+            "other bytes are another shape"
+        );
         assert_eq!(entry.interior, held.interior);
         assert_eq!(entry.boundary, held.boundary);
         assert_eq!(entry.bounds, held.bounds);
