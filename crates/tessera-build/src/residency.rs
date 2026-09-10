@@ -300,17 +300,44 @@ pub(crate) fn render_tail_bytes(schema: &crate::config::Schema, n: u64) -> u64 {
 /// The residency of everything the batch loop's model does not cover.
 ///
 /// `member_rows` is the total across every layer's member table, and `n` the item count.
+///
+/// `dense` says the source ids are a contiguous range. The resolver then reads only the range's
+/// first id and its length, so `pipeline` drops the id vector **before** `layers::publish` rather
+/// than after it, and the vector and the publication's Roaring — the two largest anonymous terms —
+/// never stand at once. Summing them there refuses a build that fits. On the sparse path the
+/// resolver binary-searches the vector throughout and both do stand together, which is what this
+/// assumed for every build before 2026-09-10.
 pub(crate) fn entity_order_residency(
     n: u64,
     columns: &[ColumnCost],
     member_rows: u64,
+    dense: bool,
 ) -> Residency {
+    let id_bytes = 8 * n;
+    let publication_bytes = member_rows.saturating_mul(BYTES_PER_MEMBER_ROW);
+    // Exclusive on the dense path, so the peak is the larger and not the sum. Printed as one term
+    // naming both, because an operator reading a refusal needs to see which of the two set it.
+    let exclusive = dense && member_rows > 0;
     let mut terms = vec![
         Term {
-            what:
+            what: if exclusive {
+                format!(
+                    "the larger of the sorted source ids ({} MiB, 8 B/item, released before the \
+                     publication) and the publication's own Roaring ({} MiB) — the ids are a \
+                     contiguous range, so the resolver keeps only its bounds and the two never \
+                     stand together",
+                    id_bytes >> 20,
+                    publication_bytes >> 20
+                )
+            } else {
                 "the sorted source ids, 8 B/item (input.rs; released after the layer publication)"
-                    .into(),
-            bytes: 8 * n,
+                    .into()
+            },
+            bytes: if exclusive {
+                id_bytes.max(publication_bytes)
+            } else {
+                id_bytes
+            },
             mapped: false,
         },
         // **File-backed since 2026-09-09**, and so charged to the disk rather than to memory: the
@@ -385,14 +412,17 @@ pub(crate) fn entity_order_residency(
         }
     }
     if member_rows > 0 {
-        terms.push(Term {
-            what: format!(
-                "{member_rows} layer member row(s) at {BYTES_PER_MEMBER_ROW} B — the publication's \
-                 own Roaring, while the level it is publishing is in flight"
-            ),
-            bytes: member_rows.saturating_mul(BYTES_PER_MEMBER_ROW),
-            mapped: false,
-        });
+        // Folded into the first term on the dense path, where it is exclusive with the id vector.
+        if !exclusive {
+            terms.push(Term {
+                what: format!(
+                    "{member_rows} layer member row(s) at {BYTES_PER_MEMBER_ROW} B — the \
+                     publication's own Roaring, while the level it is publishing is in flight"
+                ),
+                bytes: publication_bytes,
+                mapped: false,
+            });
+        }
         terms.push(Term {
             what: format!(
                 "the published memberships the store reads back through the packed extent, at \
@@ -424,7 +454,7 @@ pub(crate) fn entity_order_residency(
 /// so this opens every input and reads none of them. A file that cannot be opened, or a column that
 /// is not in it, contributes zero rather than refusing: the pre-flight is an estimate, and a build
 /// blocked because a footer would not parse is a worse outcome than one that under-reads.
-pub(crate) fn model(args: &crate::BuildArgs, n: u64) -> Residency {
+pub(crate) fn model(args: &crate::BuildArgs, n: u64, dense: bool) -> Residency {
     let mut payloads = vec![0u64; args.schema.attributes.len()];
     for source in &args.attribute_sources {
         let Some(metadata) = footer(&source.path) else {
@@ -462,7 +492,7 @@ pub(crate) fn model(args: &crate::BuildArgs, n: u64) -> Residency {
         .filter_map(|members| footer(&members.path))
         .map(|metadata| metadata.file_metadata().num_rows().max(0) as u64)
         .sum();
-    entity_order_residency(n, &columns, member_rows)
+    entity_order_residency(n, &columns, member_rows, dense)
 }
 
 /// One Parquet file's metadata, or `None` where it cannot be had.
@@ -518,7 +548,7 @@ mod tests {
             column(ScalarType::Text, text_bytes_per_item * n),
             column(ScalarType::U32, 0),
         ];
-        entity_order_residency(n, &columns, (2 * n) + (34 * n / 10) + n)
+        entity_order_residency(n, &columns, (2 * n) + (34 * n / 10) + n, false)
     }
 
     #[test]
@@ -538,11 +568,49 @@ mod tests {
     /// per-entity offsets, its presence bits and every character it holds — is a file under
     /// `.build-tmp/`, so it appears in the breakdown at its full size and adds nothing to the
     /// figure `--memory-budget` is compared against.
+    /// **A contiguous id range charges the larger of the two, not both.** `pipeline` drops the id
+    /// vector before `layers::publish` when the resolver only needs the range's bounds, so the
+    /// vector and the publication's Roaring never stand together — and a model that sums them
+    /// refuses a build that fits. Rung 6 is the case: 3.5x10^9 items and as many member rows was
+    /// refused needing 53,404 MiB, of which 13,335 was a Roaring that the ids had already made way
+    /// for.
+    #[test]
+    fn a_contiguous_id_range_charges_the_larger_of_the_ids_and_the_publication() {
+        let n = 1_000_000_u64;
+        let sparse = entity_order_residency(n, &[], n, false);
+        let dense = entity_order_residency(n, &[], n, true);
+
+        // Stated as the difference between the two, so the assertion does not have to restate
+        // every other term of the model — `SLACK` and the columns are the same on both paths.
+        let ids = 8 * n;
+        let publication = n * BYTES_PER_MEMBER_ROW;
+        assert_eq!(
+            sparse.total() - dense.total(),
+            ids.min(publication),
+            "the dense path drops whichever of the two is smaller"
+        );
+        assert_eq!(sparse.total(), dense.total() + ids.min(publication));
+
+        // The refusal has to say which of the two set the figure, so both are named in one term.
+        let described = dense.describe();
+        assert!(described.contains("the larger of the sorted source ids"), "got: {described}");
+        assert!(
+            !described.contains("while the level it is publishing is in flight"),
+            "the folded term must not also be printed on its own: {described}"
+        );
+
+        // A layerless build has no publication to be exclusive with, so denseness changes nothing.
+        assert_eq!(
+            entity_order_residency(n, &[], 0, true).total(),
+            entity_order_residency(n, &[], 0, false).total()
+        );
+    }
+
     #[test]
     fn a_declared_column_is_reported_as_mapped_and_charged_at_nothing() {
         let n = 10_000_000;
-        let bare = entity_order_residency(n, &[], 0);
-        let with_keyword = entity_order_residency(n, &[column(ScalarType::Keyword, 400 * n)], 0);
+        let bare = entity_order_residency(n, &[], 0, false);
+        let with_keyword = entity_order_residency(n, &[column(ScalarType::Keyword, 400 * n)], 0, false);
         assert_eq!(with_keyword.total(), bare.total());
         let term = with_keyword
             .terms
@@ -565,7 +633,7 @@ mod tests {
     fn a_text_column_costs_its_extents_and_not_an_arena() {
         let n = 10_000_000;
         let payload = 400 * n;
-        let with_text = entity_order_residency(n, &[column(ScalarType::Text, payload)], 0);
+        let with_text = entity_order_residency(n, &[column(ScalarType::Text, payload)], 0, false);
         let term = with_text
             .terms
             .iter()
@@ -596,12 +664,12 @@ mod tests {
         };
         let extent_bytes = n.div_ceil(8) + 200 * n;
 
-        let without = entity_order_residency(n, &[plain], 0);
+        let without = entity_order_residency(n, &[plain], 0, false);
         assert_eq!(without.mapped(), extent_bytes);
 
         // The runs are charged the source's characters, being uncompressed where the extents that
         // hold the same prose are not.
-        let with = entity_order_residency(n, &[indexed], 0);
+        let with = entity_order_residency(n, &[indexed], 0, false);
         assert_eq!(with.mapped(), extent_bytes + 400 * n);
         assert_eq!(
             with.total(),
@@ -625,8 +693,8 @@ mod tests {
     fn a_member_row_is_charged_where_it_is_resident_and_reported_where_it_is_a_file() {
         let n = 10_000_000;
         let rows = 64_000_000;
-        let without = entity_order_residency(n, &[], 0);
-        let with = entity_order_residency(n, &[], rows);
+        let without = entity_order_residency(n, &[], 0, false);
+        let with = entity_order_residency(n, &[], rows, false);
         assert_eq!(
             with.total() - without.total(),
             rows * BYTES_PER_MEMBER_ROW,
@@ -948,7 +1016,7 @@ require_member_visibility = "none"
         }
 
         let (args, _temp) = fixture(N);
-        let model = model(&args, N);
+        let model = model(&args, N, false);
         println!("model: {} MiB{}", model.total() >> 20, model.describe());
         crate::build_observed(&args, &Trace).unwrap();
         println!(

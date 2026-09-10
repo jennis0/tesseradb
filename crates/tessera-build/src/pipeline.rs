@@ -604,6 +604,9 @@ const BATCH_GRID: u64 = 1 << 24;
 fn plan_build(
     args: &BuildArgs,
     n: u64,
+    // Whether the source ids are a contiguous range — see `residency::entity_order_residency`,
+    // which charges the id vector and the publication's Roaring as exclusive when they are.
+    dense: bool,
     pair_rows: usize,
     row_counts: &[u64],
     histogram: &[u64],
@@ -623,7 +626,7 @@ fn plan_build(
     // The plan below already refuses an infeasible stride, and a budget the operator named is a
     // bound they asked to have enforced. An auto-derived budget is `MemAvailable` damped, so exceeding *that* is the kill
     // this exists to replace.
-    let tail = crate::residency::model(args, n);
+    let tail = crate::residency::model(args, n, dense);
     if tail.total() > budget {
         return Err(BuildError::Invalid(format!(
             "this build's entity-order stages need about {} MiB, over the {} MiB memory budget. \
@@ -896,7 +899,14 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
     // size is identity-bearing (I9), so it is derived deterministically here, recorded in
     // provenance when it batches, and never silently re-derived on a rebuild (the CLI replays
     // a carried bundle's recorded value).
-    let plan = plan_build(args, n, pair_rows, &row_counts, &histogram, histogram_shift)?;
+    // **The same test the resolver makes**, taken here so the residency model can charge the id
+    // vector and the publication's Roaring as exclusive rather than simultaneous: a range spanning
+    // exactly its own length can only be `first + i` at every `i`.
+    let dense = match (source_ids.first(), source_ids.last()) {
+        (Some(first), Some(last)) => last - first + 1 == source_ids.len() as u64,
+        _ => false,
+    };
+    let plan = plan_build(args, n, dense, pair_rows, &row_counts, &histogram, histogram_shift)?;
     drop(histogram);
     if plan.batches > 1 {
         eprintln!(
