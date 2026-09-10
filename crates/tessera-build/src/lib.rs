@@ -1488,6 +1488,7 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
         paths.extend(pipeline::write_record_blob(
             &partition_dir,
             &args.schema,
+            tiler_items.len() as u64,
             &by_entity,
             &open_prose,
         )?);

@@ -150,13 +150,17 @@ the same reason: file descriptors and buffers, not correctness.
 
 ## 5. The disk pre-flight
 
-`residency.rs` charges the column phase, which is what refused rung 4 at 274.5 GB modelled against
-257.7 GB free.
+`residency.rs` charges the phases from the attribute join on, which is what refused rung 4 at
+274.5 GB modelled against 257.7 GB free (the model as it stood then; it has since been rewritten
+into six phases and its figures have moved).
 
-Removed: a `text` column's arena, charged at the source's uncompressed Parquet payload plus 4 B an
-entity of layout.
+Removed: a `text` column's arena, charged at the source's Parquet payload plus 4 B an entity of
+layout.
 
-Added: that column's extents, charged at half the payload. The measured block ratio on prose is
+Added: that column's extents, charged at half the payload. The payload is the column's characters,
+measured over a sample of the source's row groups: a Parquet footer's uncompressed size is the
+encoded page size and reads a dictionary-encoded string column at a quarter of its values
+([`probes/2026-09-10-build-disk/`](../../probes/2026-09-10-build-disk/README.md)). The measured block ratio on prose is
 2.9× ([`probes/2026-09-04-rung-4-whole/`](../../probes/2026-09-04-rung-4-whole/), the base blob
 at 44.77 GB against the 128 GiB of prose it holds), and half is charged rather than a 2.9th because the figure is one
 corpus's and the pre-flight refuses a build rather than warns. Modelled, not measured for this
@@ -164,7 +168,7 @@ shape.
 
 The text index's runs keep their term, still charged at the column they are tokenised from. The
 extents and the base blob stand on the disk together for the length of the merge, so the output's
-own bytes are already in the assembly phase and are not double-charged here.
+own bytes are already charged from the blob phase on and are not double-charged here.
 
 At rung 4 the abstract column's two terms fall from 115,536 MiB and 115,147 MiB to about 57,768
 and 115,147, which is 113 GB off a 274.5 GB refusal. The build the model then admits wrote a

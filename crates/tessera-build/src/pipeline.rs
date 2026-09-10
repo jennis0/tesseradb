@@ -313,7 +313,7 @@ const JOIN_STAGE_BYTES: usize = 256 << 20;
 
 /// How many rows of `attributes` fit in [`JOIN_STAGE_BYTES`], at least one and never more than the
 /// corpus.
-fn staging_rows(attributes: &[&crate::config::Attribute], n: u64) -> usize {
+pub(crate) fn staging_rows(attributes: &[&crate::config::Attribute], n: u64) -> usize {
     // The join key beside each staged row — `(source_id, pos)`, 16 bytes and not the 12 an earlier
     // comment claimed — the 8 bytes the sweep's answer takes beside it (`(entity, pos)`), and one
     // typed slot per column. Each column's presence bit adds an eighth of a byte per row on top,
@@ -623,7 +623,10 @@ fn plan_build(
     // The plan below already refuses an infeasible stride, and a budget the operator named is a
     // bound they asked to have enforced. An auto-derived budget is `MemAvailable` damped, so exceeding *that* is the kill
     // this exists to replace.
-    let tail = crate::residency::model(args, n);
+    // **The string columns' characters are measured once here**, both models wanting them and the
+    // sample decoding rows to get them (`residency::payloads_per_item`).
+    let payloads = crate::residency::payloads_per_item(args);
+    let tail = crate::residency::model(args, n, &payloads);
     if tail.total() > budget {
         return Err(BuildError::Invalid(format!(
             "this build's entity-order stages need about {} MiB, over the {} MiB memory budget. \
@@ -773,48 +776,32 @@ fn plan_build(
     band_bounds.push((lo, row_counts.len() as u32));
 
     // Disk pre-flight (fail-closed): the build's transient spills and its outputs coexist in
-    // phases; refuse up front, with the arithmetic, rather than dying on ENOSPC hours in. The
-    // four phase peaks, all conservative: buckets full beside the first batch's bands; bands
-    // full beside the postings spool; the declared columns beside the text index's runs; the
-    // spool becoming postings.arrow beside the segment. (P here is pre-dedup pairs; band/spool
-    // bytes-per-pair are stated ceilings for the varint codec and Roaring postings, not
-    // measurements of this corpus.)
-    //
-    // **The column phase is a whole window, not a moment.** Every declared column in entity
-    // order is a mapped file from the attribute join to the release five stages later
-    // (`column.rs`), and the text index spills its runs inside that window — so those bytes are
-    // on the disk together, and they are on it while the geometry maps still are. The other three
-    // phases all end before the attribute join opens it. The column figure is `residency.rs`'s
-    // own, reused rather than re-derived: a second copy of that arithmetic is how this stops
-    // being true again.
-    //
-    // **The sorted source ids are in all three of the first phases**, at 8 B/item: they are
-    // written in pass one and released at the layer publication, which is inside the column
-    // window. The column phase carries them through `tail.mapped()`; the other two add them here.
+    // phases, so the forecast is the largest phase and not a total nothing ever holds. Refuse up
+    // front with the arithmetic rather than dying on ENOSPC hours in. `residency::disk` names every
+    // term and the phases it stands through; nothing is derived twice here.
     let p = pair_rows as u64;
-    let ids = 8 * n;
-    let phase_spill = ids + if bucket_in_ram { 0 } else { 8 * p } + (6 * p) / batches.max(1);
-    let phase_bands = ids + 6 * p + 4 * p;
-    // 8 B/item of `x-of-entity`/`y-of-entity`, which outlive the release; 4 B/item of pairs
-    // already written as postings.arrow before the window opened.
-    let phase_columns = tail.mapped() + 8 * n + 4 * p;
-    // The segment write: the spool becoming postings.arrow beside the segment, and the row-order
-    // attribute tail beside both — one mapped file per render column, built here and unlinked with
-    // the record batch that reads it (`residency::render_tail_bytes`).
-    let phase_assemble = 4 * p + 26 * n + crate::residency::render_tail_bytes(&args.schema, n);
-    let disk_need = phase_spill
-        .max(phase_bands)
-        .max(phase_columns)
-        .max(phase_assemble);
+    let disk = crate::residency::disk(args, n, p, batches, bucket_in_ram, &payloads, &tail);
+    let (phase, disk_need) = disk.peak();
+    // **Printed, not only refused.** An operator sizing a corpus has no other way to ask what a
+    // build will cost the disk, and the campaign's rung 6 died at hour three on a forecast nobody
+    // could read (`probes/2026-09-10-build-disk/`).
+    eprintln!(
+        "disk: ~{} MiB at peak, in the {} phase{}",
+        disk_need >> 20,
+        phase.name(),
+        crate::residency::Phase::ALL
+            .iter()
+            .map(|&ph| format!(" ({} {} MiB)", ph.name(), disk.at(ph) >> 20))
+            .collect::<String>()
+    );
     if let Some(free) = available_disk(&args.out) {
         if free < disk_need {
             return Err(BuildError::Invalid(format!(
-                "insufficient disk for this build: ~{disk_need} bytes needed at peak \
-                 (spill phase {phase_spill}, band phase {phase_bands}, column phase \
-                 {phase_columns}, assembly phase {phase_assemble}; n = {n}, pairs = {p}, \
-                 batches = {batches}), {free} available at the output path; free disk and \
-                 retry. Where the column phase's bytes are:{}",
-                tail.describe()
+                "insufficient disk for this build: ~{disk_need} bytes needed at peak, in the {} \
+                 phase (n = {n}, pairs = {p}, batches = {batches}), {free} available at the output \
+                 path; free disk and retry. Where that phase's bytes are:{}",
+                phase.name(),
+                disk.describe_phase(phase)
             )));
         }
     }
@@ -1122,26 +1109,44 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
     // from the anchor takes its code in the first-declared view that holds it. Materialised here
     // rather than chosen inside the sort, so the batch loop reads one array and the choice is
     // made once per item.
-    let mut anchor_x_map = spill::MappedU32::zeroed(tmp.path(), "x-anchor.u32", n as usize)?;
-    let mut anchor_y_map = spill::MappedU32::zeroed(tmp.path(), "y-anchor.u32", n as usize)?;
-    {
-        let xs = anchor_x_map.as_mut_slice();
-        let ys = anchor_y_map.as_mut_slice();
-        let order: Vec<usize> = std::iter::once(args.anchor)
-            .chain((0..args.views.len()).filter(|&v| v != args.anchor))
-            .collect();
-        for (ordinal, (x, y)) in xs.iter_mut().zip(ys.iter_mut()).enumerate() {
-            let held = order
-                .iter()
-                .copied()
-                .find(|&v| bit_get(&geometry[v].present, ordinal))
-                .expect("the union of the views' ids is where this ordinal came from");
-            *x = geometry[held].x.as_slice()[ordinal];
-            *y = geometry[held].y.as_slice()[ordinal];
+    //
+    // **Where the anchor holds every item there is nothing to materialise**, the fallback reaching
+    // no ordinal and the array it would write being the anchor view's own, value for value. A
+    // view's ids are distinct (pass one checks each view's for duplicates as it fills its segment),
+    // so a view whose row count is the union's is a view holding every ordinal. That is every
+    // single-view corpus and every multi-view one whose anchor covers the union — 8 B/item of
+    // reserved disk and an `n`-length copy, both for a file byte-identical to one already written.
+    let anchor_fallback_reaches_an_item = geometry[args.anchor].rows != n;
+    let anchor_maps = if anchor_fallback_reaches_an_item {
+        let mut anchor_x_map = spill::MappedU32::zeroed(tmp.path(), "x-anchor.u32", n as usize)?;
+        let mut anchor_y_map = spill::MappedU32::zeroed(tmp.path(), "y-anchor.u32", n as usize)?;
+        {
+            let xs = anchor_x_map.as_mut_slice();
+            let ys = anchor_y_map.as_mut_slice();
+            let order: Vec<usize> = std::iter::once(args.anchor)
+                .chain((0..args.views.len()).filter(|&v| v != args.anchor))
+                .collect();
+            for (ordinal, (x, y)) in xs.iter_mut().zip(ys.iter_mut()).enumerate() {
+                let held = order
+                    .iter()
+                    .copied()
+                    .find(|&v| bit_get(&geometry[v].present, ordinal))
+                    .expect("the union of the views' ids is where this ordinal came from");
+                *x = geometry[held].x.as_slice()[ordinal];
+                *y = geometry[held].y.as_slice()[ordinal];
+            }
         }
-    }
-    let x_of_ordinal = anchor_x_map.as_slice();
-    let y_of_ordinal = anchor_y_map.as_slice();
+        Some((anchor_x_map, anchor_y_map))
+    } else {
+        None
+    };
+    let (x_of_ordinal, y_of_ordinal) = match &anchor_maps {
+        Some((x, y)) => (x.as_slice(), y.as_slice()),
+        None => (
+            geometry[args.anchor].x.as_slice(),
+            geometry[args.anchor].y.as_slice(),
+        ),
+    };
     timer.end(BuildStage::GeometryRead, n);
 
     // `source_ids` is **held** past this point rather than dropped and re-read: pass one unions
@@ -1346,9 +1351,9 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
     // The anchor's Morton geometry has served its one reader — the sort's tiebreak — and is
     // released here rather than at the end of the build. At 10⁹ that is 8 GB of dirty mapped
     // pages returned before the band sweep and the postings write start competing for page
-    // cache. Each view's own geometry stays: pass two is what reads it.
-    drop(anchor_x_map);
-    drop(anchor_y_map);
+    // cache. Each view's own geometry stays: pass two is what reads it. Nothing to release where
+    // the anchor covered the union and no array was written.
+    drop(anchor_maps);
     let band_receipts: Vec<spill::SpillReceipt> = band_writers
         .into_iter()
         .map(|w| w.finish())
@@ -1699,6 +1704,21 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
     // The text columns' share, charged out of the block rather than measured beside it — the two
     // interleave over one column loop, so a boundary in time cannot separate them.
     timer.charge(BuildStage::TextIndex, text_index.elapsed, text_index.terms);
+    // **A column with no blob row is dead here, not two stages further on.** The blob reads the
+    // columns whose values have no other home ([`blob_resident`]); the segment write reads the
+    // render columns. A column that is neither — an `index = true` keyword, say — has just met its
+    // last reader, and holding it to the release below costs the blob's whole stage. Measured on
+    // 125,789,091 GBIF occurrences: `specieskey`'s offsets and arena are 3.15 GB against a 19.4 GB
+    // peak that fell on the record blob (`probes/2026-09-10-build-disk/`).
+    let mut attributes_by_entity = attributes_by_entity;
+    for (column, attribute) in attributes_by_entity
+        .iter_mut()
+        .zip(args.schema.attributes.iter())
+    {
+        if !attribute.render && !blob_resident(&args.schema, attribute) {
+            column.release();
+        }
+    }
     timer.end(BuildStage::FilterPostings, n);
 
     // The record blob wants the same two things the postings did — entity ids final under I9, and
@@ -1709,6 +1729,7 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
     let record_paths = write_record_blob(
         &partition_dir,
         &args.schema,
+        n,
         &attributes_by_entity,
         &open_prose,
     )?;
@@ -1719,16 +1740,17 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
         column.remove();
     }
     timer.end(BuildStage::RecordBlob, n);
-    // **Everything past here wants only the render columns**, and the two passes that wanted the
-    // rest have just run. `permute_attribute_tail` skips a non-render column outright (its home is
-    // entity space, and giving it a slot in every row is the per-row cost §10.3's routing exists to
-    // avoid), so an index-only column is dead from this line — but it was living to the end of the
-    // segment write, straight through the tiler sort's 12 B/row and the record batch beside it.
+    // **Everything past here wants only the render columns**, and the pass that wanted the rest has
+    // just run. `permute_attribute_tail` skips a non-render column outright (its home is entity
+    // space, and giving it a slot in every row is the per-row cost §10.3's routing exists to
+    // avoid), so a blob-resident column is dead from this line and would otherwise live to the end
+    // of the segment write, straight through the tiler sort's 12 B/row and the record batch beside
+    // it.
     //
     // A `text` column has nothing left to release — its prose was spilled as extents and the
-    // extents are unlinked above — but every other index-only column was living to the end of the
-    // segment write, and at 2.5×10⁸ a keyword column is gigabytes of it.
-    let mut attributes_by_entity = attributes_by_entity;
+    // extents are unlinked above. What is left is the blob-resident columns, the postings pass
+    // having already released the rest; `release` is idempotent, so the loop states the whole rule
+    // rather than the half of it this line reaches.
     for (column, attribute) in attributes_by_entity
         .iter_mut()
         .zip(args.schema.attributes.iter())
@@ -1781,6 +1803,15 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
                 bit_set(&mut member, entity as usize);
             }
         }
+        // **This view's ordinal-space geometry has served its only reader.** The permutation above
+        // is the whole of what pass two wants it for; the two files that stay are the entity-space
+        // ones the tiler sorts. 8 B/item per view, and holding them to the `drop(geometry)` after
+        // the loop kept them through the tiler sort, both segment writes and the artifact pass —
+        // 1.01 GB over 125,789,091 GBIF occurrences, a fifth of the build after its last read
+        // (`probes/2026-09-10-build-disk/`). The presence bits and the row count are read below and
+        // are a bit an item, not eight bytes.
+        geometry[index].x = spill::MappedU32::empty();
+        geometry[index].y = spill::MappedU32::empty();
         let x_of_entity = x_map.as_slice();
         let y_of_entity = y_map.as_slice();
 
@@ -3000,6 +3031,7 @@ fn write_filter_postings_banded(
 pub(crate) fn write_record_blob(
     partition_dir: &Path,
     schema: &crate::config::Schema,
+    n: u64,
     by_entity: &[EntityColumn],
     prose: &[crate::prose::OpenProse],
 ) -> Result<Vec<PathBuf>> {
@@ -3016,12 +3048,7 @@ pub(crate) fn write_record_blob(
         .attributes
         .iter()
         .enumerate()
-        // **Text is blob-resident whether or not it is indexed** (records §4.4), which is the one
-        // place this predicate is not simply "has no other home": an indexed text column has a
-        // token index *and* a blob row, because the index answers `match` and only the blob can
-        // answer `entity → value`. Postings are term → entities; nothing in them reconstructs the
-        // prose a drill-down returns.
-        .filter(|(_, a)| a.ty == ScalarType::Text || (!a.render && !postings_are_owed(schema, a)))
+        .filter(|(_, a)| blob_resident(schema, a))
         .map(|(i, _)| i)
         .collect();
     if blob_columns.is_empty() {
@@ -3034,7 +3061,7 @@ pub(crate) fn write_record_blob(
     let blocks_path = record_dir.join(RECORD_BLOCKS_FILE);
     let hasrow_path = record_dir.join(RECORD_HASROW_FILE);
     let directory_path = record_dir.join(RECORD_DIRECTORY_FILE);
-    let n = by_entity.first().map_or(0, EntityColumn::len);
+    let n = n as usize;
     // The columns that are still columns. A `text` column's tag comes from its extents instead,
     // and no tag is carried by both.
     let column_tags: Vec<usize> = blob_columns
@@ -3073,6 +3100,34 @@ pub(crate) fn write_record_blob(
         fsync_file(path)?;
     }
     Ok(vec![blocks_path, hasrow_path, directory_path])
+}
+
+/// Does this column's value live in the record blob — the home for a value with no other?
+///
+/// **Blob-resident is "no other home", not "no flags"** — and for a category the two differ.
+/// Records §4.2 exempts categories from the blob because their entity-space structures are the
+/// vocabulary machinery's constant floor, but that floor is [`postings_are_owed`], which holds for
+/// an *indexed* or `derived` category and not for a `public` one. A `public` category declared with
+/// neither flag therefore has no hot column, no value column and no postings, so excluding every
+/// category stored its values nowhere at all and refused nothing — silent loss of a field the
+/// caller declared. Asking the same question the entity-space pass asks is what keeps the two
+/// exhaustive between them: a field is in exactly one home, and records §3's rule that every
+/// declared field answers `entity → value` holds by construction.
+///
+/// **Text is blob-resident whether or not it is indexed** (records §4.4), which is the one place
+/// this predicate is not simply "has no other home": an indexed text column has a token index
+/// *and* a blob row, because the index answers `match` and only the blob can answer
+/// `entity → value`. Postings are term → entities; nothing in them reconstructs the prose a
+/// drill-down returns.
+///
+/// It is also what says **when a column's storage may go back to the disk**: a non-render column
+/// that is not blob-resident has no reader past the filter postings (`write_column_release`).
+pub(crate) fn blob_resident(
+    schema: &crate::config::Schema,
+    attribute: &crate::config::Attribute,
+) -> bool {
+    attribute.ty == ScalarType::Text
+        || (!attribute.render && !postings_are_owed(schema, attribute))
 }
 
 /// The entity-ordered columns' rows as one ascending stream, for the blob's merge.
@@ -5544,7 +5599,8 @@ mod tests {
             .expect("typed column"),
         ];
         let written =
-            write_record_blob(dir.path(), &schema, &by_entity, &[]).expect("blob stage writes");
+            write_record_blob(dir.path(), &schema, by_entity[0].len() as u64, &by_entity, &[])
+                .expect("blob stage writes");
         assert!(!written.is_empty());
         let blob = tessera_filter::RecordBlob::open_dir(
             &dir.path().join("attrs/record"),
@@ -5578,7 +5634,13 @@ mod tests {
                 )
                 .expect("typed column"),
             ];
-        let written = write_record_blob(dir.path(), &schema, &only_category, &[])
+        let written = write_record_blob(
+            dir.path(),
+            &schema,
+            only_category[0].len() as u64,
+            &only_category,
+            &[],
+        )
             .expect("blob stage accepts");
         assert!(written.is_empty(), "no blob-resident column, no files");
 
@@ -5600,7 +5662,13 @@ mod tests {
                 .expect("typed column"),
             ];
         let written =
-            write_record_blob(dir.path(), &schema, &only_category, &[]).expect("blob stage writes");
+            write_record_blob(
+            dir.path(),
+            &schema,
+            only_category[0].len() as u64,
+            &only_category,
+            &[],
+        ).expect("blob stage writes");
         assert!(
             !written.is_empty(),
             "a public category with neither flag has no entity-space home; without a blob row \
@@ -5763,7 +5831,7 @@ mod tests {
                 notes_clone(&scratch, &notes),
                 EntityColumn::prose(&scratch, ScalarType::Text, N).expect("the prose slot"),
             ];
-            let paths = write_record_blob(dir.path(), &schema, &by_entity, &[open])
+            let paths = write_record_blob(dir.path(), &schema, by_entity[0].len() as u64, &by_entity, &[open])
                 .expect("the blob merges");
             assert_eq!(paths.len(), 3, "the blob is three files");
             written.push(
@@ -5808,7 +5876,7 @@ mod tests {
             notes_clone(&scratch, &notes),
             EntityColumn::prose(&scratch, ScalarType::Text, N).expect("the prose slot"),
         ];
-        write_record_blob(dir.path(), &schema, &by_entity, &[open]).expect("the blob merges");
+        write_record_blob(dir.path(), &schema, by_entity[0].len() as u64, &by_entity, &[open]).expect("the blob merges");
         let blob = tessera_filter::RecordBlob::open_dir(
             &dir.path().join("attrs/record"),
             tessera_filter::Access::Read,
