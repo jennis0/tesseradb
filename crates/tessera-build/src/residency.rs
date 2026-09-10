@@ -17,8 +17,10 @@
 //!
 //! From the attribute pass to the segment write the build holds, all at once:
 //!
-//! - the **sorted source ids** and the **ordinal→entity map**, 12 bytes an item, because a member
-//!   and an attribute row are both named by source id and both have to resolve;
+//! - the **sorted source ids**, 8 bytes an item, because a member and an attribute row are both
+//!   named by source id and both have to resolve. The **ordinal→entity map** answers the second
+//!   half of that resolution and is 4 bytes an item, but it is file-backed since 2026-09-09 and is
+//!   charged to the disk below rather than to memory;
 //! - the **published memberships** in the store, as Roaring.
 //!
 //! **None of it is a batch.** The loop's residency shrinks when the stride does; this does not
@@ -311,10 +313,14 @@ pub(crate) fn entity_order_residency(
             bytes: 8 * n,
             mapped: false,
         },
+        // **File-backed since 2026-09-09**, and so charged to the disk rather than to memory: the
+        // map is written scattered once and read scattered thereafter, which is `MappedArray`'s
+        // own case, and 4 B/item is 13.3 GiB at the GBIF rung. It is page cache the kernel may
+        // evict, not memory the machine must have.
         Term {
-            what: "the ordinal→entity map, 4 B/item".into(),
+            what: "the ordinal→entity map, 4 B/item, in .build-tmp/".into(),
             bytes: 4 * n,
-            mapped: false,
+            mapped: true,
         },
     ];
     for (index, column) in columns.iter().enumerate() {
