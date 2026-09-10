@@ -39,7 +39,7 @@
 //! written to a mapping on a 47 GB box and read back at random. The arena buys random access by
 //! entity, so a column nothing reaches that way pays for an answer no pass asks for. Its values
 //! are spilled as record-blob extents while the join decodes them ([`crate::extents`],
-//! `build-prose-extents.md`), and its slot here is [`EntityColumn::spilled`]: the presence bits
+//! `build-column-extents.md`), and its slot here is [`EntityColumn::spilled`]: the presence bits
 //! and the length, and no arena.
 //!
 //! **The readers decide which columns those are**, and the rule is stated once, in
@@ -66,7 +66,7 @@
 //! measured the record blob finishing at its uncapped wall in *both* orders once the scatter into
 //! the entity-major columns ascends, so the second decode bought nothing a sorted write had not
 //! already bought, and it governed only `keyword`/`utf8` columns even before that (`text` columns
-//! take extents — `build-prose-extents.md` §6) and no corpus in the ladder ever reached its share.
+//! take extents — `build-column-extents.md` §6) and no corpus in the ladder ever reached its share.
 //!
 //! **The record names its own entity, so a reader that wants every value can walk the arena
 //! instead of the column.** Entity order is signature-then-Morton order and arrival order is the
@@ -321,7 +321,7 @@ impl EntityColumn {
     /// A spilled column's slot: `n` entities, every one absent, and **no arena**.
     ///
     /// A column [`crate::pipeline::takes_extents`] routed is never held in entity order
-    /// (`build-prose-extents.md`): the join spills it as record-blob extents in its own chunks and
+    /// (`build-column-extents.md`): the join spills it as record-blob extents in its own chunks and
     /// the record blob reads those, a `text` column's token index having read them first. What is
     /// left here is the length and the presence bits, so the column keeps its place in the
     /// declaration-indexed vector every later pass indexes by attribute position.

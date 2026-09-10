@@ -1,7 +1,7 @@
 # An entity-ordered text arena, and the scatter that turned out to matter more
 
 ⊘ **2026-09-04, dated note.** `--arena-order` and the entity-ordered two-pass fill this probe built
-are deleted (owner ruling, `build-prose-extents.md` §6): the ascending scatter this probe found —
+are deleted (owner ruling, `build-column-extents.md` §6): the ascending scatter this probe found —
 §3 below — is what stays. The measurements below are unaffected history.
 
 **Date** 2026-09-03. **Branch** `build/entity-ordered-arena`. **Box** WSL2, 12 cores, 47 GB, local

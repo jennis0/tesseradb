@@ -32,7 +32,7 @@
 //! column that is a permutation of the source's characters through a mapping larger than memory.
 //! A column whose only reader is the record blob is spared it: each join chunk of it is written
 //! as one record-blob extent in that chunk's entity order ([`takes_extents`], [`crate::extents`],
-//! `build-prose-extents.md`), the blob merges the extents, and a `text` column's token index
+//! `build-column-extents.md`), the blob merges the extents, and a `text` column's token index
 //! reads them in block windows first.
 //!
 //! ## Batch-scoped signature assignment (§11.1)
@@ -3028,7 +3028,7 @@ fn write_filter_postings_banded(
 /// against the manifest without any name table in the artefact.
 ///
 /// **A spilled column arrives as extents and everything else as columns**, and the two are merged
-/// here (`build-prose-extents.md`). A column [`takes_extents`] routed was never placed at an
+/// here (`build-column-extents.md`). A column [`takes_extents`] routed was never placed at an
 /// entity index: the join spilled each of its chunks as a blob extent in that chunk's entity
 /// order, so this stage reads each extent front to back and takes the lowest head across them.
 /// What that removes is a random read per row into a file larger than the machine, which at
@@ -3162,7 +3162,7 @@ pub(crate) fn value_column_is_owed(
 /// that ask that question of a string column: the value column and its dictionary
 /// ([`value_column_is_owed`]), and the hot row tail (`render`). A column with neither is read by
 /// the record blob alone, and the blob's merge takes an extent as readily as a column
-/// (`build-prose-extents.md`). Every input to the test is compiled from the declaration, so the
+/// (`build-column-extents.md`). Every input to the test is compiled from the declaration, so the
 /// route is known before the first source file is opened.
 ///
 /// That answers `true` for every bundle-wide `text` column, which owes no value column whatever

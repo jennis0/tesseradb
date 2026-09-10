@@ -297,7 +297,7 @@ keyword dictionary leaves them behind where `TmpDir::create` would have swept th
 `index` nor `render`, so its only reader is the record blob — and it costs 5.7 GB of entity-ordered
 arena and offsets at 125,789,091 items to hand the blob values it then writes as 1.55 GB of
 compressed extents. A `text` column with the same readers takes the prose route instead
-(`build-prose-extents.md`): spilled as extents while the join decodes it, never placed at an entity
+(`build-column-extents.md`): spilled as extents while the join decodes it, never placed at an entity
 index. Routing a blob-resident `keyword` column the same way would remove the largest single file
 in the build. It changes which pass produces the blob's input, so it is an owner's call rather than
 a performance one.

@@ -799,7 +799,7 @@ breakdown, the serve-under-cap result and the layer spread at full scale. §4b.
 
 ## 4b. Rung 4, whole: the build completes
 
-⊘ **2026-09-04, dated note.** `--arena-order` is deleted (`build-prose-extents.md` §6); the figures
+⊘ **2026-09-04, dated note.** `--arena-order` is deleted (`build-column-extents.md` §6); the figures
 below are unaffected history.
 
 **2026-09-04.** The same corpus, the same declaration, the same box — 102,117,343 rows,
@@ -903,7 +903,7 @@ what was measured.
 
 ## 4c. Rung 4, again: the same bundle in a third of the time
 
-⊘ **2026-09-04, dated note.** `--arena-order` is deleted (`build-prose-extents.md` §6); the figures
+⊘ **2026-09-04, dated note.** `--arena-order` is deleted (`build-column-extents.md` §6); the figures
 below are unaffected history.
 
 **2026-09-04.** Same corpus, same declaration, same box, and **byte-identical output**: 46 files
@@ -912,7 +912,7 @@ that carries its digest. `tessera build --stage-timings --arena-order auto` unde
 on branch `build/prose-extents`. **4,169.9 s — 1 h 09 m 30 s**, against 10,578.4 s.
 
 What changed is that a `text` column's prose is no longer placed at an entity index at all
-([`build-prose-extents.md`](design/build-prose-extents.md)). Each chunk the join stages is already
+([`build-column-extents.md`](design/build-column-extents.md)). Each chunk the join stages is already
 sorted by entity, so each chunk of each text column is written out as one record-blob extent in
 that chunk's entity order. The text index reads the extents in block windows; the record blob
 merges them with the entity-ordered columns through the lifecycle's own row merge. The blob's

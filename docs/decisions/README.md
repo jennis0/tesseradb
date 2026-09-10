@@ -43,6 +43,7 @@ Architecture and security rulings, one per file, unchanged once written. A rever
 - [0102](0102-the-viewer-plane-gains-an-enumerated-cors-origin-list.md): The viewer plane gains an enumerated production CORS origin list; the session plane does not
 - [0104](0104-a-filter-answers-a-boolean-per-served-artifact.md): A filter answers a boolean per served artifact, and it answers about what is in view
 - [0107](0107-a-generating-set-with-no-survivors-is-not-served.md): A generating set with no survivors is not served
+- [0112](0112-the-allocation-tiebreak-is-the-source-id-ordinal.md): The allocation tiebreak is the source-id ordinal
 - [0114](0114-the-drill-down-serves-the-satisfied-labels-only.md): The item drill-down serves the satisfied labels only
 - [0121](0121-the-suggestion-walk-probes-per-request-and-its-timing-is-accepted.md): The suggestion walk probes per request, and its timing channel is accepted and registered
 - [0124](0124-the-suggestion-route-may-follow-the-viewers-cardinality.md): The suggestion route may follow the viewer's own cardinality

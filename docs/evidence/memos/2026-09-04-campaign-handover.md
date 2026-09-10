@@ -10,7 +10,7 @@ measurement tooling and its schema are [`../../../test_corpora/common/README.md`
 Rungs 3 (MedCPT, 36M), 4 (PaperSeek + OpenAlex, 102M, abstracts indexed, 70.8 GB bundle) and 5
 (TreeOfLife, 233M, two views) are built, verified, served under a memory cap at half the bundle,
 measured on the principal ladder, and in the rendered campaign table. The build no longer holds
-prose in an arena (`docs/design/build-prose-extents.md`; rung 4 builds in 1 h 09 m, byte-identical
+prose in an arena (`docs/design/build-column-extents.md`; rung 4 builds in 1 h 09 m, byte-identical
 to the arena build). Online ingest on MedCPT went from 11.8k to 62k rows/s
 (`probes/2026-09-04-ingest-executor/`). Every track's branch is merged; no worktree of the
 campaign's remains.
@@ -86,7 +86,7 @@ cell re-run reaching 233,055,986 visible under the declared terms alone.
   (`ingest_cycle.py --fraction`), ~40 min each; the spectrum row in the table is still 10% only.
 - **Block-parallel compression in `RecordBlobWriter`.** The prose-extents change compresses on
   the join's single lane per text column; at 10⁷ uncapped that is +38 s on the join. Measured in
-  `docs/design/build-prose-extents.md` §8.
+  `docs/design/build-column-extents.md` §8.
 - **An indexed unique key's cost.** Rung 5's `uuid` keyword index is 8 GB of a 40 GB bundle. A rule
   or a warning at `tessera check` when an indexed keyword's cardinality is the row count.
 - **A stale base is not refused at open.** A bundle built by an older engine 404s every artifact

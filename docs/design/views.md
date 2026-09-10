@@ -1126,13 +1126,14 @@ that disagrees between appearances (it is the entity's label, not the row's), an
 `(external_id, view)`, and the same entity in two views is the ordinary case rather than a
 duplicate.
 
-**The allocation key over several sources** (decision 0112,
-extending 0073): within a signature group, ties order by the item's Morton code in the
+**The allocation key over several sources** (decision 0112, extending 0073 — no decision file
+exists for 0073): within a signature group, ties order by the item's Morton code in the
 **declared anchor view** — `[defaults].allocation_view`, required when more than one view is
-declared, refused absent naming the candidates — then by `external_id` bytes. An item absent
-from the anchor takes its Morton code in the first-declared view that holds it. Explicit rather
-than positional, so reordering declaration blocks cannot silently re-key a rebuild; the ids are
-permanent (I9), which is why the anchor is a declaration and not a default.
+declared, refused absent naming the candidates — then by the item's ordinal in the sorted,
+duplicate-free union of every view's source ids. An item absent from the anchor takes its Morton
+code in the first-declared view that holds it. Explicit rather than positional, so reordering
+declaration blocks cannot silently re-key a rebuild; the ids are permanent (I9), which is why the
+anchor is a declaration and not a default.
 
 **Populate at ingest** is spec §2's addressing and spec §4's join rule, for a plain view and a
 group's view alike, after the create operation of spec §3.2 where the view is new.
@@ -1335,6 +1336,10 @@ immutable.
 
 Made 2026-08-30 (owner): the allocation key — a declared anchor view's Morton code then
 `external_id` bytes, within the signature group (decision 0112). Nothing is open.
+
+**Superseded 2026-09-10**: [decision 0112](../decisions/0112-the-allocation-tiebreak-is-the-source-id-ordinal.md)
+is now written, and records the tiebreak as the item's ordinal in the sorted, duplicate-free union
+of every view's source ids, not `external_id` bytes.
 
 ## Appendix A — a declaration, written out
 

@@ -358,7 +358,7 @@ serve battery ran; the disk was this build's alone.
 **Byte-identical output in 1 h 09 m 30 s**, on branch `build/prose-extents`: 46 files compared
 against the bundle above, none differing but `MANIFEST.json`'s `created_at` and the `CURRENT` that
 carries its digest. `docs/ingest-campaign.md` §4c carries the stage table and the 10⁷ counterweight;
-the design is [`build-prose-extents.md`](../../docs/design/build-prose-extents.md).
+the design is [`build-column-extents.md`](../../docs/design/build-column-extents.md).
 
 | | before | this run |
 |---|---|---|

@@ -1,0 +1,335 @@
+ROOT data/ladder/gbif-64p/bundle items 25846007
+TOTAL apparent 2123831429 (2.124 GB)  allocated 2123935744 (2.124 GB)
+kind                                             apparent B    allocated B   B/item  %bundle  files
+external ids (arrow)                              419998594      420003840   16.250   19.78%      1
+render columns                                    345691378      345694208   13.375   16.28%      1
+record blob: blocks                               189787007      189788160    7.343    8.94%      1
+layer membership (.tsmb)                          179308788      179318784    6.938    8.44%      3
+attr values (indexed scalar)                      152414004      152420352    5.897    7.18%      2
+record blob: directory                            106767906      106774528    4.131    5.03%      1
+view: permutation                                 103550976      103550976    4.006    4.88%      1
+row-column (label/leaf)                           103384060      103391232    4.000    4.87%      2
+entity->terms: offsets                            103384032      103387136    4.000    4.87%      1
+view: row-entity                                  103384028      103387136    4.000    4.87%      1
+geometry: morton                                  103384028      103391232    4.000    4.87%      1
+external ids: locator                             103384028      103387136    4.000    4.87%      1
+entity->terms: terms                              103384028      103387136    4.000    4.87%      1
+attr presence                                       2324562        2330624    0.090    0.11%      2
+tile index (.tsti)                                  1491728        1495040    0.058    0.07%      1
+containment (.tscp)                                 1007724        1015808    0.039    0.05%      3
+attr token/term index: dictionary                    907453         909312    0.035    0.04%      1
+access terms: pairs.parquet (oracle)                 217920         221184    0.008    0.01%      1
+reports                                               21105          24576    0.001    0.00%      2
+access terms: postings                                12530          16384    0.000    0.00%      1
+manifest / CURRENT                                     7715          12288    0.000    0.00%      2
+record blob: other                                     5584           8192    0.000    0.00%      1
+entity->terms: hasrow                                  5584           8192    0.000    0.00%      1
+segments json                                          5137           8192    0.000    0.00%      1
+global term dictionary                                 1530           4096    0.000    0.00%      1
+
+--- largest files ---
+     419998594   16.250  v00000/partitions/default/entities/external-ids-0.arrow
+     345691378   13.375  v00000/partitions/default/views/geo/segments/seg-0/columns.arrow
+     189787007    7.343  v00000/partitions/default/attrs/record/blocks.bin
+     106767906    4.131  v00000/partitions/default/attrs/record/directory.arrow
+     103550976    4.006  v00000/partitions/default/views/geo/permutation.bin
+     103384032    4.000  v00000/partitions/default/entities/terms/offsets.u32
+     103384028    4.000  v00000/partitions/default/views/geo/row-entity.u32
+     103384028    4.000  v00000/partitions/default/views/geo/segments/seg-0/morton.u32
+     103384028    4.000  v00000/partitions/default/entities/ext-locator.u32
+     103384028    4.000  v00000/partitions/default/entities/terms/terms.u32
+      98816762    3.823  v00000/partitions/default/attrs/specieskey/values.arrow
+      71038569    2.749  v00000/partitions/default/members/members-000000-002.tsmb
+      58951516    2.281  v00000/partitions/default/members/members-000000-001.tsmb
+      53597242    2.074  v00000/partitions/default/attrs/year/values.arrow
+      51692030    2.000  v00000/partitions/default/row-column/row-column-000000-000.tslb
+
+ROOT data/ladder/geonames/bundle-final items 13463857
+TOTAL apparent 1397884892 (1.398 GB)  allocated 1398059008 (1.398 GB)
+kind                                             apparent B    allocated B   B/item  %bundle  files
+render columns                                    513312082      513318912   38.125   36.72%      1
+attr values (indexed scalar)                      189718096      189734912   14.091   13.57%      8
+attr token/term index: postings                   161523522      161542144   11.997   11.55%      9
+record blob: blocks                               114923816      114929664    8.536    8.22%      1
+layer membership (.tsmb)                          103233927      103247872    7.667    7.39%      7
+manifest / CURRENT                                 56011044       56020992    4.160    4.01%      2
+record blob: directory                             55587746       55590912    4.129    3.98%      1
+view: permutation                                  53855444       53858304    4.000    3.85%      1
+view: row-entity                                   53855428       53858304    4.000    3.85%      1
+geometry: morton                                   53855428       53862400    4.000    3.85%      1
+attr token/term index: dictionary                  25571371       25575424    1.899    1.83%      1
+record blob: artifact extent blocks                 3861816        3862528    0.287    0.28%      1
+tile index (.tsti)                                  3722856        3739648    0.277    0.27%      7
+attr presence                                       3023038        3043328    0.225    0.22%      8
+containment (.tscp)                                 2790952        2809856    0.207    0.20%      7
+record blob: artifact extent directory              1920290        1921024    0.143    0.14%      1
+view: presence roaring                               956376         958464    0.071    0.07%      2
+access terms: pairs.parquet (oracle)                 115008         118784    0.009    0.01%      1
+reports                                               22603          28672    0.002    0.00%      2
+segments json                                         10067          12288    0.001    0.00%      1
+access terms: postings                                 9394          12288    0.001    0.00%      1
+record blob: other                                     2914           4096    0.000    0.00%      1
+global term dictionary                                 1528           4096    0.000    0.00%      1
+record blob: artifact extent other                      146           4096    0.000    0.00%      1
+
+--- largest files ---
+     513312082   38.125  v00000/partitions/default/views/world/segments/seg-0/columns.arrow
+     114923816    8.536  v00000/partitions/default/attrs/record/blocks.bin
+     112956082    8.390  v00000/partitions/default/attrs/name/postings.arrow
+      56010931    4.160  v00000/MANIFEST.json
+      55587746    4.129  v00000/partitions/default/attrs/record/directory.arrow
+      53855444    4.000  v00000/partitions/default/views/world/permutation.bin
+      53855428    4.000  v00000/partitions/default/views/world/row-entity.u32
+      53855428    4.000  v00000/partitions/default/views/world/segments/seg-0/morton.u32
+      40360058    2.998  v00000/partitions/default/attrs/admin2/values.arrow
+      28596410    2.124  v00000/partitions/default/attrs/country/values.arrow
+      28533114    2.119  v00000/partitions/default/attrs/admin1/values.arrow
+      28409594    2.110  v00000/partitions/default/attrs/feature_code/values.arrow
+      28263354    2.099  v00000/partitions/default/attrs/timezone/values.arrow
+      25571371    1.899  v00000/partitions/default/attrs/name/dict.bin
+      22330881    1.659  v00000/partitions/default/members/members-000000-002.tsmb
+
+ROOT data/ladder/medcpt-1m/bundle-probe items 1000000
+TOTAL apparent 332724070 (0.333 GB)  allocated 332800000 (0.333 GB)
+kind                                             apparent B    allocated B   B/item  %bundle  files
+row-column (label/leaf)                            96357100       96358400   96.357   28.96%      1
+layer membership (.tsmb)                           63059916       63062016   63.060   18.95%      2
+record blob: blocks                                56563227       56565760   56.563   17.00%      1
+attr token/term index: postings                    37820068       37826560   37.820   11.37%      2
+render columns                                     20376130       20377600   20.376    6.12%      1
+entity->terms: terms                               18405448       18407424   18.405    5.53%      1
+attr values (indexed scalar)                       12245108       12251136   12.245    3.68%      2
+attr token/term index: dictionary                   6656422        6664192    6.656    2.00%      3
+view: permutation                                   4198400        4198400    4.198    1.26%      1
+record blob: directory                              4144866        4145152    4.145    1.25%      1
+entity->terms: offsets                              4000004        4001792    4.000    1.20%      1
+view: row-entity                                    4000000        4001792    4.000    1.20%      1
+geometry: morton                                    4000000        4001792    4.000    1.20%      1
+containment (.tscp)                                  301800         303104    0.302    0.09%      2
+record blob: artifact extent blocks                  293325         294912    0.293    0.09%      1
+record blob: artifact extent directory               122850         122880    0.123    0.04%      1
+access terms: pairs.parquet (oracle)                  92870          94208    0.093    0.03%      1
+access terms: postings                                43570          45056    0.044    0.01%      1
+reports                                               21720          24576    0.022    0.01%      2
+manifest / CURRENT                                     8710          16384    0.009    0.00%      2
+segments json                                          5112           8192    0.005    0.00%      1
+view: presence roaring                                 3142           4096    0.003    0.00%      1
+attr presence                                          3078           4096    0.003    0.00%      1
+record blob: other                                      486           4096    0.000    0.00%      1
+tile index (.tsti)                                      360           4096    0.000    0.00%      1
+entity->terms: hasrow                                   230           4096    0.000    0.00%      1
+global term dictionary                                  103           4096    0.000    0.00%      1
+record blob: artifact extent other                       25           4096    0.000    0.00%      1
+
+--- largest files ---
+      96357100   96.357  v00000/partitions/default/row-column/row-column-000000-000.tsll
+      61349821   61.350  v00000/partitions/default/members/members-000000-001.tsmb
+      56563227   56.563  v00000/partitions/default/attrs/record/blocks.bin
+      26230962   26.231  v00000/partitions/default/attrs/title/postings.arrow
+      20376130   20.376  v00000/partitions/default/views/knn/segments/seg-0/columns.arrow
+      18405448   18.405  v00000/partitions/default/entities/terms/terms.u32
+      11589106   11.589  v00000/partitions/default/attrs/mesh_major/postings.arrow
+       8119482    8.119  v00000/partitions/default/attrs/published/values.arrow
+       4964403    4.964  v00000/partitions/default/attrs/pmid/dict.bin
+       4198400    4.198  v00000/partitions/default/views/knn/permutation.bin
+       4144866    4.145  v00000/partitions/default/attrs/record/directory.arrow
+       4125626    4.126  v00000/partitions/default/attrs/pmid/values.arrow
+       4000004    4.000  v00000/partitions/default/entities/terms/offsets.u32
+       4000000    4.000  v00000/partitions/default/views/knn/row-entity.u32
+       4000000    4.000  v00000/partitions/default/views/knn/segments/seg-0/morton.u32
+
+ROOT data/ladder/medcpt-1m-abs/bundle-probe items 1000000
+TOTAL apparent 798433620 (0.798 GB)  allocated 798523392 (0.799 GB)
+kind                                             apparent B    allocated B   B/item  %bundle  files
+record blob: blocks                               376714383      376717312  376.714   47.18%      1
+attr token/term index: postings                   179109974      179122176  179.110   22.43%      3
+row-column (label/leaf)                            96357100       96358400   96.357   12.07%      1
+layer membership (.tsmb)                           62985104       62988288   62.985    7.89%      2
+render columns                                     20376130       20377600   20.376    2.55%      1
+entity->terms: terms                               18405448       18407424   18.405    2.31%      1
+attr values (indexed scalar)                       12245108       12251136   12.245    1.53%      2
+attr token/term index: dictionary                  10881139       10891264   10.881    1.36%      4
+record blob: directory                              4260002        4263936    4.260    0.53%      1
+view: permutation                                   4198400        4198400    4.198    0.53%      1
+entity->terms: offsets                              4000004        4001792    4.000    0.50%      1
+view: row-entity                                    4000000        4001792    4.000    0.50%      1
+geometry: morton                                    4000000        4001792    4.000    0.50%      1
+containment (.tscp)                                  304908         307200    0.305    0.04%      2
+record blob: artifact extent blocks                  293331         294912    0.293    0.04%      1
+record blob: artifact extent directory               122850         122880    0.123    0.02%      1
+access terms: pairs.parquet (oracle)                  92870          94208    0.093    0.01%      1
+access terms: postings                                43570          45056    0.044    0.01%      1
+reports                                               21812          24576    0.022    0.00%      2
+manifest / CURRENT                                     9200          16384    0.009    0.00%      2
+segments json                                          5039           8192    0.005    0.00%      1
+view: presence roaring                                 3142           4096    0.003    0.00%      1
+attr presence                                          3098           4096    0.003    0.00%      1
+tile index (.tsti)                                      360           4096    0.000    0.00%      1
+record blob: other                                      290           4096    0.000    0.00%      1
+entity->terms: hasrow                                   230           4096    0.000    0.00%      1
+global term dictionary                                  103           4096    0.000    0.00%      1
+record blob: artifact extent other                       25           4096    0.000    0.00%      1
+
+--- largest files ---
+     376714383  376.714  v00000/partitions/default/attrs/record/blocks.bin
+     141308338  141.308  v00000/partitions/default/attrs/abstract/postings.arrow
+      96357100   96.357  v00000/partitions/default/row-column/row-column-000000-000.tsll
+      61275661   61.276  v00000/partitions/default/members/members-000000-001.tsmb
+      26213490   26.213  v00000/partitions/default/attrs/title/postings.arrow
+      20376130   20.376  v00000/partitions/default/views/knn/segments/seg-0/columns.arrow
+      18405448   18.405  v00000/partitions/default/entities/terms/terms.u32
+      11588146   11.588  v00000/partitions/default/attrs/mesh_major/postings.arrow
+       8119482    8.119  v00000/partitions/default/attrs/published/values.arrow
+       4964403    4.964  v00000/partitions/default/attrs/pmid/dict.bin
+       4260002    4.260  v00000/partitions/default/attrs/record/directory.arrow
+       4224717    4.225  v00000/partitions/default/attrs/abstract/dict.bin
+       4198400    4.198  v00000/partitions/default/views/knn/permutation.bin
+       4125626    4.126  v00000/partitions/default/attrs/pmid/values.arrow
+       4000004    4.000  v00000/partitions/default/entities/terms/offsets.u32
+
+ROOT data/ladder/medcpt-10m-abs/bundle-auto items 10000000
+TOTAL apparent 7705567013 (7.706 GB)  allocated 7705661440 (7.706 GB)
+kind                                             apparent B    allocated B   B/item  %bundle  files
+record blob: blocks                              3716028194     3716034560  371.603   48.23%      1
+attr token/term index: postings                  1702954070     1702965248  170.295   22.10%      3
+row-column (label/leaf)                           963487236      963493888   96.349   12.50%      1
+layer membership (.tsmb)                          543884239      543891456   54.388    7.06%      2
+render columns                                    203751106      203751424   20.375    2.64%      1
+entity->terms: terms                              184069688      184070144   18.407    2.39%      1
+attr values (indexed scalar)                      122438900      122441728   12.244    1.59%      2
+attr token/term index: dictionary                  64562661       64573440    6.456    0.84%      4
+record blob: directory                             42581154       42582016    4.258    0.55%      1
+view: permutation                                  40112128       40112128    4.011    0.52%      1
+entity->terms: offsets                             40000004       40001536    4.000    0.52%      1
+view: row-entity                                   40000000       40001536    4.000    0.52%      1
+geometry: morton                                   40000000       40001536    4.000    0.52%      1
+containment (.tscp)                                  573140         577536    0.057    0.01%      2
+access terms: pairs.parquet (oracle)                 506242         507904    0.051    0.01%      1
+record blob: artifact extent blocks                  304514         307200    0.030    0.00%      1
+record blob: artifact extent directory               126882         126976    0.013    0.00%      1
+access terms: postings                                82098          86016    0.008    0.00%      1
+view: presence roaring                                31622          32768    0.003    0.00%      1
+attr presence                                         31230          32768    0.003    0.00%      1
+reports                                               22013          24576    0.002    0.00%      2
+manifest / CURRENT                                     9224          16384    0.001    0.00%      2
+segments json                                          5044           8192    0.001    0.00%      1
+record blob: other                                     2234           4096    0.000    0.00%      1
+entity->terms: hasrow                                  2166           4096    0.000    0.00%      1
+tile index (.tsti)                                     1096           4096    0.000    0.00%      1
+global term dictionary                                  103           4096    0.000    0.00%      1
+record blob: artifact extent other                       25           4096    0.000    0.00%      1
+
+--- largest files ---
+    3716028194  371.603  v00000/partitions/default/attrs/record/blocks.bin
+    1347576882  134.758  v00000/partitions/default/attrs/abstract/postings.arrow
+     963487236   96.349  v00000/partitions/default/row-column/row-column-000000-000.tsll
+     527238136   52.724  v00000/partitions/default/members/members-000000-001.tsmb
+     245693554   24.569  v00000/partitions/default/attrs/title/postings.arrow
+     203751106   20.375  v00000/partitions/default/views/knn/segments/seg-0/columns.arrow
+     184069688   18.407  v00000/partitions/default/entities/terms/terms.u32
+     109683634   10.968  v00000/partitions/default/attrs/mesh_major/postings.arrow
+      81188282    8.119  v00000/partitions/default/attrs/published/values.arrow
+      42581154    4.258  v00000/partitions/default/attrs/record/directory.arrow
+      41575643    4.158  v00000/partitions/default/attrs/pmid/dict.bin
+      41250618    4.125  v00000/partitions/default/attrs/pmid/values.arrow
+      40112128    4.011  v00000/partitions/default/views/knn/permutation.bin
+      40000004    4.000  v00000/partitions/default/entities/terms/offsets.u32
+      40000000    4.000  v00000/partitions/default/views/knn/row-entity.u32
+
+ROOT data/ladder/treeoflife-1m/bundle items 1000000
+TOTAL apparent 187779713 (0.188 GB)  allocated 187920384 (0.188 GB)
+kind                                             apparent B    allocated B   B/item  %bundle  files
+render columns                                     52154068       52158464   52.154   27.77%      2
+attr token/term index: dictionary                  35265616       35274752   35.266   18.78%      3
+layer membership (.tsmb)                           18638760       18653184   18.639    9.93%      9
+external ids (arrow)                               16251010       16252928   16.251    8.65%      1
+attr values (indexed scalar)                       11502504       11509760   11.503    6.13%      4
+view: permutation                                   8396800        8396800    8.397    4.47%      2
+view: row-entity                                    7041036        7045120    7.041    3.75%      2
+geometry: morton                                    7041036        7045120    7.041    3.75%      2
+manifest / CURRENT                                  5057855        5062656    5.058    2.69%      2
+row-column (label/leaf)                             4561602        4571136    4.562    2.43%      3
+entity->terms: offsets                              4000004        4001792    4.000    2.13%      1
+external ids: locator                               4000000        4001792    4.000    2.13%      1
+entity->terms: terms                                4000000        4001792    4.000    2.13%      1
+attr token/term index: postings                     3210918        3219456    3.211    1.71%      3
+record blob: blocks                                 3013406        3014656    3.013    1.60%      1
+record blob: directory                              2926498        2928640    2.926    1.56%      1
+containment (.tscp)                                  488960         512000    0.489    0.26%      9
+record blob: other                                   129404         131072    0.129    0.07%      1
+reports                                               30147          32768    0.030    0.02%      2
+global term dictionary                                16045          16384    0.016    0.01%      1
+segments json                                         15499          16384    0.015    0.01%      1
+access terms: postings                                14706          16384    0.015    0.01%      1
+tile index (.tsti)                                    10840          28672    0.011    0.01%      5
+access terms: pairs.parquet (oracle)                   9967          12288    0.010    0.01%      1
+record blob: artifact extent directory                 2210           4096    0.002    0.00%      1
+record blob: artifact extent blocks                     577           4096    0.001    0.00%      1
+entity->terms: hasrow                                   230           4096    0.000    0.00%      1
+record blob: artifact extent other                       15           4096    0.000    0.00%      1
+
+--- largest files ---
+      34452893   34.453  v00000/partitions/default/attrs/uuid/dict.bin
+      29628138   29.628  v00000/partitions/default/views/bioclip/segments/seg-0/columns.arrow
+      22525930   22.526  v00000/partitions/default/views/geo/segments/seg-0/columns.arrow
+      16251010   16.251  v00000/partitions/default/entities/external-ids-0.arrow
+       8441792    8.442  v00000/partitions/default/members/members-000000-008.tsmb
+       5057742    5.058  v00000/MANIFEST.json
+       4198400    4.198  v00000/partitions/default/views/geo/permutation.bin
+       4198400    4.198  v00000/partitions/default/views/bioclip/permutation.bin
+       4125626    4.126  v00000/partitions/default/attrs/uuid/values.arrow
+       4125626    4.126  v00000/partitions/default/attrs/scientific_name/values.arrow
+       4000004    4.000  v00000/partitions/default/entities/terms/offsets.u32
+       4000000    4.000  v00000/partitions/default/views/bioclip/row-entity.u32
+       4000000    4.000  v00000/partitions/default/views/bioclip/segments/seg-0/morton.u32
+       4000000    4.000  v00000/partitions/default/entities/ext-locator.u32
+       4000000    4.000  v00000/partitions/default/entities/terms/terms.u32
+
+ROOT data/rung4-run/bundle items 102117343
+TOTAL apparent 70783071941 (70.783 GB)  allocated 70783246336 (70.783 GB)
+kind                                             apparent B    allocated B   B/item  %bundle  files
+record blob: blocks                             44336891609    44336910336  434.176   62.64%      1
+attr token/term index: postings                 19705910116    19705925632  192.973   27.84%      2
+render columns                                   1812584170     1812590592   17.750    2.56%      1
+attr token/term index: dictionary                 899986472      900005888    8.813    1.27%      3
+attr values (indexed scalar)                      829175412      829186048    8.120    1.17%      2
+layer membership (.tsmb)                          486589550      486600704    4.765    0.69%      5
+record blob: directory                            437460770      437465088    4.284    0.62%      1
+view: permutation                                 408690688      408694784    4.002    0.58%      1
+entity->terms: offsets                            408469376      408473600    4.000    0.58%      1
+view: row-entity                                  408469372      408469504    4.000    0.58%      1
+geometry: morton                                  408469372      408473600    4.000    0.58%      1
+entity->terms: terms                              408469372      408473600    4.000    0.58%      1
+row-column (label/leaf)                           204234702      204238848    2.000    0.29%      1
+view: presence roaring                             18630246       18636800    0.182    0.03%      2
+attr presence                                       7936051        7938048    0.078    0.01%      1
+access terms: pairs.parquet (oracle)                 853436         856064    0.008    0.00%      1
+record blob: artifact extent blocks                   79345          81920    0.001    0.00%      1
+containment (.tscp)                                   35072          49152    0.000    0.00%      5
+access terms: postings                                22962          24576    0.000    0.00%      1
+record blob: artifact extent directory                22882          24576    0.000    0.00%      1
+record blob: other                                    22025          24576    0.000    0.00%      1
+entity->terms: hasrow                                 22025          24576    0.000    0.00%      1
+reports                                               21521          24576    0.000    0.00%      2
+manifest / CURRENT                                    12645          20480    0.000    0.00%      2
+segments json                                          8147           8192    0.000    0.00%      1
+tile index (.tsti)                                     4368          16384    0.000    0.00%      4
+global term dictionary                                  160           4096    0.000    0.00%      1
+record blob: artifact extent other                       75           4096    0.000    0.00%      1
+
+--- largest files ---
+   44336891609  434.176  v00000/partitions/default/attrs/record/blocks.bin
+   17257806322  169.000  v00000/partitions/default/attrs/abstract/postings.arrow
+    2448103794   23.973  v00000/partitions/default/attrs/title/postings.arrow
+    1812584170   17.750  v00000/partitions/default/views/knn/segments/seg-0/columns.arrow
+     494766066    4.845  v00000/partitions/default/attrs/openalex_id/dict.bin
+     437460770    4.284  v00000/partitions/default/attrs/record/directory.arrow
+     421234618    4.125  v00000/partitions/default/attrs/openalex_id/values.arrow
+     408690688    4.002  v00000/partitions/default/views/knn/permutation.bin
+     408469376    4.000  v00000/partitions/default/entities/terms/offsets.u32
+     408469372    4.000  v00000/partitions/default/views/knn/row-entity.u32
+     408469372    4.000  v00000/partitions/default/views/knn/segments/seg-0/morton.u32
+     408469372    4.000  v00000/partitions/default/entities/terms/terms.u32
+     407940794    3.995  v00000/partitions/default/attrs/publication_year/values.arrow
+     349868873    3.426  v00000/partitions/default/attrs/abstract/dict.bin
+     204234702    2.000  v00000/partitions/default/row-column/row-column-000000-000.tslb

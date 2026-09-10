@@ -25,7 +25,7 @@
 //! same block format and the same addressing as the base blob (`records-and-search.md` §3). The
 //! record blob merges the extents, and a `text` column's token index reads them in block windows
 //! first. Every byte moves sequentially, and the working set is one chunk plus one block per
-//! extent. `docs/design/build-prose-extents.md` carries the design.
+//! extent. `docs/design/build-column-extents.md` carries the design.
 //!
 //! # An entity written twice
 //!

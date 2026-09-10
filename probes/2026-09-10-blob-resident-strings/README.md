@@ -10,7 +10,7 @@ of three levels.
 record blob is the only thing that reads it. The build gave it an entity-ordered arena and an
 offset array anyway, because the route was decided by the declared type: `text` took the record
 blob's extents and every other string family took an arena
-([`build-prose-extents.md`](../../docs/design/build-prose-extents.md) §2 as it stood). This
+([`build-column-extents.md`](../../docs/design/build-column-extents.md) §2 as it stood). This
 measures what that cost, routes the column by its readers instead, and checks the bundle is the
 same bundle.
 
@@ -143,7 +143,7 @@ wall seconds:
 | the largest resident set a stage reported | 11,212 MiB | **9,817 MiB** |
 
 That is the same shape the prose route measured at 10⁷ and for the same reason
-(`build-prose-extents.md` §8): what the route buys at a rung whose arena fits in memory is the peak
+(`build-column-extents.md` §8): what the route buys at a rung whose arena fits in memory is the peak
 — 12% of the resident set here and a quarter of the disk — and what it buys at a rung whose arena
 does not is the build finishing. Rung 6's `scientificname` arena is 155 GB (modelled) on a box with
 47 GiB of memory and 459 GB of disk.

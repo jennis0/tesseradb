@@ -1,0 +1,139 @@
+
+### gbif (64-part spread) — 25846007 items, 2123831429 B (2.12 GB), 82.2 B/item, bundle_format 8
+| kind | bytes | B/item | %% of bundle |
+|---|---|---|---|
+| external-id sidecar (opt-in) | 523,382,622 | 20.25 | 24.6% |
+| record blob | 296,560,497 | 11.47 | 14.0% |
+| layers (members, row-column, containment, tile index) | 285,192,300 | 11.03 | 13.4% |
+| view maps (permutation, row-entity) | 206,935,004 | 8.01 | 9.7% |
+| labels (entities/terms) | 206,773,644 | 8.00 | 9.7% |
+| wire identity (tessera_id) | 206,768,056 | 8.00 | 9.7% |
+| geometry: morton cell | 103,384,028 | 4.00 | 4.9% |
+| geometry: residual | 103,384,028 | 4.00 | 4.9% |
+| keyword dict + ordinals | 101,392,523 | 3.92 | 4.8% |
+| scalar values + presence + category postings | 54,253,496 | 2.10 | 2.6% |
+| render columns | 35,539,294 | 1.38 | 1.7% |
+| access terms (+ oracle pairs) | 230,450 | 0.01 | 0.0% |
+| manifest, reports | 28,820 | 0.00 | 0.0% |
+| other: SEGMENTS-0.json | 5,137 | 0.00 | 0.0% |
+| global term dictionary | 1,530 | 0.00 | 0.0% |
+| **total** | **2,123,831,429** | **82.17** | **100%** |
+
+### geonames — 13463857 items, 1397884892 B (1.40 GB), 103.8 B/item, bundle_format 3
+| kind | bytes | B/item | %% of bundle |
+|---|---|---|---|
+| render columns | 351,745,798 | 26.13 | 25.2% |
+| scalar values + presence + category postings | 241,308,574 | 17.92 | 17.3% |
+| record blob | 176,296,728 | 13.09 | 12.6% |
+| text index (dict + postings) | 138,527,453 | 10.29 | 9.9% |
+| layers (members, row-column, containment, tile index) | 109,747,735 | 8.15 | 7.9% |
+| view maps (permutation, row-entity) | 108,667,248 | 8.07 | 7.8% |
+| wire identity (tessera_id) | 107,710,856 | 8.00 | 7.7% |
+| manifest, reports | 56,033,647 | 4.16 | 4.0% |
+| geometry: morton cell | 53,855,428 | 4.00 | 3.9% |
+| geometry: residual | 53,855,428 | 4.00 | 3.9% |
+| access terms (+ oracle pairs) | 124,402 | 0.01 | 0.0% |
+| other: SEGMENTS-0.json | 10,067 | 0.00 | 0.0% |
+| global term dictionary | 1,528 | 0.00 | 0.0% |
+| **total** | **1,397,884,892** | **103.82** | **100%** |
+
+### treeoflife-1m — 1000000 items, 187779713 B (0.19 GB), 187.8 B/item, bundle_format 8
+| kind | bytes | B/item | %% of bundle |
+|---|---|---|---|
+| keyword dict + ordinals | 43,430,212 | 43.43 | 23.1% |
+| render columns | 31,030,960 | 31.03 | 16.5% |
+| layers (members, row-column, containment, tile index) | 23,700,162 | 23.70 | 12.6% |
+| external-id sidecar (opt-in) | 20,251,010 | 20.25 | 10.8% |
+| view maps (permutation, row-entity) | 15,437,836 | 15.44 | 8.2% |
+| wire identity (tessera_id) | 14,082,072 | 14.08 | 7.5% |
+| labels (entities/terms) | 8,000,234 | 8.00 | 4.3% |
+| geometry: morton cell | 7,041,036 | 7.04 | 3.7% |
+| geometry: residual | 7,041,036 | 7.04 | 3.7% |
+| record blob | 6,072,110 | 6.07 | 3.2% |
+| manifest, reports | 5,088,002 | 5.09 | 2.7% |
+| text index (dict + postings) | 3,278,322 | 3.28 | 1.7% |
+| scalar values + presence + category postings | 3,270,504 | 3.27 | 1.7% |
+| access terms (+ oracle pairs) | 24,673 | 0.02 | 0.0% |
+| global term dictionary | 16,045 | 0.02 | 0.0% |
+| other: SEGMENTS-0.json | 15,499 | 0.02 | 0.0% |
+| **total** | **187,779,713** | **187.78** | **100%** |
+
+### medcpt-1m (no abstracts) — 1000000 items, 332724070 B (0.33 GB), 332.7 B/item, bundle_format 5
+| kind | bytes | B/item | %% of bundle |
+|---|---|---|---|
+| layers (members, row-column, containment, tile index) | 159,719,176 | 159.72 | 48.0% |
+| record blob | 61,124,779 | 61.12 | 18.4% |
+| text index (dict + postings) | 39,512,087 | 39.51 | 11.9% |
+| labels (entities/terms) | 22,405,682 | 22.41 | 6.7% |
+| keyword dict + ordinals | 9,090,029 | 9.09 | 2.7% |
+| render columns | 8,376,130 | 8.38 | 2.5% |
+| view maps (permutation, row-entity) | 8,201,542 | 8.20 | 2.5% |
+| scalar values + presence + category postings | 8,122,560 | 8.12 | 2.4% |
+| wire identity (tessera_id) | 8,000,000 | 8.00 | 2.4% |
+| geometry: morton cell | 4,000,000 | 4.00 | 1.2% |
+| geometry: residual | 4,000,000 | 4.00 | 1.2% |
+| access terms (+ oracle pairs) | 136,440 | 0.14 | 0.0% |
+| manifest, reports | 30,430 | 0.03 | 0.0% |
+| other: SEGMENTS-0.json | 5,112 | 0.01 | 0.0% |
+| global term dictionary | 103 | 0.00 | 0.0% |
+| **total** | **332,724,070** | **332.72** | **100%** |
+
+### medcpt-1m-abs — 1000000 items, 798433620 B (0.80 GB), 798.4 B/item, bundle_format 5
+| kind | bytes | B/item | %% of bundle |
+|---|---|---|---|
+| record blob | 381,390,881 | 381.39 | 47.8% |
+| text index (dict + postings) | 185,026,710 | 185.03 | 23.2% |
+| layers (members, row-column, containment, tile index) | 159,647,472 | 159.65 | 20.0% |
+| labels (entities/terms) | 22,405,682 | 22.41 | 2.8% |
+| keyword dict + ordinals | 9,090,029 | 9.09 | 1.1% |
+| render columns | 8,376,130 | 8.38 | 1.0% |
+| view maps (permutation, row-entity) | 8,201,542 | 8.20 | 1.0% |
+| scalar values + presence + category postings | 8,122,580 | 8.12 | 1.0% |
+| wire identity (tessera_id) | 8,000,000 | 8.00 | 1.0% |
+| geometry: morton cell | 4,000,000 | 4.00 | 0.5% |
+| geometry: residual | 4,000,000 | 4.00 | 0.5% |
+| access terms (+ oracle pairs) | 136,440 | 0.14 | 0.0% |
+| manifest, reports | 31,012 | 0.03 | 0.0% |
+| other: SEGMENTS-0.json | 5,039 | 0.01 | 0.0% |
+| global term dictionary | 103 | 0.00 | 0.0% |
+| **total** | **798,433,620** | **798.43** | **100%** |
+
+### medcpt-10m-abs — 10000000 items, 7705567013 B (7.71 GB), 770.6 B/item, bundle_format 5
+| kind | bytes | B/item | %% of bundle |
+|---|---|---|---|
+| record blob | 3,759,043,003 | 375.90 | 48.8% |
+| text index (dict + postings) | 1,725,941,088 | 172.59 | 22.4% |
+| layers (members, row-column, containment, tile index) | 1,507,945,711 | 150.79 | 19.6% |
+| labels (entities/terms) | 224,071,858 | 22.41 | 2.9% |
+| render columns | 83,751,106 | 8.38 | 1.1% |
+| keyword dict + ordinals | 82,826,261 | 8.28 | 1.1% |
+| scalar values + presence + category postings | 81,219,512 | 8.12 | 1.1% |
+| view maps (permutation, row-entity) | 80,143,750 | 8.01 | 1.0% |
+| wire identity (tessera_id) | 80,000,000 | 8.00 | 1.0% |
+| geometry: morton cell | 40,000,000 | 4.00 | 0.5% |
+| geometry: residual | 40,000,000 | 4.00 | 0.5% |
+| access terms (+ oracle pairs) | 588,340 | 0.06 | 0.0% |
+| manifest, reports | 31,237 | 0.00 | 0.0% |
+| other: SEGMENTS-0.json | 5,044 | 0.00 | 0.0% |
+| global term dictionary | 103 | 0.00 | 0.0% |
+| **total** | **7,705,567,013** | **770.56** | **100%** |
+
+### paperseek (rung 4, whole) — 102117343 items, 70783071941 B (70.78 GB), 693.2 B/item, bundle_format 5
+| kind | bytes | B/item | %% of bundle |
+|---|---|---|---|
+| record blob | 44,774,476,706 | 438.46 | 63.3% |
+| text index (dict + postings) | 20,111,130,522 | 196.94 | 28.4% |
+| keyword dict + ordinals | 916,000,684 | 8.97 | 1.3% |
+| view maps (permutation, row-entity) | 835,790,306 | 8.18 | 1.2% |
+| labels (entities/terms) | 816,960,773 | 8.00 | 1.2% |
+| wire identity (tessera_id) | 816,938,744 | 8.00 | 1.2% |
+| layers (members, row-column, containment, tile index) | 690,863,692 | 6.77 | 1.0% |
+| render columns | 587,176,054 | 5.75 | 0.8% |
+| scalar values + presence + category postings | 415,876,845 | 4.07 | 0.6% |
+| geometry: morton cell | 408,469,372 | 4.00 | 0.6% |
+| geometry: residual | 408,469,372 | 4.00 | 0.6% |
+| access terms (+ oracle pairs) | 876,398 | 0.01 | 0.0% |
+| manifest, reports | 34,166 | 0.00 | 0.0% |
+| other: SEGMENTS-0.json | 8,147 | 0.00 | 0.0% |
+| global term dictionary | 160 | 0.00 | 0.0% |
+| **total** | **70,783,071,941** | **693.15** | **100%** |
