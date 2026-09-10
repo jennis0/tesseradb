@@ -534,6 +534,67 @@ pub(crate) enum NoFold {
     InsufficientDisc { need: u64, free: u64 },
 }
 
+impl NoFold {
+    /// Every gate, in the order [`NoFold::index`] numbers them.
+    ///
+    /// **`&'static str` from a closed list, and that is what makes a leak impossible here.** These
+    /// names reach `/control/status`, which is the operator plane and not the viewer plane, but
+    /// the rule is the same one the WAL pin's names follow (`ArtifactStore::wal_pin`): a
+    /// `format!("{:?}", reason)` would publish whatever a future variant carries, and a variant
+    /// naming a layer, a view or a partition would then put corpus-derived text on a status
+    /// response without anything in the type system objecting. A fixed array of literals cannot
+    /// carry a value at all.
+    ///
+    /// The names are the variant names in snake case, so a status field maps back to the arm that
+    /// produced it.
+    pub(crate) const GATES: [&'static str; 6] = [
+        "wal_poisoned",
+        "overlay_diverged",
+        "stepped_down",
+        "nothing_to_fold",
+        "insufficient_memory",
+        "insufficient_disc",
+    ];
+
+    /// This gate's position in [`NoFold::GATES`], and in the per-gate counters keyed by it.
+    ///
+    /// Exhaustive, so a new variant is a compile error here rather than a refusal counted under
+    /// somebody else's name. `nofold_gates_are_named_and_numbered_once` is what holds the array
+    /// and this match in step.
+    pub(crate) fn index(self) -> usize {
+        match self {
+            NoFold::WalPoisoned => 0,
+            NoFold::OverlayDiverged => 1,
+            NoFold::SteppedDown => 2,
+            NoFold::NothingToFold => 3,
+            NoFold::InsufficientMemory { .. } => 4,
+            NoFold::InsufficientDisc { .. } => 5,
+        }
+    }
+
+    /// The gauge form: a stable name for the condition, its counter's index, and the two figures
+    /// where it carries them.
+    ///
+    /// **The refusal has to leave the process, and this is the only route out.** A refused fold
+    /// advances no counter the `compaction` block publishes: `folds` does not move because nothing
+    /// was folded, and `fold_failures` does not because a refusal is not a failure.
+    ///
+    /// The pair is `None` for the four conditions that carry no figures; for the two that do,
+    /// `need` is the estimate and `had` is what the host answered — `MemAvailable` for the memory
+    /// gate, `statvfs`'s `f_bavail` for the disc one.
+    pub(crate) fn gauge(self) -> (&'static str, Option<u64>, Option<u64>) {
+        let (need, had) = match self {
+            NoFold::WalPoisoned
+            | NoFold::OverlayDiverged
+            | NoFold::SteppedDown
+            | NoFold::NothingToFold => (None, None),
+            NoFold::InsufficientMemory { need, available } => (Some(need), Some(available)),
+            NoFold::InsufficientDisc { need, free } => (Some(need), Some(free)),
+        };
+        (NoFold::GATES[self.index()], need, had)
+    }
+}
+
 /// What the fold's two pre-flight refusals compare against.
 ///
 /// **Measured by the caller, so [`plan_fold`] stays pure.** Free space and available memory are
@@ -2767,5 +2828,80 @@ mod tests {
         // Saturating rather than wrapping: an absurd manifest must refuse the fold, never wrap to
         // a small number and admit it.
         assert_eq!(disc_estimate(u64::MAX), u64::MAX / 100);
+    }
+
+    /// **Every refusal has a name on the operator plane, and the two that carry figures keep
+    /// them.** A refused fold advances no counter the `compaction` block publishes, so this
+    /// mapping is the whole of what an operator sees; an arm that lost its figures would leave
+    /// `insufficient_disc` reading as a bare condition when it is the one refusal whose numbers
+    /// say how far the device is from folding.
+    ///
+    /// The match in `gauge` is exhaustive, so a seventh variant does not compile until it is
+    /// named here.
+    #[test]
+    fn every_refusal_carries_a_name_and_the_two_with_figures_keep_them() {
+        assert_eq!(
+            NoFold::WalPoisoned.gauge(),
+            ("wal_poisoned", None, None),
+            "a condition with no figures publishes its name and two nulls"
+        );
+        assert_eq!(NoFold::OverlayDiverged.gauge(), ("overlay_diverged", None, None));
+        assert_eq!(NoFold::SteppedDown.gauge(), ("stepped_down", None, None));
+        assert_eq!(NoFold::NothingToFold.gauge(), ("nothing_to_fold", None, None));
+        assert_eq!(
+            NoFold::InsufficientMemory {
+                need: 9,
+                available: 4
+            }
+            .gauge(),
+            ("insufficient_memory", Some(9), Some(4)),
+            "need first, then what the host answered"
+        );
+        assert_eq!(
+            NoFold::InsufficientDisc { need: 71, free: 12 }.gauge(),
+            ("insufficient_disc", Some(71), Some(12)),
+            "the gap between these two is what the device has to gain before a fold will start"
+        );
+    }
+
+    /// **One counter per gate, so a standing refusal cannot bury the others.** `due()` re-fires
+    /// every tick once the interval floor has passed, and a refusal stamps no
+    /// `last_fold_start_unix`, so a gate that stands increments on every tick while anything
+    /// refusing between two of them replaces it in `last_refusal`. The per-gate counters are what
+    /// an operator reads instead, and they are keyed by `index`.
+    ///
+    /// Both `index` and `gauge` are exhaustive, so a seventh variant does not compile until it is
+    /// named. What neither catches is a variant given an index the array has no entry for, which
+    /// is what this covers.
+    #[test]
+    fn nofold_gates_are_named_and_numbered_once() {
+        let arms = [
+            NoFold::WalPoisoned,
+            NoFold::OverlayDiverged,
+            NoFold::SteppedDown,
+            NoFold::NothingToFold,
+            NoFold::InsufficientMemory {
+                need: 9,
+                available: 4,
+            },
+            NoFold::InsufficientDisc { need: 71, free: 12 },
+        ];
+        assert_eq!(
+            arms.len(),
+            NoFold::GATES.len(),
+            "every gate has a counter and every counter has a gate"
+        );
+        for (expected, arm) in arms.iter().enumerate() {
+            assert_eq!(
+                arm.index(),
+                expected,
+                "the arms are numbered in the order GATES names them"
+            );
+            assert_eq!(
+                arm.gauge().0,
+                NoFold::GATES[expected],
+                "the name a refusal publishes is the one its counter is keyed by"
+            );
+        }
     }
 }

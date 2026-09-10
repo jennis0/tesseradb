@@ -141,9 +141,9 @@ pub use tessera_store::manifest::Quantisation;
 // is how to answer: `AcceptError` for the status mapping, and `ExecutorPosture`/`ExecutorStats`
 // for `readyz` and `/control/status`.
 pub use write::{
-    AcceptError, ExecutorHealth, ExecutorPosture, ExecutorStartError, ExecutorStats, PendingChange,
-    PublishGeometryError, ValuesReceipt, WriteStage, DENY_DURABILITY_ATTEMPTS,
-    DENY_WINDOW_MAX_ENTRIES,
+    AcceptError, ExecutorHealth, ExecutorPosture, ExecutorStartError, ExecutorStats, FoldRefusal,
+    PendingChange, PublishGeometryError, ValuesReceipt, WalGauge, WriteStage,
+    DENY_DURABILITY_ATTEMPTS, DENY_WINDOW_MAX_ENTRIES, FOLD_GATES,
 };
 // The flush's own laps, beside `WriteStage`'s and read by the same status block.
 pub use flush::FlushStage;

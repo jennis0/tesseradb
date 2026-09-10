@@ -1196,15 +1196,37 @@ impl ArtifactStore {
     /// carries — the minimum, because rotation takes a single bound and each is released by a
     /// different event (`grown_wal_pos`, `filled_wal_pos`, `content_wal_pos`).
     pub fn oldest_wal_pos(&self) -> Option<u64> {
+        self.wal_pin().map(|(_, pos)| pos)
+    }
+
+    /// The same bound as [`Self::oldest_wal_pos`], with the name of the pin that sets it.
+    ///
+    /// **The name is what makes the bound actionable, because the four are released by different
+    /// events.** `publication` goes at the next tail pack, and `content` at the next content
+    /// extent, so a log pinned by either is waiting on a tick. `growth` and `fill` land below
+    /// their level's high-water, which no append-only pack reaches, so only the compaction fold's
+    /// whole rewrite releases them ([`Self::mark_growth_packed`]) — and a log pinned by one of
+    /// those on a node whose fold is refused grows for as long as the refusal lasts. Without the
+    /// name a large log reads the same either way.
+    ///
+    /// Published on `/control/status` beside the log's size and the position it has reached; the
+    /// difference between that position and this one is how much of the log the pin is holding
+    /// down.
+    ///
+    /// The names are `"publication"`, `"growth"`, `"fill"` and `"content"`, and the order here is
+    /// the tie-break: where two pins sit at one position the earlier name is reported. Ties do not
+    /// change the bound, which is why [`Self::oldest_wal_pos`] is this function's minimum rather
+    /// than a second list that could drift from it.
+    pub fn wal_pin(&self) -> Option<(&'static str, u64)> {
         [
-            self.oldest_wal_pos,
-            self.grown_wal_pos,
-            self.filled_wal_pos,
-            self.content_wal_pos,
+            ("publication", self.oldest_wal_pos),
+            ("growth", self.grown_wal_pos),
+            ("fill", self.filled_wal_pos),
+            ("content", self.content_wal_pos),
         ]
         .into_iter()
-        .flatten()
-        .min()
+        .filter_map(|(held_by, pos)| pos.map(|pos| (held_by, pos)))
+        .min_by_key(|(_, pos)| *pos)
     }
 
     /// Applies a durable publication, a durable growth or a durable fill — the **three** paths by
@@ -4114,5 +4136,39 @@ mod tests {
         assert_eq!(store.oldest_wal_pos(), None);
         assert!(store.unpublished_content().is_empty());
         assert!(store.content_row_is_packed("topics/x", 0, 0));
+    }
+
+    /// **The pin's name is what an operator acts on, and it has to agree with the bound.**
+    ///
+    /// A pinned log is published on `/control/status` as a size and a span, and the two pins that
+    /// only the fold releases have to be distinguishable from the two a tick releases: an operator
+    /// seeing `growth` knows the log grows until a fold runs, and one seeing `publication` knows
+    /// the next tick clears it. The bound itself must not move, so the two answers are asserted
+    /// together at every step.
+    #[test]
+    fn the_pin_names_its_holder_and_never_disagrees_with_the_bound() {
+        let mut store = ArtifactStore::new();
+        assert_eq!(store.wal_pin(), None, "an empty store pins nothing");
+
+        assert_eq!(
+            store.apply(&publication("clusters/a", 0, 100, &[1, 2]), 40),
+            0
+        );
+        assert_eq!(
+            store.wal_pin(),
+            Some(("publication", 40)),
+            "an unpacked publication holds the log, and a tick's pack releases it"
+        );
+
+        assert_eq!(store.apply(&growth("clusters/a", 0, 0, &[3]), 96), 0);
+        store.mark_published("clusters/a", 0, 1);
+        assert_eq!(
+            store.wal_pin(),
+            Some(("growth", 96)),
+            "the publication packed and the growth below it did not, so the holder changes"
+        );
+
+        store.mark_growth_packed();
+        assert_eq!(store.wal_pin(), None);
     }
 }

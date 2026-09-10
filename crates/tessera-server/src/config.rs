@@ -1765,12 +1765,17 @@ const DEFAULT_MAX_EXCLUDED_PER_REQUEST: usize = 1_000_000;
 ///
 /// **It bounds a startup relation; it does not stop appends** — in the spirit of
 /// [`DEFAULT_OVERLAY_SOFT_LIMIT`]'s "it alarms; it does not act". ⊘ The name reads as a runtime
-/// ceiling and is not one: `Wal` exposes no length accessor, so nothing can compare the live WAL
-/// against this number. It is consumed in exactly one place — the startup assertion that the
-/// queue's worst case plus reserved deny headroom sits strictly below it — and past that point the
-/// WAL grows until the filesystem refuses, at which point `WalError::Poisoned` makes the handle
-/// dead. Runtime enforcement would need a `Wal::len()` and a ruling on what "at the limit" should do
-/// (refusing ingest is straightforward; refusing a *deny* is fail-open), and neither exists.
+/// ceiling and is not one: nothing compares the live WAL against this number. It is consumed in
+/// exactly one place — the startup assertion that the queue's worst case plus reserved deny
+/// headroom sits strictly below it — and past that point the WAL grows until the filesystem
+/// refuses, at which point `WalError::Poisoned` makes the handle dead.
+///
+/// **The live log's size is readable and is not read here.** `Wal::disc_bytes` exists and
+/// `/control/status` publishes it beside the member count and the rotation bound, which is the
+/// gauge half of the question. What is still missing is the ruling: what a node at the limit
+/// should do. Refusing ingest is straightforward; refusing a *deny* is fail-open, and the deny
+/// lane is the one that has nowhere else to go. So the accessor is a gauge and this key acts on
+/// nothing.
 const DEFAULT_WAL_HARD_LIMIT_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 
 /// Overlay depth at which an alarm is raised. **SA §7's own default**, carried across unchanged.
