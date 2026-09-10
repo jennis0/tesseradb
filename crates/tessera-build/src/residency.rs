@@ -91,6 +91,16 @@
 //! the process was already at 331 MiB in its first stage, reading the points file, before a single
 //! term below existed.
 //!
+//! ⊘ **The largest transient this leaves out is the member merge's own vector**, and it is not a
+//! function of anything the plan knows. `layers::merge_member_runs` holds every source id of the
+//! artifact it is emitting as one `Vec<u64>`, because a source id's entity is not a monotone
+//! function of it and the membership has to be in hand to be sorted; two later passes decode the
+//! same artifact again. The denominator is the **largest single artifact's** member count, which
+//! the member file's footer does not carry and which nothing short of a pass over the file would
+//! establish. At GBIF's kingdom level that vector is 22.5 GB (2.81×10⁹ members at 8 bytes) and at
+//! its family level 1.4 GB, which is why that corpus's taxonomy starts at family. No term below
+//! covers it.
+//!
 //! So the bound is used the way a lower bound can be: **over budget refuses**, because a lower bound
 //! that already exceeds the budget settles it, and the band below refuses nothing and prints the
 //! numbers instead. What this buys is the difference between *refused in the first second with the
@@ -99,13 +109,29 @@
 //! 2.5×10⁸ points over the generator's declaration models at tens of gigabytes against the 12 GB
 //! budget those runs passed, where 10⁸ under an auto-derived budget still slips through.
 //!
-//! ⊘ **The disk figure is a ceiling, and measured at 1.2 to 1.7 times the real peak** — the other
-//! way round, because it is compared against free space rather than a flag and an under-read is an
-//! ENOSPC at hour three. It was a lower bound until 2026-09-10, at 0.51 to 0.59 of the peak at four
-//! row counts from 16.3×10⁶ to 125.8×10⁶ GBIF occurrences, and rung 6 died inside the difference
-//! (`probes/2026-09-10-build-disk/`). What is left of the margin is three stated ceilings, named at
-//! their terms: the postings and the oracle's pairs at 4 B a pair, the record blob at half its
-//! columns' characters, and a published member entry at 3 B.
+//! ⊘ **The disk figure is neither a bound nor a measurement, and it decides nothing.** Most terms
+//! are arithmetic over a fixed width and are exact; several are stated ceilings a term of the right
+//! shape sits far below (`postings.arrow` over a relation whose terms encode as runs — GBIF's 253
+//! country terms are 33,714 bytes against the hundreds of megabytes charged); and four are
+//! estimates that a corpus shape can exceed, each saying so at itself: the record blob's blocks at
+//! half the characters ([`EXTENT_SHARE`]), a published member entry at three bytes
+//! ([`MAPPED_BYTES_PER_MEMBER_ENTRY`]), the member spill's pair of files at four
+//! ([`SPILLED_BYTES_PER_MEMBER_ENTRY`]), and a text index at 35% of its column
+//! ([`TEXT_INDEX_SHARE_PERCENT`]). Each term's own doc says whether it is an exact width, a
+//! ceiling or an estimate, and a term that is not exact says so where the forecast prints it.
+//!
+//! ⊘ **Measured at 1.66, 1.49, 1.39 and 1.34 times the peak**, at 16.3×10⁶, 30.1×10⁶, 64.7×10⁶ and
+//! 125.8×10⁶ GBIF occurrences: this crate's own binary against the peaks sampled in
+//! `probes/2026-09-10-build-disk/`, re-run in `probes/2026-09-11-disk-forecast/`, which also holds
+//! what that corpus does not exercise. The margin falls with the corpus because what is left of it
+//! is constants. On a corpus with three indexed `text` columns the model reached none of the
+//! 176.81 B/item — 23% of that bundle — that the token index and the dictionaries cost, until they
+//! became terms.
+//!
+//! **So the pre-flight prints it and warns; it does not refuse** (`crate::pipeline::plan_build`).
+//! A figure that can be wrong in either direction is not one to hold a door with, and a build that
+//! runs out of disk is recoverable: it writes no `CURRENT`, publishes no identity, mints no id that
+//! survives, and its partial prefix is swept on the way out.
 
 use tessera_spatial::ScalarType;
 
@@ -143,13 +169,14 @@ pub(crate) enum Phase {
     /// The batch loop and the postings write: the term bands, the anchor geometry, the
     /// ordinal→entity map, and the first of the bundle's own files.
     Bands,
-    /// The attribute join and the layer publication — **the model's largest phase on every corpus
-    /// measured**, and within 3% of the index phase beside it, which is where the measurement puts
-    /// the peak at 125.8×10⁶ items. Every declared column filling, the join's staging buffer, the
-    /// source ids, and the member spill.
+    /// The attribute join and the layer publication — **the model's largest phase below 10⁸ items**
+    /// on every corpus measured, and within 3% of the index phase beside it. Every declared column
+    /// filling, the join's staging buffer, the source ids, and the member spill.
     Join,
     /// The filter postings, the keyword dictionaries and the text index: the columns full, their
-    /// dictionaries' scratch beside them, and the value columns being written.
+    /// dictionaries' scratch beside them, and the value columns being written. **The model's
+    /// largest phase at 125.8×10⁶ GBIF occurrences**, which is where the measurement puts the peak
+    /// (`probes/2026-09-11-disk-forecast/`).
     Index,
     /// The record blob. A column with no blob row went back to the disk at the end of the phase
     /// above, so what stands here is the blob-resident and render columns and the blob itself.
@@ -318,6 +345,10 @@ pub(crate) struct ColumnCost {
     /// different things and the declaration is what decides between them, so the pre-flight asks
     /// the pass's own predicate rather than the type.
     pub extents: bool,
+    /// What the record-blob rows carrying this column's values cost beyond their characters, where
+    /// this column spills its extents ([`record_framing_bytes`]). Zero for a column that keeps its
+    /// arena, whose values are not framed until the record blob itself.
+    pub framing_bytes: u64,
     /// Whether this column is the one a text index is built over — which costs the build a second
     /// set of files beside the column itself, and costs it them at the same time.
     pub text_index: bool,
@@ -348,12 +379,212 @@ fn carries_characters(ty: ScalarType) -> bool {
 /// The extents are the same 256 KiB zstd blocks the base blob is cut into, and the base blob at
 /// the 10⁸ PaperSeek rung measured 44.77 GB against 128 GiB of prose — 2.9×
 /// (`probes/2026-09-04-rung-4-whole/breakdown.txt`). Half is charged rather than a 2.9th because
-/// that ratio is one corpus's prose at one operating point, and this figure refuses a build
-/// rather than warning about one. A keyword column compresses harder still where its values
-/// repeat: GBIF's `scientificname` spilled 1.63 GB of extents over 3.93 GB of characters, 0.42×,
-/// and its blocks alone 0.27× (measured, `probes/2026-09-10-blob-resident-strings/`). ⊘ Modelled
-/// for the extents, measured for the blob.
+/// that ratio is one corpus's prose at one operating point. A keyword column compresses harder
+/// still where its values repeat: GBIF's `scientificname` spilled 1.63 GB of extents over 3.93 GB
+/// of characters, 0.42×, and its blocks alone 0.27× (measured,
+/// `probes/2026-09-10-blob-resident-strings/`).
+///
+/// ⊘ **On the characters alone this is an estimate and not a ceiling.** A compression ratio has no
+/// lower bound at one half. Measured at 0.251 on GBIF's `scientificname` and 0.345 on PaperSeek
+/// prose, but at **0.567 to 0.750 on high-entropy short values** — random hex, base64 and
+/// lowercase at 12 to 32 characters, zstd level 3 over 256 KiB blocks — and at 0.634 on GeoNames'
+/// names. What bounds the error is that zstd does not expand incompressible input, so the blocks
+/// are at most the characters and half of them reads at most 2× low.
+///
+/// **What closes most of that gap is the framing charged beside them**
+/// ([`record_framing_bytes`]): a short value's row costs 15 bytes of frame around 8 to 13 of
+/// characters, so half of the two together is above every measured shape but one. GeoNames' 13.5
+/// characters a name compress to 8.6 bytes and are charged 14.2; 12 random lowercase characters
+/// compress to 7.2 and are charged 13.5. The one shape still under-read is a value of 30
+/// characters or more that does not compress at all — 32 random base64 characters are 24 bytes
+/// against a charge of 23.5, 2% low.
 const EXTENT_SHARE: u64 = 2;
+
+/// What one record-blob row costs beyond its characters: **8 bytes a row and 3 a field**, plus a
+/// `u32` length on each `utf8` one (`tessera_filter::record` — `entity u32 | payload_len u32`,
+/// then `tag u16 | kind u8 | value` a field).
+///
+/// Charged over the blob-resident columns and their rows because for a short value it is more
+/// than the value: an 8-character key in one `utf8` field is 15 bytes of framing against 8 of
+/// characters. It rides through the same zstd the blocks do, so it is charged at [`EXTENT_SHARE`]
+/// with them.
+fn record_framing_bytes(schema: &crate::config::Schema, rows: u64) -> u64 {
+    let fields: u64 = schema
+        .attributes
+        .iter()
+        .filter(|a| crate::pipeline::blob_resident(schema, a))
+        .map(|a| {
+            if carries_characters(a.ty) {
+                RECORD_UTF8_FIELD_BYTES
+            } else {
+                RECORD_FIELD_BYTES
+            }
+        })
+        .sum();
+    if fields == 0 {
+        return 0;
+    }
+    rows.saturating_mul(RECORD_ROW_BYTES + fields)
+}
+
+/// `entity u32 | payload_len u32` before a record-blob row's first field.
+const RECORD_ROW_BYTES: u64 = 8;
+
+/// `tag u16 | kind u8` before a record-blob field's value.
+const RECORD_FIELD_BYTES: u64 = 3;
+
+/// What one **extent** row costs beyond its characters, for `rows` of one spilled column.
+///
+/// An extent row carries that column alone (`crate::extents`), so it is one row header and one
+/// `utf8` field — 15 bytes around a value an unindexed `keyword` column can hold in 8. Charged for
+/// every column the routing spills and not for the type: a `keyword` or `utf8` column the record
+/// blob alone reads spills the same extents a `text` column does.
+fn extent_framing_bytes(rows: u64) -> u64 {
+    rows.saturating_mul(RECORD_ROW_BYTES + RECORD_UTF8_FIELD_BYTES)
+}
+
+/// [`RECORD_FIELD_BYTES`] and the `byte_len u32` a `utf8` value carries in front of its characters.
+const RECORD_UTF8_FIELD_BYTES: u64 = RECORD_FIELD_BYTES + 4;
+
+/// What `pairs.parquet` costs a pair, in tenths of a byte.
+///
+/// `(entity_id u64, term_id u32)` under `DELTA_BINARY_PACKED` and Snappy with no dictionary
+/// (`tessera_store::pairs`). Entities ascend within a term and reset at each term boundary, so a
+/// relation of short terms makes every mini-block pay for its outlier — and the delta is bounded
+/// by the entity space, which I9 bounds at 2³². **The encoding therefore saturates at about 4.2
+/// bytes a pair**, which is what is charged: measured 4.185 and 4.176 at the corner (10⁶ terms of
+/// 10 and 10⁷ terms of 1 over a 4×10⁹ entity space) and 0.785 to 3.546 on every shape below it.
+/// Four was charged as a ceiling before and is exceeded by 4–5% at the corner.
+const ORACLE_BYTES_PER_PAIR_TENTHS: u64 = 42;
+
+/// What a `text` column's **token index** costs against its characters, in hundredths:
+/// `postings.arrow` and `dict.bin` together.
+///
+/// ⊘ **An estimate above every measurement, not a ceiling.** Measured on the 10⁷ MedCPT sample:
+/// 0.166 of the characters on `abstract` (1.365 GB over 8.21 GB), 0.282 on `title`, 0.198 on
+/// `mesh_major`; and the text index's sorted runs, which encode the same `(token, entity)` pairs
+/// before they are packed, measured 0.215 on 7.4×10⁷ Overture names. Charged a quarter above the
+/// largest of them, on [`MAPPED_BYTES_PER_MEMBER_ENTRY`]'s discipline.
+///
+/// **A column of many short distinct tokens exceeds it.** A posting is about four bytes a
+/// `(token, entity)` pair whatever the token is, so a column of three-character tokens spends
+/// about as many bytes on its index as on its characters. Nothing in the declaration says which a
+/// column will be.
+const TEXT_INDEX_SHARE_PERCENT: u64 = 35;
+
+/// What one `dict.bin` entry costs beyond the characters it holds, in tenths of a byte: two
+/// varints a key — the shared prefix length and the suffix length — and 8 bytes of restart offset
+/// a block of 16 keys (`tessera_filter::dict`'s format and its `DEFAULT_RESTART_INTERVAL`).
+///
+/// Charged beside the characters rather than folded into them, because for a column of short
+/// distinct values it is most of the file: 12-character keys are 2.5 bytes of entry against 12 of
+/// suffix, and a term reading the characters alone as a ceiling is under the file wherever the
+/// values do not share prefixes. Front coding removes bytes from a suffix and adds none, so the
+/// characters bound the suffixes whatever the values are.
+///
+/// ⊘ A key of 128 bytes or more spends a second byte on each of the two varints. The same key's
+/// own characters cover that many times over.
+const DICT_BYTES_PER_KEY_TENTHS: u64 = 25;
+
+/// The count at or below which a term's postings are a raw `u32` array rather than Roaring
+/// (`tessera_authz::postings`, tag 0). The threshold the build passes is
+/// `tessera_types::SMALL_TERM_THRESHOLD_DEFAULT`.
+const SMALL_TERM_ENTITIES: u64 = 32;
+
+/// The entity span one Roaring container addresses, and what one costs: a descriptor and a key,
+/// then an array of `u16` offsets or an 8 KiB bitset, whichever the container's cardinality makes
+/// smaller.
+const ROARING_CONTAINER_SPAN: u64 = 1 << 16;
+const ROARING_CONTAINER_HEADER: u64 = 8;
+const ROARING_BITSET_BYTES: u64 = 8 << 10;
+
+/// What `terms/postings.arrow` comes to for a relation whose terms have these pre-dedup row
+/// counts, over an entity space of `n`.
+///
+/// **Not `4 × pairs`, in either direction.** The file is one `LargeBinaryArray` record a term —
+/// `8(T+1)` bytes of offset, then a tag byte and a payload — and a term of cardinality `c ≤ 32`
+/// writes `4c` raw bytes. So a relation of `T` singleton terms costs 13 bytes a pair where `4p`
+/// charges 4, which is the per-record ACL shape; measured **4.91 and 5.22 B/pair** on two
+/// 10⁷-term relations over 10⁸ pairs. Above the threshold the payload is portable Roaring, which
+/// is charged here at an array container's two bytes a member, capped at a bitset's 8 KiB, plus a
+/// container header per 65,536 of entity space the term can reach.
+///
+/// ⊘ **The Roaring half is a ceiling and a loose one.** A run container costs four bytes a run
+/// whatever it holds, so a term whose entities are contiguous in Morton order encodes far below
+/// this: GBIF's 253 country terms over 125,789,091 occurrences are 33,714 bytes, against the
+/// hundreds of megabytes charged. Nothing in the declaration says which shape a term will have.
+fn postings_bytes(term_rows: &[u64], n: u64) -> u64 {
+    let mut total = 8u64.saturating_mul(term_rows.len() as u64 + 1);
+    for &rows in term_rows {
+        total = total.saturating_add(1).saturating_add(term_postings_bytes(rows, n));
+    }
+    total
+}
+
+/// One term's posting record, payload only.
+fn term_postings_bytes(rows: u64, n: u64) -> u64 {
+    if rows == 0 {
+        return 0;
+    }
+    if rows <= SMALL_TERM_ENTITIES {
+        return 4 * rows;
+    }
+    let containers = n.div_ceil(ROARING_CONTAINER_SPAN).min(rows).max(1);
+    let payload = (2 * rows).min(ROARING_BITSET_BYTES.saturating_mul(containers));
+    payload.saturating_add(ROARING_CONTAINER_HEADER.saturating_mul(containers))
+}
+
+/// How many bytes a LEB128 varint of `value` occupies: seven bits a byte, one byte for zero.
+fn varint_len(value: u64) -> u64 {
+    let bits = 64 - u64::from(value.leading_zeros());
+    bits.div_ceil(7).max(1)
+}
+
+/// **What the plan learned about this corpus** that the declaration does not carry: the item
+/// count, the access relation's shape and the batching the memory budget derived. Every field is
+/// known once pass one and the dictionary have run, which is where the pre-flight sits.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Corpus<'a> {
+    /// Items, post-dedup — the entity space's size.
+    pub n: u64,
+    /// The access relation's **pre-dedup** row count.
+    pub pair_rows: u64,
+    /// Each term's pre-dedup rows, indexed by term id — the postings' own denominator.
+    pub term_rows: &'a [u64],
+    /// How many signature batches the budget derived.
+    pub batches: u64,
+    /// Whether the packed pair buckets are held rather than spilled.
+    pub bucket_in_ram: bool,
+}
+
+/// The corpus's **source ids**, as the two terms that are functions of them need them.
+///
+/// Both are known before the plan: pass one has read every view's ids into one array and sorted
+/// it (`crate::pipeline::read_source_ids_union`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct IdShape {
+    /// **The rows every view declares, before the union dedups them** — the length the ids file is
+    /// allocated at, which is what it costs the disk. `n` is what survives the dedup, and the two
+    /// differ by however much the views overlap: 1.76× on `treeoflife-1m`, 4.29× on `multiview`.
+    pub slots: u64,
+    /// **The largest source id**, which is what sets the varint width the member spill's runs are
+    /// charged at. Not the distance between the lowest and the highest: an artifact's first source
+    /// is written absolutely and only the rest as deltas (`crate::spill`'s member runs), so a
+    /// corpus whose ids are large and narrowly spread pays the full width on every artifact's
+    /// first entry. Every value a run encodes is at most this one.
+    pub max_id: u64,
+}
+
+impl IdShape {
+    /// The shape of a corpus whose ids are exactly `0..n` — one view, no duplicates, dense ids.
+    #[cfg(test)]
+    fn dense(n: u64) -> IdShape {
+        IdShape {
+            slots: n,
+            max_id: n.saturating_sub(1),
+        }
+    }
+}
 
 /// The fixed width one entity's value occupies in [`crate::column::EntityColumn`]'s typed
 /// storage. A variable-width type answers [`ARENA_OFFSET`] here — its offset and its record
@@ -418,13 +649,21 @@ const BYTES_PER_MEMBER_ENTRY: u64 = 4;
 /// What one member entry costs the **disk**, and the process's page cache, as the packed membership
 /// extent the store then reads through: 3 bytes, an array container's own width and a little.
 ///
-/// ⊘ **Measured at 2.24 and charged at 3.** GBIF's three taxonomy levels over 125,789,091
-/// occurrences write 843.8 MB of extent for 377,367,273 declared key values
-/// (`probes/2026-09-10-build-disk/`); the 10⁷ MedCPT sample's two extents are 543,884,239 bytes
-/// over 471,778,374 entries — **1.15 B an entry**, because a descriptor whose members are dense in
-/// entity space comes out as a run or a bitset container rather than an array. The model charges
-/// above the larger figure for the reason the constant above does: a term that errs high costs a
-/// rerun and one that errs low is the ENOSPC this pre-flight exists to pre-empt.
+/// ⊘ **An estimate over the corpora on this box, not a ceiling over every membership.** Measured
+/// at 0.98 to 2.40 bytes an entry across seven bundles — 0.980 on PaperSeek's 496,443,271 entries,
+/// 1.153 on the 10⁷ MedCPT sample's 471,743,606, 1.508 on GeoNames, 2.377 on `treeoflife-1m`,
+/// 2.403 on `gbif-64p`, and 2.236 on GBIF's three taxonomy levels over 125,789,091 occurrences
+/// (843.8 MB for 377,367,273 declared key values). Three is charged because it is above every one
+/// of them.
+///
+/// **The shape that exceeds it is many small artifacts whose members are uncorrelated with entity
+/// order**: a fine taxonomy over a large corpus, an owner-per-record layer, a layer over an
+/// embedding view whose entity order is a k-NN layout rather than the layer's own axis. Measured
+/// against portable Roaring over a 4×10⁹ entity space: 2.05 B an entry at 10⁷ members an artifact,
+/// **5.93 at 10⁵, 9.98 at 10³ and 14.00 at 4**. Most of that is not the bitmap — it is the 8 bytes
+/// of offset every artifact pays and one container header a scattered member — so no per-entry
+/// constant covers it, and the denominator that would is the artifact count, which the member
+/// file's footer does not carry.
 ///
 /// **Charged in the column window**, which is where these bytes are: the extents are written at the
 /// layer publication (stage 8c) and mapped from there to the end of the build, and the declared
@@ -440,11 +679,32 @@ const MAPPED_BYTES_PER_MEMBER_ENTRY: u64 = 3;
 /// Both are LEB128 delta encodings over ascending values, so the true figure falls wherever a
 /// membership is dense in its id space and rises where it is scattered.
 ///
-/// ⊘ **Measured at 2.9 and charged at 4.** GBIF's taxonomy spills at most 1,084.6 MB of runs and
-/// table together over 377,367,273 declared key values, at four row counts from 16.3×10⁶ to
-/// 125.8×10⁶ and within 4% of each other (`probes/2026-09-10-build-disk/`). GeoNames' two member
-/// files carry 68.4×10⁶ pairs and spilled 73 MiB of runs beside a 68 MiB table — 2.2 B an entry.
+/// **The two encode over different spaces, and only one of them is entity space.** The merged
+/// table's deltas are over entities, which live in `0..n`; the runs' are over **source ids**
+/// (`crate::spill`'s member runs), which are whatever the corpus's publisher issued. A corpus
+/// whose ids are the row number spends one or two bytes on a delta; one whose ids are hashes over
+/// the `u64` space spends nine or ten. [`member_spill_bytes`] is where that difference is charged.
+///
+/// ⊘ **Four is an estimate for a corpus whose ids are dense, not a ceiling over every id space.**
+/// GBIF's taxonomy spills at most 1,084.6 MB of runs and table together over 377,367,273 declared
+/// key values — 2.9 B an entry — at four row counts from 16.3×10⁶ to 125.8×10⁶ and within 4% of
+/// each other (`probes/2026-09-10-build-disk/`); the split is 1.50 for the runs and 1.37 for the
+/// table. GeoNames' two member files carry 68.4×10⁶ pairs and spilled 73 MiB of runs beside a
+/// 68 MiB table — 2.2 B an entry.
 const SPILLED_BYTES_PER_MEMBER_ENTRY: u64 = 4;
+
+/// What the member spill's runs and merged table come to for `entries` pairs over an id space
+/// topping out at [`IdShape::max_id`] and an entity space of `n`.
+///
+/// [`SPILLED_BYTES_PER_MEMBER_ENTRY`] for the pair of files, plus **whatever wider a source-id
+/// entry is than an entity one**: the runs encode source ids and the table entities, so a corpus
+/// whose ids are hashes pays the extra varint bytes on the runs alone. The difference is zero for
+/// every corpus whose ids are its row numbers, which is every corpus on the ladder, and six bytes
+/// an entry for ids spread over the whole `u64` space.
+fn member_spill_bytes(entries: u64, ids: IdShape, n: u64) -> u64 {
+    let sparse = varint_len(ids.max_id).saturating_sub(varint_len(n));
+    entries.saturating_mul(SPILLED_BYTES_PER_MEMBER_ENTRY + sparse)
+}
 
 /// What the segment's **row-order** tail costs on disk: one fixed-width slot per row per render
 /// column, in `.build-tmp/`, for the length of the segment write.
@@ -473,9 +733,11 @@ pub(crate) fn render_tail_bytes(schema: &crate::config::Schema, n: u64) -> u64 {
 ///
 /// `member_entries` is every `(artifact, source)` pair the layers' member sources declare and
 /// `level_entries` a ceiling on any one level's, those being the two windows a member entry is held
-/// in: the spill holds every pair at once, the publication one level's. `n` is the item count.
+/// in: the spill holds every pair at once, the publication one level's. `n` is the item count, and
+/// `ids` the source ids' own shape ([`IdShape`]).
 pub(crate) fn entity_order_residency(
     n: u64,
+    ids: IdShape,
     columns: &[ColumnCost],
     member_entries: u64,
     level_entries: u64,
@@ -488,11 +750,18 @@ pub(crate) fn entity_order_residency(
         // search on the sparse path, which is the random-access case `MappedArray` was written
         // for. 8 B/item is 26.0 GiB at the GBIF rung. They are released at the layer publication,
         // so they are on the disk for every phase of the pre-flight but the assembly.
+        //
+        // **Charged over the slots the file is allocated at and not over `n`**: pass one counts
+        // every view's rows, allocates the union at their sum and dedups inside it, so a corpus
+        // whose views overlap holds a file larger than the entity space it produces
+        // ([`IdShape::slots`]).
         Term {
-            what: "the sorted source ids, 8 B/item, in .build-tmp/ (released at the layer \
-                   publication)"
-                .into(),
-            bytes: 8 * n,
+            what: format!(
+                "the sorted source ids, 8 B over the {} row(s) every view declares before the \
+                 union dedups them, in .build-tmp/ (released at the layer publication)",
+                ids.slots
+            ),
+            bytes: 8u64.saturating_mul(ids.slots.max(n)),
             mapped: true,
             phases: Phases::SPILL.and(Phases::BANDS).and(Phases::JOIN),
         },
@@ -516,7 +785,9 @@ pub(crate) fn entity_order_residency(
         // ([`EXTENT_SHARE`]); the presence bits are all that is left of the column itself.
         let spilled = column.extents;
         let bytes = if spilled {
-            presence.saturating_add(column.payload_bytes / EXTENT_SHARE)
+            presence
+                .saturating_add(column.payload_bytes / EXTENT_SHARE)
+                .saturating_add(column.framing_bytes / EXTENT_SHARE)
         } else if column.payload_bytes > 0 {
             // 8 bytes of entity-indexed offset and the presence bit, plus the arena the characters
             // and their record headers fill.
@@ -537,8 +808,8 @@ pub(crate) fn entity_order_residency(
             what: if spilled {
                 format!(
                     "declared column {index} ({ty}): {} MiB of extents in .build-tmp/, \
-                     modelled at half the source's {} MiB of characters",
-                    (column.payload_bytes / EXTENT_SHARE) >> 20,
+                     modelled at half the source's {} MiB of characters and their row framing",
+                    ((column.payload_bytes + column.framing_bytes) / EXTENT_SHARE) >> 20,
                     column.payload_bytes >> 20
                 )
             } else if column.payload_bytes > 0 {
@@ -594,7 +865,7 @@ pub(crate) fn entity_order_residency(
         terms.push(Term {
             what: format!(
                 "the published memberships the store reads back through the packed extent, at \
-                 {MAPPED_BYTES_PER_MEMBER_ENTRY} B a member entry"
+                 an estimate of {MAPPED_BYTES_PER_MEMBER_ENTRY} B a member entry"
             ),
             bytes: member_entries.saturating_mul(MAPPED_BYTES_PER_MEMBER_ENTRY),
             mapped: true,
@@ -603,10 +874,11 @@ pub(crate) fn entity_order_residency(
         });
         terms.push(Term {
             what: format!(
-                "the member spill's runs and the table they merge into, at \
-                 {SPILLED_BYTES_PER_MEMBER_ENTRY} B a member entry, in .build-tmp/"
+                "the member spill's runs and the table they merge into, at an estimate of \
+                 {} B a member entry, in .build-tmp/",
+                member_spill_bytes(1, ids, n)
             ),
-            bytes: member_entries.saturating_mul(SPILLED_BYTES_PER_MEMBER_ENTRY),
+            bytes: member_spill_bytes(member_entries, ids, n),
             mapped: true,
             phases: Phases::JOIN,
         });
@@ -652,6 +924,12 @@ fn model_inputs(
             // for itself would charge an arena the build no longer fills, or the other way round
             // on the next column whose readers change.
             extents: routes.takes_extents(index),
+            // The frame around each extent row, which is the route's and not the type's
+            // ([`extent_framing_bytes`]).
+            framing_bytes: match routes.takes_extents(index) {
+                true => extent_framing_bytes(n),
+                false => 0,
+            },
             // The same test the emit itself makes, called rather than restated: a text column
             // earns an index exactly where it is owed postings.
             text_index: attribute.ty == ScalarType::Text
@@ -741,12 +1019,13 @@ const ROUTE_HEADROOM: u64 = 2;
 pub(crate) fn plan_routes(
     args: &crate::BuildArgs,
     n: u64,
+    ids: IdShape,
     payloads: &[f64],
     free: Option<u64>,
 ) -> (crate::pipeline::ColumnRoutes, Residency) {
     let spilled = crate::pipeline::ColumnRoutes::every_available(&args.schema);
     let (columns, entries, level_entries) = model_inputs(args, n, payloads, &spilled);
-    choose_routes(&args.schema, n, columns, entries, level_entries, free)
+    choose_routes(&args.schema, n, ids, columns, entries, level_entries, free)
 }
 
 /// [`plan_routes`] unless the caller named the route ([`crate::ExtentRoute`]), in which case the
@@ -755,28 +1034,31 @@ pub(crate) fn plan_routes(
 pub(crate) fn routes_for(
     args: &crate::BuildArgs,
     n: u64,
+    ids: IdShape,
     payloads: &[f64],
     free: Option<u64>,
     route: crate::ExtentRoute,
 ) -> (crate::pipeline::ColumnRoutes, Residency) {
     let forced = match route {
-        crate::ExtentRoute::Derived => return plan_routes(args, n, payloads, free),
+        crate::ExtentRoute::Derived => return plan_routes(args, n, ids, payloads, free),
         crate::ExtentRoute::Arena => crate::pipeline::ColumnRoutes::forced_only(&args.schema),
         crate::ExtentRoute::Extents => {
             crate::pipeline::ColumnRoutes::every_available(&args.schema)
         }
     };
     let (columns, entries, level_entries) = model_inputs(args, n, payloads, &forced);
-    let tail = entity_order_residency(n, &columns, entries, level_entries);
+    let tail = entity_order_residency(n, ids, &columns, entries, level_entries);
     (forced, tail)
 }
 
 /// [`plan_routes`] over the model's inputs rather than the build's, so the rule can be tested at a
 /// schema and a free-space figure without a corpus behind them. `columns` arrives with every
 /// available column spilled.
+#[allow(clippy::too_many_arguments)]
 fn choose_routes(
     schema: &crate::config::Schema,
     n: u64,
+    ids: IdShape,
     mut columns: Vec<ColumnCost>,
     entries: u64,
     level_entries: u64,
@@ -789,14 +1071,16 @@ fn choose_routes(
             continue;
         }
         columns[index].extents = false;
-        let candidate = entity_order_residency(n, &columns, entries, level_entries);
+        columns[index].framing_bytes = 0;
+        let candidate = entity_order_residency(n, ids, &columns, entries, level_entries);
         if stage_scratch(&candidate) <= ceiling {
             routes.take_arena(index);
         } else {
             columns[index].extents = true;
+            columns[index].framing_bytes = extent_framing_bytes(n);
         }
     }
-    let tail = entity_order_residency(n, &columns, entries, level_entries);
+    let tail = entity_order_residency(n, ids, &columns, entries, level_entries);
     (routes, tail)
 }
 
@@ -808,7 +1092,7 @@ pub(crate) fn stage_scratch(residency: &Residency) -> u64 {
     residency.peak().1
 }
 
-/// **What the whole build asks the disk for**, phase by phase, so the pre-flight refuses on the
+/// **What the whole build asks the disk for**, phase by phase, so the pre-flight warns on the
 /// largest window rather than on a total nothing ever holds.
 ///
 /// The entity-order terms are `tail`'s, carried rather than recomputed — a second copy of that
@@ -821,15 +1105,27 @@ pub(crate) fn stage_scratch(residency: &Residency) -> u64 {
 /// phase (measured over 16.3×10⁶ to 125.8×10⁶ occurrences, agreeing to within 1%), and the build
 /// that ran out of disk at rung 6 had 93 GB of it written when it died
 /// (`probes/2026-09-10-build-disk/`).
+///
+/// ⊘ **Two of the bundle's families still carry no term, both for the same reason**: their
+/// denominator is a level's **artifact count**, which nothing knows before the level is published
+/// — a layer whose `value_set` is open has no roster to read one from. They are the tile index
+/// (`tile-index/*.tsti`, two `u32` an artifact) and the artifact record extents
+/// (`attrs/record/extents/`). Measured at 1.49 MB over 25,846,007 items on `gbif-64p` and 435 KB
+/// over 10⁷ on the MedCPT sample — 0.06 and 0.04 bytes an item, three orders below the terms
+/// below.
 pub(crate) fn disk(
     args: &crate::BuildArgs,
-    n: u64,
-    pair_rows: u64,
-    batches: u64,
-    bucket_in_ram: bool,
+    corpus: Corpus<'_>,
     payloads: &[f64],
     tail: &Residency,
 ) -> Residency {
+    let Corpus {
+        n,
+        pair_rows,
+        term_rows,
+        batches,
+        bucket_in_ram,
+    } = corpus;
     let p = pair_rows;
     let views = args.views.len().max(1) as u64;
     let mut terms: Vec<Term> = tail.terms.iter().filter(|t| t.mapped).cloned().collect();
@@ -962,40 +1258,82 @@ pub(crate) fn disk(
         Phases::BANDS.onwards(),
     );
     push(
-        "postings.arrow, at a ceiling of 4 B/pair".into(),
-        4 * p,
+        format!(
+            "postings.arrow, one record over each of {} term(s) at its own row count — 8 B of \
+             Arrow offset and a tag each, then 4 B an entity below 32 of them and a ceiling of \
+             Roaring above",
+            term_rows.len()
+        ),
+        postings_bytes(term_rows, n),
         Phases::BANDS.onwards(),
     );
     if args.emit_oracle_pairs {
         push(
-            "pairs.parquet, at a ceiling of 4 B/pair — the test-time oracle's copy of the \
-             relation, which --no-oracle-pairs does not write"
-                .into(),
-            4 * p,
+            format!(
+                "pairs.parquet, at a ceiling of {}.{} B/pair — the test-time oracle's copy of \
+                 the relation, which --no-oracle-pairs does not write",
+                ORACLE_BYTES_PER_PAIR_TENTHS / 10,
+                ORACLE_BYTES_PER_PAIR_TENTHS % 10
+            ),
+            (p.saturating_mul(ORACLE_BYTES_PER_PAIR_TENTHS)) / 10,
             Phases::BANDS.onwards(),
         );
     }
     if args.mint_external_ids {
+        // The sidecar is an Arrow `binary` column beside a `u32` entity — a 4 B offset a row and
+        // one more at the end, an 8 B `external_id` payload and the entity — and the locator
+        // beside it (`ext-locator.u32`) is a `u32` an item. That is 20 B/item of buffer, and the
+        // two files measure **20.25** on both bundles that mint them, 26× apart in `n`
+        // (`docs/evidence/memos/2026-09-10-disk-bundle-payload.md` §1), so the quarter byte an
+        // item the Arrow framing adds is charged with them. ⊘ What is left out is about a
+        // kilobyte of schema and footer a file, which is a constant and not a rate.
         push(
-            "the external-id sidecar and its locator, 12 B/item".into(),
-            12 * n,
+            "the external-id sidecar and its locator, at a measured 20.25 B/item: a 4 B Arrow \
+             offset, an 8 B id and a 4 B entity in the sidecar, a 4 B locator, and a quarter byte \
+             an item of Arrow framing"
+                .into(),
+            4 * (n + 1) + 16 * n + n.div_ceil(4),
             Phases::BANDS.onwards(),
         );
     }
+    // **Blob residency and a token index are independent, and a `text` column is both.** A column
+    // whose value lives in the record blob still owes `postings.arrow` and `dict.bin` wherever it
+    // is indexed (`pipeline::blob_resident`), and those two files are in the bundle from the index
+    // phase to the end of the build. Skipping the rest of this loop for a blob-resident column
+    // left an indexed `text` column's whole index uncharged: **176.81 B/item on the 10⁷ MedCPT
+    // sample, 23% of that bundle**.
     let mut blob_payload = 0u64;
     for (index, attribute) in args.schema.attributes.iter().enumerate() {
+        let characters = payload(payloads[index], n);
         if crate::pipeline::blob_resident(&args.schema, attribute) {
-            blob_payload = blob_payload.saturating_add(payload(payloads[index], n));
-            continue;
+            blob_payload = blob_payload.saturating_add(characters);
         }
         if !crate::pipeline::postings_are_owed(&args.schema, attribute) {
+            continue;
+        }
+        if attribute.ty == ScalarType::Text {
+            // A `text` column's index is a token index: one posting per `(token, entity)` pair and
+            // a dictionary of the tokens, and no value column at all — its `entity → value` answer
+            // is the record blob's. [`TEXT_INDEX_SHARE_PERCENT`] carries the figure and what it
+            // rests on.
+            push(
+                format!(
+                    "attribute '{}': the text index's postings.arrow and dict.bin, at an \
+                     estimate of {TEXT_INDEX_SHARE_PERCENT}% of the column's {} MiB of \
+                     characters",
+                    attribute.name,
+                    characters >> 20
+                ),
+                characters.saturating_mul(TEXT_INDEX_SHARE_PERCENT) / 100,
+                Phases::INDEX.onwards(),
+            );
             continue;
         }
         // An indexed keyword column's values file is its dictionary ordinals, four bytes a row;
         // every other family's is its declared width. The presence bitmap beside it is charged at
         // a bit an item, which is a Roaring bitmap's own ceiling.
         let width = match attribute.ty {
-            ScalarType::Utf8 | ScalarType::Keyword | ScalarType::Text => 4,
+            ScalarType::Utf8 | ScalarType::Keyword => 4,
             ty => fixed_width(ty),
         };
         push(
@@ -1005,6 +1343,19 @@ pub(crate) fn disk(
             ),
             width * n + n.div_ceil(8),
             Phases::INDEX.onwards(),
+        );
+        // `values.arrow` is assembled from a spool of the same values beside it
+        // (`tessera_filter::values_writer`), so the column's slots stand twice while it is
+        // written. Measured on the GBIF prefix: `specieskey` 473,983,152 bytes of spool and `year`
+        // 243,206,776, both alive at the index phase's peak.
+        push(
+            format!(
+                "attribute '{}': the value column's own spool, {width} B/item, beside \
+                 values.arrow while it is assembled",
+                attribute.name
+            ),
+            width * n,
+            Phases::INDEX,
         );
         if matches!(attribute.ty, ScalarType::Utf8 | ScalarType::Keyword) {
             // The dictionary pass's own scratch, under the column's directory rather than
@@ -1017,25 +1368,52 @@ pub(crate) fn disk(
                      4 B/item and a ceiling of half the column's characters",
                     attribute.name
                 ),
-                4 * n + payload(payloads[index], n) / EXTENT_SHARE,
+                4 * n + characters / EXTENT_SHARE,
                 Phases::INDEX,
+            );
+            // And the dictionary the pass leaves behind, which is in the bundle from there on.
+            // **The characters and the entry overhead beside them**, both at a ceiling: the file
+            // is front-coded, so its suffix bytes are at most the column's characters, and each
+            // key costs [`DICT_BYTES_PER_KEY_TENTHS`] on top of them. The key count is charged at
+            // one a row, which is its own ceiling. Measured at 0.57 of the characters on the 10⁷
+            // MedCPT sample's `pmid`, whose eight-character ids are nearly all distinct, and
+            // 0.003 on GBIF's `specieskey`, whose 2.6×10⁵ keys repeat over 16.3×10⁶ rows.
+            push(
+                format!(
+                    "attribute '{}': dict.bin, at a ceiling of the column's {} MiB of characters \
+                     and {}.{} B a key over one key a row",
+                    attribute.name,
+                    characters >> 20,
+                    DICT_BYTES_PER_KEY_TENTHS / 10,
+                    DICT_BYTES_PER_KEY_TENTHS % 10
+                ),
+                characters.saturating_add(n.saturating_mul(DICT_BYTES_PER_KEY_TENTHS) / 10),
+                Phases::INDEX.onwards(),
             );
         }
     }
-    if blob_payload > 0 {
+    // The blocks are charged at half the characters **and half the row framing**: a row is
+    // `entity | payload_len` and each field a `tag | kind`, plus a `u32` length on a `utf8` one,
+    // and for a short value that is more than the value ([`record_framing_bytes`]). The framing is
+    // zero exactly where no column is blob-resident, which is where there is no blob.
+    let framing = record_framing_bytes(&args.schema, n);
+    if framing > 0 {
         push(
             format!(
                 "the record blob: {} MiB of directory at 4 B/item, and its blocks modelled at half \
-                 the {} MiB of characters its columns carry",
+                 the {} MiB of characters its columns carry and the {} MiB of row framing around \
+                 them",
                 (4 * n) >> 20,
-                blob_payload >> 20
+                blob_payload >> 20,
+                framing >> 20
             ),
-            4 * n + blob_payload / EXTENT_SHARE,
+            4 * n + (blob_payload + framing) / EXTENT_SHARE,
             Phases::BLOB.onwards(),
         );
     }
     // Per view: `morton.u32`, `permutation.bin`, `row-entity.u32` and the segment's `columns.arrow`
-    // — the residual, the `tessera_id` and one slot per render column.
+    // — the residual, the `tessera_id` and one slot per render column, each with the Arrow validity
+    // bitmap the column carries beside it at a bit a row.
     let render: u64 = args
         .schema
         .attributes
@@ -1043,23 +1421,158 @@ pub(crate) fn disk(
         .filter(|a| a.render)
         .map(|a| fixed_width(a.ty))
         .sum();
+    let arrow_columns = 2 + args.schema.attributes.iter().filter(|a| a.render).count() as u64;
     push(
         format!("each view's segment, permutation and row→entity files, over {views} view(s)"),
-        (4 + 4 + 4 + 4 + 8 + render) * n * views,
+        ((4 + 4 + 4 + 4 + 8 + render) * n + arrow_columns * n.div_ceil(8)) * views,
         Phases::ASSEMBLE,
     );
-    // The artifact pass's row-column lane, one `u32` ordinal a row per level it draws.
-    let levels: u64 = args
-        .layers
-        .iter()
-        .map(|layer| layer.levels.len().max(1) as u64)
-        .sum();
     push(
-        format!("the artifact pass's row-column lanes, 4 B/item over {levels} level(s) a view"),
-        4 * n * views * levels,
+        "the artifact pass's row-column lanes, at a ceiling of 4 B an ordinal over the levels \
+         and the views each layer draws on"
+            .into(),
+        row_column_bytes(args, n, &member_entries_by_layer(args)),
         Phases::ASSEMBLE,
     );
     Residency { terms }
+}
+
+/// **The line a build prints where the forecast is over the free space**, or `None` where it is
+/// not.
+///
+/// Built here rather than at the call site so it can be tested: it is the only place the model's
+/// per-term breakdown reaches an operator, and a warning that had lost it would still be a warning.
+///
+/// It warns and the build goes on (`crate::pipeline::plan_build` carries why).
+pub(crate) fn forecast_warning(disk: &Residency, corpus: Corpus<'_>, free: u64) -> Option<String> {
+    let (phase, need) = disk.peak();
+    if free >= need {
+        return None;
+    }
+    let Corpus {
+        n,
+        pair_rows,
+        batches,
+        ..
+    } = corpus;
+    Some(format!(
+        "warning: this build is forecast to need ~{need} bytes at peak, in the {} phase (n = {n}, \
+         pairs = {pair_rows}, batches = {batches}), against {free} available at the output path. \
+         The forecast is a model, not a measurement — each term below says whether it is an exact \
+         width, a ceiling or an estimate — so the build goes on. If it does run out, the error \
+         names the file it could not reserve and the partial bundle is swept. Where that phase's \
+         bytes are:{}",
+        phase.name(),
+        disk.describe_phase(phase)
+    ))
+}
+
+/// What the artifact pass's row-column lanes cost **one** view.
+///
+/// **The lane's size depends on which of two forms a level takes, and a flat `4 × n` a level is
+/// only one of them.** `tessera_store::derived::choose` picks from the memberships the build has
+/// just resolved: a level whose memberships partition the corpus is a label lane (`.tslb`) at one
+/// narrow ordinal a row, and one whose memberships overlap is a list lane (`.tsll`) — a `u32`
+/// offset a row *and* one ordinal an entry. The 10⁷ MedCPT sample's MeSH list lane is
+/// **963,487,236 bytes, 96.35 B/item**, against the 8 a per-item charge gives it.
+///
+/// **What tells the two apart before the build is the entry count against the entity space.** A
+/// level partitions only where no entity is in two of its artifacts, so a layer declaring more
+/// than one entry an entity a level has at least one level that does not — and that layer is
+/// charged the list form at every level. GBIF's taxonomy declares exactly three entries an
+/// occurrence over three levels and is charged the label form, which is what it writes
+/// (1,258 MB measured against 1,509 charged); MedCPT's MeSH declares 47 an article over two
+/// levels and is charged the list form. A pin settles it outright: `rows` writes no lane at all,
+/// `column` is a label lane, `list` a list one.
+///
+/// ⊘ **The test is necessary and not sufficient**, so a layer whose entries are uneven across its
+/// levels — two an entity at one level and none at another — is charged the label form where one
+/// of its levels is a list.
+///
+/// ⊘ **The list charge is a ceiling of about 2× on a level of many artifacts**, and the label
+/// charge on a level of few. An ordinal is stored at the narrowest width that addresses the level
+/// — one byte under 255 artifacts, two under 65,535, four above — and the artifact count is not
+/// known before the level is published.
+fn row_column_bytes(args: &crate::BuildArgs, n: u64, entries: &[u64]) -> u64 {
+    use tessera_types::layer::ServingLayout;
+    let mut bytes = 0u64;
+    for (layer, &declared) in args.layers.iter().zip(entries) {
+        let views = layer_views(args, layer);
+        let levels = layer.levels.len().max(1) as u64;
+        // One narrow ordinal a row a level, which is a label lane whole and a list lane's offset
+        // table.
+        let lanes = 4u64
+            .saturating_mul(n)
+            .saturating_mul(levels)
+            .saturating_mul(views);
+        let overlapping = declared > n.saturating_mul(levels);
+        let list = match layer.layout {
+            Some(ServingLayout::ArtifactMajor) => continue,
+            Some(ServingLayout::RowMajorLabel) => false,
+            Some(ServingLayout::RowMajorList) => true,
+            None => overlapping,
+        };
+        bytes = bytes.saturating_add(if list {
+            lanes.saturating_add(4u64.saturating_mul(declared).saturating_mul(views))
+        } else {
+            lanes
+        });
+    }
+    bytes
+}
+
+/// **How many of this build's views a layer draws on**, which is what its lanes are one of a level.
+///
+/// Not the length of `views`: a declared name is a plain view **or a whole group**, and a group
+/// name draws the layer on every view of it (`Config::expand_layer_views`, `views.md` §2). A layer
+/// on a ten-view group declares one name and writes ten lanes a level.
+///
+/// A name matching no view of this build is charged every view rather than none. The declaration
+/// refuses an unknown name long before here (`config`'s layer compilation), so a name that reaches
+/// this and resolves to nothing is arguments assembled without the view; a lane charged twice
+/// costs a rerun, and one charged at nothing is the ENOSPC the forecast exists to name.
+fn layer_views(args: &crate::BuildArgs, layer: &tessera_types::layer::LayerDeclaration) -> u64 {
+    let total = args.views.len().max(1) as u64;
+    if layer.views.is_empty() {
+        return total;
+    }
+    layer
+        .views
+        .iter()
+        .map(|name| {
+            let drawn = args
+                .views
+                .iter()
+                .filter(|view| {
+                    // The view's own id, or the group's — a group name draws the layer on every
+                    // view of it, and `<group>` is the first component of `group:key`.
+                    &view.view_id == name
+                        || tessera_store::view_path_components(&view.view_id)
+                            .first()
+                            .is_some_and(|head| head == name)
+                })
+                .count() as u64;
+            match drawn {
+                0 => total,
+                drawn => drawn,
+            }
+        })
+        .sum()
+}
+
+/// Each declared layer's `(artifact, source)` pairs, in declaration order — its member source's
+/// key values, or zero for a layer that declares no member file.
+fn member_entries_by_layer(args: &crate::BuildArgs) -> Vec<u64> {
+    args.layers
+        .iter()
+        .map(|layer| {
+            args.layer_inputs
+                .iter()
+                .find(|input| input.name == layer.name)
+                .and_then(|input| input.members.as_ref())
+                .map_or(0, |members| member_entries(members).0)
+        })
+        .collect()
 }
 
 /// The characters one item of each declared column carries, indexed by declaration position —
@@ -1250,6 +1763,7 @@ mod tests {
             ty,
             payload_bytes: payload,
             extents: false,
+            framing_bytes: 0,
             text_index: false,
             phases: Phases::JOIN.and(Phases::INDEX).and(Phases::BLOB),
         }
@@ -1280,7 +1794,7 @@ mod tests {
             column(ScalarType::U32, 0),
         ];
         let entries = (2 * n) + (34 * n / 10) + n;
-        entity_order_residency(n, &columns, entries, entries)
+        entity_order_residency(n, IdShape::dense(n), &columns, entries, entries)
     }
 
     #[test]
@@ -1304,8 +1818,8 @@ mod tests {
     #[test]
     fn the_source_ids_are_reported_as_mapped_and_charged_at_nothing() {
         let n = 1_000_000_u64;
-        let with_layer = entity_order_residency(n, &[], n, n);
-        let without = entity_order_residency(n, &[], 0, 0);
+        let with_layer = entity_order_residency(n, IdShape::dense(n), &[], n, n);
+        let without = entity_order_residency(n, IdShape::dense(n), &[], 0, 0);
 
         // The publication is the only charged term either way; the ids move the mapped figure and
         // not the charged one.
@@ -1328,6 +1842,62 @@ mod tests {
         );
     }
 
+    /// **The ids file is charged over the rows every view declares, not over the entity space.**
+    /// Pass one allocates the union at the sum of the views' row counts and dedups inside it, so a
+    /// corpus whose views overlap holds a file larger than the `n` it produces —
+    /// 1.76× on `treeoflife-1m` and 4.29× on `multiview`.
+    #[test]
+    fn the_source_ids_are_charged_over_the_slots_the_file_is_allocated_at() {
+        let n = 1_000_000;
+        let dense = entity_order_residency(n, IdShape::dense(n), &[], 0, 0);
+        let overlapping = entity_order_residency(
+            n,
+            IdShape {
+                slots: 4 * n,
+                max_id: n - 1,
+            },
+            &[],
+            0,
+            0,
+        );
+        assert_eq!(
+            overlapping.at(Phase::Spill) - dense.at(Phase::Spill),
+            8 * 3 * n,
+            "four views over one entity space cost four ids files, not one"
+        );
+    }
+
+    /// **The member spill's runs widen with the largest source id.** The runs encode source ids
+    /// and the merged table entities, so a corpus whose ids are hashes over the `u64` space spends
+    /// the extra varint bytes on the runs alone.
+    #[test]
+    fn the_member_spill_widens_with_a_sparse_id_space() {
+        let n = 1_000_000;
+        let entries = 4_000_000;
+        let dense = entity_order_residency(n, IdShape::dense(n), &[], entries, entries);
+        let hashed = entity_order_residency(
+            n,
+            IdShape {
+                slots: n,
+                max_id: u64::MAX,
+            },
+            &[],
+            entries,
+            entries,
+        );
+        // varint_len(u64::MAX) = 10 against varint_len(10^6) = 3.
+        assert_eq!(
+            hashed.at(Phase::Join) - dense.at(Phase::Join),
+            entries * 7,
+            "a delta over the whole u64 space is ten bytes where one over 10^6 entities is three"
+        );
+        assert_eq!(
+            hashed.total(),
+            dense.total(),
+            "the spill is a file either way"
+        );
+    }
+
     /// **A declared column is reported and not charged.** The whole of a keyword column — its
     /// per-entity offsets, its presence bits and every character it holds — is a file under
     /// `.build-tmp/`, so it appears in the breakdown at its full size and adds nothing to the
@@ -1335,8 +1905,14 @@ mod tests {
     #[test]
     fn a_declared_column_is_reported_as_mapped_and_charged_at_nothing() {
         let n = 10_000_000;
-        let bare = entity_order_residency(n, &[], 0, 0);
-        let with_keyword = entity_order_residency(n, &[column(ScalarType::Keyword, 400 * n)], 0, 0);
+        let bare = entity_order_residency(n, IdShape::dense(n), &[], 0, 0);
+        let with_keyword = entity_order_residency(
+            n,
+            IdShape::dense(n),
+            &[column(ScalarType::Keyword, 400 * n)],
+            0,
+            0,
+        );
         assert_eq!(with_keyword.total(), bare.total());
         let term = with_keyword
             .terms
@@ -1366,7 +1942,7 @@ mod tests {
         let n = 10_000_000;
         let payload = 400 * n;
         for ty in [ScalarType::Text, ScalarType::Keyword, ScalarType::Utf8] {
-            let route = entity_order_residency(n, &[spilled(ty, payload)], 0, 0);
+            let route = entity_order_residency(n, IdShape::dense(n), &[spilled(ty, payload)], 0, 0);
             let term = route
                 .terms
                 .iter()
@@ -1379,7 +1955,7 @@ mod tests {
                 term.what
             );
             // The arena route on the same column, for the difference the routing is worth.
-            let arena = entity_order_residency(n, &[column(ty, payload)], 0, 0);
+            let arena = entity_order_residency(n, IdShape::dense(n), &[column(ty, payload)], 0, 0);
             let held = arena
                 .terms
                 .iter()
@@ -1389,7 +1965,77 @@ mod tests {
                 held.bytes > term.bytes + 8 * n,
                 "{ty:?}: the arena route costs the offsets and the characters whole"
             );
+            // And the frame around each extent row, which goes through the same compression the
+            // characters do ([`extent_framing_bytes`]).
+            let framed = entity_order_residency(
+                n,
+                IdShape::dense(n),
+                &[ColumnCost {
+                    framing_bytes: extent_framing_bytes(n),
+                    ..spilled(ty, payload)
+                }],
+                0,
+                0,
+            );
+            let with_frame = framed
+                .terms
+                .iter()
+                .find(|t| t.what.contains("declared column"))
+                .expect("the column is a term of its own");
+            assert_eq!(
+                with_frame.bytes,
+                term.bytes + extent_framing_bytes(n) / 2,
+                "{ty:?}: 15 B a row of frame, charged at half with the characters"
+            );
         }
+    }
+
+    /// **The row framing is charged from the route, not from the declared type.** A `keyword`
+    /// column the record blob alone reads spills the same extents a `text` column does and pays
+    /// the same 15 bytes a row, and the same column on the arena route pays none of it — its
+    /// values are not framed until the record blob itself.
+    ///
+    /// Kills a model that tests `ty == Text` for the frame, which leaves an unindexed `keyword`
+    /// column's rows uncharged on the route that column now takes.
+    #[test]
+    fn the_row_framing_follows_the_route_and_not_the_type() {
+        let n = 2_000;
+        let (mut args, _temp) = fixture(n);
+        let code = args
+            .schema
+            .attributes
+            .iter()
+            .position(|a| a.name == "code")
+            .expect("the fixture declares a keyword column");
+        // With neither `index` nor `render` the column is read by the record blob alone, which is
+        // the shape the extent route exists for.
+        args.schema.attributes[code].index = false;
+        let payloads = payloads_per_item(&args);
+
+        let spilled = crate::pipeline::ColumnRoutes::every_available(&args.schema);
+        assert!(
+            spilled.takes_extents(code),
+            "an unflagged keyword column has the extent route"
+        );
+        let (columns, _, _) = model_inputs(&args, n, &payloads, &spilled);
+        assert_eq!(columns[code].framing_bytes, extent_framing_bytes(n));
+        let weight = args
+            .schema
+            .attributes
+            .iter()
+            .position(|a| a.name == "weight")
+            .expect("the fixture declares a render column");
+        assert_eq!(
+            columns[weight].framing_bytes, 0,
+            "a fixed-width column carries no extents and no frame around them"
+        );
+
+        let arena = crate::pipeline::ColumnRoutes::forced_only(&args.schema);
+        let (held, _, _) = model_inputs(&args, n, &payloads, &arena);
+        assert_eq!(
+            held[code].framing_bytes, 0,
+            "a column that keeps its arena is not framed until the record blob itself"
+        );
     }
 
     /// A schema of string columns, each named by its position, for the route tests. `index` is the
@@ -1431,6 +2077,7 @@ mod tests {
         let schema = route_schema(&[(ScalarType::Keyword, false)]);
         let scratch_with_arena = stage_scratch(&entity_order_residency(
             n,
+            IdShape::dense(n),
             &[column(ScalarType::Keyword, payload)],
             0,
             0,
@@ -1439,6 +2086,7 @@ mod tests {
         let fits = choose_routes(
             &schema,
             n,
+            IdShape::dense(n),
             vec![spilled(ScalarType::Keyword, payload)],
             0,
             0,
@@ -1452,6 +2100,7 @@ mod tests {
         let does_not = choose_routes(
             &schema,
             n,
+            IdShape::dense(n),
             vec![spilled(ScalarType::Keyword, payload)],
             0,
             0,
@@ -1477,7 +2126,7 @@ mod tests {
             spilled(ScalarType::Keyword, 400 * n),
             spilled(ScalarType::Utf8, 400 * n),
         ];
-        let (routes, _) = choose_routes(&schema, n, columns, 0, 0, None);
+        let (routes, _) = choose_routes(&schema, n, IdShape::dense(n), columns, 0, 0, None);
         assert!(routes.takes_extents(0) && routes.takes_extents(1));
     }
 
@@ -1496,7 +2145,8 @@ mod tests {
                 spilled(ScalarType::Text, payload),
                 column(ScalarType::Keyword, payload),
             ];
-            let (routes, _) = choose_routes(&schema, n, columns, 0, 0, Some(free));
+            let (routes, _) =
+                choose_routes(&schema, n, IdShape::dense(n), columns, 0, 0, Some(free));
             assert!(routes.takes_extents(0), "text spills with {free} bytes free");
             assert!(
                 !routes.takes_extents(1),
@@ -1516,6 +2166,7 @@ mod tests {
         let schema = route_schema(&[(ScalarType::Keyword, false), (ScalarType::Utf8, false)]);
         let one = stage_scratch(&entity_order_residency(
             n,
+            IdShape::dense(n),
             &[
                 column(ScalarType::Keyword, payload),
                 spilled(ScalarType::Utf8, payload),
@@ -1525,6 +2176,7 @@ mod tests {
         ));
         let both = stage_scratch(&entity_order_residency(
             n,
+            IdShape::dense(n),
             &[
                 column(ScalarType::Keyword, payload),
                 column(ScalarType::Utf8, payload),
@@ -1537,7 +2189,15 @@ mod tests {
             spilled(ScalarType::Keyword, payload),
             spilled(ScalarType::Utf8, payload),
         ];
-        let (routes, _) = choose_routes(&schema, n, columns, 0, 0, Some(one * ROUTE_HEADROOM));
+        let (routes, _) = choose_routes(
+            &schema,
+            n,
+            IdShape::dense(n),
+            columns,
+            0,
+            0,
+            Some(one * ROUTE_HEADROOM),
+        );
         assert!(!routes.takes_extents(0), "the first column takes the arena");
         assert!(
             routes.takes_extents(1),
@@ -1575,7 +2235,7 @@ mod tests {
         // 459 GB of disk, which is what the box the rung was attempted on has.
         let free = Some(459_000_000_000);
         for (n, spills) in [(125_789_091u64, false), (3_495_729_729u64, true)] {
-            let (routes, _) = choose_routes(&schema, n, gbif(n), 3 * n, n, free);
+            let (routes, _) = choose_routes(&schema, n, IdShape::dense(n), gbif(n), 3 * n, n, free);
             assert_eq!(
                 routes.takes_extents(3),
                 spills,
@@ -1598,14 +2258,14 @@ mod tests {
         let extent_bytes = n.div_ceil(8) + 200 * n;
         // The source ids and the ordinal→entity map are files whatever the schema declares, so
         // each figure below is stated against a build declaring no column at all.
-        let bare = entity_order_residency(n, &[], 0, 0).at(Phase::Index);
+        let bare = entity_order_residency(n, IdShape::dense(n), &[], 0, 0).at(Phase::Index);
 
-        let without = entity_order_residency(n, &[plain], 0, 0);
+        let without = entity_order_residency(n, IdShape::dense(n), &[plain], 0, 0);
         assert_eq!(without.at(Phase::Index) - bare, extent_bytes);
 
         // The runs are charged the source's characters, being uncompressed where the extents that
         // hold the same prose are not.
-        let with = entity_order_residency(n, &[indexed], 0, 0);
+        let with = entity_order_residency(n, IdShape::dense(n), &[indexed], 0, 0);
         assert_eq!(with.at(Phase::Index) - bare, extent_bytes + 400 * n);
         assert_eq!(
             with.total(),
@@ -1629,8 +2289,8 @@ mod tests {
     fn a_member_row_is_charged_where_it_is_resident_and_reported_where_it_is_a_file() {
         let n = 10_000_000;
         let rows = 64_000_000;
-        let without = entity_order_residency(n, &[], 0, 0);
-        let with = entity_order_residency(n, &[], rows, rows);
+        let without = entity_order_residency(n, IdShape::dense(n), &[], 0, 0);
+        let with = entity_order_residency(n, IdShape::dense(n), &[], rows, rows);
         assert_eq!(
             with.total() - without.total(),
             rows * BYTES_PER_MEMBER_ENTRY,
@@ -1661,7 +2321,7 @@ mod tests {
     fn a_term_is_charged_to_the_phases_it_stands_through() {
         let n = 10_000_000;
         let entries = 64_000_000;
-        let residency = entity_order_residency(n, &[], entries, entries);
+        let residency = entity_order_residency(n, IdShape::dense(n), &[], entries, entries);
 
         let ids = 8 * n;
         assert_eq!(
@@ -1695,8 +2355,8 @@ mod tests {
             phases: Phases::JOIN.onwards(),
             ..column(ScalarType::U32, 0)
         };
-        let bare = entity_order_residency(n, &[], 0, 0);
-        let with = entity_order_residency(n, &[indexed, rendered], 0, 0);
+        let bare = entity_order_residency(n, IdShape::dense(n), &[], 0, 0);
+        let with = entity_order_residency(n, IdShape::dense(n), &[indexed, rendered], 0, 0);
 
         let index_only = 8 * n + n.div_ceil(8) + arena_capacity(40 * n + 4 * n);
         let render = 4 * n + n.div_ceil(8);
@@ -1710,6 +2370,265 @@ mod tests {
             with.at(Phase::Assemble) - bare.at(Phase::Assemble),
             render,
             "the render column is read by the segment write and stays"
+        );
+    }
+
+    /// The disk model over the fixture below, at whatever row count the caller wants.
+    fn fixture_disk(args: &crate::BuildArgs, n: u64) -> Residency {
+        let payloads = payloads_per_item(args);
+        let free = crate::pipeline::available_disk(&args.out);
+        let (_routes, tail) = plan_routes(args, n, IdShape::dense(n), &payloads, free);
+        disk(
+            args,
+            Corpus {
+                n,
+                pair_rows: n,
+                term_rows: &[n],
+                batches: 1,
+                bucket_in_ram: true,
+            },
+            &payloads,
+            &tail,
+        )
+    }
+
+    /// The corpus shape [`fixture_disk`] models, for a caller that wants it beside the model.
+    fn fixture_corpus(n: u64, term_rows: &[u64]) -> Corpus<'_> {
+        Corpus {
+            n,
+            pair_rows: n,
+            term_rows,
+            batches: 1,
+            bucket_in_ram: true,
+        }
+    }
+
+    /// **The warning carries the phase and every term in it**, which is the whole of what an
+    /// operator can act on: the total says a build may not fit and the breakdown says what to drop.
+    ///
+    /// Kills a warning that prints the total alone, and one that prints at a free-space figure the
+    /// forecast fits inside.
+    #[test]
+    fn a_forecast_over_the_free_space_warns_with_the_phase_and_its_terms() {
+        let n = 2_000;
+        let (args, _temp) = fixture(n);
+        let disk = fixture_disk(&args, n);
+        let term_rows = [n];
+        let corpus = fixture_corpus(n, &term_rows);
+        let (phase, need) = disk.peak();
+        assert!(need > 0, "the fixture has to forecast something");
+
+        assert!(
+            forecast_warning(&disk, corpus, need).is_none(),
+            "a forecast the free space covers warns about nothing"
+        );
+        let warning = forecast_warning(&disk, corpus, need - 1)
+            .expect("a forecast over the free space warns");
+        assert!(
+            warning.contains(phase.name()),
+            "the warning must name the phase it is about: {warning}"
+        );
+        let breakdown = disk.describe_phase(phase);
+        assert!(
+            breakdown.lines().count() > 2,
+            "the fixture has to have several terms in its peak phase for this to test anything"
+        );
+        assert!(
+            warning.contains(&breakdown),
+            "the warning must carry the phase's per-term breakdown: {warning}"
+        );
+    }
+
+    /// **An indexed `text` column's token index is in the bundle, and is charged.** Its
+    /// `postings.arrow` and `dict.bin` are written at the index phase and released by nothing. A
+    /// model that stopped at the column's blob residency reached neither: 176.81 B/item on the
+    /// 10⁷ MedCPT sample, 23% of that bundle.
+    #[test]
+    fn an_indexed_text_columns_token_index_is_a_term_of_the_bundle() {
+        let (args, _temp) = fixture(2_000);
+        let disk = fixture_disk(&args, 2_000);
+        let term = disk
+            .terms
+            .iter()
+            .find(|t| t.what.contains("the text index's postings.arrow"))
+            .expect("an indexed text column's token index is a term of its own");
+        assert!(term.bytes > 0, "{}", term.what);
+        assert!(
+            term.phases.holds(Phase::Assemble),
+            "the token index is in the bundle to the end of the build"
+        );
+        // And the blob row the same column keeps, which is a different term over the same
+        // characters.
+        assert!(
+            disk.terms.iter().any(|t| t.what.contains("the record blob")),
+            "a text column is blob-resident whether or not it is indexed"
+        );
+    }
+
+    /// **An indexed `keyword` column's dictionary is in the bundle, and is charged.** The scratch
+    /// the dictionary pass leaves behind was a term and the dictionary it produces was not.
+    #[test]
+    fn an_indexed_keyword_columns_dictionary_is_a_term_of_the_bundle() {
+        let (args, _temp) = fixture(2_000);
+        let disk = fixture_disk(&args, 2_000);
+        let term = disk
+            .terms
+            .iter()
+            .find(|t| t.what.contains("': dict.bin"))
+            .expect("the finished dictionary is a term of its own");
+        assert!(term.phases.holds(Phase::Assemble), "{}", term.what);
+        assert!(
+            disk.terms
+                .iter()
+                .any(|t| t.what.contains("the value column's own spool")),
+            "values.arrow is assembled from a spool of the same values beside it"
+        );
+        // **And the entry overhead beside the characters.** The file is front-coded, two varints
+        // and a share of a restart offset an entry, so a column of short distinct values that
+        // share no prefix is over the characters alone.
+        let characters = payload(payloads_per_item(&args)[2], 2_000);
+        assert!(
+            term.bytes > characters,
+            "the charge has to be over the characters alone: {} against {characters}",
+            term.bytes
+        );
+        assert_eq!(
+            term.bytes,
+            characters + 2_000 * DICT_BYTES_PER_KEY_TENTHS / 10
+        );
+    }
+
+    /// **The external-id sidecar is four components over two files**, and the locator is one of
+    /// them. A term that charged three was 4 B/item short, which is 14 GB at the 3.50×10⁹-row
+    /// rung.
+    #[test]
+    fn the_external_id_sidecar_is_charged_at_the_figure_it_measures() {
+        let (mut args, _temp) = fixture(2_000);
+        args.mint_external_ids = true;
+        // The term is arithmetic over `n` alone, so the model is taken at the row count the
+        // measurement was made at rather than the fixture's.
+        let n = 1_000_000;
+        let disk = fixture_disk(&args, n);
+        let term = disk
+            .terms
+            .iter()
+            .find(|t| t.what.contains("the external-id sidecar"))
+            .expect("a minting build carries the sidecar as a term of its own");
+        // `medcpt-1m` built with `--mint-external-ids` writes 16,251,010 B of
+        // `external-ids-0.arrow` and 4,000,000 of `ext-locator.u32` at this `n` — 20,251,010, of
+        // which the schema and footer are about a kilobyte (measured,
+        // `probes/2026-09-11-disk-forecast/`).
+        assert_eq!(term.bytes, 20_250_004);
+        assert!(
+            term.bytes > 20 * n,
+            "the Arrow framing is a quarter byte an item on top of the four buffers"
+        );
+    }
+
+    /// **A row-major list lane costs its entries, not four bytes an item.** The lane's form is
+    /// chosen from the memberships the build resolves, so a level the declaration leaves open is
+    /// charged the list form: an offset a row and an ordinal an entry. A layer pinned `rows`
+    /// writes no lane at all.
+    #[test]
+    fn a_row_column_lane_is_charged_its_entries_where_the_form_is_open() {
+        use tessera_types::layer::ServingLayout;
+        let (mut args, _temp) = fixture(2_000);
+        let n = 2_000;
+        let entries = member_entries_by_layer(&args);
+        assert_eq!(entries, vec![n], "the fixture's member file names every item");
+
+        // One entry an entity over one level: every level can be a label lane.
+        assert_eq!(
+            row_column_bytes(&args, n, &entries),
+            4 * n,
+            "a label lane is one ordinal a row and no offset table"
+        );
+        // Three an entity over the same one level: at least one level overlaps.
+        assert_eq!(
+            row_column_bytes(&args, n, &[3 * n]),
+            4 * n + 4 * 3 * n,
+            "a list lane is an offset a row and an ordinal an entry"
+        );
+
+        args.layers[0].layout = Some(ServingLayout::RowMajorList);
+        assert_eq!(
+            row_column_bytes(&args, n, &entries),
+            4 * n + 4 * n,
+            "a pin settles the form whatever the entry count says"
+        );
+
+        args.layers[0].layout = Some(ServingLayout::ArtifactMajor);
+        assert_eq!(
+            row_column_bytes(&args, n, &[3 * n]),
+            0,
+            "a layer pinned artifact-major writes no lane"
+        );
+    }
+
+    /// **A layer on a group draws on every view of it, and is charged every one.** `views` holds
+    /// the names the declaration carries, and one of them can be a group
+    /// (`Config::expand_layer_views`), so counting the names charges a layer on a ten-view group
+    /// one view's lanes.
+    ///
+    /// A name resolving to no view of this build is charged every view rather than none, which is
+    /// the direction a forecast can be wrong in without ending a build at hour three.
+    #[test]
+    fn a_layer_on_a_group_is_charged_every_view_of_it() {
+        let n = 2_000;
+        let (mut args, _temp) = fixture(n);
+        let view = args.views[0].clone();
+        args.views = ["g:a", "g:b", "g:c"]
+            .iter()
+            .map(|id| crate::ViewArgs {
+                view_id: (*id).into(),
+                ..view.clone()
+            })
+            .collect();
+
+        args.layers[0].views = vec!["g".into()];
+        assert_eq!(
+            layer_views(&args, &args.layers[0]),
+            3,
+            "a group name draws the layer on every view of the group"
+        );
+        assert_eq!(
+            row_column_bytes(&args, n, &[n]),
+            4 * n * 3,
+            "one label lane per view of the group"
+        );
+
+        args.layers[0].views = vec!["g:a".into(), "g:b".into()];
+        assert_eq!(
+            layer_views(&args, &args.layers[0]),
+            2,
+            "two views of the group named one at a time are two views"
+        );
+
+        args.layers[0].views = vec!["s0".into()];
+        assert_eq!(
+            layer_views(&args, &args.layers[0]),
+            3,
+            "a name matching no view of this build is charged every view, not none"
+        );
+    }
+
+    /// **`postings.arrow` is a record a term, not four bytes a pair.** A relation of singleton
+    /// terms costs thirteen bytes a pair — eight of Arrow offset, a tag and four of entity — where
+    /// `4 × pairs` charges four.
+    #[test]
+    fn the_postings_are_charged_per_term_and_a_singleton_term_costs_thirteen() {
+        let n = 1_000_000;
+        let singletons = vec![1u64; 1_000];
+        assert_eq!(
+            postings_bytes(&singletons, n),
+            8 * 1_001 + 1_000 * (1 + 4),
+            "the offset table and one tagged four-byte entity a term"
+        );
+        // And a term over the whole entity space is a bitset rather than four bytes a member.
+        let whole = postings_bytes(&[n], n);
+        assert!(
+            whole < 4 * n,
+            "a term of 10^6 entities is 8 KiB a container, not 4 B a member: {whole}"
         );
     }
 
@@ -1972,6 +2891,12 @@ require_member_visibility = "none"
                 .any(|f| f == "columns.arrow" || f == "postings.arrow"),
             "the refusal should land before any segment is written; found {written:?}"
         );
+        // And the partial prefix goes back, so a retry has the disk the first attempt took. The
+        // dictionary is written under it before the plan runs, so there is something to sweep.
+        assert!(
+            !args.out.join(crate::PREFIX).exists(),
+            "a failed build takes its partial bundle with it; found {written:?}"
+        );
     }
 
     /// And the same build fits under a budget that covers it, so the pre-flight is a bound and not
@@ -1986,6 +2911,52 @@ require_member_visibility = "none"
             !args.out.join(".build-tmp").exists(),
             "a successful build takes its scratch directory with it"
         );
+    }
+
+    /// **A build into a directory that already holds a bundle refuses, and the bundle stands.**
+    ///
+    /// The argument check runs before the sweep (`crate::pipeline::build`) for this case alone:
+    /// `<out>/CURRENT` existing is the one refusal that fires while `<out>/v00000` is the
+    /// *published* prefix, so a sweep reaching it is asking to delete a bundle readers can
+    /// resolve. It refuses, but the caller is then told the tool tried.
+    #[test]
+    fn a_build_into_a_published_bundle_root_refuses_and_leaves_it_whole() {
+        let (args, _temp) = fixture(2_000);
+        crate::build(&args).expect("the first build publishes a bundle");
+        let current = std::fs::read(args.out.join("CURRENT")).expect("CURRENT was published");
+        let prefix = args.out.join(crate::PREFIX);
+        let before: u64 = walk_bytes(&prefix);
+        assert!(before > 0, "the published prefix has to hold something");
+
+        let error = crate::build(&args).expect_err("a second build into the same --out refuses");
+        assert!(
+            error.to_string().contains("already contains a bundle"),
+            "the refusal is the argument check's: {error}"
+        );
+        assert_eq!(
+            std::fs::read(args.out.join("CURRENT")).expect("CURRENT still stands"),
+            current,
+            "the published pointer must be untouched"
+        );
+        assert_eq!(
+            walk_bytes(&prefix),
+            before,
+            "the published prefix must be untouched"
+        );
+    }
+
+    /// Every byte under a directory, recursively — what a published prefix weighs.
+    fn walk_bytes(dir: &std::path::Path) -> u64 {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return 0;
+        };
+        entries
+            .filter_map(|entry| entry.ok())
+            .map(|entry| match entry.path().is_dir() {
+                true => walk_bytes(&entry.path()),
+                false => entry.metadata().map(|m| m.len()).unwrap_or(0),
+            })
+            .sum()
     }
 
     #[test]
@@ -2013,7 +2984,13 @@ require_member_visibility = "none"
 
         let (args, _temp) = fixture(N);
         let free = crate::pipeline::available_disk(&args.out);
-        let (_routes, model) = plan_routes(&args, N, &payloads_per_item(&args), free);
+        let (_routes, model) = plan_routes(
+            &args,
+            N,
+            IdShape::dense(N),
+            &payloads_per_item(&args),
+            free,
+        );
         println!("model: {} MiB{}", model.total() >> 20, model.describe());
         crate::build_observed(&args, &Trace).unwrap();
         println!(

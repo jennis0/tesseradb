@@ -1,4 +1,4 @@
-//! `hard_link_forward` and `reclaim_prefix` (compaction §8): the fold's carry-forward and
+//! `hard_link_forward` and the two reclaims (compaction §8): the fold's carry-forward and
 //! whole-prefix delete. Each test's doc names the mutation it kills.
 
 use std::fs;
@@ -6,7 +6,7 @@ use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 
 use tessera_store::manifest::CurrentPointer;
-use tessera_store::{hard_link_forward, reclaim_prefix, StoreError};
+use tessera_store::{hard_link_forward, reclaim_prefix, reclaim_unpublished_prefix, StoreError};
 
 fn write_current(root: &Path, prefix: &str) {
     let current = CurrentPointer {
@@ -204,5 +204,50 @@ fn linking_onto_an_existing_target_is_an_error_not_a_silent_overwrite() {
     assert_eq!(
         untouched, b"already here from a first pass",
         "the pre-existing target must be byte-for-byte untouched, not overwritten or truncated"
+    );
+}
+
+/// **A prefix in a root with no `CURRENT` is reclaimed**, which is the partial bundle a failed
+/// build leaves: it wrote its prefix and never reached the pointer, so nothing names it.
+///
+/// Kills a `reclaim_unpublished_prefix` that refuses whenever `CURRENT` cannot be read — which is
+/// what `reclaim_prefix` does, and is why the two are separate functions.
+#[test]
+fn an_unpublished_prefix_in_a_root_with_no_current_is_reclaimed() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    let prefix = root.join("v00000");
+    fs::create_dir_all(prefix.join("dictionary")).expect("mkdir prefix");
+    fs::write(prefix.join("dictionary/terms-0.dict"), b"partial").expect("write a partial file");
+
+    reclaim_unpublished_prefix(&prefix).expect("no CURRENT, so nothing names this prefix");
+    assert!(!prefix.exists(), "the partial prefix must be gone");
+    assert!(root.exists(), "the bundle root itself is not this function's business");
+}
+
+/// **A `CURRENT` of any kind refuses the unpublished reclaim**, whether it names this prefix or
+/// another, because absence is that function's whole proof.
+///
+/// Kills a `reclaim_unpublished_prefix` that reads `CURRENT` and compares prefix names — that
+/// would delete a superseded prefix on the wrong evidence, and `reclaim_prefix` is the entry point
+/// that carries the right one.
+#[test]
+fn an_unpublished_reclaim_refuses_wherever_a_current_exists() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    let prefix = root.join("v00000");
+    fs::create_dir_all(&prefix).expect("mkdir prefix");
+    fs::write(prefix.join("MANIFEST.json"), b"{}").expect("write MANIFEST.json");
+    // A pointer naming a *different* prefix: `reclaim_prefix` would delete this one.
+    write_current(root, "v00001");
+
+    let err = reclaim_unpublished_prefix(&prefix).expect_err("a CURRENT exists");
+    assert!(
+        matches!(&err, StoreError::ReclaimRefusedCurrentExists { prefix: p, .. } if p == "v00000"),
+        "expected ReclaimRefusedCurrentExists naming the prefix, got {err:?}"
+    );
+    assert!(
+        prefix.join("MANIFEST.json").exists(),
+        "nothing may be deleted on a refusal"
     );
 }

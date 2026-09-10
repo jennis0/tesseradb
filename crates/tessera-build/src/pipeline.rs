@@ -613,6 +613,7 @@ fn plan_build(
     args: &BuildArgs,
     n: u64,
     route: crate::ExtentRoute,
+    ids: crate::residency::IdShape,
     pair_rows: usize,
     row_counts: &[u64],
     histogram: &[u64],
@@ -641,7 +642,7 @@ fn plan_build(
     // is not affected by the choice: every column's storage is a mapped term and `total()` counts
     // the anonymous ones.
     let free = available_disk(&args.out);
-    let (routes, tail) = crate::residency::routes_for(args, n, &payloads, free, route);
+    let (routes, tail) = crate::residency::routes_for(args, n, ids, &payloads, free, route);
     report_column_routes(args, &routes, &tail, free);
     if tail.total() > budget {
         return Err(BuildError::Invalid(format!(
@@ -801,16 +802,33 @@ fn plan_build(
     }
     band_bounds.push((lo, row_counts.len() as u32));
 
-    // Disk pre-flight (fail-closed): the build's transient spills and its outputs coexist in
-    // phases, so the forecast is the largest phase and not a total nothing ever holds. Refuse up
-    // front with the arithmetic rather than dying on ENOSPC hours in. `residency::disk` names every
-    // term and the phases it stands through; nothing is derived twice here.
+    // ---- the disk pre-flight ------------------------------------------------------------------
+    // The build's transient spills and its outputs coexist in phases, so the forecast is the
+    // largest phase and not a total nothing ever holds. `residency::disk` names every term and the
+    // phases it stands through; nothing is derived twice here.
+    //
+    // **It warns and does not refuse.** The model can be wrong in either direction — several of its
+    // terms are stated ceilings a corpus can exceed, and several corpus shapes cost bytes no term
+    // covers — so it is not a figure to hold a door with. A build that runs out of disk writes no
+    // `CURRENT`, publishes no identity and mints no id that survives, and the partial prefix is
+    // swept, so what a wrong admission costs is the build's wall clock. What a wrong refusal cost
+    // was the same wall clock with no way to say "I accept the risk": there is no flag,
+    // environment variable or configuration key that moves this figure. That is the house rule for
+    // something recoverable that discloses nothing — print the numbers and leave the decision with
+    // the operator — and it is the shape the memory model above already uses for its own band.
     let p = pair_rows as u64;
-    let disk = crate::residency::disk(args, n, p, batches, bucket_in_ram, &payloads, &tail);
+    let corpus = crate::residency::Corpus {
+        n,
+        pair_rows: p,
+        term_rows: row_counts,
+        batches,
+        bucket_in_ram,
+    };
+    let disk = crate::residency::disk(args, corpus, &payloads, &tail);
     let (phase, disk_need) = disk.peak();
-    // **Printed, not only refused.** An operator sizing a corpus has no other way to ask what a
-    // build will cost the disk, and the campaign's rung 6 died at hour three on a forecast nobody
-    // could read (`probes/2026-09-10-build-disk/`).
+    // **Printed whatever the free space is.** An operator sizing a corpus has no other way to ask
+    // what a build will cost the disk, and the campaign's rung 6 died at hour three on a forecast
+    // nobody could read (`probes/2026-09-10-build-disk/`).
     eprintln!(
         "disk: ~{} MiB at peak, in the {} phase{}",
         disk_need >> 20,
@@ -820,16 +838,10 @@ fn plan_build(
             .map(|&ph| format!(" ({} {} MiB)", ph.name(), disk.at(ph) >> 20))
             .collect::<String>()
     );
-    if let Some(free) = available_disk(&args.out) {
-        if free < disk_need {
-            return Err(BuildError::Invalid(format!(
-                "insufficient disk for this build: ~{disk_need} bytes needed at peak, in the {} \
-                 phase (n = {n}, pairs = {p}, batches = {batches}), {free} available at the output \
-                 path; free disk and retry. Where that phase's bytes are:{}",
-                phase.name(),
-                disk.describe_phase(phase)
-            )));
-        }
+    if let Some(warning) =
+        free.and_then(|free| crate::residency::forecast_warning(&disk, corpus, free))
+    {
+        eprintln!("{warning}");
     }
 
     Ok(BuildPlan {
@@ -896,12 +908,56 @@ fn report_column_routes(
     );
 }
 
+/// Run the build, and **take the partial prefix with it if it does not finish**.
+///
+/// `.build-tmp/` has always gone back on the way out ([`spill::TmpDir`]), and the prefix under
+/// `<out>/` did not — so a build that ran out of disk left its bytes behind and the retry started
+/// with less free space than the first attempt had. The rung-6 attempt died at hour three with
+/// 93 GB of bundle written. Nothing published it: `CURRENT` is written last and
+/// [`crate::validate_args`] refuses to start where one already exists, so a prefix here is a
+/// prefix no reader can resolve, which is the proof
+/// [`tessera_store::reclaim_unpublished_prefix`] makes for itself before deleting anything.
+///
+/// That refusal is why the argument check runs here rather than inside [`build_bundle`]. It is
+/// the one error that fires while `<out>/CURRENT` exists, which is the one state the sweep
+/// refuses to delete in, so leaving it under the sweep would print a warning naming a published
+/// bundle on every build into a directory that already holds one.
+///
+/// **A failure to sweep is a warning and nothing else.** The build has already failed and the
+/// error the caller gets is the one worth having; a tree that cannot be removed is the residual
+/// that stood before this existed.
 pub(crate) fn build(
     args: &BuildArgs,
     observer: &dyn BuildObserver,
     route: crate::ExtentRoute,
 ) -> Result<BuildReport> {
     validate_args(args)?;
+    let outcome = build_bundle(args, observer, route);
+    if outcome.is_err() {
+        let prefix = args.out.join(PREFIX);
+        if prefix.is_dir() {
+            match tessera_store::reclaim_unpublished_prefix(&prefix) {
+                Ok(()) => eprintln!(
+                    "swept the partial bundle at {}: this build wrote no CURRENT, so nothing \
+                     names it and a retry has the disk back",
+                    prefix.display()
+                ),
+                Err(e) => eprintln!(
+                    "warning: the partial bundle at {} could not be swept ({e}); it stands, and \
+                     its disk with it",
+                    prefix.display()
+                ),
+            }
+        }
+    }
+    outcome
+}
+
+fn build_bundle(
+    args: &BuildArgs,
+    observer: &dyn BuildObserver,
+    route: crate::ExtentRoute,
+) -> Result<BuildReport> {
     let mut timer = StageTimer::new(observer);
     let plugin = Passthrough::new();
     require_decomposable_labelling(&plugin)?;
@@ -977,10 +1033,15 @@ pub(crate) fn build(
     // size is identity-bearing (I9), so it is derived deterministically here, recorded in
     // provenance when it batches, and never silently re-derived on a rebuild (the CLI replays
     // a carried bundle's recorded value).
+    let id_shape = crate::residency::IdShape {
+        slots: source_ids.slots() as u64,
+        max_id: ids_last,
+    };
     let plan = plan_build(
         args,
         n,
         route,
+        id_shape,
         pair_rows,
         &row_counts,
         &histogram,
@@ -5313,6 +5374,16 @@ fn read_source_ids_into(
 pub(crate) struct SourceIds {
     ids: spill::MappedArray<u64>,
     len: usize,
+}
+
+impl SourceIds {
+    /// **What the file cost the disk**, which is every view's rows and not the union's: the array
+    /// is allocated at their sum and the dedup moves values inside it rather than shortening it
+    /// ([`read_source_ids_union`]). The disk pre-flight is charged over this and `n` is what
+    /// survives ([`crate::residency::IdShape`]).
+    pub(crate) fn slots(&self) -> usize {
+        self.ids.as_slice().len()
+    }
 }
 
 impl std::ops::Deref for SourceIds {

@@ -227,8 +227,9 @@ encoded page size and reads a dictionary-encoded string column at a quarter of i
 at 44.77 GB against the 128 GiB of prose it holds) and on a repetitive keyword column it is higher
 still
 ([`probes/2026-09-10-blob-resident-strings/`](../../probes/2026-09-10-blob-resident-strings/README.md)),
-and half is charged rather than a 2.9th because the figure is one corpus's and the pre-flight
-refuses a build rather than warns. Modelled, not measured for this shape.
+and half is charged rather than a 2.9th because the figure is one corpus's. Modelled, not measured
+for this shape, and an estimate rather than a ceiling: a compression ratio has no lower bound at one
+half, and a blob-resident column of high-entropy short values measures 0.567 to 0.750.
 
 Which columns the term applies to is the route the build chose, carried into the model rather than
 restated in it: a pre-flight that decided the route for itself would charge an arena the build does
@@ -311,4 +312,5 @@ threads, one per text column, so a corpus of one text column compresses on one c
 compression inside `RecordBlobWriter` is where that would come from, and it is not in this change.
 
 At 10⁹ with abstracts the 10⁸ figures scale to about 9 hours over the three stages, 1.2 TB of prose
-and 400 GB of extents. The disk pre-flight is what decides whether that build starts.
+and 400 GB of extents. The disk pre-flight prints that forecast before the build starts; it warns
+where the disk will not hold it and leaves the decision with the operator.
