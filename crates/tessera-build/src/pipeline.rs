@@ -26,13 +26,14 @@
 //! | points ×1 | external ids (when minting) | 20N |
 //! | points ×1 | geometry, the tiler sort, and the segment | 28N |
 //!
-//! ## A text column's prose is never permuted
+//! ## A column no pass reads at an entity is never permuted
 //!
-//! Every other declared family is placed at its entity index as the join resolves it. Prose is
-//! the corpus's bytes, so placing it is a permutation of the source through a mapping larger than
-//! memory. Instead each join chunk of each `text` column is written as one record-blob extent in
-//! that chunk's entity order ([`crate::prose`], `build-prose-extents.md`); the text index reads
-//! the extents in block windows and the record blob merges them.
+//! A declared value is placed at its entity index as the join resolves it, and for a string
+//! column that is a permutation of the source's characters through a mapping larger than memory.
+//! A column whose only reader is the record blob is spared it: each join chunk of it is written
+//! as one record-blob extent in that chunk's entity order ([`takes_extents`], [`crate::extents`],
+//! `build-prose-extents.md`), the blob merges the extents, and a `text` column's token index
+//! reads them in block windows first.
 //!
 //! ## Batch-scoped signature assignment (§11.1)
 //!
@@ -82,8 +83,9 @@
 //! scatters and tallies each column on a thread of its own
 //! ([`read_one_attribute_source`]). It participates in no ordering decision either, and for a
 //! stronger reason than the sorts do: the lanes never meet. Each column is its own mapped array
-//! with its own presence bits and its own arena, indexed by entity, and each `text` column its own
-//! extent writer ([`crate::prose`]), so no two lanes can name the same byte; the only shared state is read-only (the join's answer, the declaration) and the
+//! with its own presence bits and its own arena, indexed by entity, and each spilled column its
+//! own extent writer ([`crate::extents`]), so no two lanes can name the same byte. The only
+//! shared state is read-only — the join's answer and the declaration — and the
 //! only shared *result* is the coverage tally, which is returned per lane and folded in
 //! declaration order rather than accumulated across threads. Minting stays where it was — a
 //! serial pre-pass per decoded batch, in file order — so the vocabulary codes a build assigns are
@@ -1542,7 +1544,7 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
     // The columns' files live in the same `.build-tmp/` as the spill and band files, so a killed
     // build leaves them to the next `TmpDir::create` exactly as it leaves those.
     let scratch = crate::column::ColumnScratch::new(tmp.path());
-    let (attributes_by_entity, mut prose, coverage) = read_attributes_by_entity(
+    let (attributes_by_entity, mut spilled, coverage) = read_attributes_by_entity(
         args,
         n,
         &source_ids,
@@ -1684,21 +1686,21 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
     // here (stage 5, permanent under I9) and the values have just been read, which are the two
     // things the emit needs. It cannot ride on `PostingsWrite` — that stage runs before the
     // attribute values exist.
-    // The extents the join spilled, opened once for both readers: the text index tokenises them
-    // in block windows and the record blob merges them (`crate::prose`). Folded first where a
-    // column spilled more than one merge holds open.
-    for column in prose.iter_mut() {
+    // The extents the join spilled, opened once for every reader: the record blob merges them,
+    // and a `text` column's token index tokenises them in block windows first (`crate::extents`).
+    // Folded first where a column spilled more than one merge holds open.
+    for column in spilled.iter_mut() {
         column.cascade()?;
     }
-    let open_prose: Vec<crate::prose::OpenProse> = prose
+    let open_extents: Vec<crate::extents::OpenExtents> = spilled
         .iter()
-        .map(crate::prose::ProseColumn::open)
+        .map(crate::extents::ExtentColumn::open)
         .collect::<Result<_>>()?;
     let (filter_paths, text_index) = write_filter_postings(
         &partition_dir,
         &args.schema,
         &attributes_by_entity,
-        &open_prose,
+        &open_extents,
         plan.budget,
     )?;
     // The text columns' share, charged out of the block rather than measured beside it — the two
@@ -1731,12 +1733,12 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
         &args.schema,
         n,
         &attributes_by_entity,
-        &open_prose,
+        &open_extents,
     )?;
     // Both readers are done, so the extents go back to the disk before the row spaces are
     // written. A build that failed above leaves them to `TmpDir::close`.
-    drop(open_prose);
-    for column in prose.iter_mut() {
+    drop(open_extents);
+    for column in spilled.iter_mut() {
         column.remove();
     }
     timer.end(BuildStage::RecordBlob, n);
@@ -1747,7 +1749,7 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
     // of the segment write, straight through the tiler sort's 12 B/row and the record batch beside
     // it.
     //
-    // A `text` column has nothing left to release — its prose was spilled as extents and the
+    // A spilled column has nothing left to release — its characters went out as extents and the
     // extents are unlinked above. What is left is the blob-resident columns, the postings pass
     // having already released the rest; `release` is idempotent, so the loop states the whole rule
     // rather than the half of it this line reaches.
@@ -2060,7 +2062,7 @@ fn read_attributes_by_entity(
     tmp: &Path,
 ) -> Result<(
     Vec<EntityColumn>,
-    Vec<crate::prose::ProseColumn>,
+    Vec<crate::extents::ExtentColumn>,
     Vec<crate::AttributeCoverage>,
 )> {
     if args.schema.is_empty() {
@@ -2070,22 +2072,23 @@ fn read_attributes_by_entity(
     // One typed column per attribute, indexed by entity — see [`EntityColumn`] for why this is not
     // the `ScalarValue` vector it reads like, and what that costs at 10⁸ items and above.
     //
-    // **A `text` column's slot carries no values.** Its prose is spilled as record-blob extents by
-    // the sweep below and read from them by the text index and the record blob
-    // ([`crate::prose`]); what is kept here is the length, so every later pass can go on indexing
-    // this vector by an attribute's declaration position.
+    // **A column no pass reads at an entity carries no values here.** Its characters are spilled
+    // as record-blob extents by the sweep below and read from them by the record blob, and by the
+    // token index too where the column is `text` ([`takes_extents`], [`crate::extents`]). What is
+    // kept here is the length, so every later pass can go on indexing this vector by an
+    // attribute's declaration position.
     let mut by_entity: Vec<EntityColumn> = attributes
         .iter()
-        .map(|a| match a.ty {
-            ScalarType::Text => EntityColumn::prose(scratch, a.ty, n as usize),
-            ty => EntityColumn::filled(scratch, ty, n as usize),
+        .map(|a| match takes_extents(&args.schema, a) {
+            true => EntityColumn::spilled(scratch, a.ty, n as usize),
+            false => EntityColumn::filled(scratch, a.ty, n as usize),
         })
         .collect::<Result<_>>()?;
-    let mut prose: Vec<crate::prose::ProseColumn> = attributes
+    let mut spilled: Vec<crate::extents::ExtentColumn> = attributes
         .iter()
         .enumerate()
-        .filter(|(_, a)| a.ty == ScalarType::Text)
-        .map(|(i, a)| crate::prose::ProseColumn::new(tmp, i, &a.name))
+        .filter(|(_, a)| takes_extents(&args.schema, a))
+        .map(|(i, a)| crate::extents::ExtentColumn::new(tmp, i, &a.name))
         .collect();
     // **One sweep per source, not one over a single corpus file.** Each declared attribute names
     // the file it is read from, so the groups are the passes; a build whose columns sit in three
@@ -2101,18 +2104,18 @@ fn read_attributes_by_entity(
             minters,
             scratch,
             &mut by_entity,
-            &mut prose,
+            &mut spilled,
             &mut coverage,
         )?;
     }
-    Ok((by_entity, prose, coverage))
+    Ok((by_entity, spilled, coverage))
 }
 
 /// What one column's share of a resolved chunk is: a scatter into its entity-major column, or —
-/// for a `text` column, which has none — an extent of prose written in the chunk's entity order.
+/// for a column that has none ([`takes_extents`]) — an extent written in the chunk's entity order.
 ///
 /// The lanes share nothing. Each entity-order column is its own mapped array with its own
-/// presence bits, and each `text` column its own extent writer, so a chunk's work splits across
+/// presence bits, and each spilled column its own extent writer, so a chunk's work splits across
 /// them with no synchronisation: `resolved` is read-only and every write a lane makes lands in
 /// storage no other lane can name.
 enum JoinLane<'a> {
@@ -2121,22 +2124,22 @@ enum JoinLane<'a> {
         src: &'a mut EntityColumn,
         home: &'a mut EntityColumn,
     },
-    Prose {
+    Extent {
         src: &'a mut EntityColumn,
-        out: &'a mut crate::prose::ProseColumn,
+        out: &'a mut crate::extents::ExtentColumn,
     },
 }
 
-/// Write one chunk's prose as an extent, and return how many of its rows carried a value.
+/// Write one chunk's values as an extent, and return how many of its rows carried a value.
 ///
 /// `resolved` ascends in the entity and its sort is stable, so an entity written twice within the
 /// chunk keeps the last row that carried a value — the same answer the scatter reaches by writing
 /// them in order, and the same one an absent later row leaves alone. Counted per resolved row
 /// rather than per entity, which is what the coverage report says.
-fn spill_prose_chunk(
+fn spill_extent_chunk(
     src: &EntityColumn,
     resolved: &[(u32, u32)],
-    out: &mut crate::prose::ProseColumn,
+    out: &mut crate::extents::ExtentColumn,
 ) -> Result<u64> {
     let mut rows: Vec<(u32, u32)> = Vec::new();
     let mut count = 0u64;
@@ -2175,7 +2178,7 @@ fn read_one_attribute_source(
     minters: &mut std::collections::HashMap<String, tessera_store::vocabulary::VocabularyMinter>,
     scratch: &crate::column::ColumnScratch,
     by_entity: &mut [EntityColumn],
-    prose: &mut [crate::prose::ProseColumn],
+    spilled: &mut [crate::extents::ExtentColumn],
     coverage: &mut Vec<crate::AttributeCoverage>,
 ) -> Result<()> {
     let filled: Vec<usize> = group.attributes.clone();
@@ -2237,7 +2240,7 @@ fn read_one_attribute_source(
                  resolved: &mut Vec<(u32, u32)>,
                  staged: &mut [EntityColumn],
                  by_entity: &mut [EntityColumn],
-                 prose: &mut [crate::prose::ProseColumn],
+                 spilled: &mut [crate::extents::ExtentColumn],
                  matched: &mut u64,
                  unknown: &mut u64,
                  present: &mut [u64]|
@@ -2276,9 +2279,9 @@ fn read_one_attribute_source(
             // slot the declaration gave that attribute.
             let mut homes: Vec<Option<&mut EntityColumn>> =
                 by_entity.iter_mut().map(Some).collect();
-            let mut spills: Vec<Option<&mut crate::prose::ProseColumn>> =
+            let mut spills: Vec<Option<&mut crate::extents::ExtentColumn>> =
                 (0..homes.len()).map(|_| None).collect();
-            for column in prose.iter_mut() {
+            for column in spilled.iter_mut() {
                 let at = column.column;
                 spills[at] = Some(column);
             }
@@ -2286,7 +2289,7 @@ fn read_one_attribute_source(
                 .iter()
                 .zip(staged.iter_mut())
                 .map(|(&column, src)| match spills[column].take() {
-                    Some(out) => JoinLane::Prose { src, out },
+                    Some(out) => JoinLane::Extent { src, out },
                     None => {
                         let home = homes[column].take().expect(
                             "an attribute is read from exactly one source, so one lane owns it",
@@ -2315,7 +2318,7 @@ fn read_one_attribute_source(
                         }
                         Ok(count)
                     }
-                    JoinLane::Prose { src, out } => spill_prose_chunk(src, resolved, out),
+                    JoinLane::Extent { src, out } => spill_extent_chunk(src, resolved, out),
                 })
                 .collect();
             for (slot, lane) in present.iter_mut().zip(counted) {
@@ -2351,7 +2354,7 @@ fn read_one_attribute_source(
                     &mut resolved,
                     &mut staged,
                     by_entity,
-                    prose,
+                    spilled,
                     &mut matched_rows,
                     &mut unknown_rows,
                     &mut present,
@@ -2390,7 +2393,7 @@ fn read_one_attribute_source(
             &mut resolved,
             &mut staged,
             by_entity,
-            prose,
+            spilled,
             &mut matched_rows,
             &mut unknown_rows,
             &mut present,
@@ -2875,14 +2878,14 @@ pub(crate) fn write_filter_postings(
     partition_dir: &Path,
     schema: &crate::config::Schema,
     by_entity: &[EntityColumn],
-    prose: &[crate::prose::OpenProse],
+    spilled: &[crate::extents::OpenExtents],
     memory_budget: u64,
 ) -> Result<(Vec<PathBuf>, TextIndexCost)> {
     write_filter_postings_banded(
         partition_dir,
         schema,
         by_entity,
-        prose,
+        spilled,
         POSTINGS_BAND_ROWS,
         TextIndexPlan::for_budget(memory_budget),
         KeywordDictPlan::for_budget(memory_budget),
@@ -2910,7 +2913,7 @@ fn write_filter_postings_banded(
     partition_dir: &Path,
     schema: &crate::config::Schema,
     by_entity: &[EntityColumn],
-    prose: &[crate::prose::OpenProse],
+    spilled: &[crate::extents::OpenExtents],
     band_rows: usize,
     text_plan: TextIndexPlan,
     keyword_plan: KeywordDictPlan,
@@ -2924,16 +2927,19 @@ fn write_filter_postings_banded(
         let column_dir = partition_dir.join("attrs").join(&attribute.name);
         std::fs::create_dir_all(&column_dir).map_err(|e| BuildError::io(&column_dir, e))?;
 
-        // **A text column has no value column**, so it leaves before the one below is written. Its
-        // entity-space artefact is the token dictionary and the postings over it; the values
-        // themselves are in the record blob, which no scan reads (records §4.4).
-        if attribute.ty == ScalarType::Text {
-            let spilled = prose
+        // **A text column owes no value column**, so it leaves before the one below is written.
+        // Its entity-space artefact is the token dictionary and the postings over it; the values
+        // themselves are in the record blob, which no scan reads (records §4.4). That is
+        // [`value_column_is_owed`]'s whole exception, and the loop asks it rather than the type so
+        // that the pass and [`takes_extents`] cannot part company about which columns keep an
+        // arena.
+        if !value_column_is_owed(schema, attribute) {
+            let extents = spilled
                 .iter()
-                .find(|spilled| spilled.column == column)
+                .find(|column_extents| column_extents.column == column)
                 .ok_or_else(|| {
                     BuildError::Invalid(format!(
-                        "attribute '{}' is text and the join spilled no prose for it; a text \
+                        "attribute '{}' is text and the join spilled no extents for it; a text \
                          column's values are its extents and there is nothing to index",
                         attribute.name
                     ))
@@ -2942,7 +2948,7 @@ fn write_filter_postings_banded(
             let written = write_text_index(
                 &column_dir,
                 attribute,
-                TextValues::Prose(spilled),
+                TextValues::Extents(extents),
                 text_plan,
             )?;
             text.elapsed += started.elapsed();
@@ -3021,19 +3027,19 @@ fn write_filter_postings_banded(
 /// the hot column's tail and the ingest row vector already rely on — so drill-down resolves it
 /// against the manifest without any name table in the artefact.
 ///
-/// **The prose arrives as extents and everything else as columns**, and the two are merged here
-/// (`build-prose-extents.md`). A `text` column's values were never placed at an entity index: the
-/// join spilled each of its chunks as a blob extent in that chunk's entity order, so this stage
-/// reads each extent front to back and takes the lowest head across them. What that removes is a
-/// random read per row into a file larger than the machine, which at 1.02×10⁸ abstracts wrote
-/// 52 MB in thirteen minutes at 144 major faults a second
+/// **A spilled column arrives as extents and everything else as columns**, and the two are merged
+/// here (`build-prose-extents.md`). A column [`takes_extents`] routed was never placed at an
+/// entity index: the join spilled each of its chunks as a blob extent in that chunk's entity
+/// order, so this stage reads each extent front to back and takes the lowest head across them.
+/// What that removes is a random read per row into a file larger than the machine, which at
+/// 1.02×10⁸ abstracts wrote 52 MB in thirteen minutes at 144 major faults a second
 /// (`probes/2026-09-03-text-arena-streaming/` §5).
 pub(crate) fn write_record_blob(
     partition_dir: &Path,
     schema: &crate::config::Schema,
     n: u64,
     by_entity: &[EntityColumn],
-    prose: &[crate::prose::OpenProse],
+    spilled: &[crate::extents::OpenExtents],
 ) -> Result<Vec<PathBuf>> {
     // **Blob-resident is "no other home", not "no flags"** — and for a category the two differ.
     // Records §4.2 exempts categories from the blob because their entity-space structures are the
@@ -3062,12 +3068,12 @@ pub(crate) fn write_record_blob(
     let hasrow_path = record_dir.join(RECORD_HASROW_FILE);
     let directory_path = record_dir.join(RECORD_DIRECTORY_FILE);
     let n = n as usize;
-    // The columns that are still columns. A `text` column's tag comes from its extents instead,
-    // and no tag is carried by both.
+    // The columns that are still columns. A column the join spilled has its tag carried by its
+    // extents instead ([`takes_extents`]), and no tag is carried by both.
     let column_tags: Vec<usize> = blob_columns
         .iter()
         .copied()
-        .filter(|&column| schema.attributes[column].ty != ScalarType::Text)
+        .filter(|&column| !takes_extents(schema, &schema.attributes[column]))
         .collect();
     let mut columns = ColumnRows {
         schema,
@@ -3076,8 +3082,8 @@ pub(crate) fn write_record_blob(
         entity: 0,
         n,
     };
-    let mut extents: Vec<Vec<crate::prose::ExtentRows<'_>>> =
-        prose.iter().map(crate::prose::ExtentRows::over).collect();
+    let mut extents: Vec<Vec<crate::extents::ExtentRows<'_>>> =
+        spilled.iter().map(crate::extents::ExtentRows::over).collect();
     let mut sources: Vec<&mut dyn tessera_filter_write::RecordRows> = Vec::new();
     if !column_tags.is_empty() {
         sources.push(&mut columns);
@@ -3128,6 +3134,62 @@ pub(crate) fn blob_resident(
 ) -> bool {
     attribute.ty == ScalarType::Text
         || (!attribute.render && !postings_are_owed(schema, attribute))
+}
+
+/// Does this column owe an **entity-space value column**, and the dictionary a keyword's ordinals
+/// index?
+///
+/// [`postings_are_owed`] is most of it: the value column is the artefact of record and the
+/// postings are derived from it (`filter-index.md` §2.1), so a column that owes no postings owes
+/// no value column either. A `text` column is the exception in the other direction — it owes
+/// postings over its tokens and no per-entity slot at all, its values being the record blob's
+/// (records §4.4) — which is why the type appears here and nowhere else in the routing.
+///
+/// This is the whole of what reads a string column's characters **at an entity index**, `render`
+/// aside, and [`takes_extents`] is its complement.
+pub(crate) fn value_column_is_owed(
+    schema: &crate::config::Schema,
+    attribute: &crate::config::Attribute,
+) -> bool {
+    attribute.ty != ScalarType::Text && postings_are_owed(schema, attribute)
+}
+
+/// Does this column's characters take the record blob's extents rather than an entity-ordered
+/// arena ([`crate::extents`])?
+///
+/// **The readers decide, not the declared type.** An arena is a permutation of the source and it
+/// exists to answer `entity → value` by random access, so it is owed by exactly the two passes
+/// that ask that question of a string column: the value column and its dictionary
+/// ([`value_column_is_owed`]), and the hot row tail (`render`). A column with neither is read by
+/// the record blob alone, and the blob's merge takes an extent as readily as a column
+/// (`build-prose-extents.md`). Every input to the test is compiled from the declaration, so the
+/// route is known before the first source file is opened.
+///
+/// That answers `true` for every bundle-wide `text` column, which owes no value column whatever
+/// its `index` says, and for a `keyword` or `utf8` column declared with neither flag — the shape
+/// that cost 5.7 GB of arena and offsets at 125,789,091 GBIF occurrences to hand the blob 1.55 GB
+/// (`probes/2026-09-10-blob-resident-strings/`).
+///
+/// **`render` is refused on every string type at the declaration**
+/// (`config::compile_attributes`), and `write_columns` refuses one that reaches it anyway, so the
+/// middle term fires only for a `Schema` assembled programmatically. It is stated rather than
+/// dropped because it is what makes `takes_extents` imply [`blob_resident`]: a column routed here
+/// whose values the blob does not hold would spill extents nothing reads.
+///
+/// **A group-scoped family is not asked.** Its columns are the scoped pass's own, one per view,
+/// and it has no blob row to be read from — the record blob is bundle-wide and addressed by a
+/// column's position in `declared_scalars`, which a family has none of (`views.md` §5). So a
+/// scoped string column keeps its arena whatever its flags say, and `write_scoped_columns` writes
+/// its value column from it.
+pub(crate) fn takes_extents(
+    schema: &crate::config::Schema,
+    attribute: &crate::config::Attribute,
+) -> bool {
+    matches!(
+        attribute.ty,
+        ScalarType::Utf8 | ScalarType::Keyword | ScalarType::Text
+    ) && !attribute.render
+        && !value_column_is_owed(schema, attribute)
 }
 
 /// The entity-ordered columns' rows as one ascending stream, for the blob's merge.
@@ -4165,22 +4227,22 @@ impl TextIndexPlan {
 /// format rather than minting a second one is the whole reason this crate already depends on it.
 /// Where one text pass reads its prose from.
 ///
-/// **Two producers, one pass.** The bundle-wide columns are read from the record-blob extents the
-/// join spilled ([`crate::prose`]); a group-scoped `text` column is read from the per-view
+/// **Two producers, one pass.** A bundle-wide `text` column is read from the record-blob extents
+/// the join spilled ([`crate::extents`]); a group-scoped one is read from the per-view
 /// [`EntityColumn`] the scoped pass builds, which keeps its arena because it has no blob row to
 /// be read from (`views.md` §5).
 pub(crate) enum TextValues<'a> {
     /// A column's arena, divided into contiguous byte ranges.
     Arena(&'a EntityColumn),
-    /// One column's prose extents, divided into contiguous block ranges.
-    Prose(&'a crate::prose::OpenProse),
+    /// One column's extents, divided into contiguous block ranges.
+    Extents(&'a crate::extents::OpenExtents),
 }
 
 /// One worker's share of a text pass: a byte range of an arena, or a block range of an extent.
 #[derive(Debug, Clone, Copy)]
 enum TextWindow {
     Arena(u64, u64),
-    Prose(crate::prose::ProseWindow),
+    Extents(crate::extents::ExtentWindow),
 }
 
 impl TextValues<'_> {
@@ -4192,10 +4254,10 @@ impl TextValues<'_> {
                 .into_iter()
                 .map(|(lo, hi)| TextWindow::Arena(lo, hi))
                 .collect(),
-            TextValues::Prose(prose) => prose
+            TextValues::Extents(extents) => extents
                 .windows(target)
                 .into_iter()
-                .map(TextWindow::Prose)
+                .map(TextWindow::Extents)
                 .collect(),
         }
     }
@@ -4210,8 +4272,8 @@ impl TextValues<'_> {
             (TextValues::Arena(values), TextWindow::Arena(lo, hi)) => {
                 values.for_each_record_in(lo, hi, visit)
             }
-            (TextValues::Prose(prose), TextWindow::Prose(window)) => {
-                prose.for_each_record_in(window, visit)
+            (TextValues::Extents(extents), TextWindow::Extents(window)) => {
+                extents.for_each_record_in(window, visit)
             }
             _ => Err(BuildError::Invalid(
                 "a text window was given to the other producer's reader".into(),
@@ -5524,6 +5586,71 @@ mod tests {
     use super::*;
     use tessera_types::IdentityKey;
 
+    /// **The extent route is decided by a column's readers and not by its type.**
+    ///
+    /// The arena answers `entity → value` at random, and the two passes that ask a string column
+    /// that question are the value column with its dictionary and the hot row tail. A column
+    /// neither reaches is read by the record blob alone, which reads an extent as readily as a
+    /// column — so `keyword` and `utf8` join `text` on the route exactly when they are declared
+    /// with neither `index` nor `render`.
+    ///
+    /// **And every column routed there has a blob row to land in.** Extents whose values the blob
+    /// does not hold would be a column stored nowhere, which is the failure
+    /// `a_category_is_blob_resident_exactly_when_it_has_no_entity_space_home` covers from the
+    /// other side.
+    #[test]
+    fn the_extent_route_is_the_readers_and_not_the_type() {
+        let declared = |ty, index, render| crate::config::Attribute {
+            name: "column".to_string(),
+            field: None,
+            title: None,
+            ty,
+            analyser: None,
+            vocabulary: None,
+            value_set: None,
+            index,
+            render,
+        };
+        let schema = |attribute| crate::config::Schema {
+            attributes: vec![attribute],
+            vocabularies: Default::default(),
+        };
+        let cases = [
+            // A string column with no reader at an entity: the blob's, and spilled.
+            (ScalarType::Keyword, false, false, true),
+            (ScalarType::Utf8, false, false, true),
+            (ScalarType::Text, false, false, true),
+            // Indexed: `text` owes a token index over the extents, and the other two owe a value
+            // column and a dictionary, which are read at an entity.
+            (ScalarType::Text, true, false, true),
+            (ScalarType::Keyword, true, false, false),
+            (ScalarType::Utf8, true, false, false),
+            // Rendered: the row tail reads the column at an entity. ⊘ `render` on a string type
+            // is refused at the declaration and `write_columns` refuses one that arrives anyway,
+            // so this arm is reachable only from a `Schema` built programmatically.
+            (ScalarType::Keyword, false, true, false),
+            // A fixed-width column is a slot and is never spilled, whatever its flags say.
+            (ScalarType::U32, false, false, false),
+            (ScalarType::U32, true, false, false),
+            (ScalarType::F64, false, true, false),
+        ];
+        for (ty, index, render, expected) in cases {
+            let schema = schema(declared(ty, index, render));
+            let attribute = &schema.attributes[0];
+            assert_eq!(
+                takes_extents(&schema, attribute),
+                expected,
+                "{ty:?} index={index} render={render}"
+            );
+            if takes_extents(&schema, attribute) {
+                assert!(
+                    blob_resident(&schema, attribute),
+                    "{ty:?} index={index} render={render}: spilled with no blob row to land in"
+                );
+            }
+        }
+    }
+
     /// **Every declared field lands in exactly one home, and the two placement passes must agree
     /// on which** (records §3). The blob takes a field the entity-space pass declines, so the
     /// question both ask is `postings_are_owed`: a `derived` category keeps its entity-space
@@ -5586,20 +5713,19 @@ mod tests {
             attributes: vec![category.clone(), note.clone()],
             vocabularies: vocabularies_at(crate::config::Visibility::Derived),
         };
-        // One entity; values are per column, in declaration order.
+        // One entity; values are per column, in declaration order. The keyword's value arrives
+        // as an extent rather than as a column, [`takes_extents`] having routed it there, and the
+        // blob's answer is what this test is about either way.
         let by_entity = vec![
             EntityColumn::from_values(&scratch, ScalarType::U16, [ScalarValue::U16(7)], "colour")
                 .expect("typed column"),
-            EntityColumn::from_values(
-                &scratch,
-                ScalarType::Utf8,
-                [ScalarValue::Utf8("kept".to_string())],
-                "note",
-            )
-            .expect("typed column"),
+            EntityColumn::spilled(&scratch, ScalarType::Keyword, 1).expect("the note slot"),
         ];
+        let mut notes = crate::extents::ExtentColumn::new(dir.path(), 1, "note");
+        notes.push_extent(&[(0u32, "kept")]).expect("an extent");
+        let open = [notes.open().expect("the extents open")];
         let written =
-            write_record_blob(dir.path(), &schema, by_entity[0].len() as u64, &by_entity, &[])
+            write_record_blob(dir.path(), &schema, by_entity[0].len() as u64, &by_entity, &open)
                 .expect("blob stage writes");
         assert!(!written.is_empty());
         let blob = tessera_filter::RecordBlob::open_dir(
@@ -5697,8 +5823,8 @@ mod tests {
     #[test]
     fn folding_the_extents_leaves_the_same_rows() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let extents = crate::prose::ProseColumn::MERGE_FAN_IN * 2 + 3;
-        let mut spilled = crate::prose::ProseColumn::new(dir.path(), 0, "abstract");
+        let extents = crate::extents::ExtentColumn::MERGE_FAN_IN * 2 + 3;
+        let mut spilled = crate::extents::ExtentColumn::new(dir.path(), 0, "abstract");
         // One row per extent, walking entity space in a stride so the extents interleave, plus a
         // second value for one entity in a later extent than the one that first carried it.
         for extent in 0..extents {
@@ -5718,7 +5844,9 @@ mod tests {
     }
 
     /// Every live `(entity, value)` a spilled column holds, which is what both its readers see.
-    fn prose_rows(column: &crate::prose::ProseColumn) -> std::collections::BTreeMap<u32, String> {
+    fn prose_rows(
+        column: &crate::extents::ExtentColumn,
+    ) -> std::collections::BTreeMap<u32, String> {
         let open = column.open().expect("the extents open");
         let mut rows: std::collections::BTreeMap<u32, String> = Default::default();
         for window in open.windows(3) {
@@ -5731,64 +5859,72 @@ mod tests {
         rows
     }
 
-    /// **The join's chunking must not be observable in the record blob.** A chunk is one prose
-    /// extent, so a corpus joined in one chunk and the same corpus joined in chunks of three have
-    /// to be the same three files. What that pins is the merge: an entity's fields gathered from
-    /// several extents and a column, ordered by tag, with the last chunk that carried a value
-    /// winning.
+    /// **The join's chunking must not be observable in the record blob.** A chunk is one extent
+    /// per spilled column, so a corpus joined in one chunk and the same corpus joined in chunks of
+    /// three have to be the same three files. What that pins is the merge: an entity's fields
+    /// gathered from two families of extents and an entity-ordered column, ordered by tag, with
+    /// the last chunk that carried a value winning.
     ///
-    /// The corpus straddles what the merge has to answer. Entities carry a keyword, prose, both
-    /// or neither; one prose value is the empty string, which is a value and not absence; two
-    /// entities are written twice, one of them across a chunk boundary at several of the
-    /// chunkings and one within a chunk at all of them.
+    /// **Two spilled families and a column**, because that is the shape [`takes_extents`] routes
+    /// on a real schema: a `keyword` column with neither `index` nor `render` takes the extents a
+    /// `text` column takes, and a fixed-width column with the same flags stays where it was. A
+    /// tag reaching the merge from two sources at one entity would be a value overwriting
+    /// another's.
+    ///
+    /// The corpus straddles what the merge has to answer. Entities carry a count, a keyword,
+    /// prose, several of those or none; one prose value is the empty string, which is a value and
+    /// not absence; two entities are written twice, one of them across a chunk boundary at
+    /// several of the chunkings and one within a chunk at all of them.
     #[test]
-    fn the_prose_extents_do_not_change_the_blobs_bytes() {
+    fn the_extents_do_not_change_the_blobs_bytes() {
         const N: usize = 64;
         let scratch_dir = tempfile::tempdir().expect("tempdir");
         let scratch = crate::column::ColumnScratch::new(scratch_dir.path());
+        let string_column = |name: &str, ty: ScalarType| crate::config::Attribute {
+            name: name.to_string(),
+            field: None,
+            title: None,
+            ty,
+            analyser: None,
+            vocabulary: None,
+            value_set: None,
+            index: false,
+            render: false,
+        };
         let schema = crate::config::Schema {
             attributes: vec![
-                crate::config::Attribute {
-                    name: "note".to_string(),
-                    field: None,
-                    title: None,
-                    ty: ScalarType::Keyword,
-                    analyser: None,
-                    vocabulary: None,
-                    value_set: None,
-                    index: false,
-                    render: false,
-                },
-                crate::config::Attribute {
-                    name: "abstract".to_string(),
-                    field: None,
-                    title: None,
-                    ty: ScalarType::Text,
-                    analyser: None,
-                    vocabulary: None,
-                    value_set: None,
-                    index: false,
-                    render: false,
-                },
+                string_column("count", ScalarType::U32),
+                string_column("note", ScalarType::Keyword),
+                string_column("abstract", ScalarType::Text),
             ],
             vocabularies: Default::default(),
         };
-        // The keyword column is entity-ordered as it always was: a third of the entities carry
-        // one, and a third of those also carry prose.
-        let notes = EntityColumn::from_values(
-            &scratch,
-            ScalarType::Keyword,
-            (0..N).map(|entity| match entity % 3 {
-                0 => ScalarValue::Utf8(format!("note-{entity}")),
-                _ => ScalarValue::Null,
-            }),
-            "note",
-        )
-        .expect("typed column");
+        for attribute in &schema.attributes[1..] {
+            assert!(
+                takes_extents(&schema, attribute),
+                "'{}' is what this test is about",
+                attribute.name
+            );
+        }
+        assert!(
+            !takes_extents(&schema, &schema.attributes[0]),
+            "a fixed-width column stays a column"
+        );
 
-        // The prose as the source yields it: entity order is not source order, one entity is
-        // written twice adjacently and one far apart, and one value is the empty string.
-        let mut source: Vec<(u32, String)> = (0..N)
+        // The fixed-width column is entity-ordered as it always was: a third of the entities carry
+        // a count.
+        let counts: Vec<ScalarValue> = (0..N)
+            .map(|entity| match entity % 3 {
+                0 => ScalarValue::U32(entity as u32 * 10),
+                _ => ScalarValue::Null,
+            })
+            .collect();
+
+        // Each spilled column as its own source yields it: entity order is not source order, one
+        // entity is written twice adjacently and one far apart, and one prose value is the empty
+        // string. The two sources disagree about which entities they cover and about the order
+        // they arrive in, so no chunking aligns their extents.
+        let mut prose_source: Vec<(u32, String)> = (0..N)
             .filter(|entity| entity % 5 != 1)
             .map(|entity| {
                 let value = if entity == 20 {
@@ -5799,40 +5935,42 @@ mod tests {
                 ((entity * 37 % N) as u32, value)
             })
             .collect();
-        source.push((source[3].0, "the later value, adjacent".to_string()));
-        source.insert(2, (source[9].0, "the earlier value, far apart".to_string()));
+        prose_source.push((prose_source[3].0, "the later value, adjacent".to_string()));
+        prose_source.insert(2, (prose_source[9].0, "the earlier value, far apart".to_string()));
+        let mut note_source: Vec<(u32, String)> = (0..N)
+            .filter(|entity| entity % 4 != 3)
+            .map(|entity| ((entity * 11 % N) as u32, format!("note-{entity}")))
+            .collect();
+        note_source.push((note_source[7].0, "the later note, adjacent".to_string()));
+        note_source.insert(1, (note_source[19].0, "the earlier note, far apart".to_string()));
+
+        let blob_of = |dir: &Path, chunk: usize| -> Vec<PathBuf> {
+            let extent_dir = dir.join("extents");
+            std::fs::create_dir_all(&extent_dir).expect("extent dir");
+            let notes = spilled_column(&extent_dir, 1, "note", &note_source, chunk);
+            let prose = spilled_column(&extent_dir, 2, "abstract", &prose_source, chunk);
+            let open = [
+                notes.open().expect("the extents open"),
+                prose.open().expect("the extents open"),
+            ];
+            let by_entity = [
+                EntityColumn::from_values(
+                    &scratch,
+                    ScalarType::U32,
+                    counts.iter().cloned(),
+                    "count",
+                )
+                .expect("typed column"),
+                EntityColumn::spilled(&scratch, ScalarType::Keyword, N).expect("the note slot"),
+                EntityColumn::spilled(&scratch, ScalarType::Text, N).expect("the prose slot"),
+            ];
+            write_record_blob(dir, &schema, N as u64, &by_entity, &open).expect("the blob merges")
+        };
 
         let mut written: Vec<Vec<(PathBuf, Vec<u8>)>> = Vec::new();
         for chunk in [1usize, 2, 3, 5, 7, 64, 4_096] {
             let dir = tempfile::tempdir().expect("tempdir");
-            let extent_dir = dir.path().join("extents");
-            std::fs::create_dir_all(&extent_dir).expect("extent dir");
-            let mut prose = crate::prose::ProseColumn::new(&extent_dir, 1, "abstract");
-            for rows in source.chunks(chunk) {
-                // The join sorts a chunk by entity, stably, and the last row carrying a value
-                // wins — `spill_prose_chunk`'s rule, spelt here rather than called so that the
-                // test states what it is asserting about.
-                let mut held: Vec<(u32, &str)> = rows
-                    .iter()
-                    .map(|(entity, value)| (*entity, value.as_str()))
-                    .collect();
-                held.sort_by_key(|&(entity, _)| entity);
-                let mut kept: Vec<(u32, &str)> = Vec::new();
-                for row in held {
-                    if kept.last().map(|&(entity, _)| entity) == Some(row.0) {
-                        kept.pop();
-                    }
-                    kept.push(row);
-                }
-                prose.push_extent(&kept).expect("an extent");
-            }
-            let open = prose.open().expect("the extents open");
-            let by_entity = [
-                notes_clone(&scratch, &notes),
-                EntityColumn::prose(&scratch, ScalarType::Text, N).expect("the prose slot"),
-            ];
-            let paths = write_record_blob(dir.path(), &schema, by_entity[0].len() as u64, &by_entity, &[open])
-                .expect("the blob merges");
+            let paths = blob_of(dir.path(), chunk);
             assert_eq!(paths.len(), 3, "the blob is three files");
             written.push(
                 paths
@@ -5853,10 +5991,72 @@ mod tests {
 
         // And the merged blob says what the corpus says.
         let dir = tempfile::tempdir().expect("tempdir");
-        let extent_dir = dir.path().join("extents");
-        std::fs::create_dir_all(&extent_dir).expect("extent dir");
-        let mut prose = crate::prose::ProseColumn::new(&extent_dir, 1, "abstract");
-        for rows in source.chunks(3) {
+        blob_of(dir.path(), 3);
+        let blob = tessera_filter::RecordBlob::open_dir(
+            &dir.path().join("attrs/record"),
+            tessera_filter::Access::Read,
+        )
+        .expect("open");
+        // The last value written for an entity is the one the blob holds.
+        let last_of = |source: &[(u32, String)]| {
+            let mut held: std::collections::BTreeMap<u32, String> = Default::default();
+            for (entity, value) in source {
+                held.insert(*entity, value.clone());
+            }
+            held
+        };
+        let expected_prose = last_of(&prose_source);
+        let expected_note = last_of(&note_source);
+        for entity in 0..N as u32 {
+            let fields = blob.fields_of(entity).expect("read");
+            let utf8_at = |tag: u16| -> Option<String> {
+                fields.as_ref().and_then(|fields| {
+                    fields
+                        .iter()
+                        .find(|field| field.tag == tag)
+                        .map(|field| match &field.value {
+                            tessera_filter::RecordValue::Utf8(value) => value.clone(),
+                            other => panic!("entity {entity} carries {other:?} at tag {tag}"),
+                        })
+                })
+            };
+            assert_eq!(
+                utf8_at(2),
+                expected_prose.get(&entity).cloned(),
+                "entity {entity}'s prose"
+            );
+            assert_eq!(
+                utf8_at(1),
+                expected_note.get(&entity).cloned(),
+                "entity {entity}'s note"
+            );
+            let count = fields.as_ref().and_then(|fields| {
+                fields
+                    .iter()
+                    .find(|field| field.tag == 0)
+                    .map(|field| field.value.clone())
+            });
+            let expected = match entity % 3 {
+                0 => Some(tessera_filter::RecordValue::U32(entity * 10)),
+                _ => None,
+            };
+            assert_eq!(count, expected, "entity {entity}'s count");
+        }
+    }
+
+    /// One column's source rows spilled as extents of `chunk` rows each, the way the join spills
+    /// them: sorted by entity within the chunk, stably, with the last row carrying a value
+    /// winning. Spelt out rather than calling [`spill_extent_chunk`], so that the test states the
+    /// rule it is asserting about.
+    fn spilled_column(
+        dir: &Path,
+        column: usize,
+        name: &str,
+        source: &[(u32, String)],
+        chunk: usize,
+    ) -> crate::extents::ExtentColumn {
+        let mut spilled = crate::extents::ExtentColumn::new(dir, column, name);
+        for rows in source.chunks(chunk) {
             let mut held: Vec<(u32, &str)> = rows
                 .iter()
                 .map(|(entity, value)| (*entity, value.as_str()))
@@ -5869,65 +6069,9 @@ mod tests {
                 }
                 kept.push(row);
             }
-            prose.push_extent(&kept).expect("an extent");
+            spilled.push_extent(&kept).expect("an extent");
         }
-        let open = prose.open().expect("the extents open");
-        let by_entity = [
-            notes_clone(&scratch, &notes),
-            EntityColumn::prose(&scratch, ScalarType::Text, N).expect("the prose slot"),
-        ];
-        write_record_blob(dir.path(), &schema, by_entity[0].len() as u64, &by_entity, &[open]).expect("the blob merges");
-        let blob = tessera_filter::RecordBlob::open_dir(
-            &dir.path().join("attrs/record"),
-            tessera_filter::Access::Read,
-        )
-        .expect("open");
-        // The last value written for an entity is the one the blob holds.
-        let mut expected: std::collections::BTreeMap<u32, &str> = Default::default();
-        for (entity, value) in &source {
-            expected.insert(*entity, value.as_str());
-        }
-        for entity in 0..N as u32 {
-            let fields = blob.fields_of(entity).expect("read");
-            let prose = fields.as_ref().and_then(|fields| {
-                fields
-                    .iter()
-                    .find(|field| field.tag == 1)
-                    .map(|field| match &field.value {
-                        tessera_filter::RecordValue::Utf8(value) => value.as_str(),
-                        other => panic!("entity {entity} carries {other:?} at the prose tag"),
-                    })
-            });
-            assert_eq!(
-                prose,
-                expected.get(&entity).copied(),
-                "entity {entity}'s prose"
-            );
-            if entity % 3 == 0 {
-                let note = fields
-                    .as_ref()
-                    .expect("a note entity has a row")
-                    .iter()
-                    .find(|field| field.tag == 0)
-                    .expect("the note field");
-                assert_eq!(
-                    note.value,
-                    tessera_filter::RecordValue::Utf8(format!("note-{entity}"))
-                );
-            }
-        }
-    }
-
-    /// A second copy of an entity-ordered column, `write_record_blob` taking it by reference and
-    /// the test wanting one per chunking.
-    fn notes_clone(scratch: &crate::column::ColumnScratch, values: &EntityColumn) -> EntityColumn {
-        EntityColumn::from_values(
-            scratch,
-            ScalarType::Keyword,
-            (0..values.len()).map(|entity| values.value_at(entity)),
-            "note",
-        )
-        .expect("typed column")
+        spilled
     }
 
     /// **The chunking must not be observable in the artefact.** A chunk boundary is a place one
@@ -5959,7 +6103,7 @@ mod tests {
         // The two producers over the same corpus: the scoped column's arena, and the extents the
         // join spills for a bundle-wide column. One, three and eleven of them, interleaved.
         let extent_dir = tempfile::tempdir().expect("tempdir");
-        let spilled: Vec<crate::prose::ProseColumn> = [1usize, 3, 11]
+        let spilled: Vec<crate::extents::ExtentColumn> = [1usize, 3, 11]
             .into_iter()
             .map(|extents| {
                 let dir = extent_dir.path().join(format!("extents-{extents}"));
@@ -5967,12 +6111,12 @@ mod tests {
                 text_fixture_extents(&dir, extents)
             })
             .collect();
-        let open: Vec<crate::prose::OpenProse> = spilled
+        let open: Vec<crate::extents::OpenExtents> = spilled
             .iter()
             .map(|column| column.open().expect("the extents open"))
             .collect();
         let sources: Vec<TextValues<'_>> = std::iter::once(TextValues::Arena(&values))
-            .chain(open.iter().map(TextValues::Prose))
+            .chain(open.iter().map(TextValues::Extents))
             .collect();
 
         let mut files: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
@@ -6001,7 +6145,7 @@ mod tests {
                 std::fs::create_dir_all(&column_dir).expect("column dir");
                 let values = match values {
                     TextValues::Arena(column) => TextValues::Arena(column),
-                    TextValues::Prose(prose) => TextValues::Prose(prose),
+                    TextValues::Extents(prose) => TextValues::Extents(prose),
                 };
                 let written =
                     write_text_index(&column_dir, &attribute, values, plan).expect("text index");
@@ -6332,8 +6476,8 @@ mod tests {
 
     /// The fixture's prose spilled as `extents` blob extents, assigned round-robin by entity so
     /// that the extents interleave in entity space exactly as a join's chunks do.
-    fn text_fixture_extents(dir: &Path, extents: usize) -> crate::prose::ProseColumn {
-        let mut column = crate::prose::ProseColumn::new(dir, 0, "abstract");
+    fn text_fixture_extents(dir: &Path, extents: usize) -> crate::extents::ExtentColumn {
+        let mut column = crate::extents::ExtentColumn::new(dir, 0, "abstract");
         for extent in 0..extents {
             let held: Vec<(u32, String)> = (0..N_TEXT)
                 .filter(|entity| entity % extents == extent)

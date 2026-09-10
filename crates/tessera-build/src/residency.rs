@@ -313,6 +313,11 @@ impl Residency {
 pub(crate) struct ColumnCost {
     pub ty: ScalarType,
     pub payload_bytes: u64,
+    /// Whether the join spills this column's characters as record-blob extents rather than filling
+    /// an entity-ordered arena with them ([`crate::pipeline::takes_extents`]). The two shapes cost
+    /// different things and the declaration is what decides between them, so the pre-flight asks
+    /// the pass's own predicate rather than the type.
+    pub extents: bool,
     /// Whether this column is the one a text index is built over — which costs the build a second
     /// set of files beside the column itself, and costs it them at the same time.
     pub text_index: bool,
@@ -326,10 +331,11 @@ pub(crate) struct ColumnCost {
 /// Whether a column's values are characters rather than a fixed width — which is what makes them a
 /// term of their own rather than part of the column's slot size.
 ///
-/// Where those characters *land* differs by type and is priced at each term: a `keyword` or `utf8`
-/// column holds them in [`crate::column::EntityColumn`]'s arena, and a bundle-wide `text` column
-/// spills them as record-blob extents instead ([`crate::prose`], [`EXTENT_SHARE`]). The attribute
-/// join stages every one of the three in an arena of its own.
+/// Where those characters *land* differs by the column's readers and is priced at each term: a
+/// column some pass reads at an entity holds them in [`crate::column::EntityColumn`]'s arena, and
+/// one the record blob alone reads spills them as record-blob extents instead
+/// ([`crate::pipeline::takes_extents`], [`crate::extents`], [`EXTENT_SHARE`]). The attribute join
+/// stages every string type in an arena of its own whichever route it takes.
 fn carries_characters(ty: ScalarType) -> bool {
     matches!(
         ty,
@@ -337,13 +343,16 @@ fn carries_characters(ty: ScalarType) -> bool {
     )
 }
 
-/// What a `text` column's prose extents cost against the column's Parquet payload: **one half**.
+/// What a spilled column's extents cost against the column's Parquet payload: **one half**.
 ///
 /// The extents are the same 256 KiB zstd blocks the base blob is cut into, and the base blob at
 /// the 10⁸ PaperSeek rung measured 44.77 GB against 128 GiB of prose — 2.9×
 /// (`probes/2026-09-04-rung-4-whole/breakdown.txt`). Half is charged rather than a 2.9th because
 /// that ratio is one corpus's prose at one operating point, and this figure refuses a build
-/// rather than warning about one. ⊘ Modelled for the extents, measured for the blob.
+/// rather than warning about one. A keyword column compresses harder still where its values
+/// repeat: GBIF's `scientificname` spilled 1.63 GB of extents over 3.93 GB of characters, 0.42×,
+/// and its blocks alone 0.27× (measured, `probes/2026-09-10-blob-resident-strings/`). ⊘ Modelled
+/// for the extents, measured for the blob.
 const EXTENT_SHARE: u64 = 2;
 
 /// The fixed width one entity's value occupies in [`crate::column::EntityColumn`]'s typed
@@ -502,11 +511,11 @@ pub(crate) fn entity_order_residency(
     for (index, column) in columns.iter().enumerate() {
         let width = fixed_width(column.ty);
         let presence = n.div_ceil(8);
-        // **A `text` column has no arena and no offset array.** What it has instead is one
-        // record-blob extent per join chunk, holding the same prose compressed
+        // **A spilled column has no arena and no offset array.** What it has instead is one
+        // record-blob extent per join chunk, holding the same characters compressed
         // ([`EXTENT_SHARE`]); the presence bits are all that is left of the column itself.
-        let prose = column.ty == ScalarType::Text;
-        let bytes = if prose {
+        let spilled = column.extents;
+        let bytes = if spilled {
             presence.saturating_add(column.payload_bytes / EXTENT_SHARE)
         } else if column.payload_bytes > 0 {
             // 8 bytes of entity-indexed offset and the presence bit, plus the arena the characters
@@ -525,9 +534,9 @@ pub(crate) fn entity_order_residency(
         };
         let ty = column.ty.arrow_type_name();
         terms.push(Term {
-            what: if prose {
+            what: if spilled {
                 format!(
-                    "declared column {index} ({ty}): {} MiB of prose extents in .build-tmp/, \
+                    "declared column {index} ({ty}): {} MiB of extents in .build-tmp/, \
                      modelled at half the source's {} MiB of characters",
                     (column.payload_bytes / EXTENT_SHARE) >> 20,
                     column.payload_bytes >> 20
@@ -562,10 +571,10 @@ pub(crate) fn entity_order_residency(
                     "the text index's sorted runs over column {index}, charged at the column they \
                      are tokenised from"
                 ),
-                // The column's own storage. For a `text` column the runs are charged at the
+                // The column's own storage. For a spilled column the runs are charged at the
                 // source's characters rather than at the extents that hold them, the runs being
                 // uncompressed.
-                bytes: if prose { column.payload_bytes } else { bytes },
+                bytes: if spilled { column.payload_bytes } else { bytes },
                 mapped: true,
                 phases: Phases::INDEX,
             });
@@ -631,6 +640,10 @@ pub(crate) fn model(args: &crate::BuildArgs, n: u64, payloads: &[f64]) -> Reside
         .map(|(attribute, &per_item)| ColumnCost {
             ty: attribute.ty,
             payload_bytes: payload(per_item, n),
+            // The join's own predicate, called rather than restated: a model that decided the
+            // route for itself would charge an arena the build no longer fills, or the other way
+            // round on the next column whose readers change.
+            extents: crate::pipeline::takes_extents(&args.schema, attribute),
             // The same test the emit itself makes, called rather than restated: a text column
             // earns an index exactly where it is owed postings.
             text_index: attribute.ty == ScalarType::Text
@@ -1084,12 +1097,24 @@ fn uncompressed_column_bytes(
 mod tests {
     use super::*;
 
+    /// A column whose characters, if it has any, fill an arena — the shape a string column keeps
+    /// while some pass reads it at an entity.
     fn column(ty: ScalarType, payload: u64) -> ColumnCost {
         ColumnCost {
             ty,
             payload_bytes: payload,
+            extents: false,
             text_index: false,
             phases: Phases::JOIN.and(Phases::INDEX).and(Phases::BLOB),
+        }
+    }
+
+    /// The same column, spilled as record-blob extents instead
+    /// ([`crate::pipeline::takes_extents`]).
+    fn spilled(ty: ScalarType, payload: u64) -> ColumnCost {
+        ColumnCost {
+            extents: true,
+            ..column(ty, payload)
         }
     }
 
@@ -1105,7 +1130,7 @@ mod tests {
             column(ScalarType::TimestampUs, 0),
             column(ScalarType::U8, 0),
             column(ScalarType::Keyword, 8 * n),
-            column(ScalarType::Text, text_bytes_per_item * n),
+            spilled(ScalarType::Text, text_bytes_per_item * n),
             column(ScalarType::U32, 0),
         ];
         let entries = (2 * n) + (34 * n / 10) + n;
@@ -1185,25 +1210,40 @@ mod tests {
         );
     }
 
-    /// **A text column costs its extents, not an arena.** Its prose is written once as
+    /// **A spilled column costs its extents, not an arena.** Its characters are written once as
     /// record-blob blocks under `.build-tmp/`, charged at half the source's characters
-    /// ([`EXTENT_SHARE`]); the column itself is presence bits and nothing else.
+    /// ([`EXTENT_SHARE`]); the column itself is presence bits and nothing else. That holds for
+    /// every string type the route takes, and what it removes on a `keyword` column is the offset
+    /// array as well as the arena — 12 B/item before a character.
     #[test]
-    fn a_text_column_costs_its_extents_and_not_an_arena() {
+    fn a_spilled_column_costs_its_extents_and_not_an_arena() {
         let n = 10_000_000;
         let payload = 400 * n;
-        let with_text = entity_order_residency(n, &[column(ScalarType::Text, payload)], 0, 0);
-        let term = with_text
-            .terms
-            .iter()
-            .find(|t| t.what.contains("declared column"))
-            .expect("the column is a term of its own");
-        assert_eq!(term.bytes, n.div_ceil(8) + payload / 2);
-        assert!(
-            term.what.contains("prose extents"),
-            "the breakdown must name them: {}",
-            term.what
-        );
+        for ty in [ScalarType::Text, ScalarType::Keyword, ScalarType::Utf8] {
+            let route = entity_order_residency(n, &[spilled(ty, payload)], 0, 0);
+            let term = route
+                .terms
+                .iter()
+                .find(|t| t.what.contains("declared column"))
+                .expect("the column is a term of its own");
+            assert_eq!(term.bytes, n.div_ceil(8) + payload / 2, "{ty:?}");
+            assert!(
+                term.what.contains("MiB of extents"),
+                "the breakdown must name them: {}",
+                term.what
+            );
+            // The arena route on the same column, for the difference the routing is worth.
+            let arena = entity_order_residency(n, &[column(ty, payload)], 0, 0);
+            let held = arena
+                .terms
+                .iter()
+                .find(|t| t.what.contains("declared column"))
+                .expect("the column is a term of its own");
+            assert!(
+                held.bytes > term.bytes + 8 * n,
+                "{ty:?}: the arena route costs the offsets and the characters whole"
+            );
+        }
     }
 
     /// **A text index costs a second set of files, at the same time as the first.** The runs spill
@@ -1212,7 +1252,7 @@ mod tests {
     #[test]
     fn a_text_index_carries_its_runs_beside_the_column() {
         let n = 10_000_000;
-        let plain = column(ScalarType::Text, 400 * n);
+        let plain = spilled(ScalarType::Text, 400 * n);
         let indexed = ColumnCost {
             text_index: true,
             ..plain

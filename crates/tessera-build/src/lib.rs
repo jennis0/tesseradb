@@ -26,11 +26,11 @@ pub mod config;
 pub mod deep;
 pub mod disclosure;
 pub mod error;
+mod extents;
 pub mod input;
 pub mod layers;
 pub mod observer;
 mod pipeline;
-mod prose;
 mod residency;
 pub mod shapes;
 pub(crate) mod spill;
@@ -1430,10 +1430,13 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
             .iter()
             .enumerate()
             .map(|(index, attribute)| {
-                // A `text` column's values are its extents in both builds (`crate::prose`), so
-                // its slot here carries the length and nothing else.
-                if attribute.ty == tessera_spatial::ScalarType::Text {
-                    return column::EntityColumn::prose(&scratch, attribute.ty, tiler_items.len())
+                // A spilled column's values are its extents in both builds
+                // (`pipeline::takes_extents`, `crate::extents`), so its slot here carries the
+                // length and nothing else. The two builds route on one predicate: a column the
+                // streaming pipeline spills and this one placed at an entity would put the same
+                // value in the blob under two tags.
+                if pipeline::takes_extents(&args.schema, attribute) {
+                    return column::EntityColumn::spilled(&scratch, attribute.ty, tiler_items.len())
                         .map_err(|e| {
                             BuildError::Invalid(format!("attribute '{}': {e}", attribute.name))
                         });
@@ -1447,14 +1450,15 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
                 .map_err(|e| BuildError::Invalid(format!("attribute '{}': {e}", attribute.name)))
             })
             .collect::<Result<_>>()?;
-        // One extent per text column, holding every value in entity order — which is the shape
-        // the streaming pipeline reaches after several chunks, and the same reader serves both.
-        let mut prose_columns: Vec<prose::ProseColumn> = Vec::new();
+        // One extent per spilled column, holding every value in entity order — which is the
+        // shape the streaming pipeline reaches after several chunks, and the same reader serves
+        // both.
+        let mut extent_columns: Vec<extents::ExtentColumn> = Vec::new();
         for (index, attribute) in args.schema.attributes.iter().enumerate() {
-            if attribute.ty != tessera_spatial::ScalarType::Text {
+            if !pipeline::takes_extents(&args.schema, attribute) {
                 continue;
             }
-            let mut column = prose::ProseColumn::new(tmp.path(), index, &attribute.name);
+            let mut column = extents::ExtentColumn::new(tmp.path(), index, &attribute.name);
             let rows: Vec<(u32, &str)> = tiler_items
                 .iter()
                 .enumerate()
@@ -1466,11 +1470,11 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
                 })
                 .collect();
             column.push_extent(&rows)?;
-            prose_columns.push(column);
+            extent_columns.push(column);
         }
-        let open_prose: Vec<prose::OpenProse> = prose_columns
+        let open_extents: Vec<extents::OpenExtents> = extent_columns
             .iter()
-            .map(prose::ProseColumn::open)
+            .map(extents::ExtentColumn::open)
             .collect::<Result<_>>()?;
         // The record blob beside the postings, from the same entity-major values — the two
         // builds must stay byte-identical, so this path writes every artefact the streaming
@@ -1481,7 +1485,7 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
             &partition_dir,
             &args.schema,
             &by_entity,
-            &open_prose,
+            &open_extents,
             args.memory_budget
                 .unwrap_or_else(pipeline::detect_memory_budget),
         )?;
@@ -1490,10 +1494,10 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
             &args.schema,
             tiler_items.len() as u64,
             &by_entity,
-            &open_prose,
+            &open_extents,
         )?);
-        drop(open_prose);
-        drop(prose_columns);
+        drop(open_extents);
+        drop(extent_columns);
         drop(by_entity);
         tmp.close()?;
         paths
