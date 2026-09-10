@@ -867,6 +867,19 @@ pub(crate) fn disk(
         6 * p,
         Phases::BANDS,
     );
+    // **File-backed since 2026-09-10**, and a disk term for the first time because it never had a
+    // memory one here: the label-agreement tally is charged in `pipeline::plan_build`'s
+    // `loop_fixed`, which still carries its 4 B/item deliberately so `auto_batch` and the entity
+    // ids under it do not move (I9). It is written scattered by the pairs pack and read scattered
+    // by the assignment walk, so it stands from the pairs pass to that walk and no longer — the
+    // anchor geometry's window exactly.
+    push(
+        "the label-agreement tally by ordinal, 4 B/item, in .build-tmp/ (released at the \
+         assignment)"
+            .into(),
+        4 * n,
+        Phases::SPILL.and(Phases::BANDS),
+    );
 
     // ---- the geometry --------------------------------------------------------------------
     // Read in ordinal space once per view and released at that view's permutation, so every
