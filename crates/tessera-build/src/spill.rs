@@ -35,7 +35,10 @@ use std::path::{Path, PathBuf};
 
 use crate::error::{BuildError, Result};
 
-/// Reserve `bytes` of **allocated** blocks for `file`, extending it to that length.
+/// Reserve **allocated** blocks for `file` over `[from, to)`, extending it to `to`.
+///
+/// The range rather than the whole file, because an arena is reserved once per growth step and a
+/// call from zero each time would re-walk every extent already allocated.
 ///
 /// **`posix_fallocate` and not `set_len`, because these files are written through a mapping.** A
 /// `set_len` leaves a sparse file: its blocks are allocated at the moment a page is first written,
@@ -51,15 +54,24 @@ use crate::error::{BuildError, Result};
 /// A filesystem that does not implement it (`EOPNOTSUPP`, `ENOSYS`, or `EINVAL` from one that
 /// refuses the request) falls back to `set_len` and the sparse behaviour above — worse than the
 /// allocation, better than refusing to build there at all.
-fn reserve(file: &File, path: &Path, bytes: u64) -> Result<()> {
+fn reserve(file: &File, path: &Path, from: u64, to: u64) -> Result<()> {
     use std::os::unix::io::AsRawFd;
+    if to <= from {
+        return Ok(());
+    }
     // SAFETY: `fd` is this call's own open file and `posix_fallocate` touches nothing else. It
     // returns an errno rather than setting one, so there is no `errno` read to race.
-    let code = unsafe { libc::posix_fallocate(file.as_raw_fd(), 0, bytes as libc::off_t) };
+    let code = unsafe {
+        libc::posix_fallocate(
+            file.as_raw_fd(),
+            from as libc::off_t,
+            (to - from) as libc::off_t,
+        )
+    };
     match code {
         0 => Ok(()),
         libc::EOPNOTSUPP | libc::ENOSYS | libc::EINVAL => {
-            file.set_len(bytes).map_err(|e| BuildError::io(path, e))
+            file.set_len(to).map_err(|e| BuildError::io(path, e))
         }
         errno => Err(BuildError::io(
             path,
@@ -137,7 +149,7 @@ impl<T: Zeroable> MappedArray<T> {
         let bytes = (len as u64)
             .checked_mul(std::mem::size_of::<T>() as u64)
             .expect("element count times width exceeds u64");
-        reserve(&file, &path, bytes)?;
+        reserve(&file, &path, 0, bytes)?;
         // SAFETY: the file is this build's own, created empty under a directory it owns, and the
         // mapping is not shared with another process. Its length is fixed for the mapping's life.
         let map =
@@ -288,6 +300,14 @@ pub(crate) struct MappedArena {
 
 /// The arena's first mapping, and the floor its doubling starts from.
 const ARENA_MIN_BYTES: u64 = 1 << 20;
+
+/// How much an arena past this size takes at each growth, once doubling stops — and so the most
+/// disk an arena holds above the bytes it carries. See [`MappedArena::grow`].
+///
+/// 256 MiB, which is 512 growths over the 137 GB arena the GBIF rung's `scientificname` column
+/// models at (modelled: 3,495,729,729 items at the 39.2 B/item measured over 125,789,091 of
+/// them). Each growth is an `mmap` pair and a `posix_fallocate` over the new range alone.
+pub(crate) const ARENA_GROWTH_STEP: u64 = 256 << 20;
 
 /// How often a record boundary is remembered for [`MappedArena::windows`].
 ///
@@ -456,11 +476,26 @@ impl MappedArena {
         }
     }
 
+    /// Extend to hold `need` bytes: doubling while the arena is small, [`ARENA_GROWTH_STEP`] at a
+    /// time once it is not.
+    ///
+    /// **Doubling all the way up over-allocates by as much as the arena holds.** The blocks are
+    /// reserved rather than left sparse (see [`reserve`]), so a capacity is disk a build has
+    /// actually taken: an arena whose values stop just past a power of two costs twice what it
+    /// carries. Measured on 125,789,091 GBIF occurrences, whose `scientificname` arena holds
+    /// 4.93 GB: **8.59 GB allocated, 3.66 GB of it never written** — 21% of that build's whole
+    /// disk peak (`probes/2026-09-10-build-disk/`).
+    ///
+    /// The step also makes the cost modellable, which the doubling could not be: the capacity is
+    /// now within one step of the payload, so `crate::residency` charges an arena its characters
+    /// and a constant rather than twice its characters.
     fn grow(&mut self, need: u64) -> Result<()> {
-        self.map_to(
-            need.max(self.capacity.saturating_mul(2))
-                .max(ARENA_MIN_BYTES),
-        )
+        let next = if self.capacity < ARENA_GROWTH_STEP {
+            self.capacity.saturating_mul(2)
+        } else {
+            self.capacity.saturating_add(ARENA_GROWTH_STEP)
+        };
+        self.map_to(need.max(next).max(ARENA_MIN_BYTES))
     }
 
     fn map_to(&mut self, capacity: u64) -> Result<()> {
@@ -471,7 +506,7 @@ impl MappedArena {
                 "an arena with no file cannot be appended to".into(),
             ));
         };
-        reserve(file, path, capacity)?;
+        reserve(file, path, self.capacity, capacity)?;
         // The old mapping is dropped before the new one is taken: the writes it carried are in the
         // file's page cache already (`MAP_SHARED`), so the fresh mapping sees every one of them.
         self.map = None;
@@ -2086,6 +2121,25 @@ pub(crate) struct MemberTable {
     extents: Vec<MemberExtent>,
 }
 
+/// The table goes back to the disk when its last reader does.
+///
+/// **The publication is the only reader.** It is written at the layer publication and read there,
+/// one artifact at a time, through the hierarchy pass and the store's own load; the artifact pass
+/// four stages later reads the packed extents the store wrote, not this. Left to `TmpDir::close`
+/// it stood through the filter postings, the record blob, both row spaces and the manifest digest
+/// — measured at 518 MB over 125,789,091 GBIF occurrences, a third of the build's wall clock after
+/// its last read (`probes/2026-09-10-build-disk/`). The same argument [`MappedArray`]'s own `Drop`
+/// makes.
+impl Drop for MemberTable {
+    fn drop(&mut self) {
+        self.file = None;
+        if self.path.as_os_str().is_empty() {
+            return;
+        }
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
 impl MemberTable {
     /// A table with no file behind it, for a build whose layers declare no member source at all.
     /// Every artifact answers the empty membership, which is a membership and not an absence.
@@ -2332,6 +2386,30 @@ mod tests {
             assert_eq!(arena.append(b"first").unwrap(), 0);
         }
         assert!(!path.exists(), "the file goes when the arena does");
+    }
+
+    /// **The arena never holds more than one growth step above what it carries**, which is the
+    /// contract `crate::residency::arena_capacity` charges against. Under the step it doubles, so
+    /// its capacity is under twice its content and therefore under content plus the step; above the
+    /// step it grows by the step. The blocks are reserved rather than sparse, so this bound is disk
+    /// the build has taken and not a length it has declared.
+    #[test]
+    fn the_arena_reserves_at_most_one_step_above_what_it_holds() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let path = temp.path().join("arena.bytes");
+        let mut arena = MappedArena::create(temp.path(), "arena.bytes").unwrap();
+        let mut used = 0u64;
+        for i in 0..6_000usize {
+            let bytes = vec![b'x'; 1 + (i % 3_000)];
+            arena.append(&bytes).unwrap();
+            used += bytes.len() as u64;
+            let reserved = fs::metadata(&path).unwrap().len();
+            assert!(
+                reserved <= used + ARENA_GROWTH_STEP,
+                "record {i}: {reserved} reserved over {used} written"
+            );
+        }
+        assert!(used > ARENA_MIN_BYTES, "the arena must have grown at all");
     }
 
     // ---- bucket files -----------------------------------------------------------------

@@ -54,7 +54,7 @@
 //! (`probes/2026-09-02-mapped-memberships/README.md`). They are read back through the packed
 //! extent `layers.rs` has just written and fsynced — one write, no second format — so what stays on
 //! the heap is a Roaring container's descriptor and the members themselves are page cache. The
-//! publication's own window still holds them ([`BYTES_PER_MEMBER_ROW`]); nothing after it does.
+//! publication's own window still holds them ([`BYTES_PER_MEMBER_ENTRY`]); nothing after it does.
 //!
 //! The segment's **row-order** tail moved the same way and at the same time
 //! ([`crate::pipeline::permute_attribute_tail`]): eight render columns at 7.4×10⁷ rows were ~2.4 GB
@@ -70,21 +70,22 @@
 //! model that kept charging them would refuse builds that now fit, which is the failure mode of
 //! carrying a cost model past the thing it modelled.
 //!
-//! **[`Residency::mapped`] is the other half, and the disk pre-flight is its reader.** Those files
-//! are on the disk from the attribute join to the column release, and the text index and the
-//! member spill both write their runs into the same window — a stretch the pre-flight's three
-//! original phase peaks all end before. Its column phase is this figure, taken from here rather
-//! than derived a second time.
+//! **[`disk`] is the other half, and the disk pre-flight is its reader.** It carries every mapped
+//! term below and adds what lives outside this window: the pair spills, the geometry, the join's
+//! staging buffer, the keyword dictionaries' scratch, the row spaces' own files, and the bundle,
+//! which nothing releases. Each term names the [`Phase`]s it stands through and the forecast is the
+//! largest phase, because two structures whose lifetimes do not overlap cost the larger and not the
+//! sum.
 //!
 //! # What the numbers are, and what they are not
 //!
 //! Every term below is arithmetic over things known before the first pass: the item count, the
-//! declared schema, and two figures read from Parquet footers — a member table's row count and a
-//! column's *uncompressed* byte size. No data is read.
+//! declared schema, a member source's declared key values (its footer's), and a string column's
+//! bytes an item (a sample of its row groups — see [`ColumnCost`] for why the footer will not say).
 //!
-//! ⊘ **This is a lower bound, and measured to be about half the real peak.** Transients inside a
-//! stage — a Parquet decode buffer, an analyser's scratch, the allocator's own slack — are not
-//! enumerated, and [`SLACK`] is one constant standing in for all of them. The one build it has been
+//! ⊘ **The memory figure is a lower bound, and measured to be about half the real peak.**
+//! Transients inside a stage — a Parquet decode buffer, an analyser's scratch, the allocator's own
+//! slack — are not enumerated, and [`SLACK`] is one constant standing in for all of them. The one build it has been
 //! checked against ([`tests::the_model_is_checked_against_an_observed_peak`], 10⁶ items, one `text`
 //! column, 10⁶ member rows) read **190 MiB against an observed 407 MiB**, and the trace shows why:
 //! the process was already at 331 MiB in its first stage, reading the points file, before a single
@@ -97,6 +98,14 @@
 //! catch every build that will not fit. At the campaign's own corner it catches the headline one:
 //! 2.5×10⁸ points over the generator's declaration models at tens of gigabytes against the 12 GB
 //! budget those runs passed, where 10⁸ under an auto-derived budget still slips through.
+//!
+//! ⊘ **The disk figure is a ceiling, and measured at 1.2 to 1.7 times the real peak** — the other
+//! way round, because it is compared against free space rather than a flag and an under-read is an
+//! ENOSPC at hour three. It was a lower bound until 2026-09-10, at 0.51 to 0.59 of the peak at four
+//! row counts from 16.3×10⁶ to 125.8×10⁶ GBIF occurrences, and rung 6 died inside the difference
+//! (`probes/2026-09-10-build-disk/`). What is left of the margin is three stated ceilings, named at
+//! their terms: the postings and the oracle's pairs at 4 B a pair, the record blob at half its
+//! columns' characters, and a published member entry at 3 B.
 
 use tessera_spatial::ScalarType;
 
@@ -107,20 +116,116 @@ pub(crate) const SLACK: u64 = 64 << 20;
 /// What a string value costs outside its characters: the entity-indexed arena offset in
 /// [`crate::column::EntityColumn`], plus the arena record's own header.
 ///
-/// Eight bytes of offset and eight of header — the entity and the length the record carries so the
-/// arena can be read in its own order (`column.rs`). The characters ride in the arena and are
-/// counted as its payload; the `String` header this replaced was 24 bytes per entity, paid before
-/// a character was stored.
-const ARENA_OFFSET: u64 = 8 + 8;
+/// Eight bytes of offset and four of record header — the length, and the entity too where the
+/// column is one read in arena order (`column.rs`, [`crate::column`]'s `RECORD_HEADER_INDEXED`).
+/// The wider header is charged for a `text` column, which is the only family walked that way. The
+/// characters ride in the arena and are counted as its payload; the `String` header this replaced
+/// was 24 bytes per entity, paid before a character was stored.
+fn arena_offset(ty: ScalarType) -> u64 {
+    match ty {
+        ScalarType::Text => 8 + 8,
+        _ => 8 + 4,
+    }
+}
+
+/// The windows the disk pre-flight takes the largest of, in build order.
+///
+/// **A build's files do not all stand at once.** The pair buckets are consumed by the batch loop,
+/// a declared column is unlinked at its last reader, the member table goes back at the publication
+/// — and the bundle's own bytes only accumulate. Two structures whose lifetimes do not overlap cost
+/// the larger and not the sum, so the forecast is a maximum over these six and every term below
+/// says which of them it is on the disk for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Phase {
+    /// Pass one to the pairs pack: the sorted source ids, the pair buckets, and each view's
+    /// geometry as it is read.
+    Spill,
+    /// The batch loop and the postings write: the term bands, the anchor geometry, the
+    /// ordinal→entity map, and the first of the bundle's own files.
+    Bands,
+    /// The attribute join and the layer publication — **the model's largest phase on every corpus
+    /// measured**, and within 3% of the index phase beside it, which is where the measurement puts
+    /// the peak at 125.8×10⁶ items. Every declared column filling, the join's staging buffer, the
+    /// source ids, and the member spill.
+    Join,
+    /// The filter postings, the keyword dictionaries and the text index: the columns full, their
+    /// dictionaries' scratch beside them, and the value columns being written.
+    Index,
+    /// The record blob. A column with no blob row went back to the disk at the end of the phase
+    /// above, so what stands here is the blob-resident and render columns and the blob itself.
+    Blob,
+    /// The row spaces, the segment write and the artifact pass: the entity-space geometry, the
+    /// row-order render tail, and the whole finished bundle.
+    Assemble,
+}
+
+impl Phase {
+    pub(crate) const ALL: [Phase; 6] = [
+        Phase::Spill,
+        Phase::Bands,
+        Phase::Join,
+        Phase::Index,
+        Phase::Blob,
+        Phase::Assemble,
+    ];
+
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Phase::Spill => "spill",
+            Phase::Bands => "band",
+            Phase::Join => "join",
+            Phase::Index => "index",
+            Phase::Blob => "blob",
+            Phase::Assemble => "assembly",
+        }
+    }
+
+    const fn bit(self) -> u8 {
+        1 << self as u8
+    }
+}
+
+/// Which phases a term's bytes are on the disk for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Phases(u8);
+
+impl Phases {
+    pub(crate) const SPILL: Phases = Phases(Phase::Spill.bit());
+    pub(crate) const BANDS: Phases = Phases(Phase::Bands.bit());
+    pub(crate) const JOIN: Phases = Phases(Phase::Join.bit());
+    pub(crate) const INDEX: Phases = Phases(Phase::Index.bit());
+    pub(crate) const BLOB: Phases = Phases(Phase::Blob.bit());
+    pub(crate) const ASSEMBLE: Phases = Phases(Phase::Assemble.bit());
+
+    /// Both, for a term standing through two windows.
+    pub(crate) const fn and(self, other: Phases) -> Phases {
+        Phases(self.0 | other.0)
+    }
+
+    /// This phase and every one after it — what the bundle's own files take, nothing releasing
+    /// them once they are written.
+    pub(crate) const fn onwards(self) -> Phases {
+        // Every bit at or above the lowest one set. A `Phases` naming two phases is not a range,
+        // and `onwards` is only ever built from a single one.
+        Phases(!(self.0 - 1))
+    }
+
+    fn holds(self, phase: Phase) -> bool {
+        self.0 & phase.bit() != 0
+    }
+}
 
 /// One named term of the residency, so a refusal prints where the bytes are rather than a total.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Term {
     pub what: String,
     pub bytes: u64,
-    /// A file under `.build-tmp/` rather than anonymous memory — reported, but not charged against
-    /// the memory budget.
+    /// A file under `.build-tmp/` or in the bundle, rather than anonymous memory — reported, but
+    /// not charged against the memory budget.
     pub mapped: bool,
+    /// The disk phases these bytes stand through. Meaningless for an anonymous term, which the
+    /// memory model reads as one window.
+    pub phases: Phases,
 }
 
 /// The entity-order residency, term by term.
@@ -140,17 +245,37 @@ impl Residency {
             .sum()
     }
 
-    /// What the build asks the **disk** for: the mapped terms only — the declared columns, their
-    /// arenas and the text index's runs, all files under the build's own scratch. The counterpart
-    /// of [`Self::total`], and the term the disk pre-flight's column phase is built from
-    /// (`pipeline::plan_build`): those files stand from the attribute join to the column release,
-    /// which is a window none of the three phases that pre-flight modelled before touches.
-    pub fn mapped(&self) -> u64 {
+    /// What the build asks the **disk** for in one phase: the mapped terms standing through it.
+    /// The counterpart of [`Self::total`], and what the disk pre-flight takes the maximum of.
+    pub fn at(&self, phase: Phase) -> u64 {
         self.terms
             .iter()
-            .filter(|t| t.mapped)
+            .filter(|t| t.mapped && t.phases.holds(phase))
             .map(|t| t.bytes)
             .sum()
+    }
+
+    /// The largest phase, and what it comes to.
+    pub fn peak(&self) -> (Phase, u64) {
+        Phase::ALL
+            .iter()
+            .map(|&phase| (phase, self.at(phase)))
+            .max_by_key(|&(_, bytes)| bytes)
+            .expect("Phase::ALL is not empty")
+    }
+
+    /// One phase's mapped terms as one line each, largest first — the form a disk refusal prints.
+    pub fn describe_phase(&self, phase: Phase) -> String {
+        let mut terms: Vec<&Term> = self
+            .terms
+            .iter()
+            .filter(|t| t.mapped && t.phases.holds(phase) && t.bytes > 0)
+            .collect();
+        terms.sort_by_key(|t| std::cmp::Reverse(t.bytes));
+        terms
+            .iter()
+            .map(|t| format!("\n  {:>9} MiB  {}", t.bytes >> 20, t.what))
+            .collect()
     }
 
     /// The terms as one line each — the form a refusal prints. **Charged first, largest first
@@ -173,11 +298,17 @@ impl Residency {
 
 /// What one declared column costs per entity, and where the variable part came from.
 ///
-/// `payload_bytes` is the column's **uncompressed** size in its Parquet source, read from the
-/// footer. It is the closest thing to the in-memory string payload that can be had without reading
-/// the file, and it is an under-read rather than an over-read: Parquet's uncompressed size is the
-/// encoded page size, and a dictionary-encoded column of repeated strings expands when it is
-/// materialised into one `String` per entity.
+/// `payload_bytes` is the **characters** this build's `n` items carry in the column: the mean bytes
+/// a row of the Parquet source holds, measured over a sample of its row groups
+/// ([`sampled_bytes_per_item`]), times `n`.
+///
+/// ⊘ **It was the column's uncompressed size in the Parquet footer until 2026-09-10, and that
+/// figure is not the characters.** Parquet's uncompressed size is the *encoded* page size, so a
+/// dictionary-encoded column of repeated strings reads as its indices and its dictionary: GBIF's
+/// `scientificname` footers say 7.22 bytes a row where the values are 31.22, and `specieskey`'s say
+/// 2.14 where they are 6.60 (measured over 125,789,091 rows). At the GBIF rung that one term put
+/// the forecast 104 GB under the arena the build then filled. The footer is still the fallback for
+/// a file the sample cannot read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ColumnCost {
     pub ty: ScalarType,
@@ -185,16 +316,25 @@ pub(crate) struct ColumnCost {
     /// Whether this column is the one a text index is built over — which costs the build a second
     /// set of files beside the column itself, and costs it them at the same time.
     pub text_index: bool,
+    /// The windows this column's storage stands through, which is **its last reader and not the
+    /// release stage**: a `render` column is read by the segment write, a blob-resident one by the
+    /// record blob, and a column that is neither has met its last reader when the filter postings
+    /// end (`pipeline::write_filter_postings`).
+    pub phases: Phases,
 }
 
-/// Whether one entity's value lives in [`crate::column::EntityColumn`]'s arena — which is what
-/// makes the column's characters a term of their own rather than part of its width.
+/// Whether a column's values are characters rather than a fixed width — which is what makes them a
+/// term of their own rather than part of the column's slot size.
 ///
-/// A `text` column is not one of them: its prose is spilled as record-blob extents while the join
-/// decodes it and is never placed at an entity index ([`crate::prose`]). [`EXTENT_SHARE`] is what
-/// it costs instead.
-fn is_variable_width(ty: ScalarType) -> bool {
-    matches!(ty, ScalarType::Utf8 | ScalarType::Keyword)
+/// Where those characters *land* differs by type and is priced at each term: a `keyword` or `utf8`
+/// column holds them in [`crate::column::EntityColumn`]'s arena, and a bundle-wide `text` column
+/// spills them as record-blob extents instead ([`crate::prose`], [`EXTENT_SHARE`]). The attribute
+/// join stages every one of the three in an arena of its own.
+fn carries_characters(ty: ScalarType) -> bool {
+    matches!(
+        ty,
+        ScalarType::Utf8 | ScalarType::Keyword | ScalarType::Text
+    )
 }
 
 /// What a `text` column's prose extents cost against the column's Parquet payload: **one half**.
@@ -216,23 +356,42 @@ fn fixed_width(ty: ScalarType) -> u64 {
         ScalarType::U16 | ScalarType::I16 => 2,
         ScalarType::U32 | ScalarType::I32 | ScalarType::F32 => 4,
         ScalarType::U64 | ScalarType::I64 | ScalarType::F64 | ScalarType::TimestampUs => 8,
-        ScalarType::Utf8 | ScalarType::Keyword | ScalarType::Text => ARENA_OFFSET,
+        ScalarType::Utf8 | ScalarType::Keyword | ScalarType::Text => arena_offset(ty),
     }
 }
 
-/// What one layer member row costs the **machine**: about 4 bytes as Roaring — the store's own
-/// decoded copy, at the ~2 bytes an array container spends on a scattered member and less on a
-/// dense one, and the level being published beside it, whose incoming bitmaps and durable record
-/// bytes are the same membership twice more.
+/// What an arena of `payload` characters takes on the disk: the characters and one growth step.
+///
+/// [`crate::spill::MappedArena`] reserves its blocks rather than leaving the file sparse, so its
+/// capacity is disk the build has taken. Past [`crate::spill::ARENA_GROWTH_STEP`] the capacity is
+/// within one step of the payload; below it the arena doubles, so a small arena is charged a whole
+/// step where it takes at most twice what it holds. That over-charge is a constant per string
+/// column and the exactness above it is what the step was added for — the doubling alone cost
+/// 3.66 GB of never-written blocks on 125,789,091 GBIF occurrences
+/// (`probes/2026-09-10-build-disk/`).
+fn arena_capacity(payload: u64) -> u64 {
+    payload.saturating_add(crate::spill::ARENA_GROWTH_STEP)
+}
+
+/// What one layer member **entry** — one `(artifact, source)` pair — costs the **machine**: about
+/// 4 bytes as Roaring, the store's own decoded copy, at the ~2 bytes an array container spends on a
+/// scattered member and less on a dense one, and the level being published beside it, whose
+/// incoming bitmaps and durable record bytes are the same membership twice more.
+///
+/// **Charged over one level's entries and not the layer's**, because [`crate::layers::publish`]
+/// walks the levels and drops each one's bitmaps when its record is written. A level draws at most
+/// one artifact per member row, so the file's row count is a ceiling on any one level's entries and
+/// is what this is charged over — where the disk terms below are charged over every entry, all of
+/// which are on the disk at once.
 ///
 /// It was 12 until 2026-08-30, the other 8 being the plan's `Vec<u64>` of source ids: one vector
 /// per artifact, every one of them live from the first row of the first member source until the
-/// last level was published. Those pairs go to disk now ([`SPILLED_BYTES_PER_MEMBER_ROW`]), so the
+/// last level was published. Those pairs go to disk now ([`SPILLED_BYTES_PER_MEMBER_ENTRY`]), so the
 /// plan holds a spill budget rather than the corpus and the term that is left is the published
 /// memberships alone.
 ///
 /// **Only the store's copy was corpus-wide, and it is a mapping now** — see
-/// [`MAPPED_BYTES_PER_MEMBER_ROW`]. The store used to carry one heap Roaring bitmap per artifact
+/// [`MAPPED_BYTES_PER_MEMBER_ENTRY`]. The store used to carry one heap Roaring bitmap per artifact
 /// from the layers stage to the artifact pass four stages later: **+1.2 GB of anonymous memory at
 /// the 10⁷ MedCPT sample**, 2.7 B per closed member row, measured across the build's peak
 /// (`probes/2026-09-02-mapped-memberships/README.md`). `layers.rs` reads each membership back
@@ -245,39 +404,38 @@ fn fixed_width(ty: ScalarType) -> u64 {
 /// direction since the packing was streamed: the constant charges the corpus for terms that are a
 /// level's, and it is left at 4 rather than lowered because a term that errs high refuses a build
 /// that would have fitted, where one that errs low is the kill this module exists to pre-empt.
-const BYTES_PER_MEMBER_ROW: u64 = 4;
+const BYTES_PER_MEMBER_ENTRY: u64 = 4;
 
-/// What one member row costs the **disk**, and the process's page cache, as the packed membership
-/// extent the store then reads through: 2 bytes, an array container's own width.
+/// What one member entry costs the **disk**, and the process's page cache, as the packed membership
+/// extent the store then reads through: 3 bytes, an array container's own width and a little.
 ///
-/// ⊘ **Measured below that and charged above it.** The 10⁷ MedCPT sample's two extents are
-/// 543,884,239 bytes over 471,778,374 member rows — **1.15 B a row**, because a descriptor whose
-/// members are dense in entity space comes out as a run or a bitset container rather than an
-/// array. The model charges the array case for the reason the constant above does: a term that errs
-/// high costs a rerun and one that errs low is the ENOSPC this pre-flight exists to pre-empt.
+/// ⊘ **Measured at 2.24 and charged at 3.** GBIF's three taxonomy levels over 125,789,091
+/// occurrences write 843.8 MB of extent for 377,367,273 declared key values
+/// (`probes/2026-09-10-build-disk/`); the 10⁷ MedCPT sample's two extents are 543,884,239 bytes
+/// over 471,778,374 entries — **1.15 B an entry**, because a descriptor whose members are dense in
+/// entity space comes out as a run or a bitset container rather than an array. The model charges
+/// above the larger figure for the reason the constant above does: a term that errs high costs a
+/// rerun and one that errs low is the ENOSPC this pre-flight exists to pre-empt.
 ///
 /// **Charged in the column window**, which is where these bytes are: the extents are written at the
 /// layer publication (stage 8c) and mapped from there to the end of the build, and the declared
 /// columns are still on the disk until the release two stages later. They are the bundle's own
 /// bytes and would be needed whether or not the store read them back — what the mapping changes is
 /// that they are also resident, as page cache the kernel may evict.
-const MAPPED_BYTES_PER_MEMBER_ROW: u64 = 2;
+const MAPPED_BYTES_PER_MEMBER_ENTRY: u64 = 3;
 
-/// What one layer member row costs the **disk** while the publication is running: the sorted runs
+/// What one layer member entry costs the **disk** while the publication is running: the sorted runs
 /// the member spill writes and the merged member table it reads back, both under `.build-tmp/` and
 /// both alive at once — the runs are deleted only once the whole table is written.
 ///
-/// Charged as if a pair cost one raw source id in each file. Both are LEB128 delta encodings over
-/// ascending values, so the true figure is below that wherever a membership is dense in its id
-/// space and at it where the membership is scattered.
+/// Both are LEB128 delta encodings over ascending values, so the true figure falls wherever a
+/// membership is dense in its id space and rises where it is scattered.
 ///
-/// ⊘ **Modelled, not measured per build**, and the one corpus with a figure is GeoNames: its two
-/// member files' 26.9×10⁶ Parquet rows carry 68.4×10⁶ `(artifact, source)` pairs, which spilled
-/// 73 MiB of runs beside a 68 MiB table — **140 MiB against the 205 MiB this charges**. Loose in
-/// the direction the whole module is loose in, and loose the other way in its denominator: a
-/// member row's `key` column is a list, so a row is one pair on a flat layer and one per level on
-/// a ladder.
-const SPILLED_BYTES_PER_MEMBER_ROW: u64 = 8;
+/// ⊘ **Measured at 2.9 and charged at 4.** GBIF's taxonomy spills at most 1,084.6 MB of runs and
+/// table together over 377,367,273 declared key values, at four row counts from 16.3×10⁶ to
+/// 125.8×10⁶ and within 4% of each other (`probes/2026-09-10-build-disk/`). GeoNames' two member
+/// files carry 68.4×10⁶ pairs and spilled 73 MiB of runs beside a 68 MiB table — 2.2 B an entry.
+const SPILLED_BYTES_PER_MEMBER_ENTRY: u64 = 4;
 
 /// What the segment's **row-order** tail costs on disk: one fixed-width slot per row per render
 /// column, in `.build-tmp/`, for the length of the segment write.
@@ -304,13 +462,16 @@ pub(crate) fn render_tail_bytes(schema: &crate::config::Schema, n: u64) -> u64 {
 
 /// The residency of everything the batch loop's model does not cover.
 ///
-/// `member_rows` is the total across every layer's member table, and `n` the item count.
+/// `member_entries` is every `(artifact, source)` pair the layers' member sources declare and
+/// `level_entries` a ceiling on any one level's, those being the two windows a member entry is held
+/// in: the spill holds every pair at once, the publication one level's. `n` is the item count.
 pub(crate) fn entity_order_residency(
     n: u64,
     columns: &[ColumnCost],
-    member_rows: u64,
+    member_entries: u64,
+    level_entries: u64,
 ) -> Residency {
-    let publication_bytes = member_rows.saturating_mul(BYTES_PER_MEMBER_ROW);
+    let publication_bytes = level_entries.saturating_mul(BYTES_PER_MEMBER_ENTRY);
     let mut terms = vec![
         // **File-backed since 2026-09-10**, and so charged to the disk rather than to memory. The
         // ids are read sequentially by every pass but one — the join's merge sweep, the
@@ -324,6 +485,7 @@ pub(crate) fn entity_order_residency(
                 .into(),
             bytes: 8 * n,
             mapped: true,
+            phases: Phases::SPILL.and(Phases::BANDS).and(Phases::JOIN),
         },
         // **File-backed since 2026-09-09**, and so charged to the disk rather than to memory: the
         // map is written scattered once and read scattered thereafter, which is `MappedArray`'s
@@ -333,6 +495,8 @@ pub(crate) fn entity_order_residency(
             what: "the ordinal→entity map, 4 B/item, in .build-tmp/".into(),
             bytes: 4 * n,
             mapped: true,
+            // Written by the assignment walk and read to the last view's permutation.
+            phases: Phases::BANDS.onwards(),
         },
     ];
     for (index, column) in columns.iter().enumerate() {
@@ -344,11 +508,20 @@ pub(crate) fn entity_order_residency(
         let prose = column.ty == ScalarType::Text;
         let bytes = if prose {
             presence.saturating_add(column.payload_bytes / EXTENT_SHARE)
+        } else if column.payload_bytes > 0 {
+            // 8 bytes of entity-indexed offset and the presence bit, plus the arena the characters
+            // and their record headers fill.
+            8u64.saturating_mul(n)
+                .saturating_add(presence)
+                .saturating_add(arena_capacity(
+                    column
+                        .payload_bytes
+                        .saturating_add((width - 8) * n),
+                ))
         } else {
             width
                 .saturating_mul(n)
                 .saturating_add(presence)
-                .saturating_add(column.payload_bytes)
         };
         let ty = column.ty.arrow_type_name();
         terms.push(Term {
@@ -370,6 +543,7 @@ pub(crate) fn entity_order_residency(
             },
             bytes,
             mapped: true,
+            phases: column.phases,
         });
         // The text index's sorted runs, **charged at the column they are tokenised from** rather
         // than at a constant of their own. The runs spill while the column is resident, so the two
@@ -393,88 +567,491 @@ pub(crate) fn entity_order_residency(
                 // uncompressed.
                 bytes: if prose { column.payload_bytes } else { bytes },
                 mapped: true,
+                phases: Phases::INDEX,
             });
         }
     }
-    if member_rows > 0 {
+    if member_entries > 0 {
         terms.push(Term {
             what: format!(
-                "{member_rows} layer member row(s) at {BYTES_PER_MEMBER_ROW} B — the \
-                 publication's own Roaring, while the level it is publishing is in flight"
+                "{level_entries} member entr(ies) in the largest level at \
+                 {BYTES_PER_MEMBER_ENTRY} B — the publication's own Roaring, while the level it is \
+                 publishing is in flight"
             ),
             bytes: publication_bytes,
             mapped: false,
+            phases: Phases::JOIN,
         });
         terms.push(Term {
             what: format!(
                 "the published memberships the store reads back through the packed extent, at \
-                 {MAPPED_BYTES_PER_MEMBER_ROW} B a member row"
+                 {MAPPED_BYTES_PER_MEMBER_ENTRY} B a member entry"
             ),
-            bytes: member_rows.saturating_mul(MAPPED_BYTES_PER_MEMBER_ROW),
+            bytes: member_entries.saturating_mul(MAPPED_BYTES_PER_MEMBER_ENTRY),
             mapped: true,
+            // The bundle's own extents: written at the publication and never released.
+            phases: Phases::JOIN.onwards(),
         });
         terms.push(Term {
             what: format!(
                 "the member spill's runs and the table they merge into, at \
-                 {SPILLED_BYTES_PER_MEMBER_ROW} B a member row, in .build-tmp/"
+                 {SPILLED_BYTES_PER_MEMBER_ENTRY} B a member entry, in .build-tmp/"
             ),
-            bytes: member_rows.saturating_mul(SPILLED_BYTES_PER_MEMBER_ROW),
+            bytes: member_entries.saturating_mul(SPILLED_BYTES_PER_MEMBER_ENTRY),
             mapped: true,
+            phases: Phases::JOIN,
         });
     }
     terms.push(Term {
         what: "slack for decode buffers, stage scratch and the allocator".into(),
         bytes: SLACK,
         mapped: false,
+        phases: Phases::JOIN,
     });
     Residency { terms }
 }
 
-/// The whole tail's residency for this build, with the two Parquet figures read from footers.
+/// The whole tail's residency for this build: the schema, the item count, and two figures per
+/// input — a member source's declared key values, read from its footer, and a string column's
+/// characters, read from a sample of its row groups ([`payloads_per_item`]).
 ///
-/// **Footers only.** A row count and a column's uncompressed size both live in the file's metadata,
-/// so this opens every input and reads none of them. A file that cannot be opened, or a column that
-/// is not in it, contributes zero rather than refusing: the pre-flight is an estimate, and a build
-/// blocked because a footer would not parse is a worse outcome than one that under-reads.
-pub(crate) fn model(args: &crate::BuildArgs, n: u64) -> Residency {
-    let mut payloads = vec![0u64; args.schema.attributes.len()];
-    for source in &args.attribute_sources {
-        let Some(metadata) = footer(&source.path) else {
-            continue;
-        };
-        for &index in &source.attributes {
-            let Some(attribute) = args.schema.attributes.get(index) else {
-                continue;
-            };
-            if !is_variable_width(attribute.ty) {
-                continue;
-            }
-            payloads[index] = payloads[index]
-                .saturating_add(uncompressed_column_bytes(&metadata, attribute.column()));
-        }
-    }
+/// **Footers, and about 2×10⁶ values a string column.** The row counts are metadata; the characters
+/// are not, and the metadata figure for them is wrong by a factor of four on the corpus that ran
+/// out of disk ([`ColumnCost`]). A file that cannot be opened, or a column that is not in it,
+/// contributes zero rather than refusing: the pre-flight is an estimate, and a build blocked
+/// because a footer would not parse is a worse outcome than one that under-reads.
+pub(crate) fn model(args: &crate::BuildArgs, n: u64, payloads: &[f64]) -> Residency {
+    // Scaled by `n` rather than taken whole, so a `--limit` build is charged the prefix it builds
+    // and not the file it reads from.
     let columns: Vec<ColumnCost> = args
         .schema
         .attributes
         .iter()
         .zip(payloads)
-        .map(|(attribute, payload_bytes)| ColumnCost {
+        .map(|(attribute, &per_item)| ColumnCost {
             ty: attribute.ty,
-            payload_bytes,
+            payload_bytes: payload(per_item, n),
             // The same test the emit itself makes, called rather than restated: a text column
             // earns an index exactly where it is owed postings.
             text_index: attribute.ty == ScalarType::Text
                 && crate::pipeline::postings_are_owed(&args.schema, attribute),
+            phases: if attribute.render {
+                Phases::JOIN.onwards()
+            } else if crate::pipeline::blob_resident(&args.schema, attribute) {
+                Phases::JOIN.and(Phases::INDEX).and(Phases::BLOB)
+            } else {
+                Phases::JOIN.and(Phases::INDEX)
+            },
         })
         .collect();
-    let member_rows = args
-        .layer_inputs
+    // **Two denominators over the same member sources**, because a member entry is held in two
+    // windows of different sizes. Every entry is on the disk at once, as the spill's runs and the
+    // table they merge into: that is the file's key values. One *level's* are in memory at once, as
+    // the publication's Roaring, and a level draws at most one artifact per member row: that is the
+    // file's rows, which is a ceiling on any one level whatever the shape of its key lists.
+    let mut entries = 0u64;
+    let mut level_entries = 0u64;
+    for layer in &args.layer_inputs {
+        let Some(members) = layer.members.as_ref() else {
+            continue;
+        };
+        let (declared, rows) = member_entries(members);
+        entries = entries.saturating_add(declared);
+        level_entries = level_entries.saturating_add(rows);
+    }
+    entity_order_residency(n, &columns, entries, level_entries)
+}
+
+/// **What the whole build asks the disk for**, phase by phase, so the pre-flight refuses on the
+/// largest window rather than on a total nothing ever holds.
+///
+/// The entity-order terms are `tail`'s, carried rather than recomputed — a second copy of that
+/// arithmetic is how the two stop agreeing. What is added here is everything outside that window:
+/// the pair spills, the geometry, the join's staging buffer, the keyword dictionary's scratch, the
+/// row spaces' own files, and **the bundle**, which nothing releases.
+///
+/// ⊘ **The bundle was not modelled at all until 2026-09-10**, beyond one `4 B/pair` term for the
+/// postings. It is 68.5 bytes an item on the GBIF schema when it is finished and 22.5 by the index
+/// phase (measured over 16.3×10⁶ to 125.8×10⁶ occurrences, agreeing to within 1%), and the build
+/// that ran out of disk at rung 6 had 93 GB of it written when it died
+/// (`probes/2026-09-10-build-disk/`).
+pub(crate) fn disk(
+    args: &crate::BuildArgs,
+    n: u64,
+    pair_rows: u64,
+    batches: u64,
+    bucket_in_ram: bool,
+    payloads: &[f64],
+    tail: &Residency,
+) -> Residency {
+    let p = pair_rows;
+    let views = args.views.len().max(1) as u64;
+    let mut terms: Vec<Term> = tail.terms.iter().filter(|t| t.mapped).cloned().collect();
+    let mut push = |what: String, bytes: u64, phases: Phases| {
+        if bytes > 0 {
+            terms.push(Term {
+                what,
+                bytes,
+                mapped: true,
+                phases,
+            });
+        }
+    };
+
+    // ---- the pair relation's own spills ------------------------------------------------------
+    // Stated ceilings for the varint codec and the Roaring postings, not measurements of this
+    // corpus: a relation over few terms encodes far below them. A term that errs high costs a
+    // rerun; one that errs low is the ENOSPC this exists to pre-empt.
+    if !bucket_in_ram {
+        push(
+            "the packed pair buckets, 8 B/pair, in .build-tmp/ (deleted as the batch loop loads \
+             each)"
+                .into(),
+            8 * p,
+            Phases::SPILL,
+        );
+    }
+    push(
+        "the first term band beside the buckets, at a ceiling of 6 B/pair".into(),
+        (6 * p) / batches.max(1),
+        Phases::SPILL,
+    );
+    push(
+        "the term bands, at a ceiling of 6 B/pair, in .build-tmp/".into(),
+        6 * p,
+        Phases::BANDS,
+    );
+
+    // ---- the geometry --------------------------------------------------------------------
+    // Read in ordinal space once per view and released at that view's permutation, so every
+    // view's is on the disk together from the geometry pass to the first row space.
+    push(
+        format!(
+            "each view's geometry by ordinal, 8 B/item over {views} view(s), in .build-tmp/"
+        ),
+        8 * n * views,
+        Phases::SPILL.onwards(),
+    );
+    // **Only where the fallback can reach an item.** A single-view build's anchor holds every
+    // ordinal, and `pipeline::build` then reads that view's own arrays rather than writing a copy
+    // of them. Charged on a multi-view declaration because whether the anchor covers the union is
+    // not known until pass one has run.
+    if views > 1 {
+        push(
+            "the anchor view's Morton geometry, 8 B/item, in .build-tmp/ (released at the \
+             assignment)"
+                .into(),
+            8 * n,
+            Phases::SPILL.and(Phases::BANDS),
+        );
+    }
+    push(
+        "the row space's geometry in entity order, 8 B/item, in .build-tmp/ (one view at a time)"
+            .into(),
+        8 * n,
+        Phases::ASSEMBLE,
+    );
+    push(
+        "the row-order render tail, one mapped file per render column, in .build-tmp/".into(),
+        render_tail_bytes(&args.schema, n),
+        Phases::ASSEMBLE,
+    );
+
+    // ---- the attribute join's staging buffer -------------------------------------------------
+    // A second set of columns per attribute source, [`crate::pipeline::JOIN_STAGE_BYTES`] wide in
+    // fixed-width slots — but its arenas hold a whole chunk's characters, which that budget does
+    // not bound (`pipeline::staged_width` prices a string at a `String` header it no longer costs).
+    for source in &args.attribute_sources {
+        let columns: Vec<&crate::config::Attribute> = source
+            .attributes
+            .iter()
+            .filter_map(|&i| args.schema.attributes.get(i))
+            .collect();
+        if columns.is_empty() {
+            continue;
+        }
+        let staged = crate::pipeline::staging_rows(&columns, n) as u64;
+        let mut bytes = 0u64;
+        for &index in &source.attributes {
+            let Some(attribute) = args.schema.attributes.get(index) else {
+                continue;
+            };
+            bytes = bytes
+                .saturating_add(fixed_width(attribute.ty).saturating_mul(staged))
+                .saturating_add(staged.div_ceil(8));
+            if carries_characters(attribute.ty) {
+                bytes = bytes
+                    .saturating_add(payload(payloads[index], staged))
+                    .saturating_add(crate::spill::ARENA_GROWTH_STEP);
+            }
+        }
+        push(
+            format!(
+                "the attribute join's staging buffer over '{}', {staged} rows a chunk, in \
+                 .build-tmp/",
+                source.name
+            ),
+            bytes,
+            Phases::JOIN,
+        );
+    }
+
+    // ---- the bundle, which nothing releases --------------------------------------------------
+    push(
+        "the entity→term transpose, 4 B/item of offsets and a ceiling of 4 B/pair of terms".into(),
+        4 * (n + 1) + 4 * p,
+        Phases::BANDS.onwards(),
+    );
+    push(
+        "postings.arrow, at a ceiling of 4 B/pair".into(),
+        4 * p,
+        Phases::BANDS.onwards(),
+    );
+    if args.emit_oracle_pairs {
+        push(
+            "pairs.parquet, at a ceiling of 4 B/pair — the test-time oracle's copy of the \
+             relation, which --no-oracle-pairs does not write"
+                .into(),
+            4 * p,
+            Phases::BANDS.onwards(),
+        );
+    }
+    if args.mint_external_ids {
+        push(
+            "the external-id sidecar and its locator, 12 B/item".into(),
+            12 * n,
+            Phases::BANDS.onwards(),
+        );
+    }
+    let mut blob_payload = 0u64;
+    for (index, attribute) in args.schema.attributes.iter().enumerate() {
+        if crate::pipeline::blob_resident(&args.schema, attribute) {
+            blob_payload = blob_payload.saturating_add(payload(payloads[index], n));
+            continue;
+        }
+        if !crate::pipeline::postings_are_owed(&args.schema, attribute) {
+            continue;
+        }
+        // An indexed keyword column's values file is its dictionary ordinals, four bytes a row;
+        // every other family's is its declared width. The presence bitmap beside it is charged at
+        // a bit an item, which is a Roaring bitmap's own ceiling.
+        let width = match attribute.ty {
+            ScalarType::Utf8 | ScalarType::Keyword | ScalarType::Text => 4,
+            ty => fixed_width(ty),
+        };
+        push(
+            format!(
+                "attribute '{}': its value column at {width} B/item and its presence bitmap",
+                attribute.name
+            ),
+            width * n + n.div_ceil(8),
+            Phases::INDEX.onwards(),
+        );
+        if matches!(attribute.ty, ScalarType::Utf8 | ScalarType::Keyword) {
+            // The dictionary pass's own scratch, under the column's directory rather than
+            // `.build-tmp/`: a `u32` ordinal per row scattered out of the merge, and the sorted
+            // runs it merges, both gone by the end of the pass. Measured at 5.3 B/item over
+            // 125.8×10⁶ GBIF occurrences against the 8 this charges.
+            push(
+                format!(
+                    "attribute '{}': the keyword dictionary's row ordinals and sorted runs, \
+                     4 B/item and a ceiling of half the column's characters",
+                    attribute.name
+                ),
+                4 * n + payload(payloads[index], n) / EXTENT_SHARE,
+                Phases::INDEX,
+            );
+        }
+    }
+    if blob_payload > 0 {
+        push(
+            format!(
+                "the record blob: {} MiB of directory at 4 B/item, and its blocks modelled at half \
+                 the {} MiB of characters its columns carry",
+                (4 * n) >> 20,
+                blob_payload >> 20
+            ),
+            4 * n + blob_payload / EXTENT_SHARE,
+            Phases::BLOB.onwards(),
+        );
+    }
+    // Per view: `morton.u32`, `permutation.bin`, `row-entity.u32` and the segment's `columns.arrow`
+    // — the residual, the `tessera_id` and one slot per render column.
+    let render: u64 = args
+        .schema
+        .attributes
         .iter()
-        .filter_map(|layer| layer.members.as_ref())
-        .filter_map(|members| footer(&members.path))
-        .map(|metadata| metadata.file_metadata().num_rows().max(0) as u64)
+        .filter(|a| a.render)
+        .map(|a| fixed_width(a.ty))
         .sum();
-    entity_order_residency(n, &columns, member_rows)
+    push(
+        format!("each view's segment, permutation and row→entity files, over {views} view(s)"),
+        (4 + 4 + 4 + 4 + 8 + render) * n * views,
+        Phases::ASSEMBLE,
+    );
+    // The artifact pass's row-column lane, one `u32` ordinal a row per level it draws.
+    let levels: u64 = args
+        .layers
+        .iter()
+        .map(|layer| layer.levels.len().max(1) as u64)
+        .sum();
+    push(
+        format!("the artifact pass's row-column lanes, 4 B/item over {levels} level(s) a view"),
+        4 * n * views * levels,
+        Phases::ASSEMBLE,
+    );
+    Residency { terms }
+}
+
+/// The characters one item of each declared column carries, indexed by declaration position —
+/// **sampled once**, because both models want it and the sample decodes rows.
+///
+/// Zero for a fixed-width column, which carries none, and for one whose source will not open: an
+/// input the pre-flight cannot read contributes nothing rather than refusing the build.
+pub(crate) fn payloads_per_item(args: &crate::BuildArgs) -> Vec<f64> {
+    let mut payloads = vec![0.0f64; args.schema.attributes.len()];
+    for source in &args.attribute_sources {
+        let Some(metadata) = footer(&source.path) else {
+            continue;
+        };
+        let rows = metadata.file_metadata().num_rows().max(0) as u64;
+        for &index in &source.attributes {
+            let Some(attribute) = args.schema.attributes.get(index) else {
+                continue;
+            };
+            if !carries_characters(attribute.ty) {
+                continue;
+            }
+            let column = attribute.column();
+            // The sample, and the footer's own figure where the file will not give one.
+            let per_item = sampled_bytes_per_item(&source.path, column).unwrap_or_else(|| {
+                let footer_bytes = uncompressed_column_bytes(&metadata, column);
+                if rows == 0 {
+                    0.0
+                } else {
+                    footer_bytes as f64 / rows as f64
+                }
+            });
+            payloads[index] += per_item;
+        }
+    }
+    payloads
+}
+
+/// `per_item` characters over `rows` items, rounded.
+fn payload(per_item: f64, rows: u64) -> u64 {
+    (per_item * rows as f64).round() as u64
+}
+
+/// Row groups sampled per string column, spread across the file rather than taken from its head:
+/// a corpus in its publisher's export order has no reason to be uniform, and GBIF is not.
+const PAYLOAD_SAMPLE_GROUPS: usize = 3;
+
+/// Rows read from each sampled row group. 700,000 over three groups is at most ~2.1×10⁶ values
+/// decoded per string column, whatever the corpus — a bounded read against a build that otherwise
+/// discovers the same figure by filling the disk with it.
+const PAYLOAD_SAMPLE_ROWS: usize = 700_000;
+
+/// The mean bytes one row of a string column carries, or `None` where the file will not say.
+///
+/// The characters alone: a null row contributes nothing and is counted in the denominator, so the
+/// figure already carries the column's null rate and a caller multiplies by `n`.
+fn sampled_bytes_per_item(path: &std::path::Path, column: &str) -> Option<f64> {
+    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+    let groups = {
+        let builder =
+            ParquetRecordBatchReaderBuilder::try_new(std::fs::File::open(path).ok()?).ok()?;
+        let count = builder.metadata().num_row_groups();
+        if count == 0 {
+            return None;
+        }
+        let take = PAYLOAD_SAMPLE_GROUPS.min(count);
+        (0..take).map(|i| i * count / take).collect::<Vec<_>>()
+    };
+    let mut bytes = 0u64;
+    let mut rows = 0u64;
+    for group in groups {
+        let builder =
+            ParquetRecordBatchReaderBuilder::try_new(std::fs::File::open(path).ok()?).ok()?;
+        let root = builder
+            .schema()
+            .fields()
+            .iter()
+            .position(|f| f.name() == column)?;
+        let projection = parquet::arrow::ProjectionMask::roots(builder.parquet_schema(), [root]);
+        let reader = builder
+            .with_row_groups(vec![group])
+            .with_projection(projection)
+            .with_limit(PAYLOAD_SAMPLE_ROWS)
+            .with_batch_size(65_536)
+            .build()
+            .ok()?;
+        for batch in reader {
+            let batch = batch.ok()?;
+            let array = batch.column(0);
+            rows += batch.num_rows() as u64;
+            bytes += string_bytes(array)?;
+        }
+    }
+    (rows > 0).then(|| bytes as f64 / rows as f64)
+}
+
+/// The characters one decoded array holds, or `None` for an array that is not a string one — a
+/// declared `keyword` over a source column of another type, which the attribute join refuses on its
+/// own terms and this declines to price rather than guess at.
+fn string_bytes(array: &arrow::array::ArrayRef) -> Option<u64> {
+    use arrow::array::Array;
+    let offsets_span = |first: i64, last: i64| (last - first).max(0) as u64;
+    match array.data_type() {
+        arrow::datatypes::DataType::Utf8 => {
+            let a = array
+                .as_any()
+                .downcast_ref::<arrow::array::StringArray>()
+                .expect("a Utf8 array downcasts to StringArray");
+            let offsets = a.value_offsets();
+            Some(offsets_span(offsets[0] as i64, offsets[a.len()] as i64))
+        }
+        arrow::datatypes::DataType::LargeUtf8 => {
+            let a = array
+                .as_any()
+                .downcast_ref::<arrow::array::LargeStringArray>()
+                .expect("a LargeUtf8 array downcasts to LargeStringArray");
+            let offsets = a.value_offsets();
+            Some(offsets_span(offsets[0], offsets[a.len()]))
+        }
+        _ => None,
+    }
+}
+
+/// One member source's `(artifact, source)` pairs — its **key values** — and its rows beside them.
+///
+/// ⊘ **The row count was the only denominator until 2026-09-10 and it is the wrong one for the disk
+/// terms.** A member row's `key` column is a list, so a row is one pair on a flat layer and one per
+/// level on a tiered one. GBIF's member file is 3,495,729,729 rows carrying 10,014,654,968 pairs,
+/// and the spill and the packed extents were each charged at 2.9× less than the build then wrote.
+/// The rows are still the right denominator for the publication's own window, which is one level.
+///
+/// The leaf's `num_values` counts a value at every level of repetition, so a row whose key list is
+/// short is counted at its own length rather than at the level count. A row naming no artifact at
+/// all is over-counted where the writer stores an empty list as one null value, which is the
+/// direction this whole module is loose in.
+fn member_entries(members: &crate::config::MemberSource) -> (u64, u64) {
+    let Some(metadata) = footer(&members.path) else {
+        return (0, 0);
+    };
+    let rows = metadata.file_metadata().num_rows().max(0) as u64;
+    let key = members.fields.of("key");
+    let mut values = 0u64;
+    for group in metadata.row_groups() {
+        for chunk in group.columns() {
+            if chunk.column_path().parts().first().map(String::as_str) == Some(key) {
+                values = values.saturating_add(chunk.num_values().max(0) as u64);
+            }
+        }
+    }
+    // A file whose key column is not named as declared prices at its rows, which is what the
+    // footer can still say. The join refuses the file on its own terms.
+    (if values == 0 { rows } else { values }, rows)
 }
 
 /// One Parquet file's metadata, or `None` where it cannot be had.
@@ -512,6 +1089,7 @@ mod tests {
             ty,
             payload_bytes: payload,
             text_index: false,
+            phases: Phases::JOIN.and(Phases::INDEX).and(Phases::BLOB),
         }
     }
 
@@ -530,7 +1108,8 @@ mod tests {
             column(ScalarType::Text, text_bytes_per_item * n),
             column(ScalarType::U32, 0),
         ];
-        entity_order_residency(n, &columns, (2 * n) + (34 * n / 10) + n)
+        let entries = (2 * n) + (34 * n / 10) + n;
+        entity_order_residency(n, &columns, entries, entries)
     }
 
     #[test]
@@ -554,14 +1133,14 @@ mod tests {
     #[test]
     fn the_source_ids_are_reported_as_mapped_and_charged_at_nothing() {
         let n = 1_000_000_u64;
-        let with_layer = entity_order_residency(n, &[], n);
-        let without = entity_order_residency(n, &[], 0);
+        let with_layer = entity_order_residency(n, &[], n, n);
+        let without = entity_order_residency(n, &[], 0, 0);
 
         // The publication is the only charged term either way; the ids move the mapped figure and
         // not the charged one.
         assert_eq!(
             with_layer.total() - without.total(),
-            n * BYTES_PER_MEMBER_ROW,
+            n * BYTES_PER_MEMBER_ENTRY,
             "the publication's Roaring is what a layer adds to the charged figure"
         );
         let ids = with_layer
@@ -585,16 +1164,20 @@ mod tests {
     #[test]
     fn a_declared_column_is_reported_as_mapped_and_charged_at_nothing() {
         let n = 10_000_000;
-        let bare = entity_order_residency(n, &[], 0);
-        let with_keyword = entity_order_residency(n, &[column(ScalarType::Keyword, 400 * n)], 0);
+        let bare = entity_order_residency(n, &[], 0, 0);
+        let with_keyword = entity_order_residency(n, &[column(ScalarType::Keyword, 400 * n)], 0, 0);
         assert_eq!(with_keyword.total(), bare.total());
         let term = with_keyword
             .terms
             .iter()
             .find(|t| t.what.contains("declared column"))
             .expect("the column is a term of its own");
-        // The offsets, the presence bits and the characters.
-        assert_eq!(term.bytes, ARENA_OFFSET * n + n.div_ceil(8) + 400 * n);
+        // The offsets, the presence bits, and the arena the characters and their record headers
+        // fill.
+        assert_eq!(
+            term.bytes,
+            8 * n + n.div_ceil(8) + arena_capacity(400 * n + 4 * n)
+        );
         assert!(
             with_keyword.describe().contains("(mapped)"),
             "the breakdown must say which terms are files: {}",
@@ -609,7 +1192,7 @@ mod tests {
     fn a_text_column_costs_its_extents_and_not_an_arena() {
         let n = 10_000_000;
         let payload = 400 * n;
-        let with_text = entity_order_residency(n, &[column(ScalarType::Text, payload)], 0);
+        let with_text = entity_order_residency(n, &[column(ScalarType::Text, payload)], 0, 0);
         let term = with_text
             .terms
             .iter()
@@ -629,11 +1212,7 @@ mod tests {
     #[test]
     fn a_text_index_carries_its_runs_beside_the_column() {
         let n = 10_000_000;
-        let plain = ColumnCost {
-            ty: ScalarType::Text,
-            payload_bytes: 400 * n,
-            text_index: false,
-        };
+        let plain = column(ScalarType::Text, 400 * n);
         let indexed = ColumnCost {
             text_index: true,
             ..plain
@@ -641,15 +1220,15 @@ mod tests {
         let extent_bytes = n.div_ceil(8) + 200 * n;
         // The source ids and the ordinal→entity map are files whatever the schema declares, so
         // each figure below is stated against a build declaring no column at all.
-        let bare = entity_order_residency(n, &[], 0).mapped();
+        let bare = entity_order_residency(n, &[], 0, 0).at(Phase::Index);
 
-        let without = entity_order_residency(n, &[plain], 0);
-        assert_eq!(without.mapped() - bare, extent_bytes);
+        let without = entity_order_residency(n, &[plain], 0, 0);
+        assert_eq!(without.at(Phase::Index) - bare, extent_bytes);
 
         // The runs are charged the source's characters, being uncompressed where the extents that
         // hold the same prose are not.
-        let with = entity_order_residency(n, &[indexed], 0);
-        assert_eq!(with.mapped() - bare, extent_bytes + 400 * n);
+        let with = entity_order_residency(n, &[indexed], 0, 0);
+        assert_eq!(with.at(Phase::Index) - bare, extent_bytes + 400 * n);
         assert_eq!(
             with.total(),
             without.total(),
@@ -672,16 +1251,16 @@ mod tests {
     fn a_member_row_is_charged_where_it_is_resident_and_reported_where_it_is_a_file() {
         let n = 10_000_000;
         let rows = 64_000_000;
-        let without = entity_order_residency(n, &[], 0);
-        let with = entity_order_residency(n, &[], rows);
+        let without = entity_order_residency(n, &[], 0, 0);
+        let with = entity_order_residency(n, &[], rows, rows);
         assert_eq!(
             with.total() - without.total(),
-            rows * BYTES_PER_MEMBER_ROW,
+            rows * BYTES_PER_MEMBER_ENTRY,
             "only the Roaring copies are memory"
         );
         assert_eq!(
-            with.mapped() - without.mapped(),
-            rows * (SPILLED_BYTES_PER_MEMBER_ROW + MAPPED_BYTES_PER_MEMBER_ROW),
+            with.at(Phase::Join) - without.at(Phase::Join),
+            rows * (SPILLED_BYTES_PER_MEMBER_ENTRY + MAPPED_BYTES_PER_MEMBER_ENTRY),
             "the runs, the merged table and the extent the store reads through are all disk"
         );
         assert!(
@@ -696,6 +1275,66 @@ mod tests {
         );
     }
 
+    /// **A phase is charged what stands through it and not what the build ever writes.** The
+    /// sorted source ids go back at the layer publication, so they are the join phase's and no
+    /// later phase's; the packed member extents are written there and never released, so they are
+    /// that phase's and every one after it.
+    #[test]
+    fn a_term_is_charged_to_the_phases_it_stands_through() {
+        let n = 10_000_000;
+        let entries = 64_000_000;
+        let residency = entity_order_residency(n, &[], entries, entries);
+
+        let ids = 8 * n;
+        assert_eq!(
+            residency.at(Phase::Join) - residency.at(Phase::Index),
+            ids + entries * SPILLED_BYTES_PER_MEMBER_ENTRY,
+            "the ids and the member spill are the join's and not the index's"
+        );
+        assert_eq!(
+            residency.at(Phase::Index),
+            residency.at(Phase::Assemble),
+            "what is left after the join is the map and the extents, and neither is released"
+        );
+        assert_eq!(
+            residency.at(Phase::Spill),
+            ids,
+            "before the assignment the map does not exist"
+        );
+    }
+
+    /// **A column is charged to its last reader's phase.** A render column is read by the segment
+    /// write, a blob-resident one by the record blob, and a column that is neither has met its last
+    /// reader when the filter postings end (`pipeline::write_filter_postings`).
+    #[test]
+    fn a_column_is_charged_to_the_phase_its_last_reader_is_in() {
+        let n = 10_000_000;
+        let indexed = ColumnCost {
+            phases: Phases::JOIN.and(Phases::INDEX),
+            ..column(ScalarType::Keyword, 40 * n)
+        };
+        let rendered = ColumnCost {
+            phases: Phases::JOIN.onwards(),
+            ..column(ScalarType::U32, 0)
+        };
+        let bare = entity_order_residency(n, &[], 0, 0);
+        let with = entity_order_residency(n, &[indexed, rendered], 0, 0);
+
+        let index_only = 8 * n + n.div_ceil(8) + arena_capacity(40 * n + 4 * n);
+        let render = 4 * n + n.div_ceil(8);
+        assert_eq!(with.at(Phase::Index) - bare.at(Phase::Index), index_only + render);
+        assert_eq!(
+            with.at(Phase::Blob) - bare.at(Phase::Blob),
+            render,
+            "the index-only column went back at the end of the postings"
+        );
+        assert_eq!(
+            with.at(Phase::Assemble) - bare.at(Phase::Assemble),
+            render,
+            "the render column is read by the segment write and stays"
+        );
+    }
+
     /// The description leads with the largest **charged** term, because that is the one the
     /// operator is being refused for and the one they can act on.
     #[test]
@@ -706,7 +1345,7 @@ mod tests {
             .find(|l| !l.trim().is_empty())
             .unwrap_or_default();
         assert!(
-            first.contains("member row"),
+            first.contains("member entr"),
             "the member tables are the largest charged term at this schema; got {first}"
         );
         assert!(!first.contains("(mapped)"), "got {first}");
@@ -995,7 +1634,7 @@ require_member_visibility = "none"
         }
 
         let (args, _temp) = fixture(N);
-        let model = model(&args, N);
+        let model = model(&args, N, &payloads_per_item(&args));
         println!("model: {} MiB{}", model.total() >> 20, model.describe());
         crate::build_observed(&args, &Trace).unwrap();
         println!(

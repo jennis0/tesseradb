@@ -72,6 +72,13 @@
 //! and the entity in the header is the four bytes an entity per record that buys it. A
 //! group-scoped `text` column is what still reads it.
 //!
+//! **A `keyword` or `utf8` column is never walked, so its records carry no entity.** Every reader
+//! of one reaches it at an entity — the keyword dictionary, the filter postings, the record blob —
+//! and the walk refuses a column of that shape rather than decoding an entity out of a length. The
+//! declared type decides which header a column writes ([`record_header`]), so the two cannot drift
+//! apart per call site: 4 B/item, 28.0 GB across the GBIF rung's two keyword columns (modelled,
+//! items × 4 B; measured at 0.98 GB over 125,789,091 of them).
+//!
 //! A record is authoritative only while `at[entity]` still names it: a value written twice for one
 //! entity leaves the first record in the arena with nothing pointing at it, so the walk checks
 //! the offset back against the column before it yields a record. That check is a random read of
@@ -190,22 +197,46 @@ enum ColumnData {
 
 /// A string column: where each entity's bytes are, and the arena they are in.
 ///
-/// The offset names a record — a `u32` little-endian entity, a `u32` little-endian length, then
-/// that many bytes — one entity-indexed array rather than an offset array and a length array,
-/// because both would be written at the same random entity index and the second would double the
-/// page faults the scatter takes to save four bytes an entity it does not need to.
+/// The offset names a record — an optional `u32` little-endian entity, a `u32` little-endian
+/// length, then that many bytes — one entity-indexed array rather than an offset array and a
+/// length array, because both would be written at the same random entity index and the second
+/// would double the page faults the scatter takes to save four bytes an entity it does not need
+/// to.
 #[derive(Debug)]
 struct StringColumn {
     at: MappedArray<u64>,
     arena: MappedArena,
+    /// [`RECORD_HEADER_WALKED`] or [`RECORD_HEADER_INDEXED`], by the column's declared type.
+    header: usize,
 }
 
-/// The header the arena stores before each value's bytes: the entity, then the length.
+/// The header of a record in a column read **in arena order**: the entity, then the length.
 ///
 /// **The entity is in the record and not only in `at`**, because that is what makes the arena
 /// readable in its own order — see the module docs. Four bytes an entity, against a walk that
 /// otherwise costs a major fault per document on any corpus larger than the box.
-const RECORD_HEADER: usize = 2 * std::mem::size_of::<u32>();
+const RECORD_HEADER_WALKED: usize = 2 * std::mem::size_of::<u32>();
+
+/// The header of a record in a column read **only through `at`**: the length alone.
+///
+/// A `keyword` or `utf8` column is reached at an entity and nowhere else — [`EntityColumn::str_at`]
+/// from the keyword dictionary, the filter postings and the record blob — so the entity in the
+/// record would be four bytes an item written for a walk no consumer makes. That is 14.0 GB per
+/// such column at the GBIF rung's 3,495,729,729 items (modelled, items × 4 B).
+///
+/// **The type decides it, not the caller.** [`EntityColumn::for_each_record_in`] is the arena walk
+/// and it refuses a column of this shape; the only column built with an arena and walked in its own
+/// order is a group-scoped `text` one, which has no blob row to be read from instead
+/// (`views.md` §5).
+const RECORD_HEADER_INDEXED: usize = std::mem::size_of::<u32>();
+
+/// Which header a string column of `ty` carries.
+fn record_header(ty: ScalarType) -> usize {
+    match ty {
+        ScalarType::Text => RECORD_HEADER_WALKED,
+        _ => RECORD_HEADER_INDEXED,
+    }
+}
 
 /// The refusal every setter shares: a value whose tag is not the column's.
 ///
@@ -262,6 +293,7 @@ impl EntityColumn {
                                 n,
                             )?,
                             arena: MappedArena::create(&scratch.dir, &scratch.name("arena"))?,
+                            header: record_header(ty),
                         })
                     }
                 }
@@ -434,18 +466,25 @@ impl EntityColumn {
         let ColumnData::Utf8(col) = &self.data else {
             return Ok(());
         };
+        if col.header != RECORD_HEADER_WALKED {
+            return Err(BuildError::Invalid(format!(
+                "a {:?} column is read at an entity, and its records carry a length and no entity \
+                 to walk them by",
+                self.ty
+            )));
+        }
         let mut window = col.arena.window(lo, hi)?;
         while window.has_more() {
             let offset = window.offset();
-            let header = window.peek(RECORD_HEADER)?;
-            if header.len() < RECORD_HEADER {
+            let header = window.peek(RECORD_HEADER_WALKED)?;
+            if header.len() < RECORD_HEADER_WALKED {
                 return Err(BuildError::Invalid(format!(
                     "arena window [{lo}, {hi}) ends inside a record header at {offset}"
                 )));
             }
             let entity = u32::from_le_bytes(header[0..4].try_into().expect("four bytes")) as usize;
             let len = u32::from_le_bytes(header[4..8].try_into().expect("four bytes")) as usize;
-            window.consume(RECORD_HEADER);
+            window.consume(RECORD_HEADER_WALKED);
             let body = window.peek(len)?;
             if body.len() < len {
                 return Err(BuildError::Invalid(format!(
@@ -659,6 +698,7 @@ impl StringColumn {
         StringColumn {
             at: MappedArray::empty(),
             arena: MappedArena::empty(),
+            header: RECORD_HEADER_INDEXED,
         }
     }
 
@@ -669,15 +709,17 @@ impl StringColumn {
                 value.len()
             ))
         })?;
-        let tag = u32::try_from(entity).map_err(|_| {
-            BuildError::Invalid(format!(
-                "entity {entity} exceeds the u32 an arena record's header carries"
-            ))
-        })?;
         // Header and bytes in one write, so a value is never split across a growth and the
         // arena's own record marks land where a record starts.
-        let mut record = Vec::with_capacity(RECORD_HEADER + value.len());
-        record.extend_from_slice(&tag.to_le_bytes());
+        let mut record = Vec::with_capacity(self.header + value.len());
+        if self.header == RECORD_HEADER_WALKED {
+            let tag = u32::try_from(entity).map_err(|_| {
+                BuildError::Invalid(format!(
+                    "entity {entity} exceeds the u32 an arena record's header carries"
+                ))
+            })?;
+            record.extend_from_slice(&tag.to_le_bytes());
+        }
         record.extend_from_slice(&len.to_le_bytes());
         record.extend_from_slice(value.as_bytes());
         let offset = self.arena.append(&record)?;
@@ -687,16 +729,17 @@ impl StringColumn {
 
     fn get(&self, entity: usize) -> &str {
         let offset = self.at.as_slice()[entity];
+        // The length is the header's last four bytes, whichever header this column writes.
         let len = u32::from_le_bytes(
             self.arena
-                .bytes(offset + 4, 4)
+                .bytes(offset + (self.header - 4) as u64, 4)
                 .try_into()
                 .expect("a four-byte slice is four bytes"),
         ) as usize;
         // Checked rather than `from_utf8_unchecked`: the bytes came from a `&str` and cannot be
         // anything else, so the scan costs a second over a corpus's prose and buys a loud failure
         // where a torn mapping or a wrong offset would otherwise be a silently wrong value.
-        std::str::from_utf8(self.arena.bytes(offset + RECORD_HEADER as u64, len))
+        std::str::from_utf8(self.arena.bytes(offset + self.header as u64, len))
             .expect("the arena holds only bytes written from a &str")
     }
 }
