@@ -318,6 +318,45 @@ pub struct ExecutorHealth {
     /// for `flush_requested`'s reason: at most one fold is in flight, so two requests before one
     /// tick are satisfied by that tick together.
     pub(crate) fold_requested: AtomicBool,
+    /// Folds the scheduler planned and `plan_fold` refused, and the last refusal in full.
+    ///
+    /// **A third counter beside `folds` and `fold_failures`, because a refusal is neither of
+    /// those.** Nothing was folded, so `folds` does not move; nothing was written to discard, so
+    /// `fold_failures` does not either. Without a counter of its own a refusal leaves no figure at
+    /// all, and the pair an operator watches sits still while the corpus stops shrinking. That
+    /// matters most for the refusal a deployment cannot leave: the fold demands 150% of the live
+    /// bytes free on a device already holding 1.3–2.6× live, and it is the only operation that
+    /// reclaims (compaction §8).
+    ///
+    /// `plan_fold` is called only for a fold the schedule or an operator asked for, so every
+    /// increment here answers a request rather than an idle tick. `nothing_to_fold` is among the
+    /// reasons and is not an alarm: it is what a `POST /control/compact` against an empty corpus
+    /// answers.
+    ///
+    /// **One counter per gate**, indexed by `NoFold::index`, because a single total answers "a
+    /// fold was refused" and not "which refusal is standing". The schedule re-evaluates at every
+    /// tick once the interval floor has passed, and a refusal stamps no `last_fold_start_unix`, so
+    /// a gate that stands increments on every tick from then on. `last_refusal` alone would be
+    /// whichever refusal happened last, which on a node refusing on disc every tick is whatever
+    /// else refused in between — the alarm fires and does not say why. Six counters cost six words
+    /// and make the standing gate the one with the large number.
+    pub(crate) fold_refusals: [AtomicU64; crate::compact::NoFold::GATES.len()],
+    /// The last refusal, or `None` before the first — see [`ExecutorHealth::fold_refusals`] and
+    /// [`FoldRefusal`]. A `Mutex` for [`ExecutorHealth::last_fold_passes`]' reason: written once
+    /// per refused fold, read only by `/control/status`. Kept beside the per-gate counters because
+    /// it is the only place the two figures of an `insufficient_disc` refusal appear.
+    pub(crate) last_fold_refusal: Mutex<Option<FoldRefusal>>,
+    /// The WAL as the last sample found it — see [`WalGauge`], which says what each figure means
+    /// and what the pin's span distinguishes.
+    ///
+    /// **Sampled on the executor thread rather than at the poll**, because the log lives on that
+    /// thread and a status request has no route to it, so a dashboard adds nothing to the node's
+    /// cost. The sample is taken at a tick, before that tick's own publication rotates anything,
+    /// and at most once per `flush_max_age_secs` — the walk is O(members) and the member count is
+    /// unbounded under a pin ([`Executor::sample_wal_gauge`]). The reading is therefore up to one
+    /// period old. Once more at [`Executor::run`]'s entry, so a node's first period does not
+    /// report an empty log.
+    pub(crate) wal_gauge: Mutex<WalGauge>,
     /// A completed fold has been sent to `fold_done` and not yet drained — the dedicated thread's
     /// half of the same completion handshake a flush has, and set before the send for the same
     /// reason.
@@ -653,6 +692,69 @@ impl StageMark {
     }
 }
 
+/// The gates `plan_fold` can refuse on, in the order [`ExecutorStats::fold_refusals_by_gate`]
+/// counts them and [`FoldRefusal::gate`] names them.
+///
+/// **Literals from a closed list, never a formatted variant.** `crate::compact::NoFold::GATES`
+/// carries the argument: a `format!("{:?}", reason)` would put whatever a future arm holds onto a
+/// status response, and an arm naming a layer or a view would then publish corpus-derived text
+/// with nothing in the type system objecting.
+pub const FOLD_GATES: [&str; crate::compact::NoFold::GATES.len()] = crate::compact::NoFold::GATES;
+
+/// A fold the scheduler asked for and `plan_fold` would not plan.
+///
+/// **What a reader should conclude from it**: a recent `at_unix` with `folds` not moving is a
+/// deployment that is asking for compaction and not getting it, and `gate` says which of the six
+/// conditions is holding. For `insufficient_disc` the two figures are the whole diagnosis —
+/// `need_bytes` is 150% of the live bytes the input manifests name and `had_bytes` is what
+/// `statvfs` answered, and the gap between them is what the device has to gain before a fold will
+/// start. Nothing else in the system reclaims, so that gap does not close on its own.
+///
+/// `gate` is [`crate::compact::NoFold`]'s variant name in snake case; the figures are `None` for
+/// the four conditions that carry none.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FoldRefusal {
+    pub gate: &'static str,
+    pub need_bytes: Option<u64>,
+    pub had_bytes: Option<u64>,
+    /// When the refusal happened, as a unix second.
+    pub at_unix: u64,
+}
+
+/// The write-ahead log's size and its rotation bound, sampled at the executor's tick.
+///
+/// **What a reader should conclude from it.** `members` is the direct signal: steady-state
+/// retention is two, and a sequence that keeps growing is a rotation that is not reclaiming
+/// (`Wal::members`). `pin` is what separates the two ways a log gets large. `None` and a large
+/// `bytes` is a log that is large because ingest is fast, and the next publication rotates it.
+/// `Some` and a large `pin_span_bytes` is a log that cannot rotate below that position, and the
+/// name says what would release it: `publication` and `content` go at a tick, `growth` and `fill`
+/// only at the compaction fold's whole rewrite (`ArtifactStore::wal_pin`). Without the pin those
+/// two states read identically.
+///
+/// `position` counts record bytes across every member the sequence has ever held, so it rises
+/// through reclamation and is not a size; `bytes` is what the surviving members occupy now. The
+/// span is `position - pin`, the part of the log the pin is holding down.
+///
+/// Sampled at the executor's first loop iteration and at most once per `flush_max_age_secs`
+/// thereafter, so the figures are up to one period old and are never unsampled on a running node.
+/// The walk costs two `stat`s per member and the member count is unbounded under a pin, so the
+/// rate limit is what stops the gauge getting dearer as the condition it reports gets worse
+/// ([`Executor::sample_wal_gauge`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct WalGauge {
+    pub members: u64,
+    pub bytes: u64,
+    pub position: u64,
+    /// The rotation bound and the name of the pin holding it, or `None` when nothing pins the log.
+    pub pin: Option<(&'static str, u64)>,
+    /// `position - pin`, and `0` when nothing pins the log.
+    pub pin_span_bytes: u64,
+    /// Walks taken since the executor started, `1` for the reading its first loop iteration took.
+    /// Two polls returning the same value read the same sample, not two samples that agreed.
+    pub samples: u64,
+}
+
 /// A snapshot of [`ExecutorHealth`], for `/control/status` and for tests.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ExecutorStats {
@@ -707,6 +809,20 @@ pub struct ExecutorStats {
     pub fold_failures: u64,
     /// Whether a `POST /control/compact` is awaiting the next tick.
     pub fold_requested: bool,
+    /// Requested folds `plan_fold` would not plan, and the last of them — see
+    /// [`ExecutorHealth::fold_refusals`] for why a refusal advances neither counter above, and
+    /// [`FoldRefusal`] for what a reader concludes from the pair.
+    ///
+    /// The total is the sum of [`ExecutorStats::fold_refusals_by_gate`] rather than a counter of
+    /// its own, so the two cannot disagree.
+    pub fold_refusals: u64,
+    /// The same refusals split by gate, indexed as [`FOLD_GATES`] names them. A gate that stands
+    /// is counted at every tick the schedule re-evaluates on, so the largest entry is the
+    /// condition the deployment is actually in.
+    pub fold_refusals_by_gate: [u64; FOLD_GATES.len()],
+    pub last_fold_refusal: Option<FoldRefusal>,
+    /// The WAL as the last sample found it — see [`WalGauge`].
+    pub wal: WalGauge,
     /// The last fold's wall clock in seconds and the highest resident set its pass staircase saw,
     /// in bytes — see [`ExecutorHealth::last_fold_secs`] for what the second number is and is not.
     /// Both 0 before the first fold.
@@ -888,6 +1004,9 @@ impl ExecutorHealth {
             folds: AtomicU64::new(0),
             fold_failures: AtomicU64::new(0),
             fold_requested: AtomicBool::new(false),
+            fold_refusals: std::array::from_fn(|_| AtomicU64::new(0)),
+            last_fold_refusal: Mutex::new(None),
+            wal_gauge: Mutex::new(WalGauge::default()),
             fold_completed_pending: AtomicBool::new(false),
             fold_ended_unix: AtomicU64::new(0),
             last_fold_secs: AtomicU64::new(0),
@@ -989,6 +1108,10 @@ impl ExecutorHealth {
     pub fn stats(&self) -> ExecutorStats {
         let work_submitted = self.work_submitted.load(Ordering::Relaxed);
         let work_completed = self.work_completed.load(Ordering::Relaxed);
+        // Read once; the total below is their sum, so a poll cannot publish a total the breakdown
+        // does not add up to.
+        let fold_refusals_by_gate: [u64; FOLD_GATES.len()] =
+            std::array::from_fn(|gate| self.fold_refusals[gate].load(Ordering::Relaxed));
         ExecutorStats {
             posture: self.posture(),
             work_submitted,
@@ -1034,6 +1157,10 @@ impl ExecutorHealth {
             folds: self.folds.load(Ordering::Relaxed),
             fold_failures: self.fold_failures.load(Ordering::Relaxed),
             fold_requested: self.fold_requested.load(Ordering::SeqCst),
+            fold_refusals_by_gate,
+            fold_refusals: fold_refusals_by_gate.iter().sum(),
+            last_fold_refusal: *lock_recover(&self.last_fold_refusal),
+            wal: *lock_recover(&self.wal_gauge),
             last_fold_secs: self.last_fold_secs.load(Ordering::Relaxed),
             last_fold_rss: self.last_fold_rss.load(Ordering::Relaxed),
             last_fold_attr_read: self.last_fold_attr_read.load(Ordering::Relaxed),
@@ -1042,6 +1169,23 @@ impl ExecutorHealth {
             flush_requested: self.flush_requested.load(Ordering::SeqCst),
             flush_in_flight: self.flush_in_flight.load(Ordering::SeqCst),
         }
+    }
+
+    /// Record a fold the planner would not plan. Executor thread only, once per refusal.
+    fn record_fold_refusal(&self, reason: crate::compact::NoFold) {
+        let (gate, need_bytes, had_bytes) = reason.gauge();
+        *lock_recover(&self.last_fold_refusal) = Some(FoldRefusal {
+            gate,
+            need_bytes,
+            had_bytes,
+            at_unix: unix_now().unwrap_or(0),
+        });
+        self.fold_refusals[reason.index()].fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Record the WAL's size and rotation bound. Executor thread only, once per tick.
+    fn record_wal_gauge(&self, gauge: WalGauge) {
+        *lock_recover(&self.wal_gauge) = gauge;
     }
 
     /// Fold one closed window's tally in. Executor thread only, once per window close.
@@ -3415,6 +3559,8 @@ impl WritePath {
                     // Seeded from the opened WAL's position so a freshly started node does not
                     // rotate until something is appended in this run.
                     wal_position_at_last_rotation: wal_position_at_start,
+                    last_wal_sample: None,
+                    wal_samples: 0,
                     #[cfg(feature = "fault-injection")]
                     faults: thread_faults,
                 };
@@ -6162,6 +6308,12 @@ struct Executor {
     /// whether the log has grown since — the deny-only regime's rotation trigger (owner-ruled
     /// 2026-08-04; write-path §4.5). An idle node whose position has not moved rotates nothing.
     wal_position_at_last_rotation: u64,
+    /// When [`Executor::sample_wal_gauge`] last began a walk, or `None` before the first one.
+    /// The rate limit on that walk is stated there; this is the clock it reads.
+    last_wal_sample: Option<std::time::Instant>,
+    /// Walks [`Executor::sample_wal_gauge`] has taken, published as [`WalGauge::samples`] so a
+    /// reader can tell a reading that was refreshed from one the rate limit held back.
+    wal_samples: u64,
     #[cfg(feature = "fault-injection")]
     faults: Option<Arc<tessera_lifecycle::faults::FaultSwitchboard>>,
 }
@@ -6217,6 +6369,11 @@ impl Executor {
     /// takes every job visible to its `try_recv`, so a token is still only ever discarded while a
     /// job is still visible.
     fn run(&mut self) {
+        // The WAL gauge is sampled at the tick, and the first tick is a whole period away. Taken
+        // once here so a node that has just restarted onto a log it replayed does not publish
+        // "no members, no bytes" for that period, which reads as an empty log rather than an
+        // unsampled one. This is the sample that arms the rate limit.
+        self.sample_wal_gauge();
         loop {
             self.recover_wal();
             // **Completed flushes are applied before the tick plans another**, and the order is
@@ -6289,6 +6446,15 @@ impl Executor {
         if !due && !requested && !fold_requested {
             return;
         }
+        // **The WAL's size and its rotation bound, sampled here because nothing off this thread
+        // can read them.** The log is owned by the executor and a status request has no route to
+        // it, so the gauge is taken at the tick and published as of that tick. Before this tick's
+        // own publication, so the reading is what the tick found rather than what it left; on both
+        // the flushing and the flush-skipped path, so a node whose flush is stalled still reports
+        // the log growing under it. The tick is not a period — a row trip fires one every
+        // `FLUSH_COMPLETION_POLL` while the buffer is full — so the walk rate-limits itself to one
+        // per period and returns without doing anything on the ticks in between.
+        self.sample_wal_gauge();
         // **Reclamation is checked at every tick, ahead of the flush's in-flight gate**, because it
         // is the one maintenance step whose readiness depends on nothing this executor does: it is
         // waiting on request threads to finish against a superseded generation. Skipping it on a
@@ -7222,6 +7388,11 @@ impl Executor {
             Ok(plan) => plan,
             Err(reason) => {
                 self.health.fold_requested.store(false, Ordering::SeqCst);
+                // Beside the log line, and on the operator plane rather than only in it: a
+                // refusal moves neither `folds` nor `fold_failures`, so `/control/status` is
+                // otherwise silent about the one condition a deployment cannot leave on its own
+                // (see `ExecutorHealth::fold_refusals`).
+                self.health.record_fold_refusal(reason);
                 tracing::warn!(
                     gate = ?reason,
                     "a compaction fold was requested and refused: this node folds nothing in \
@@ -16649,6 +16820,55 @@ impl Executor {
             return;
         }
         self.rotate_wal();
+    }
+
+    /// Read the WAL's size and its rotation bound into [`ExecutorHealth::wal_gauge`], at most once
+    /// per tick period.
+    ///
+    /// **A read of state this thread already owns, and nothing else.** It rotates nothing,
+    /// compares nothing against a limit and returns no decision: `wal_hard_limit_bytes` is a
+    /// startup relation and what a node should do at a runtime ceiling is undecided
+    /// (`Wal::disc_bytes`). Nothing in the process reads the gauge it writes; `/control/status`
+    /// and the tests are its only consumers.
+    ///
+    /// **The cost is O(members): two `stat`s per surviving member**, the log file and its `.sync`
+    /// sidecar, plus one artifact-store lock and two O(1) reads. Steady-state retention is two
+    /// members, and the count is published beside the bytes so a reader can see when the walk
+    /// stopped being cheap.
+    ///
+    /// **The rate limit is what keeps that cost bounded, because the member count is not.** Under
+    /// a `growth` or `fill` pin nothing below the pin is reclaimed, so a member accumulates per
+    /// rotation for as long as the fold that would release it is refused — the condition this
+    /// gauge exists to make visible. The walk therefore gets dearer as the problem gets worse.
+    /// The tick it sits on is not a period either: `rows_due` holds continuously while the buffer
+    /// is at `flush_max_items`, so a loader the flush cannot keep up with ticks at
+    /// `FLUSH_COMPLETION_POLL`, 50 times a second. The clock below bounds the walk to one per
+    /// `flush_max_age_secs` whatever the tick does, which is the freshness [`WalGauge`] already
+    /// promises.
+    ///
+    /// Called from both the flushing and the flush-skipped path, so a node whose flush is stalled
+    /// still reports the log growing under it, and once at [`Executor::run`]'s entry so a restarted
+    /// node does not report an unsampled zero for its first period.
+    fn sample_wal_gauge(&mut self) {
+        let period = std::time::Duration::from_secs(self.flush_max_age_secs);
+        if let Some(last) = self.last_wal_sample {
+            if last.elapsed() < period {
+                return;
+            }
+        }
+        // Before the walk, so a slow walk shortens the next interval rather than pushing it out.
+        self.last_wal_sample = Some(std::time::Instant::now());
+        self.wal_samples += 1;
+        let position = self.wal.position();
+        let pin = self.live.with_artifacts(|store| store.wal_pin());
+        self.health.record_wal_gauge(WalGauge {
+            members: self.wal.member_count(),
+            bytes: self.wal.disc_bytes(),
+            position,
+            pin,
+            pin_span_bytes: pin.map_or(0, |(_, pos)| position.saturating_sub(pos)),
+            samples: self.wal_samples,
+        });
     }
 
     /// Publish new geometry: check, swap, prune. **The executor's own arm of lifecycle §1.3's

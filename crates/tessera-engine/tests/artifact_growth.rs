@@ -91,6 +91,15 @@ impl Fixture {
         engine
     }
 
+    /// The same engine with a one-second tick period, for the one case here whose subject is the
+    /// WAL gauge: that gauge is sampled at most once per period, so at the shipped 90 s a test
+    /// reading it after each of three events would sit out four and a half minutes.
+    fn open_with_short_tick(&self) -> Engine {
+        let engine = open_engine_publishing_with_tick_period(&self.root, &self.cache, &self.wal, 1);
+        engine.set_background_refresh_for_test(false);
+        engine
+    }
+
     /// The corpus entities behind a run of source ids — what a clustering pipeline, or an ingest
     /// carrying a cluster id, would resolve its members to.
     fn members(&self, source_ids: std::ops::Range<u64>) -> Vec<EntityId> {
@@ -290,6 +299,38 @@ fn rotate(engine: &Engine) {
             "the tick that rotates the log never ran"
         );
         std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
+/// Tick until the WAL gauge has been walked again, and return the reading.
+///
+/// The sample is rate-limited to one per tick period (`Executor::sample_wal_gauge`), so a tick is
+/// not enough on its own: `wal.samples` is what says a fresh walk has run. With the one-second
+/// period `Fixture::open_with_short_tick` sets, this returns within about a second.
+fn resampled_gauge(engine: &Engine) -> tessera_engine::WalGauge {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    // The entry sample is taken on the executor thread, which `start_write_executor` does not wait
+    // for. Without this the first call could take that sample for its own and read a gauge older
+    // than the event it was called to observe.
+    while engine.write_executor_stats().wal.samples == 0 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the executor never took its entry sample"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let before = engine.write_executor_stats().wal.samples;
+    loop {
+        rotate(engine);
+        let now = engine.write_executor_stats().wal;
+        if now.samples > before {
+            return now;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the gauge never took another sample"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
     }
 }
 
@@ -553,6 +594,63 @@ fn a_rotation_may_not_reclaim_the_member_holding_a_growth() {
         count(&engine),
         310,
         "and the join is what the restart reads back"
+    );
+}
+
+/// **The pin the case above proves, as the number an operator reads.**
+///
+/// A log that cannot rotate and a log that is merely busy are the same size, and until the gauge
+/// names the pin they are the same reading. `growth` is the name that matters: it is released by
+/// the fold's whole rewrite and by nothing else, so a node whose fold is refused holds this pin for
+/// as long as the refusal lasts (`compaction.md` §9).
+///
+/// The gauge is sampled at a tick and at most once per tick period, so every read here goes
+/// through `resampled_gauge`, which ticks until the walk has run again.
+#[test]
+fn the_wal_gauge_names_the_growth_pin_and_the_fold_releases_it() {
+    let fx = fixture();
+    let engine = fx.open_with_short_tick();
+    publish(&fx, &engine, 0..300);
+
+    let before = resampled_gauge(&engine);
+    assert!(
+        before.members >= 1,
+        "the log always has an active member; the gauge read {}",
+        before.members
+    );
+    assert!(
+        before.bytes > 0,
+        "a member file carries a header at least; the gauge read {} bytes",
+        before.bytes
+    );
+
+    grow(&fx, &engine, 300..310);
+
+    let held = resampled_gauge(&engine);
+    let (holder, at) = held.pin.expect(
+        "the growth landed below its level's high-water, so it pins the log until a whole rewrite \
+         covers it",
+    );
+    assert_eq!(
+        holder, "growth",
+        "the name is what says a tick will not release this one"
+    );
+    assert!(
+        at <= held.position,
+        "the pin sits at a record already written: pinned at {at}, log at {}",
+        held.position
+    );
+    assert_eq!(
+        held.pin_span_bytes,
+        held.position - at,
+        "the span is how much of the log the pin is holding down"
+    );
+
+    fold(&engine);
+    assert_eq!(
+        resampled_gauge(&engine).pin,
+        None,
+        "the fold rewrote the level whole, which is the one event that releases a growth"
     );
 }
 

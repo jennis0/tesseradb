@@ -45,7 +45,7 @@ use tessera_lifecycle::faults::{FaultSwitchboard, PauseAction, PauseSite, Step};
 use tessera_lifecycle::ChangeOp;
 use tessera_types::EntityId;
 
-use common::{build_fixture, full_coverage_credential, open_engine, source_id_key, N_ITEMS};
+use common::{build_fixture, full_coverage_credential, open_engine, source_id_key, tick, N_ITEMS};
 
 const WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 
@@ -2402,6 +2402,149 @@ fn a_poisoned_node_writes_no_side_manifest_for_its_denies() {
         engine.write_executor_stats().overlay_publications,
         0,
         "and the gauge agrees it published nothing"
+    );
+}
+
+/// **A refused fold is counted and named, and it moves neither counter beside it.**
+///
+/// This is the gap the gauge closes. `plan_fold` answers six conditions and a refusal advances
+/// nothing: `folds` does not, because nothing was folded, and `fold_failures` does not, because a
+/// refusal is not a failure. A deployment can therefore ask for compaction on every schedule and
+/// never get it while both counters sit still — which matters most for `insufficient_disc`, since
+/// the fold is also the only operation that reclaims (compaction §8) and the device does not
+/// recover on its own.
+///
+/// The contrived refusal here is `wal_poisoned`, because it is the one a test can produce
+/// deterministically: a torn append is terminal, so the gate is a stable value rather than a race
+/// (see `a_torn_wal_stays_poisoned_and_still_applies_denies`). What is asserted is the plumbing —
+/// counted, named, and neither of the other two touched — which is the same for every gate.
+#[test]
+fn a_refused_fold_is_counted_and_named_while_neither_fold_counter_moves() {
+    let tmp = TempDir::new().unwrap();
+    let (engine, faults) = engine_with_faults(&tmp, 8);
+
+    let before = engine.write_executor_stats();
+    assert_eq!(before.fold_refusals, 0, "nothing has been refused yet");
+    assert_eq!(before.fold_refusals_by_gate, [0; tessera_engine::FOLD_GATES.len()]);
+    assert_eq!(before.last_fold_refusal, None);
+
+    faults.fail_next_appends(1);
+    let doomed = entity_of(&engine, 3);
+    let _ = engine.accept_change(doomed, ChangeOp::Suppress);
+    assert_eq!(
+        engine.write_executor_posture(),
+        ExecutorPosture::WalPoisoned
+    );
+
+    engine.request_fold();
+    let deadline = std::time::Instant::now() + WAIT;
+    let stats = loop {
+        let now = engine.write_executor_stats();
+        if now.fold_refusals > 0 {
+            break now;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the requested fold was neither planned nor recorded as refused"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    };
+
+    let refusal = stats
+        .last_fold_refusal
+        .expect("a counted refusal carries the reason it was counted for");
+    assert_eq!(refusal.gate, "wal_poisoned");
+    assert_eq!(
+        (refusal.need_bytes, refusal.had_bytes),
+        (None, None),
+        "this gate compares no figures, so it publishes none"
+    );
+    assert_eq!(
+        stats.folds, 0,
+        "nothing was folded, so the published-fold counter must not move"
+    );
+    assert_eq!(
+        stats.fold_failures, 0,
+        "and a refusal is not a failure: no prefix was written and nothing was discarded, so \
+         charging it to fold_failures would put an orphaned-prefix alarm on a fold that never ran"
+    );
+
+    // **The gate it was counted under, and the five it was not.** One total says a fold was
+    // refused; it does not say which refusal is standing, and on a node whose gate re-fires every
+    // tick `last_refusal` is whatever refused most recently rather than what is holding.
+    let slot = tessera_engine::FOLD_GATES
+        .iter()
+        .position(|gate| *gate == "wal_poisoned")
+        .expect("the gate a refusal names is one of the six the counters are keyed by");
+    assert_eq!(
+        stats.fold_refusals_by_gate[slot], stats.fold_refusals,
+        "every refusal so far was this gate's, so its counter carries the whole total"
+    );
+    assert_eq!(
+        stats.fold_refusals_by_gate.iter().sum::<u64>(),
+        stats.fold_refusals,
+        "the total is the sum of the six, so the two cannot disagree"
+    );
+}
+
+/// **The WAL gauge is walked once a period, not once a tick.**
+///
+/// The tick is not a cadence the gauge can ride: `flush_max_items` makes a tick due for as long as
+/// the buffer stays full, and a loader the flush cannot keep up with therefore ticks at
+/// `FLUSH_COMPLETION_POLL`, fifty times a second. The walk is two `stat`s per surviving member,
+/// and the member count is unbounded under exactly the pin the gauge exists to report, so an
+/// unlimited sample gets dearer as the condition gets worse.
+///
+/// What is asserted here is the limit holding: ticks advance, the log grows under it, and the
+/// published reading does not move. That it expires is asserted in `artifact_growth.rs`, whose
+/// gauge case ticks until the walk runs again.
+#[test]
+fn the_wal_gauge_is_walked_once_a_period_and_not_once_a_tick() {
+    let tmp = TempDir::new().unwrap();
+    let (engine, _faults) = engine_with_faults(&tmp, 8);
+
+    // The entry sample is taken on the executor thread, which `start_write_executor` does not wait
+    // for, so this waits for it rather than assuming it has already happened.
+    wait_until("the executor's entry sample", || {
+        engine.write_executor_stats().wal.samples > 0
+    });
+    let first = engine.write_executor_stats().wal;
+    assert_eq!(
+        first.samples, 1,
+        "the executor's first loop iteration takes one, so a node in its first period reports \
+         the log it replayed rather than an unsampled zero"
+    );
+
+    // Denies append, so a walk taken after these would read a position the entry sample could not
+    // have seen.
+    for source in 0..8u64 {
+        let entity = entity_of(&engine, source);
+        engine
+            .accept_change(entity, ChangeOp::Suppress)
+            .expect("a healthy node accepts a suppression");
+    }
+
+    let ticks_before = engine.write_executor_stats().ticks;
+    for _ in 0..20 {
+        tick(&engine);
+    }
+
+    let after = engine.write_executor_stats();
+    assert!(
+        after.ticks >= ticks_before + 20,
+        "the twenty ticks ran: {} to {}",
+        ticks_before,
+        after.ticks
+    );
+    assert!(
+        after.wal_appends >= 8,
+        "and the log took the eight denies: {} appends",
+        after.wal_appends
+    );
+    assert_eq!(
+        after.wal, first,
+        "the reading is the entry sample still, unchanged through twenty ticks and eight appends \
+         — the walk is bounded by the tick period and the tick is not"
     );
 }
 

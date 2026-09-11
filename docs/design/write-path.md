@@ -166,11 +166,14 @@ acknowledgement below depends on them:
   `wal_hard_limit_bytes` (8 GiB) is consumed by exactly one thing: a **startup relation** refusing
   a configuration whose command queue could, at its worst, out-write the declared bound
   (`ingest_queue_bound × ingest_max_batch_bytes` + 1 GiB of deny headroom must sit strictly below
-  it). Nothing measures the log's size at runtime and no 429 is keyed on it. On a genuinely full
+  it). No 429 is keyed on it and nothing is compared against it at runtime. On a genuinely full
   device a deny's append fails and the machinery below takes over — the apply-anyway fold behind
-  a 500, the node unready until an operator acts. ⊘ A runtime gauge or ceiling is ruled a
-  nice-to-have, not built (owner, 2026-08-04); §4.5's coupling note is the growth bound that
-  actually exists.
+  a 500, the node unready until an operator acts. ✔ The log's size **is** measured and published:
+  `/control/status`'s `write_executor` block carries the surviving member count, their bytes, the
+  position the log has reached and the rotation bound pinning it, sampled on the executor thread at
+  most once per flush tick period (compaction §9). ⊘ A runtime *ceiling* is not built: acting on a
+  limit needs a ruling on what "at the limit" does, and refusing a deny for space is fail-open.
+  §4.5's coupling note is the growth bound that actually exists.
 - **A failed fsync is repaired before it is a failure.** On Linux a writeback error can be
   reported exactly once, so a bare second fsync can claim success with the data gone; the repair
   rewinds to the last durable offset and **re-writes** the failed region — sound because that
@@ -1261,7 +1264,7 @@ fold's asymmetry, the diverged-node publication gate, and the reader's honour-be
 | `ingest_admission` | 64 | concurrent ingest handlers; 429 with a service-rate-derived `Retry-After` (1–300 s clamp) |
 | `ingest_max_batch_rows` / `_bytes` | 10,000 / 16 MiB | 422 / route-level refusal (decision 0036) |
 | `overlay_soft_limit` | 500,000 | the pressure gauge; alarms, does not act — the fold has its own schedule (compaction §9) |
-| `wal_hard_limit_bytes` | 8 GiB | a **startup relation** on the command queue's worst case (+1 GiB deny headroom); ⊘ not a runtime ceiling — nothing measures the live log (ruled nice-to-have) |
+| `wal_hard_limit_bytes` | 8 GiB | a **startup relation** on the command queue's worst case (+1 GiB deny headroom); ⊘ not a runtime ceiling — the live log's size is published on `/control/status` (§1.3) and nothing is compared against this key |
 | `segment_floor_bytes` | 16 MiB | below this, segments compare equal for merge selection. With `tier_width`, sets where the size ladder saturates — a read-path constant (§7, decision 0049) |
 | `tier_width` | 4 | segments per size class before a merge is selected. **Widening it leaves *more* live segments**, not fewer (§7). Below 2 nothing can ever be selected, so widths below 2 are refused at startup rather than read as "merge eagerly" |
 | `coalesce_width` | 8 | same-tier entries, per entity-space axis, before a coalesce is selected (§7). Same below-2 refusal as `tier_width`, for the same silent-non-run reason |

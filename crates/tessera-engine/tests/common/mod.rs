@@ -430,6 +430,35 @@ pub fn open_engine_publishing(bundle_root: &Path, cache_dir: &Path, wal_path: &P
     engine
 }
 
+/// The same, with the tick period cut to `secs`.
+///
+/// For a test whose subject is a cadence rather than a publication: the WAL gauge is sampled at
+/// most once per `flush_max_age_secs` (`Executor::sample_wal_gauge`), so a test that reads it twice
+/// either waits out the shipped 90 s or runs against a shorter period. Everything else keeps
+/// [`config`]'s values.
+pub fn open_engine_publishing_with_tick_period(
+    bundle_root: &Path,
+    cache_dir: &Path,
+    wal_path: &Path,
+    secs: u64,
+) -> Engine {
+    let mut engine = Engine::open(
+        bundle_root,
+        cache_dir,
+        wal_path,
+        Passthrough::new(),
+        EngineConfig {
+            flush_max_age_secs: secs,
+            ..config()
+        },
+    )
+    .expect("engine should open against a freshly built bundle");
+    engine
+        .start_write_executor(8)
+        .expect("the executor starts once");
+    engine
+}
+
 pub fn open_engine(bundle_root: &Path, cache_dir: &Path, wal_path: &Path) -> Engine {
     Engine::open(
         bundle_root,

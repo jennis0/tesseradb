@@ -1007,6 +1007,56 @@ it costs anything else. **The RSS figure is a staircase maximum, not a peak**: o
 boundary, so a spike inside a pass is invisible to it, and P1 is what says how far under the true
 peak it sits — at 10⁷, the staircase saw 57 MB of growth where `VmHWM` saw 445 MB.
 
+### The refusal, and the one alarm that covers every disc term
+
+✔ **A refused fold advances neither counter above**, and this is the third: `fold_refusals`.
+`folds` does not move because nothing was folded, and `fold_failures` does not because nothing was
+written to discard. Without the third counter a deployment can ask for compaction on every schedule
+and never get it while both of the others sit still, and the reason reaches only the log.
+
+✔ **The refusals are counted per gate**, one counter for each of the six, and the total is their
+sum. A gate that stands is counted at every tick the schedule re-evaluates on: the trigger re-fires
+once the interval floor has passed, and a refusal stamps no fold start, so a node refusing on disc
+adds a refusal per tick period for as long as the device stays full. A single total says only that
+a fold was refused. `last_refusal` names the most recent refusal, which on such a node is whatever
+else refused between two of the disc ones. The gate with the large count is the condition the
+deployment is in. `last_refusal` is kept beside the six because it is the only place the figures
+appear, and the gate names in both come from one closed list of literals.
+
+**`fold_refusals` rising while `folds` stays flat is the condition to alarm on**, and it is one
+alarm rather than four because four disc terms share one release. The WAL pin a membership growth
+takes, the orphan files inside the live prefix, the superseded side-manifests and the fragment
+cache directory all grow between folds and are reclaimed at the fold and nowhere else. An operator
+watching this pair sees all four stop draining at once, and reads `fold_refusals_by_gate` to see
+which gate is holding.
+
+**`insufficient_disc` is the refusal to act on first, because the deployment cannot leave it.** The
+pre-flight demands 150% of the live bytes free (§8) on a device already holding a measured
+1.3–2.6× live, so a box provisioned at 2× live can serve a corpus and cannot fold it; and since the
+fold is the only operation that reclaims, the gap does not close on its own. `need_bytes` and
+`had_bytes` are that gap stated: the estimate, and what `statvfs` answered. `nothing_to_fold` is
+among the six gates and is not an alarm — it is what a `POST /control/compact` against an empty
+corpus answers.
+
+✔ **The log's own gauges are in the `write_executor` block**, because the pin is one of the four
+terms and it is the one that reads as ordinary traffic. `wal.members` is the direct signal:
+steady-state retention is two, and a sequence that keeps growing is a rotation that is not
+reclaiming. `wal.bytes` is what the surviving members and their `.sync` sidecars have allocated on
+the device, which at one block per sidecar is the figure a capacity question turns on.
+`wal.pinned_by` names the pin holding the rotation bound, and `wal.pin_span_bytes` is how much of
+the log sits above it. A log with no pin is large because ingest is fast and the next publication
+rotates it; a log pinned by `growth` or `fill` cannot rotate below that record until a fold rewrites
+the level whole. The two are the same size and, without the name, the same reading. Nothing is
+compared against `wal_hard_limit_bytes`, which bounds a startup relation and not a runtime ceiling
+(write-path §1.3).
+
+The sample runs on the executor thread, since the log is owned by it, and at most once per flush
+tick period. The walk is two `stat`s per surviving member, and the member count is what grows
+without bound while a pin stands, so an unlimited sample would get dearer as the condition it
+reports gets worse. The tick is not a period either: the row trigger keeps a tick due for as long
+as the buffer stays full, which on a fast loader is fifty a second. `wal.samples` counts the walks,
+so two polls returning the same figures have read one sample rather than two that agreed.
+
 ### The automatic trigger
 
 Evaluated at the flush tick, like every other cadence here. A fold is dispatched when **any** gauge

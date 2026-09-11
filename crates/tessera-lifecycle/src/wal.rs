@@ -1099,6 +1099,25 @@ impl SequenceBase {
     }
 }
 
+/// The blocks `path` has allocated, in bytes, or zero where the file is absent or its metadata
+/// will not read.
+///
+/// `st_blocks` is in 512-byte units whatever the filesystem's block size is, and it is what a
+/// capacity gauge wants: an 8-byte sidecar holds a whole block. [`Wal::disc_bytes`] says why the
+/// figure is allocation and not apparent length.
+#[cfg(unix)]
+fn allocated_bytes(path: &Path) -> u64 {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(path).map(|m| m.blocks() * 512).unwrap_or(0)
+}
+
+/// Apparent length, where no allocation figure is available. It understates a sparse or
+/// small-file-heavy sequence and is the closest answer the platform gives.
+#[cfg(not(unix))]
+fn allocated_bytes(path: &Path) -> u64 {
+    std::fs::metadata(path).map(|m| m.len()).unwrap_or(0)
+}
+
 /// One member file of the sequence, open for append.
 struct WalFile {
     number: u64,
@@ -1548,14 +1567,57 @@ impl Wal {
         self.active.end_pos()
     }
 
-    /// Every surviving member's number, ascending — the active one last. Telemetry and tests: the
-    /// steady state is two, and a sequence that keeps growing is a rotation that is not reclaiming.
-    pub fn members(&self) -> Vec<u64> {
+    /// Every surviving member's number, ascending — the active one last.
+    fn member_numbers(&self) -> impl Iterator<Item = u64> + '_ {
         self.sealed
             .iter()
             .map(|s| s.number)
             .chain(std::iter::once(self.active.number))
-            .collect()
+    }
+
+    /// Every surviving member's number, ascending — the active one last. Tests: the steady state
+    /// is two, and a sequence that keeps growing is a rotation that is not reclaiming. A gauge
+    /// wanting only the count uses [`Wal::member_count`], which allocates nothing.
+    pub fn members(&self) -> Vec<u64> {
+        self.member_numbers().collect()
+    }
+
+    /// How many members survive. The sealed spans plus the active one, from state already held,
+    /// so this is O(1) where [`Wal::members`] allocates a vector the caller then measures.
+    pub fn member_count(&self) -> u64 {
+        self.sealed.len() as u64 + 1
+    }
+
+    /// What the surviving members and their sidecars occupy on disc, in bytes.
+    ///
+    /// **A gauge, and not the runtime ceiling `wal_hard_limit_bytes` reads as.** That key bounds a
+    /// startup relation and nothing compares the live log against it; what a node should do at a
+    /// limit is undecided, and refusing a *deny* for space would be fail-open. This reports the
+    /// size to `/control/status` and decides nothing. Enforcement still needs the ruling, not the
+    /// accessor.
+    ///
+    /// **Allocated blocks, not apparent length.** `st_blocks` answers the question a capacity
+    /// gauge is asked — what the device cannot use for anything else — and it comes from the same
+    /// `stat` the length would. The difference is the whole of what the `.sync` sidecars cost: one
+    /// 8-byte file per member, which is a block apiece and an inode apiece, so a sequence of 6,700
+    /// members holds ~26 MiB in sidecars that an apparent-size sum reports as ~52 KiB
+    /// (`docs/evidence/memos/2026-09-10-disk-at-ingest.md` §5.2, on the ~4 KiB fixed cost of a
+    /// file). Both files of each member are counted here for that reason.
+    ///
+    /// Two `stat`s per surviving member, so the cost is the member count, which is the figure
+    /// published beside it. Steady-state retention is two ([`Wal::member_count`]). A log that has
+    /// grown makes this call dearer in the same proportion that it makes the log worth looking at,
+    /// which is why [`Wal::member_count`] and not this is what a caller polls.
+    ///
+    /// **Not [`Wal::position`]**, which counts record bytes across every member the sequence has
+    /// ever held and so rises through reclamation. This is what stands on the device now.
+    ///
+    /// A file whose metadata will not read counts zero, so a gauge on the status path answers with
+    /// a number rather than an error.
+    pub fn disc_bytes(&self) -> u64 {
+        self.member_numbers()
+            .map(|n| allocated_bytes(&self.base.member(n)) + allocated_bytes(&self.base.sidecar(n)))
+            .sum()
     }
 
     /// Seal the active member, open the next one with `snapshot` at its head, and reclaim every
@@ -2043,6 +2105,18 @@ impl ExecutorWal {
     /// Every surviving member's number — see [`Wal::members`].
     pub fn members(&self) -> Vec<u64> {
         self.wal.members()
+    }
+
+    /// How many members survive — see [`Wal::member_count`], which is the allocation-free form a
+    /// gauge reads.
+    pub fn member_count(&self) -> u64 {
+        self.wal.member_count()
+    }
+
+    /// What the surviving members occupy on disc — see [`Wal::disc_bytes`], whose doc says why it
+    /// is a gauge and not a ceiling, and why it counts allocated blocks.
+    pub fn disc_bytes(&self) -> u64 {
+        self.wal.disc_bytes()
     }
 
     pub fn append(&mut self, rec: &WalRecord) -> Result<()> {

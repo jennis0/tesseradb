@@ -5541,6 +5541,43 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::V
             // answered 500 and their callers owe retries (contracts §3.1); rising repeatedly means a
             // disk failing slowly.
             "wal_recoveries": executor.wal_recoveries,
+            // **How large the log is, and whether it can rotate** — the three counters above say
+            // how much traffic went through it and none of them says either. Sampled on the
+            // executor thread, because the log is owned by that thread and a status request has no
+            // route to it, so these are up to `flush_max_age_secs` old. Taken once when the
+            // executor starts, so a node in its first period reports the log it replayed rather
+            // than an unsampled zero, and at most once per period after that: the walk is two
+            // `stat`s per surviving member and the member count is exactly what grows without
+            // bound under a pin. `samples` counts the walks, so two polls returning the same
+            // figures read one sample rather than two that agreed.
+            //
+            // `members` is the one to watch. Steady-state retention is two, and a sequence that
+            // keeps growing is a rotation that is not reclaiming. `bytes` is what those members
+            // occupy now; `position` counts record bytes across every member the sequence has ever
+            // held, so it rises through reclamation and is not a size.
+            //
+            // **`pin` is what separates the two ways a log gets large**, and without it they read
+            // identically: no pin and a large `bytes` is a log that is large because ingest is
+            // fast, and the next publication rotates it; a pin with a large `pin_span_bytes` is a
+            // log that cannot rotate below that position at all. The name says what would release
+            // it — `publication` and `content` at a tick, `growth` and `fill` only at the
+            // compaction fold's whole rewrite (`ArtifactStore::wal_pin`, which states the rule for
+            // all four). A `growth` or `fill` pin on a node whose fold is being refused is the
+            // unbounded case: see `compaction.fold_refusals` below, the same alarm from the other
+            // end.
+            //
+            // **Nothing is compared against `wal_hard_limit_bytes`.** That key bounds a startup
+            // relation, and what a node should do at a runtime ceiling is undecided — refusing a
+            // deny for space would be fail-open. These report; they do not act.
+            "wal": {
+                "members": executor.wal.members,
+                "bytes": executor.wal.bytes,
+                "position": executor.wal.position,
+                "pinned_by": executor.wal.pin.map(|(held_by, _)| held_by),
+                "pinned_at": executor.wal.pin.map(|(_, pos)| pos),
+                "pin_span_bytes": executor.wal.pin_span_bytes,
+                "samples": executor.wal.samples,
+            },
             "apply_nanos_total": executor.apply_nanos_total,
             "apply_nanos_max": executor.apply_nanos_max,
             // The queue-depth gauge and the drain estimate `retry_after_s` is derived from.
@@ -5765,12 +5802,50 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::V
         // schedule pays for it at most once per tick and only when every cheaper route has
         // declined; recomputing it on every `/control/status` poll would make an operator's
         // dashboard the most expensive thing on the node. The trigger's own log line reports it
-        // when it fires.
+        // when it fires. `last_refusal` below is the same rule applied to the pre-flight: it
+        // reports the last decision the scheduler made, and recomputes nothing on the request.
+        //
+        // **`fold_refusals` is the third counter, and it is the disc alarm.** A fold that is
+        // *refused* moves neither of the two above: `folds` does not, because nothing was folded,
+        // and `fold_failures` does not, because a refusal is not a failure. So a deployment can
+        // ask for compaction on every schedule and never get it while both counters sit still.
+        // `fold_refusals` rising while `folds` stays flat is the condition to alarm on, and it is
+        // one alarm for four disc terms rather than four: the WAL pin a membership growth takes,
+        // the orphan files inside the live prefix, the superseded side-manifests and the fragment
+        // cache all release at the fold and nowhere else (`compaction.md` §9).
+        //
+        // **`fold_refusals_by_gate` is what says which refusal is standing**, and the total alone
+        // does not. The schedule re-evaluates at every tick once the interval floor has passed and
+        // a refusal stamps no fold start, so a gate that stands is counted again on every tick;
+        // anything else refusing between two of them takes `last_refusal` with it. The gate with
+        // the large number is the deployment's condition, and `last_refusal` is the most recent
+        // one whatever its gate.
+        //
+        // `last_refusal` also carries the figures. `gate` is the `NoFold` arm in snake case, and
+        // for `insufficient_disc` the two figures are the whole diagnosis: `need_bytes` is 150% of
+        // the live bytes the input manifests name, `had_bytes` is what `statvfs` answered, and the
+        // gap is what the device has to gain before a fold will start. Since the fold is also the
+        // only thing that reclaims, that gap does not close on its own — a box provisioned at 2×
+        // live can serve a corpus and cannot fold it (compaction §8). `nothing_to_fold` is among
+        // the gates and is not an alarm: it is what a `POST /control/compact` against an empty
+        // corpus answers.
         "compaction": {
             "live_rows": state.engine.live_rows(),
             "folds": executor.folds,
             "fold_failures": executor.fold_failures,
             "fold_requested": executor.fold_requested,
+            "fold_refusals": executor.fold_refusals,
+            "fold_refusals_by_gate": tessera_engine::FOLD_GATES
+                .iter()
+                .zip(executor.fold_refusals_by_gate)
+                .map(|(gate, count)| (gate.to_string(), serde_json::json!(count)))
+                .collect::<serde_json::Map<_, _>>(),
+            "last_refusal": executor.last_fold_refusal.map(|r| serde_json::json!({
+                "gate": r.gate,
+                "need_bytes": r.need_bytes,
+                "had_bytes": r.had_bytes,
+                "at_unix": r.at_unix,
+            })),
             "last_secs": executor.last_fold_secs,
             "last_rss_bytes": executor.last_fold_rss,
             "last_attr_bytes_read": executor.last_fold_attr_read,
