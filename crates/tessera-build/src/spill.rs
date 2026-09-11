@@ -131,6 +131,16 @@ macro_rules! zeroable {
 zeroable!(u8, u16, u32, u64, i8, i16, i32, i64, f32, f64);
 
 impl<T: Zeroable> MappedArray<T> {
+    /// The array with no elements — no file, no mapping, nothing to unlink.
+    pub(crate) fn empty() -> Self {
+        MappedArray {
+            map: None,
+            path: None,
+            len: 0,
+            element: PhantomData,
+        }
+    }
+
     /// A zeroed array of `len` values at `<dir>/<name>`.
     pub(crate) fn zeroed(dir: &Path, name: &str, len: usize) -> Result<Self> {
         if len == 0 {
@@ -160,16 +170,6 @@ impl<T: Zeroable> MappedArray<T> {
             len,
             element: PhantomData,
         })
-    }
-
-    /// The array with no elements — no file, no mapping, nothing to unlink.
-    pub(crate) fn empty() -> Self {
-        MappedArray {
-            map: None,
-            path: None,
-            len: 0,
-            element: PhantomData,
-        }
     }
 
     /// The array, read-only.
@@ -279,9 +279,10 @@ impl<T: Zeroable> Drop for MappedArray<T> {
 /// a read across a growth.
 #[derive(Debug)]
 pub(crate) struct MappedArena {
-    /// `None` for the arena of a released column, which owns no file and is never appended to.
-    file: Option<File>,
-    path: Option<PathBuf>,
+    file: File,
+    path: PathBuf,
+    /// `None` until the first append large enough to grow the file: an arena holding nothing, or
+    /// holding nothing but zero-length records, has no bytes to map.
     map: Option<memmap2::MmapMut>,
     /// Bytes handed out so far — the offset the next append lands at.
     used: u64,
@@ -339,8 +340,8 @@ impl MappedArena {
             .open(&path)
             .map_err(|e| BuildError::io(&path, e))?;
         Ok(MappedArena {
-            file: Some(file),
-            path: Some(path),
+            file,
+            path,
             map: None,
             used: 0,
             capacity: 0,
@@ -348,20 +349,6 @@ impl MappedArena {
             next_mark: 0,
             since_mark: 0,
         })
-    }
-
-    /// The arena with no file — what a released column's storage becomes.
-    pub(crate) fn empty() -> Self {
-        MappedArena {
-            file: None,
-            path: None,
-            map: None,
-            used: 0,
-            capacity: 0,
-            marks: Vec::new(),
-            next_mark: 0,
-            since_mark: 0,
-        }
     }
 
     /// Append `bytes` and return the offset they landed at.
@@ -390,7 +377,15 @@ impl MappedArena {
 
     /// The `len` bytes at `offset`. Panics where the range is not one this arena handed out, which
     /// is a defect in the caller's own index rather than an input error.
+    ///
+    /// **A zero-length record is a value.** The empty string is one a corpus may hold
+    /// (`column.rs`), and an arena holding nothing but empty records was never grown, so it has no
+    /// mapping to slice — answered before the mapping is reached rather than by giving the arena a
+    /// byte to burn.
     pub(crate) fn bytes(&self, offset: u64, len: usize) -> &[u8] {
+        if len == 0 {
+            return &[];
+        }
         let map = self
             .map
             .as_ref()
@@ -435,16 +430,14 @@ impl MappedArena {
 
     /// A sequential reader over `[lo, hi)`, which must be a range [`Self::windows`] handed out.
     pub(crate) fn window(&self, lo: u64, hi: u64) -> Result<ArenaWindow> {
-        let (Some(file), Some(path)) = (&self.file, &self.path) else {
-            return Err(BuildError::Invalid(
-                "an arena with no file cannot be read".into(),
-            ));
-        };
-        let file = file.try_clone().map_err(|e| BuildError::io(path, e))?;
+        let file = self
+            .file
+            .try_clone()
+            .map_err(|e| BuildError::io(&self.path, e))?;
         advise(&file, lo, hi - lo, libc::POSIX_FADV_SEQUENTIAL);
         Ok(ArenaWindow {
             file,
-            path: path.clone(),
+            path: self.path.clone(),
             buf: vec![0u8; ARENA_WINDOW_BUF],
             base: lo,
             filled: 0,
@@ -499,22 +492,17 @@ impl MappedArena {
     }
 
     fn map_to(&mut self, capacity: u64) -> Result<()> {
-        // A released column's arena owns no file, and nothing appends to one: reaching here is a
-        // caller that kept a column past `release`.
-        let (Some(file), Some(path)) = (&self.file, &self.path) else {
-            return Err(BuildError::Invalid(
-                "an arena with no file cannot be appended to".into(),
-            ));
-        };
-        reserve(file, path, self.capacity, capacity)?;
+        reserve(&self.file, &self.path, self.capacity, capacity)?;
         // The old mapping is dropped before the new one is taken: the writes it carried are in the
         // file's page cache already (`MAP_SHARED`), so the fresh mapping sees every one of them.
         self.map = None;
         // SAFETY: the file is this build's own, created under a directory it owns, and the mapping
         // is not shared with another process. Its length is fixed until the next `grow`, which
         // takes `&mut self` and drops this mapping before extending it.
-        self.map =
-            Some(unsafe { memmap2::MmapMut::map_mut(file) }.map_err(|e| BuildError::io(path, e))?);
+        self.map = Some(
+            unsafe { memmap2::MmapMut::map_mut(&self.file) }
+                .map_err(|e| BuildError::io(&self.path, e))?,
+        );
         self.capacity = capacity;
         Ok(())
     }
@@ -642,9 +630,7 @@ impl Drop for MappedArena {
     fn drop(&mut self) {
         // As `MappedArray`: the disk comes back when the column does, not at the end of the build.
         self.map = None;
-        if let Some(path) = self.path.take() {
-            let _ = fs::remove_file(path);
-        }
+        let _ = fs::remove_file(&self.path);
     }
 }
 

@@ -142,15 +142,15 @@ pub(crate) const SLACK: u64 = 64 << 20;
 /// What a string value costs outside its characters: the entity-indexed arena offset in
 /// [`crate::column::EntityColumn`], plus the arena record's own header.
 ///
-/// Eight bytes of offset and four of record header — the length, and the entity too where the
-/// column is one read in arena order (`column.rs`, [`crate::column`]'s `RECORD_HEADER_INDEXED`).
-/// The wider header is charged for a `text` column, which is the only family walked that way. The
-/// characters ride in the arena and are counted as its payload; the `String` header this replaced
-/// was 24 bytes per entity, paid before a character was stored.
+/// Eight bytes of offset always. The header is eight more for a `text` column — the entity and
+/// the length, which is what makes the arena readable in its own order — and **nothing** for the
+/// rest, whose length is packed into the offset word beside the offset (`column.rs`,
+/// `RecordShape`). The characters ride in the arena and are counted as its payload; the `String`
+/// header this replaced was 24 bytes per entity, paid before a character was stored.
 fn arena_offset(ty: ScalarType) -> u64 {
     match ty {
         ScalarType::Text => 8 + 8,
-        _ => 8 + 4,
+        _ => 8,
     }
 }
 
@@ -780,17 +780,17 @@ pub(crate) fn entity_order_residency(
     for (index, column) in columns.iter().enumerate() {
         let width = fixed_width(column.ty);
         let presence = n.div_ceil(8);
-        // **A spilled column has no arena and no offset array.** What it has instead is one
-        // record-blob extent per join chunk, holding the same characters compressed
-        // ([`EXTENT_SHARE`]); the presence bits are all that is left of the column itself.
+        // **A spilled column has nothing in entity order at all** — no arena, no offset array
+        // and no presence bitmap ([`crate::column::EntityColumn::spilled`]). What it has instead
+        // is one record-blob extent per join chunk, holding the same characters compressed
+        // ([`EXTENT_SHARE`]).
         let spilled = column.extents;
         let bytes = if spilled {
-            presence
-                .saturating_add(column.payload_bytes / EXTENT_SHARE)
+            (column.payload_bytes / EXTENT_SHARE)
                 .saturating_add(column.framing_bytes / EXTENT_SHARE)
         } else if column.payload_bytes > 0 {
             // 8 bytes of entity-indexed offset and the presence bit, plus the arena the characters
-            // and their record headers fill.
+            // and — for a `text` column — their record headers fill.
             8u64.saturating_mul(n)
                 .saturating_add(presence)
                 .saturating_add(arena_capacity(
@@ -1919,12 +1919,9 @@ mod tests {
             .iter()
             .find(|t| t.what.contains("declared column"))
             .expect("the column is a term of its own");
-        // The offsets, the presence bits, and the arena the characters and their record headers
-        // fill.
-        assert_eq!(
-            term.bytes,
-            8 * n + n.div_ceil(8) + arena_capacity(400 * n + 4 * n)
-        );
+        // The offsets, the presence bits, and the arena the characters fill. A `keyword` record
+        // has no header: its length is packed into the offset word (`column.rs`, `RecordShape`).
+        assert_eq!(term.bytes, 8 * n + n.div_ceil(8) + arena_capacity(400 * n));
         assert!(
             with_keyword.describe().contains("(mapped)"),
             "the breakdown must say which terms are files: {}",
@@ -1932,11 +1929,13 @@ mod tests {
         );
     }
 
-    /// **A spilled column costs its extents, not an arena.** Its characters are written once as
-    /// record-blob blocks under `.build-tmp/`, charged at half the source's characters
-    /// ([`EXTENT_SHARE`]); the column itself is presence bits and nothing else. That holds for
-    /// every string type the route takes, and what it removes on a `keyword` column is the offset
-    /// array as well as the arena — 12 B/item before a character.
+    /// **A spilled column costs its extents and nothing else.** Its characters are written once
+    /// as record-blob blocks under `.build-tmp/`, charged at half the source's characters
+    /// ([`EXTENT_SHARE`]); the column's own slot is a length in memory and no file at all — not
+    /// even the presence bitmap, which the join has no lane to mark
+    /// ([`crate::column::EntityColumn::spilled`]). That holds for every string type the route
+    /// takes, and what it removes on a `keyword` column is the offset array as well as the
+    /// arena — 8.125 B/item before a character.
     #[test]
     fn a_spilled_column_costs_its_extents_and_not_an_arena() {
         let n = 10_000_000;
@@ -1948,7 +1947,7 @@ mod tests {
                 .iter()
                 .find(|t| t.what.contains("declared column"))
                 .expect("the column is a term of its own");
-            assert_eq!(term.bytes, n.div_ceil(8) + payload / 2, "{ty:?}");
+            assert_eq!(term.bytes, payload / 2, "{ty:?}");
             assert!(
                 term.what.contains("MiB of extents"),
                 "the breakdown must name them: {}",
@@ -2256,7 +2255,7 @@ mod tests {
             text_index: true,
             ..plain
         };
-        let extent_bytes = n.div_ceil(8) + 200 * n;
+        let extent_bytes = 200 * n;
         // The source ids and the ordinal→entity map are files whatever the schema declares, so
         // each figure below is stated against a build declaring no column at all.
         let bare = entity_order_residency(n, IdShape::dense(n), &[], 0, 0).at(Phase::Index);
@@ -2359,7 +2358,7 @@ mod tests {
         let bare = entity_order_residency(n, IdShape::dense(n), &[], 0, 0);
         let with = entity_order_residency(n, IdShape::dense(n), &[indexed, rendered], 0, 0);
 
-        let index_only = 8 * n + n.div_ceil(8) + arena_capacity(40 * n + 4 * n);
+        let index_only = 8 * n + n.div_ceil(8) + arena_capacity(40 * n);
         let render = 4 * n + n.div_ceil(8);
         assert_eq!(with.at(Phase::Index) - bare.at(Phase::Index), index_only + render);
         assert_eq!(
