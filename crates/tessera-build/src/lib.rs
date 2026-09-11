@@ -458,6 +458,20 @@ pub struct BuildReport {
     /// stages, which is a property of the machine and not of the corpus. Two builds of one corpus
     /// whose wall clocks differ have this list as the first thing to compare.
     pub spilled_columns: Vec<String>,
+    /// **The slots the source-ids array was allocated at, and zero where the build wrote none.**
+    ///
+    /// An item's ordinal is its index in the sorted, deduplicated union of every view's source
+    /// ids. Where that union is one unbroken range the ordinal is a subtraction and pass one
+    /// writes no array: at the GBIF rung that is 28 GB of writes and one sort of 3.5×10⁹ `u64`s
+    /// not made. Proving the range needs a bound on the union's span before the ids are read, and
+    /// the bound comes from each points file's own parquet statistics — so a file that states
+    /// nothing about its id column is built down the array route instead.
+    ///
+    /// **Returned because the route is derived from the input's statistics and changes no byte of
+    /// the bundle** (`tests/id_space_routes.rs`), and because this is the only place an operator
+    /// can see which one a build took. The linear build reports zero: it holds its points in
+    /// memory and has never had an array here.
+    pub source_id_slots: u64,
 }
 
 /// **How many of the grid's cells the placed points actually landed in**, beside how many points
@@ -1463,9 +1477,15 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
     // other placed at an entity would put its values in the blob under two tags, which is a byte
     // difference for a reason that is not the entity assignment this build exists to check.
     //
-    // The id shape the routing reads is the same one the pipeline derives: this build takes one
-    // view and refuses a repeated source id, so the union it would have read has one slot a point
-    // and its last id is the largest.
+    // The id shape the routing reads. This build takes one view and refuses a repeated source id,
+    // so the union it would have read has one slot a point and its last id is the largest. The
+    // pipeline can charge fewer slots than this over the same corpus — it writes no ids file where
+    // it proves the union is one unbroken range before reading it — and the two can therefore
+    // choose different routes for the same column. That is not a byte difference: the route a
+    // string column's characters take is not recorded in the bundle
+    // (`build-column-extents.md` §2, `tests/extent_route.rs`). Charging the slots keeps the
+    // oracle's own model of the disk conservative rather than tying it to a points file's parquet
+    // statistics.
     let ids = residency::IdShape {
         slots: n,
         max_id: points.last().map_or(0, |p| p.source_id),
@@ -2176,6 +2196,7 @@ fn write_manifests(
         hierarchy_shapes: Vec::new(),
         attribute_coverage: Vec::new(),
         spilled_columns: Vec::new(),
+        source_id_slots: 0,
         keyword_cardinalities,
     })
 }

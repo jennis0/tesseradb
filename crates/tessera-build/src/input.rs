@@ -1416,6 +1416,51 @@ fn statistic_min(stats: &Statistics) -> Option<u64> {
     }
 }
 
+fn statistic_max(stats: &Statistics) -> Option<u64> {
+    match stats {
+        Statistics::Int32(s) => s.max_opt().map(|v| *v as u64),
+        Statistics::Int64(s) => s.max_opt().and_then(|v| u64::try_from(*v).ok()),
+        _ => None,
+    }
+}
+
+/// The lowest and highest `entity_id` a points file's own statistics claim, folded over its row
+/// groups — or `None` where the file cannot state them.
+///
+/// **A range the file's ids lie in, not the extrema of what a scan selects.** A `limit` or a form
+/// B discriminator selects a subset, so the selection's own extrema lie inside this range. A
+/// caller sizing a structure over it must take the true extrema from the rows it reads.
+///
+/// `None` where a row group carries no statistics, where the id column is a type the statistics
+/// cannot express, or where an unsigned value above 2^63 is stored as a negative `INT64` and
+/// `u64::try_from` refuses it. A caller gets no range rather than a wrong one.
+pub fn id_bounds(path: &Path, fields: &Fields) -> Result<Option<(u64, u64)>> {
+    let file = File::open(path).map_err(|e| BuildError::io(path, e))?;
+    let builder =
+        ParquetRecordBatchReaderBuilder::try_new(file).map_err(|e| BuildError::parquet(path, e))?;
+    let schema = builder.schema().clone();
+    let id_idx = field_index(path, &schema, fields, ENTITY_ID)?;
+    let meta = builder.metadata();
+    let mut bounds: Option<(u64, u64)> = None;
+    for rg in 0..meta.num_row_groups() {
+        let group = meta.row_group(rg);
+        if group.num_rows() == 0 {
+            continue;
+        }
+        let Some(stats) = group.column(id_idx).statistics() else {
+            return Ok(None);
+        };
+        let (Some(lo), Some(hi)) = (statistic_min(stats), statistic_max(stats)) else {
+            return Ok(None);
+        };
+        bounds = Some(match bounds {
+            None => (lo, hi),
+            Some((low, high)) => (low.min(lo), high.max(hi)),
+        });
+    }
+    Ok(bounds)
+}
+
 /// The column index of `canonical` under the names the declaration resolved — or a refusal naming
 /// the object, the field, the column it looked for, and the columns the file actually carries.
 ///

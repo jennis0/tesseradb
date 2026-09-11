@@ -41,6 +41,10 @@
 //! 10⁹ items: a 14.96 GiB peak became 7.55 GiB of page cache over a flat 228 MiB of anonymous
 //! memory (`probes/2026-09-10-source-ids-memory/`).
 //!
+//! On a corpus that numbers its rows the array is not written at all. Pass one proves the union is
+//! one unbroken range from a presence bitmap a sixty-fourth of its size, and an ordinal is then a
+//! subtraction — so this term is zero, and [`IdShape::slots`] is what says which build is which.
+//!
 //! Every **declared column in entity order** was the other half of this list and the larger half of
 //! the campaign's kills: a fixed-width type at its own width, a `text`, `keyword` or `utf8` one at a
 //! `String` *per entity* — 24 bytes of header before a character was stored — plus a presence bit
@@ -563,9 +567,13 @@ pub(crate) struct Corpus<'a> {
 /// it (`crate::pipeline::read_source_ids_union`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) struct IdShape {
-    /// **The rows every view declares, before the union dedups them** — the length the ids file is
-    /// allocated at, which is what it costs the disk. `n` is what survives the dedup, and the two
-    /// differ by however much the views overlap: 1.76× on `treeoflife-1m`, 4.29× on `multiview`.
+    /// **The length the ids file is allocated at, and zero where there is no file.**
+    ///
+    /// Pass one writes no array where it can prove the union is one unbroken range before reading
+    /// the ids, which is every corpus that numbers its rows ([`crate::pipeline::SourceIds`]).
+    /// Where it does write one and read the ids into it unsorted, the length is the rows every
+    /// view declares before the union dedups them — `n` is what survives, and the two differ by
+    /// however much the views overlap: 1.76× on `treeoflife-1m`, 4.29× on `multiview`.
     pub slots: u64,
     /// **The largest source id**, which is what sets the varint width the member spill's runs are
     /// charged at. Not the distance between the lowest and the highest: an artifact's first source
@@ -744,24 +752,25 @@ pub(crate) fn entity_order_residency(
 ) -> Residency {
     let publication_bytes = level_entries.saturating_mul(BYTES_PER_MEMBER_ENTRY);
     let mut terms = vec![
-        // **File-backed since 2026-09-10**, and so charged to the disk rather than to memory. The
-        // ids are read sequentially by every pass but one — the join's merge sweep, the
-        // external-id write, the ordinal walks — and the exception is `layers::publish`'s binary
-        // search on the sparse path, which is the random-access case `MappedArray` was written
-        // for. 8 B/item is 26.0 GiB at the GBIF rung. They are released at the layer publication,
-        // so they are on the disk for every phase of the pre-flight but the assembly.
+        // **A file under `.build-tmp/` where there is one at all**, and so charged to the disk
+        // rather than to memory. The ids are read sequentially by every pass but one — the join's
+        // merge sweep, the external-id write, the ordinal walks — and the exception is
+        // `layers::publish`'s binary search, which is the random-access case `MappedArray` was
+        // written for. They are released at the layer publication, so they are on the disk for
+        // every phase of the pre-flight but the assembly.
         //
-        // **Charged over the slots the file is allocated at and not over `n`**: pass one counts
-        // every view's rows, allocates the union at their sum and dedups inside it, so a corpus
-        // whose views overlap holds a file larger than the entity space it produces
-        // ([`IdShape::slots`]).
+        // **Charged over the slots the file is allocated at and not over `n`**, and at nothing
+        // where pass one proved the union is one unbroken range and wrote no array
+        // ([`IdShape::slots`]). Where it did write one, a corpus whose views overlap holds a file
+        // larger than the entity space it produces: the union is allocated at the sum of the
+        // views' row counts and the dedup moves values inside it.
         Term {
             what: format!(
-                "the sorted source ids, 8 B over the {} row(s) every view declares before the \
-                 union dedups them, in .build-tmp/ (released at the layer publication)",
+                "the sorted source ids, 8 B over {} slot(s), in .build-tmp/ (released at the \
+                 layer publication)",
                 ids.slots
             ),
-            bytes: 8u64.saturating_mul(ids.slots.max(n)),
+            bytes: 8u64.saturating_mul(ids.slots),
             mapped: true,
             phases: Phases::SPILL.and(Phases::BANDS).and(Phases::JOIN),
         },
@@ -1864,6 +1873,36 @@ mod tests {
             overlapping.at(Phase::Spill) - dense.at(Phase::Spill),
             8 * 3 * n,
             "four views over one entity space cost four ids files, not one"
+        );
+    }
+
+    /// **A build that wrote no ids array is charged nothing for one**, and the term disappears from
+    /// what a refusal prints rather than standing at zero. Pass one proves the union is one
+    /// unbroken range from a presence bitmap and writes no array
+    /// ([`crate::pipeline::SourceIds`]), which is every corpus on the ladder but `multiview`.
+    #[test]
+    fn a_proved_range_is_charged_no_ids_file_at_all() {
+        let n = 1_000_000;
+        let held = entity_order_residency(n, IdShape::dense(n), &[], 0, 0);
+        let ranged = entity_order_residency(
+            n,
+            IdShape {
+                slots: 0,
+                max_id: n - 1,
+            },
+            &[],
+            0,
+            0,
+        );
+        assert_eq!(
+            held.at(Phase::Spill) - ranged.at(Phase::Spill),
+            8 * n,
+            "the array is the whole difference between the two routes"
+        );
+        assert!(
+            !ranged.describe().contains("the sorted source ids"),
+            "a term at zero bytes is not a term: {}",
+            ranged.describe()
         );
     }
 
