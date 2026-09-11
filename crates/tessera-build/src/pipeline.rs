@@ -5947,6 +5947,39 @@ fn read_source_ids_present(
     Ok(union.map(|union| (union, anchors)))
 }
 
+/// The ordinal space the presence bitmap decided: a range where the union is one, and the array
+/// walked out of the bitmap where it is not.
+///
+/// The walk emits set bits ascending, so the array it writes is already sorted and already
+/// deduplicated — no `par_sort_unstable` over the corpus, and it is allocated at the distinct
+/// count rather than at the views' pre-deduplication sum.
+fn source_ids_of_presence(present: &IdPresence, tmp: &Path) -> Result<SourceIds> {
+    let n = present.count();
+    // `first` and `last` both lie in the span, so the width cannot overflow. An empty union has no
+    // extrema and takes the array arm, which answers nothing rather than subtracting from a first
+    // id that does not exist.
+    if let Some((first, last)) = present.extrema() {
+        if last - first + 1 == n {
+            return Ok(SourceIds::Contiguous {
+                first,
+                len: n as usize,
+            });
+        }
+    }
+    let mut ids = spill::MappedArray::<u64>::zeroed(tmp, "source-ids.u64", n as usize)?;
+    let slots = ids.as_mut_slice();
+    let mut written = 0usize;
+    for id in present.ids() {
+        slots[written] = id;
+        written += 1;
+    }
+    debug_assert_eq!(written as u64, n, "the walk writes one id per set bit");
+    Ok(SourceIds::Sparse {
+        ids,
+        len: n as usize,
+    })
+}
+
 /// **Pass one's entity space** (`views.md` §7): every view's point source, unioned by
 /// `external_id`.
 ///
@@ -5974,37 +6007,7 @@ fn read_source_ids_union(args: &BuildArgs, tmp: &Path) -> Result<(SourceIds, Vec
     }
     if let Some((base, span)) = union_id_span(args, &counts)? {
         if let Some((present, anchors)) = read_source_ids_present(args, &counts, base, span)? {
-            let n = present.count();
-            if let Some((first, last)) = present.extrema() {
-                // `last` and `first` both lie in the span, so the width below cannot overflow.
-                if last - first + 1 == n {
-                    return Ok((
-                        SourceIds::Contiguous {
-                            first,
-                            len: n as usize,
-                        },
-                        anchors,
-                    ));
-                }
-            }
-            // Not a range: the array is owed after all, and the bitmap hands it over already
-            // sorted and already deduplicated, at the distinct count rather than at the views'
-            // pre-dedup sum.
-            let mut ids = spill::MappedArray::<u64>::zeroed(tmp, "source-ids.u64", n as usize)?;
-            let slots = ids.as_mut_slice();
-            let mut written = 0usize;
-            for id in present.ids() {
-                slots[written] = id;
-                written += 1;
-            }
-            debug_assert_eq!(written as u64, n, "the walk writes one id per set bit");
-            return Ok((
-                SourceIds::Sparse {
-                    ids,
-                    len: n as usize,
-                },
-                anchors,
-            ));
+            return Ok((source_ids_of_presence(&present, tmp)?, anchors));
         }
     }
     let total: usize = counts.iter().sum();
