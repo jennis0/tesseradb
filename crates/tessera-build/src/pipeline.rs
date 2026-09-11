@@ -698,10 +698,20 @@ fn plan_build(
     // bucket (8 bytes/pair) + recs (16/item — 12 before decision 0073 added the Morton tiebreak
     // to the sort key, and a model left at 12 would plan a batch the loop cannot hold) +
     // starts (4/item) + long bitset (1/8 per item),
-    // beside the loop-wide distinct-terms-per-ordinal tally (4/item over all n; the
-    // ordinal→entity map beside it is the same width and is a file), per-term counters (4/term), the
-    // join-chunk buffer (which scales down with the corpus, so a tiny test budget stays
-    // feasible for a tiny corpus) and a fixed slack for band buffers, decoders and allocator.
+    // beside the loop-wide distinct-terms-per-ordinal tally (4/item over all n), per-term
+    // counters (4/term), the join-chunk buffer (which scales down with the corpus, so a tiny test
+    // budget stays feasible for a tiny corpus) and a fixed slack for band buffers, decoders and
+    // allocator.
+    //
+    // **The leading `4 * n` is that tally, and it stays although the tally is no longer memory.**
+    // It became a file under `.build-tmp/` on 2026-09-10, as the ordinal→entity map beside it did
+    // before; the term is kept deliberately and is not an oversight to tidy. It feeds `feasible`
+    // below, `feasible` picks `auto_batch`, and a batch stride partitions entity-id space — so
+    // dropping the term would give every budget-constrained corpus a different stride and with it
+    // a different permanent entity-id assignment, which I9 does not allow to change. What the
+    // build now needs is less than what it plans for, which is the safe direction. Removing the
+    // term, to buy larger batches, is a separate decision the owner has not taken — ruling 6 of
+    // the disk-use campaign, 2026-09-10.
     const SLACK: u64 = 64 << 20;
     let chunk_bytes = 16 * (JOIN_CHUNK_ROWS as u64).min(pair_rows.max(1) as u64);
     let loop_fixed = 4 * n + 4 * row_counts.len() as u64 + chunk_bytes + SLACK;
@@ -1010,7 +1020,17 @@ pub(crate) fn build(
     let mut resolved: Vec<(u64, u64)> = Vec::new();
     // Each view's own distinct contribution per ordinal, summed over the views — the numerator
     // of the label-agreement identity the batch loop checks (`views.md` §7).
-    let mut distinct_of_ordinal: Vec<u32> = vec![0; n as usize];
+    //
+    // **File-backed**, which is [`spill::MappedArray`]'s case exactly: written at a scattered
+    // index by the sweep in [`resolve_pairs_chunk`], read at a scattered index by the assignment
+    // walk's label-agreement check, never sorted. At 4 B/item it was the build's largest anonymous
+    // structure — 13.0 GiB at the GBIF rung's 3.50×10⁹ items (modelled, items × 4 B) — and mapped
+    // it is page cache the kernel may evict rather than memory the machine must have.
+    // `plan_build`'s `loop_fixed` charges the same 4 B/item still, on purpose and for I9's sake:
+    // the comment at that term says why.
+    let mut distinct_map =
+        spill::MappedU32::zeroed(tmp.path(), "distinct-of-ordinal.u32", n as usize)?;
+    let distinct_of_ordinal = distinct_map.as_mut_slice();
     let mut resolve = |chunk: &mut Vec<(u64, u64)>,
                        resolved: &mut Vec<(u64, u64)>,
                        distinct_of_ordinal: &mut [u32],
@@ -1036,12 +1056,7 @@ pub(crate) fn build(
         let changed_view = current.is_some_and(|(previous, _)| previous != view);
         let changed_row = current != Some((view, source_id));
         if changed_view || (changed_row && chunk.len() >= JOIN_CHUNK_ROWS) {
-            if let Err(e) = resolve(
-                &mut chunk,
-                &mut resolved,
-                &mut distinct_of_ordinal,
-                &mut sink,
-            ) {
+            if let Err(e) = resolve(&mut chunk, &mut resolved, distinct_of_ordinal, &mut sink) {
                 failure = Some(e);
                 return ControlFlow::Break(());
             }
@@ -1053,12 +1068,7 @@ pub(crate) fn build(
     if let Some(error) = failure {
         return Err(error);
     }
-    resolve(
-        &mut chunk,
-        &mut resolved,
-        &mut distinct_of_ordinal,
-        &mut sink,
-    )?;
+    resolve(&mut chunk, &mut resolved, distinct_of_ordinal, &mut sink)?;
     drop(chunk);
     drop(resolved);
     if pushed as usize != pair_rows {
@@ -1425,10 +1435,12 @@ pub(crate) fn build(
     // passes below take it as the plain `&[u32]` they always did.
     let entity_of_ordinal = entity_map.as_slice();
     // The two ordinal-space counters of the label-agreement identity (`views.md` §7) have served
-    // their only reader, the check inside the walk above. 4 B/item each, so releasing them here
-    // rather than at the end of the build takes 1.74 GiB off rung 5 and 26.4 GiB off the GBIF rung
-    // (modelled, items × 8 B) across every stage from the postings write to the last segment.
-    drop(distinct_of_ordinal);
+    // their only reader, the check inside the walk above, and are released here rather than at the
+    // end of the build — across every stage from the postings write to the last segment. 4 B/item
+    // each: `appearances` is that much anonymous memory and the tally is that much disk, so what
+    // this returns at the GBIF rung is 13.0 GiB of each (modelled, items × 4 B). The tally's file
+    // is unlinked by `MappedArray`'s own `Drop`, so the disk comes back at the same point.
+    drop(distinct_map);
     drop(appearances);
     // The anchor's Morton geometry has served its one reader — the sort's tiebreak — and is
     // released here rather than at the end of the build. At 10⁹ that is 8 GB of dirty mapped
