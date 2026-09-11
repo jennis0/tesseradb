@@ -55,7 +55,7 @@ use tessera_store::read::{ColumnsRef, MortonSlice, SegmentData};
 // The derived structures' writer half lives beside the formats it writes; the alias is what keeps
 // the call sites below reading as what they do rather than as which file they are in.
 use tessera_store::derived;
-use tessera_store::derived::{Filed, LevelShape, PostingSlice, SignatureIndex};
+use tessera_store::derived::{DerivedIndex, Filed, LevelShape, PostingSlice, SignatureIndex};
 use tessera_store::permutation::ProjectScratch;
 use tessera_store::RowSpace;
 use tessera_types::layer::{MembershipSource, RegisteredLayer, ServingLayout};
@@ -105,7 +105,6 @@ impl LevelLayoutReport {
 pub struct ArtifactPass {
     pub tile_index_extents: Vec<tessera_store::manifest::TileIndexExtent>,
     pub row_column_extents: Vec<tessera_store::manifest::RowColumnExtent>,
-    pub containment_extents: Vec<tessera_store::manifest::ContainmentExtent>,
     /// The persisted row form of every spatial level that got no column — see
     /// `ShapeRowsExtent`.
     pub shape_rows_extents: Vec<tessera_store::manifest::ShapeRowsExtent>,
@@ -136,7 +135,7 @@ pub fn run(
     partition: &str,
     view: &str,
     row_count: u32,
-    data_plugin_hash: &str,
+    index: &mut DerivedIndex,
 ) -> ArtifactPass {
     let started = Instant::now();
     let mut pass = ArtifactPass::default();
@@ -388,7 +387,7 @@ pub fn run(
         });
     }
     pass.tile_index_extents =
-        derived::file_tile_indexes(prefix_dir, partition, MANIFEST_N, tile_indexes);
+        derived::file_tile_indexes(prefix_dir, partition, MANIFEST_N, index, tile_indexes);
 
     // ---- the row-major columns: every level that is ---------------------------------------------
     //
@@ -448,7 +447,8 @@ pub fn run(
             ),
         }
     }
-    pass.row_column_extents = derived::file_row_columns(prefix_dir, partition, MANIFEST_N, columns);
+    pass.row_column_extents =
+        derived::file_row_columns(prefix_dir, partition, MANIFEST_N, index, columns);
 
     // ---- the shape row forms: every spatial level whose persisted form is not a column ---------
     //
@@ -485,7 +485,7 @@ pub fn run(
         }
     }
     pass.shape_rows_extents =
-        derived::file_shape_rows(prefix_dir, partition, MANIFEST_N, shape_rows);
+        derived::file_shape_rows(prefix_dir, partition, MANIFEST_N, index, shape_rows);
 
     // ---- the decompositions, per spatial level ------------------------------------------------
     let held: Vec<Filed> = decomposed
@@ -513,18 +513,13 @@ pub fn run(
             }
         })
         .collect();
-    pass.shape_held_extents = derived::file_shape_held(prefix_dir, partition, MANIFEST_N, held);
-
-    // ---- the containment partitions -------------------------------------------------------------
-    pass.containment_extents = containment(store, &levels, prefix_dir, partition, data_plugin_hash);
+    pass.shape_held_extents =
+        derived::file_shape_held(prefix_dir, partition, MANIFEST_N, index, held);
 
     for entry in &pass.tile_index_extents {
         pass.paths.push(prefix_dir.join(&entry.path));
     }
     for entry in &pass.row_column_extents {
-        pass.paths.push(prefix_dir.join(&entry.path));
-    }
-    for entry in &pass.containment_extents {
         pass.paths.push(prefix_dir.join(&entry.path));
     }
     for entry in &pass.shape_rows_extents {
@@ -581,15 +576,22 @@ const MANIFEST_N: u64 = 0;
 
 /// Compose and file this prefix's containment partitions, one per `(layer, level)`.
 ///
+/// **Once for the prefix.** A partition is a function of the level's records and the prefix's
+/// postings, so it is the same bytes whichever view is being written and its manifest entry
+/// carries no view. Composing it inside [`run`], which runs per view, would write every level one
+/// identical file and one entry per view. The fold composes for every level in one call
+/// (`Executor::write_containment_partitions`) and this does the same, which is why the level list
+/// here is the store's rather than one view's drawn layers.
+///
 /// **The gate first**: under any plugin but the builtin the partition is not sound at all, so
 /// nothing is composed and nothing is written — the same gate the fold applies, taken from the same
 /// manifest field.
-fn containment(
+pub fn containment(
     store: &ArtifactStore,
-    levels: &[(String, u32)],
     prefix_dir: &Path,
     partition: &str,
     data_plugin_hash: &str,
+    index: &mut DerivedIndex,
 ) -> Vec<tessera_store::manifest::ContainmentExtent> {
     if data_plugin_hash != tessera_plugin::Passthrough::new().data_plugin_hash() {
         return Vec::new();
@@ -610,8 +612,12 @@ fn containment(
         }
     };
 
+    let levels: Vec<(String, u32)> = store
+        .levels_and_extents()
+        .map(|(layer, level, _)| (layer.to_string(), level))
+        .collect();
     let mut composed: Vec<Filed> = Vec::new();
-    for (layer, level) in levels {
+    for (layer, level) in &levels {
         let contents = |visit: &mut dyn FnMut(u32, &[&Bitmap])| {
             for (ordinal, record) in store.level(layer, *level) {
                 let generating: Vec<&Bitmap> =
@@ -657,7 +663,7 @@ fn containment(
             bytes: derived::compose_containment(&contents, &signatures),
         });
     }
-    derived::file_containment(prefix_dir, partition, MANIFEST_N, composed)
+    derived::file_containment(prefix_dir, partition, MANIFEST_N, index, composed)
 }
 
 /// The pass's own report, printed where `report_attribute_coverage` prints — so both entry points
@@ -730,11 +736,10 @@ pub fn report(pass: &ArtifactPass) {
         }
     }
     eprintln!(
-        "  wrote {} tile index(es), {} row-major column(s), {} containment partition(s), {} \
-         shape row form(s), {} decomposition file(s)",
+        "  wrote {} tile index(es), {} row-major column(s), {} shape row form(s), {} \
+         decomposition file(s)",
         pass.tile_index_extents.len(),
         pass.row_column_extents.len(),
-        pass.containment_extents.len(),
         pass.shape_rows_extents.len(),
         pass.shape_held_extents.len(),
     );

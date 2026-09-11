@@ -7874,12 +7874,17 @@ impl Executor {
                 .with_artifacts(|store| store.levels_moved_by(&executed)),
             retired: executed.clone(),
         };
+        // **One counter for the whole publication.** Every derived file this fold writes is named
+        // from it, so no two of these calls can name the same file — see
+        // `tessera_store::derived::DerivedIndex`.
+        let mut derived_index = tessera_store::derived::DerivedIndex::default();
         let containment = self.write_containment_partitions(
             &to_prefix_dir,
             &plan.partition,
             manifest_n,
             &live.bundle.manifest.data_plugin_hash,
             &pending,
+            &mut derived_index,
         );
         // **The row spaces every derived structure below is computed over**, opened once: base
         // only, against the permutations this fold just wrote.
@@ -7929,6 +7934,7 @@ impl Executor {
             &spaces,
             &layouts,
             &pending,
+            &mut derived_index,
         );
         // **And the columns for the levels that do**, in the same pass and under the same
         // omissions. A level whose column will not compose gets no entry, and is served
@@ -7942,6 +7948,7 @@ impl Executor {
             &layouts,
             &pending,
             &fold_segments,
+            &mut derived_index,
         );
         // **And the row forms of the spatial levels the columns do not cover**, so the next open
         // claims what this fold just resolved instead of resolving it again
@@ -7954,6 +7961,7 @@ impl Executor {
             &row_columns,
             &pending,
             &fold_segments,
+            &mut derived_index,
         );
         let shape_held = self.write_shape_held(
             &to_prefix_dir,
@@ -7962,6 +7970,7 @@ impl Executor {
             &fold_incarnations,
             &pending,
             &fold_segments,
+            &mut derived_index,
         );
         stairs.record("8 derived");
 
@@ -10883,7 +10892,10 @@ fn plan_fills(
                         })
                         .or_else(|| {
                             crate::session::flushed_scoped_of(
-                                generation, entity, family, &owner_view,
+                                generation,
+                                entity,
+                                family,
+                                &owner_view,
                             )
                             .and_then(held)
                         });
@@ -11008,7 +11020,9 @@ fn values_growth_records(
             tessera_lifecycle::membership::growth_record(
                 layer,
                 level,
-                ordinals.iter().map(|(ordinal, joining)| (*ordinal, joining)),
+                ordinals
+                    .iter()
+                    .map(|(ordinal, joining)| (*ordinal, joining)),
             )
         })
         .collect())
@@ -12518,10 +12532,9 @@ impl Executor {
                             // (`ingest.md` §1.1): a union cannot express a leave, and the
                             // withdrawal an emptied set makes moves every rank above it. A page of
                             // joins alone is unioned into the operator that is served.
-                            let leaves = tessera_lifecycle::membership::deserialise_leaving(
-                                &grown.leaving,
-                            )
-                            .is_none_or(|leaving| !leaving.is_empty());
+                            let leaves =
+                                tessera_lifecycle::membership::deserialise_leaving(&grown.leaving)
+                                    .is_none_or(|leaving| !leaving.is_empty());
                             pages.push(crate::artifacts::SetPage {
                                 ordinal: grown.ordinal,
                                 rank,
@@ -14931,6 +14944,7 @@ impl Executor {
     /// **Every failure is an empty list, not a discarded fold.** A partition is derived — the level
     /// recomposes it on first use — so refusing to publish over one would be a refusal outside the
     /// disclosure surface, and the thing being refused has a correct fallback.
+    #[allow(clippy::too_many_arguments)]
     fn write_containment_partitions(
         &self,
         prefix_dir: &std::path::Path,
@@ -14938,6 +14952,7 @@ impl Executor {
         n: u64,
         data_plugin_hash: &str,
         pending: &PendingRetirement,
+        index: &mut tessera_store::derived::DerivedIndex,
     ) -> Vec<tessera_store::manifest::ContainmentExtent> {
         // The gate: under any plugin but the builtin the partition is not sound at all, so nothing
         // is composed and nothing is written (`crate::containment`).
@@ -15002,6 +15017,7 @@ impl Executor {
             prefix_dir,
             partition,
             n,
+            index,
             composed
                 .into_iter()
                 .map(
@@ -15299,6 +15315,7 @@ impl Executor {
         layouts: &[(String, u32, tessera_types::layer::ServingLayout)],
         pending: &PendingRetirement,
         fold_segments: &[(String, tessera_store::read::SegmentData)],
+        index: &mut tessera_store::derived::DerivedIndex,
     ) -> Vec<tessera_store::manifest::RowColumnExtent> {
         let wanted: Vec<(String, u32, tessera_types::layer::ServingLayout)> = layouts
             .iter()
@@ -15401,6 +15418,7 @@ impl Executor {
             prefix_dir,
             partition,
             n,
+            index,
             written
                 .into_iter()
                 .filter_map(|(view, layer, level, level_version, layout, bytes)| {
@@ -15437,6 +15455,7 @@ impl Executor {
         columns: &[tessera_store::manifest::RowColumnExtent],
         pending: &PendingRetirement,
         fold_segments: &[(String, tessera_store::read::SegmentData)],
+        index: &mut tessera_store::derived::DerivedIndex,
     ) -> Vec<tessera_store::manifest::ShapeRowsExtent> {
         let levels: Vec<(String, u32)> = self.live.with_artifacts(|store| {
             store
@@ -15500,11 +15519,12 @@ impl Executor {
                 });
             }
         }
-        tessera_store::derived::file_shape_rows(prefix_dir, partition, n, filed)
+        tessera_store::derived::file_shape_rows(prefix_dir, partition, n, index, filed)
     }
 
     /// Write this prefix's persisted decompositions: every spatial level's held shapes for each
     /// fold view, as the level holds them at its current version.
+    #[allow(clippy::too_many_arguments)]
     fn write_shape_held(
         &self,
         prefix_dir: &std::path::Path,
@@ -15513,6 +15533,7 @@ impl Executor {
         incarnations: &FxHashMap<String, tessera_types::view::ViewIncarnation>,
         pending: &PendingRetirement,
         fold_segments: &[(String, tessera_store::read::SegmentData)],
+        index: &mut tessera_store::derived::DerivedIndex,
     ) -> Vec<tessera_store::manifest::ShapeHeldExtent> {
         let filed: Vec<tessera_store::derived::Filed> = self.live.with_artifacts(|store| {
             let mut out = Vec::new();
@@ -15564,7 +15585,7 @@ impl Executor {
             }
             out
         });
-        tessera_store::derived::file_shape_held(prefix_dir, partition, n, filed)
+        tessera_store::derived::file_shape_held(prefix_dir, partition, n, index, filed)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -15577,6 +15598,7 @@ impl Executor {
         spaces: &[(String, tessera_store::RowSpace)],
         layouts: &[(String, u32, tessera_types::layer::ServingLayout)],
         pending: &PendingRetirement,
+        index: &mut tessera_store::derived::DerivedIndex,
     ) -> Vec<tessera_store::manifest::TileIndexExtent> {
         if spaces.is_empty() {
             return Vec::new();
@@ -15643,6 +15665,7 @@ impl Executor {
             prefix_dir,
             partition,
             n,
+            index,
             projected
                 .into_iter()
                 .filter_map(|(view, layer, level, level_version, bytes)| {
@@ -16144,8 +16167,12 @@ impl Executor {
         if let Some(segment) = &completed.segment {
             manifest.segments.push(segment.descriptor.clone());
             manifest.deltas.push(segment.tier_path.clone());
-            manifest.external_id_runs.push(segment.external_id_run.clone());
-            manifest.locator_extents.push(segment.locator_extent.clone());
+            manifest
+                .external_id_runs
+                .push(segment.external_id_run.clone());
+            manifest
+                .locator_extents
+                .push(segment.locator_extent.clone());
         }
         manifest.files.extend(completed.files);
         if let Some(extent) = completed.dict_extent {

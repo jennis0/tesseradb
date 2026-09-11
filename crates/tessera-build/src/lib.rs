@@ -1706,6 +1706,7 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
     // exists here — the batched build has to wait for its tiler sort, which is the only reason the
     // two call sites sit at different step numbers. See `crate::artifact_pass`.
     let artifact_store = std::mem::take(&mut published_layers.store);
+    let mut derived_index = tessera_store::derived::DerivedIndex::default();
     let artifact_pass = crate::artifact_pass::run(
         &mut published_layers,
         &artifact_store,
@@ -1713,10 +1714,23 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
         PHASH,
         &view.view_id,
         n as u32,
+        &mut derived_index,
+    );
+    // The containment partitions are not per view, so they are filed once for the prefix. The
+    // batched build does the same, and `tests/build_equivalence.rs` holds the two to one bundle.
+    let containment_extents = crate::artifact_pass::containment(
+        &artifact_store,
+        &args.out.join(PREFIX),
+        PHASH,
         &plugin.data_plugin_hash(),
+        &mut derived_index,
     );
     drop(artifact_store);
     crate::artifact_pass::report(&artifact_pass);
+    eprintln!(
+        "  wrote {} containment partition(s)",
+        containment_extents.len()
+    );
     report_hierarchies(&published_layers.hierarchy_shapes);
     published_layers
         .tile_index_extents
@@ -1724,9 +1738,7 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
     published_layers
         .row_column_extents
         .clone_from(&artifact_pass.row_column_extents);
-    published_layers
-        .containment_extents
-        .clone_from(&artifact_pass.containment_extents);
+    published_layers.containment_extents = containment_extents;
     published_layers
         .shape_rows_extents
         .clone_from(&artifact_pass.shape_rows_extents);
@@ -1745,6 +1757,12 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
     other_paths.extend(filter_paths);
     other_paths.extend(published_layers.paths.iter().cloned());
     other_paths.extend(artifact_pass.paths.iter().cloned());
+    other_paths.extend(
+        published_layers
+            .containment_extents
+            .iter()
+            .map(|entry| args.out.join(PREFIX).join(&entry.path)),
+    );
     let mut report = write_manifests(
         args,
         &BundleFiles {
