@@ -1,13 +1,16 @@
 # A column no pass reads at an entity is never permuted
 
 **Date:** 2026-09-04, extended 2026-09-10 from `text` to every string column the record blob alone
-reads (§2's "Which columns take extents").
+reads, and 2026-09-11 to choosing between the two routes per column (§2's "Which columns can take
+extents" and "Which of them take it").
 **Status:** Provisional. Built for the base build; the flush and the fold are unchanged. Byte
 identity against the arena build is measured for `text` at 10⁶ (`medcpt-1m`, 36 files), 10⁷
-(`medcpt-10m-abs`, 38 files) and 10⁸ (`paperseek`, 46 files), and for a blob-resident `keyword` on
-five ladder corpora up to 2.58×10⁷ items
-([`probes/2026-09-10-blob-resident-strings/`](../../probes/2026-09-10-blob-resident-strings/README.md)).
-None differ but `MANIFEST.json`'s `created_at` and the `CURRENT` that carries its digest.
+(`medcpt-10m-abs`, 38 files) and 10⁸ (`paperseek`, 46 files), and for a blob-resident `keyword`
+forced down each route on five ladder corpora up to 2.58×10⁷ items
+([`probes/2026-09-10-blob-resident-strings/`](../../probes/2026-09-10-blob-resident-strings/README.md));
+`crates/tessera-build/tests/extent_route.rs` holds the same property on a corpus carrying all three
+string families at once. None differ but `MANIFEST.json`'s `created_at` and the `CURRENT` that
+carries its digest.
 **Reads against:** [`records-and-search.md`](records-and-search.md) §3 and §4.4 (the record blob's
 format and addressing, the text family), [`compaction.md`](compaction.md) (the fold's record pass),
 [decision 0091](../decisions/0091-build-is-ingest-into-an-empty-database.md).
@@ -72,15 +75,15 @@ and the output is byte-identical to the arena build's.
 
 Working set: one join chunk, plus one uncompressed block per extent at the merge.
 
-### Which columns take extents
+### Which columns can take extents
 
 **The column's readers decide, not its declared type.** An arena answers `entity → value` at
 random, and two passes ask a string column that question: the entity-space value column with the
 dictionary a keyword's ordinals index, and the hot row tail. A column neither reaches is read by
-the record blob alone, and the blob's merge takes an extent as readily as a column. So a
-bundle-wide string column takes extents when it owes no value column and declares no `render`,
-which is `pipeline::takes_extents` and is arithmetic over the compiled schema, settled before the
-first source file is opened.
+the record blob alone, and the blob's merge takes an extent as readily as a column. So the extent
+route is open to a bundle-wide string column when it owes no value column and declares no `render`,
+which is `pipeline::may_take_extents` and is arithmetic over the compiled schema, settled before
+the first source file is opened.
 
 That is every bundle-wide `text` column — one owes a token index over its extents and never a
 value column (`records-and-search.md` §4.4) — and every `keyword` or `utf8` column declared with
@@ -91,6 +94,47 @@ column keeps its arena, the dictionary writer reading it at an entity.
 for a `Schema` assembled programmatically. It is in the test because it is what makes a spilled
 column always a blob-resident one: extents whose values the blob does not hold would be a declared
 column stored nowhere.
+
+### Which of them take it
+
+**A `text` column always; the rest while the arena has the disk for it.** The two routes write the
+same bundle, byte for byte, so the choice is the build's own cost and nothing else's, and the two
+costs run in opposite directions:
+
+| | arena | extents |
+|---|---|---|
+| what it costs the disk | the characters, an 8 B/item offset array and one growth step | the characters as 256 KiB zstd blocks, a row directory and a has-row bitmap |
+| measured, 125,789,091 GBIF occurrences | 5.71 GB for `scientificname` | 1.63 GB |
+| the build's peak disk, same corpus | 12.60 GB | 9.26 GB |
+| the build's wall clock, same corpus | 324.7 s | 356.1 s |
+
+So a column that fits takes the arena, and one that does not spills. `residency::plan_routes`
+chooses it, once, at the plan: it walks the declared columns in order, moves each onto the arena,
+and keeps the move while the entity-order stages' largest phase still models inside half the space
+free on the output filesystem. Two arenas that each fit alone need not fit together, which is why
+a column is charged against what the columns before it already took rather than against an empty
+disk. `ExtentRoute` overrides the choice for a measurement or a test; nothing derives it twice.
+
+**The free space and not the memory budget.** The arena's only reader is the record blob's merge,
+which walks entity space ascending, and the join writes each chunk of the arena in that chunk's
+own entity order — so the merge reads it as a few dozen ascending runs and not at random. Squeezing
+the page cache does not break that: measured at 125,789,091 occurrences uncapped and under cgroup
+caps of 8 and 6 GiB, `record_blob` held at 28.7–28.9 s on the arena route while the extent route's
+stayed at 39.3–44.5 s, and below 6 GiB the build is OOM-killed in a stage no route reaches
+([`probes/2026-09-10-blob-resident-strings/`](../../probes/2026-09-10-blob-resident-strings/README.md)).
+The arena route was faster at every row count and every survivable cap measured, by 1 to 10% of the
+whole build. What it costs is 26 to 31% more peak disk, and space is what the 3,495,729,729-row
+rung ran out of.
+
+⊘ **The route moves with the machine, and the log is what says which one a build took.** Free space
+on a shared filesystem is not a constant, so one corpus can route two ways on one box a day apart.
+The output is byte-identical either way; the wall clock is not, by the 1–10% above. The build
+prints the route, the modelled scratch and the free space it was decided against, so two runs can
+be read against each other after the fact.
+
+⊘ **One column, one value distribution.** Every figure here is GBIF's `scientificname`, a
+repetitive keyword of 757,711 distinct values over 125,789,091 rows. A blob-resident column of
+near-unique values would spill more and save less.
 
 A **group-scoped** column keeps its arena whatever its flags say, and it is the one reader of a
 string column's `EntityColumn` that remains for the `text` family. It has no blob row — the record
@@ -186,9 +230,10 @@ still
 and half is charged rather than a 2.9th because the figure is one corpus's and the pre-flight
 refuses a build rather than warns. Modelled, not measured for this shape.
 
-Which columns the term applies to is `pipeline::takes_extents`, called by the model rather than
-restated in it: a pre-flight that decided the route for itself would charge an arena the build no
-longer fills.
+Which columns the term applies to is the route the build chose, carried into the model rather than
+restated in it: a pre-flight that decided the route for itself would charge an arena the build does
+not fill. The choice reads the model in turn — a column takes the arena while the entity-order
+stages' largest phase fits half the free space — so the two are one arithmetic and not two.
 
 The text index's runs keep their term, still charged at the column they are tokenised from. The
 extents and the base blob stand on the disk together for the length of the merge, so the output's
