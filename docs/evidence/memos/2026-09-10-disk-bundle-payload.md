@@ -220,7 +220,13 @@ under `attrs/record/extents/`.
 values whatever its flags (`records-and-search.md` §3). One self-describing row per entity, rows
 concatenated in ascending entity order.
 
-**Format** (`crates/tessera-filter/src/record.rs:9-27`):
+**Format** as measured. ⊘ **The per-row framing below was replaced on 2026-09-11** by a block
+header stating the row count, the first rank, the first entity and a digest of the directory's row
+offsets, with one varint per row carrying its entity as a gap
+([decision 0141](../../decisions/0141-the-record-blob-states-identity-once-per-block.md)); §2's
+framing figures are what that ruling rests on, and the row shape here is the one they were taken
+over.
+
 
 ```
 row     := entity u32 LE | payload_len u32 LE | payload

@@ -130,9 +130,16 @@ pub struct GenerationStamp {
 // and read the view out of the membership; and a 7 blob read by a reader that ignored the field
 // restores every artifact of a group-scoped level with no view, collapsing two views' keys into
 // one index. The number is what stops it opening.
+// 9: the record blob states identity once per block instead of once per row (decision 0141). A row
+// is now its fields alone: the entity and the payload length that headed it are gone, the block
+// carries its first entity and one varint gap per row after it, and the directory's row offsets
+// are what delimit a row. A reader at 9 would take the first four bytes of an 8 block's first row
+// as a row count and address the rest of the blob against it; an 8 reader handed a 9 block would
+// read the block header as a row and serve its bytes as an entity's fields. The number is what
+// stops either opening.
 // Each bump makes a stale local bundle a loud refusal rather than a silent misread — a fail-closed
 // guard, not compatibility (decision 0048).
-pub const BUNDLE_FORMAT: u32 = 8;
+pub const BUNDLE_FORMAT: u32 = 9;
 pub const API_VERSION: u32 = 1;
 pub const ABI_VERSION: u32 = 1;
 pub const ROW_ABSENT: u32 = 0xFFFF_FFFF;
@@ -156,7 +163,7 @@ mod tests {
     }
     #[test]
     fn constants() {
-        assert_eq!(BUNDLE_FORMAT, 8);
+        assert_eq!(BUNDLE_FORMAT, 9);
         assert_eq!(ROW_ABSENT, 0xFFFF_FFFF);
     }
 }

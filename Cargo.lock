@@ -2695,6 +2695,7 @@ dependencies = [
  "tessera-wire",
  "tokio",
  "toml 0.8.23",
+ "zstd",
 ]
 
 [[package]]

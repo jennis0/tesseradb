@@ -88,3 +88,7 @@ tokio = { version = "1", features = ["full"] }
 # `blocking` for the campaign's ingest arm: a driver that posts one batch and reads its answer
 # before building the next has no use for a runtime, and the async arms beside it are unaffected.
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "blocking"] }
+# `blob_framing_probe` re-compresses each candidate framing at the record blob's own level, so it
+# needs the same libzstd `tessera-filter` reads the blocks with. Comparing a candidate against a
+# differently-invoked compressor would price the compressor rather than the framing.
+zstd = { workspace = true }

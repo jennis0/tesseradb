@@ -120,6 +120,7 @@ from .harness import (
     CLI_BIN,
     REPO_ROOT,
     build_env,
+    bundle_format_matches,
     ensure_cli_built,
     read_recipe,
     write_deployment,
@@ -703,8 +704,8 @@ def build_multiview_bundle(work_dir: Path | None = None) -> Path:
 
 
 def _is_usable_bundle(bundle_root: Path, wanted: dict) -> bool:
-    """The receipt matches, the bundle under it reads, and nothing has been published into it
-    since the build — `catalogue.py`'s three gates, for its reasons."""
+    """The receipt matches, the bundle under it reads at this checkout's format, and nothing has
+    been published into it since the build — `catalogue.py`'s gates, for its reasons."""
     import json  # noqa: PLC0415 — only the reuse test reads these files
 
     if read_recipe(bundle_root) != wanted:
@@ -714,6 +715,8 @@ def _is_usable_bundle(bundle_root: Path, wanted: dict) -> bool:
         prefix_dir = bundle_root / current["prefix"]
         manifest = json.loads((prefix_dir / "MANIFEST.json").read_text())
         if manifest.get("identity") is None:
+            return False
+        if not bundle_format_matches(prefix_dir):
             return False
         for partition in (prefix_dir / "partitions").iterdir():
             if len(list(partition.glob("SEGMENTS-*.json"))) > 1:

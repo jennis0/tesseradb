@@ -97,6 +97,10 @@ pub struct VerifyDeepReport {
     /// External-id run rows confirmed to agree with the locator side in both directions; 0 where
     /// the deployment minted no external ids — the ordinary case, not a degraded one.
     pub external_id_bindings: u64,
+    /// Record-blob rows walked across the base blob and every extent of every partition, each
+    /// one's identity checked against the block that holds it and against the has-row bitmap's
+    /// member at its rank ([`check_record_blobs`]); 0 where no column is blob-resident.
+    pub record_rows: u64,
     /// `(segment, column)` pairs confirmed to hold a group-scoped **render** family's lane
     /// ([`check_scoped_render_lanes`]); 0 where no family declares `render`, which is every
     /// bundle whose attributes are entity-scoped.
@@ -127,6 +131,7 @@ pub fn verify_deep(root: &Path, opts: &VerifyOpts) -> Result<VerifyDeepReport> {
         pairs_rows: 0,
         dict_records: 0,
         external_id_bindings: 0,
+        record_rows: 0,
         scoped_render_lanes: 0,
     };
 
@@ -143,6 +148,13 @@ pub fn verify_deep(root: &Path, opts: &VerifyOpts) -> Result<VerifyDeepReport> {
         )?;
         check_dict_extents(&prefix_dir, &partition.manifest, &mut report)?;
         check_external_ids(&prefix_dir, &bundle.manifest, &partition.manifest, &mut report)?;
+        check_record_blobs(
+            &prefix_dir,
+            phash,
+            &bundle.manifest,
+            &partition.manifest,
+            &mut report,
+        )?;
         check_scoped_render_lanes(&bundle.manifest, phash, partition, &mut report)?;
     }
 
@@ -465,6 +477,90 @@ impl PairsCursor {
             self.idx = 0;
         }
     }
+}
+
+/// The record blob's addressing, walked layer by layer: every block decompressed, every row
+/// framed inside its extent, every row's identity taken from the block that holds it and compared
+/// with the has-row bitmap's member at its rank (`records-and-search.md` §3, §10).
+///
+/// **This is the one structure whose addressing nothing else in the bundle can see.** The other
+/// homes are positional, so there is no offset to be wrong; the blob reaches a row through three
+/// derived indirections, and a fold or coalesce that rewrote them wrongly would produce a bundle
+/// whose files all match their digests and whose drill-down serves a neighbour's record. The read
+/// path refuses that per request; without this pass nothing reports it offline, so a defect would
+/// first be seen by a viewer receiving someone else's record.
+///
+/// The walk is [`tessera_filter::RecordBlob::for_each_row`], which is the reader's own self-check
+/// and not a transcription of it: a verifier with its own idea of the format would agree with a
+/// blob the reader refuses, or refuse one it serves.
+///
+/// **The base blob is walked where the manifest names its files**, not where the directory happens
+/// to exist: a build writes `attrs/record/` only where a column is blob-resident, and probing the
+/// filesystem would read a base deleted from under the manifest as "this bundle has no base".
+/// Extents come from the segments manifest's two lists, the flushes' and the artifact levels',
+/// which hold the same format and take the same reader.
+fn check_record_blobs(
+    prefix_dir: &Path,
+    phash: &str,
+    manifest: &Manifest,
+    partition_manifest: &SegmentsManifest,
+    report: &mut VerifyDeepReport,
+) -> Result<()> {
+    let base_rel = format!(
+        "partitions/{phash}/attrs/record/{}",
+        tessera_filter::RECORD_BLOCKS_FILE
+    );
+    let mut layers: Vec<(String, PathBuf, PathBuf, PathBuf)> = Vec::new();
+    if manifest.files.contains_key(&base_rel) {
+        let dir = prefix_dir
+            .join("partitions")
+            .join(phash)
+            .join("attrs")
+            .join("record");
+        layers.push((
+            format!("partitions/{phash}/attrs/record"),
+            dir.join(tessera_filter::RECORD_BLOCKS_FILE),
+            dir.join(tessera_filter::RECORD_HASROW_FILE),
+            dir.join(tessera_filter::RECORD_DIRECTORY_FILE),
+        ));
+    }
+    for extent in partition_manifest
+        .record_extents
+        .iter()
+        .chain(partition_manifest.artifact_record_extents.iter())
+    {
+        layers.push((
+            extent.blocks.clone(),
+            join_rel(prefix_dir, &extent.blocks)?,
+            join_rel(prefix_dir, &extent.hasrow)?,
+            join_rel(prefix_dir, &extent.directory)?,
+        ));
+    }
+
+    for (name, blocks, hasrow, directory) in layers {
+        let blob = tessera_filter::RecordBlob::open(
+            &blocks,
+            &hasrow,
+            &directory,
+            tessera_filter::Access::Read,
+        )
+        .map_err(|e| BuildError::Invalid(format!("{name}: {e}")))?;
+        let mut rows = 0u64;
+        blob.for_each_row(&mut |_, _| {
+            rows += 1;
+            Ok(())
+        })
+        .map_err(|e| BuildError::Invalid(format!("{name}: {e}")))?;
+        if rows != blob.rows() {
+            return Err(BuildError::Invalid(format!(
+                "{name}: the walk returned {rows} rows where the has-row bitmap holds {} — the \
+                 blocks and the bitmap do not address the same rows",
+                blob.rows()
+            )));
+        }
+        report.record_rows += rows;
+    }
+    Ok(())
 }
 
 /// Dictionary extents positional and never repeating a descriptor (decision 0042): each extent's

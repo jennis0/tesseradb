@@ -273,7 +273,9 @@ Schema: `kingdom` category render, `specieskey` **keyword index**, `year` u16 in
   per distinct key (`dict.bin`, format at `crates/tessera-filter/src/dict.rs:36`), and a Roaring
   presence bitmap where presence is partial — omitted entirely where it is universal
   (`Presence::written`, `pipeline.rs:3418`). **4 B/present value + the dictionary.**
-- **Blob-resident string.** No `attrs/<column>/` at all. In the blob: 8 B row header + 2 B tag +
+- **Blob-resident string.** No `attrs/<column>/` at all. ⊘ The row framing below was replaced on
+  2026-09-11 ([decision 0141](../../decisions/0141-the-record-blob-states-identity-once-per-block.md));
+  the figure is what the ruling was taken against. In the blob: 8 B row header + 2 B tag +
   1 B kind + 4 B length + characters, all zstd-compressed (`crates/tessera-filter/src/record.rs:200`,
   `:209`); plus **4 B per has-row entity, uncompressed**, in `directory.arrow` — an Arrow IPC file
   written with no compression (`crates/tessera-filter-write/src/record.rs:231`). The 15 B of

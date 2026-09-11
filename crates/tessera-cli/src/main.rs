@@ -1894,12 +1894,14 @@ fn main() -> ExitCode {
                         print_shallow(&report.shallow);
                         println!(
                             "deep: {} term(s), {} delta tier(s), {} pairs row(s), {} dict \
-                             record(s), {} external-id binding(s), {} scoped render lane(s)",
+                             record(s), {} external-id binding(s), {} record blob row(s), {} \
+                             scoped render lane(s)",
                             report.terms,
                             report.delta_tiers,
                             report.pairs_rows,
                             report.dict_records,
                             report.external_id_bindings,
+                            report.record_rows,
                             report.scoped_render_lanes
                         );
                         ExitCode::SUCCESS

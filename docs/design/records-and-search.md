@@ -214,6 +214,19 @@ whole carries the one has-row bitmap; the two statements are about different thi
 One block read returns an entity's whole residual record; drill-down assembles the rest from the
 other two homes by array index.
 
+**A block states whose rows it holds** *(2026-09-11, owner ruling;
+[decision 0141](../decisions/0141-the-record-blob-states-identity-once-per-block.md))*. Its header
+carries the row count, the first rank, the first entity and a 64-bit digest over the directory's
+row offsets for the block, then one LEB128 varint per row after the first holding that row's entity
+as a distance from its predecessor, less the one that strict ascent already gives. A row is its
+fields and nothing else. The entity id and payload length that used to head every row are gone:
+they were **42.6% of `blocks.bin` on `gbif-64p` and 54.7% on `treeoflife-1m`** compressed, where a
+page-oriented store spends a fraction of a percent. Rebuilding both corpora under the block form
+takes **38.1% off `gbif-64p`'s `blocks.bin` and 41.5% off `treeoflife-1m`'s**, and 9.6% off a prose
+corpus whose rows are four times longer (measured, decision 0141). The identity is checked as often
+as it was, once per row read; it is *stored* once per block, which is where every other storage
+engine puts it.
+
 **The drill-down carries the item's satisfied labels beside its record** *(2026-08-31,
 [decision 0114](../decisions/0114-the-drill-down-serves-the-satisfied-labels-only.md),
 `architecture.md` §7.4, `contracts.md` §3.2)*. `labels` is the intersection of the item's own term
@@ -228,11 +241,26 @@ with no list costs nothing) — read after the visibility verdict like every oth
 homes are positional, so there is no offset to get wrong; the blob's indirection is new, and a
 build or fold defect the digest cannot catch — digests cover bytes, not addressing consistency —
 would otherwise serve a *neighbour's* record for a visible entity, from blocks that also hold
-entities the principal cannot see. So: every offset and row length is bounds-checked against its
-block; each row carries its entity id as a discriminant, checked at read and **never serialised
-to any client** (I10 as corrected by 0065 — the blob is an index internal, not a gather artefact);
-a mismatch refuses the request rather than answering. §10's catalogue gains the block-boundary
-cases.
+entities the principal cannot see. Reaching a row is three derived steps, and each is checked
+against something a different file states:
+
+| the step | what could be wrong | what refuses |
+|---|---|---|
+| `hasrow.rank(entity)` | the bitmap names a different entity at a rank | the block's first entity against the bitmap's member at that rank, and every row's own entity against the entity the rank resolved to |
+| `block_of(rank)` | a corrupt compressed offset, or an off-by-one | the block's first rank against the directory's, and the rank's distance from it against the row count |
+| `row_offsets[…]` | the directory disagrees with the bytes it addresses | the block's digest over the directory's whole row-offset slice for it, and the rows section's length |
+
+Every offset and length is bounds-checked against its block, a row's fields must consume its extent
+exactly, and a mismatch refuses the request rather than answering. **Entity ids in a block are
+never serialised to any client** (I10 as corrected by 0065 — the blob is an index internal, not a
+gather artefact). §10's catalogue gains the block-boundary cases.
+
+What is **not** caught is corruption inside a row's bytes that still frames as a whole field
+sequence filling the row's extent: the self-description refuses an unknown kind, a length past the
+extent or a walk that ends short of it, and past that the file digest is the guard. `tessera verify
+--deep` walks every block of every layer offline, so a fold or coalesce that corrupted the
+addressing is reported by a verifier rather than first seen by a viewer receiving another
+principal's record.
 
 Three honesty notes travel with the format. The mixed row's ratio was *assumed* to match the
 per-column 2.44× and is now **measured better than it**: 3.00× against a 2.54× title control
@@ -257,7 +285,7 @@ fixture's own generation functions, so a build that wrote wrong bytes and then s
 by them *disagrees* with the oracle instead of being agreed with — strictly stronger than reading
 the artefact, and this design inherits that construction rather than the weaker one an earlier
 draft claimed. The one narrow artefact-level check the blob adds is its own **addressing
-self-consistency** — rank, offsets, discriminants — which the fixture cannot see and B6's
+self-consistency** — rank, offsets, identities — which the fixture cannot see and B6's
 refusals depend on. Within the system, the artefact-of-record rule stands as stated: derived
 structures are rebuilt from the record, never trusted beside it.
 
@@ -1092,7 +1120,7 @@ The oracle keeps the fixture-input relation (§3, review B7): expected values an
 derive from the fixture's own generation functions, with text passed through the linked analyser
 by invoking the `tessera tokenise` verb. The blob is checked through the served surface, plus one
 narrow artefact-level check the fixture cannot see — the addressing self-consistency B6's refusals
-depend on: rank, offsets, block bounds, discriminants. The analyser is pinned by golden
+depend on: rank, offsets, block bounds, identities. The analyser is pinned by golden
 known-answer vectors per script family, dictionary-segmented scripts included. Where scoring
 lands, the oracle recomputes the mask-local statistics independently — DF as
 `|posting ∩ candidate|` from its own relation — and asserts the served cap selection is the

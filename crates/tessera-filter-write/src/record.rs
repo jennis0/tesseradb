@@ -55,7 +55,9 @@ use arrow::buffer::{OffsetBuffer, ScalarBuffer};
 use arrow::datatypes::{DataType, Field, Schema};
 use croaring::{Bitmap, Portable};
 
-use tessera_filter::{encode_row, RecordBlob, RecordField};
+use tessera_filter::{
+    encode_block_header, encode_row, extent_digest, RecordBlob, RecordField,
+};
 
 /// zstd's default level — the operating point the string-storage probe measured its block ratios
 /// at. A writer's choice, not a format fact: the reader decompresses whatever level wrote the
@@ -77,6 +79,9 @@ pub struct RecordBlobWriter {
     buf: Vec<u8>,
     /// The current block's within-block row offsets, moved into `row_offsets` at seal.
     current_offsets: Vec<u32>,
+    /// The current block's entities, in the order their rows were appended. The block header
+    /// states them as gaps at seal, which is what makes identity the block's own statement.
+    current_entities: Vec<u32>,
     /// The rank of the current block's first row.
     block_first_rank: u32,
     /// Sealed blocks: `(compressed_offset, compressed_len, uncompressed_len, first_rank)`.
@@ -110,6 +115,7 @@ impl RecordBlobWriter {
             written: 0,
             buf: Vec::new(),
             current_offsets: Vec::new(),
+            current_entities: Vec::new(),
             block_first_rank: 0,
             directory: Vec::new(),
             row_offsets: Vec::new(),
@@ -151,6 +157,7 @@ impl RecordBlobWriter {
             ))
         })?;
         self.current_offsets.push(offset);
+        self.current_entities.push(entity);
         self.hasrow.add(entity);
         self.last_entity = Some(entity);
         self.rank = self.rank.checked_add(1).ok_or_else(|| {
@@ -160,13 +167,30 @@ impl RecordBlobWriter {
     }
 
     /// Compress and stream the open block, and record its directory row.
+    ///
+    /// The header goes on the front here rather than at [`Self::push_row`] because it cannot be
+    /// written until the block is closed: it states the row count, and it carries the digest of
+    /// the row offsets the directory is about to be given. That digest is the only place the two
+    /// files meet, so the reader can tell a directory that disagrees with these bytes from one
+    /// that addresses them (`tessera_filter::extent_digest`).
     fn seal_block(&mut self) -> io::Result<()> {
         if self.buf.is_empty() {
             return Ok(());
         }
-        let uncompressed = u32::try_from(self.buf.len())
+        let rows_len = u32::try_from(self.buf.len())
             .map_err(|_| invalid("a block exceeds u32::MAX uncompressed bytes"))?;
-        let compressed = zstd::bulk::compress(&self.buf, ZSTD_LEVEL)?;
+        let digest = extent_digest(&self.current_offsets, rows_len);
+        let mut block = Vec::with_capacity(self.buf.len() + 32 + self.current_entities.len());
+        encode_block_header(
+            self.block_first_rank,
+            &self.current_entities,
+            digest,
+            &mut block,
+        )?;
+        block.extend_from_slice(&self.buf);
+        let uncompressed = u32::try_from(block.len())
+            .map_err(|_| invalid("a block exceeds u32::MAX uncompressed bytes"))?;
+        let compressed = zstd::bulk::compress(&block, ZSTD_LEVEL)?;
         self.blocks.write_all(&compressed)?;
         self.directory.push((
             self.written,
@@ -177,6 +201,7 @@ impl RecordBlobWriter {
         self.written += compressed.len() as u64;
         self.row_offsets.append(&mut self.current_offsets);
         self.list_offsets.push(self.row_offsets.len() as i64);
+        self.current_entities.clear();
         self.block_first_rank = self.rank;
         self.buf.clear();
         Ok(())
