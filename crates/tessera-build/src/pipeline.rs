@@ -5784,17 +5784,22 @@ impl IdPresence {
     }
 
     /// The lowest and highest id present, or `None` where none is.
+    ///
+    /// Each is `base` plus the offset of a **set** bit, which is inside the span by construction,
+    /// so neither sum can pass the end of the type. The offset is formed first for that reason: a
+    /// span ending at `u64::MAX` has padding bits in its last word, and `base + word * 64 + 63`
+    /// would name one of them before the subtraction brought it back.
     fn extrema(&self) -> Option<(u64, u64)> {
         let low = self
             .words
             .iter()
             .position(|w| *w != 0)
-            .map(|w| self.base + w as u64 * 64 + self.words[w].trailing_zeros() as u64)?;
+            .map(|w| self.base + (w as u64 * 64 + self.words[w].trailing_zeros() as u64))?;
         let high = self
             .words
             .iter()
             .rposition(|w| *w != 0)
-            .map(|w| self.base + w as u64 * 64 + 63 - self.words[w].leading_zeros() as u64)?;
+            .map(|w| self.base + (w as u64 * 64 + 63 - self.words[w].leading_zeros() as u64))?;
         Some((low, high))
     }
 
@@ -5973,7 +5978,10 @@ fn source_ids_of_presence(present: &IdPresence, tmp: &Path) -> Result<SourceIds>
         slots[written] = id;
         written += 1;
     }
-    debug_assert_eq!(written as u64, n, "the walk writes one id per set bit");
+    // An `assert` rather than a `debug_assert`: a short walk would leave trailing zeros in the
+    // array, which resolve as ordinals and move every entity id the build assigns (I9). It is one
+    // comparison after a walk over the whole bitmap.
+    assert_eq!(written as u64, n, "the walk writes one id per set bit");
     Ok(SourceIds::Sparse {
         ids,
         len: n as usize,
@@ -7698,6 +7706,21 @@ mod tests {
         bits.union_with(&other);
         assert_eq!(bits.count(), 5);
         assert_eq!(bits.ids().collect::<Vec<_>>(), vec![100, 101, 163, 164, 299]);
+    }
+
+    /// **A span ending at `u64::MAX` has padding bits in its last word**, and naming one of them
+    /// on the way to an answer would pass the end of the type. Every offset here is a set bit's,
+    /// which is inside the span.
+    #[test]
+    fn the_presence_bitmap_spans_the_top_of_the_id_space() {
+        let base = u64::MAX - 70;
+        let mut bits = IdPresence::zeroed(base, 71);
+        assert_eq!(bits.set(base), Some(false));
+        assert_eq!(bits.set(base + 70), Some(false));
+        assert_eq!(bits.set(u64::MAX), Some(true), "base + 70 is u64::MAX");
+        assert_eq!(bits.extrema(), Some((base, u64::MAX)));
+        assert_eq!(bits.count(), 2);
+        assert_eq!(bits.ids().collect::<Vec<_>>(), vec![base, u64::MAX]);
     }
 
     /// A range is exactly `extrema` spanning `count`, which is what pass one tests before it
