@@ -271,6 +271,65 @@ impl OpenExtents {
         }
         Ok(())
     }
+
+    /// Every live `(entity, value)` across one column's extents, ascending in the entity.
+    ///
+    /// The extents each ascend and their live sets are disjoint, so the lowest head is the next
+    /// row and no two streams ever offer the same entity. That is the stream the keyword
+    /// dictionary pass reads in place of an entity-indexed arena: it wants the column once, in
+    /// entity order, and this delivers it without the offset array that ordering used to cost
+    /// (`build-column-extents.md`).
+    pub(crate) fn for_each_live_record(
+        &self,
+        visit: &mut dyn FnMut(u32, &str) -> Result<()>,
+    ) -> Result<()> {
+        let mut cursors: Vec<tessera_filter::RecordRowCursor<'_>> =
+            self.blobs.iter().map(RecordBlob::rows_cursor).collect();
+        let mut heads: Vec<Option<(u32, Vec<RecordField>)>> = Vec::with_capacity(cursors.len());
+        let mut heap: std::collections::BinaryHeap<std::cmp::Reverse<(u32, usize)>> =
+            std::collections::BinaryHeap::with_capacity(cursors.len());
+        for (i, cursor) in cursors.iter_mut().enumerate() {
+            let head = next_live(cursor, &self.live[i])?;
+            if let Some((entity, _)) = &head {
+                heap.push(std::cmp::Reverse((*entity, i)));
+            }
+            heads.push(head);
+        }
+        while let Some(std::cmp::Reverse((entity, source))) = heap.pop() {
+            let taken = heads[source]
+                .take()
+                .expect("a stream in the heap has a head");
+            visit(entity, field_value(&taken.1, self.column)?)?;
+            let next = next_live(&mut cursors[source], &self.live[source])?;
+            if let Some((next_entity, _)) = &next {
+                if *next_entity <= entity {
+                    return Err(BuildError::Invalid(format!(
+                        "an extent yielded entity {next_entity} at or below its predecessor \
+                         {entity}; an extent is written in the chunk's entity order"
+                    )));
+                }
+                heap.push(std::cmp::Reverse((*next_entity, source)));
+            }
+            heads[source] = next;
+        }
+        Ok(())
+    }
+}
+
+/// The next row of one extent that its live set holds — a row outside it is a value a later chunk
+/// overwrote, skipped here for the reason [`OpenExtents::for_each_record_in`] skips it.
+fn next_live(
+    cursor: &mut tessera_filter::RecordRowCursor<'_>,
+    live: &Bitmap,
+) -> Result<Option<(u32, Vec<RecordField>)>> {
+    loop {
+        let Some((entity, fields)) = cursor.next_row().map_err(record_error)? else {
+            return Ok(None);
+        };
+        if live.contains(entity) {
+            return Ok(Some((entity, fields)));
+        }
+    }
 }
 
 /// The one field an extent's row carries, as a string.

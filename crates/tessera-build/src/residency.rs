@@ -2133,24 +2133,25 @@ mod tests {
     /// **`text` spills however much disk there is** (`build-column-extents.md` §2). Its arena is
     /// filled by a second decode of the source in entity order, and that cost is the source
     /// permutation rather than the arena's size, so no amount of space buys it back. An indexed
-    /// `keyword` is the other unconditional case and goes the other way: the dictionary writer
-    /// reads it at an entity, so it keeps its arena however little space is left.
+    /// `keyword` beside it has two routes like every other bundle-wide string column, and space
+    /// buys it the arena.
     #[test]
-    fn the_two_unconditional_families_ignore_the_free_space() {
+    fn text_ignores_the_free_space_and_an_indexed_keyword_does_not() {
         let n = 1_000_000;
         let payload = 400 * n;
         let schema = route_schema(&[(ScalarType::Text, true), (ScalarType::Keyword, true)]);
         for free in [1 << 20, 1 << 30, 1 << 40] {
             let columns = vec![
                 spilled(ScalarType::Text, payload),
-                column(ScalarType::Keyword, payload),
+                spilled(ScalarType::Keyword, payload),
             ];
             let (routes, _) =
                 choose_routes(&schema, n, IdShape::dense(n), columns, 0, 0, Some(free));
             assert!(routes.takes_extents(0), "text spills with {free} bytes free");
-            assert!(
-                !routes.takes_extents(1),
-                "an indexed keyword keeps its arena with {free} bytes free"
+            assert_eq!(
+                routes.takes_extents(1),
+                free < 1 << 40,
+                "an indexed keyword's route with {free} bytes free"
             );
         }
     }

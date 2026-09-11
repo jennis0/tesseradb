@@ -1,8 +1,8 @@
 //! **The route a string column's characters take is invisible in the bundle** — which is what lets
 //! the build choose it from the free space (`build-column-extents.md` §2).
 //!
-//! A `keyword` or `utf8` column the record blob alone reads has two homes: an entity-ordered arena
-//! under `.build-tmp/`, or one record-blob extent per join chunk. Which it takes is
+//! A bundle-wide `keyword` or `utf8` column has two homes: an entity-ordered arena under
+//! `.build-tmp/`, or one record-blob extent per join chunk. Which it takes is
 //! `residency::plan_routes`, and the input is the modelled scratch against the space free on the
 //! output filesystem — so the same corpus on two machines, or on one machine either side of a
 //! large build, can take either. Everything downstream depends on that being unobservable: the
@@ -42,8 +42,9 @@ fn note_of(e: u64) -> Option<String> {
     (!e.is_multiple_of(7)).then(|| format!("note-{}-{}", e % 13, "x".repeat((e % 11) as usize)))
 }
 
-/// The indexed keyword: its dictionary reads it at an entity, so it keeps its arena down both
-/// routes and this column is what pins that.
+/// The indexed keyword. Its dictionary reads it once in entity order, which an extent merge
+/// answers as readily as an arena, so it has two routes like `note` and this column is what pins
+/// that its dictionary, its ordinals and its presence bitmap come out the same down both.
 fn code_of(e: u64) -> Option<String> {
     (!e.is_multiple_of(5)).then(|| format!("code-{}", e % 17))
 }
@@ -293,10 +294,11 @@ fn the_route_a_string_column_takes_is_not_in_the_bundle() {
     let (spilling, spilling_report) = built(dir.path(), "spilling", ExtentRoute::Extents);
     let (arena, arena_report) = built(dir.path(), "arena", ExtentRoute::Arena);
 
-    // `prose` is the `text` column and spills either way; `note` is the one with two routes.
+    // `prose` is the `text` column and spills either way; `note` and `code` are the two with a
+    // choice — the blob-resident keyword and the indexed one.
     assert_eq!(
         spilling_report.spilled_columns,
-        vec!["note".to_string(), "prose".to_string()],
+        vec!["note".to_string(), "code".to_string(), "prose".to_string()],
         "the extent route spills every column it is available to"
     );
     assert_eq!(
