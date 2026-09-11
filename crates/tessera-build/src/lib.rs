@@ -1462,9 +1462,18 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
     // oracle must reach the same answer over the same inputs. A column one build spilled and the
     // other placed at an entity would put its values in the blob under two tags, which is a byte
     // difference for a reason that is not the entity assignment this build exists to check.
+    //
+    // The id shape the routing reads is the same one the pipeline derives: this build takes one
+    // view and refuses a repeated source id, so the union it would have read has one slot a point
+    // and its last id is the largest.
+    let ids = residency::IdShape {
+        slots: n,
+        max_id: points.last().map_or(0, |p| p.source_id),
+    };
     let routes = residency::routes_for(
         args,
         n,
+        ids,
         &residency::payloads_per_item(args),
         pipeline::available_disk(&args.out),
         ExtentRoute::Derived,

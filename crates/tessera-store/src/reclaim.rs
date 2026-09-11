@@ -21,6 +21,12 @@
 //! executor. This module only makes the two mechanical steps safe to call: a link that cannot
 //! escape either prefix and never silently overwrites, and a delete that refuses whenever it
 //! cannot prove the target is not the live prefix.
+//!
+//! **Two deletes, two proofs, one removal.** [`reclaim_prefix`] proves a prefix is not live by
+//! reading `CURRENT` and finding another prefix named there. [`reclaim_unpublished_prefix`] proves
+//! it by finding no `CURRENT` at all, which is the state a bundle directory is in while a build is
+//! still writing it and stays in if that build fails. Each refuses on anything short of its own
+//! proof, and both go through the same removal.
 
 use std::path::Path;
 
@@ -143,24 +149,7 @@ pub fn hard_link_forward(from_prefix: &Path, to_prefix: &Path, rels: &[String]) 
 /// - [`StoreError::Io`] / [`StoreError::Json`] if `CURRENT` cannot be read or parsed.
 /// - [`StoreError::Io`] if the delete itself fails.
 pub fn reclaim_prefix(prefix_dir: &Path) -> Result<()> {
-    let prefix_name = prefix_dir
-        .file_name()
-        .and_then(|n| n.to_str())
-        .ok_or_else(|| StoreError::MalformedBundle {
-            detail: format!(
-                "reclaim_prefix: {} has no prefix directory name to compare against CURRENT",
-                prefix_dir.display()
-            ),
-        })?;
-    let bundle_root = prefix_dir
-        .parent()
-        .ok_or_else(|| StoreError::MalformedBundle {
-            detail: format!(
-                "reclaim_prefix: {} has no parent directory to read CURRENT from",
-                prefix_dir.display()
-            ),
-        })?;
-
+    let (prefix_name, bundle_root) = prefix_parts(prefix_dir, "reclaim_prefix")?;
     let current_path = bundle_root.join("CURRENT");
     let current_bytes = read_to_vec(&current_path)?;
     let current: CurrentPointer =
@@ -176,6 +165,77 @@ pub fn reclaim_prefix(prefix_dir: &Path) -> Result<()> {
         });
     }
 
+    remove_tree(prefix_dir)
+}
+
+/// Delete a prefix tree **no `CURRENT` has ever named** — the partial bundle a failed build leaves.
+///
+/// A batch build writes its prefix under `<out>/` and writes `CURRENT` last, and it refuses to
+/// start at all where `<out>/CURRENT` already exists (`tessera_build`'s argument validation), so
+/// after a build has failed there is no `CURRENT` in that root. No manifest names the prefix, no
+/// reader can resolve it, and nothing has been published from it. Deleting it is what stops a
+/// retry starting with less free space than the first attempt had.
+///
+/// **The exception is a second build into the same `--out`.** Nothing locks a bundle root, so two
+/// builds can be writing `<out>/v00000` at once, and the one that fails first deletes the other's
+/// tree from under it. What that costs is the running build, which fails on a file that went away.
+/// It is not a new hazard — two builds into one `--out` were already writing over each other's
+/// files — and it is not a published byte: `CURRENT` is still absent, so neither build has
+/// published anything a reader can reach.
+///
+/// # The check that makes this safe to call
+///
+/// The absence of `CURRENT` is the whole proof, so it is tested rather than assumed: this derives
+/// the bundle root from `prefix_dir`'s parent and refuses if a `CURRENT` is there at all —
+/// readable or not, naming this prefix or another. That is the opposite reading of `CURRENT` from
+/// [`reclaim_prefix`]'s and it is why the two are separate functions: one deletes what a live
+/// pointer says is superseded, the other deletes what no pointer has ever reached. Neither will
+/// delete a prefix on the other's evidence.
+///
+/// # Errors
+///
+/// - [`StoreError::ReclaimRefusedCurrentExists`] if the bundle root has a `CURRENT` — a typed
+///   refusal, because this is a delete and a caller must be able to tell that nothing was deleted.
+/// - [`StoreError::MalformedBundle`] if `prefix_dir` has no file name or no parent.
+/// - [`StoreError::Io`] if the delete itself fails.
+pub fn reclaim_unpublished_prefix(prefix_dir: &Path) -> Result<()> {
+    let (prefix_name, bundle_root) = prefix_parts(prefix_dir, "reclaim_unpublished_prefix")?;
+    let current_path = bundle_root.join("CURRENT");
+    // `try_exists` and not `exists`: a `CURRENT` this process cannot stat is a `CURRENT` this
+    // function cannot prove is absent, and the refusal is the same either way.
+    if current_path.try_exists().unwrap_or(true) {
+        return Err(StoreError::ReclaimRefusedCurrentExists {
+            prefix: prefix_name.to_string(),
+            current: current_path,
+        });
+    }
+    remove_tree(prefix_dir)
+}
+
+/// A prefix directory's own name and the bundle root holding it.
+fn prefix_parts<'a>(prefix_dir: &'a Path, what: &str) -> Result<(&'a str, &'a Path)> {
+    let prefix_name = prefix_dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| StoreError::MalformedBundle {
+            detail: format!(
+                "{what}: {} has no prefix directory name to compare against CURRENT",
+                prefix_dir.display()
+            ),
+        })?;
+    let bundle_root = prefix_dir
+        .parent()
+        .ok_or_else(|| StoreError::MalformedBundle {
+            detail: format!(
+                "{what}: {} has no parent directory to read CURRENT from",
+                prefix_dir.display()
+            ),
+        })?;
+    Ok((prefix_name, bundle_root))
+}
+
+/// The one removal both reclaims run, once each has made its own proof.
+fn remove_tree(prefix_dir: &Path) -> Result<()> {
     std::fs::remove_dir_all(prefix_dir).map_err(|source| StoreError::Io {
         path: prefix_dir.to_path_buf(),
         source,

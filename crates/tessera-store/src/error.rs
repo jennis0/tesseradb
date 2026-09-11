@@ -107,6 +107,13 @@ pub enum StoreError {
     /// match on free text to tell "refused, and nothing was deleted" from any other malformed-input
     /// error is one string edit away from not noticing when the refusal stops firing.
     ReclaimRefused { prefix: String, current: String },
+    /// [`crate::reclaim::reclaim_unpublished_prefix`] was asked to delete a prefix in a bundle
+    /// root that has a `CURRENT`.
+    ///
+    /// That reclaim's whole proof is that no `CURRENT` exists, so a `CURRENT` that does — whether
+    /// or not it names this prefix, whether or not it can be read — is the end of it. A caller
+    /// wanting the other proof calls [`crate::reclaim::reclaim_prefix`], which reads it.
+    ReclaimRefusedCurrentExists { prefix: String, current: PathBuf },
     /// A manifest-derived path component (partition `phash`, view/segment id, or a `files`
     /// map key) was rejected before ever being joined onto a filesystem path — empty, `.`,
     /// `..`, absolute, or containing a path separator where a single opaque component was
@@ -234,6 +241,13 @@ impl fmt::Display for StoreError {
                 f,
                 "refusing to reclaim prefix '{prefix}': CURRENT still names '{current}' as live, \
                  and reclamation is the one operation here that deletes bundle data"
+            ),
+            StoreError::ReclaimRefusedCurrentExists { prefix, current } => write!(
+                f,
+                "refusing to reclaim unpublished prefix '{prefix}': {} exists, so this prefix \
+                 may be one a reader can resolve, and reclamation is the one operation here that \
+                 deletes bundle data",
+                current.display()
             ),
             StoreError::NonCanonicalManifestName { partition, name } => write!(
                 f,
