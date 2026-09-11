@@ -28,9 +28,12 @@
 //! A **fixed-width** column is a [`MappedArray`] of its own element type, and its presence bits are
 //! another one. That is the whole of it.
 //!
-//! A **string** column is an entity-indexed [`MappedArray<u64>`] of offsets into a
-//! [`MappedArena`], each offset naming a record: the entity, a `u32` length, then the bytes. A
-//! string column is stored that way when a pass reads it at an entity, and not otherwise.
+//! A **string** column is an entity-indexed [`MappedArray<u64>`] of words into a
+//! [`MappedArena`], each word naming a record. What the word holds and how the record is framed
+//! is [`RecordShape`]: a `text` column's arena is also read in its own order, so its records carry
+//! an entity and a length; every other string column is reached at an entity alone, so its
+//! records are the characters and the word carries both numbers. A string column is stored this
+//! way when a pass reads it at an entity, and not otherwise.
 //!
 //! # A column no pass reads at an entity has no storage here
 //!
@@ -39,8 +42,10 @@
 //! written to a mapping on a 47 GB box and read back at random. The arena buys random access by
 //! entity, so a column nothing reaches that way pays for an answer no pass asks for. Its values
 //! are spilled as record-blob extents while the join decodes them ([`crate::extents`],
-//! `build-column-extents.md`), and its slot here is [`EntityColumn::spilled`]: the presence bits
-//! and the length, and no arena.
+//! `build-column-extents.md`), and its slot here is [`EntityColumn::spilled`]: the length, and no
+//! files at all. Not even presence bits — the join has no lane that would mark one
+//! ([`ColumnStorage`]), so a bitmap beside such a column is `n/8` bytes reserved, never written,
+//! and read only to answer absence.
 //!
 //! **The readers decide which columns those are**, and the rule is stated once, in
 //! [`crate::pipeline::takes_extents`]: a string column with no value column and no `render` slot
@@ -79,12 +84,15 @@
 //! and the entity in the header is the four bytes an entity per record that buys it. A
 //! group-scoped `text` column is what still reads it.
 //!
-//! **A `keyword` or `utf8` column is never walked, so its records carry no entity.** Every reader
-//! of one reaches it at an entity — the keyword dictionary, the filter postings, the record blob —
-//! and the walk refuses a column of that shape rather than decoding an entity out of a length. The
-//! declared type decides which header a column writes ([`record_header`]), so the two cannot drift
-//! apart per call site: 4 B/item, 28.0 GB across the GBIF rung's two keyword columns (modelled,
-//! items × 4 B; measured at 0.98 GB over 125,789,091 of them).
+//! **A `keyword` or `utf8` column is never walked, so its records carry no header at all.** Every
+//! reader of one reaches it at an entity — the keyword dictionary, the filter postings, the record
+//! blob — through [`StringColumn::get`], which has just read the word in `at` that led it there.
+//! So the length goes in that word beside the offset and the entity is not written down twice; the
+//! walk refuses a column of that shape rather than looking for a header that is not there. The
+//! declared type decides which shape a column writes ([`record_shape`]), so the two cannot drift
+//! apart per call site: 4 B/item of entity and 4 B a value of length, 28.0 GB and 26.9 GB across
+//! the GBIF rung's two keyword columns (modelled, items × 4 B and present values × 4 B; the
+//! entity term measured at 0.98 GB over 125,789,091 of them).
 //!
 //! A record is authoritative only while `at[entity]` still names it: a value written twice for one
 //! entity leaves the first record in the arena with nothing pointing at it, so the walk checks
@@ -179,9 +187,34 @@ impl ColumnScratch {
 #[derive(Debug)]
 pub(crate) struct EntityColumn {
     ty: ScalarType,
-    data: ColumnData,
-    present: MappedArray<u64>,
+    storage: ColumnStorage,
     len: usize,
+}
+
+/// What a column holds: its values in entity order with a presence bit beside each, or nothing.
+///
+/// **The presence bits are in the same variant as the values**, so a column with no values has no
+/// bitmap a writer could mark. That is the shape a column [`crate::pipeline::takes_extents`]
+/// routed needs: the join writes its characters out as record-blob extents and never reaches the
+/// slot here, so a bitmap beside it is `n/8` bytes reserved, never written, and read only to
+/// answer absence at every entity — 437 MB a column at the GBIF rung's 3,495,729,729 items
+/// (modelled, items ÷ 8; measured at 0.125 B/item over 125,789,091 of them). [`Self::Empty`]
+/// answers the same absence and reserves nothing.
+///
+/// One of these exists per declared attribute, so the 224 bytes the held variant is larger by are
+/// twenty allocations in a build. Boxing it to even them up would put a pointer chase in front of
+/// [`EntityColumn::is_present`], which runs once per entity per column.
+#[allow(clippy::large_enum_variant)]
+#[derive(Debug)]
+enum ColumnStorage {
+    /// The values, and one presence bit per entity beside them.
+    ByEntity {
+        data: ColumnData,
+        present: MappedArray<u64>,
+    },
+    /// No values and no presence bits. A spilled column's slot, and what [`EntityColumn::release`]
+    /// leaves behind once a column has met its last reader.
+    Empty,
 }
 
 /// The typed storage behind an [`EntityColumn`].
@@ -204,44 +237,78 @@ enum ColumnData {
 
 /// A string column: where each entity's bytes are, and the arena they are in.
 ///
-/// The offset names a record — an optional `u32` little-endian entity, a `u32` little-endian
-/// length, then that many bytes — one entity-indexed array rather than an offset array and a
-/// length array, because both would be written at the same random entity index and the second
-/// would double the page faults the scatter takes to save four bytes an entity it does not need
-/// to.
+/// **One entity-indexed array rather than an offset array and a length array.** Both would be
+/// written at the same random entity index, so the second would double the page faults the
+/// scatter takes. What the word at that index holds differs by [`RecordShape`]: the record's
+/// offset where the arena is also walked in its own order, and the offset and the length together
+/// where it is not.
 #[derive(Debug)]
 struct StringColumn {
     at: MappedArray<u64>,
     arena: MappedArena,
-    /// [`RECORD_HEADER_WALKED`] or [`RECORD_HEADER_INDEXED`], by the column's declared type.
-    header: usize,
+    /// How a record is framed, and what `at` holds, by the column's declared type.
+    shape: RecordShape,
 }
 
-/// The header of a record in a column read **in arena order**: the entity, then the length.
+/// How a string column frames a record, and what its `at` word holds.
 ///
-/// **The entity is in the record and not only in `at`**, because that is what makes the arena
-/// readable in its own order — see the module docs. Four bytes an entity, against a walk that
-/// otherwise costs a major fault per document on any corpus larger than the box.
+/// **The declared type decides it, not the caller**, so the two cannot drift apart per call site.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RecordShape {
+    /// **Also read in arena order.** The record is the entity, then the length, then the bytes;
+    /// `at` holds its offset.
+    ///
+    /// The entity is in the record and not only in `at`, because that is what makes the arena
+    /// readable in its own order — see the module docs. Four bytes an entity, against a walk that
+    /// otherwise costs a major fault per document on any corpus larger than the box.
+    Walked,
+    /// **Read only through `at`.** The record is the bytes alone; `at` holds the offset and the
+    /// length in one word.
+    ///
+    /// A `keyword` or `utf8` column is reached at an entity and nowhere else —
+    /// [`EntityColumn::str_at`] from the keyword dictionary, the filter postings and the record
+    /// blob — so a header on one of its records carries an entity no consumer reads and a length
+    /// read only by [`StringColumn::get`], which has just read the word that led it there. Both go
+    /// in that word: [`PACKED_LENGTH_BITS`] of length above [`PACKED_OFFSET_BITS`] of offset, for
+    /// an arena of [`PACKED_OFFSET_LIMIT`] bytes holding values of [`PACKED_LENGTH_LIMIT`]. That
+    /// is 4 B an item of entity and 4 B a value of length the arena never holds — 28.0 GB and
+    /// 26.9 GB across the GBIF rung's two `keyword` columns at 3,495,729,729 items (modelled,
+    /// items × 4 B and present values × 4 B). Measured on `gbif-64p`: 199.2 MB of record header
+    /// off 49,801,433 present values at 25,846,007 items, and 160 MiB off both the arenas'
+    /// reserved capacity and the build's peak disk, the arena growing in steps.
+    ///
+    /// [`EntityColumn::for_each_record_in`] is the arena walk and it refuses a column of this
+    /// shape: there is no header for a scan to resynchronise on. The only column built with an
+    /// arena and walked in its own order is a group-scoped `text` one, which has no blob row to be
+    /// read from instead (`views.md` §5).
+    Indexed,
+}
+
+/// A [`RecordShape::Walked`] record's header: the entity `u32`, then the length `u32`.
 const RECORD_HEADER_WALKED: usize = 2 * std::mem::size_of::<u32>();
 
-/// The header of a record in a column read **only through `at`**: the length alone.
-///
-/// A `keyword` or `utf8` column is reached at an entity and nowhere else — [`EntityColumn::str_at`]
-/// from the keyword dictionary, the filter postings and the record blob — so the entity in the
-/// record would be four bytes an item written for a walk no consumer makes. That is 14.0 GB per
-/// such column at the GBIF rung's 3,495,729,729 items (modelled, items × 4 B).
-///
-/// **The type decides it, not the caller.** [`EntityColumn::for_each_record_in`] is the arena walk
-/// and it refuses a column of this shape; the only column built with an arena and walked in its own
-/// order is a group-scoped `text` one, which has no blob row to be read from instead
-/// (`views.md` §5).
-const RECORD_HEADER_INDEXED: usize = std::mem::size_of::<u32>();
+/// The low bits of a [`RecordShape::Indexed`] column's `at` word: where the record starts.
+const PACKED_OFFSET_BITS: u32 = 40;
 
-/// Which header a string column of `ty` carries.
-fn record_header(ty: ScalarType) -> usize {
+/// The high bits of that word: how long the record is.
+const PACKED_LENGTH_BITS: u32 = u64::BITS - PACKED_OFFSET_BITS;
+
+/// The arena an indexed column's offsets can name: 1 TiB. The largest any rung models is
+/// `scientificname`'s at 123 GB, where the ladder's own largest measured arena is 128 GiB of
+/// PaperSeek prose — which is `text` and keeps its header (modelled, 35.2 B/item over
+/// 3,495,729,729 items; see [`crate::spill::ARENA_GROWTH_STEP`] for the per-item figure).
+const PACKED_OFFSET_LIMIT: u64 = 1 << PACKED_OFFSET_BITS;
+
+/// The longest value an indexed column can hold: 16 MiB, where a walked one holds 4 GiB. Both are
+/// refused at [`StringColumn::set`] rather than truncated — a length that wrapped would serve the
+/// neighbouring record's bytes.
+const PACKED_LENGTH_LIMIT: usize = 1 << PACKED_LENGTH_BITS;
+
+/// Which shape a string column of `ty` writes.
+fn record_shape(ty: ScalarType) -> RecordShape {
     match ty {
-        ScalarType::Text => RECORD_HEADER_WALKED,
-        _ => RECORD_HEADER_INDEXED,
+        ScalarType::Text => RecordShape::Walked,
+        _ => RecordShape::Indexed,
     }
 }
 
@@ -268,6 +335,39 @@ fn present_entities_of(words: &[u64]) -> impl Iterator<Item = usize> + '_ {
         residual = *words.get(next_word)?;
         next_word += 1;
     })
+}
+
+/// Whether `entity`'s bit is set.
+fn present_bit(words: &[u64], entity: usize) -> bool {
+    words[entity / 64] >> (entity % 64) & 1 == 1
+}
+
+/// Mark `entity` present.
+///
+/// **A free function over the bitmap rather than a method on the column**, so that it cannot be
+/// called on a column that has no bitmap ([`ColumnStorage`]): a spilled column's values are its
+/// extents, and a bit marked here would say the slot holds one.
+fn mark_present(words: &mut MappedArray<u64>, entity: usize) {
+    words.as_mut_slice()[entity / 64] |= 1u64 << (entity % 64);
+}
+
+/// Mark `entity` absent.
+fn clear_present(words: &mut [u64], entity: usize) {
+    words[entity / 64] &= !(1u64 << (entity % 64));
+}
+
+/// The refusal a write to a column with no storage raises.
+///
+/// Reached where a pass writes to a column [`crate::pipeline::takes_extents`] routed, or to one
+/// already released. Both are build defects rather than corpus errors, and both would otherwise
+/// put a value where no reader looks for it.
+#[cold]
+#[inline(never)]
+fn no_slot(ty: ScalarType, name: &str) -> BuildError {
+    BuildError::Invalid(format!(
+        "attribute column '{name}' ({ty:?}) holds no values in entity order — its characters are \
+         record-blob extents, or its last reader has run"
+    ))
 }
 
 #[cold]
@@ -300,7 +400,7 @@ impl EntityColumn {
                                 n,
                             )?,
                             arena: MappedArena::create(&scratch.dir, &scratch.name("arena"))?,
-                            header: record_header(ty),
+                            shape: record_shape(ty),
                         })
                     }
                 }
@@ -308,31 +408,36 @@ impl EntityColumn {
         }
         Ok(EntityColumn {
             ty,
-            data: fixed_width_columns!(arms),
-            present: MappedArray::<u64>::zeroed(
-                &scratch.dir,
-                &scratch.name("present"),
-                n.div_ceil(64),
-            )?,
+            storage: ColumnStorage::ByEntity {
+                data: fixed_width_columns!(arms),
+                present: MappedArray::<u64>::zeroed(
+                    &scratch.dir,
+                    &scratch.name("present"),
+                    n.div_ceil(64),
+                )?,
+            },
             len: n,
         })
     }
 
-    /// A spilled column's slot: `n` entities, every one absent, and **no arena**.
+    /// A spilled column's slot: `n` entities, every one absent, and **no files at all**.
     ///
     /// A column [`crate::pipeline::takes_extents`] routed is never held in entity order
     /// (`build-column-extents.md`): the join spills it as record-blob extents in its own chunks and
     /// the record blob reads those, a `text` column's token index having read them first. What is
-    /// left here is the length and the presence bits, so the column keeps its place in the
-    /// declaration-indexed vector every later pass indexes by attribute position.
+    /// left here is the length, so the column keeps its place in the declaration-indexed vector
+    /// every later pass indexes by attribute position.
     ///
-    /// Nothing marks a presence bit on one of these, so [`Self::str_at`] and [`Self::value_at`]
-    /// answer absence at every entity and neither reaches the empty offset array.
-    pub(crate) fn spilled(scratch: &ColumnScratch, ty: ScalarType, n: usize) -> Result<Self> {
+    /// **Not even a presence bitmap**, which the join has no lane to mark ([`ColumnStorage`]):
+    /// [`Self::str_at`], [`Self::value_at`] and [`Self::present_entities`] answer absence at every
+    /// entity from the variant.
+    ///
+    /// `scratch` is taken so that the two constructors read alike at their call sites and a column
+    /// that later owes a file does not change its caller's signature.
+    pub(crate) fn spilled(_scratch: &ColumnScratch, ty: ScalarType, n: usize) -> Result<Self> {
         Ok(EntityColumn {
             ty,
-            data: ColumnData::Utf8(StringColumn::empty()),
-            present: MappedArray::<u64>::zeroed(&scratch.dir, &scratch.name("present"), n.div_ceil(64))?,
+            storage: ColumnStorage::Empty,
             len: n,
         })
     }
@@ -365,22 +470,25 @@ impl EntityColumn {
     /// Called where a stage boundary is the last reader — the release after the record blob — and
     /// it unlinks the files as well as dropping the mappings, so the disk returns with the memory.
     pub(crate) fn release(&mut self) {
-        self.data = ColumnData::empty(self.ty);
-        self.present = MappedArray::empty();
+        self.storage = ColumnStorage::Empty;
         self.len = 0;
     }
 
     pub(crate) fn set(&mut self, entity: usize, value: ScalarValue, name: &str) -> Result<()> {
+        let ty = self.ty;
+        let ColumnStorage::ByEntity { data, present } = &mut self.storage else {
+            return Err(no_slot(ty, name));
+        };
         // Absent: the zero stands, and the bit is *cleared* to say so rather than merely left
         // alone. Clearing matters where slots are reused — the staging buffer in
         // `read_attributes_by_entity` writes a fresh chunk over the last one, and a bit left set
         // by a previous row would make this row's absence read as that row's value.
         if matches!(value, ScalarValue::Null) {
-            self.clear_present(entity);
+            clear_present(present.as_mut_slice(), entity);
             return Ok(());
         }
-        self.data.set(entity, value, self.ty, name)?;
-        self.mark_present(entity);
+        data.set(entity, value, ty, name)?;
+        mark_present(present, entity);
         Ok(())
     }
 
@@ -388,28 +496,26 @@ impl EntityColumn {
     /// staging buffer uses, where [`Self::set`] would want a `String` allocated for the moment
     /// between the two columns.
     fn set_str(&mut self, entity: usize, value: &str, name: &str) -> Result<()> {
-        self.data.set_str(entity, value, self.ty, name)?;
-        self.mark_present(entity);
+        let ty = self.ty;
+        let ColumnStorage::ByEntity { data, present } = &mut self.storage else {
+            return Err(no_slot(ty, name));
+        };
+        data.set_str(entity, value, ty, name)?;
+        mark_present(present, entity);
         Ok(())
     }
 
-    fn mark_present(&mut self, entity: usize) {
-        self.present.as_mut_slice()[entity / 64] |= 1u64 << (entity % 64);
-    }
-
-    fn clear_present(&mut self, entity: usize) {
-        self.present.as_mut_slice()[entity / 64] &= !(1u64 << (entity % 64));
-    }
-
     pub(crate) fn is_present(&self, entity: usize) -> bool {
-        self.present.as_slice()[entity / 64] >> (entity % 64) & 1 == 1
+        match &self.storage {
+            ColumnStorage::ByEntity { present, .. } => present_bit(present.as_slice(), entity),
+            ColumnStorage::Empty => false,
+        }
     }
 
     pub(crate) fn value_at(&self, entity: usize) -> ScalarValue {
-        if self.is_present(entity) {
-            self.data.get(entity)
-        } else {
-            ScalarValue::Null
+        match &self.storage {
+            ColumnStorage::ByEntity { data, .. } if self.is_present(entity) => data.get(entity),
+            _ => ScalarValue::Null,
         }
     }
 
@@ -432,16 +538,20 @@ impl EntityColumn {
     /// nothing, against one test per 64 here. The yielded order is ascending, which every caller
     /// relies on: the postings each builds are sorted by construction, not by a later sort.
     pub(crate) fn present_entities(&self) -> impl Iterator<Item = usize> + '_ {
-        present_entities_of(self.present.as_slice())
+        present_entities_of(match &self.storage {
+            ColumnStorage::ByEntity { present, .. } => present.as_slice(),
+            ColumnStorage::Empty => &[],
+        })
     }
 
     /// Borrow a string value, or `None` where the entity has none. For the readers that only scan
     /// the column — the keyword dictionary and the text index — where [`Self::iter`]'s copy would
     /// be a second copy of every string in the corpus.
     pub(crate) fn str_at(&self, entity: usize) -> Option<&str> {
-        self.is_present(entity)
-            .then(|| self.data.str_at(entity))
-            .flatten()
+        match &self.storage {
+            ColumnStorage::ByEntity { data, .. } if self.is_present(entity) => data.str_at(entity),
+            _ => None,
+        }
     }
 
     /// At most `target` contiguous arena byte ranges, together covering every record this column
@@ -452,8 +562,11 @@ impl EntityColumn {
     /// came free from; it divides the arena instead, and pays for that with a sort at the spill
     /// and a merge rather than a concatenation at the fan-in (`pipeline.rs`).
     pub(crate) fn arena_windows(&self, target: usize) -> Vec<(u64, u64)> {
-        match &self.data {
-            ColumnData::Utf8(col) => col.arena.windows(target),
+        match &self.storage {
+            ColumnStorage::ByEntity {
+                data: ColumnData::Utf8(col),
+                ..
+            } => col.arena.windows(target),
             _ => Vec::new(),
         }
     }
@@ -471,13 +584,17 @@ impl EntityColumn {
         hi: u64,
         visit: &mut dyn FnMut(usize, &str) -> Result<()>,
     ) -> Result<()> {
-        let ColumnData::Utf8(col) = &self.data else {
+        let ColumnStorage::ByEntity {
+            data: ColumnData::Utf8(col),
+            ..
+        } = &self.storage
+        else {
             return Ok(());
         };
-        if col.header != RECORD_HEADER_WALKED {
+        if col.shape != RecordShape::Walked {
             return Err(BuildError::Invalid(format!(
-                "a {:?} column is read at an entity, and its records carry a length and no entity \
-                 to walk them by",
+                "a {:?} column is read at an entity, and its records carry no header to walk them \
+                 by",
                 self.ty
             )));
         }
@@ -519,7 +636,11 @@ impl EntityColumn {
     /// Give the arena's pages back to the kernel before a streaming walk over it — see
     /// [`crate::spill::MappedArena::unmap_pages`].
     pub(crate) fn unmap_arena_pages(&self) {
-        if let ColumnData::Utf8(col) = &self.data {
+        if let ColumnStorage::ByEntity {
+            data: ColumnData::Utf8(col),
+            ..
+        } = &self.storage
+        {
             col.arena.unmap_pages();
         }
     }
@@ -536,13 +657,18 @@ impl EntityColumn {
         pos: usize,
         name: &str,
     ) -> Result<()> {
-        if !src.is_present(pos) {
+        // A staging buffer is always held in entity order: the join stages every source column
+        // that way and routes only the destination (`pipeline::JoinLane`).
+        let ColumnStorage::ByEntity { data, present } = &mut src.storage else {
+            return Err(no_slot(src.ty, name));
+        };
+        if !present_bit(present.as_slice(), pos) {
             return Ok(());
         }
-        src.clear_present(pos);
-        match src.data.str_at(pos) {
+        clear_present(present.as_mut_slice(), pos);
+        match data.str_at(pos) {
             Some(text) => self.set_str(entity, text, name),
-            None => self.set(entity, src.data.get(pos), name),
+            None => self.set(entity, data.get(pos), name),
         }
     }
 
@@ -568,15 +694,21 @@ impl EntityColumn {
         scratch: &ColumnScratch,
         name: &str,
     ) -> Result<tessera_store::write::ScalarColumn> {
-        let EntityColumn {
-            ty,
-            data,
-            present,
-            len,
-        } = self;
+        let EntityColumn { ty, storage, len } = self;
         // The presence bits went out as the render presence bitmap beside the column
         // (decision 0064); the tail itself is non-nullable (contracts R4) and carries no validity
         // buffer, so this file has no reader left.
+        //
+        // **A column with no storage is refused rather than written as zeros.** Every caller
+        // builds this lane with [`Self::filled`] and fills it before it gets here, so reaching
+        // this arm means a row tail assembled from a column that carries no values — which on the
+        // wire is a render column of placeholders no reader can tell from real ones.
+        let ColumnStorage::ByEntity { data, present } = storage else {
+            return Err(BuildError::Invalid(format!(
+                "attribute column '{name}' has no values in entity order, so there is nothing to \
+                 permute into a row tail"
+            )));
+        };
         drop(present);
         macro_rules! arms {
             ($(($v:ident, $t:ty)),* $(,)?) => {
@@ -623,29 +755,17 @@ impl EntityColumn {
     /// buffer per chunk and every string in it has been moved across by the time a chunk ends, so
     /// without this the buffer's arena would grow to the whole source's payload.
     pub(crate) fn reset_staging(&mut self) {
-        if let ColumnData::Utf8(strings) = &mut self.data {
+        if let ColumnStorage::ByEntity {
+            data: ColumnData::Utf8(strings),
+            ..
+        } = &mut self.storage
+        {
             strings.arena.reset();
         }
     }
 }
 
 impl ColumnData {
-    /// The type's storage with nothing in it — no file and no mapping.
-    fn empty(ty: ScalarType) -> Self {
-        macro_rules! arms {
-            ($(($v:ident, $t:ty)),* $(,)?) => {
-                match ty {
-                    $(ScalarType::$v => ColumnData::$v(MappedArray::<$t>::empty()),)*
-                    ScalarType::Bool => ColumnData::Bool(MappedArray::<u8>::empty()),
-                    ScalarType::Utf8 | ScalarType::Keyword | ScalarType::Text => {
-                        ColumnData::Utf8(StringColumn::empty())
-                    }
-                }
-            };
-        }
-        fixed_width_columns!(arms)
-    }
-
     /// Write one value at `entity`, refusing a tag that is not the column's: a coerced value gives
     /// one entity another's identity, with every value present and none its own.
     fn set(&mut self, entity: usize, value: ScalarValue, ty: ScalarType, name: &str) -> Result<()> {
@@ -702,52 +822,75 @@ impl ColumnData {
 }
 
 impl StringColumn {
-    fn empty() -> Self {
-        StringColumn {
-            at: MappedArray::empty(),
-            arena: MappedArena::empty(),
-            header: RECORD_HEADER_INDEXED,
-        }
-    }
-
     fn set(&mut self, entity: usize, value: &str) -> Result<()> {
-        let len = u32::try_from(value.len()).map_err(|_| {
-            BuildError::Invalid(format!(
-                "a string value of {} bytes exceeds the arena's u32 length",
-                value.len()
-            ))
-        })?;
-        // Header and bytes in one write, so a value is never split across a growth and the
-        // arena's own record marks land where a record starts.
-        let mut record = Vec::with_capacity(self.header + value.len());
-        if self.header == RECORD_HEADER_WALKED {
-            let tag = u32::try_from(entity).map_err(|_| {
-                BuildError::Invalid(format!(
-                    "entity {entity} exceeds the u32 an arena record's header carries"
-                ))
-            })?;
-            record.extend_from_slice(&tag.to_le_bytes());
+        match self.shape {
+            // Header and bytes in one write, so a value is never split across a growth and the
+            // arena's own record marks land where a record starts.
+            RecordShape::Walked => {
+                let len = u32::try_from(value.len()).map_err(|_| {
+                    BuildError::Invalid(format!(
+                        "a string value of {} bytes exceeds the u32 length an arena record's \
+                         header carries",
+                        value.len()
+                    ))
+                })?;
+                let tag = u32::try_from(entity).map_err(|_| {
+                    BuildError::Invalid(format!(
+                        "entity {entity} exceeds the u32 an arena record's header carries"
+                    ))
+                })?;
+                let mut record = Vec::with_capacity(RECORD_HEADER_WALKED + value.len());
+                record.extend_from_slice(&tag.to_le_bytes());
+                record.extend_from_slice(&len.to_le_bytes());
+                record.extend_from_slice(value.as_bytes());
+                let offset = self.arena.append(&record)?;
+                self.at.as_mut_slice()[entity] = offset;
+            }
+            // The characters alone, and the two numbers a reader needs in the word it already
+            // reads to find them.
+            RecordShape::Indexed => {
+                if value.len() >= PACKED_LENGTH_LIMIT {
+                    return Err(BuildError::Invalid(format!(
+                        "a string value of {} bytes exceeds the {PACKED_LENGTH_LIMIT}-byte length \
+                         an entity-indexed column packs beside its offset",
+                        value.len()
+                    )));
+                }
+                let offset = self.arena.append(value.as_bytes())?;
+                if offset >= PACKED_OFFSET_LIMIT {
+                    return Err(BuildError::Invalid(format!(
+                        "an entity-indexed column's arena reached {offset} bytes, past the \
+                         {PACKED_OFFSET_LIMIT} its offsets can name"
+                    )));
+                }
+                self.at.as_mut_slice()[entity] =
+                    offset | ((value.len() as u64) << PACKED_OFFSET_BITS);
+            }
         }
-        record.extend_from_slice(&len.to_le_bytes());
-        record.extend_from_slice(value.as_bytes());
-        let offset = self.arena.append(&record)?;
-        self.at.as_mut_slice()[entity] = offset;
         Ok(())
     }
 
     fn get(&self, entity: usize) -> &str {
-        let offset = self.at.as_slice()[entity];
-        // The length is the header's last four bytes, whichever header this column writes.
-        let len = u32::from_le_bytes(
-            self.arena
-                .bytes(offset + (self.header - 4) as u64, 4)
-                .try_into()
-                .expect("a four-byte slice is four bytes"),
-        ) as usize;
+        let word = self.at.as_slice()[entity];
+        let (offset, len) = match self.shape {
+            RecordShape::Walked => {
+                let len = u32::from_le_bytes(
+                    self.arena
+                        .bytes(word + 4, 4)
+                        .try_into()
+                        .expect("a four-byte slice is four bytes"),
+                ) as usize;
+                (word + RECORD_HEADER_WALKED as u64, len)
+            }
+            RecordShape::Indexed => (
+                word & (PACKED_OFFSET_LIMIT - 1),
+                (word >> PACKED_OFFSET_BITS) as usize,
+            ),
+        };
         // Checked rather than `from_utf8_unchecked`: the bytes came from a `&str` and cannot be
         // anything else, so the scan costs a second over a corpus's prose and buys a loud failure
         // where a torn mapping or a wrong offset would otherwise be a silently wrong value.
-        std::str::from_utf8(self.arena.bytes(offset + self.header as u64, len))
+        std::str::from_utf8(self.arena.bytes(offset, len))
             .expect("the arena holds only bytes written from a &str")
     }
 }
@@ -973,8 +1116,11 @@ mod tests {
         for ty in types {
             let column = EntityColumn::filled(&scratch, ty, 1).unwrap();
             assert!(!column.is_present(0), "{ty:?}: a fresh slot is absent");
+            let ColumnStorage::ByEntity { data, .. } = &column.storage else {
+                panic!("{ty:?}: a filled column holds its values in entity order");
+            };
             assert_eq!(
-                column.data.get(0),
+                data.get(0),
                 ScalarValue::Null.or_render_placeholder(ty),
                 "{ty:?}: the zero a mapping reads as is not the render placeholder"
             );
@@ -1009,5 +1155,96 @@ mod tests {
         let column = EntityColumn::filled(&scratch, ScalarType::U32, 0).unwrap();
         assert_eq!(column.len(), 0);
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+
+    /// **A spilled column reserves nothing and answers absent at every entity.**
+    ///
+    /// The bitmap it used to carry was `n/8` bytes of `posix_fallocate`d blocks with no writer —
+    /// the join's extent lane never reaches the slot — and no reader but the three answers below.
+    /// Both halves are asserted together: the files, because reserved blocks are what the change
+    /// is for, and the answers, because a caller that stopped seeing absence would be reading a
+    /// column that is not there.
+    #[test]
+    fn a_spilled_column_reserves_no_blocks_and_reads_absent() {
+        for ty in [ScalarType::Text, ScalarType::Keyword, ScalarType::Utf8] {
+            let dir = tempfile::TempDir::new().unwrap();
+            let scratch = ColumnScratch::new(dir.path());
+            let column = EntityColumn::spilled(&scratch, ty, 1_000_000).unwrap();
+            assert_eq!(
+                std::fs::read_dir(dir.path()).unwrap().count(),
+                0,
+                "{ty:?}: a spilled column owns no file"
+            );
+            assert_eq!(column.len(), 1_000_000, "{ty:?}: the length is kept");
+            assert!(!column.is_present(0), "{ty:?}");
+            assert!(!column.is_present(999_999), "{ty:?}");
+            assert_eq!(column.str_at(0), None, "{ty:?}");
+            assert_eq!(column.value_at(0), ScalarValue::Null, "{ty:?}");
+            assert_eq!(column.present_entities().next(), None, "{ty:?}");
+            assert_eq!(column.arena_windows(8), Vec::new(), "{ty:?}");
+        }
+    }
+
+    /// **A write to a spilled column is refused, not dropped.** Its values are its extents, so a
+    /// value placed here would be stored where no reader looks for it.
+    #[test]
+    fn a_spilled_column_refuses_a_write() {
+        let (scratch, _dir) = scratch();
+        let mut column = EntityColumn::spilled(&scratch, ScalarType::Keyword, 8).unwrap();
+        let refused = column.set(0, ScalarValue::Utf8("key".into()), "k");
+        assert!(refused.is_err(), "a spilled column took a value");
+        assert!(!column.is_present(0));
+        let mut staged = EntityColumn::filled(&scratch, ScalarType::Keyword, 1).unwrap();
+        staged.set(0, ScalarValue::Utf8("key".into()), "k").unwrap();
+        assert!(
+            column.take_from(0, &mut staged, 0, "k").is_err(),
+            "a spilled column took a value from a staging buffer"
+        );
+    }
+
+    /// **Both record shapes round-trip, in an arena filled the way the join fills one.**
+    ///
+    /// The values are written out of entity order, an entity is written twice, and one value is
+    /// empty — which is the shape that has no bytes in the arena at all and still is not absence.
+    /// Asserted for `keyword`, whose length rides in the offset word, and for `text`, whose
+    /// records carry a header a walk reads.
+    #[test]
+    fn a_value_reads_back_whatever_shape_its_record_takes() {
+        for ty in [ScalarType::Keyword, ScalarType::Utf8, ScalarType::Text] {
+            let (scratch, _dir) = scratch();
+            let mut column = EntityColumn::filled(&scratch, ty, 6).unwrap();
+            for (entity, value) in [(5, "last"), (0, ""), (3, "middle"), (0, "first")] {
+                column
+                    .set(entity, ScalarValue::Utf8(value.into()), "v")
+                    .unwrap();
+            }
+            assert_eq!(column.str_at(0), Some("first"), "{ty:?}: rewritten");
+            assert_eq!(column.str_at(1), None, "{ty:?}: never written");
+            assert_eq!(column.str_at(3), Some("middle"), "{ty:?}");
+            assert_eq!(column.str_at(5), Some("last"), "{ty:?}");
+            assert_eq!(
+                column.present_entities().collect::<Vec<_>>(),
+                vec![0, 3, 5],
+                "{ty:?}"
+            );
+        }
+    }
+
+    /// **A value longer than the packed length is refused rather than truncated.** A length that
+    /// wrapped would name a prefix of the record and serve the neighbour's bytes after it, with
+    /// nothing to say so.
+    #[test]
+    fn a_value_past_the_packed_length_is_refused() {
+        let (scratch, _dir) = scratch();
+        let mut column = EntityColumn::filled(&scratch, ScalarType::Keyword, 1).unwrap();
+        let long = "x".repeat(PACKED_LENGTH_LIMIT);
+        let refused = column.set(0, ScalarValue::Utf8(long), "k");
+        assert!(refused.is_err(), "a 16 MiB value was packed into 24 bits");
+        // One byte under the limit is a value, and reads back whole.
+        let held = "y".repeat(PACKED_LENGTH_LIMIT - 1);
+        column
+            .set(0, ScalarValue::Utf8(held.clone()), "k")
+            .unwrap();
+        assert_eq!(column.str_at(0), Some(held.as_str()));
     }
 }

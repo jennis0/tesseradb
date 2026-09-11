@@ -109,7 +109,7 @@ costs run in opposite directions:
 
 | | arena | extents |
 |---|---|---|
-| what it costs the disk | the characters, an 8 B/item offset array and one growth step | the characters as 256 KiB zstd blocks, a row directory and a has-row bitmap |
+| what it costs the disk | the characters, an 8 B/item offset array, an n/8 presence bitmap and one growth step | the characters as 256 KiB zstd blocks, a row directory and a has-row bitmap, and nothing per entity |
 | measured, 125,789,091 GBIF occurrences | 5.71 GB for `scientificname` | 1.63 GB |
 | the build's peak disk, same corpus | 12.60 GB | 9.26 GB |
 | the build's wall clock, same corpus | 324.7 s | 356.1 s |
@@ -117,7 +117,11 @@ costs run in opposite directions:
 The indexed family runs the same way. Measured on `gbif-64p`, 25,846,007 occurrences, with
 `scientificname` spilled either way so that only `specieskey`'s route moves: peak disk 1.99 GB on
 the arena against 1.74 GB on the extents, a saving of 250.7 MB or 9.70 B/item, for 64.5 s against
-67.2 s of wall clock. With both columns on the arena the same build peaks at 2.98 GB in 59.1 s.
+67.2 s of wall clock. ⊘ That pair is not re-measured against the packed offset word, which takes
+4 B off every present value on the arena side alone; forcing one column's route needs
+`build_routed` and there is no command for it. With both columns on the arena — which is what this
+box's free space chooses — the same build peaks at **2.81 GB** in 59.1 s (measured, two runs
+agreeing to 8 KB).
 
 So a column that fits takes the arena, and one that does not spills. `residency::plan_routes`
 chooses it, once, at the plan: it walks the declared columns in order, moves each onto the arena,
@@ -228,9 +232,11 @@ the same reason: file descriptors and buffers, not correctness.
 274.5 GB modelled against 257.7 GB free (the model as it stood then; it has since been rewritten
 into six phases and its figures have moved).
 
-Removed: a spilled column's arena, charged at the source's Parquet payload plus its layout — 8 B
-an entity of offset and the record header, 12 B on a `keyword` or `utf8` column and 16 on a
-`text` one.
+Removed: everything a spilled column would have held in entity order — the arena charged at the
+source's Parquet payload plus its layout, the 8 B an entity of offset, the 8 B a record of header
+a `text` column carries (a `keyword` or `utf8` record carries none, its length riding in the spare
+bits of the offset word — `column.rs`), and the presence bitmap, which the join's extent lane never
+marks.
 
 Added: that column's extents, charged at half the payload. The payload is the column's characters,
 measured over a sample of the source's row groups: a Parquet footer's uncompressed size is the
