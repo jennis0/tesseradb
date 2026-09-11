@@ -1875,6 +1875,18 @@ fn build_bundle(
             column.release();
         }
     }
+    // **And the same line for a spilled column's extents.** An indexed keyword's extents are the
+    // dictionary pass's alone, so they go back to the disk here rather than standing through the
+    // record blob, which is the phase the measured peak falls on.
+    let mut open_extents = open_extents;
+    open_extents.retain(|extents| {
+        blob_resident(&args.schema, &args.schema.attributes[extents.column])
+    });
+    for column in spilled.iter_mut() {
+        if !blob_resident(&args.schema, &args.schema.attributes[column.column]) {
+            column.remove();
+        }
+    }
     timer.end(BuildStage::FilterPostings, n);
 
     // The record blob wants the same two things the postings did — entity ids final under I9, and
@@ -2739,6 +2751,10 @@ fn write_scoped_columns(
                 &presence_path,
                 attribute,
                 &column.values,
+                // **A group-scoped family is not routed** ([`may_take_extents`]): its columns are
+                // this pass's own and there is no blob row for an extent to land in, so the
+                // characters are always the column's.
+                None,
                 keyword_plan,
             )?;
             fsync_file(&values_path)?;
@@ -3144,6 +3160,13 @@ fn write_filter_postings_banded(
         // The value column is the artefact of record (filter-index §2.1); the postings below are
         // derived from it. Written first so that a build interrupted between the two leaves the
         // record without its accelerator rather than an accelerator with no record.
+        //
+        // **A keyword column's characters are wherever its route put them** ([`ColumnRoutes`]):
+        // the column's own arena, or the extents the join spilled, which this pass is the only
+        // reader of. A column of another family never spills, so the lookup answers `None` for it.
+        let extents = spilled
+            .iter()
+            .find(|column_extents| column_extents.column == column);
         let values_path = column_dir.join("values.arrow");
         let presence_path = column_dir.join("presence.roaring");
         let written = write_column_values(
@@ -3152,6 +3175,7 @@ fn write_filter_postings_banded(
             &presence_path,
             attribute,
             values,
+            extents,
             keyword_plan,
         )?;
         fsync_file(&values_path)?;
@@ -3267,8 +3291,14 @@ pub(crate) fn write_record_blob(
         entity: 0,
         n,
     };
-    let mut extents: Vec<Vec<crate::extents::ExtentRows<'_>>> =
-        spilled.iter().map(crate::extents::ExtentRows::over).collect();
+    // **Only a blob-resident column's extents are the blob's.** An indexed keyword spills its
+    // characters the same way and its reader is the dictionary pass, which has already run and
+    // unlinked them; its values belong in `values.arrow` and its tag in no blob row at all.
+    let mut extents: Vec<Vec<crate::extents::ExtentRows<'_>>> = spilled
+        .iter()
+        .filter(|column| blob_columns.contains(&column.column))
+        .map(crate::extents::ExtentRows::over)
+        .collect();
     let mut sources: Vec<&mut dyn tessera_filter_write::RecordRows> = Vec::new();
     if !column_tags.is_empty() {
         sources.push(&mut columns);
@@ -3341,39 +3371,43 @@ pub(crate) fn value_column_is_owed(
 /// Could this column's characters take the record blob's extents instead of an entity-ordered
 /// arena ([`crate::extents`])? Whether they do is [`ColumnRoutes`].
 ///
-/// **The readers decide, not the declared type.** An arena is a permutation of the source and it
-/// exists to answer `entity → value` by random access, so it is owed by exactly the two passes
-/// that ask that question of a string column: the value column and its dictionary
-/// ([`value_column_is_owed`]), and the hot row tail (`render`). A column with neither is read by
-/// the record blob alone, and the blob's merge takes an extent as readily as a column
-/// (`build-column-extents.md` §2). Every input to this test is compiled from the declaration, so
-/// which columns have two routes is known before the first source file is opened.
+/// **The order a reader wants decides, not the declared type.** An arena is a permutation of the
+/// source, and the entity-indexed offset array beside it exists to answer `entity → value` at
+/// random. Every pass that reads a string column reads it once, ascending in the entity: the
+/// record blob's merge, a `text` column's token index, and the keyword dictionary's chunk walk.
+/// An extent delivers that order directly — each one is a join chunk in the chunk's own entity
+/// order, and a merge across them is the column ascending — so the offset array buys nothing any
+/// of them needs. What closes the route instead is `render`, whose row tail reads the column at a
+/// row and not at an entity.
 ///
-/// That answers `true` for every bundle-wide `text` column, which owes no value column whatever
-/// its `index` says, and for a `keyword` or `utf8` column declared with neither flag — the shape
-/// that cost 5.7 GB of arena and offsets at 125,789,091 GBIF occurrences to hand the blob 1.55 GB
-/// (`probes/2026-09-10-blob-resident-strings/`).
+/// That answers `true` for every bundle-wide string column: a `text` column, a `keyword` or
+/// `utf8` column declared with neither flag — the shape that cost 5.7 GB of arena and offsets at
+/// 125,789,091 GBIF occurrences to hand the blob 1.55 GB
+/// (`probes/2026-09-10-blob-resident-strings/`) — and an **indexed** `keyword` or `utf8` column,
+/// whose extents the dictionary pass reads through
+/// [`crate::extents::OpenExtents::for_each_live_record`] where it used to read an arena at
+/// `8 B/item` of offsets.
+///
+/// **The extents' reader differs by column and every routed column has one.** A
+/// [`blob_resident`] column's are merged into the blob; an indexed one's are the dictionary
+/// pass's alone and are unlinked when it ends. Extents nothing reads would be a column stored
+/// nowhere, which is what the `render` term above refuses.
 ///
 /// **`render` is refused on every string type at the declaration**
-/// (`config::compile_attributes`), and `write_columns` refuses one that reaches it anyway, so the
-/// middle term fires only for a `Schema` assembled programmatically. It is stated rather than
-/// dropped because it is what makes a spilled column a [`blob_resident`] one: a column routed to
-/// extents whose values the blob does not hold would spill extents nothing reads.
+/// (`config::compile_attributes`), and `write_columns` refuses one that reaches it anyway, so that
+/// term fires only for a `Schema` assembled programmatically.
 ///
 /// **A group-scoped family is not asked.** Its columns are the scoped pass's own, one per view,
-/// and it has no blob row to be read from — the record blob is bundle-wide and addressed by a
-/// column's position in `declared_scalars`, which a family has none of (`views.md` §5). So a
-/// scoped string column keeps its arena whatever its flags say, and `write_scoped_columns` writes
-/// its value column from it.
+/// and the join that fills them is `write_scoped_columns`'s rather than this one's (`views.md`
+/// §5). So a scoped string column keeps its arena whatever its flags say.
 pub(crate) fn may_take_extents(
-    schema: &crate::config::Schema,
+    _schema: &crate::config::Schema,
     attribute: &crate::config::Attribute,
 ) -> bool {
     matches!(
         attribute.ty,
         ScalarType::Utf8 | ScalarType::Keyword | ScalarType::Text
     ) && !attribute.render
-        && !value_column_is_owed(schema, attribute)
 }
 
 /// Is the arena route closed to this column whatever the arena would cost?
@@ -3627,6 +3661,7 @@ fn write_column_values(
     presence_path: &Path,
     attribute: &crate::config::Attribute,
     values: &EntityColumn,
+    extents: Option<&crate::extents::OpenExtents>,
     keyword_plan: KeywordDictPlan,
 ) -> Result<WrittenColumn> {
     let mut presence = Presence::default();
@@ -3648,11 +3683,18 @@ fn write_column_values(
     // spend — the empty string is one a corpus may legitimately hold — so absence arrives as
     // `ScalarValue::Null` and the empty string arrives as itself.
     if attribute.ty == ScalarType::Keyword {
+        // The characters are wherever the route put them. A column that spilled carries no
+        // values here at all ([`EntityColumn::spilled`]), so the two cases are exclusive and the
+        // column is still what says how many entities there are.
+        let source = match extents {
+            Some(extents) => KeywordValues::Extents(extents),
+            None => KeywordValues::Column(values),
+        };
         dict = Some(write_keyword_column(
             column_dir,
             values_path,
             attribute,
-            values,
+            source,
             &mut presence,
             &mut writer,
             keyword_plan,
@@ -3776,25 +3818,14 @@ impl Presence {
 /// produce it — and the dictionary has no key for it either. A points file is not the ingest plane
 /// and has no upstream check, so the refusal is here, naming the column and the entity a build
 /// operator has to go and fix.
-fn for_each_keyword<'a>(
+fn for_each_keyword(
     attribute: &crate::config::Attribute,
-    values: &'a EntityColumn,
+    values: KeywordValues<'_>,
     presence: &mut Presence,
-    visit: &mut dyn FnMut(u32, &'a str) -> Result<()>,
+    visit: &mut dyn FnMut(u32, &str) -> Result<()>,
 ) -> Result<u64> {
     let mut rows = 0u64;
-    // Absent runs are skipped a word at a time; absence itself is what [`Presence`] reads out of
-    // the gaps this leaves.
-    for entity in values.present_entities() {
-        // Borrowed, not read through `value_at`: this visits one `&str` per entity across the
-        // whole column, so copying here would be a second copy of every keyword in the corpus.
-        let Some(text) = values.str_at(entity) else {
-            return Err(BuildError::Invalid(format!(
-                "attribute '{}' is declared `keyword` but carries {:?}",
-                attribute.name,
-                values.value_at(entity)
-            )));
-        };
+    let mut step = |entity: u32, text: &str| -> Result<()> {
         if text.is_empty() {
             return Err(BuildError::Invalid(format!(
                 "attribute '{}' is declared `keyword` and entity {entity} carries the empty \
@@ -3815,11 +3846,64 @@ fn for_each_keyword<'a>(
                 u32::MAX
             ))
         })?;
-        presence.present(entity as u32);
+        presence.present(entity);
         visit(row, text)?;
         rows += 1;
+        Ok(())
+    };
+    match values {
+        // Absent runs are skipped a word at a time; absence itself is what [`Presence`] reads out
+        // of the gaps this leaves.
+        KeywordValues::Column(values) => {
+            for entity in values.present_entities() {
+                // Borrowed, not read through `value_at`: this visits one `&str` per entity across
+                // the whole column, so copying here would be a second copy of every keyword in the
+                // corpus.
+                let Some(text) = values.str_at(entity) else {
+                    return Err(BuildError::Invalid(format!(
+                        "attribute '{}' is declared `keyword` but carries {:?}",
+                        attribute.name,
+                        values.value_at(entity)
+                    )));
+                };
+                step(entity as u32, text)?;
+            }
+        }
+        KeywordValues::Extents(extents) => {
+            extents.for_each_live_record(&mut |entity, text| step(entity, text))?;
+        }
     }
     Ok(rows)
+}
+
+/// Where one keyword column's characters are read from — the two routes [`ColumnRoutes`] chooses
+/// between, seen from the one pass that consumes them.
+///
+/// Both deliver each present entity once, ascending, carrying the value the join wrote last for
+/// it: the column through its presence bits and its offset array, the extents through a merge
+/// across the join chunks with each one's live set applied (`crate::extents`). So the dictionary,
+/// the ordinals and the presence bitmap are the same bytes either way, and the choice is the
+/// build's disk and not the bundle's.
+#[derive(Clone, Copy)]
+pub(crate) enum KeywordValues<'a> {
+    Column(&'a EntityColumn),
+    Extents(&'a crate::extents::OpenExtents),
+}
+
+impl KeywordValues<'_> {
+    /// A ceiling on the present rows, for the chunk buffer's capacity: the column's entities, or
+    /// the extents' rows before their live sets take the overwritten ones out. A hint and not a
+    /// count — nothing downstream reads it.
+    fn rows_hint(&self) -> usize {
+        match self {
+            KeywordValues::Column(values) => values.len(),
+            KeywordValues::Extents(extents) => extents
+                .blobs
+                .iter()
+                .map(|blob| blob.hasrow().cardinality() as usize)
+                .sum(),
+        }
+    }
 }
 
 /// How one indexed keyword column's dictionary pass is sized: the present rows one chunk sorts
@@ -3832,26 +3916,40 @@ fn for_each_keyword<'a>(
 /// resident set rather than a stage with the machine to itself.
 ///
 /// Where the two differ is the divisor. The text pass divides its allowance by the thread count
-/// because `threads` workers accumulate at once; this pass is one walk of entity space in row
-/// order, so one chunk is live and the allowance is that chunk. It is not parallelised: the values
-/// are reached through the column's entity-indexed offsets, so a worker over an entity range reads
-/// the arena in the same scattered order a single walk does, and what a second worker would add is
-/// a second scatter over the same file rather than a second stream.
+/// because `threads` workers accumulate at once; this pass is one walk of the column in row order,
+/// so one chunk is live and the allowance is that chunk. It is not parallelised: on either route
+/// the values arrive as one entity-ascending stream, and a second worker over a range of it would
+/// be a second reader of the same file rather than a second stream.
+///
+/// **Two bounds, not one.** The chunk buffers each row's characters as well as its entry in the
+/// array to be sorted, so a chunk of long values fills the allowance at a row count a chunk of
+/// short ones would not. Whichever bound a chunk reaches first spills it. Where the boundary falls
+/// changes the runs and changes no byte of the output
+/// ([`tests::chunking_the_keyword_column_does_not_change_its_bytes`]).
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct KeywordDictPlan {
     chunk_rows: usize,
+    chunk_bytes: usize,
 }
 
 /// The floor on a chunk, so a tiny `--memory-budget` cannot derive a plan that spills a run every
 /// few rows and then cascades them all back together.
 const KEYWORD_MIN_CHUNK_ROWS: usize = 1 << 12;
 
+/// The floor on a chunk's characters, for the reason [`KEYWORD_MIN_CHUNK_ROWS`] is the floor on
+/// its rows.
+const KEYWORD_MIN_CHUNK_BYTES: usize = 1 << 20;
+
 impl KeywordDictPlan {
     /// The plan a build's memory budget derives.
     pub(crate) fn for_budget(budget: u64) -> KeywordDictPlan {
         let allowance = (budget / TEXT_BUDGET_SHARE).clamp(TEXT_BUDGET_MIN, TEXT_BUDGET_MAX);
         let chunk_rows = (allowance as usize / KEYWORD_ROW_BYTES).max(KEYWORD_MIN_CHUNK_ROWS);
-        KeywordDictPlan { chunk_rows }
+        let chunk_bytes = (allowance as usize).max(KEYWORD_MIN_CHUNK_BYTES);
+        KeywordDictPlan {
+            chunk_rows,
+            chunk_bytes,
+        }
     }
 
     /// An explicit plan, for the tests that must force several runs and a cascade out of a corpus
@@ -3860,34 +3958,37 @@ impl KeywordDictPlan {
     fn explicit(chunk_rows: usize) -> KeywordDictPlan {
         KeywordDictPlan {
             chunk_rows: chunk_rows.max(1),
+            chunk_bytes: usize::MAX,
         }
     }
 }
 
-/// What one buffered row costs: its entry in the array the chunk sorts, and its place in the
-/// scratch a key's rows are gathered into. The figure [`KeywordDictPlan`] divides the budget by.
+/// What one buffered row costs beyond its characters: its entry in the array the chunk sorts, and
+/// its place in the scratch a key's rows are gathered into. The figure [`KeywordDictPlan`] divides
+/// the budget by.
 const KEYWORD_ROW_BYTES: usize = std::mem::size_of::<KeywordPair>() + std::mem::size_of::<u32>();
 
 /// One present row's key and the row it sits at.
 ///
-/// **The key's first bytes are carried beside the reference so that most comparisons never reach
-/// the arena.** A key is a `&str` into a mapped arena of the whole column — 8.0 GB for rung 5's
-/// `uuid` — so a sort that dereferences both sides of every comparison is the random access over
-/// that file this pass exists to remove. The first eight bytes read big-endian and zero-padded
-/// order two keys exactly as their bytes do: where the padded prefixes differ, the keys differ the
-/// same way at the same position, a key shorter than the other padding with the zeros that make
-/// "shorter is less" true. So [`keyword_key_order`] reads the arena only to separate two keys that
-/// agree in their first eight characters.
+/// **The key's first bytes are carried beside its position so that most comparisons never reach
+/// the characters.** The first eight bytes read big-endian and zero-padded order two keys exactly
+/// as their bytes do: where the padded prefixes differ, the keys differ the same way at the same
+/// position, a key shorter than the other padding with the zeros that make "shorter is less" true.
+/// So [`keyword_key_order`] reads the buffer only to separate two keys that agree in their first
+/// eight characters.
 ///
-/// **The reference is held here rather than in a side array the sort indexes into.** Holding a
-/// position instead would take the sorted element from 28 bytes to 12, and it measured slower:
-/// the sorted array's order bears no relation to the side array's, so every key read after the
-/// sort is a random access into it — 2×10⁷ of them over 320 MB — and over 2×10⁷ distinct keys that
-/// was 13.45 s against 10.12 s (`probes/2026-09-08-keyword-spill/`).
+/// **The key is a position in the chunk's own buffer and not a reference into the column.** The
+/// two routes deliver a value's characters differently — an arena the whole pass may borrow from,
+/// and a block of one extent that is decompressed and dropped — so the chunk copies what it
+/// buffers and both routes reach the same sort. Holding a reference measured faster when the
+/// alternative was a position into a side array of the *column's* 320 MB of keys, 13.45 s against
+/// 10.12 s over 2×10⁷ distinct ones (`probes/2026-09-08-keyword-spill/`); what the sort reaches
+/// into here is the chunk's own buffer, which the plan bounds.
 #[derive(Clone, Copy)]
-struct KeywordPair<'a> {
+struct KeywordPair {
     prefix: u64,
-    text: &'a str,
+    at: u32,
+    len: u32,
     row: u32,
 }
 
@@ -3909,37 +4010,62 @@ fn keyword_prefix(text: &str) -> u64 {
 /// out of the sort in no order, so [`KeywordChunk::spill`] sorts each key's own rows — a `u32`
 /// sort over one key's rows, which is also what
 /// [`crate::spill::TextRunWriter::push_entity`] demands: strictly ascending within a record.
-fn keyword_key_order(a: &KeywordPair<'_>, b: &KeywordPair<'_>) -> std::cmp::Ordering {
+fn keyword_key_order(a: &KeywordPair, b: &KeywordPair, text: &[u8]) -> std::cmp::Ordering {
     a.prefix
         .cmp(&b.prefix)
-        .then_with(|| a.text.as_bytes().cmp(b.text.as_bytes()))
+        .then_with(|| buffered_key(text, a).cmp(buffered_key(text, b)))
+}
+
+/// One buffered key's characters.
+fn buffered_key<'a>(text: &'a [u8], pair: &KeywordPair) -> &'a [u8] {
+    &text[pair.at as usize..pair.at as usize + pair.len as usize]
 }
 
 /// One chunk of present rows, buffered in row order and sorted by key at the spill.
-struct KeywordChunk<'a> {
-    pairs: Vec<KeywordPair<'a>>,
+struct KeywordChunk {
+    pairs: Vec<KeywordPair>,
+    /// The buffered rows' characters, in push order. [`KeywordPair`] indexes into it.
+    text: Vec<u8>,
     /// One key's rows, gathered and sorted for the run writer.
     rows: Vec<u32>,
 }
 
-impl<'a> KeywordChunk<'a> {
-    fn with_capacity(rows: usize) -> KeywordChunk<'a> {
+impl KeywordChunk {
+    fn with_capacity(rows: usize) -> KeywordChunk {
         KeywordChunk {
             pairs: Vec::with_capacity(rows),
+            text: Vec::new(),
             rows: Vec::new(),
         }
     }
 
-    fn len(&self) -> usize {
-        self.pairs.len()
+    /// Whether this chunk has reached either of the plan's bounds.
+    fn full(&self, plan: KeywordDictPlan) -> bool {
+        self.pairs.len() >= plan.chunk_rows || self.text.len() >= plan.chunk_bytes
     }
 
-    fn push(&mut self, row: u32, text: &'a str) {
+    fn push(&mut self, row: u32, text: &str) -> Result<()> {
+        let at = u32::try_from(self.text.len()).map_err(|_| {
+            BuildError::Invalid(format!(
+                "a keyword chunk buffered {} bytes of characters, past the u32 a buffered key's \
+                 position is held in",
+                self.text.len()
+            ))
+        })?;
+        let len = u32::try_from(text.len()).map_err(|_| {
+            BuildError::Invalid(format!(
+                "a keyword value of {} bytes is longer than the u32 its length is held in",
+                text.len()
+            ))
+        })?;
+        self.text.extend_from_slice(text.as_bytes());
         self.pairs.push(KeywordPair {
             prefix: keyword_prefix(text),
-            text,
+            at,
+            len,
             row,
         });
+        Ok(())
     }
 
     /// Sort by key and write the chunk out as one run, leaving the buffer empty.
@@ -3952,41 +4078,44 @@ impl<'a> KeywordChunk<'a> {
         if self.pairs.is_empty() {
             return Ok(());
         }
-        self.pairs.sort_unstable_by(keyword_key_order);
+        // Split apart so the comparator may read the characters while the array is sorted.
+        let KeywordChunk { pairs, text, rows } = self;
+        pairs.sort_unstable_by(|a, b| keyword_key_order(a, b, text));
 
         let path = column_dir.join(format!("keyword-run-{seq:05}.spill"));
         let mut writer = spill::TextRunWriter::create(&path)?;
         let mut start = 0usize;
-        while start < self.pairs.len() {
-            let head = self.pairs[start];
+        while start < pairs.len() {
+            let head = pairs[start];
+            let key = buffered_key(text, &head);
             let mut end = start + 1;
-            while end < self.pairs.len()
-                && self.pairs[end].prefix == head.prefix
-                && self.pairs[end].text == head.text
+            while end < pairs.len()
+                && pairs[end].prefix == head.prefix
+                && buffered_key(text, &pairs[end]) == key
             {
                 end += 1;
             }
-            self.rows.clear();
-            self.rows
-                .extend(self.pairs[start..end].iter().map(|pair| pair.row));
-            self.rows.sort_unstable();
-            let count = u32::try_from(self.rows.len()).map_err(|_| {
+            rows.clear();
+            rows.extend(pairs[start..end].iter().map(|pair| pair.row));
+            rows.sort_unstable();
+            let count = u32::try_from(rows.len()).map_err(|_| {
                 BuildError::Invalid(format!(
                     "keyword run {}: the key {:?} is carried by more rows than a u32 can count",
                     path.display(),
-                    head.text
+                    String::from_utf8_lossy(key)
                 ))
             })?;
-            writer.begin(head.text.as_bytes(), count)?;
-            for &row in self.rows.iter() {
+            writer.begin(key, count)?;
+            for &row in rows.iter() {
                 writer.push_entity(row)?;
             }
             start = end;
         }
         receipts.push(writer.finish()?);
-        // Cleared rather than replaced, where the text pass's accumulator is replaced: this
-        // buffer's capacity *is* the plan's budget, so keeping it is what the next chunk wants.
+        // Cleared rather than replaced, where the text pass's accumulator is replaced: these
+        // buffers' capacity *is* the plan's budget, so keeping it is what the next chunk wants.
         self.pairs.clear();
+        self.text.clear();
         *seq += 1;
         Ok(())
     }
@@ -4059,7 +4188,7 @@ fn write_keyword_column(
     column_dir: &Path,
     values_path: &Path,
     attribute: &crate::config::Attribute,
-    values: &EntityColumn,
+    values: KeywordValues<'_>,
     presence: &mut Presence,
     writer: &mut ValueColumnWriter,
     plan: KeywordDictPlan,
@@ -4068,10 +4197,10 @@ fn write_keyword_column(
     let mut receipts: Vec<spill::SpillReceipt> = Vec::new();
     let mut seq = 0usize;
     // Sized to the plan up front, or to the column where it is smaller.
-    let mut chunk = KeywordChunk::with_capacity(plan.chunk_rows.min(values.len()));
+    let mut chunk = KeywordChunk::with_capacity(plan.chunk_rows.min(values.rows_hint()));
     let rows = for_each_keyword(attribute, values, presence, &mut |row, text| {
-        chunk.push(row, text);
-        if chunk.len() >= plan.chunk_rows {
+        chunk.push(row, text)?;
+        if chunk.full(plan) {
             chunk.spill(column_dir, &mut seq, &mut receipts)?;
         }
         Ok(())
@@ -5856,18 +5985,17 @@ mod tests {
     use super::*;
     use tessera_types::IdentityKey;
 
-    /// **The extent route is decided by a column's readers and not by its type.**
+    /// **The extent route is decided by the order a column's readers want, not by its type.**
     ///
-    /// The arena answers `entity → value` at random, and the two passes that ask a string column
-    /// that question are the value column with its dictionary and the hot row tail. A column
-    /// neither reaches is read by the record blob alone, which reads an extent as readily as a
-    /// column — so `keyword` and `utf8` join `text` on the route exactly when they are declared
-    /// with neither `index` nor `render`.
+    /// The entity-indexed offset array beside an arena answers `entity → value` at random, and
+    /// the one pass that asks a string column that question is the hot row tail. Every other
+    /// reader — the record blob's merge, a `text` column's token index, a keyword dictionary's
+    /// chunk walk — reads the column once, ascending, which an extent merge answers. So every
+    /// bundle-wide string column has two routes and `render` is what closes one.
     ///
-    /// **And every column routed there has a blob row to land in.** Extents whose values the blob
-    /// does not hold would be a column stored nowhere, which is the failure
-    /// `a_category_is_blob_resident_exactly_when_it_has_no_entity_space_home` covers from the
-    /// other side.
+    /// **And every column routed there has a reader for its extents.** Extents nothing reads
+    /// would be a column stored nowhere: a blob-resident column's are merged into the blob, and
+    /// an indexed one's are its dictionary pass's.
     #[test]
     fn the_extent_route_is_the_readers_and_not_the_type() {
         let declared = |ty, index, render| crate::config::Attribute {
@@ -5891,10 +6019,10 @@ mod tests {
             (ScalarType::Utf8, false, false, true),
             (ScalarType::Text, false, false, true),
             // Indexed: `text` owes a token index over the extents, and the other two owe a value
-            // column and a dictionary, which are read at an entity.
+            // column and a dictionary, whose one pass reads the extents in entity order.
             (ScalarType::Text, true, false, true),
-            (ScalarType::Keyword, true, false, false),
-            (ScalarType::Utf8, true, false, false),
+            (ScalarType::Keyword, true, false, true),
+            (ScalarType::Utf8, true, false, true),
             // Rendered: the row tail reads the column at an entity. ⊘ `render` on a string type
             // is refused at the declaration and `write_columns` refuses one that arrives anyway,
             // so this arm is reachable only from a `Schema` built programmatically.
@@ -5914,8 +6042,8 @@ mod tests {
             );
             if may_take_extents(&schema, attribute) {
                 assert!(
-                    blob_resident(&schema, attribute),
-                    "{ty:?} index={index} render={render}: spilled with no blob row to land in"
+                    blob_resident(&schema, attribute) || value_column_is_owed(&schema, attribute),
+                    "{ty:?} index={index} render={render}: spilled with no reader for the extents"
                 );
                 // The arena route is closed to `text` and open to the rest: the second decode a
                 // `text` arena costs is the source permutation and not the arena's size
@@ -6617,6 +6745,87 @@ mod tests {
     /// the corpus, and do not, and align to the 64-entity words presence is stored in, and do not.
     const KEYWORD_CHUNKS: [usize; 7] = [1, 2, 3, 7, 64, 300, 4_096];
 
+    /// **The route a keyword column's characters take is not in its artefacts.** Its dictionary,
+    /// its ordinals and its presence bitmap are the same three files whether the pass reads an
+    /// entity-ordered arena or the extents the join spilled, at every extent chunking.
+    ///
+    /// The source is what makes this worth asserting rather than assuming. Entity order is not
+    /// source order; one entity is written twice next to itself and one far apart, so which value
+    /// an entity ends with is the arena's last write on one route and the extents' live sets on
+    /// the other; and the chunkings put those two rows in one extent and in different ones.
+    /// `tests/extent_route.rs` holds the same property over a whole bundle; what is here is the
+    /// case a corpus of 400 rows in one chunk cannot reach.
+    #[test]
+    fn the_keyword_column_is_the_same_files_from_an_arena_and_from_extents() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let scratch_dir = tempfile::tempdir().expect("tempdir");
+        let scratch = crate::column::ColumnScratch::new(scratch_dir.path());
+        let attribute = keyword_fixture_attribute();
+
+        // The source rows, in an order that is not entity order, with two entities written twice.
+        let mut source: Vec<(u32, String)> = (0..N_KEYWORD)
+            .filter_map(|entity| match keyword_fixture_key(entity) {
+                ScalarValue::Utf8(key) => {
+                    Some(((entity * 37 % N_KEYWORD) as u32, key))
+                }
+                _ => None,
+            })
+            .collect();
+        source.push((source[5].0, "the later key, adjacent".to_string()));
+        source.insert(2, (source[40].0, "the earlier key, far apart".to_string()));
+
+        // The arena route's column: the same rows scattered in order, so the last write for an
+        // entity is the value, which is what `EntityColumn::set` does in the join.
+        let mut column =
+            EntityColumn::filled(&scratch, ScalarType::Keyword, N_KEYWORD).expect("typed column");
+        for (entity, key) in &source {
+            column
+                .set(*entity as usize, ScalarValue::Utf8(key.clone()), "key")
+                .expect("set");
+        }
+
+        let files_of = |column_dir: &Path,
+                        values: &EntityColumn,
+                        extents: Option<&crate::extents::OpenExtents>| {
+            std::fs::create_dir_all(column_dir).expect("column dir");
+            let values_path = column_dir.join("values.arrow");
+            let presence_path = column_dir.join(tessera_filter::PRESENCE_FILE);
+            let written = write_column_values(
+                column_dir,
+                &values_path,
+                &presence_path,
+                &attribute,
+                values,
+                extents,
+                KeywordDictPlan::explicit(7),
+            )
+            .expect("keyword column");
+            assert!(written.presence, "the fixture has absent entities");
+            let dict_path = written.dict.expect("a keyword column owes a dictionary");
+            [
+                std::fs::read(&dict_path).expect("dict"),
+                std::fs::read(&values_path).expect("values"),
+                std::fs::read(&presence_path).expect("presence"),
+            ]
+        };
+
+        let from_arena = files_of(&dir.path().join("arena"), &column, None);
+        let empty =
+            EntityColumn::spilled(&scratch, ScalarType::Keyword, N_KEYWORD).expect("the slot");
+        for chunk in [1usize, 2, 3, 7, 64, 4_096] {
+            let extent_dir = dir.path().join(format!("extents-{chunk}"));
+            std::fs::create_dir_all(&extent_dir).expect("extent dir");
+            let spilled = spilled_column(&extent_dir, 0, "key", &source, chunk);
+            let open = spilled.open().expect("the extents open");
+            let from_extents =
+                files_of(&dir.path().join(format!("spilled-{chunk}")), &empty, Some(&open));
+            assert_eq!(
+                from_extents, from_arena,
+                "extents in chunks of {chunk} wrote different files"
+            );
+        }
+    }
+
     /// **The chunking must not be observable in the artefacts.** A chunk boundary is a place one
     /// buffer's rows end and the next one's begin, so a column emitted in one chunk and the same
     /// column emitted in chunks of three have to be the same three files. That is what makes
@@ -6643,6 +6852,7 @@ mod tests {
                 &presence_path,
                 &attribute,
                 &values,
+                None,
                 KeywordDictPlan::explicit(chunk_rows),
             )
             .expect("keyword column");
@@ -6699,6 +6909,7 @@ mod tests {
                 &presence_path,
                 &attribute,
                 &values,
+                None,
                 KeywordDictPlan::explicit(chunk_rows),
             )
             .expect("keyword column");

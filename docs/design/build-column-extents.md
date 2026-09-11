@@ -1,12 +1,14 @@
 # A column no pass reads at an entity is never permuted
 
 **Date:** 2026-09-04, extended 2026-09-10 from `text` to every string column the record blob alone
-reads, and 2026-09-11 to choosing between the two routes per column (§2's "Which columns can take
-extents" and "Which of them take it").
+reads, 2026-09-11 to choosing between the two routes per column, and 2026-09-11 again to the
+indexed `keyword` and `utf8` families, whose dictionary pass reads the extents (§2's "Which columns
+can take extents" and "Which of them take it").
 **Status:** Provisional. Built for the base build; the flush and the fold are unchanged. Byte
 identity against the arena build is measured for `text` at 10⁶ (`medcpt-1m`, 36 files), 10⁷
 (`medcpt-10m-abs`, 38 files) and 10⁸ (`paperseek`, 46 files), and for a blob-resident `keyword`
-forced down each route on five ladder corpora up to 2.58×10⁷ items
+forced down each route on five ladder corpora up to 2.58×10⁷ items, and for an indexed `keyword`
+forced down each route on `gbif-64p` at 2.58×10⁷ items
 ([`probes/2026-09-10-blob-resident-strings/`](../../probes/2026-09-10-blob-resident-strings/README.md));
 `crates/tessera-build/tests/extent_route.rs` holds the same property on a corpus carrying all three
 string families at once. None differ but `MANIFEST.json`'s `created_at` and the `CURRENT` that
@@ -55,9 +57,11 @@ flowchart TD
   C --> D["one blob extent per chunk per text column<br/>.build-tmp/, RecordBlobWriter"]
   D --> E["text index: extents read in block windows,<br/>tokenised, spilled as term runs"]
   D --> F["record blob: k-way merge of the extents<br/>with the entity-ordered columns"]
+  D --> G["keyword dictionary: extents merged on the entity,<br/>chunked, spilled as sorted runs"]
 ```
 
-Caption: each byte of prose is written once as an extent and read once by each consumer.
+Caption: each byte of a column's characters is written once as an extent and read once by each
+consumer.
 
 A join chunk is already sorted by entity, because the scatter into the fixed-width columns needs
 it. Each chunk of each `text` column is written out through `RecordBlobWriter` as one blob extent:
@@ -77,23 +81,25 @@ Working set: one join chunk, plus one uncompressed block per extent at the merge
 
 ### Which columns can take extents
 
-**The column's readers decide, not its declared type.** An arena answers `entity → value` at
-random, and two passes ask a string column that question: the entity-space value column with the
-dictionary a keyword's ordinals index, and the hot row tail. A column neither reaches is read by
-the record blob alone, and the blob's merge takes an extent as readily as a column. So the extent
-route is open to a bundle-wide string column when it owes no value column and declares no `render`,
-which is `pipeline::may_take_extents` and is arithmetic over the compiled schema, settled before
-the first source file is opened.
+**The order a column's readers want decides, not its declared type.** The entity-indexed offset
+array beside an arena exists to answer `entity → value` at random, and one pass asks a string
+column that question: the hot row tail, which reads a value at a row. Every other reader takes the
+column once, ascending in the entity. The record blob's merge does, the token index does, and so
+does the keyword dictionary's chunk pass. An extent is a join chunk in that chunk's own entity
+order, so a merge across a column's extents is the column ascending, and the offset array buys
+none of them anything. The extent route is therefore open to a bundle-wide string column that
+declares no `render`, which is `pipeline::may_take_extents` and is arithmetic over the compiled
+schema, settled before the first source file is opened.
 
-That is every bundle-wide `text` column — one owes a token index over its extents and never a
-value column (`records-and-search.md` §4.4) — and every `keyword` or `utf8` column declared with
-neither `index` nor `render`, whose only reader is the blob. An **indexed** `keyword` or `utf8`
-column keeps its arena, the dictionary writer reading it at an entity.
+That is every bundle-wide `text`, `keyword` and `utf8` column, whatever its `index` says. Which
+reader the extents have differs: a `text` column's are read by its token index and by the record
+blob (`records-and-search.md` §4.4); a `keyword` or `utf8` column with neither flag has only the
+blob; an **indexed** `keyword` or `utf8` column has only its dictionary pass, which merges them on
+the entity in place of walking an arena at 8 B/item of offsets.
 
 ⊘ `render` is refused on every string type at the declaration, so that term of the test fires only
-for a `Schema` assembled programmatically. It is in the test because it is what makes a spilled
-column always a blob-resident one: extents whose values the blob does not hold would be a declared
-column stored nowhere.
+for a `Schema` assembled programmatically. It is in the test because it is what leaves every
+spilled column with a reader: extents nothing reads would be a declared column stored nowhere.
 
 ### Which of them take it
 
@@ -107,6 +113,11 @@ costs run in opposite directions:
 | measured, 125,789,091 GBIF occurrences | 5.71 GB for `scientificname` | 1.63 GB |
 | the build's peak disk, same corpus | 12.60 GB | 9.26 GB |
 | the build's wall clock, same corpus | 324.7 s | 356.1 s |
+
+The indexed family runs the same way. Measured on `gbif-64p`, 25,846,007 occurrences, with
+`scientificname` spilled either way so that only `specieskey`'s route moves: peak disk 1.99 GB on
+the arena against 1.74 GB on the extents, a saving of 250.7 MB or 9.70 B/item, for 64.5 s against
+67.2 s of wall clock. With both columns on the arena the same build peaks at 2.98 GB in 59.1 s.
 
 So a column that fits takes the arena, and one that does not spills. `residency::plan_routes`
 chooses it, once, at the plan: it walks the declared columns in order, moves each onto the arena,
@@ -170,7 +181,9 @@ blob holds, which is the property the arena walk's offset check gives today.
 ### Stage order
 
 Unchanged: `attribute_tail`, `layers`, `filter_postings` with the text index charged out of it,
-`record_blob`. The extents are deleted after the blob is written.
+`record_blob`. A column's extents are deleted once its last reader is done with them: an indexed
+`keyword` or `utf8` column's at the end of the filter postings, which is where its dictionary pass
+runs, and a blob-resident column's after the blob is written.
 
 ## 3. What is shared with the flush and the fold
 
