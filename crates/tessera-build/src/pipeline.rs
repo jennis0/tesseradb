@@ -30,10 +30,10 @@
 //!
 //! A declared value is placed at its entity index as the join resolves it, and for a string
 //! column that is a permutation of the source's characters through a mapping larger than memory.
-//! A column whose only reader is the record blob is spared it: each join chunk of it is written
-//! as one record-blob extent in that chunk's entity order ([`takes_extents`], [`crate::extents`],
-//! `build-column-extents.md`), the blob merges the extents, and a `text` column's token index
-//! reads them in block windows first.
+//! A column whose only reader is the record blob may be spared it: each join chunk of it is
+//! written as one record-blob extent in that chunk's entity order ([`ColumnRoutes`],
+//! [`crate::extents`], `build-column-extents.md`), the blob merges the extents, and a `text`
+//! column's token index reads them in block windows first.
 //!
 //! ## Batch-scoped signature assignment (§11.1)
 //!
@@ -528,6 +528,11 @@ struct BuildPlan {
     /// falls as the build fills memory, and a second reading late in the run would derive a
     /// smaller budget from the build's own success at using the first.
     budget: u64,
+    /// Which string columns spill their characters as record-blob extents rather than filling an
+    /// entity-ordered arena. Derived from the free space rather than from the budget beside it,
+    /// and the one choice in this plan that changes no byte of the bundle ([`ColumnRoutes`],
+    /// [`crate::residency::plan_routes`]).
+    routes: ColumnRoutes,
     batch_items: u64,
     batches: u64,
     bucket_in_ram: bool,
@@ -583,7 +588,7 @@ pub(crate) fn detect_memory_budget() -> u64 {
 /// Free bytes on the filesystem holding `path`, or `None` where unknowable — the disk
 /// pre-flight then simply does not run, rather than refusing builds on a guess.
 #[cfg(unix)]
-fn available_disk(path: &std::path::Path) -> Option<u64> {
+pub(crate) fn available_disk(path: &std::path::Path) -> Option<u64> {
     use std::os::unix::ffi::OsStrExt;
     let c_path = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
     let mut stats: libc::statvfs = unsafe { std::mem::zeroed() };
@@ -594,7 +599,7 @@ fn available_disk(path: &std::path::Path) -> Option<u64> {
 }
 
 #[cfg(not(unix))]
-fn available_disk(_path: &std::path::Path) -> Option<u64> {
+pub(crate) fn available_disk(_path: &std::path::Path) -> Option<u64> {
     None
 }
 
@@ -603,9 +608,11 @@ fn available_disk(_path: &std::path::Path) -> Option<u64> {
 /// budget step of a whole grid cell, not a few megabytes.
 const BATCH_GRID: u64 = 1 << 24;
 
+#[allow(clippy::too_many_arguments)]
 fn plan_build(
     args: &BuildArgs,
     n: u64,
+    route: crate::ExtentRoute,
     pair_rows: usize,
     row_counts: &[u64],
     histogram: &[u64],
@@ -628,7 +635,14 @@ fn plan_build(
     // **The string columns' characters are measured once here**, both models wanting them and the
     // sample decoding rows to get them (`residency::payloads_per_item`).
     let payloads = crate::residency::payloads_per_item(args);
-    let tail = crate::residency::model(args, n, &payloads);
+    // **The route each string column takes, and the model it settles on.** A column with two
+    // routes takes the arena while the entity-order stages have the disk for it and the extents
+    // when they do not (`residency::plan_routes`, `build-column-extents.md` §2). The refusal below
+    // is not affected by the choice: every column's storage is a mapped term and `total()` counts
+    // the anonymous ones.
+    let free = available_disk(&args.out);
+    let (routes, tail) = crate::residency::routes_for(args, n, &payloads, free, route);
+    report_column_routes(args, &routes, &tail, free);
     if tail.total() > budget {
         return Err(BuildError::Invalid(format!(
             "this build's entity-order stages need about {} MiB, over the {} MiB memory budget. \
@@ -810,6 +824,7 @@ fn plan_build(
 
     Ok(BuildPlan {
         budget,
+        routes,
         batch_items,
         batches,
         bucket_in_ram,
@@ -818,7 +833,64 @@ fn plan_build(
     })
 }
 
-pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<BuildReport> {
+/// **Printed, because the route the build took is what makes two runs' timings comparable.**
+///
+/// It is derived from the space free on the output filesystem, so a box that fills up can route a
+/// corpus one way today and the other way tomorrow. Nothing downstream can see the difference —
+/// the bundle is byte-identical either way — but the build's own wall clock moves with it, 5 to
+/// 10% at the row counts measured, and a run whose log does not say which route it took cannot be
+/// read against another's.
+fn report_column_routes(
+    args: &BuildArgs,
+    routes: &ColumnRoutes,
+    tail: &crate::residency::Residency,
+    free: Option<u64>,
+) {
+    let available = args
+        .schema
+        .attributes
+        .iter()
+        .filter(|a| may_take_extents(&args.schema, a))
+        .count();
+    if available == 0 {
+        return;
+    }
+    let spilled = routes.spilled();
+    eprintln!(
+        "columns: {} of {available} string column(s) spill their characters as record-blob \
+         extents, the entity-order stages modelling {} MiB of scratch against {} free{}",
+        spilled.len(),
+        crate::residency::stage_scratch(tail) >> 20,
+        match free {
+            Some(bytes) => format!("{} MiB", bytes >> 20),
+            None => "an unreadable amount of space".to_string(),
+        },
+        match spilled.is_empty() {
+            true => String::new(),
+            false => format!(
+                ": {}",
+                spilled
+                    .iter()
+                    .map(|&index| {
+                        let attribute = &args.schema.attributes[index];
+                        let why = match extents_are_forced(&args.schema, attribute) {
+                            true => "text",
+                            false => "no room for its arena",
+                        };
+                        format!("{} ({why})", attribute.name)
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        }
+    );
+}
+
+pub(crate) fn build(
+    args: &BuildArgs,
+    observer: &dyn BuildObserver,
+    route: crate::ExtentRoute,
+) -> Result<BuildReport> {
     validate_args(args)?;
     let mut timer = StageTimer::new(observer);
     let plugin = Passthrough::new();
@@ -895,7 +967,15 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
     // size is identity-bearing (I9), so it is derived deterministically here, recorded in
     // provenance when it batches, and never silently re-derived on a rebuild (the CLI replays
     // a carried bundle's recorded value).
-    let plan = plan_build(args, n, pair_rows, &row_counts, &histogram, histogram_shift)?;
+    let plan = plan_build(
+        args,
+        n,
+        route,
+        pair_rows,
+        &row_counts,
+        &histogram,
+        histogram_shift,
+    )?;
     drop(histogram);
     if plan.batches > 1 {
         eprintln!(
@@ -1547,6 +1627,7 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
     let (attributes_by_entity, mut spilled, coverage) = read_attributes_by_entity(
         args,
         n,
+        &plan.routes,
         &source_ids,
         entity_of_ordinal,
         &mut minters,
@@ -1732,6 +1813,7 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
         &partition_dir,
         &args.schema,
         n,
+        &plan.routes,
         &attributes_by_entity,
         &open_extents,
     )?;
@@ -2029,6 +2111,7 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
     timer.end(BuildStage::Manifests, report.bundle_bytes);
     report.attribute_coverage = coverage;
     report.artifact_levels = artifact_levels;
+    report.spilled_columns = crate::spilled_column_names(&args.schema, &plan.routes);
     Ok(report)
 }
 
@@ -2055,6 +2138,7 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
 fn read_attributes_by_entity(
     args: &BuildArgs,
     n: u64,
+    routes: &ColumnRoutes,
     source_ids: &[u64],
     entity_of_ordinal: &[u32],
     minters: &mut std::collections::HashMap<String, tessera_store::vocabulary::VocabularyMinter>,
@@ -2072,14 +2156,15 @@ fn read_attributes_by_entity(
     // One typed column per attribute, indexed by entity — see [`EntityColumn`] for why this is not
     // the `ScalarValue` vector it reads like, and what that costs at 10⁸ items and above.
     //
-    // **A column no pass reads at an entity carries no values here.** Its characters are spilled
-    // as record-blob extents by the sweep below and read from them by the record blob, and by the
-    // token index too where the column is `text` ([`takes_extents`], [`crate::extents`]). What is
-    // kept here is the length, so every later pass can go on indexing this vector by an
-    // attribute's declaration position.
+    // **A spilled column carries no values here.** Its characters are spilled as record-blob
+    // extents by the sweep below and read from them by the record blob, and by the token index too
+    // where the column is `text` ([`ColumnRoutes`], [`crate::extents`]). What is kept here is the
+    // length, so every later pass can go on indexing this vector by an attribute's declaration
+    // position.
     let mut by_entity: Vec<EntityColumn> = attributes
         .iter()
-        .map(|a| match takes_extents(&args.schema, a) {
+        .enumerate()
+        .map(|(i, a)| match routes.takes_extents(i) {
             true => EntityColumn::spilled(scratch, a.ty, n as usize),
             false => EntityColumn::filled(scratch, a.ty, n as usize),
         })
@@ -2087,7 +2172,7 @@ fn read_attributes_by_entity(
     let mut spilled: Vec<crate::extents::ExtentColumn> = attributes
         .iter()
         .enumerate()
-        .filter(|(_, a)| takes_extents(&args.schema, a))
+        .filter(|&(i, _)| routes.takes_extents(i))
         .map(|(i, a)| crate::extents::ExtentColumn::new(tmp, i, &a.name))
         .collect();
     // **One sweep per source, not one over a single corpus file.** Each declared attribute names
@@ -2931,8 +3016,9 @@ fn write_filter_postings_banded(
         // Its entity-space artefact is the token dictionary and the postings over it; the values
         // themselves are in the record blob, which no scan reads (records §4.4). That is
         // [`value_column_is_owed`]'s whole exception, and the loop asks it rather than the type so
-        // that the pass and [`takes_extents`] cannot part company about which columns keep an
-        // arena.
+        // that the pass and [`may_take_extents`] cannot part company about which columns keep an
+        // arena. A `text` column's extents are there whatever the budget said
+        // ([`extents_are_forced`]), which is what lets this arm require them.
         if !value_column_is_owed(schema, attribute) {
             let extents = spilled
                 .iter()
@@ -3028,8 +3114,8 @@ fn write_filter_postings_banded(
 /// against the manifest without any name table in the artefact.
 ///
 /// **A spilled column arrives as extents and everything else as columns**, and the two are merged
-/// here (`build-column-extents.md`). A column [`takes_extents`] routed was never placed at an
-/// entity index: the join spilled each of its chunks as a blob extent in that chunk's entity
+/// here (`build-column-extents.md`). A column [`ColumnRoutes`] routed to extents was never placed
+/// at an entity index: the join spilled each of its chunks as a blob extent in that chunk's entity
 /// order, so this stage reads each extent front to back and takes the lowest head across them.
 /// What that removes is a random read per row into a file larger than the machine, which at
 /// 1.02×10⁸ abstracts wrote 52 MB in thirteen minutes at 144 major faults a second
@@ -3038,6 +3124,7 @@ pub(crate) fn write_record_blob(
     partition_dir: &Path,
     schema: &crate::config::Schema,
     n: u64,
+    routes: &ColumnRoutes,
     by_entity: &[EntityColumn],
     spilled: &[crate::extents::OpenExtents],
 ) -> Result<Vec<PathBuf>> {
@@ -3069,11 +3156,11 @@ pub(crate) fn write_record_blob(
     let directory_path = record_dir.join(RECORD_DIRECTORY_FILE);
     let n = n as usize;
     // The columns that are still columns. A column the join spilled has its tag carried by its
-    // extents instead ([`takes_extents`]), and no tag is carried by both.
+    // extents instead ([`ColumnRoutes`]), and no tag is carried by both.
     let column_tags: Vec<usize> = blob_columns
         .iter()
         .copied()
-        .filter(|&column| !takes_extents(schema, &schema.attributes[column]))
+        .filter(|&column| !routes.takes_extents(column))
         .collect();
     let mut columns = ColumnRows {
         schema,
@@ -3154,16 +3241,16 @@ pub(crate) fn value_column_is_owed(
     attribute.ty != ScalarType::Text && postings_are_owed(schema, attribute)
 }
 
-/// Does this column's characters take the record blob's extents rather than an entity-ordered
-/// arena ([`crate::extents`])?
+/// Could this column's characters take the record blob's extents instead of an entity-ordered
+/// arena ([`crate::extents`])? Whether they do is [`ColumnRoutes`].
 ///
 /// **The readers decide, not the declared type.** An arena is a permutation of the source and it
 /// exists to answer `entity → value` by random access, so it is owed by exactly the two passes
 /// that ask that question of a string column: the value column and its dictionary
 /// ([`value_column_is_owed`]), and the hot row tail (`render`). A column with neither is read by
 /// the record blob alone, and the blob's merge takes an extent as readily as a column
-/// (`build-column-extents.md`). Every input to the test is compiled from the declaration, so the
-/// route is known before the first source file is opened.
+/// (`build-column-extents.md` §2). Every input to this test is compiled from the declaration, so
+/// which columns have two routes is known before the first source file is opened.
 ///
 /// That answers `true` for every bundle-wide `text` column, which owes no value column whatever
 /// its `index` says, and for a `keyword` or `utf8` column declared with neither flag — the shape
@@ -3173,15 +3260,15 @@ pub(crate) fn value_column_is_owed(
 /// **`render` is refused on every string type at the declaration**
 /// (`config::compile_attributes`), and `write_columns` refuses one that reaches it anyway, so the
 /// middle term fires only for a `Schema` assembled programmatically. It is stated rather than
-/// dropped because it is what makes `takes_extents` imply [`blob_resident`]: a column routed here
-/// whose values the blob does not hold would spill extents nothing reads.
+/// dropped because it is what makes a spilled column a [`blob_resident`] one: a column routed to
+/// extents whose values the blob does not hold would spill extents nothing reads.
 ///
 /// **A group-scoped family is not asked.** Its columns are the scoped pass's own, one per view,
 /// and it has no blob row to be read from — the record blob is bundle-wide and addressed by a
 /// column's position in `declared_scalars`, which a family has none of (`views.md` §5). So a
 /// scoped string column keeps its arena whatever its flags say, and `write_scoped_columns` writes
 /// its value column from it.
-pub(crate) fn takes_extents(
+pub(crate) fn may_take_extents(
     schema: &crate::config::Schema,
     attribute: &crate::config::Attribute,
 ) -> bool {
@@ -3190,6 +3277,86 @@ pub(crate) fn takes_extents(
         ScalarType::Utf8 | ScalarType::Keyword | ScalarType::Text
     ) && !attribute.render
         && !value_column_is_owed(schema, attribute)
+}
+
+/// Is the arena route closed to this column whatever the arena would cost?
+///
+/// **`text` takes extents on the permutation and not on the size** (`build-column-extents.md` §2).
+/// Its arena is filled by a second decode of the source's prose, in entity order, because the
+/// token index and the record blob both walk entity space and neither can afford a random read per
+/// document. That second decode was the largest single cost in the build — `attribute_tail` 6,369.1 s
+/// against 890.2 s at the 10⁸ PaperSeek rung — and it is paid whether or not the arena would have
+/// fitted in memory. So a `text` column has one route and the choice below does not reach it.
+pub(crate) fn extents_are_forced(
+    schema: &crate::config::Schema,
+    attribute: &crate::config::Attribute,
+) -> bool {
+    attribute.ty == ScalarType::Text && may_take_extents(schema, attribute)
+}
+
+/// **Which declared columns the join spills as record-blob extents, decided once for the build.**
+///
+/// [`may_take_extents`] says which columns have two routes; this says which of them take the
+/// spilled one. The choice is [`crate::residency::plan_routes`]'s and is the modelled arena
+/// against the space free on the output filesystem: an arena the disk cannot hold is the ENOSPC
+/// that stops a build at hour three, and an arena it can hold costs the build a compression pass
+/// it did not need. Both routes write the same bundle, byte for byte, so nothing outside the build
+/// can observe which was taken.
+///
+/// Indexed by declaration position, and `false` for every column the route is not available to, so
+/// a caller asks one question of one structure.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ColumnRoutes {
+    extents: Vec<bool>,
+}
+
+impl ColumnRoutes {
+    /// Every column the extent route is available to takes it — the route a build takes when no
+    /// arena fits, and the one the record blob's own tests want.
+    pub(crate) fn every_available(schema: &crate::config::Schema) -> Self {
+        ColumnRoutes {
+            extents: schema
+                .attributes
+                .iter()
+                .map(|a| may_take_extents(schema, a))
+                .collect(),
+        }
+    }
+
+    /// Only the columns with no arena route at all — the `text` family ([`extents_are_forced`]).
+    pub(crate) fn forced_only(schema: &crate::config::Schema) -> Self {
+        ColumnRoutes {
+            extents: schema
+                .attributes
+                .iter()
+                .map(|a| extents_are_forced(schema, a))
+                .collect(),
+        }
+    }
+
+    /// Does the column at this declaration position spill its characters as extents?
+    ///
+    /// A position past the schema answers `false`: the record blob's tests build a `ColumnRoutes`
+    /// over the schema they are given, and a column that is not in it has no route either way.
+    pub(crate) fn takes_extents(&self, column: usize) -> bool {
+        self.extents.get(column).copied().unwrap_or(false)
+    }
+
+    /// Move one column onto the arena route. [`crate::residency::plan_routes`]'s only writer.
+    pub(crate) fn take_arena(&mut self, column: usize) {
+        self.extents[column] = false;
+    }
+
+    /// The declaration positions that spilled, for the line the build prints and the report it
+    /// returns.
+    pub(crate) fn spilled(&self) -> Vec<usize> {
+        self.extents
+            .iter()
+            .enumerate()
+            .filter(|&(_, &spilled)| spilled)
+            .map(|(index, _)| index)
+            .collect()
+    }
 }
 
 /// The entity-ordered columns' rows as one ascending stream, for the blob's merge.
@@ -5638,14 +5805,22 @@ mod tests {
             let schema = schema(declared(ty, index, render));
             let attribute = &schema.attributes[0];
             assert_eq!(
-                takes_extents(&schema, attribute),
+                may_take_extents(&schema, attribute),
                 expected,
                 "{ty:?} index={index} render={render}"
             );
-            if takes_extents(&schema, attribute) {
+            if may_take_extents(&schema, attribute) {
                 assert!(
                     blob_resident(&schema, attribute),
                     "{ty:?} index={index} render={render}: spilled with no blob row to land in"
+                );
+                // The arena route is closed to `text` and open to the rest: the second decode a
+                // `text` arena costs is the source permutation and not the arena's size
+                // (`build-column-extents.md` §2).
+                assert_eq!(
+                    extents_are_forced(&schema, attribute),
+                    ty == ScalarType::Text,
+                    "{ty:?} index={index} render={render}: the wrong route is the unconditional one"
                 );
             }
         }
@@ -5714,7 +5889,7 @@ mod tests {
             vocabularies: vocabularies_at(crate::config::Visibility::Derived),
         };
         // One entity; values are per column, in declaration order. The keyword's value arrives
-        // as an extent rather than as a column, [`takes_extents`] having routed it there, and the
+        // as an extent rather than as a column, [`ColumnRoutes`] having routed it there, and the
         // blob's answer is what this test is about either way.
         let by_entity = vec![
             EntityColumn::from_values(&scratch, ScalarType::U16, [ScalarValue::U16(7)], "colour")
@@ -5724,9 +5899,15 @@ mod tests {
         let mut notes = crate::extents::ExtentColumn::new(dir.path(), 1, "note");
         notes.push_extent(&[(0u32, "kept")]).expect("an extent");
         let open = [notes.open().expect("the extents open")];
-        let written =
-            write_record_blob(dir.path(), &schema, by_entity[0].len() as u64, &by_entity, &open)
-                .expect("blob stage writes");
+        let written = write_record_blob(
+            dir.path(),
+            &schema,
+            by_entity[0].len() as u64,
+            &ColumnRoutes::every_available(&schema),
+            &by_entity,
+            &open,
+        )
+        .expect("blob stage writes");
         assert!(!written.is_empty());
         let blob = tessera_filter::RecordBlob::open_dir(
             &dir.path().join("attrs/record"),
@@ -5764,10 +5945,11 @@ mod tests {
             dir.path(),
             &schema,
             only_category[0].len() as u64,
+            &ColumnRoutes::every_available(&schema),
             &only_category,
             &[],
         )
-            .expect("blob stage accepts");
+        .expect("blob stage accepts");
         assert!(written.is_empty(), "no blob-resident column, no files");
 
         // But the same category under `public` owes no value column and no postings, so
@@ -5787,14 +5969,15 @@ mod tests {
                 )
                 .expect("typed column"),
             ];
-        let written =
-            write_record_blob(
+        let written = write_record_blob(
             dir.path(),
             &schema,
             only_category[0].len() as u64,
+            &ColumnRoutes::every_available(&schema),
             &only_category,
             &[],
-        ).expect("blob stage writes");
+        )
+        .expect("blob stage writes");
         assert!(
             !written.is_empty(),
             "a public category with neither flag has no entity-space home; without a blob row \
@@ -5865,7 +6048,7 @@ mod tests {
     /// gathered from two families of extents and an entity-ordered column, ordered by tag, with
     /// the last chunk that carried a value winning.
     ///
-    /// **Two spilled families and a column**, because that is the shape [`takes_extents`] routes
+    /// **Two spilled families and a column**, because that is the shape [`ColumnRoutes`] routes
     /// on a real schema: a `keyword` column with neither `index` nor `render` takes the extents a
     /// `text` column takes, and a fixed-width column with the same flags stays where it was. A
     /// tag reaching the merge from two sources at one entity would be a value overwriting
@@ -5901,13 +6084,13 @@ mod tests {
         };
         for attribute in &schema.attributes[1..] {
             assert!(
-                takes_extents(&schema, attribute),
+                may_take_extents(&schema, attribute),
                 "'{}' is what this test is about",
                 attribute.name
             );
         }
         assert!(
-            !takes_extents(&schema, &schema.attributes[0]),
+            !may_take_extents(&schema, &schema.attributes[0]),
             "a fixed-width column stays a column"
         );
 
@@ -5964,7 +6147,15 @@ mod tests {
                 EntityColumn::spilled(&scratch, ScalarType::Keyword, N).expect("the note slot"),
                 EntityColumn::spilled(&scratch, ScalarType::Text, N).expect("the prose slot"),
             ];
-            write_record_blob(dir, &schema, N as u64, &by_entity, &open).expect("the blob merges")
+            write_record_blob(
+                dir,
+                &schema,
+                N as u64,
+                &ColumnRoutes::every_available(&schema),
+                &by_entity,
+                &open,
+            )
+            .expect("the blob merges")
         };
 
         let mut written: Vec<Vec<(PathBuf, Vec<u8>)>> = Vec::new();

@@ -172,3 +172,141 @@ ever failed.
 
 ⊘ **A `utf8` column was not built.** It is not declarable from TOML, so the route's `utf8` arm is
 covered by `pipeline::tests::the_extent_route_is_the_readers_and_not_the_type` and by no build.
+
+## 2026-09-11: which route, and what the choice is keyed on
+
+**Date** 2026-09-11. **Branch** `perf/extent-route-threshold`, against main at 1db5d16e. Same box,
+same corpora, same slicer and sampler. The question is the one the section above left open: the
+extent route saves a quarter of the peak disk and costs 13% of the entity-order stages at a rung
+whose arena fits, so which rungs should take it.
+
+Two binaries, both from this branch, differing in one token — `build` calling `pipeline::build`
+with `ExtentRoute::Arena` or `ExtentRoute::Extents` rather than `Derived`. Everything else is held
+still: the same memory budget, the same batch stride, the same band and dictionary plans. Varying
+the free space or the budget instead would have varied the plan as well.
+
+    export CARGO_TARGET_DIR=<a target dir of this worktree>
+    # three binaries: the derived route, and one forced down each
+    cargo build --release --bin tessera            # tessera-derived
+    sed -i 's/ExtentRoute::Derived/ExtentRoute::Arena/' crates/tessera-build/src/lib.rs
+    cargo build --release --bin tessera            # tessera-arena, then restore and repeat for Extents
+    ARENA=/tmp/tessera-arena EXTENTS=/tmp/tessera-extents DERIVED=/tmp/tessera-derived \
+      LADDER=data/ladder WORK=/tmp/routes bash probes/2026-09-10-blob-resident-strings/routes.sh
+
+## The arena route is faster everywhere it was measured
+
+Quiet box — no foreign process over 20% of a core before or after any run, checked either side of
+each — oracle pairs written, the derived memory budget (36.5 GiB ± 0.4). Wall clock is the whole
+build; peak disk is allocated blocks over the bundle root, sampled every 0.5 s.
+
+| items | arena wall | extents wall | | arena peak | extents peak | |
+|---|---|---|---|---|---|---|
+| 16,299,326 | **38.6 s** | 42.0 | +8.8% | 1.94 GB | **1.38** | −29% |
+| 30,104,813 | **73.7** | 78.5 | +6.5% | 3.31 | **2.37** | −28% |
+| 64,657,133 | **162.3** | 170.6 | +5.1% | 6.61 | **4.59** | −31% |
+| 125,789,091 | **324.7** | 356.1 | +9.7% | 12.60 | **9.26** | −26% |
+
+The route the derived rule takes at all four is the arena. Both binaries' peaks agree with the
+section above's to within 3%, which is that section's own sampler margin.
+
+Per stage at 125,789,091 items: the arena route's `attribute_tail` is 42.6 s against 58.0 and its
+`record_blob` 28.9 against 44.5, where `filter_postings` is 25.2 against 24.4. The extent route
+pays zstd twice — once in the join's own lane and once decompressing and recompressing at the
+merge — and the arena route pays neither.
+
+## There is no crossover in memory, because the build OOMs first
+
+`--memory-budget 4g` on every run, so the plan is one build and only the page cache moves;
+`--no-oracle-pairs`; a `systemd-run --scope` with `MemoryMax` and `MemorySwapMax=0`. Wall seconds.
+
+| cap | 30.1×10⁶ arena | extents | 125.8×10⁶ arena | extents |
+|---|---|---|---|---|
+| none (46 GiB available) | **73.7** | 78.5 | **324.7** | 356.1 |
+| 8 GiB | **72.4** | 78.3 | **352.1** | 364.9 |
+| 6 GiB | **72.2** | 79.6 | **379.9** | 383.9 |
+| 5 GiB | — | — | OOM-killed | — |
+| 4 GiB | 79.8 | **79.1** | OOM-killed | — |
+| 3 GiB | **85.0** | 93.2 | — | — |
+
+The 30.1×10⁶ pair at 4 GiB is the one point of the sweep where the two routes are level, and the
+next cap down parts them again in the arena's favour. The uncapped 30.1×10⁶ and 125.8×10⁶ rows are
+the derived budget rather than the 4 GiB one, so they are the trend's end and not a fifth point on
+its curve.
+
+**The arena's reads do not degrade under pressure.** At 125,789,091 items `record_blob` is 28.9 s
+uncapped, 28.8 s at 8 GiB and 28.7 s at 6 GiB on the arena route, against 44.5, 39.3 and 40.0 on
+the extent route — three caps spanning a factor of eight in page cache, and no trend. An arena is a permutation of the source, but the join writes each chunk of it in
+that chunk's own entity order, so the blob's ascending merge reads it as a few dozen ascending runs
+rather than at random — which is what `probes/2026-09-03-entity-ordered-arena/` found for the fill
+order and is why the page cache holding less of it costs nothing. What does degrade under a cap is
+the join: `attribute_tail` 42.6 s uncapped, 66.3 at 8 GiB, 77.5 at 6 GiB.
+
+⊘ **Below 6 GiB the 125.8×10⁶ build cannot run at all.** At 5 GiB it is OOM-killed in `tiler_sort`
+at 5,072 MiB and at 4 GiB in `filter_postings` at 4,064 MiB — stages whose memory no route reaches.
+The modelled entity-order window is 13,063 MiB there, so the cap the build dies at is 2.1× under
+the window, and the route cannot be the thing that decides whether a build fits memory.
+
+## So the route is keyed on the disk
+
+The choice is per column, at the plan: a column with two routes moves onto the arena and stays
+there while the entity-order stages' largest phase still models inside half the space free on the
+output filesystem. Half, because the filesystem is shared and the choice stands for the whole
+build.
+
+The modelled scratch on this schema, arena route, falls with the corpus as the per-column constants
+amortise: 131.3 B/item at 16.3×10⁶, 116.6 at 30.1×10⁶, 108.7 at 64.7×10⁶ and 104.3 at 125.8×10⁶.
+Extrapolating on the last of those, the crossover is at
+
+| free space | crossover |
+|---|---|
+| 190 GB | 0.91×10⁹ items |
+| 380 GB | 1.82×10⁹ |
+| 459 GB, an empty disk | 2.20×10⁹ |
+
+and 3,495,729,729 rows model at 365 GB of scratch, which spills at any free space this box has had.
+All four slices took the arena, at 2,041 / 3,346 / 6,702 / 12,519 MiB of modelled scratch against
+190,515 to 228,956 MiB free.
+
+⊘ **Rung 6 is modelled and not built**, from the per-item fit above.
+`residency::tests::the_gbif_rung_spills_where_the_slice_that_fits_does_not` holds the two ends of
+that table against the rule.
+
+⊘ **Free space is not a constant, and the crossover moves with it.** The output filesystem held
+between 190 and 381 GB free over the course of these runs, which moves the crossover by a factor of
+two. Every corpus in the ladder is two orders of magnitude below it and every route above is the
+same either way, but a corpus near that line would route two ways on two days — byte-identical, and
+5 to 10% apart on the clock. The build prints the route, the modelled scratch and the free space it
+was decided against, which is what makes two such runs readable against each other.
+
+## The bundle is the same bundle, down either route
+
+Each corpus built with both binaries and compared file by file. In every case the only files that
+differ are `MANIFEST.json`, in `created_at` alone and checked field by field, and the `CURRENT`
+that carries its digest.
+
+| corpus | items | files | the route actually differed |
+|---|---|---|---|
+| `gbif-64p` | 25,846,007 | 32 | **yes** — `scientificname` took the arena down one and extents down the other |
+| `multiview` | 21,300 | 111 | no bundle-wide string column has two routes; its `text` column is group-scoped |
+| `treeoflife-1m` | 1,000,000 | 61 | no — `common_name` is `text` and spills either way |
+| `medcpt-1m` | 1,000,000 | 36 | no — `title` and `mesh_major` are `text` |
+| `geonames` | 13,463,857 | 70 | no — `name` is `text` |
+
+Only `gbif-64p` carries a column the choice reaches, so the other four are a regression check on
+the routing rather than a check of it. `crates/tessera-build/tests/extent_route.rs` is the case no
+ladder corpus has: one build carrying a blob-resident `keyword`, an indexed `keyword` and a `text`
+column, forced down both routes, byte-identical, with the routes read back from the build's report
+rather than assumed.
+
+## What is not measured
+
+⊘ **Nothing was measured above 1.26×10⁸ items**, and nothing above a 5.71 GB arena. The claim that
+the arena's reads stay sequential is structural — it is the join's chunk sort — but the largest
+arena it has been checked on is that one.
+
+⊘ **The cap sweep squeezes the page cache and not the disk.** No run was made with the output
+filesystem near full, which is the condition the route exists to avoid.
+
+⊘ **One column, one value distribution**, as above: `scientificname` is 757,711 distinct values over
+125,789,091 rows. A blob-resident column of near-unique values spills more and saves less, and
+would reach the crossover at a smaller corpus.

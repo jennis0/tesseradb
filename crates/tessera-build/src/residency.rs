@@ -620,16 +620,23 @@ pub(crate) fn entity_order_residency(
     Residency { terms }
 }
 
-/// The whole tail's residency for this build: the schema, the item count, and two figures per
-/// input — a member source's declared key values, read from its footer, and a string column's
-/// characters, read from a sample of its row groups ([`payloads_per_item`]).
+/// What the entity-order model is arithmetic over for this build: one [`ColumnCost`] per declared
+/// column, every member entry the layers declare, and a ceiling on any one level's.
 ///
 /// **Footers, and about 2×10⁶ values a string column.** The row counts are metadata; the characters
 /// are not, and the metadata figure for them is wrong by a factor of four on the corpus that ran
 /// out of disk ([`ColumnCost`]). A file that cannot be opened, or a column that is not in it,
 /// contributes zero rather than refusing: the pre-flight is an estimate, and a build blocked
 /// because a footer would not parse is a worse outcome than one that under-reads.
-pub(crate) fn model(args: &crate::BuildArgs, n: u64, payloads: &[f64]) -> Residency {
+///
+/// Separated from [`entity_order_residency`] because [`plan_routes`] varies one column's route at
+/// a time and must not re-read a footer per candidate.
+fn model_inputs(
+    args: &crate::BuildArgs,
+    n: u64,
+    payloads: &[f64],
+    routes: &crate::pipeline::ColumnRoutes,
+) -> (Vec<ColumnCost>, u64, u64) {
     // Scaled by `n` rather than taken whole, so a `--limit` build is charged the prefix it builds
     // and not the file it reads from.
     let columns: Vec<ColumnCost> = args
@@ -637,13 +644,14 @@ pub(crate) fn model(args: &crate::BuildArgs, n: u64, payloads: &[f64]) -> Reside
         .attributes
         .iter()
         .zip(payloads)
-        .map(|(attribute, &per_item)| ColumnCost {
+        .enumerate()
+        .map(|(index, (attribute, &per_item))| ColumnCost {
             ty: attribute.ty,
             payload_bytes: payload(per_item, n),
-            // The join's own predicate, called rather than restated: a model that decided the
-            // route for itself would charge an arena the build no longer fills, or the other way
-            // round on the next column whose readers change.
-            extents: crate::pipeline::takes_extents(&args.schema, attribute),
+            // The build's own routing, read rather than restated: a model that decided the route
+            // for itself would charge an arena the build no longer fills, or the other way round
+            // on the next column whose readers change.
+            extents: routes.takes_extents(index),
             // The same test the emit itself makes, called rather than restated: a text column
             // earns an index exactly where it is owed postings.
             text_index: attribute.ty == ScalarType::Text
@@ -672,7 +680,132 @@ pub(crate) fn model(args: &crate::BuildArgs, n: u64, payloads: &[f64]) -> Reside
         entries = entries.saturating_add(declared);
         level_entries = level_entries.saturating_add(rows);
     }
-    entity_order_residency(n, &columns, entries, level_entries)
+    (columns, entries, level_entries)
+}
+
+/// **How much of the free space an arena has to fit inside to be worth filling.**
+///
+/// The two routes are not equally wrong. Taking the extents where the arena would have fitted
+/// costs a compression pass the build did not need, measured at 5–10% of the whole build's wall
+/// clock at four row counts from 16.3×10⁶ to 125.8×10⁶ GBIF occurrences. Taking the arena where
+/// it does not fit costs the ENOSPC that stopped the 3.50×10⁹-row rung with 93 GB of its bundle
+/// written (`probes/2026-09-10-build-disk/`). One is a percentage and the other is a build
+/// that does not finish, so the rule leaves room rather than aiming at the crossover.
+///
+/// Room for a factor of two, because the output filesystem is shared with whatever else the
+/// machine is doing and this choice is made once, at the plan, for the length of the build.
+///
+/// What is compared against it is [`stage_scratch`], which is the entity-order stages' own files
+/// and not the whole build's disk — and on the corpus this was measured over the two are nearly
+/// the same number: 2,041 MiB modelled against a 1,853 MiB measured peak at 16.3×10⁶ GBIF
+/// occurrences, and 12,519 against 12,011 at 125.8×10⁶, the measured figure being the whole bundle
+/// root (`probes/2026-09-10-blob-resident-strings/`). So a build the rule sends down the arena is
+/// one the pre-flight then passes rather than warns about, with the second factor of two left over
+/// for the corpus whose bundle is a larger share of its peak than GBIF's.
+const ROUTE_HEADROOM: u64 = 2;
+
+/// **The route each declared column's characters take, and the residency it settles on.**
+///
+/// A column with two routes ([`crate::pipeline::may_take_extents`]) takes the arena where the
+/// entity-order stages have the disk for it and the record blob's extents where they do not.
+/// `free` is the space on the output filesystem, or `None` where that is unknowable, which spills
+/// every column the route is available to: the arena is the larger footprint and the one a build
+/// runs out of disk on, so an unreadable filesystem takes the smaller.
+///
+/// **The disk and not the memory budget.** An arena is read at an entity by exactly two passes —
+/// the value column's dictionary and the row tail — and a column routed here has neither, so its
+/// only reader is the record blob's merge, which walks entity space ascending. The join writes
+/// each chunk of the arena in that chunk's entity order, so the merge reads it as a handful of
+/// ascending runs rather than at random, and squeezing the page cache does not break it: measured
+/// at 125,789,091 GBIF occurrences uncapped and under cgroup caps of 8 and 6 GiB, `record_blob`
+/// held at 28.7–28.9 s on the arena route while the extent route's stayed at 39.3–44.5 s
+/// (`probes/2026-09-10-blob-resident-strings/`). Below 6 GiB the build is OOM-killed in a stage no
+/// route reaches. What the arena does cost is space — 26 to 31% more peak disk at every row count
+/// measured — and space is what the 3.50×10⁹-row rung ran out of.
+///
+/// What is compared is not the arena on its own: it stands beside every other declared column, the
+/// sorted source ids, the ordinal→entity map and the member spill, all of which are files in the
+/// same window. So the test is the **largest phase of the entity-order stages' own scratch**
+/// against the free space with [`ROUTE_HEADROOM`] left over. ⊘ That window is not the whole build's
+/// disk: the bundle's own bytes and the postings are [`disk`]'s and no route moves them. The
+/// pre-flight covers those and reports on them.
+///
+/// **One column at a time, in declaration order.** Two arenas that each fit alone need not fit
+/// together, so a column is promoted only against the window the promotions before it already
+/// bought. Declaration order rather than ascending size: the payload figure is a sample of three
+/// row groups ([`payloads_per_item`]), so ordering by it would let a byte of sampling noise
+/// re-route two columns of similar size, where the declaration does not move.
+///
+/// The routes change no byte of the bundle. What they change is where the characters stand while
+/// the build runs, which is why this is the disk's business and not the schema's.
+pub(crate) fn plan_routes(
+    args: &crate::BuildArgs,
+    n: u64,
+    payloads: &[f64],
+    free: Option<u64>,
+) -> (crate::pipeline::ColumnRoutes, Residency) {
+    let spilled = crate::pipeline::ColumnRoutes::every_available(&args.schema);
+    let (columns, entries, level_entries) = model_inputs(args, n, payloads, &spilled);
+    choose_routes(&args.schema, n, columns, entries, level_entries, free)
+}
+
+/// [`plan_routes`] unless the caller named the route ([`crate::ExtentRoute`]), in which case the
+/// named one is taken and the model is rebuilt over it — so the disk forecast a forced build
+/// prints describes the build it is about to run.
+pub(crate) fn routes_for(
+    args: &crate::BuildArgs,
+    n: u64,
+    payloads: &[f64],
+    free: Option<u64>,
+    route: crate::ExtentRoute,
+) -> (crate::pipeline::ColumnRoutes, Residency) {
+    let forced = match route {
+        crate::ExtentRoute::Derived => return plan_routes(args, n, payloads, free),
+        crate::ExtentRoute::Arena => crate::pipeline::ColumnRoutes::forced_only(&args.schema),
+        crate::ExtentRoute::Extents => {
+            crate::pipeline::ColumnRoutes::every_available(&args.schema)
+        }
+    };
+    let (columns, entries, level_entries) = model_inputs(args, n, payloads, &forced);
+    let tail = entity_order_residency(n, &columns, entries, level_entries);
+    (forced, tail)
+}
+
+/// [`plan_routes`] over the model's inputs rather than the build's, so the rule can be tested at a
+/// schema and a free-space figure without a corpus behind them. `columns` arrives with every
+/// available column spilled.
+fn choose_routes(
+    schema: &crate::config::Schema,
+    n: u64,
+    mut columns: Vec<ColumnCost>,
+    entries: u64,
+    level_entries: u64,
+    free: Option<u64>,
+) -> (crate::pipeline::ColumnRoutes, Residency) {
+    let mut routes = crate::pipeline::ColumnRoutes::every_available(schema);
+    let ceiling = free.unwrap_or(0) / ROUTE_HEADROOM;
+    for (index, attribute) in schema.attributes.iter().enumerate() {
+        if !routes.takes_extents(index) || crate::pipeline::extents_are_forced(schema, attribute) {
+            continue;
+        }
+        columns[index].extents = false;
+        let candidate = entity_order_residency(n, &columns, entries, level_entries);
+        if stage_scratch(&candidate) <= ceiling {
+            routes.take_arena(index);
+        } else {
+            columns[index].extents = true;
+        }
+    }
+    let tail = entity_order_residency(n, &columns, entries, level_entries);
+    (routes, tail)
+}
+
+/// **What the entity-order stages have on the disk at once**: the largest phase's mapped terms.
+///
+/// The anonymous terms are not in it. They are the publication's Roaring and one slack constant,
+/// neither of which a route moves, and they are memory rather than space.
+pub(crate) fn stage_scratch(residency: &Residency) -> u64 {
+    residency.peak().1
 }
 
 /// **What the whole build asks the disk for**, phase by phase, so the pre-flight refuses on the
@@ -1246,6 +1379,198 @@ mod tests {
         }
     }
 
+    /// A schema of string columns, each named by its position, for the route tests. `index` is the
+    /// declaration flag, so the second element of a case decides whether the column is offered the
+    /// extent route at all.
+    fn route_schema(columns: &[(ScalarType, bool)]) -> crate::config::Schema {
+        crate::config::Schema {
+            attributes: columns
+                .iter()
+                .enumerate()
+                .map(|(index, &(ty, indexed))| crate::config::Attribute {
+                    name: format!("column{index}"),
+                    field: None,
+                    title: None,
+                    ty,
+                    analyser: None,
+                    vocabulary: None,
+                    value_set: None,
+                    index: indexed,
+                    render: false,
+                })
+                .collect(),
+            vocabularies: Default::default(),
+        }
+    }
+
+    /// **The route is the modelled arena against the free space.** A column the record blob alone
+    /// reads fills an arena while the entity-order stages have the disk for one and spills its
+    /// characters as record-blob extents when they do not, which is the whole of the rule
+    /// (`build-column-extents.md` §2).
+    ///
+    /// The two figures straddle the whole window rather than the arena: what the column is charged
+    /// against is every file standing beside it, and at 10⁷ items the source ids and the
+    /// ordinal→entity map are 120 MB of that before a character.
+    #[test]
+    fn a_string_column_fills_an_arena_while_one_fits_and_spills_when_it_does_not() {
+        let n = 10_000_000;
+        let payload = 400 * n;
+        let schema = route_schema(&[(ScalarType::Keyword, false)]);
+        let scratch_with_arena = stage_scratch(&entity_order_residency(
+            n,
+            &[column(ScalarType::Keyword, payload)],
+            0,
+            0,
+        ));
+
+        let fits = choose_routes(
+            &schema,
+            n,
+            vec![spilled(ScalarType::Keyword, payload)],
+            0,
+            0,
+            Some(scratch_with_arena * ROUTE_HEADROOM),
+        );
+        assert!(
+            !fits.0.takes_extents(0),
+            "a window inside the free space's headroom keeps the arena"
+        );
+
+        let does_not = choose_routes(
+            &schema,
+            n,
+            vec![spilled(ScalarType::Keyword, payload)],
+            0,
+            0,
+            Some(scratch_with_arena * ROUTE_HEADROOM - 1),
+        );
+        assert!(
+            does_not.0.takes_extents(0),
+            "a window over the free space's headroom spills"
+        );
+        // And the residency the caller carries away is the one the routes describe, not the
+        // all-spilled model the choice started from.
+        assert!(stage_scratch(&fits.1) > stage_scratch(&does_not.1));
+    }
+
+    /// **A filesystem that will not say how much is free spills.** The arena is the larger
+    /// footprint and the one a build runs out of disk on, so the route with nothing to go on takes
+    /// the smaller.
+    #[test]
+    fn an_unreadable_filesystem_spills_every_column_it_can() {
+        let n = 1_000_000;
+        let schema = route_schema(&[(ScalarType::Keyword, false), (ScalarType::Utf8, false)]);
+        let columns = vec![
+            spilled(ScalarType::Keyword, 400 * n),
+            spilled(ScalarType::Utf8, 400 * n),
+        ];
+        let (routes, _) = choose_routes(&schema, n, columns, 0, 0, None);
+        assert!(routes.takes_extents(0) && routes.takes_extents(1));
+    }
+
+    /// **`text` spills however much disk there is** (`build-column-extents.md` §2). Its arena is
+    /// filled by a second decode of the source in entity order, and that cost is the source
+    /// permutation rather than the arena's size, so no amount of space buys it back. An indexed
+    /// `keyword` is the other unconditional case and goes the other way: the dictionary writer
+    /// reads it at an entity, so it keeps its arena however little space is left.
+    #[test]
+    fn the_two_unconditional_families_ignore_the_free_space() {
+        let n = 1_000_000;
+        let payload = 400 * n;
+        let schema = route_schema(&[(ScalarType::Text, true), (ScalarType::Keyword, true)]);
+        for free in [1 << 20, 1 << 30, 1 << 40] {
+            let columns = vec![
+                spilled(ScalarType::Text, payload),
+                column(ScalarType::Keyword, payload),
+            ];
+            let (routes, _) = choose_routes(&schema, n, columns, 0, 0, Some(free));
+            assert!(routes.takes_extents(0), "text spills with {free} bytes free");
+            assert!(
+                !routes.takes_extents(1),
+                "an indexed keyword keeps its arena with {free} bytes free"
+            );
+        }
+    }
+
+    /// **Two arenas that each fit alone need not fit together.** A column is promoted against the
+    /// window the promotions before it already bought, so the space is spent once and not once per
+    /// column. Declaration order decides which one gets it, which is what makes the answer the
+    /// same on two runs over one corpus.
+    #[test]
+    fn a_second_arena_is_spilled_where_the_space_only_covers_one() {
+        let n = 10_000_000;
+        let payload = 400 * n;
+        let schema = route_schema(&[(ScalarType::Keyword, false), (ScalarType::Utf8, false)]);
+        let one = stage_scratch(&entity_order_residency(
+            n,
+            &[
+                column(ScalarType::Keyword, payload),
+                spilled(ScalarType::Utf8, payload),
+            ],
+            0,
+            0,
+        ));
+        let both = stage_scratch(&entity_order_residency(
+            n,
+            &[
+                column(ScalarType::Keyword, payload),
+                column(ScalarType::Utf8, payload),
+            ],
+            0,
+            0,
+        ));
+        assert!(one < both, "the fixture has to straddle something");
+        let columns = vec![
+            spilled(ScalarType::Keyword, payload),
+            spilled(ScalarType::Utf8, payload),
+        ];
+        let (routes, _) = choose_routes(&schema, n, columns, 0, 0, Some(one * ROUTE_HEADROOM));
+        assert!(!routes.takes_extents(0), "the first column takes the arena");
+        assert!(
+            routes.takes_extents(1),
+            "the second is charged against the window the first left"
+        );
+    }
+
+    /// **The rung the route exists for, at the schema it exists for.** GBIF's `scientificname` is
+    /// a `keyword` with neither `index` nor `render`, measured at 31.22 characters an item over
+    /// 125,789,091 occurrences, beside an indexed `keyword` at 6.60 and three member rows an item
+    /// (`probes/2026-09-10-blob-resident-strings/`). At 3,495,729,729 rows its arena is 155 GB
+    /// (modelled) and the entity-order stages want about 365 GB of scratch around it, which is
+    /// more than the box has — so the column spills, which is the case the extent route was built
+    /// for. The same schema at 1.26×10⁸ rows fits with two orders of magnitude to spare and keeps
+    /// its arena.
+    #[test]
+    fn the_gbif_rung_spills_where_the_slice_that_fits_does_not() {
+        // The two string columns and the fixed-width ones, at the characters an item the corpus
+        // measures. Positions follow `data/ladder/gbif`'s declaration: category, indexed keyword,
+        // u16, blob-resident keyword.
+        let gbif = |n: u64| {
+            vec![
+                column(ScalarType::U8, 0),
+                column(ScalarType::Keyword, (6.60 * n as f64) as u64),
+                column(ScalarType::U16, 0),
+                spilled(ScalarType::Keyword, (31.22 * n as f64) as u64),
+            ]
+        };
+        let schema = route_schema(&[
+            (ScalarType::U8, false),
+            (ScalarType::Keyword, true),
+            (ScalarType::U16, false),
+            (ScalarType::Keyword, false),
+        ]);
+        // 459 GB of disk, which is what the box the rung was attempted on has.
+        let free = Some(459_000_000_000);
+        for (n, spills) in [(125_789_091u64, false), (3_495_729_729u64, true)] {
+            let (routes, _) = choose_routes(&schema, n, gbif(n), 3 * n, n, free);
+            assert_eq!(
+                routes.takes_extents(3),
+                spills,
+                "at {n} rows the blob-resident keyword takes the wrong route"
+            );
+        }
+    }
+
     /// **A text index costs a second set of files, at the same time as the first.** The runs spill
     /// while the column they are tokenised from is still resident, so the disk pre-flight's column
     /// phase has to see both — and neither may reach the memory figure.
@@ -1674,7 +1999,8 @@ require_member_visibility = "none"
         }
 
         let (args, _temp) = fixture(N);
-        let model = model(&args, N, &payloads_per_item(&args));
+        let free = crate::pipeline::available_disk(&args.out);
+        let (_routes, model) = plan_routes(&args, N, &payloads_per_item(&args), free);
         println!("model: {} MiB{}", model.total() >> 20, model.describe());
         crate::build_observed(&args, &Trace).unwrap();
         println!(

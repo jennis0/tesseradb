@@ -448,6 +448,16 @@ pub struct BuildReport {
     /// bytes its index cost (`unique_key`). Printed at every build; a key unique per row earns a
     /// warning and never a refusal.
     pub keyword_cardinalities: Vec<KeywordCardinality>,
+    /// The declared columns whose characters the join spilled as record-blob extents rather than
+    /// filling an entity-ordered arena with them, by name, in declaration order
+    /// (`build-column-extents.md` §2).
+    ///
+    /// **Returned because the route is derived from the free space and changes no byte of the
+    /// bundle.** A `text` column is here at every build; a `keyword` or `utf8` column the record
+    /// blob alone reads is here when its arena would not fit beside the rest of the entity-order
+    /// stages, which is a property of the machine and not of the corpus. Two builds of one corpus
+    /// whose wall clocks differ have this list as the first thing to compare.
+    pub spilled_columns: Vec<String>,
 }
 
 /// **How many of the grid's cells the placed points actually landed in**, beside how many points
@@ -1025,7 +1035,35 @@ struct StagedItem {
 /// arrays rather than one struct per item. [`build_in_memory`] is the older, linear
 /// implementation, kept as the byte-equality oracle the two are tested against.
 pub fn build(args: &BuildArgs) -> Result<BuildReport> {
-    pipeline::build(args, &observer::NoopObserver)
+    pipeline::build(args, &observer::NoopObserver, ExtentRoute::Derived)
+}
+
+/// Which route [`build`] gives a string column that has two — an entity-ordered arena under
+/// `.build-tmp/`, or one record-blob extent per join chunk (`build-column-extents.md` §2).
+///
+/// **A seam for measurement and for tests**, beside [`BuildArgs::band_rows`] and for the same
+/// reason: the derived route is the modelled scratch against the space free on the output
+/// filesystem, and a corpus small enough to build in a test cannot reach either end of that. It is
+/// also what lets a probe time the two routes against each other with the rest of the plan held
+/// still, where varying the free space would vary the machine as well.
+///
+/// It changes no byte of the bundle. `tests/extent_route.rs` is what holds that.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ExtentRoute {
+    /// The modelled scratch against the free space, which is what [`build`] takes.
+    #[default]
+    Derived,
+    /// Every column that has an arena route fills one. A `text` column still spills, its second
+    /// decode being the source permutation rather than the arena's size.
+    Arena,
+    /// Every column that has an extent route takes it, which is the shape a build with no room
+    /// reaches on its own.
+    Extents,
+}
+
+/// [`build`] with the string columns' route named rather than derived ([`ExtentRoute`]).
+pub fn build_routed(args: &BuildArgs, route: ExtentRoute) -> Result<BuildReport> {
+    pipeline::build(args, &observer::NoopObserver, route)
 }
 
 /// [`build`], reporting each pipeline stage's duration to `observer` as it completes.
@@ -1037,7 +1075,7 @@ pub fn build_observed(
     args: &BuildArgs,
     observer: &dyn observer::BuildObserver,
 ) -> Result<BuildReport> {
-    pipeline::build(args, observer)
+    pipeline::build(args, observer, ExtentRoute::Derived)
 }
 
 /// The linear, fully in-memory build.
@@ -1419,6 +1457,19 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
     // streaming pipeline reads its attributes column-major already, and one of the two builds
     // paying a transpose is better than two emit paths that could disagree about a record's
     // contents (which `write_manifests` exists to prevent for the same reason).
+    // **The same route, derived the same way**: the streaming build's plan chooses a string
+    // column's home from the modelled arena and the free space (`residency::plan_routes`), and the
+    // oracle must reach the same answer over the same inputs. A column one build spilled and the
+    // other placed at an entity would put its values in the blob under two tags, which is a byte
+    // difference for a reason that is not the entity assignment this build exists to check.
+    let routes = residency::routes_for(
+        args,
+        n,
+        &residency::payloads_per_item(args),
+        pipeline::available_disk(&args.out),
+        ExtentRoute::Derived,
+    )
+    .0;
     let filter_paths = {
         // The oracle's columns are mapped exactly as the streaming pipeline's are (`column.rs`),
         // so this path holds its own `.build-tmp/` for the length of the emit.
@@ -1431,11 +1482,11 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
             .enumerate()
             .map(|(index, attribute)| {
                 // A spilled column's values are its extents in both builds
-                // (`pipeline::takes_extents`, `crate::extents`), so its slot here carries the
-                // length and nothing else. The two builds route on one predicate: a column the
-                // streaming pipeline spills and this one placed at an entity would put the same
-                // value in the blob under two tags.
-                if pipeline::takes_extents(&args.schema, attribute) {
+                // (`pipeline::ColumnRoutes`, `crate::extents`), so its slot here carries the
+                // length and nothing else. The two builds route through one function over one
+                // free-space figure: a column the streaming pipeline spills and this one placed at
+                // an entity would put the same value in the blob under two tags.
+                if routes.takes_extents(index) {
                     return column::EntityColumn::spilled(&scratch, attribute.ty, tiler_items.len())
                         .map_err(|e| {
                             BuildError::Invalid(format!("attribute '{}': {e}", attribute.name))
@@ -1455,7 +1506,7 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
         // both.
         let mut extent_columns: Vec<extents::ExtentColumn> = Vec::new();
         for (index, attribute) in args.schema.attributes.iter().enumerate() {
-            if !pipeline::takes_extents(&args.schema, attribute) {
+            if !routes.takes_extents(index) {
                 continue;
             }
             let mut column = extents::ExtentColumn::new(tmp.path(), index, &attribute.name);
@@ -1493,6 +1544,7 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
             &partition_dir,
             &args.schema,
             tiler_items.len() as u64,
+            &routes,
             &by_entity,
             &open_extents,
         )?);
@@ -1720,7 +1772,21 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
     )?;
     report.attribute_coverage = attribute_coverage;
     report.hierarchy_shapes = published_layers.hierarchy_shapes.clone();
+    report.spilled_columns = spilled_column_names(&args.schema, &routes);
     Ok(report)
+}
+
+/// The spilled columns by name, in declaration order — [`BuildReport::spilled_columns`] for both
+/// build paths, so the oracle's report can be compared with the streaming build's.
+fn spilled_column_names(
+    schema: &crate::config::Schema,
+    routes: &pipeline::ColumnRoutes,
+) -> Vec<String> {
+    routes
+        .spilled()
+        .iter()
+        .map(|&index| schema.attributes[index].name.clone())
+        .collect()
 }
 
 /// The schema as the segment writer wants it: `(name, type)` in declared order.
@@ -2082,6 +2148,7 @@ fn write_manifests(
         artifact_levels: Vec::new(),
         hierarchy_shapes: Vec::new(),
         attribute_coverage: Vec::new(),
+        spilled_columns: Vec::new(),
         keyword_cardinalities,
     })
 }
