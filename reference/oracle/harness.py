@@ -57,6 +57,23 @@ DEFAULT_VIEW = "s0"
 # in `/tmp` carried no record of what produced it.
 
 
+# `tessera_types::BUNDLE_FORMAT`, transcribed. The receipt records the *inputs* a fixture was built
+# from, and the format number is not one of them: it is a property of the engine that built it. A
+# fixture is shared across checkouts at a fixed path, so one built by an engine at another number
+# has to be rebuilt rather than reused — `tessera serve` refuses it, and this suite reads `attrs/`
+# by hand and would decode the older bytes under the newer format's rules.
+BUNDLE_FORMAT = 9
+
+
+def bundle_format_matches(prefix_dir: Path) -> bool:
+    """Whether the bundle under `prefix_dir` was written at the format this checkout reads."""
+    try:
+        manifest = json.loads((prefix_dir / "MANIFEST.json").read_text())
+    except (OSError, ValueError):
+        return False
+    return manifest.get("bundle_format") == BUNDLE_FORMAT
+
+
 def recipe_path(bundle_root: Path) -> Path:
     """The receipt's path — *beside* the bundle, not inside it.
 

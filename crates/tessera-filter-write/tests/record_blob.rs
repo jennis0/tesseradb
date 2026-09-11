@@ -39,8 +39,8 @@ fn open(p: &Paths) -> Result<RecordBlob, RecordError> {
 }
 
 /// The fixture's generation function: entity `e` carries a `u64` and a four-byte string, so every
-/// row is exactly 30 bytes — 8 header + 11 + 11 — and block cutting is arithmetic the test can
-/// state.
+/// row is exactly 22 bytes — 11 + 11, a row carrying no header of its own — and block cutting is
+/// arithmetic the test can state.
 fn fields_for(e: u32) -> Vec<RecordField> {
     vec![
         RecordField {
@@ -54,7 +54,7 @@ fn fields_for(e: u32) -> Vec<RecordField> {
     ]
 }
 
-const ROW_BYTES: usize = 30;
+const ROW_BYTES: usize = 22;
 
 /// Entities deliberately not dense from zero: rank is not entity, and a reader that conflated
 /// them would fail here first.
@@ -262,9 +262,43 @@ fn doctor_directory(path: &Path, doctor: impl FnOnce(&mut Directory)) {
     write_directory(path, &dir);
 }
 
-/// **The B6 case.** A directory offset redirected at another entity's row must refuse on the
-/// discriminant — the typed error, never the neighbour's fields. This is the defect the digest
-/// cannot catch when a build or fold writes a consistent-looking wrong directory.
+/// One block's uncompressed bytes, mutated and written back with the directory corrected — the
+/// corruption a digest over `blocks.bin` would catch in a bundle, but which the reader must also
+/// refuse on its own.
+fn doctor_block(p: &Paths, block: usize, doctor: impl FnOnce(&mut Vec<u8>)) {
+    let mut dir = read_directory(&p.directory);
+    let bytes = std::fs::read(&p.blocks).expect("read blocks");
+    let at = dir.compressed_offset[block] as usize;
+    let len = dir.compressed_len[block] as usize;
+    let mut plain = zstd::bulk::decompress(
+        &bytes[at..at + len],
+        dir.uncompressed_len[block] as usize * 4 + 1024,
+    )
+    .expect("decompress");
+    doctor(&mut plain);
+    let recompressed = zstd::bulk::compress(&plain, 3).expect("compress");
+
+    let mut out = Vec::with_capacity(bytes.len());
+    out.extend_from_slice(&bytes[..at]);
+    out.extend_from_slice(&recompressed);
+    out.extend_from_slice(&bytes[at + len..]);
+    std::fs::write(&p.blocks, &out).expect("write blocks");
+
+    dir.compressed_len[block] = recompressed.len() as u64;
+    dir.uncompressed_len[block] = plain.len() as u32;
+    let mut cursor = 0u64;
+    for i in 0..dir.compressed_offset.len() {
+        dir.compressed_offset[i] = cursor;
+        cursor += dir.compressed_len[i];
+    }
+    write_directory(&p.directory, &dir);
+}
+
+/// **The B6 case, caught a file earlier.** A directory offset redirected at another entity's row
+/// must refuse — the typed error, never the neighbour's fields. The block carries a digest of the
+/// row offsets it was written beside, so a directory that disagrees with the bytes it addresses is
+/// refused for the whole block rather than one row at a time, and the redirected read never
+/// reaches the row it was pointed at.
 #[test]
 fn a_redirected_offset_refuses_and_never_serves_the_neighbour() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -272,20 +306,190 @@ fn a_redirected_offset_refuses_and_never_serves_the_neighbour() {
     // Rank 1 (entity 10) now points at rank 0's row (entity 3), inside the same block.
     doctor_directory(&p.directory, |d| d.row_offsets[0][1] = d.row_offsets[0][0]);
 
-    let blob = open(&p).expect("the doctored directory still opens; the defect is per-row");
+    let blob = open(&p).expect("the doctored directory still opens; the defect is per-block");
     let err = blob
         .fields_of(entity_of_rank(1))
         .expect_err("a redirected row refuses");
     assert!(matches!(err, RecordError::Malformed(_)), "{err}");
-    assert!(err.to_string().contains("discriminant"), "{err}");
-    // The neighbour whose row was stolen either answers as itself or refuses on the tiling check
-    // — the directory is inconsistent, and refusing more than the minimum is fail-closed's
-    // direction. What it must never do is answer with anything but its own fields.
+    assert!(err.to_string().contains("extent digest"), "{err}");
+    // The neighbour whose row was pointed at refuses too: the disagreement is the block's, and
+    // refusing more than the minimum is fail-closed's direction. What neither may do is answer
+    // with anything but its own fields.
     match blob.fields_of(entity_of_rank(0)) {
         Ok(fields) => assert_eq!(fields, Some(fields_for(entity_of_rank(0)))),
         Err(e) => assert!(matches!(e, RecordError::Malformed(_)), "{e}"),
     }
     // And the exhaustive check finds the inconsistency the single read found.
+    assert!(blob.self_check().is_err());
+}
+
+/// **A wrong rank inside the right block.** A has-row bitmap that names a different entity at a
+/// rank — the same cardinality, the same block, the same offsets, so nothing the directory or the
+/// digest can see — must refuse on the block's own statement of identity. This is the failure the
+/// per-row entity used to catch and the block's entity gaps catch now.
+///
+/// Mutation killed: dropping the `entity_at` comparison in `row_at`, or deriving the expected
+/// entity from the bitmap instead of from the block, serves entity 10's row to entity 11.
+#[test]
+fn a_hasrow_naming_another_entity_at_a_rank_refuses() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let p = write_fixture(dir.path(), 3, 1024);
+    let bytes = std::fs::read(&p.hasrow).expect("read");
+    let mut bitmap = Bitmap::try_deserialize::<Portable>(&bytes).expect("portable");
+    // Rank 0 keeps its member, so the block's first-entity check still agrees; rank 1 does not.
+    assert!(bitmap.remove_checked(entity_of_rank(1)), "rank 1 was there");
+    bitmap.add(entity_of_rank(1) + 1);
+    std::fs::write(&p.hasrow, bitmap.serialize::<Portable>()).expect("doctor");
+
+    let blob = open(&p).expect("cardinality is unchanged, so the open-time checks pass");
+    let err = blob
+        .fields_of(entity_of_rank(1) + 1)
+        .expect_err("the row at that rank belongs to another entity");
+    assert!(matches!(err, RecordError::Malformed(_)), "{err}");
+    assert!(err.to_string().contains("belongs to entity"), "{err}");
+    // Rank 0 is unaffected and still answers as itself.
+    assert_eq!(
+        blob.fields_of(entity_of_rank(0)).expect("read"),
+        Some(fields_for(entity_of_rank(0)))
+    );
+    // The walk finds it too, from the other direction: the bitmap's member and the block's gap
+    // disagree at that rank.
+    assert!(blob.self_check().is_err());
+}
+
+/// **A has-row bitmap that renames a block's first entity.** Removing rank 0's member and adding
+/// one that sorts below rank 1's leaves every later rank naming the entity it named before, so no
+/// row read past the first would notice. The block states its first entity, and the bitmap's
+/// rank-0 member must be it.
+///
+/// Mutation killed: dropping the `first_entity` comparison in `header_of` — after which a read of
+/// rank 1 answers normally out of a blob whose rank space has shifted under it.
+#[test]
+fn a_hasrow_renaming_a_blocks_first_entity_refuses() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let p = write_fixture(dir.path(), 3, 1024);
+    let bytes = std::fs::read(&p.hasrow).expect("read");
+    let mut bitmap = Bitmap::try_deserialize::<Portable>(&bytes).expect("portable");
+    assert!(bitmap.remove_checked(entity_of_rank(0)), "rank 0 was there");
+    bitmap.add(entity_of_rank(0) + 1);
+    assert!(entity_of_rank(0) + 1 < entity_of_rank(1), "rank 1 is unmoved");
+    std::fs::write(&p.hasrow, bitmap.serialize::<Portable>()).expect("doctor");
+
+    let blob = open(&p).expect("cardinality is unchanged, so the open-time checks pass");
+    // Rank 1 still names entity 10 and its row still belongs to entity 10; only the block's
+    // first entity disagrees, and that is what must refuse.
+    let err = blob
+        .fields_of(entity_of_rank(1))
+        .expect_err("the bitmap and the block disagree about rank 0");
+    assert!(matches!(err, RecordError::Malformed(_)), "{err}");
+    assert!(err.to_string().contains("first entity"), "{err}");
+    assert!(blob.self_check().is_err());
+}
+
+/// **A wrong block.** Two blocks' bytes swapped in `blocks.bin`, their compressed lengths kept, so
+/// every open-time check still passes: the block a rank resolves to now holds another block's
+/// rows. The block states its own first rank, so the read refuses rather than answering out of
+/// bytes that belong to other entities.
+///
+/// Mutation killed: dropping the `first_rank` comparison in `header_of`.
+#[test]
+fn a_block_holding_another_blocks_rows_refuses() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    // Two blocks of three rows each, written identically so their compressed frames are the same
+    // length and the directory still tiles after the swap.
+    let p = write_fixture(dir.path(), 6, 3 * ROW_BYTES);
+    let blob = open(&p).expect("opens");
+    assert_eq!(blob.block_count(), 2, "6 rows at 3 per block");
+    let (lo_len, hi_len) = {
+        let d = read_directory(&p.directory);
+        (d.compressed_len[0] as usize, d.compressed_len[1] as usize)
+    };
+    let bytes = std::fs::read(&p.blocks).expect("read");
+    let mut swapped = Vec::with_capacity(bytes.len());
+    swapped.extend_from_slice(&bytes[lo_len..lo_len + hi_len]);
+    swapped.extend_from_slice(&bytes[..lo_len]);
+    std::fs::write(&p.blocks, &swapped).expect("swap");
+    doctor_directory(&p.directory, |d| {
+        d.compressed_len.swap(0, 1);
+        d.uncompressed_len.swap(0, 1);
+        d.compressed_offset[1] = d.compressed_len[0];
+    });
+
+    let blob = open(&p).expect("the directory still tiles blocks.bin exactly");
+    let err = blob
+        .fields_of(entity_of_rank(0))
+        .expect_err("block 0 now holds block 1's rows");
+    assert!(matches!(err, RecordError::Malformed(_)), "{err}");
+    assert!(err.to_string().contains("first rank"), "{err}");
+    assert!(blob.self_check().is_err());
+}
+
+/// **A block that does not tile.** A byte appended to a block's rows section: every row still
+/// starts where the directory puts it, but the section is a byte longer than the rows account
+/// for. The extent digest covers that length as well as the offsets, so the block refuses before
+/// a row is framed.
+#[test]
+fn a_block_longer_than_its_rows_refuses() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let p = write_fixture(dir.path(), 3, 1024);
+    doctor_block(&p, 0, |block| block.push(0));
+
+    let blob = open(&p).expect("opens; the defect is inside the block");
+    let err = blob
+        .fields_of(entity_of_rank(2))
+        .expect_err("the rows do not account for the block");
+    assert!(matches!(err, RecordError::Malformed(_)), "{err}");
+    assert!(err.to_string().contains("extent digest"), "{err}");
+    assert!(blob.self_check().is_err());
+}
+
+/// **A row that does not fill its extent.** One row's string length shortened by a byte, which
+/// moves neither the row offsets nor the section's length, so the digest still agrees. The field
+/// walk has to consume the extent exactly, and a byte left over is what refuses.
+///
+/// Mutation killed: ending the field loop while fewer than three bytes remain, which would
+/// tolerate a trailing byte and serve the short row as if it were whole.
+#[test]
+fn a_row_that_does_not_fill_its_extent_refuses() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let p = write_fixture(dir.path(), 3, 1024);
+    // Row 1 is [tag 0, kind u64, 8 bytes][tag 1, kind utf8, len u32, 4 bytes]; the length prefix
+    // sits 22 + 3 + 8 + 3 bytes into the rows section.
+    doctor_block(&p, 0, |block| {
+        let rows_at = block.len() - 3 * ROW_BYTES;
+        let len_at = rows_at + ROW_BYTES + 3 + 8 + 3;
+        assert_eq!(block[len_at], 4, "the string length prefix");
+        block[len_at] = 3;
+    });
+
+    let blob = open(&p).expect("opens; the offsets and the section length are untouched");
+    let err = blob
+        .fields_of(entity_of_rank(1))
+        .expect_err("a row that leaves a byte over refuses");
+    assert!(matches!(err, RecordError::Malformed(_)), "{err}");
+    // Its neighbours are unaffected: the defect is one row's, and the block still tiles.
+    assert_eq!(
+        blob.fields_of(entity_of_rank(2)).expect("read"),
+        Some(fields_for(entity_of_rank(2)))
+    );
+    assert!(blob.self_check().is_err());
+}
+
+/// **A truncated block.** A block's rows section cut short: the directory's last offsets now fall
+/// outside it. The bounds check refuses before any byte is framed.
+#[test]
+fn a_block_cut_short_refuses() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let p = write_fixture(dir.path(), 3, 1024);
+    doctor_block(&p, 0, |block| {
+        block.truncate(block.len() - 5);
+    });
+
+    let blob = open(&p).expect("opens; the defect is inside the block");
+    let err = blob
+        .fields_of(entity_of_rank(2))
+        .expect_err("the last row runs past the block");
+    assert!(matches!(err, RecordError::Malformed(_)), "{err}");
     assert!(blob.self_check().is_err());
 }
 

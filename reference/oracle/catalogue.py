@@ -118,6 +118,7 @@ from .harness import (
     CLI_BIN,
     REPO_ROOT,
     build_env,
+    bundle_format_matches,
     ensure_cli_built,
     read_recipe,
     write_deployment,
@@ -1361,6 +1362,11 @@ def _is_usable_bundle(bundle_root: Path, wanted: dict) -> bool:
     cannot be confirmed is rebuilt, because being wrong in that direction costs a build and being
     wrong in the other hands every test a fixture nobody asked for.
 
+    **The format number is one of the structural checks, not part of the receipt**
+    ([`harness.bundle_format_matches`]). The recipe stamps the corpus and the arguments, which a
+    format bump does not touch, so a fixture built by an engine at an earlier number would be
+    reused and read as though it were this one.
+
     **The published-state check is not hypothetical.** An accepted deny is written into the bundle
     prefix as a further `SEGMENTS-<n>.json` (contracts §2.3), so any driver that points a server at
     this shared fixture and then suppresses or deletes an item leaves the fixture denied for every
@@ -1381,6 +1387,8 @@ def _is_usable_bundle(bundle_root: Path, wanted: dict) -> bool:
             for p in prefix.glob("partitions/*/SEGMENTS-*.json")
             if p.name != "SEGMENTS-0.json"
         ]
+        if not bundle_format_matches(prefix):
+            return False
         return not published
     except (OSError, KeyError, ValueError):
         return False

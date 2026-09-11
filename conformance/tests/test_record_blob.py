@@ -88,30 +88,34 @@ def test_an_oversized_row_gets_an_oversized_block_of_its_own(catalogue_bundle_ro
     in a block above the target holding exactly that one row — never split across blocks — and
     the corpus must cut enough ordinary blocks that the first/last-of-block drill-down cases
     (records §10's catalogue) are non-degenerate when they land."""
-    import pyarrow.ipc as ipc  # noqa: PLC0415
     from pyroaring import BitMap  # noqa: PLC0415
 
     record_dir = rb.record_dir_of(catalogue_bundle_root)
-    with ipc.open_file(record_dir / rb.DIRECTORY_FILE) as reader:
-        directory = reader.read_all().to_pylist()
+    headers = rb.block_headers(record_dir)
     hasrow = list(BitMap.deserialize((record_dir / rb.HASROW_FILE).read_bytes()))
 
-    assert len(directory) > 2, (
-        f"{len(directory)} blocks — too few for block-boundary cases to mean anything"
+    assert len(headers) > 2, (
+        f"{len(headers)} blocks — too few for block-boundary cases to mean anything"
     )
-    oversized = [b for b in directory if b["uncompressed_len"] > rb.BLOCK_TARGET]
+    # The target is measured over a block's rows, the header it carries being addressing rather
+    # than content (records §3).
+    oversized = [h for h in headers if h["rows_len"] > rb.BLOCK_TARGET]
     assert oversized, "no block exceeds the target, so the oversize rule is untested"
     for block in oversized:
-        assert len(block["row_offsets"]) == 1, (
-            f"an oversized block holds {len(block['row_offsets'])} rows — only a single row "
+        assert block["row_count"] == 1, (
+            f"an oversized block holds {block['row_count']} rows — only a single row "
             "larger than the target may pass it"
         )
-    # The planted oversize entity is the one carrying such a row (rank → entity via has-row).
-    # `NOTE_OVERSIZE_ID` is the **source** id the note was planted on, so it crosses to entity
-    # space here rather than being compared as though the two were one number.
+    # The planted oversize entity is the one carrying such a row. `NOTE_OVERSIZE_ID` is the
+    # **source** id the note was planted on, so it crosses to entity space here rather than being
+    # compared as though the two were one number.
     oversize_entity = catalogue_bundle.entity_of_source(cat.NOTE_OVERSIZE_ID)
-    oversize_entities = {hasrow[b["first_rank"]] for b in oversized}
+    oversize_entities = {b["first_entity"] for b in oversized}
     assert oversize_entities == {oversize_entity}, (
         f"the oversized rows belong to {sorted(oversize_entities)}, not entity "
         f"{oversize_entity} (source {cat.NOTE_OVERSIZE_ID}), which is where the note was planted"
     )
+    # The block's own statement of its first entity and the has-row bitmap's member at that rank
+    # are two files' answers to one question, and the walk above rests on their agreeing.
+    for block in headers:
+        assert hasrow[block["first_rank"]] == block["first_entity"]

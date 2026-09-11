@@ -368,3 +368,103 @@ fn no_blob_columns_means_no_blob_files() {
         "the manifest must name no blob file"
     );
 }
+
+/// Re-digest a prefix-relative file into `MANIFEST.json`, and chase that manifest's own digest
+/// into `CURRENT`, so a damage test below fails on the addressing check under test rather than on
+/// the digest sweep in front of it. The blob's three files are all named by `MANIFEST.files`, so
+/// there is no segments map to consider (`tests/verify_deep.rs` has the version that does).
+fn refresh_digest(out: &Path, rel: &str) {
+    use sha2::{Digest, Sha256};
+    let hex = |bytes: &[u8]| {
+        Sha256::digest(bytes)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>()
+    };
+    let prefix_dir = out.join(current_prefix(out));
+    let bytes = std::fs::read(prefix_dir.join(rel)).expect("the damaged file reads back");
+    let manifest_path = prefix_dir.join("MANIFEST.json");
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+    assert!(
+        manifest["files"].get(rel).is_some(),
+        "{rel} is not named by MANIFEST.files"
+    );
+    manifest["files"][rel] =
+        serde_json::json!({ "size": bytes.len(), "sha256": hex(&bytes) });
+    let manifest_bytes = serde_json::to_vec_pretty(&manifest).unwrap();
+    std::fs::write(&manifest_path, &manifest_bytes).unwrap();
+    std::fs::write(
+        out.join("CURRENT"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "prefix": current_prefix(out),
+            "manifest_digest": hex(&manifest_bytes),
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+}
+
+/// **`verify --deep` walks the blob.** Nothing else in the bundle can see the blob's addressing:
+/// the file digests match whatever the addressing says, and the read path refuses a defect one
+/// request at a time, which means a fold or coalesce that corrupted it would first be noticed by a
+/// viewer receiving another entity's record. The deep pass reports the rows it walked, and the
+/// count is what says the walk happened rather than finding nothing to do.
+#[test]
+fn verify_deep_walks_every_blob_row() {
+    let dir = build_with(blob_schema(), &note_of);
+    let out = dir.path().join("bundle");
+    let rows = RecordBlob::open_dir(&record_dir(&out), Access::Read)
+        .expect("the blob opens")
+        .rows();
+    assert!(rows > 0, "the fixture must have a blob for this to mean anything");
+
+    let report = tessera_build::verify_deep(&out, &tessera_build::VerifyOpts::default())
+        .expect("a well-formed bundle verifies deep");
+    assert_eq!(report.record_rows, rows);
+}
+
+/// **And refuses one whose has-row bitmap names a different entity at a rank.** The cardinality is
+/// unchanged, so every count agrees and the directory is untouched; what disagrees is which entity
+/// the bitmap and the block say a rank belongs to, which is the addressing defect that would serve
+/// one entity's record to another. The digest is refreshed so the refusal is the walk's and not
+/// the sweep's.
+///
+/// Mutation killed: dropping the blob from `verify_deep`'s pass, which leaves this bundle
+/// verifying clean while `RecordBlob::fields_of` refuses every read of it.
+#[test]
+fn verify_deep_refuses_a_blob_whose_bitmap_renames_a_rank() {
+    use croaring::{Bitmap, Portable};
+
+    let dir = build_with(blob_schema(), &note_of);
+    let out = dir.path().join("bundle");
+    let rel = format!(
+        "partitions/{}/attrs/record/{}",
+        open_bundle(&out)
+            .unwrap()
+            .partitions
+            .keys()
+            .next()
+            .unwrap()
+            .clone(),
+        tessera_filter::RECORD_HASROW_FILE
+    );
+    let hasrow_path = record_dir(&out).join(tessera_filter::RECORD_HASROW_FILE);
+    let mut bitmap =
+        Bitmap::try_deserialize::<Portable>(&std::fs::read(&hasrow_path).unwrap()).unwrap();
+    // Move the last member up by one. Nothing else has that id — the build's entity space stops
+    // at N — so the cardinality holds and only that rank's entity changes.
+    let last = bitmap.maximum().expect("the blob holds rows");
+    bitmap.remove(last);
+    bitmap.add(last + 1);
+    std::fs::write(&hasrow_path, bitmap.serialize::<Portable>()).unwrap();
+    refresh_digest(&out, &rel);
+
+    let err = tessera_build::verify_deep(&out, &tessera_build::VerifyOpts::default())
+        .expect_err("the deep pass must refuse a blob whose bitmap and blocks disagree");
+    let message = err.to_string();
+    assert!(
+        message.contains("entity") && message.contains("rank"),
+        "the refusal must name the disagreement, got: {message}"
+    );
+}
