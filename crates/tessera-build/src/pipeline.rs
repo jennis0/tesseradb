@@ -2173,6 +2173,13 @@ fn build_bundle(
             .shape_held_extents
             .extend(artifact_pass.shape_held_extents.iter().cloned());
         artifact_paths.extend(artifact_pass.paths.iter().cloned());
+        timer.end(
+            BuildStage::ArtifactPass,
+            (artifact_pass.tile_index_extents.len()
+                + artifact_pass.row_column_extents.len()
+                + artifact_pass.shape_rows_extents.len()
+                + artifact_pass.shape_held_extents.len()) as u64,
+        );
 
         view_files.push(permutation_path);
         view_files.push(row_entity_path);
@@ -2210,7 +2217,9 @@ fn build_bundle(
                 .iter()
                 .map(|entry| args.out.join(crate::PREFIX).join(&entry.path)),
         );
+        let composed = containment.len() as u64;
         published_layers.containment_extents.extend(containment);
+        timer.end(BuildStage::ArtifactPass, composed);
     }
 
     drop(geometry);
