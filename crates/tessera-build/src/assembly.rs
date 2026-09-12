@@ -18,13 +18,16 @@
 //! 2. **Row partition.** The walk again, pushing a 12 B `(morton, residual, entity)` record per
 //!    present ordinal into the Morton buckets. `priority` is not carried: it is `forward(entity)`'s
 //!    prefix and is recomputed when a bucket is loaded.
-//! 3. **Per bucket, in Morton order.** Load, recompute each record's `priority`, sort by
-//!    `(morton, tessera_id)`, and emit: `morton.u32` and `row-entity.u32` are appended, the
-//!    identity and the residual go into `columns.arrow`'s body at their own offsets, the occupancy
-//!    counter is fed the codes, and `(entity, row)` is pushed to a second partition.
-//! 4. **The permutation**, one entity-range bucket at a time.
-//! 5. **The render tail.** Each entity bucket reads its render column sequentially and pushes
-//!    `(row, value)` to a row partition; each row bucket writes its window into that column's
+//! 3. **Per bucket, in Morton order.** Load, taking each record's `tessera_id` as it is read,
+//!    sort by `(morton, tessera_id)` in parallel, and emit: `morton.u32` and `row-entity.u32` are
+//!    appended, the identity and the residual go into `columns.arrow`'s body at their own offsets,
+//!    the occupancy counter is fed the codes, and `(entity, row)` is pushed to a second partition.
+//! 4. **The permutation and the render lanes, from one pass over the pairs.** Each entity-range
+//!    bucket is loaded once and sorted once by entity; the permutation takes its run from it and
+//!    every render column reads its values at those entities and pushes `(row, value)` to a row
+//!    partition of its own. The bucket is deleted as soon as it has been read, so the pairs shrink
+//!    while the lanes grow.
+//! 5. **The render tail's second half.** Each row bucket writes its window into that column's
 //!    buffer. Two 8 B-a-row partitions for a column of any width, the second growing as the first
 //!    is consumed.
 //!
@@ -43,6 +46,7 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+use rayon::slice::ParallelSliceMut;
 use tessera_spatial::split32;
 use tessera_spatial::tiler::ScalarType;
 use tessera_store::columns::{ColumnsFile, ColumnsPlan};
@@ -72,53 +76,49 @@ const ROW_ALIGN: u64 = 64;
 /// beside the bucket it is walking; nothing about the file depends on it.
 const COLUMN_CHUNK_ROWS: usize = 1 << 16;
 
-/// One row of the view while its bucket is being ordered — `morton` and the `tessera_id` prefix
-/// are the sort key, `entity` recomputes the full identity on a prefix tie (contracts §2.6), and
-/// `residual` is carried from the partition so that no later pass reads geometry at a scattered
-/// index.
+/// One row of the view while its bucket is being ordered — `(morton, identity)` is the sort key,
+/// and `residual` is carried from the partition so that no later pass reads geometry at a
+/// scattered index.
 ///
 /// **This lives for one bucket, not for the corpus.** The vector is at most the partition's
 /// target — `n / 128` rows — where the record it replaced was one per row of the view.
+///
+/// **The identity is carried rather than recomputed.** It was the `priority` prefix here and a
+/// second `forward(entity)` at the emit, so every row of every view paid eight `splitmix64` rounds
+/// twice. `forward` is pure, so one call and the full 64-bit compare give exactly the order the
+/// prefix-then-refine comparator gave: `priority` is `tessera_id`'s leading 16 bits
+/// (`TesseraId::priority`), so ordering by the whole word orders by the prefix first.
+/// Eight bytes a record against six, over one bucket.
 #[derive(Clone, Copy)]
 #[repr(C)]
 pub(crate) struct RowRec {
     pub(crate) morton: u32,
     pub(crate) entity: u32,
     pub(crate) residual: u32,
-    pub(crate) priority: u16,
-    pub(crate) _pad: u16,
+    pub(crate) identity: u64,
 }
 
 impl RowRec {
-    /// `(morton, tessera_id)` ascending, with no further tiebreak (contracts §2.6 r6) —
-    /// `priority` is compared first as a cheap, physically contiguous prefix, and the full
-    /// identity is recomputed from `entity` only on a prefix tie. `forward` is a pure function, so
-    /// this is exact: the tie path costs eight `splitmix64` rounds, not an approximation of the
-    /// order.
+    /// `(morton, tessera_id)` ascending, with no further tiebreak (contracts §2.6 r6).
     ///
-    /// Comparing `priority` first and refining on a tie is **identical** to comparing the full
-    /// `tessera_id` at every row — it is not merely "usually agrees" — because `priority` is
-    /// defined as `tessera_id`'s leading 16 bits (`TesseraId::priority`), so two rows can only
-    /// disagree in `priority` if they already disagree in `tessera_id`.
-    /// `row_rec_comparator_agrees_with_a_full_tessera_id_sort_over_engineered_ties` checks this
-    /// against a naive full-`tessera_id` sort over a batch engineered to contain prefix ties.
-    pub(crate) fn cmp(&self, other: &Self, key: &IdentityKey, shard: u32) -> std::cmp::Ordering {
-        self.morton.cmp(&other.morton).then_with(|| {
-            self.priority.cmp(&other.priority).then_with(|| {
-                // Unreachable in practice (the allocator cap makes `forward` infallible for any
-                // entity a build ever assigns), but `expect` rather than `unwrap_or` — a
-                // silently wrong tiebreak here is a silently wrong row order, and that must be
-                // loud if it is ever reached.
-                let a = key
-                    .forward(shard, EntityId::new(self.entity as u64))
-                    .expect("entity ids are capped below u32::MAX by the allocator (I-1)");
-                let b = key
-                    .forward(shard, EntityId::new(other.entity as u64))
-                    .expect("entity ids are capped below u32::MAX by the allocator (I-1)");
-                a.cmp(&b)
-            })
-        })
+    /// `row_rec_comparator_agrees_with_a_full_tessera_id_sort_over_engineered_ties` checks the
+    /// order against a naive full-`tessera_id` sort over a batch engineered to contain prefix ties,
+    /// which is what it checked of the comparator this replaced.
+    pub(crate) fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.morton
+            .cmp(&other.morton)
+            .then_with(|| self.identity.cmp(&other.identity))
     }
+}
+
+/// The `tessera_id` of one entity. **Unreachable as an error in practice** — the allocator caps
+/// entity ids below `u32::MAX` (I-1), which is what makes `forward` infallible for any entity a
+/// build assigns — but `expect` rather than a fallback, because a silently wrong identity here is
+/// a silently wrong row order.
+fn identity_of(key: &IdentityKey, shard: u32, entity: u32) -> u64 {
+    key.forward(shard, EntityId::new(entity as u64))
+        .expect("entity ids are capped below u32::MAX by the allocator (I-1)")
+        .raw()
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -427,6 +427,14 @@ fn walk(job: &RowSource<'_>, mut each: impl FnMut(u32, u32, u32)) {
 /// Steps 1 and 2: the histogram, the boundaries, the page plan, and the row partition.
 ///
 /// Returns before the sort so the caller can close the tiler's stage timing where it always did.
+///
+/// **Up to four walks of the view, and they are sequentially dependent.** The histogram and the
+/// page plan share the first. The second exists only where the histogram found a hot bin, and it
+/// cannot start before the histogram's target is known; the third only where that second found a
+/// code over the target, and it counts priorities for exactly those codes — holding a priority
+/// histogram for every code of a hot bin, which is what folding it into the second would mean, is
+/// 65,536 counters a code. The fourth pushes the records, and it cannot start before the
+/// boundaries those three settle. A view with no hot bin takes two.
 pub(crate) fn partition_rows(
     job: &RowSource<'_>,
 ) -> Result<(PartitionedRows, MortonBoundaries, PagePlan)> {
@@ -605,13 +613,14 @@ pub(crate) fn write_segment(
                     morton: read(0),
                     entity,
                     residual: read(4),
-                    priority: priority_of(job.identity_key, job.shard_id, entity),
-                    _pad: 0,
+                    identity: identity_of(job.identity_key, job.shard_id, entity),
                 }
             })
             .collect();
         drop(bytes);
-        loaded.sort_unstable_by(|a, b| a.cmp(b, job.identity_key, job.shard_id));
+        // **Parallel, because the buckets are independent and this is the stage's own work.** One
+        // bucket's order is a function of its own records; nothing here reads another's.
+        loaded.par_sort_unstable_by(|a, b| a.cmp(b));
 
         for chunk in loaded.chunks(COLUMN_CHUNK_ROWS) {
             let mut codes: Vec<u8> = Vec::with_capacity(chunk.len() * 4);
@@ -622,11 +631,7 @@ pub(crate) fn write_segment(
                 occupancy.push(record.morton);
                 codes.extend_from_slice(&record.morton.to_le_bytes());
                 entities.extend_from_slice(&record.entity.to_le_bytes());
-                let identity = job
-                    .identity_key
-                    .forward(job.shard_id, EntityId::new(record.entity as u64))
-                    .map_err(BuildError::Identity)?;
-                identities.extend_from_slice(&identity.raw().to_le_bytes());
+                identities.extend_from_slice(&record.identity.to_le_bytes());
                 residuals.extend_from_slice(&record.residual.to_le_bytes());
             }
             morton_out
@@ -659,22 +664,56 @@ pub(crate) fn write_segment(
     drop(morton_out);
     drop(row_entity_out);
     debug_assert_eq!(row, rows_in_view as u64);
-    let pairs = pairs.finish()?;
+    let mut pairs = pairs.finish()?;
 
-    // ---- 4. the permutation, one entity-range bucket at a time ------------------------------
+    // ---- 4 and 5, in one pass over the pairs ------------------------------------------------
+    //
+    // **One load and one sort of each `(entity, row)` bucket, not one per consumer.** The
+    // permutation read the partition whole and every render column read it again, so a view with
+    // `k` render columns loaded and sorted 8 B a row `k + 1` times: 30.3 s at 125.8M occurrences
+    // against 7.6 s for the vector-backed writer this replaced, on one core. The bucket is now
+    // loaded once, sorted once by entity, and handed to the permutation and to every lane in turn,
+    // and it is deleted as soon as it has been — so the pairs shrink while the lanes grow, which
+    // is the phase arithmetic §4.1 states.
+    let entity_buckets = spill::boundaries_uniform(job.n).len();
+    let row_bounds = row_boundaries(rows_in_view);
+    let mut lanes: Vec<RenderLane> = job
+        .render
+        .iter()
+        .enumerate()
+        .map(|(index, column)| {
+            let slot = index + 2;
+            let width = columns.width(slot);
+            let value_bytes = width.unwrap_or(1);
+            Ok(RenderLane {
+                column,
+                slot,
+                width,
+                value_bytes,
+                partition: Partition::create(
+                    job.tmp,
+                    &format!("assembly-{}-lane-{index}", job.view),
+                    row_bounds.clone(),
+                    4 + value_bytes,
+                    rows_in_view as u64,
+                )?,
+            })
+        })
+        .collect::<Result<_>>()?;
     {
-        let mut writer =
-            PermutationWriter::create_planned(&permutation_path, &plan)
-                .map_err(|e| BuildError::io(&permutation_path, e))?;
-        for bucket in 0..spill::boundaries_uniform(job.n).len() {
+        let mut writer = PermutationWriter::create_planned(&permutation_path, &plan)
+            .map_err(|e| BuildError::io(&permutation_path, e))?;
+        let mut record = vec![0u8; 4 + lanes.iter().map(|lane| lane.value_bytes).max().unwrap_or(0)];
+        for bucket in 0..entity_buckets {
             let mut bytes = pairs.load(bucket)?;
-            // Sorted by entity before the writes, as the render tail sorts the same buckets: the
-            // pairs arrived in row order, which is Morton order, and `set` writes into the mapped
-            // permutation at the entity's own page. Unsorted, a bucket's writes are scattered over
-            // its whole entity range — 109 MB at rung 6 — which is the write-back-and-re-dirty
-            // pattern this stage exists to remove. Sorted, they are one forward sweep.
+            // Sorted by entity before the writes: the pairs arrived in row order, which is Morton
+            // order, and `set` writes into the mapped permutation at the entity's own page while a
+            // render column is read at the entity too. Unsorted, a bucket's writes are scattered
+            // over its whole entity range — 109 MB at rung 6 — which is the
+            // write-back-and-re-dirty pattern this stage exists to remove. Sorted, they are one
+            // forward sweep, and one sweep now serves every reader of the bucket.
             let pairs_in_bucket: &mut [[u8; PAIR_RECORD_BYTES]] = pairs_of(&mut bytes);
-            pairs_in_bucket.sort_unstable_by_key(|pair| {
+            pairs_in_bucket.par_sort_unstable_by_key(|pair| {
                 u32::from_le_bytes(pair[0..4].try_into().expect("four bytes"))
             });
             for pair in pairs_in_bucket.iter() {
@@ -683,15 +722,28 @@ pub(crate) fn write_segment(
                 writer
                     .set(EntityId::new(entity as u64), at)
                     .map_err(|e| BuildError::io(&permutation_path, e))?;
+                for lane in lanes.iter_mut() {
+                    let Some(value) = lane.column.values.raw_at(entity as usize) else {
+                        // An absent entity pushes nothing: the row keeps the zero the reserved
+                        // file reads as, which *is* the render placeholder (decision 0064), and
+                        // the presence bitmap below says so.
+                        continue;
+                    };
+                    record[0..4].copy_from_slice(&pair[4..8]);
+                    record[4..4 + lane.value_bytes].copy_from_slice(&value[..lane.value_bytes]);
+                    lane.partition.push(&record[..4 + lane.value_bytes])?;
+                }
             }
+            drop(bytes);
+            pairs.delete(bucket)?;
         }
         writer
             .finish()
             .map_err(|e| BuildError::io(&permutation_path, e))?;
     }
 
-    // ---- 5. the render tail ------------------------------------------------------------------
-    let presence_paths = render_tail(job, &columns, &pairs, rows_in_view)?;
+    // ---- 5, second half: each row bucket's window into the column's buffer --------------------
+    let presence_paths = write_render_columns(job, &columns, lanes, &row_bounds, rows_in_view)?;
 
     columns
         .finish()
@@ -719,52 +771,44 @@ fn row_boundaries(rows: u32) -> Vec<u32> {
         .collect()
 }
 
-/// Step 5, per render column: the entity buckets read the column sequentially and push
-/// `(row, value)`; the row buckets write their window into the column's buffer.
-fn render_tail(
+/// One render column's lane: where its `(row, value)` records go, and what the column's buffer in
+/// `columns.arrow` is.
+///
+/// **Every lane is open at once**, because the `(entity, row)` bucket that feeds them is loaded
+/// once and handed to all of them. What that costs is one writer buffer set per column while the
+/// pairs are being consumed; what it saves is a load and a sort of the whole pairs partition per
+/// column.
+struct RenderLane<'a> {
+    column: &'a RenderColumn<'a>,
+    /// The column's slot in `columns.arrow`: two fixed columns come before the render ones.
+    slot: usize,
+    /// `None` for a `bool` column, whose buffer is a bit a row rather than a byte.
+    width: Option<usize>,
+    /// What one value occupies in a lane record, which is a byte for `bool`.
+    value_bytes: usize,
+    partition: Partition,
+}
+
+/// Step 5's second half: each row bucket's window into its column's buffer, and the presence
+/// bitmap beside it.
+fn write_render_columns(
     job: &Assembly<'_>,
     columns: &ColumnsFile,
-    pairs: &spill::PartitionStore,
+    lanes: Vec<RenderLane<'_>>,
+    boundaries: &[u32],
     rows_in_view: u32,
 ) -> Result<Vec<PathBuf>> {
-    let entity_buckets = spill::boundaries_uniform(job.n).len();
-    let boundaries = row_boundaries(rows_in_view);
     let mut paths = Vec::new();
-    for (index, column) in job.render.iter().enumerate() {
-        let slot = index + 2;
-        let width = columns.width(slot);
-        let value_bytes = width.unwrap_or(1);
+    for lane in lanes {
+        let RenderLane {
+            column,
+            slot,
+            width,
+            value_bytes,
+            partition,
+        } = lane;
         let record_width = 4 + value_bytes;
-        let mut lane = Partition::create(
-            job.tmp,
-            &format!("assembly-{}-lane-{index}", job.view),
-            boundaries.clone(),
-            record_width,
-            rows_in_view as u64,
-        )?;
-        for bucket in 0..entity_buckets {
-            let mut bytes = pairs.load(bucket)?;
-            // Sorted by entity so the column is read forward: the pairs arrived in row order
-            // within a bucket, which is Morton order, and the column is entity-major.
-            let pairs_in_bucket: &mut [[u8; PAIR_RECORD_BYTES]] = pairs_of(&mut bytes);
-            pairs_in_bucket.sort_unstable_by_key(|pair| {
-                u32::from_le_bytes(pair[0..4].try_into().expect("four bytes"))
-            });
-            let mut record = vec![0u8; record_width];
-            for pair in pairs_in_bucket.iter() {
-                let entity = u32::from_le_bytes(pair[0..4].try_into().expect("four bytes"));
-                let Some(value) = column.values.raw_at(entity as usize) else {
-                    // An absent entity pushes nothing: the row keeps the zero the reserved file
-                    // reads as, which *is* the render placeholder (decision 0064), and the
-                    // presence bitmap below says so.
-                    continue;
-                };
-                record[0..4].copy_from_slice(&pair[4..8]);
-                record[4..4 + value_bytes].copy_from_slice(&value[..value_bytes]);
-                lane.push(&record)?;
-            }
-        }
-        let mut lane = lane.finish()?;
+        let mut lane = partition.finish()?;
         let mut present = croaring::Bitmap::new();
         let mut any_absent = false;
         for bucket in 0..boundaries.len() {
@@ -959,13 +1003,15 @@ mod tests {
                     morton,
                     entity,
                     residual: 0,
-                    priority: tessera_id.priority(),
-                    _pad: 0,
+                    identity: tessera_id.raw(),
                 }
             })
             .collect();
 
-        let mut priorities: Vec<u16> = rows.iter().map(|r| r.priority).collect();
+        let mut priorities: Vec<u16> = rows
+            .iter()
+            .map(|r| (r.identity >> 48) as u16)
+            .collect();
         priorities.sort_unstable();
         assert!(
             priorities.windows(2).any(|w| w[0] == w[1]),
@@ -973,7 +1019,7 @@ mod tests {
         );
 
         let mut via_comparator = rows.clone();
-        via_comparator.sort_by(|a, b| a.cmp(b, &key, shard));
+        via_comparator.sort_by(|a, b| a.cmp(b));
 
         let mut naive = rows;
         naive.sort_by_key(|r| {

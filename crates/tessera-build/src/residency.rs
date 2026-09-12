@@ -363,6 +363,11 @@ pub(crate) struct ColumnCost {
     /// Whether this column is the one a text index is built over — which costs the build a second
     /// set of files beside the column itself, and costs it them at the same time.
     pub text_index: bool,
+    /// Whether the segment write gathers this column into `columns.arrow` — which is what opens a
+    /// `(row, value)` partition for it in the assembly (`crate::assembly::RenderLane`). Read from
+    /// the declaration rather than inferred from [`Self::phases`]: a blob-resident column stands
+    /// through the same window and has no lane.
+    pub render: bool,
     /// The windows this column's storage stands through, which is **its last reader and not the
     /// release stage**: a `render` column is read by the segment write, a blob-resident one by the
     /// record blob, and a column that is neither has met its last reader when the filter postings
@@ -994,14 +999,28 @@ pub(crate) fn entity_order_residency(
     // The widest render column is a ceiling over the fixed-width ones: `render` is refused at the
     // declaration for every string type, so a render column is one of these and no wider.
     let widest_render = join_width.saturating_sub(4);
+    //
+    // **Every render lane's writer buffers stand together.** The `(entity, row)` bucket is loaded
+    // and sorted once and handed to the permutation and to every lane from that one sweep, rather
+    // than being loaded and sorted again per column, so each lane's buffers are open while the
+    // pairs are consumed. Counted at the columns the declaration renders; their width is
+    // [`widest_render`]'s ceiling, `render` being refused at the declaration for every string
+    // type. A view with no render column still pays one lane's worth here, which is the floor a
+    // build under a tight budget is charged rather than a lane it opens.
+    let render_lanes = columns.iter().filter(|column| column.render).count().max(1) as u64;
     terms.push(Term {
         what: format!(
-            "the assembly's (entity, row) and (row, value) partitions: writer buffers, one loaded \
-             bucket at up to {} B a record and the window it is placed in",
+            "the assembly's (entity, row) and {render_lanes} (row, value) partition(s): writer \
+             buffers, the loaded pairs bucket at 8 B a record, and one lane's bucket at up to {} B \
+             a record and the window it is placed in",
             4 + widest_render
         ),
         bytes: buffers(crate::spill::PARTITION_BUCKETS as u64, 8)
-            .saturating_add(buffers(crate::spill::PARTITION_BUCKETS as u64, 4 + widest_render))
+            .saturating_add(
+                buffers(crate::spill::PARTITION_BUCKETS as u64, 4 + widest_render)
+                    .saturating_mul(render_lanes),
+            )
+            .saturating_add(bucket(8))
             .saturating_add(bucket(4 + widest_render))
             .saturating_add(bucket(widest_render)),
         mapped: false,
@@ -1113,6 +1132,7 @@ fn model_inputs(
             // earns an index exactly where it is owed postings.
             text_index: attribute.ty == ScalarType::Text
                 && crate::pipeline::postings_are_owed(&args.schema, attribute),
+            render: attribute.render,
             phases: if attribute.render {
                 Phases::JOIN.onwards()
             } else if crate::pipeline::blob_resident(&args.schema, attribute) {
@@ -2107,6 +2127,7 @@ mod tests {
             extents: false,
             framing_bytes: 0,
             text_index: false,
+            render: false,
             phases: Phases::JOIN.and(Phases::INDEX).and(Phases::BLOB),
         }
     }
