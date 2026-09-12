@@ -912,7 +912,10 @@ pub(crate) const PARTITION_BUCKET_RECORDS: u64 = (1u64 << 32) / PARTITION_BUCKET
 /// The buckets a partition over a **counted** key can come to, against the 128 a uniform one has:
 /// [`boundaries_from_histogram`] closes a bucket only when the next key would pass the target, so a
 /// closed bucket and the key that closed it exceed it together and consecutive buckets sum to more
-/// than one target. With a target of `n / 128` that is at most 257.
+/// than one target. The bound is `2 × rows / target + 1`, so it is 257 only where
+/// `target ≥ rows / 128`. The caller's target is [`crate::assembly::MortonHistogram::target`],
+/// which rounds **up**: a target of `rows / 128` rounded down is one short on all but the exact
+/// multiples, and at 200 rows a floored target of 1 admits 401 buckets against the 257 this claims.
 pub(crate) const PARTITION_COUNTED_BUCKETS: u64 = 2 * PARTITION_BUCKETS as u64 + 1;
 
 /// Boundaries for a key that is **dense and uniform** over `[0, key_bound)`: an entity index, a
@@ -1109,9 +1112,11 @@ impl Partition {
         self.writers[bucket].push_bytes(record)
     }
 
-    /// How many buckets this partition has.
+    /// How many buckets this partition has — the writers, not the boundaries: a routed partition
+    /// ([`Partition::create_routed`]) has its buckets and none of the boundaries a self-routing one
+    /// derives them from.
     pub(crate) fn buckets(&self) -> usize {
-        self.boundaries.len()
+        self.writers.len()
     }
 
     /// The key range bucket `k` covers, `hi` exclusive — what a caller sizes its window by.

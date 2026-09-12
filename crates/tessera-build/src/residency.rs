@@ -60,13 +60,15 @@
 //! the heap is a Roaring container's descriptor and the members themselves are page cache. The
 //! publication's own window still holds them ([`BYTES_PER_MEMBER_ENTRY`]); nothing after it does.
 //!
-//! The segment's **row-order** tail moved the same way and at the same time
-//! ([`crate::pipeline::permute_attribute_tail`]): eight render columns at 7.4×10⁷ rows were ~2.4 GB
-//! of `Vec`, built by `push` immediately after the entity-order columns stopped being heap. ⊘ It
-//! was never a term of this model in either form — it lives in the segment write, not in the
-//! entity-order window this module covers — so what moved is its cost and not its accounting. What
-//! it is now is a mapped file per render column, priced by [`render_tail_bytes`] into the disk
-//! pre-flight's assembly phase.
+//! The segment's **row-order** tail went the same way and further: eight render columns at
+//! 7.4×10⁷ rows were ~2.4 GB of `Vec`, built by `push` immediately after the entity-order columns
+//! stopped being heap, and then a mapped file per column written at a scattered row index. It is
+//! now neither ([`crate::assembly`]): each render column is read in entity order out of one
+//! `(entity, row)` bucket at a time, pushed to a `(row, value)` partition, and each row bucket's
+//! window is written straight into `columns.arrow`'s own buffer. ⊘ The heap form was never a term
+//! of this model — it lived in the segment write, not in the entity-order window this module
+//! covers — so what the partitions are charged here is the assembly's constant, and the bytes they
+//! spill are charged to the disk model's assembly phase.
 //!
 //! They are still modelled, and still printed, as **mapped** terms: an operator whose disk is the
 //! constraint has the same right to see the number as one whose memory is. What changed is that
@@ -981,6 +983,32 @@ pub(crate) fn entity_order_residency(
         phases: Phases::ASSEMBLE,
         constant: true,
     });
+    // **Arrow's all-ones validity bitmaps, during the `columns.arrow` layout pass.** Every column
+    // of the file is non-nullable and arrow writes a validity buffer for it all the same
+    // (`docs/evidence/memos/2026-09-11-arrow-all-ones-validity-buffers.md`). The file keeps them as
+    // three numbers (`tessera_store::columns::Fill`) but the layout pass does not: arrow's IPC
+    // writer builds every buffer of the batch before it writes any of them, so one `n / 8`-byte
+    // bitmap per column is alive at once — 437 MB a column at rung 6, anonymous, and a rate over
+    // `n` rather than a constant.
+    //
+    // **Two fixed columns plus the render columns**, counted here as every fixed-width declared
+    // column, which is the same ceiling [`widest_render`] takes: `render` is refused at the
+    // declaration for every string type, so a render column is one of these. A build that declares
+    // fixed-width columns it does not render is over-charged by `n / 8` each.
+    let render_columns = columns
+        .iter()
+        .filter(|column| !carries_characters(column.ty))
+        .count() as u64;
+    terms.push(Term {
+        what: format!(
+            "arrow's all-ones validity bitmaps over {} column(s) at n/8 bytes each, alive together              while the columns.arrow layout is learnt",
+            2 + render_columns
+        ),
+        bytes: (2 + render_columns).saturating_mul(n.div_ceil(8)),
+        mapped: false,
+        phases: Phases::ASSEMBLE,
+        constant: false,
+    });
     terms.push(Term {
         what: "slack for decode buffers, stage scratch and the allocator".into(),
         bytes: SLACK,
@@ -990,7 +1018,6 @@ pub(crate) fn entity_order_residency(
     });
     Residency { terms }
 }
-
 
 /// What the entity-order model is arithmetic over for this build: one [`ColumnCost`] per declared
 /// column, every member entry the layers declare, and a ceiling on any one level's.
@@ -3246,12 +3273,15 @@ require_member_visibility = "none"
         );
     }
 
-    /// **The headline of the entity-order model: nothing anonymous grows with the corpus.**
+    /// **The headline of the entity-order model: what anonymous memory grows with the corpus is
+    /// named, and it is one bit a row a column.**
     ///
-    /// Every term the model charges against the machine is either a constant or one publication
-    /// batch, and a batch is a share of the budget. So the same schema at two row counts an order
-    /// of magnitude apart asks the machine for the same number, and what grows is the disk the
-    /// same model reports beside it.
+    /// Every term the model charges against the machine is a constant or one publication batch —
+    /// a share of the budget — with one exception, and the exception is arrow's all-ones validity
+    /// bitmaps during the `columns.arrow` layout pass, `n / 8` bytes a column alive together. So
+    /// the same schema at two row counts an order of magnitude apart asks the machine for the same
+    /// number *plus* those bitmaps, and this test subtracts them rather than pretending they are
+    /// not there. What grows properly is the disk the same model reports beside it.
     #[test]
     fn the_anonymous_total_does_not_grow_with_the_row_count() {
         // The floor a partition's own constant needs, and the budget both row counts here carry
@@ -3273,13 +3303,18 @@ require_member_visibility = "none"
                 BUDGET,
             )
         };
+        // Arrow's validity bitmaps: `tessera_id`, `residual` and the two fixed-width declared
+        // columns, at one bit a row each. The two that carry characters are not render columns and
+        // are not in `columns.arrow`.
+        let bitmaps = |n: u64| 4 * n.div_ceil(8);
         let small = residency(10_000_000);
         let large = residency(100_000_000);
-        // **The rate terms are equal**: one publication batch, whatever the level behind it.
+        // **The rate terms are equal net of the bitmaps**: one publication batch, whatever the
+        // level behind it.
         assert_eq!(
-            scaling_total(&small),
-            scaling_total(&large),
-            "the anonymous rate is one publication batch:\nat 10⁷{}\nat 10⁸{}",
+            scaling_total(&small) - bitmaps(10_000_000),
+            scaling_total(&large) - bitmaps(100_000_000),
+            "the anonymous rate is one publication batch and arrow's validity bitmaps:\nat 10⁷{}\nat 10⁸{}",
             small.describe(),
             large.describe()
         );
@@ -3290,9 +3325,10 @@ require_member_visibility = "none"
         let at_bound = residency(1u64 << 32);
         let beyond = residency(1u64 << 34);
         assert_eq!(
-            at_bound.total(),
-            beyond.total(),
-            "above the key type's bound the anonymous total is a constant:\nat 2³²{}\nat 2³⁴{}",
+            beyond.total() - at_bound.total(),
+            bitmaps(1u64 << 34) - bitmaps(1u64 << 32),
+            "above the key type's bound the anonymous total moves by the validity bitmaps and \
+             nothing else:\nat 2³²{}\nat 2³⁴{}",
             at_bound.describe(),
             beyond.describe()
         );

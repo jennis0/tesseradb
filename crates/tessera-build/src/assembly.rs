@@ -28,6 +28,14 @@
 //!    buffer. Two 8 B-a-row partitions for a column of any width, the second growing as the first
 //!    is consumed.
 //!
+//! **Two ordinals naming one entity are now refused rather than deduplicated.** The path this
+//! replaced scattered the view's geometry into entity-order files first, so a second ordinal at
+//! one entity overwrote the first's coordinates and the view quietly lost a row. Here every
+//! present ordinal is a row: the histogram counts it, the partition carries it, and step 4 hands
+//! its entity to `PermutationWriter::set`, which refuses a second row at an entity that already
+//! has one. A corpus whose ordinals are not distinct per entity fails the build naming the
+//! entity, where before it built a segment one row short of its own geometry.
+//!
 //! **What is held.** One bucket and one window per partition in flight, the Morton histogram
 //! (a constant 134 MB, the `morton >> 8` space), the page plan (one `bool` per 65,536 entities),
 //! and each render column's presence bitmap. Nothing sized by the row count.
@@ -226,9 +234,16 @@ impl MortonHistogram {
             .collect()
     }
 
-    /// The target a bucket is sized against: `rows / 128`, never zero.
+    /// The target a bucket is sized against: `rows / 128` **rounded up**, never zero.
+    ///
+    /// Rounded up because [`spill::PARTITION_COUNTED_BUCKETS`] is the bound
+    /// `2 × rows / target + 1`, which is 257 only while `target ≥ rows / 128`. Rounded down, a
+    /// 200-row build takes a target of 1 and admits 401 buckets — more than the model charges
+    /// writer buffers for. The difference at rung scale is one row in the target.
     pub(crate) fn target(&self) -> u64 {
-        (self.rows / spill::PARTITION_BUCKETS as u64).max(1)
+        self.rows
+            .div_ceil(spill::PARTITION_BUCKETS as u64)
+            .max(1)
     }
 }
 
@@ -652,7 +667,17 @@ pub(crate) fn write_segment(
             PermutationWriter::create_planned(&permutation_path, &plan)
                 .map_err(|e| BuildError::io(&permutation_path, e))?;
         for bucket in 0..spill::boundaries_uniform(job.n).len() {
-            for pair in pairs.load(bucket)?.chunks_exact(PAIR_RECORD_BYTES) {
+            let mut bytes = pairs.load(bucket)?;
+            // Sorted by entity before the writes, as the render tail sorts the same buckets: the
+            // pairs arrived in row order, which is Morton order, and `set` writes into the mapped
+            // permutation at the entity's own page. Unsorted, a bucket's writes are scattered over
+            // its whole entity range — 109 MB at rung 6 — which is the write-back-and-re-dirty
+            // pattern this stage exists to remove. Sorted, they are one forward sweep.
+            let pairs_in_bucket: &mut [[u8; PAIR_RECORD_BYTES]] = pairs_of(&mut bytes);
+            pairs_in_bucket.sort_unstable_by_key(|pair| {
+                u32::from_le_bytes(pair[0..4].try_into().expect("four bytes"))
+            });
+            for pair in pairs_in_bucket.iter() {
                 let entity = u32::from_le_bytes(pair[0..4].try_into().expect("four bytes"));
                 let at = u32::from_le_bytes(pair[4..8].try_into().expect("four bytes"));
                 writer
@@ -721,7 +746,7 @@ fn render_tail(
             let mut bytes = pairs.load(bucket)?;
             // Sorted by entity so the column is read forward: the pairs arrived in row order
             // within a bucket, which is Morton order, and the column is entity-major.
-            let pairs_in_bucket: &mut [[u8; PAIR_RECORD_BYTES]] = bytemuck_pairs(&mut bytes);
+            let pairs_in_bucket: &mut [[u8; PAIR_RECORD_BYTES]] = pairs_of(&mut bytes);
             pairs_in_bucket.sort_unstable_by_key(|pair| {
                 u32::from_le_bytes(pair[0..4].try_into().expect("four bytes"))
             });
@@ -806,11 +831,15 @@ fn render_tail(
     Ok(paths)
 }
 
-/// A bucket's bytes as fixed-width pair records, so they can be sorted in place.
-fn bytemuck_pairs(bytes: &mut [u8]) -> &mut [[u8; PAIR_RECORD_BYTES]] {
+/// A bucket's bytes as fixed-width pair records, so they can be sorted in place. A bucket holds
+/// whole records — the store verifies each one's length against its receipt — and any trailing
+/// partial record is left out of the cast rather than rounded into one.
+/// `bytemuck::cast_slice_mut` is the crate for this and is not a dependency of the workspace;
+/// one function's worth of transmute does not earn one.
+fn pairs_of(bytes: &mut [u8]) -> &mut [[u8; PAIR_RECORD_BYTES]] {
     let count = bytes.len() / PAIR_RECORD_BYTES;
-    // SAFETY: `[u8; 8]` has the alignment and size of eight `u8`, and the slice covers exactly
-    // `count` of them.
+    // SAFETY: `[u8; PAIR_RECORD_BYTES]` is `PAIR_RECORD_BYTES` `u8`s with the alignment of one,
+    // and the slice covers exactly the `count` whole records the bytes hold.
     unsafe {
         std::slice::from_raw_parts_mut(bytes.as_mut_ptr() as *mut [u8; PAIR_RECORD_BYTES], count)
     }

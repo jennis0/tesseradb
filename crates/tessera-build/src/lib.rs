@@ -1861,8 +1861,8 @@ fn spilled_column_names(
 fn scalar_schema_of(
     schema: &crate::config::Schema,
 ) -> Vec<(String, tessera_spatial::tiler::ScalarType)> {
-    // Render columns only — the segment's tail and `permute_attribute_tail`'s output must name the
-    // same columns in the same order, or every row's values land under the wrong headings.
+    // Render columns only — the segment's tail and the assembly's render lanes must name the same
+    // columns in the same order, or every row's values land under the wrong headings.
     schema
         .attributes
         .iter()

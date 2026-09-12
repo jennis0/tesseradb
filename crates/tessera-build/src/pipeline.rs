@@ -1996,10 +1996,10 @@ fn build_bundle(
     }
     timer.end(BuildStage::RecordBlob, n);
     // **Everything past here wants only the render columns**, and the pass that wanted the rest has
-    // just run. `permute_attribute_tail` skips a non-render column outright (its home is entity
-    // space, and giving it a slot in every row is the per-row cost §10.3's routing exists to
-    // avoid), so a blob-resident column is dead from this line and would otherwise live to the end
-    // of the segment write, straight through the tiler sort's 12 B/row and the record batch beside
+    // just run. The assembly reads a non-render column not at all (its home is entity space, and
+    // giving it a slot in every row is the per-row cost §10.3's routing exists to avoid), so a
+    // blob-resident column is dead from this line and would otherwise live to the end of the
+    // segment write, straight through the row partition's 12 B a row and the columns file beside
     // it.
     //
     // A spilled column has nothing left to release — its characters went out as extents and the

@@ -31,7 +31,11 @@
 //!
 //! `a_column_file_filled_in_place_is_byte_identical_to_one_written_whole` in
 //! `tests/segment_roundtrip.rs` holds the two routes to the same bytes over every declarable
-//! width, over a column set with no scalars, and over no rows at all.
+//! width, over a column set with no scalars, and over no rows at all. What it compares is two
+//! routes through **one** arrow, so it says nothing about a future one: `arrow` is pinned exactly
+//! in the workspace manifest for that reason, and the [`Recorder`]'s refusal of an unrecognised
+//! write above [`MAX_FRAMING_WRITE`] is the only thing that would catch a version whose writer
+//! encoded a batch contiguously instead of buffer by buffer.
 
 use std::fs::File;
 use std::io::{self, Write};
@@ -60,7 +64,14 @@ const FILL_CHUNK: usize = 1 << 20;
 /// `columns.arrow` is non-nullable (contracts R4) and arrow writes a validity buffer for it all the
 /// same, `rows / 8` bytes of `0xFF` saying nothing
 /// (`docs/evidence/memos/2026-09-11-arrow-all-ones-validity-buffers.md`). At rung 6 that is 437 MB
-/// a column; held as a fill it is three numbers.
+/// a column.
+///
+/// **A fill saves the file, not the process.** Held as three numbers, the bitmap costs the plan
+/// nothing to carry and the write nothing to emit. It is still allocated once, by arrow, inside
+/// [`ColumnsPlan::new`]: the IPC writer builds every buffer of the batch before it writes any of
+/// them, so one all-ones bitmap per column is alive together during the layout pass. The build's
+/// residency model charges them (`residency::entity_order_residency`, the assembly phase); this
+/// type does not get to pretend they are free.
 struct Fill {
     at: u64,
     len: u64,

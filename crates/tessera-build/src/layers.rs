@@ -2911,7 +2911,10 @@ fn write_membership_extents(
             // is nothing here to recover from it with.
             Some(pack) => {
                 return Err(BuildError::Invalid(format!(
-                    "{layer} level {level}: the publication streamed a membership pack over                      ordinals [{}, {}) and the store reports [{ordinal_lo}, {}) as ready to pack.                      The two must be the same range — the pack is what the extent will address",
+                    "{layer} level {level}: the publication streamed a membership pack over \
+                     ordinals [{}, {}) and the store reports [{ordinal_lo}, {}) as ready to \
+                     pack. The two must be the same range — the pack is what the extent will \
+                     address",
                     pack.ordinal_lo,
                     pack.ordinal_lo as u64 + pack.count as u64,
                     ordinal_lo as u64 + count as u64
@@ -2941,7 +2944,8 @@ fn write_membership_extents(
                 }
                 if pushed != count {
                     return Err(BuildError::Invalid(format!(
-                        "{layer} level {level}: {pushed} membership(s) were encoded for a range of                          {count}, so the extent would address records that are not there"
+                        "{layer} level {level}: {pushed} membership(s) were encoded for a range \
+                         of {count}, so the extent would address records that are not there"
                     )));
                 }
                 writer.finish().map_err(BuildError::Store)?;
