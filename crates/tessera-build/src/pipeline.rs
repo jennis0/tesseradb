@@ -1508,8 +1508,9 @@ fn build_bundle(
         // write-protected it, and took another fault on the next write to it. Measured at rung 6:
         // 200 to 380 MB/s of writes to grow the bundle at 20, 50,000 to 90,000 minor faults a
         // second, and an assignment stage that rose from 65 s to 233 s across identical batches
-        // as the dirty set grew (`docs/evidence/memos/
-        // 2026-09-12-gbif-whole-corpus-build-observations.md` §1). The window is
+        // as the dirty set grew
+        // (`docs/evidence/memos/2026-09-12-gbif-whole-corpus-build-observations.md` §1). The
+        // window is
         // `batch_items * 4 ≤ n * 4`, which is what `plan_build`'s retained 4 B an item pays for.
         let mut assigned: Vec<u32> = vec![0; batch_len];
         // Assignment, and the band emit in the same walk: entities ascend with position, so
@@ -1518,8 +1519,8 @@ fn build_bundle(
         // unconditional sortedness check later re-verifies exactly this property from disk.
         for (position, rec) in recs.iter().enumerate() {
             let entity = (entity_base + position as u64) as u32;
-            assigned[(rec.ordinal as u64 - ordinal_lo) as usize] = entity;
             let local = (rec.ordinal as u64 - ordinal_lo) as usize;
+            assigned[local] = entity;
             let sig = &packed[starts[local] as usize..starts[local + 1] as usize];
             // **The label is the entity's, not the row's** (`views.md` §7): every view holding
             // this item must have given it the same term set. `sig` is the deduplicated union
@@ -1566,7 +1567,6 @@ fn build_bundle(
                 .map_err(|e| BuildError::Invalid(format!("entity-terms transpose: {e}")))?;
         }
         entities[ordinal_lo as usize..ordinal_lo as usize + batch_len].copy_from_slice(&assigned);
-        drop(assigned);
         entity_base += recs.len() as u64;
         store.delete(k)?;
         timer.end(BuildStage::Assignment, recs.len() as u64);
@@ -4282,8 +4282,14 @@ impl KeywordChunk {
     }
 }
 
-/// The partition the merge pushes `(row, ordinal)` into, under the column's own directory. Its
-/// buckets go back as the values file is written past them.
+/// The partition the merge pushes `(row, ordinal)` into.
+///
+/// **Under the column's own directory in the bundle, not under `.build-tmp/`**, which is where
+/// the sorted runs it merges are already written: the partition sits with its own inputs, and the
+/// one pass that writes both unlinks both. A build that dies between them leaves a bundle with no
+/// `CURRENT`, which the sweep removes whole — so nothing survives a failure here that would not
+/// survive it in `.build-tmp/`. The mapped scratch this replaced was under `.build-tmp/` because
+/// it was a scratch *array*, with no runs beside it to sit with.
 const KEYWORD_ORDINAL_PARTITION: &str = "keyword-ordinals";
 
 /// One `(row, ordinal)` record of that partition: two little-endian `u32`s, the row first because

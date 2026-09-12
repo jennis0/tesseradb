@@ -1040,7 +1040,8 @@ impl Partition {
     ) -> Result<Partition> {
         if record_width < 4 {
             return Err(BuildError::Invalid(format!(
-                "partition {name}: a record is {record_width} bytes and its first four are its                  key"
+                "partition {name}: a record is {record_width} bytes and its first four are \
+                 its key"
             )));
         }
         if boundaries.first() != Some(&0) || boundaries.windows(2).any(|w| w[0] >= w[1]) {
@@ -1125,19 +1126,33 @@ impl Partition {
     }
 
     /// Flush and fsync every bucket, and hand back the store the reads go through.
-    pub(crate) fn finish(self) -> Result<PartitionStore> {
-        let Partition {
-            writers,
-            record_width,
-            ..
-        } = self;
+    ///
+    /// **The writers are taken out rather than moved out of `self`**: the partition owns a `Drop`
+    /// that unlinks its files, so a destructuring move is not available and a `self` left holding
+    /// them would sweep away the very buckets this just finished.
+    pub(crate) fn finish(mut self) -> Result<PartitionStore> {
+        let writers = std::mem::take(&mut self.writers);
         Ok(PartitionStore {
             receipts: writers
                 .into_iter()
                 .map(|w| w.finish().map(Some))
                 .collect::<Result<_>>()?,
-            record_width,
+            record_width: self.record_width,
         })
+    }
+}
+
+impl Drop for Partition {
+    /// **The bucket files go back with the partition it failed part-way through.** A build that
+    /// dies between [`Partition::create`] and [`Partition::finish`] would otherwise leave 128
+    /// files behind; [`PartitionStore`] has the same sweep for the half of the life after
+    /// `finish`. Best effort, as `MappedArray`'s is: `TmpDir` covers whatever this misses, and a
+    /// partition whose files are not under it (see [`Partition::create`]'s callers) is swept by
+    /// the build's own directory removal.
+    fn drop(&mut self) {
+        for writer in &self.writers {
+            let _ = std::fs::remove_file(&writer.path);
+        }
     }
 }
 
@@ -1146,7 +1161,12 @@ impl PartitionStore {
     pub(crate) fn load(&self, k: usize) -> Result<Vec<u8>> {
         let receipt = self.receipts[k]
             .as_ref()
-            .ok_or_else(|| BuildError::Invalid(format!("partition bucket {k} loaded twice")))?;
+            .ok_or_else(|| {
+                BuildError::Invalid(format!(
+                    "partition bucket {k} loaded after it was deleted — a bucket may be read as \
+                     many times as a pass wants and released once"
+                ))
+            })?;
         read_bucket_bytes(receipt, self.record_width)
     }
 
@@ -1161,8 +1181,9 @@ impl PartitionStore {
 }
 
 impl Drop for PartitionStore {
-    /// The buckets go back with the store, whichever of them the pass did not reach: a build that
-    /// failed part-way through a partition leaves nothing behind but what `TmpDir` would sweep.
+    /// The buckets go back with the store, whichever of them the pass did not reach. With
+    /// [`Partition`]'s own sweep this covers the whole of a partition's life, so a build that
+    /// fails anywhere in it leaves no bucket file behind.
     fn drop(&mut self) {
         for receipt in self.receipts.iter_mut().flatten() {
             let _ = std::fs::remove_file(&receipt.path);

@@ -21,14 +21,22 @@ fn main() {
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "unknown".to_string());
     println!("cargo:rustc-env=TESSERA_BUILD_COMMIT={commit}");
-    // A commit change moves `HEAD` on a branch checkout and the ref it names on any checkout, so
-    // both are watched. A worktree's `.git` is a file naming the real directory, which has no ref
-    // to watch here; the rerun then happens on the next full build rather than on the next commit.
-    let git = Path::new("../../.git");
+    // A commit change moves `HEAD` and the ref it names, so both are watched — and **where git
+    // says they are**, not at `../../.git`. A worktree's `.git` is a *file* naming the real
+    // directory, so the guessed paths do not exist there and the stamp went stale on every commit
+    // that did not touch this crate, which is the failure the stamp exists to catch.
     for path in ["HEAD", "refs"] {
-        let watched = git.join(path);
-        if watched.exists() {
-            println!("cargo:rerun-if-changed={}", watched.display());
+        let resolved = Command::new("git")
+            .args(["rev-parse", "--git-path", path])
+            .output()
+            .ok()
+            .filter(|out| out.status.success())
+            .and_then(|out| String::from_utf8(out.stdout).ok())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        let Some(resolved) = resolved else { continue };
+        if Path::new(&resolved).exists() {
+            println!("cargo:rerun-if-changed={resolved}");
         }
     }
 }

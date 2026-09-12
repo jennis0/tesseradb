@@ -1807,8 +1807,18 @@ impl ArtifactStore {
     /// publication may call this and why [`Self::vacated_count`] exists: a vacated artifact left
     /// standing is one served as absent, and the build refuses rather than write that bundle.
     ///
+    /// **Build-only.** Nothing derived may have been built from this level when it runs: a
+    /// tile index, a row column or a containment partition read out of a vacated artifact is the
+    /// empty set written into a file no later pass revisits. Nothing on a serving or fold path
+    /// calls it, and the build's own order — publish, pack, rehouse, then the artifact pass —
+    /// is what keeps that true.
+    ///
     /// `false` where the address names no record.
     pub fn vacate_members(&mut self, layer: &str, level: u32, ordinal: u32) -> bool {
+        debug_assert!(
+            !self.vacated.contains_key(&(layer.to_string(), level, ordinal)),
+            "an artifact vacated twice loses the cardinality the rehousing answers with"
+        );
         let Some(record) = self
             .levels
             .get_mut(&(layer.to_string(), level))
@@ -1993,9 +2003,17 @@ impl ArtifactStore {
     /// level's publication happened to be cut would reach the manifest as its level version, so
     /// two builds of one corpus under different memory budgets would produce different bundles.
     ///
-    /// Safe here for [`Self::seed_level_version`]'s reason: nothing has been derived from these
-    /// levels yet, the level having just been created.
+    /// **Build-only**, and safe here for [`Self::seed_level_version`]'s reason: nothing has been
+    /// derived from these levels yet, the level having just been created. A version moved under a
+    /// derived structure that already carries it is that structure silently adopted against a
+    /// level it was not built from.
     pub fn fold_publication_versions(&mut self, layer: &str, level: u32, records: u64) {
+        debug_assert!(
+            self.versions
+                .get(&(layer.to_string(), level))
+                .is_none_or(|version| *version >= records),
+            "a level published in {records} record(s) counted fewer than that many versions"
+        );
         let extra = records.saturating_sub(1);
         for counter in [&mut self.versions, &mut self.lineage_versions] {
             if let Some(version) = counter.get_mut(&(layer.to_string(), level)) {

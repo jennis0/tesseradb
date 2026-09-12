@@ -902,8 +902,14 @@ pub(crate) fn report_attribute_coverage(coverage: &[AttributeCoverage]) {
                 );
             }
         }
+        // **Over the rows this build read, not over the source.** A `--limit` build prunes whole
+        // row groups on their statistics before a value is decoded, so a row in a pruned group is
+        // not counted here as unknown — it is not counted at all. Said rather than left to be
+        // inferred: the figure is a floor on a limited build and the exact count on a whole one,
+        // and a floor read as a count is an operator concluding their join is cleaner than it is.
         eprintln!(
-            "        {} source row(s) named entities this build did not load",
+            "        {} source row(s) named entities this build did not load, over the rows this \
+             build read (a --limit build prunes row groups before decoding them)",
             thousands(source.unknown_rows)
         );
         // The join did not meet at all. Emphatic and not a refusal: the ids may simply be another

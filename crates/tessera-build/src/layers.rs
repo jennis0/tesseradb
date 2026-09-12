@@ -44,6 +44,21 @@
 //! caller's own name for it is the only address that survives a rebuild, and it is what an edge
 //! into the layer names.
 //!
+//! ## What the batched publication changed about `attached_to`
+//!
+//! A level is published in batches sized by the memory budget ([`publication_batch_entries`]), and
+//! `prepare_publish` resolves a parent against the batch in hand **plus the store**. So an
+//! `attached_to` naming an artifact in an *earlier batch of the same level* now resolves, where an
+//! unbatched publication refused it as a within-level edge. Whether that shape is accepted
+//! therefore depends on the budget the build ran under, which is not a property a declaration
+//! should have.
+//!
+//! Recorded rather than acted on. Levels carrying within-level hierarchy edges are published whole
+//! ([`within_level_edges`]) precisely so the resolution does not depend on the cut; what is left is
+//! that a level *without* declared within-level edges can still carry one through `attached_to`
+//! and have it resolve or not by budget. The fix is a refusal at validation, and it is an owner's
+//! call whether the shape is refused at all.
+//!
 //! ## The declarations are not read here
 //!
 //! [`crate::config`] parses them, out of the one document that also carries the attributes, the
@@ -2883,12 +2898,24 @@ fn write_membership_extents(
         // filename's index is the order `pending_ranges` answers in, which is the store's own key
         // order rather than the declaration order the publication ran in, so the pack is named
         // here and nowhere else.
-        match streamed
-            .remove(&(layer.clone(), level))
-            .filter(|pack| pack.ordinal_lo == ordinal_lo && pack.count == count)
-        {
-            Some(pack) => {
+        match streamed.remove(&(layer.clone(), level)) {
+            Some(pack) if pack.ordinal_lo == ordinal_lo && pack.count == count => {
                 std::fs::rename(&pack.path, &path).map_err(|e| BuildError::io(&path, e))?
+            }
+            // **A streamed pack that disagrees is a refusal, not a re-encode.** It used to fall
+            // through to the arm below, which encodes from a store whose published memberships
+            // have been vacated — the empty set — so the only thing standing between that and a
+            // bundle of empty artifacts was the vacated-count check at the end of this function,
+            // and a level every one of whose artifacts is legitimately empty would pass it. The
+            // disagreement is a defect in the publication's own bookkeeping either way, and there
+            // is nothing here to recover from it with.
+            Some(pack) => {
+                return Err(BuildError::Invalid(format!(
+                    "{layer} level {level}: the publication streamed a membership pack over                      ordinals [{}, {}) and the store reports [{ordinal_lo}, {}) as ready to pack.                      The two must be the same range — the pack is what the extent will address",
+                    pack.ordinal_lo,
+                    pack.ordinal_lo as u64 + pack.count as u64,
+                    ordinal_lo as u64 + count as u64
+                )));
             }
             // A level the publication did not stream — a predicate layer's, derived and applied
             // before that loop runs — is encoded from the store here, which is where every level
@@ -2897,6 +2924,7 @@ fn write_membership_extents(
                 let mut writer =
                     tessera_store::membership::PackWriter::create(&path, ordinal_lo, count)
                         .map_err(BuildError::Store)?;
+                let mut pushed = 0u32;
                 for blob in store.encode_pending(&layer, level, ordinal_lo, count) {
                     // Unreachable: `pending_ranges` reports a level with a hole as skipped above
                     // rather than as a range. A refusal rather than an assertion because the
@@ -2909,6 +2937,12 @@ fn write_membership_extents(
                         ))
                     })?;
                     writer.push(&blob).map_err(BuildError::Store)?;
+                    pushed += 1;
+                }
+                if pushed != count {
+                    return Err(BuildError::Invalid(format!(
+                        "{layer} level {level}: {pushed} membership(s) were encoded for a range of                          {count}, so the extent would address records that are not there"
+                    )));
                 }
                 writer.finish().map_err(BuildError::Store)?;
             }
