@@ -183,6 +183,33 @@ impl<T: Zeroable> MappedArray<T> {
         }
     }
 
+    /// The array's bytes, as the file holds them: `len * size_of::<T>()` little-endian values.
+    ///
+    /// For the passes that move a whole run of values at once and do not care what `T` is — the
+    /// attribute join's replay writes one bucket's window into the column file as a single
+    /// sequential run, and a run of `u16`s and a run of `i64`s are the same `memcpy`.
+    pub(crate) fn as_bytes(&self) -> &[u8] {
+        match &self.map {
+            // SAFETY: the mapping is `len * size_of::<T>()` bytes and every byte of it is a byte
+            // of the array; `&self` bars a concurrent write.
+            Some(map) => unsafe {
+                std::slice::from_raw_parts(map.as_ptr(), self.len * std::mem::size_of::<T>())
+            },
+            None => &[],
+        }
+    }
+
+    /// [`Self::as_bytes`], writable.
+    pub(crate) fn as_mut_bytes(&mut self) -> &mut [u8] {
+        let len = self.len * std::mem::size_of::<T>();
+        match &mut self.map {
+            // SAFETY: as `as_bytes`, and `&mut self` gives exclusive access. `T: Zeroable` makes
+            // every byte pattern a caller writes a value of `T`.
+            Some(map) => unsafe { std::slice::from_raw_parts_mut(map.as_mut_ptr(), len) },
+            None => &mut [],
+        }
+    }
+
     /// The array, writable. Taken once by the caller and held as an ordinary slice for the rest of
     /// the pass where the pass both fills and reads it — one binding for both is what keeps the
     /// mapping's exclusivity obvious.

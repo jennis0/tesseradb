@@ -2420,6 +2420,30 @@ fn read_attributes_by_entity(
         .filter(|&(i, _)| routes.takes_extents(i))
         .map(|(i, a)| crate::extents::ExtentColumn::new(tmp, i, &a.name))
         .collect();
+    // **A `(entity, value)` partition per fixed-width column** ([`ValueLane`]). A string column
+    // on the arena route keeps its scattered offset write: the arena beside it is appended in
+    // arrival order, and the route is not taken at any scale where the cache would fail it.
+    let mut value_lanes: Vec<Option<ValueLane>> = by_entity
+        .iter()
+        .enumerate()
+        .map(|(index, column)| match column.fixed_width() {
+            Some(width) => {
+                let boundaries = value_lane_boundaries(n);
+                Ok(Some(ValueLane {
+                    column: index,
+                    width,
+                    partition: spill::Partition::create(
+                        tmp,
+                        &format!("value-{index}"),
+                        boundaries.clone(),
+                        4 + width,
+                    )?,
+                    boundaries,
+                }))
+            }
+            None => Ok(None),
+        })
+        .collect::<Result<_>>()?;
     // **One sweep per source, not one over a single corpus file.** Each declared attribute names
     // the file it is read from, so the groups are the passes; a build whose columns sit in three
     // files reads three files, and each one joins on the identity column its own group declared.
@@ -2435,8 +2459,43 @@ fn read_attributes_by_entity(
             scratch,
             &mut by_entity,
             &mut spilled,
+            &mut value_lanes,
             &mut coverage,
         )?;
+    }
+    // **The replay, once every source has been read.** A bucket at a time, in ascending entity
+    // order: the records are scattered into a window over the bucket's own range and the window
+    // is written into the column as one sequential run, with its presence bits beside it.
+    for lane in value_lanes.into_iter().flatten() {
+        let name = &attributes[lane.column].name;
+        let record_width = 4 + lane.width;
+        let mut store = lane.partition.finish()?;
+        for (k, &lo) in lane.boundaries.iter().enumerate() {
+            let hi = lane
+                .boundaries
+                .get(k + 1)
+                .map(|&next| next as u64)
+                .unwrap_or(n)
+                .min(n);
+            let span = (hi.saturating_sub(lo as u64)) as usize;
+            let mut window = vec![0u8; span * lane.width];
+            let mut present = vec![0u64; span.div_ceil(64)];
+            for record in store.load(k)?.chunks_exact(record_width) {
+                let entity =
+                    u32::from_le_bytes(record[..4].try_into().expect("a record carries its key"));
+                let at = (entity as u64).checked_sub(lo as u64).filter(|&at| at < span as u64);
+                let Some(at) = at.map(|at| at as usize) else {
+                    return Err(BuildError::Invalid(format!(
+                        "attribute '{name}': bucket {k} of its value partition holds entity \
+                         {entity}, outside the range [{lo}, {hi}) it addresses"
+                    )));
+                };
+                window[at * lane.width..(at + 1) * lane.width].copy_from_slice(&record[4..]);
+                present[at / 64] |= 1u64 << (at % 64);
+            }
+            store.delete(k)?;
+            by_entity[lane.column].write_value_run(lo as usize, &window, &present, name)?;
+        }
     }
     Ok((by_entity, spilled, coverage))
 }
@@ -2454,10 +2513,48 @@ enum JoinLane<'a> {
         src: &'a mut EntityColumn,
         home: &'a mut EntityColumn,
     },
+    Partitioned {
+        src: &'a mut EntityColumn,
+        lane: &'a mut ValueLane,
+    },
     Extent {
         src: &'a mut EntityColumn,
         out: &'a mut crate::extents::ExtentColumn,
     },
+}
+
+/// One fixed-width column's `(entity, value)` partition, and the entity ranges its buckets
+/// address.
+///
+/// **Why a partition and not the scatter it replaces.** The join reads its source in the source's
+/// own order and each value's home is its entity, which is signature-then-Morton order — so
+/// writing each value where it belongs wrote the column's pages back and re-dirtied them many
+/// times over: 123 GB written to grow the bundle by 34 in one stage at rung 6, over value columns
+/// of 10.5 GB (`docs/evidence/memos/2026-09-12-gbif-whole-corpus-build-observations.md` §4). The
+/// values go to buckets by entity range instead, and each bucket is replayed into a window and
+/// written into the column as one sequential run.
+///
+/// **Replayed in append order, which is the order today's scatter writes in**: sweep order within
+/// a chunk, chunk order across chunks, source order across sources. So which of two rows carrying
+/// one entity wins is unchanged.
+struct ValueLane {
+    column: usize,
+    width: usize,
+    /// The first entity of each bucket, ascending from 0 and **a multiple of 64** — so a bucket's
+    /// presence bits are whole words of the column's own bitmap.
+    boundaries: Vec<u32>,
+    partition: spill::Partition,
+}
+
+/// The entity boundaries a value lane's buckets take: [`spill::boundaries_uniform`] rounded down
+/// to presence-word boundaries, so a bucket's bits are whole words.
+fn value_lane_boundaries(n: u64) -> Vec<u32> {
+    spill::boundaries_uniform(n)
+        .into_iter()
+        .map(|first| first & !63)
+        .collect::<std::collections::BTreeSet<u32>>()
+        .into_iter()
+        .collect()
 }
 
 /// Write one chunk's values as an extent, and return how many of its rows carried a value.
@@ -2509,6 +2606,7 @@ fn read_one_attribute_source(
     scratch: &crate::column::ColumnScratch,
     by_entity: &mut [EntityColumn],
     spilled: &mut [crate::extents::ExtentColumn],
+    value_lanes: &mut [Option<ValueLane>],
     coverage: &mut Vec<crate::AttributeCoverage>,
 ) -> Result<()> {
     let filled: Vec<usize> = group.attributes.clone();
@@ -2571,6 +2669,7 @@ fn read_one_attribute_source(
                  staged: &mut [EntityColumn],
                  by_entity: &mut [EntityColumn],
                  spilled: &mut [crate::extents::ExtentColumn],
+                 value_lanes: &mut [Option<ValueLane>],
                  matched: &mut u64,
                  unknown: &mut u64,
                  present: &mut [u64]|
@@ -2615,17 +2714,27 @@ fn read_one_attribute_source(
                 let at = column.column;
                 spills[at] = Some(column);
             }
+            let mut partitions: Vec<Option<&mut ValueLane>> =
+                (0..homes.len()).map(|_| None).collect();
+            for lane in value_lanes.iter_mut().flatten() {
+                let at = lane.column;
+                partitions[at] = Some(lane);
+            }
             let mut lanes: Vec<JoinLane<'_>> = filled
                 .iter()
                 .zip(staged.iter_mut())
                 .map(|(&column, src)| match spills[column].take() {
                     Some(out) => JoinLane::Extent { src, out },
-                    None => {
-                        let home = homes[column].take().expect(
-                            "an attribute is read from exactly one source, so one lane owns it",
-                        );
-                        JoinLane::Value { column, src, home }
-                    }
+                    None => match partitions[column].take() {
+                        Some(lane) => JoinLane::Partitioned { src, lane },
+                        None => {
+                            let home = homes[column].take().expect(
+                                "an attribute is read from exactly one source, so one lane owns \
+                                 it",
+                            );
+                            JoinLane::Value { column, src, home }
+                        }
+                    },
                 })
                 .collect();
             // Collected per lane and folded in lane order, so a build that fails here fails with
@@ -2645,6 +2754,23 @@ fn read_one_attribute_source(
                             // already carries it (`column.rs`) or names the file it could not
                             // write.
                             home.take_from(entity as usize, src, pos as usize, name)?;
+                        }
+                        Ok(count)
+                    }
+                    JoinLane::Partitioned { src, lane } => {
+                        let mut count = 0u64;
+                        let mut record = vec![0u8; 4 + lane.width];
+                        for &(entity, pos) in resolved.iter() {
+                            // **An absent row pushes nothing**, as the scatter this replaces
+                            // wrote nothing for one: the column was filled absent before a row
+                            // was read, and absence is the state it keeps.
+                            let Some(value) = src.raw_at(pos as usize) else {
+                                continue;
+                            };
+                            count += 1;
+                            record[..4].copy_from_slice(&entity.to_le_bytes());
+                            record[4..].copy_from_slice(value);
+                            lane.partition.push(&record)?;
                         }
                         Ok(count)
                     }
@@ -2685,6 +2811,7 @@ fn read_one_attribute_source(
                     &mut staged,
                     by_entity,
                     spilled,
+                    value_lanes,
                     &mut matched_rows,
                     &mut unknown_rows,
                     &mut present,
@@ -2724,6 +2851,7 @@ fn read_one_attribute_source(
             &mut staged,
             by_entity,
             spilled,
+            value_lanes,
             &mut matched_rows,
             &mut unknown_rows,
             &mut present,

@@ -505,6 +505,73 @@ impl EntityColumn {
         Ok(())
     }
 
+    /// What one value of this column occupies in its file, or `None` where the column is a string
+    /// one or carries no values at all.
+    ///
+    /// **The attribute join routes on this.** A fixed-width column's values go through a
+    /// `(entity, value)` partition and are written back as contiguous runs; a string column keeps
+    /// its scattered offset write, the arena beside it being appended in arrival order and the
+    /// route not taken at any scale where the cache would fail it.
+    pub(crate) fn fixed_width(&self) -> Option<usize> {
+        match &self.storage {
+            ColumnStorage::ByEntity { data, .. } => data.fixed_width(),
+            ColumnStorage::Empty => None,
+        }
+    }
+
+    /// One row's bytes exactly as the file holds them, or `None` where the row carries no value —
+    /// the payload the attribute join's partition pushes beside the entity.
+    pub(crate) fn raw_at(&self, pos: usize) -> Option<&[u8]> {
+        let width = self.fixed_width()?;
+        if !self.is_present(pos) {
+            return None;
+        }
+        let ColumnStorage::ByEntity { data, .. } = &self.storage else {
+            return None;
+        };
+        data.as_bytes().get(pos * width..(pos + 1) * width)
+    }
+
+    /// Write one contiguous run of values and the presence bits beside them — the attribute
+    /// join's replay of one partition bucket.
+    ///
+    /// `lo` is the run's first entity and must be a multiple of 64, so that the presence words
+    /// this writes are whole words of the column's own bitmap and no read-modify-write is needed
+    /// at either end. `values` is the run's bytes at the column's width and `present` its bits,
+    /// least significant first.
+    ///
+    /// **This is the whole reason a value lane is a partition.** Writing each value at its entity
+    /// as it was joined scattered the writes over the column's whole span: 123 GB written to grow
+    /// the bundle by 34 in one stage at rung 6, every page of every value column written back and
+    /// re-dirtied many times over
+    /// (`docs/evidence/memos/2026-09-12-gbif-whole-corpus-build-observations.md` §4).
+    pub(crate) fn write_value_run(
+        &mut self,
+        lo: usize,
+        values: &[u8],
+        present: &[u64],
+        name: &str,
+    ) -> Result<()> {
+        let ty = self.ty;
+        let Some(width) = self.fixed_width() else {
+            return Err(no_slot(ty, name));
+        };
+        let ColumnStorage::ByEntity {
+            data,
+            present: bits,
+        } = &mut self.storage
+        else {
+            return Err(no_slot(ty, name));
+        };
+        debug_assert_eq!(lo % 64, 0, "a run starts at a presence-word boundary");
+        let bytes = data.as_mut_bytes();
+        let at = lo * width;
+        bytes[at..at + values.len()].copy_from_slice(values);
+        let words = bits.as_mut_slice();
+        words[lo / 64..lo / 64 + present.len()].copy_from_slice(present);
+        Ok(())
+    }
+
     pub(crate) fn is_present(&self, entity: usize) -> bool {
         match &self.storage {
             ColumnStorage::ByEntity { present, .. } => present_bit(present.as_slice(), entity),
@@ -766,6 +833,49 @@ impl EntityColumn {
 }
 
 impl ColumnData {
+    /// What one value occupies, or `None` for the string member, whose values are in an arena.
+    fn fixed_width(&self) -> Option<usize> {
+        macro_rules! arms {
+            ($(($v:ident, $t:ty)),* $(,)?) => {
+                match self {
+                    $(ColumnData::$v(_) => Some(std::mem::size_of::<$t>()),)*
+                    // A byte a row in the file, packed to a bit only on the way into Arrow.
+                    ColumnData::Bool(_) => Some(1),
+                    ColumnData::Utf8(_) => None,
+                }
+            };
+        }
+        fixed_width_columns!(arms)
+    }
+
+    /// The values as the file holds them. Empty for the string member.
+    fn as_bytes(&self) -> &[u8] {
+        macro_rules! arms {
+            ($(($v:ident, $t:ty)),* $(,)?) => {
+                match self {
+                    $(ColumnData::$v(col) => col.as_bytes(),)*
+                    ColumnData::Bool(col) => col.as_bytes(),
+                    ColumnData::Utf8(_) => &[],
+                }
+            };
+        }
+        fixed_width_columns!(arms)
+    }
+
+    /// [`Self::as_bytes`], writable.
+    fn as_mut_bytes(&mut self) -> &mut [u8] {
+        macro_rules! arms {
+            ($(($v:ident, $t:ty)),* $(,)?) => {
+                match self {
+                    $(ColumnData::$v(col) => col.as_mut_bytes(),)*
+                    ColumnData::Bool(col) => col.as_mut_bytes(),
+                    ColumnData::Utf8(_) => &mut [],
+                }
+            };
+        }
+        fixed_width_columns!(arms)
+    }
+
     /// Write one value at `entity`, refusing a tag that is not the column's: a coerced value gives
     /// one entity another's identity, with every value present and none its own.
     fn set(&mut self, entity: usize, value: ScalarValue, ty: ScalarType, name: &str) -> Result<()> {
