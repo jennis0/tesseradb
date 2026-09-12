@@ -157,11 +157,12 @@ goes.
 
 **Disk, at rung 6.** The row partition stands whole at 42 GB when step 2 ends, with the
 28 GB of ordinal geometry just released, and is consumed while the `(entity, row)` partition
-grows. That partition is then read once per render column, so it stands for the whole render
-tail beside the lane being built: `(8 + 4 + w)` B a row, 45 GB for `kingdom` at 1 B and 56 GB
-for a `u32` column. Against today: the 28 GB of entity-order geometry is not written and the
-42 GB of column scratch a vector-backed writer would need does not exist. The stage's
-transient rises by about 17 GB at rung 6; §7 has the phase arithmetic.
+grows. That partition is read once, its buckets deleted as they are loaded, and every render
+lane is filled from the same pass, so the pairs shrink at 8 B a row while the lanes grow at
+`Σ(4 + wᵢ)` B a row; for `kingdom` alone the lanes end at 17 GB with the pairs gone. The
+stage's transient is the row partition's 42 GB. Against today: the 28 GB of entity-order
+geometry is not written and the 42 GB of column scratch a vector-backed writer would need does
+not exist. The stage's transient rises by 14 GB at rung 6; §7 has the phase arithmetic.
 
 ### 4.2 The keyword dictionary's ordinals
 
@@ -187,7 +188,9 @@ The per-chunk sort stays. The extent lanes push one extent per resolved row in t
 order and deduplicate against the preceding entity, so their bytes depend on it. The arena
 route, a string column whose characters fit the disk as an arena, is taken whenever the disk
 allows, so its offset lane goes through a `(entity, offset)` partition at 12 B a row the same
-way; the arena itself is appended in arrival order. An absent row pushes nothing, as today.
+way; the arena itself is appended in arrival order. Charging the arena route those 12 B a row
+moves the route choice for a string column near the free-space ceiling to the extents, which is
+a different bundle for that column and the right one. An absent row pushes nothing, as today.
 
 ### 4.4 The entity map in the assignment walk
 
@@ -282,14 +285,14 @@ What this design moves, by phase:
 |---|---|---|
 | join | the value columns scattered in place | + `(entity, value)` partitions, 5 B and 6 B a row for `kingdom` and `year`, 38 GB, consumed into the same column files; the phase's peak, 281 GB forecast, stays below assembly's |
 | index | `keyword-ordinals.scratch`, 13 GB | + `(row, ordinal)` partition, 26 GB; 335 GB forecast, below assembly's |
-| assembly | entity-order geometry 28 GB, and 70 GB of heap | row partition 42 GB while the ordinal geometry is released; then the `(entity, row)` partition beside each render lane, 45 GB at `kingdom`: **+17 GB** |
+| assembly | entity-order geometry 28 GB, and 70 GB of heap | row partition 42 GB while the ordinal geometry is released; the pairs and the render lanes after it never exceed it: **+14 GB** |
 
 `--no-oracle-pairs` is the campaign's setting, the file serving only the test oracle, and the
 model already drops its term under the flag (−14 GB). The `dict.bin` term stays a ceiling of one
 key a row: no distinct-key estimate exists before the dictionary is built, one taken from a
 sample errs low, and an operator hint is complexity nobody should carry. The forecast is a
-warning and the build goes on. The forecast the plan prints for rung 6 is then about 440 GB
-against 438 GB free, and the modelled peak about 357 GB. No archive and no second volume.
+warning and the build goes on. The forecast the plan prints for rung 6 is then about 436 GB
+against 438 GB free, and the modelled peak about 354 GB. No archive and no second volume.
 
 **The entity-id assignment stays.** Assigning entities in Morton order would make row order
 and entity order agree and remove the permutation, but entity order is signature-major so that
