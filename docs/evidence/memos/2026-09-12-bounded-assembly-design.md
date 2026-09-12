@@ -262,11 +262,12 @@ What this design moves, by phase:
 | index | `keyword-ordinals.scratch`, 13 GB | + `(row, ordinal)` partition, 26 GB; 335 GB forecast, below assembly's |
 | assembly | entity-order geometry 28 GB, and 70 GB of heap | row partition 42 GB, the later partitions growing as it is consumed: **+14 GB** |
 
-Two model corrections come with it and are worth more than the increase: `dict.bin` is charged
-at the sampled distinct-key estimate the census already provides rather than at one key a row
-(−30 GB), and `--no-oracle-pairs` is the campaign's setting, the file serving only the test
-oracle (−14 GB). The forecast the plan prints for rung 6 is then about 406 GB against 438 GB
-free, and the modelled peak about 354 GB. No archive and no second volume.
+`--no-oracle-pairs` is the campaign's setting, the file serving only the test oracle, and the
+model already drops its term under the flag (−14 GB). The `dict.bin` term stays a ceiling of one
+key a row: no distinct-key estimate exists before the dictionary is built, one taken from a
+sample errs low, and an operator hint is complexity nobody should carry. The forecast is a
+warning and the build goes on. The forecast the plan prints for rung 6 is then about 436 GB
+against 438 GB free, and the modelled peak about 354 GB. No archive and no second volume.
 
 **The entity-id assignment stays.** Assigning entities in Morton order would make row order
 and entity order agree and remove the permutation, but entity order is signature-major so that
@@ -287,14 +288,15 @@ each and one full gate at the end:
 | | scope | why this order |
 |---|---|---|
 | A | §4.5, §4.7 | without the batched publication the pre-flight refuses rung 6 outright once the term is honest, and without the trim nothing after `layers` has a cache |
-| B | §3, §4.1, §4.6, the two model corrections of §7 | the stage that cannot complete at rung 6 under any budget |
+| B | §3, §4.1, §4.6 | the stage that cannot complete at rung 6 under any budget |
 | C | §4.2, §4.3 | the eight-hour stage and the 3.6× write amplification |
 | D | §4.4 | the smallest gain; last |
 
 ## 9. Decisions
 
-- **Disk.** Taken by the design: `columns.arrow` written in place, the two model corrections,
-  no archive and no second volume.
+- **Disk.** Taken by the design: `columns.arrow` written in place, `--no-oracle-pairs`, no
+  archive and no second volume. The `dict.bin` ceiling stands (owner ruling, 2026-09-12: no
+  operator hint).
 - **The render gather.** Always two partitions (§4.1 step 5), or direct when the column fits
   a share of the budget. The design says always; at rung 6 it costs nothing at the peak.
 - **The heap.** `malloc_trim` at stage boundaries, measured, before any allocator change.
