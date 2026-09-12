@@ -621,38 +621,26 @@ fn arena_capacity(payload: u64) -> u64 {
     payload.saturating_add(crate::spill::ARENA_GROWTH_STEP)
 }
 
-/// What one layer member **entry** — one `(artifact, source)` pair — costs the **machine**: about
-/// 4 bytes as Roaring, the store's own decoded copy, at the ~2 bytes an array container spends on a
-/// scattered member and less on a dense one, and the level being published beside it, whose
-/// incoming bitmaps and durable record bytes are the same membership twice more.
+/// What one layer member **entry** — one `(artifact, source)` pair — costs the **machine** while
+/// the batch holding it is in flight: **12 bytes**, measured.
 ///
-/// **Charged over one level's entries and not the layer's**, because [`crate::layers::publish`]
-/// walks the levels and drops each one's bitmaps when its record is written. A level draws at most
-/// one artifact per member row, so the file's row count is a ceiling on any one level's entries and
-/// is what this is charged over — where the disk terms below are charged over every entry, all of
-/// which are on the disk at once.
+/// A level whose members are scattered across entity space is Roaring array containers almost
+/// throughout, and 3.4×10⁹ entries came to 46 GB of anonymous memory over the two copies that
+/// stand at once — the bitmaps the publication builds, and the copy `prepare_publish` takes of
+/// each (`docs/evidence/memos/2026-09-12-gbif-whole-corpus-build-observations.md` §5). The figure
+/// was 4 until that measurement, which is where a level of that size passed a pre-flight it then
+/// exceeded elevenfold.
 ///
-/// It was 12 until 2026-08-30, the other 8 being the plan's `Vec<u64>` of source ids: one vector
-/// per artifact, every one of them live from the first row of the first member source until the
-/// last level was published. Those pairs go to disk now ([`SPILLED_BYTES_PER_MEMBER_ENTRY`]), so the
-/// plan holds a spill budget rather than the corpus and the term that is left is the published
-/// memberships alone.
-///
-/// **Only the store's copy was corpus-wide, and it is a mapping now** — see
-/// [`MAPPED_BYTES_PER_MEMBER_ENTRY`]. The store used to carry one heap Roaring bitmap per artifact
-/// from the layers stage to the artifact pass four stages later: **+1.2 GB of anonymous memory at
-/// the 10⁷ MedCPT sample**, 2.7 B per closed member row, measured across the build's peak
-/// (`probes/2026-09-02-mapped-memberships/README.md`). `layers.rs` reads each membership back
-/// through the extent it has just written, so what is left here is the publication's own window and
-/// this constant no longer describes anything the build holds to the end.
+/// **Charged over one batch's entries, not a level's and not the layer's.**
+/// [`crate::layers::publish`] publishes a level in batches sized by
+/// [`crate::layers::publication_batch_entries`] and encodes each batch into the level's membership
+/// pack before the next is built, so what stands is a batch. A level smaller than a batch is
+/// charged its own entries.
 ///
 /// ⊘ **The Roaring figure is the scattered case and is not measured per build.** A dense membership
 /// costs an eighth of it; the model takes the expensive one, because the refusal it feeds is meant
-/// to be wrong in the direction that costs a rerun rather than a kill. It is loose in one more
-/// direction since the packing was streamed: the constant charges the corpus for terms that are a
-/// level's, and it is left at 4 rather than lowered because a term that errs high refuses a build
-/// that would have fitted, where one that errs low is the kill this module exists to pre-empt.
-const BYTES_PER_MEMBER_ENTRY: u64 = 4;
+/// to be wrong in the direction that costs a rerun rather than a kill.
+const BYTES_PER_MEMBER_ENTRY: u64 = 12;
 
 /// What one member entry costs the **disk**, and the process's page cache, as the packed membership
 /// extent the store then reads through: 3 bytes, an array container's own width and a little.
@@ -749,8 +737,11 @@ pub(crate) fn entity_order_residency(
     columns: &[ColumnCost],
     member_entries: u64,
     level_entries: u64,
+    memory_budget: u64,
 ) -> Residency {
-    let publication_bytes = level_entries.saturating_mul(BYTES_PER_MEMBER_ENTRY);
+    let batch_entries =
+        level_entries.min(crate::layers::publication_batch_entries(memory_budget));
+    let publication_bytes = batch_entries.saturating_mul(BYTES_PER_MEMBER_ENTRY);
     let mut terms = vec![
         // **A file under `.build-tmp/` where there is one at all**, and so charged to the disk
         // rather than to memory. The ids are read sequentially by every pass but one — the join's
@@ -863,9 +854,9 @@ pub(crate) fn entity_order_residency(
     if member_entries > 0 {
         terms.push(Term {
             what: format!(
-                "{level_entries} member entr(ies) in the largest level at \
-                 {BYTES_PER_MEMBER_ENTRY} B — the publication's own Roaring, while the level it is \
-                 publishing is in flight"
+                "{batch_entries} member entr(ies) in one publication batch at \
+                 {BYTES_PER_MEMBER_ENTRY} B — the publication's own Roaring, while the batch it \
+                 is publishing is in flight (the largest level holds {level_entries})"
             ),
             bytes: publication_bytes,
             mapped: false,
@@ -1034,7 +1025,17 @@ pub(crate) fn plan_routes(
 ) -> (crate::pipeline::ColumnRoutes, Residency) {
     let spilled = crate::pipeline::ColumnRoutes::every_available(&args.schema);
     let (columns, entries, level_entries) = model_inputs(args, n, payloads, &spilled);
-    choose_routes(&args.schema, n, ids, columns, entries, level_entries, free)
+    choose_routes(
+        &args.schema,
+        n,
+        ids,
+        columns,
+        entries,
+        level_entries,
+        free,
+        args.memory_budget
+            .unwrap_or_else(crate::pipeline::detect_memory_budget),
+    )
 }
 
 /// [`plan_routes`] unless the caller named the route ([`crate::ExtentRoute`]), in which case the
@@ -1056,7 +1057,10 @@ pub(crate) fn routes_for(
         }
     };
     let (columns, entries, level_entries) = model_inputs(args, n, payloads, &forced);
-    let tail = entity_order_residency(n, ids, &columns, entries, level_entries);
+    let budget = args
+        .memory_budget
+        .unwrap_or_else(crate::pipeline::detect_memory_budget);
+    let tail = entity_order_residency(n, ids, &columns, entries, level_entries, budget);
     (forced, tail)
 }
 
@@ -1072,6 +1076,7 @@ fn choose_routes(
     entries: u64,
     level_entries: u64,
     free: Option<u64>,
+    memory_budget: u64,
 ) -> (crate::pipeline::ColumnRoutes, Residency) {
     let mut routes = crate::pipeline::ColumnRoutes::every_available(schema);
     let ceiling = free.unwrap_or(0) / ROUTE_HEADROOM;
@@ -1081,7 +1086,8 @@ fn choose_routes(
         }
         columns[index].extents = false;
         columns[index].framing_bytes = 0;
-        let candidate = entity_order_residency(n, ids, &columns, entries, level_entries);
+        let candidate =
+            entity_order_residency(n, ids, &columns, entries, level_entries, memory_budget);
         if stage_scratch(&candidate) <= ceiling {
             routes.take_arena(index);
         } else {
@@ -1089,7 +1095,7 @@ fn choose_routes(
             columns[index].framing_bytes = extent_framing_bytes(n);
         }
     }
-    let tail = entity_order_residency(n, ids, &columns, entries, level_entries);
+    let tail = entity_order_residency(n, ids, &columns, entries, level_entries, memory_budget);
     (routes, tail)
 }
 
@@ -1764,6 +1770,41 @@ fn uncompressed_column_bytes(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The model at a budget no publication batch can be the binding term of, which is what every
+    /// test below wants: they read the per-entry arithmetic, and the batch sizing is
+    /// [`crate::layers::publication_batch_entries`]'s own to test.
+    #[allow(clippy::too_many_arguments)]
+    fn choose_routes(
+        schema: &crate::config::Schema,
+        n: u64,
+        ids: IdShape,
+        columns: Vec<ColumnCost>,
+        entries: u64,
+        level_entries: u64,
+        free: Option<u64>,
+    ) -> (crate::pipeline::ColumnRoutes, Residency) {
+        super::choose_routes(
+            schema,
+            n,
+            ids,
+            columns,
+            entries,
+            level_entries,
+            free,
+            u64::MAX,
+        )
+    }
+
+    fn entity_order_residency(
+        n: u64,
+        ids: IdShape,
+        columns: &[ColumnCost],
+        member_entries: u64,
+        level_entries: u64,
+    ) -> Residency {
+        super::entity_order_residency(n, ids, columns, member_entries, level_entries, u64::MAX)
+    }
 
     /// A column whose characters, if it has any, fill an arena — the shape a string column keeps
     /// while some pass reads it at an entity.

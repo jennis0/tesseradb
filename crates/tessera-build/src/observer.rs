@@ -170,7 +170,12 @@ impl<'a> StageTimer<'a> {
     }
 
     /// Close the current stage and open the next. `rows` is this stage's count.
+    ///
+    /// **The allocator's free pages go back to the kernel here**, which is what makes a stage
+    /// boundary the point the next stage's page cache is decided at ([`crate::trim_heap`]). The
+    /// trim runs before the report, so the peak this reads is the stage's own.
     pub(crate) fn end(&mut self, stage: BuildStage, rows: u64) {
+        crate::trim_heap();
         self.observer
             .stage_end(stage, self.start.elapsed(), rows, peak_rss_kib());
         self.start = std::time::Instant::now();

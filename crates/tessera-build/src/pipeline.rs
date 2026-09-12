@@ -814,15 +814,16 @@ fn plan_build(
     // budget stays feasible for a tiny corpus) and a fixed slack for band buffers, decoders and
     // allocator.
     //
-    // **The leading `4 * n` is that tally, and it stays although the tally is no longer memory.**
-    // It became a file under `.build-tmp/` on 2026-09-10, as the ordinal→entity map beside it did
-    // before; the term is kept deliberately and is not an oversight to tidy. It feeds `feasible`
-    // below, `feasible` picks `auto_batch`, and a batch stride partitions entity-id space — so
-    // dropping the term would give every budget-constrained corpus a different stride and with it
-    // a different permanent entity-id assignment, which I9 does not allow to change. What the
-    // build now needs is less than what it plans for, which is the safe direction. Removing the
-    // term, to buy larger batches, is a separate decision the owner has not taken — ruling 6 of
-    // the disk-use campaign, 2026-09-10.
+    // **The leading `4 * n` was that tally's, and what it now pays for is the assignment walk's
+    // entity window.** The tally became a file under `.build-tmp/` on 2026-09-10, as the
+    // ordinal→entity map beside it did before, and the term was kept because it feeds `feasible`,
+    // `feasible` picks `auto_batch`, and a batch stride partitions entity-id space — so dropping
+    // it would give every budget-constrained corpus a different stride and with it a different
+    // permanent entity-id assignment, which I9 does not allow to change. The walk now fills a
+    // heap `Vec<u32>` of the batch's length and writes it into the entity map in one call, which
+    // is `batch_items * 4 ≤ n * 4`: the retained term is that window, named rather than
+    // coincidental. Removing it, to buy larger batches, is a separate decision the owner has not
+    // taken — ruling 6 of the disk-use campaign, 2026-09-10.
     const SLACK: u64 = 64 << 20;
     let chunk_bytes = 16 * (JOIN_CHUNK_ROWS as u64).min(pair_rows.max(1) as u64);
     let loop_fixed = 4 * n + 4 * row_counts.len() as u64 + chunk_bytes + SLACK;
@@ -1041,6 +1042,10 @@ pub(crate) fn build(
     observer: &dyn BuildObserver,
     route: crate::ExtentRoute,
 ) -> Result<BuildReport> {
+    // **First, before any validation**, so a run whose log is all that survives says which source
+    // produced it. A campaign of 2026-09-12 lost two and three-quarter hours to a binary seven
+    // commits behind the tree its figures were read against.
+    eprintln!("tessera build: commit {}", crate::BUILD_COMMIT);
     validate_args(args)?;
     let outcome = build_bundle(args, observer, route);
     if outcome.is_err() {
@@ -1268,7 +1273,12 @@ fn build_bundle(
     let mut geometry: Vec<ViewGeometry> = Vec::with_capacity(args.views.len());
     // How many of this build's views hold each item — the denominator of the label-agreement
     // identity below, and the population of each view's permutation.
-    let mut appearances: Vec<u32> = vec![0; n as usize];
+    //
+    // **A mapped file**, on the same argument as the geometry beside it: 4 B an item is 13.3 GiB
+    // at the GBIF rung, held from here to the end of the batch loop, and as anonymous memory it
+    // was the largest term of that loop's residency that no model named.
+    let mut appearances =
+        spill::MappedU32::zeroed(tmp.path(), "appearances.u32", n as usize)?;
     for (index, view) in args.views.iter().enumerate() {
         let mut x_map =
             spill::MappedU32::zeroed(tmp.path(), &format!("x-of-ordinal-{index}.u32"), n as usize)?;
@@ -1278,6 +1288,7 @@ fn build_bundle(
         {
             let xs = x_map.as_mut_slice();
             let ys = y_map.as_mut_slice();
+            let apps = appearances.as_mut_slice();
             let mut points_seen = 0u64;
             let mut geom_anchor = 0u64;
             let mut chunk: Vec<(u64, (u32, u32))> =
@@ -1321,7 +1332,7 @@ fn build_bundle(
                             xs,
                             ys,
                             &mut present,
-                            &mut appearances,
+                            apps,
                             &mut points_seen,
                             &mut geom_anchor,
                         ) {
@@ -1340,7 +1351,7 @@ fn build_bundle(
                 xs,
                 ys,
                 &mut present,
-                &mut appearances,
+                apps,
                 &mut points_seen,
                 &mut geom_anchor,
             )?;
@@ -1558,7 +1569,7 @@ fn build_bundle(
             // (`crate::AccessRoute`).
             if per_view_labels
                 && distinct_of_ordinal[rec.ordinal as usize] as u64
-                    != sig.len() as u64 * appearances[rec.ordinal as usize] as u64
+                    != sig.len() as u64 * appearances.as_slice()[rec.ordinal as usize] as u64
             {
                 return Err(BuildError::Invalid(format!(
                     "entity_id {} carries different access labels in different views. A label is \
@@ -1606,9 +1617,8 @@ fn build_bundle(
     // The two ordinal-space counters of the label-agreement identity (`views.md` §7) have served
     // their only reader, the check inside the walk above, and are released here rather than at the
     // end of the build — across every stage from the postings write to the last segment. 4 B/item
-    // each: `appearances` is that much anonymous memory and the tally is that much disk, so what
-    // this returns at the GBIF rung is 13.0 GiB of each (modelled, items × 4 B). The tally's file
-    // is unlinked by `MappedArray`'s own `Drop`, so the disk comes back at the same point.
+    // each, both mapped files, so what this returns at the GBIF rung is 13.0 GiB of disk apiece
+    // (modelled, items × 4 B). Each file is unlinked by `MappedArray`'s own `Drop`.
     drop(distinct_map);
     drop(appearances);
     // The anchor's Morton geometry has served its one reader — the sort's tiebreak — and is

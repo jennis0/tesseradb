@@ -991,6 +991,14 @@ pub struct ArtifactStore {
     /// `(layer, level, ordinal)`. [`Self::unpublished_content`] writes them beside the level's
     /// tail, and [`Self::mark_content_published`] clears the set once the extent is durable.
     content_pending: std::collections::BTreeSet<(String, u32, u32)>,
+    /// The artifacts whose membership has been encoded into a pack and replaced by an empty
+    /// placeholder, with the cardinality the rehousing must answer with
+    /// ([`Self::vacate_members`]).
+    ///
+    /// **Only a build reaches this**, between the encode and the mapping of the file it encoded
+    /// into. An entry left here at the end of that window is an artifact holding the empty set,
+    /// so the build refuses on it rather than writing a bundle whose level serves as absent.
+    vacated: BTreeMap<(String, u32, u32), u64>,
 }
 
 impl ArtifactStore {
@@ -1762,6 +1770,45 @@ impl ArtifactStore {
         ordinal: u32,
         members: Members,
     ) -> bool {
+        let address = (layer.to_string(), level, ordinal);
+        // **A vacated artifact is checked against the cardinality it had before the vacate**, not
+        // against the placeholder standing in for it: the placeholder is empty, so the check that
+        // is the whole of this method's value would otherwise pass for any short membership.
+        let vacated = self.vacated.get(&address).copied();
+        let Some(record) = self
+            .levels
+            .get_mut(&(address.0, level))
+            .and_then(|slots| slots.get_mut(ordinal as usize))
+            .and_then(Option::as_mut)
+        else {
+            return false;
+        };
+        if members.cardinality() != vacated.unwrap_or_else(|| record.members.cardinality()) {
+            return false;
+        }
+        record.members = members;
+        if vacated.is_some() {
+            self.vacated.remove(&(layer.to_string(), level, ordinal));
+        }
+        true
+    }
+
+    /// Replace one artifact's membership with the **empty set**, remembering the cardinality
+    /// [`Self::rehouse_members`] must then answer with — the build's route from a bitmap it has
+    /// just encoded into a membership pack to the mapping of that pack.
+    ///
+    /// **What it is for.** A level is published in batches so that no more than one batch's
+    /// bitmaps are built at once, and the batch's records are encoded into the level's pack as
+    /// soon as they are published. Without this the store's own copies accumulate a level of
+    /// bitmaps anyway — 46 GB for a level of 3.4×10⁹ entries — and the batching buys nothing.
+    ///
+    /// **The window is one stage and the store is not read inside it.** Between the vacate and
+    /// the rehousing the artifact answers the empty set, which is why nothing but the build's
+    /// publication may call this and why [`Self::vacated_count`] exists: a vacated artifact left
+    /// standing is one served as absent, and the build refuses rather than write that bundle.
+    ///
+    /// `false` where the address names no record.
+    pub fn vacate_members(&mut self, layer: &str, level: u32, ordinal: u32) -> bool {
         let Some(record) = self
             .levels
             .get_mut(&(layer.to_string(), level))
@@ -1770,11 +1817,17 @@ impl ArtifactStore {
         else {
             return false;
         };
-        if members.cardinality() != record.members.cardinality() {
-            return false;
-        }
-        record.members = members;
+        let cardinality = record.members.cardinality();
+        record.members = Members::owned(Bitmap::new());
+        self.vacated
+            .insert((layer.to_string(), level, ordinal), cardinality);
         true
+    }
+
+    /// How many artifacts hold a placeholder rather than their membership — zero everywhere but
+    /// inside a build's publication window. See [`Self::vacate_members`].
+    pub fn vacated_count(&self) -> usize {
+        self.vacated.len()
     }
 
     pub fn get(&self, layer: &str, level: u32, ordinal: u32) -> Option<&ArtifactRecord> {
@@ -1930,6 +1983,25 @@ impl ArtifactStore {
     /// deciding whether to adopt a derived structure needs (`manifest::ContainmentExtent`).
     pub fn seed_level_version(&mut self, layer: &str, level: u32, version: u64) {
         self.versions.insert((layer.to_string(), level), version);
+    }
+
+    /// Count a level published in `records` publication records as the **one publication** it is.
+    ///
+    /// **The build's batched publication, and nothing else.** Both version counters name a write a
+    /// derived structure has to be rebuilt for, and a build publishes a level once however many
+    /// records it takes to keep the memberships in flight down to a batch. Without this, how a
+    /// level's publication happened to be cut would reach the manifest as its level version, so
+    /// two builds of one corpus under different memory budgets would produce different bundles.
+    ///
+    /// Safe here for [`Self::seed_level_version`]'s reason: nothing has been derived from these
+    /// levels yet, the level having just been created.
+    pub fn fold_publication_versions(&mut self, layer: &str, level: u32, records: u64) {
+        let extra = records.saturating_sub(1);
+        for counter in [&mut self.versions, &mut self.lineage_versions] {
+            if let Some(version) = counter.get_mut(&(layer.to_string(), level)) {
+                *version = version.saturating_sub(extra);
+            }
+        }
     }
 
     /// Every level [`Self::retire`] would move, given the same `retired` set: the read-only twin

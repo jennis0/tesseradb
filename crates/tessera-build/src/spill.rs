@@ -1957,6 +1957,14 @@ pub(crate) struct MemberExtent {
     anchor: u64,
 }
 
+impl MemberExtent {
+    /// How many members the extent holds — what the publication sizes its batch against, read
+    /// before the extent is decoded into a bitmap.
+    pub(crate) fn entries(&self) -> u32 {
+        self.entries
+    }
+}
+
 /// Writes the merged member table: every artifact's members, contiguous, in ascending index
 /// order.
 ///
