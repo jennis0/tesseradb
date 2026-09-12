@@ -1813,7 +1813,14 @@ pub fn scan_attributes<F: FnMut(AttributeBatch<'_>) -> Result<()>>(
         roots.push(discriminator_index(path, &file_schema, select)?);
     }
     let projection = parquet::arrow::ProjectionMask::roots(builder.parquet_schema(), roots.clone());
+    // **A limited build reads a prefix of this file too.** `--limit N` keeps the rows whose source
+    // id is below `N`, and the geometry reader has always pruned the row groups whose statistics
+    // prove they hold none of them ([`prunable_row_groups`]); this one read every row group of
+    // every attribute source to the end of the file. On the GBIF corpus that is 55 GB decoded to
+    // place 16.3×10⁶ rows.
+    let keep = prunable_row_groups(builder.metadata(), roots[0], limit);
     let reader = builder
+        .with_row_groups(keep)
         .with_projection(projection)
         .with_batch_size(65_536)
         .build()
