@@ -52,7 +52,12 @@ One exception is named, because it is a rate over the row count and the rule say
 none: writing `columns.arrow` in place runs Arrow's writer over the real row count, and the
 writer allocates an all-ones validity bitmap of `n / 8` bytes for every column, all alive at
 once, 2.2 GB at rung 6. The model charges it and the model's test subtracts it. It is the price
-of one encoder rather than two.
+of one encoder rather than two. A second exception is the artifact pass's bucket on a list-form
+level: with 128 buckets it holds one record per member entry in its row range, which no type
+bounds, so a level of many entries a row has a bucket the model charges at the largest layer's
+entries over 128 (12 GB at rung 6 for a MeSH-shaped level; GBIF's taxonomy is label-form and
+pays 268 MB). Bounding it means a bucket count derived from the entries, which §3 does not do.
+Open.
 
 Two models read the result and they are not the same model. The **batch plan** (`loop_fixed`,
 `per_batch` in `plan_build`) sets the signature stride, the stride partitions entity-id space,
@@ -180,9 +185,9 @@ wins is unchanged.
 
 The per-chunk sort stays. The extent lanes push one extent per resolved row in the sorted
 order and deduplicate against the preceding entity, so their bytes depend on it. The arena
-route, a string column whose characters fit the disk as an arena, keeps its scattered offset
-write; that route is not taken at any scale where the cache would fail it, and its model term
-says which route was chosen. An absent row pushes nothing, as today.
+route, a string column whose characters fit the disk as an arena, is taken whenever the disk
+allows, so its offset lane goes through a `(entity, offset)` partition at 12 B a row the same
+way; the arena itself is appended in arrival order. An absent row pushes nothing, as today.
 
 ### 4.4 The entity map in the assignment walk
 
