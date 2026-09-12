@@ -2327,29 +2327,35 @@ fn read_attributes_by_entity(
         .filter(|&(i, _)| routes.takes_extents(i))
         .map(|(i, a)| crate::extents::ExtentColumn::new(tmp, i, &a.name))
         .collect();
-    // **A `(entity, value)` partition per fixed-width column** ([`ValueLane`]). A string column
-    // on the arena route keeps its scattered offset write: the arena beside it is appended in
-    // arrival order, and the route is not taken at any scale where the cache would fail it.
+    // **A partition per entity-order column** ([`ValueLane`]), carrying the value for a
+    // fixed-width column and the `at` word for a string column on the arena route. Nothing the
+    // join produces is written at a scattered index: the arena beside a string column is appended
+    // in arrival order, and the word that says where a value went is replayed into `at` as a run
+    // with every other word of its entity range.
     let mut value_lanes: Vec<Option<ValueLane>> = by_entity
         .iter()
         .enumerate()
-        .map(|(index, column)| match column.fixed_width() {
-            Some(width) => {
-                let boundaries = value_lane_boundaries(n);
-                Ok(Some(ValueLane {
-                    column: index,
-                    width,
-                    partition: spill::Partition::create(
-                        tmp,
-                        &format!("value-{index}"),
-                        boundaries.clone(),
-                        4 + width,
-                        n,
-                    )?,
-                    boundaries,
-                }))
-            }
-            None => Ok(None),
+        .map(|(index, column)| {
+            let width = match (column.fixed_width(), column.is_arena_strings()) {
+                (Some(width), _) => width,
+                // The `at` word, which is what a string column holds at an entity.
+                (None, true) => 8,
+                (None, false) => return Ok(None),
+            };
+            let boundaries = value_lane_boundaries(n);
+            Ok(Some(ValueLane {
+                column: index,
+                width,
+                chars: column.is_arena_strings(),
+                partition: spill::Partition::create(
+                    tmp,
+                    &format!("value-{index}"),
+                    boundaries.clone(),
+                    4 + width,
+                    n,
+                )?,
+                boundaries,
+            }))
         })
         .collect::<Result<_>>()?;
     // **One sweep per source, not one over a single corpus file.** Each declared attribute names
@@ -2373,7 +2379,8 @@ fn read_attributes_by_entity(
     }
     // **The replay, once every source has been read.** A bucket at a time, in ascending entity
     // order: the records are scattered into a window over the bucket's own range and the window
-    // is written into the column as one sequential run, with its presence bits beside it.
+    // is written into the column as one sequential run, with its presence bits beside it. A string
+    // column's run is its `at` words, the arena behind them already written.
     for lane in value_lanes.into_iter().flatten() {
         let name = &attributes[lane.column].name;
         let record_width = 4 + lane.width;
@@ -2425,6 +2432,13 @@ enum JoinLane<'a> {
         src: &'a mut EntityColumn,
         lane: &'a mut ValueLane,
     },
+    /// A string column on the arena route: the characters go into `home`'s arena in arrival order
+    /// and the word they landed at goes to the lane, where a fixed-width column's value goes.
+    Chars {
+        src: &'a mut EntityColumn,
+        home: &'a mut EntityColumn,
+        lane: &'a mut ValueLane,
+    },
     Extent {
         src: &'a mut EntityColumn,
         out: &'a mut crate::extents::ExtentColumn,
@@ -2447,7 +2461,13 @@ enum JoinLane<'a> {
 /// one entity wins is unchanged.
 struct ValueLane {
     column: usize,
+    /// What one record's payload is wide: the column's own width, or the eight bytes of a string
+    /// column's `at` word.
     width: usize,
+    /// **A string column on the arena route**, whose payload is the word and whose characters went
+    /// into the arena as the join read them. The replay is the same one either way; what differs is
+    /// where the join takes the payload from.
+    chars: bool,
     /// The first entity of each bucket, ascending from 0 and **a multiple of 64** — so a bucket's
     /// presence bits are whole words of the column's own bitmap.
     boundaries: Vec<u32>,
@@ -2634,6 +2654,13 @@ fn read_one_attribute_source(
                 .map(|(&column, src)| match spills[column].take() {
                     Some(out) => JoinLane::Extent { src, out },
                     None => match partitions[column].take() {
+                        Some(lane) if lane.chars => {
+                            let home = homes[column].take().expect(
+                                "an attribute is read from exactly one source, so one lane owns \
+                                 it",
+                            );
+                            JoinLane::Chars { src, home, lane }
+                        }
                         Some(lane) => JoinLane::Partitioned { src, lane },
                         None => {
                             let home = homes[column].take().expect(
@@ -2678,6 +2705,25 @@ fn read_one_attribute_source(
                             count += 1;
                             record[..4].copy_from_slice(&entity.to_le_bytes());
                             record[4..].copy_from_slice(value);
+                            lane.partition.push(&record)?;
+                        }
+                        Ok(count)
+                    }
+                    JoinLane::Chars { src, home, lane } => {
+                        let name = &args.schema.attributes[lane.column].name;
+                        let mut count = 0u64;
+                        let mut record = [0u8; 12];
+                        for &(entity, pos) in resolved.iter() {
+                            // **An absent row appends nothing and pushes nothing**, as the scatter
+                            // this replaces wrote nothing for one.
+                            let Some(word) =
+                                home.take_chars_from(entity as usize, src, pos as usize, name)?
+                            else {
+                                continue;
+                            };
+                            count += 1;
+                            record[..4].copy_from_slice(&entity.to_le_bytes());
+                            record[4..].copy_from_slice(&word.to_le_bytes());
                             lane.partition.push(&record)?;
                         }
                         Ok(count)

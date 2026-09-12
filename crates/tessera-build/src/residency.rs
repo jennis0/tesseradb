@@ -819,6 +819,25 @@ pub(crate) fn entity_order_residency(
             phases: column.phases,
             constant: false,
         });
+        // **The join's `(entity, at)` partition**, for a string column whose characters fill an
+        // arena (`docs/evidence/memos/2026-09-12-bounded-assembly-design.md` §4.3). The arena is
+        // appended in arrival order and the word that says where a value went is indexed by
+        // entity, so the word goes to a partition by entity range and each bucket is written into
+        // the offset array as one run — 12 B an item, standing from the join's first chunk to the
+        // replay and released bucket by bucket there. A spilled column has no offset array and
+        // pushes nothing.
+        if !spilled && carries_characters(column.ty) {
+            terms.push(Term {
+                what: format!(
+                    "declared column {index} ({ty}): the join's (entity, at) partition, 12 B/item, \
+                     in .build-tmp/"
+                ),
+                bytes: 12u64.saturating_mul(n),
+                mapped: true,
+                phases: Phases::JOIN,
+                constant: false,
+            });
+        }
         // The text index's sorted runs, **charged at the column they are tokenised from** rather
         // than at a constant of their own. The runs spill while the column is resident, so the two
         // stand on the disk together; and a run spends one varint on a `(term, entity)` pair where
@@ -889,18 +908,22 @@ pub(crate) fn entity_order_residency(
     // whole of what `the_anonymous_total_does_not_grow_with_the_row_count` asserts, and the reason
     // the design names 2 GiB as the budget floor (§3).
     //
-    // **Two open at once at the worst phase.** The attribute join opens one per fixed-width column
-    // and holds them all while it sweeps; the assembly opens the row partition, then the pairs
-    // beside it, then one render lane at a time. Only one bucket is loaded at any moment in either,
-    // the replays being sequential.
-    let join_partitions = columns
-        .iter()
-        .filter(|column| !carries_characters(column.ty))
-        .count() as u64;
+    // **Two open at once at the worst phase.** The attribute join opens one per column it fills in
+    // entity order and holds them all while it sweeps; the assembly opens the row partition, then
+    // the pairs beside it, then one render lane at a time. Only one bucket is loaded at any moment
+    // in either, the replays being sequential.
+    //
+    // **A string column on the arena route has one too**, carrying the eight-byte `at` word where a
+    // fixed-width column carries its value (§4.3). A spilled column has no lane at all: its
+    // characters go straight to record-blob extents.
+    let join_partitions = columns.iter().filter(|column| !column.extents).count() as u64;
     let join_width = columns
         .iter()
-        .filter(|column| !carries_characters(column.ty))
-        .map(|column| 4 + fixed_width(column.ty))
+        .filter(|column| !column.extents)
+        .map(|column| match carries_characters(column.ty) {
+            true => 4 + 8,
+            false => 4 + fixed_width(column.ty),
+        })
         .max()
         .unwrap_or(0);
     // The same arithmetic the partition itself sizes its writers by, so what the pre-flight
@@ -1531,11 +1554,12 @@ pub(crate) fn disk(
     // value)` at four bytes of entity and the column's own width, standing from the join's first
     // chunk to the replay that writes each bucket into the column as a sequential run. Charged
     // over every item, which is a ceiling — an absent row pushes nothing — and released bucket by
-    // bucket at the replay. A string column on the arena route pushes nothing here, its offsets
-    // being written where they belong (`crate::column::EntityColumn::write_value_run`).
+    // bucket at the replay. A string column's lane is charged where its route is known, which is
+    // the entity-order model this carries the mapped terms of.
     for attribute in &args.schema.attributes {
-        // A string column is the one family that has no fixed-width lane: it is either an arena,
-        // which keeps its offset write, or record-blob extents, which never reach a column at all.
+        // A string column has no fixed-width lane: it is either an arena, whose `(entity, at)`
+        // partition the entity-order model charges, or record-blob extents, which never reach a
+        // column at all.
         if carries_characters(attribute.ty) {
             continue;
         }

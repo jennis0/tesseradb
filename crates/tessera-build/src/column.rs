@@ -519,6 +519,20 @@ impl EntityColumn {
         }
     }
 
+    /// **A string column holding its characters in an arena**, which is the route a declared string
+    /// column takes where it is not spilled as record-blob extents. What such a column holds at an
+    /// entity is the `at` word, and that is the lane the attribute join partitions
+    /// (`crate::pipeline::ValueLane`).
+    pub(crate) fn is_arena_strings(&self) -> bool {
+        matches!(
+            &self.storage,
+            ColumnStorage::ByEntity {
+                data: ColumnData::Utf8(_),
+                ..
+            }
+        )
+    }
+
     /// One row's bytes exactly as the file holds them, or `None` where the row carries no value —
     /// the payload the attribute join's partition pushes beside the entity.
     pub(crate) fn raw_at(&self, pos: usize) -> Option<&[u8]> {
@@ -530,6 +544,43 @@ impl EntityColumn {
             return None;
         };
         data.as_bytes().get(pos * width..(pos + 1) * width)
+    }
+
+    /// Move one string across from a staging column and **return the word its `at` lane carries**,
+    /// or `None` where the source row is absent.
+    ///
+    /// [`Self::take_from`] for a string column on the arena route, split in two: the characters go
+    /// into this column's arena in arrival order, as they always did, and the word that says where
+    /// they are goes back to the caller instead of being written at the entity. The join pushes it
+    /// to a partition and the replay writes a bucket's words as one run
+    /// (`docs/evidence/memos/2026-09-12-bounded-assembly-design.md` §4.3).
+    ///
+    /// **The presence bit is not set here**, for the same reason: it is a bit at the entity, and
+    /// the replay writes a bucket's bits as whole words beside the run.
+    pub(crate) fn take_chars_from(
+        &mut self,
+        entity: usize,
+        src: &mut EntityColumn,
+        pos: usize,
+        name: &str,
+    ) -> Result<Option<u64>> {
+        let ColumnStorage::ByEntity { data, present } = &mut src.storage else {
+            return Err(no_slot(src.ty, name));
+        };
+        if !present_bit(present.as_slice(), pos) {
+            return Ok(None);
+        }
+        clear_present(present.as_mut_slice(), pos);
+        let Some(text) = data.str_at(pos) else {
+            return Err(no_slot(src.ty, name));
+        };
+        // Borrowed from the source and appended to this column's arena, never owned: a `String` a
+        // row is what [`Self::take_from`]'s string arm exists to avoid.
+        let ty = self.ty;
+        let ColumnStorage::ByEntity { data, .. } = &mut self.storage else {
+            return Err(no_slot(ty, name));
+        };
+        Ok(Some(data.append_str(entity, text, ty, name)?))
     }
 
     /// Write one contiguous run of values and the presence bits beside them — the attribute
@@ -553,9 +604,6 @@ impl EntityColumn {
         name: &str,
     ) -> Result<()> {
         let ty = self.ty;
-        let Some(width) = self.fixed_width() else {
-            return Err(no_slot(ty, name));
-        };
         let ColumnStorage::ByEntity {
             data,
             present: bits,
@@ -563,8 +611,12 @@ impl EntityColumn {
         else {
             return Err(no_slot(ty, name));
         };
+        // **The values for a fixed-width column and the `at` words for a string one**, which is the
+        // one difference between the two lanes: a string column's characters are appended to its
+        // arena as the join reads them, and what is indexed by entity — and so what a run is
+        // written into — is the word that says where they went.
+        let (width, bytes) = data.lane_bytes_mut();
         debug_assert_eq!(lo % 64, 0, "a run starts at a presence-word boundary");
-        let bytes = data.as_mut_bytes();
         let at = lo * width;
         bytes[at..at + values.len()].copy_from_slice(values);
         let words = bits.as_mut_slice();
@@ -797,6 +849,29 @@ impl ColumnData {
         fixed_width_columns!(arms)
     }
 
+    /// **The lane a partition replay writes a bucket's run into, and what one record of it is
+    /// wide**: the values themselves for a fixed-width column, and the `at` words for a string
+    /// column on the arena route, whose characters are in the arena and whose word is the
+    /// entity-indexed thing (`StringColumn`).
+    ///
+    /// Eight bytes a record for the string lane, the type's width for every other.
+    fn lane_bytes_mut(&mut self) -> (usize, &mut [u8]) {
+        let width = self.fixed_width().unwrap_or(8);
+        match self {
+            ColumnData::Utf8(col) => (width, col.at.as_mut_bytes()),
+            _ => (width, self.as_mut_bytes()),
+        }
+    }
+
+    /// Append one string to the arena and return the word `at` holds for it — see
+    /// [`StringColumn::append`].
+    fn append_str(&mut self, entity: usize, value: &str, ty: ScalarType, name: &str) -> Result<u64> {
+        match self {
+            ColumnData::Utf8(col) => col.append(entity, value),
+            _ => Err(tag_mismatch(ty, name, &ScalarValue::Utf8(value.to_owned()))),
+        }
+    }
+
     /// Write one value at `entity`, refusing a tag that is not the column's: a coerced value gives
     /// one entity another's identity, with every value present and none its own.
     fn set(&mut self, entity: usize, value: ScalarValue, ty: ScalarType, name: &str) -> Result<()> {
@@ -853,7 +928,14 @@ impl ColumnData {
 }
 
 impl StringColumn {
-    fn set(&mut self, entity: usize, value: &str) -> Result<()> {
+    /// Append one value to the arena and return the word `at` holds for it.
+    ///
+    /// **Separate from [`Self::set`] because the word's home is written elsewhere.** The arena is
+    /// appended in arrival order and `at` is indexed by entity, which is the scattered write the
+    /// attribute join now routes through a partition
+    /// (`docs/evidence/memos/2026-09-12-bounded-assembly-design.md` §4.3): the join takes the word
+    /// from here and pushes it, and the replay writes a bucket's words as one sequential run.
+    fn append(&mut self, entity: usize, value: &str) -> Result<u64> {
         match self.shape {
             // Header and bytes in one write, so a value is never split across a growth and the
             // arena's own record marks land where a record starts.
@@ -874,8 +956,7 @@ impl StringColumn {
                 record.extend_from_slice(&tag.to_le_bytes());
                 record.extend_from_slice(&len.to_le_bytes());
                 record.extend_from_slice(value.as_bytes());
-                let offset = self.arena.append(&record)?;
-                self.at.as_mut_slice()[entity] = offset;
+                Ok(self.arena.append(&record)?)
             }
             // The characters alone, and the two numbers a reader needs in the word it already
             // reads to find them.
@@ -894,10 +975,16 @@ impl StringColumn {
                          {PACKED_OFFSET_LIMIT} its offsets can name"
                     )));
                 }
-                self.at.as_mut_slice()[entity] =
-                    offset | ((value.len() as u64) << PACKED_OFFSET_BITS);
+                Ok(offset | ((value.len() as u64) << PACKED_OFFSET_BITS))
             }
         }
+    }
+
+    /// Append one value and write its word at the entity — the direct route, which the attribute
+    /// join's staging buffers take and the home columns no longer do.
+    fn set(&mut self, entity: usize, value: &str) -> Result<()> {
+        let word = self.append(entity, value)?;
+        self.at.as_mut_slice()[entity] = word;
         Ok(())
     }
 
