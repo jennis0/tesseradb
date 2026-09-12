@@ -1549,13 +1549,24 @@ fn build_bundle(
         drop(long_sig);
         timer.end(BuildStage::SignatureSort, recs.len() as u64);
 
+        // **The batch's slice of the entity map, filled here and written once.** A batch's
+        // ordinals are the contiguous range `[ordinal_lo, ordinal_hi)`, and the walk visits them
+        // in signature order — so writing each entity straight into the mapping scattered the
+        // writes over a 1.5 GB slice of a shared file mapping, and the kernel wrote a page back,
+        // write-protected it, and took another fault on the next write to it. Measured at rung 6:
+        // 200 to 380 MB/s of writes to grow the bundle at 20, 50,000 to 90,000 minor faults a
+        // second, and an assignment stage that rose from 65 s to 233 s across identical batches
+        // as the dirty set grew (`docs/evidence/memos/
+        // 2026-09-12-gbif-whole-corpus-build-observations.md` §1). The window is
+        // `batch_items * 4 ≤ n * 4`, which is what `plan_build`'s retained 4 B an item pays for.
+        let mut assigned: Vec<u32> = vec![0; batch_len];
         // Assignment, and the band emit in the same walk: entities ascend with position, so
         // every term's entity list arrives ascending — within this batch here, and across
         // batches because bases ascend and the loop is sequential. `encode_posting`'s
         // unconditional sortedness check later re-verifies exactly this property from disk.
         for (position, rec) in recs.iter().enumerate() {
             let entity = (entity_base + position as u64) as u32;
-            entities[rec.ordinal as usize] = entity;
+            assigned[(rec.ordinal as u64 - ordinal_lo) as usize] = entity;
             let local = (rec.ordinal as u64 - ordinal_lo) as usize;
             let sig = &packed[starts[local] as usize..starts[local + 1] as usize];
             // **The label is the entity's, not the row's** (`views.md` §7): every view holding
@@ -1602,6 +1613,8 @@ fn build_bundle(
                 .push(entity, &sig_terms)
                 .map_err(|e| BuildError::Invalid(format!("entity-terms transpose: {e}")))?;
         }
+        entities[ordinal_lo as usize..ordinal_lo as usize + batch_len].copy_from_slice(&assigned);
+        drop(assigned);
         entity_base += recs.len() as u64;
         store.delete(k)?;
         timer.end(BuildStage::Assignment, recs.len() as u64);
