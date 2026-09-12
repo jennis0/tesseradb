@@ -726,10 +726,16 @@ fn member_spill_bytes(entries: u64, ids: IdShape, n: u64) -> u64 {
 /// in: the spill holds every pair at once, the publication one level's. `layer_entries` is the
 /// largest single layer's declared pairs, which is what the artifact pass partitions a level at a
 /// time. `n` is the item count, and `ids` the source ids' own shape ([`IdShape`]).
+///
+/// `scoped_render` is the group-scoped render columns of the view that carries the most of them
+/// ([`scoped_render_types`]). They are not in `columns`, which is the declaration's entity-scoped
+/// attributes, and they open a lane in the assembly exactly as those do.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn entity_order_residency(
     n: u64,
     ids: IdShape,
     columns: &[ColumnCost],
+    scoped_render: &[ScalarType],
     member_entries: u64,
     level_entries: u64,
     layer_entries: u64,
@@ -913,10 +919,11 @@ pub(crate) fn entity_order_residency(
     // whole of what `the_anonymous_total_does_not_grow_with_the_row_count` asserts, and the reason
     // the design names 2 GiB as the budget floor (§3).
     //
-    // **Two open at once at the worst phase.** The attribute join opens one per column it fills in
-    // entity order and holds them all while it sweeps; the assembly opens the row partition, then
-    // the pairs beside it, then one render lane at a time. Only one bucket is loaded at any moment
-    // in either, the replays being sequential.
+    // **How many are open at the worst phase.** The attribute join opens one per column it fills
+    // in entity order and holds them all while it sweeps; the assembly opens the row partition,
+    // then the pairs beside it, then every render lane together — one pass over the pairs feeds
+    // them all (`crate::assembly::RenderLane`). Only one bucket is loaded at any moment in either,
+    // the replays being sequential.
     //
     // **A string column on the arena route has one too**, carrying the eight-byte `at` word where a
     // fixed-width column carries its value (§4.3). A spilled column has no lane at all: its
@@ -979,26 +986,36 @@ pub(crate) fn entity_order_residency(
     }
     // **The assembly** (`crate::assembly`): the Morton histogram, which is the `morton >> 8` space
     // and so a constant of the code type; the row partition's counted buckets; and one loaded
-    // bucket sorted into 16 B records beside the 12 B it was read as.
+    // bucket sorted into 24 B records beside the 12 B it was read as. The 24 is
+    // `crate::assembly::RowRec`'s own size, which its `u64` alignment fixes there whatever order
+    // the fields are declared in.
     terms.push(Term {
         what: format!(
             "the segment assembly: a {} MiB Morton histogram, the row \
              partition's {} MiB of writer buffers, and one bucket of {records} records held as \
-             the 12 B it was written at and the 16 B it is sorted as",
+             the 12 B it was written at and the 24 B it is sorted as",
             crate::assembly::MortonHistogram::bytes_for_rows(n) >> 20,
             buffers(crate::spill::PARTITION_COUNTED_BUCKETS, 12) >> 20
         ),
         bytes: crate::assembly::MortonHistogram::bytes_for_rows(n)
             .saturating_add(buffers(crate::spill::PARTITION_COUNTED_BUCKETS, 12))
             .saturating_add(bucket(12))
-            .saturating_add(bucket(16)),
+            .saturating_add(bucket(24)),
         mapped: false,
         phases: Phases::ASSEMBLE,
         constant: true,
     });
     // The widest render column is a ceiling over the fixed-width ones: `render` is refused at the
-    // declaration for every string type, so a render column is one of these and no wider.
-    let widest_render = join_width.saturating_sub(4);
+    // declaration for every string type, so a render column is one of these and no wider. A
+    // group-scoped family is not in `columns` — its columns are read per view and never routed
+    // ([`crate::pipeline::may_take_extents`]) — so its types are measured beside them.
+    let widest_render = join_width.saturating_sub(4).max(
+        scoped_render
+            .iter()
+            .map(|&ty| fixed_width(ty))
+            .max()
+            .unwrap_or(0),
+    );
     //
     // **Every render lane's writer buffers stand together.** The `(entity, row)` bucket is loaded
     // and sorted once and handed to the permutation and to every lane from that one sweep, rather
@@ -1007,12 +1024,18 @@ pub(crate) fn entity_order_residency(
     // [`widest_render`]'s ceiling, `render` being refused at the declaration for every string
     // type. A view with no render column still pays one lane's worth here, which is the floor a
     // build under a tight budget is charged rather than a lane it opens.
-    let render_lanes = columns.iter().filter(|column| column.render).count().max(1) as u64;
+    //
+    // **A group-scoped render family opens a lane of its own** in the row space of every view its
+    // scope reaches (`views.md` §5), so `scoped_render` carries the types of the view that opens
+    // the most. One view's row space is assembled at a time, and that view is the peak.
+    let render_lanes = (columns.iter().filter(|column| column.render).count()
+        + scoped_render.len())
+    .max(1) as u64;
     terms.push(Term {
         what: format!(
             "the assembly's (entity, row) and {render_lanes} (row, value) partition(s): writer \
              buffers, the loaded pairs bucket at 8 B a record, and one lane's bucket at up to {} B \
-             a record and the window it is placed in",
+             a record, the window it is placed in and a byte a row saying which rows it filled",
             4 + widest_render
         ),
         bytes: buffers(crate::spill::PARTITION_BUCKETS as u64, 8)
@@ -1022,7 +1045,10 @@ pub(crate) fn entity_order_residency(
             )
             .saturating_add(bucket(8))
             .saturating_add(bucket(4 + widest_render))
-            .saturating_add(bucket(widest_render)),
+            .saturating_add(bucket(widest_render))
+            // The lane replay's `filled` flags: a byte a row of the bucket's range, alive while
+            // the window is, and what the presence bitmap beside the column is derived from.
+            .saturating_add(bucket(1)),
         mapped: false,
         phases: Phases::ASSEMBLE,
         constant: true,
@@ -1235,6 +1261,7 @@ pub(crate) fn plan_routes(
         n,
         ids,
         columns,
+        &scoped_render_types(args),
         entries,
         level_entries,
         layer_entries,
@@ -1271,12 +1298,55 @@ pub(crate) fn routes_for(
         n,
         ids,
         &columns,
+        &scoped_render_types(args),
         entries,
         level_entries,
         layer_entries,
         budget,
     );
     (forced, tail)
+}
+
+/// The **group-scoped render columns one view's row space carries**, at the view that carries the
+/// most of them (`views.md` §5).
+///
+/// A scoped family opens a `(row, value)` lane in the assembly exactly as a declared render column
+/// does, and it is not in [`ColumnCost`]: its columns are read per view, never routed, and never
+/// join a declared column's partition. One view's row space is assembled at a time, so the view
+/// with the widest set of lanes is the phase's peak.
+///
+/// **Which views a family reaches is `pipeline::scoped_render_targets`' rule**: a view of the
+/// family's own group, and a view of a group declaring `members` of it. Stated here over
+/// `BuildArgs` rather than shared, because that function is over the columns a pass has already
+/// read and this runs before any of them exist. The two disagreeing costs a forecast, not a
+/// bundle.
+fn scoped_render_types(args: &crate::BuildArgs) -> Vec<ScalarType> {
+    args.views
+        .iter()
+        .map(|view| {
+            let Some((group, _)) = view.view_id.split_once(tessera_store::GROUP_SEPARATOR) else {
+                // A plain view is in no group, so no scope reaches it.
+                return Vec::new();
+            };
+            let owner = args
+                .groups
+                .iter()
+                .find(|descriptor| descriptor.name == group)
+                .and_then(|descriptor| descriptor.members_of.as_deref())
+                .unwrap_or(group);
+            args.scoped_attributes
+                .iter()
+                .filter(|family| family.group == owner && family.attribute.render)
+                .map(|family| family.attribute.ty)
+                .collect::<Vec<ScalarType>>()
+        })
+        .max_by_key(|types| {
+            types
+                .iter()
+                .map(|&ty| 4 + fixed_width(ty))
+                .sum::<u64>()
+        })
+        .unwrap_or_default()
 }
 
 /// [`plan_routes`] over the model's inputs rather than the build's, so the rule can be tested at a
@@ -1288,6 +1358,7 @@ fn choose_routes(
     n: u64,
     ids: IdShape,
     mut columns: Vec<ColumnCost>,
+    scoped_render: &[ScalarType],
     entries: u64,
     level_entries: u64,
     layer_entries: u64,
@@ -1306,11 +1377,17 @@ fn choose_routes(
             n,
             ids,
             &columns,
+            scoped_render,
             entries,
             level_entries,
             layer_entries,
             memory_budget,
         );
+        // **The arena route carries its offset lane's 12 B an item** — the `(entity, at)` records
+        // of the value partition the join replays the `at` words from (`crate::pipeline`'s
+        // `ValueLane`) — and that is disk in the same window as the arena itself. A string column
+        // whose arena sits just under the ceiling is answered here with the extent route because
+        // of it.
         if stage_scratch(&candidate) <= ceiling {
             routes.take_arena(index);
         } else {
@@ -1322,6 +1399,7 @@ fn choose_routes(
         n,
         ids,
         &columns,
+        scoped_render,
         entries,
         level_entries,
         layer_entries,
@@ -1448,11 +1526,17 @@ pub(crate) fn disk(
         );
     }
     // **The assembly's partitions** (`crate::assembly`), where the entity-order geometry and the
-    // row-order render tail used to be. The row partition stands whole when the ordinal geometry
-    // is released, and every partition after it is written while the one before is consumed, so
-    // the phase's peak is the largest pair rather than the sum: the rows at 12 B and the
-    // `(entity, row)` pairs at 8 growing beneath them, then one render column's `(row, value)`
-    // lane at a time.
+    // row-order render tail used to be. The rows are written at 12 B and read into the
+    // `(entity, row)` pairs at 8; the pairs are then read once, and that one pass fills every
+    // render lane, deleting each pairs bucket as it is consumed. So what stands together is the
+    // rows, or the pairs, or all the lanes at `Σ(4 + wᵢ)` a row — the largest of the three, not
+    // their sum.
+    //
+    // **Charged as the sum anyway**, which over-states the phase by the two terms that are not
+    // the peak. A term is a file and a window here, and the shape that would say
+    // `max(12n, 8n, Σ(4 + wᵢ)n)` is a phase whose terms are alternatives; the model has no such
+    // shape, and an over-stated forecast routes a column to extents where it could have kept its
+    // arena rather than filling a disk.
     push(
         "the assembly's row partition, 12 B/row — (morton, residual, entity) in .build-tmp/, one \
          view at a time"
@@ -1467,21 +1551,28 @@ pub(crate) fn disk(
         8 * n,
         Phases::ASSEMBLE,
     );
-    if let Some(widest) = args
+    // **Every render lane, together.** One pass over the pairs fills them all, so they stand full
+    // at the same moment: the charge is a record a row in each — the key and the value — summed
+    // over the columns the view renders. A group-scoped family renders into the row spaces its
+    // scope reaches, at the view that carries the most of them ([`scoped_render_types`]).
+    let scoped_lanes = scoped_render_types(args);
+    let lane_widths: Vec<u64> = args
         .schema
         .attributes
         .iter()
         .filter(|a| a.render)
-        .map(|a| fixed_width(a.ty))
-        .max()
-    {
+        .map(|a| 4 + fixed_width(a.ty))
+        .chain(scoped_lanes.iter().map(|&ty| 4 + fixed_width(ty)))
+        .collect();
+    if !lane_widths.is_empty() {
+        let per_row: u64 = lane_widths.iter().sum();
         push(
             format!(
-                "the widest render column's (row, value) partition, {} B/row, in .build-tmp/ — \
-                 one column at a time",
-                4 + widest
+                "the assembly's {} render (row, value) partition(s), {per_row} B/row in all, in \
+                 .build-tmp/ — every lane filled by the one pass over the pairs",
+                lane_widths.len()
             ),
-            (4 + widest) * n,
+            per_row * n,
             Phases::ASSEMBLE,
         );
     }
@@ -2089,6 +2180,9 @@ mod tests {
             n,
             ids,
             columns,
+            // No group-scoped family: the fixtures here are a schema, and a scoped column's lanes
+            // are `plan_routes`' own input from the view declarations.
+            &[],
             entries,
             level_entries,
             // Every layer's entries as one layer's, which is exact for a single-layer fixture and
@@ -2110,6 +2204,8 @@ mod tests {
             n,
             ids,
             columns,
+            // As above: the fixtures declare no group-scoped render family.
+            &[],
             member_entries,
             level_entries,
             // As above: one layer, so the largest layer's entries are all of them.
@@ -3445,6 +3541,7 @@ require_member_visibility = "none"
                 n,
                 IdShape::dense(n),
                 &columns,
+                &[],
                 3 * n,
                 3 * n,
                 // One layer, so its entries are all of them: three a row, which is the shape that

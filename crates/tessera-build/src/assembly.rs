@@ -89,6 +89,11 @@ const COLUMN_CHUNK_ROWS: usize = 1 << 16;
 /// prefix-then-refine comparator gave: `priority` is `tessera_id`'s leading 16 bits
 /// (`TesseraId::priority`), so ordering by the whole word orders by the prefix first.
 /// Eight bytes a record against six, over one bucket.
+///
+/// **24 B a record, which is what the pre-flight charges** (`crate::residency`). `repr(C)` rounds
+/// a type's size up to its alignment, and the `u64` field makes that eight, so the three `u32`s
+/// and the word take 24 in any declaration order. Twenty would take `packed(4)`, and the
+/// comparator cannot borrow a `u64` field of a type packed to four.
 #[derive(Clone, Copy)]
 #[repr(C)]
 pub(crate) struct RowRec {
@@ -620,7 +625,19 @@ pub(crate) fn write_segment(
         drop(bytes);
         // **Parallel, because the buckets are independent and this is the stage's own work.** One
         // bucket's order is a function of its own records; nothing here reads another's.
+        //
+        // **An unstable sort, because the keys are distinct.** A record's key is
+        // `(morton, identity)`, `identity` being `forward(entity)` — a bijection over the shard's
+        // entity space — and `entity_of_ordinal` is injective, so no two rows of one view share an
+        // entity and no two records of a bucket compare equal. An unstable parallel sort orders
+        // equal keys by however the work divided, which would put a build's row order at the mercy
+        // of the thread count; distinct keys are what makes the result the same on every machine.
         loaded.par_sort_unstable_by(|a, b| a.cmp(b));
+        debug_assert!(
+            loaded.windows(2).all(|pair| pair[0].cmp(&pair[1]).is_lt()),
+            "two rows of one view share a (morton, tessera_id): the order would depend on how the \
+             parallel sort divided the bucket"
+        );
 
         for chunk in loaded.chunks(COLUMN_CHUNK_ROWS) {
             let mut codes: Vec<u8> = Vec::with_capacity(chunk.len() * 4);
@@ -712,10 +729,22 @@ pub(crate) fn write_segment(
             // over its whole entity range — 109 MB at rung 6 — which is the
             // write-back-and-re-dirty pattern this stage exists to remove. Sorted, they are one
             // forward sweep, and one sweep now serves every reader of the bucket.
+            //
+            // **An unstable sort, because the keys are distinct.** The key is the entity, a
+            // bucket covers one entity range, and a view holds one row an entity, so a bucket
+            // holds one record an entity. An unstable parallel sort orders equal keys by however
+            // the work divided, so equal keys here would make the permutation's last writer, and
+            // every lane's value, depend on the thread count.
             let pairs_in_bucket: &mut [[u8; PAIR_RECORD_BYTES]] = pairs_of(&mut bytes);
-            pairs_in_bucket.par_sort_unstable_by_key(|pair| {
+            let key = |pair: &[u8; PAIR_RECORD_BYTES]| {
                 u32::from_le_bytes(pair[0..4].try_into().expect("four bytes"))
-            });
+            };
+            pairs_in_bucket.par_sort_unstable_by_key(key);
+            debug_assert!(
+                pairs_in_bucket.windows(2).all(|pair| key(&pair[0]) < key(&pair[1])),
+                "two rows of one view carry the same entity: the pairs bucket's order would \
+                 depend on how the parallel sort divided it"
+            );
             for pair in pairs_in_bucket.iter() {
                 let entity = u32::from_le_bytes(pair[0..4].try_into().expect("four bytes"));
                 let at = u32::from_le_bytes(pair[4..8].try_into().expect("four bytes"));

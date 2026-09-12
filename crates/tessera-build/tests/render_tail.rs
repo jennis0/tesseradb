@@ -3,7 +3,7 @@
 //!
 //! The tail was eight `Vec`s built by `push`, then one mapped array per column written at a
 //! scattered row index; it is now two partitions a column and a sequential window write
-//! (`assembly::render_tail`). Nothing about that is visible in a bundle comparison **unless a
+//! (`assembly::write_render_columns`). Nothing about that is visible in a bundle comparison **unless a
 //! type's bytes are wrong**, which is exactly the failure mode a per-type handover has: a width
 //! taken from the wrong arm, a bit order reversed, a lane's output landing under another column's
 //! name. So every renderable type is declared here, given values a wrong width would mangle, and

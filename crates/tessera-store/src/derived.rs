@@ -528,8 +528,8 @@ pub fn project_row_column(
                 }
                 file.finish()?;
             }
-            }
-            Ok(true)
+        }
+        Ok(true)
     };
     match compose() {
         Ok(true) => Ok(Some(path)),

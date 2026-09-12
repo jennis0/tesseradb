@@ -2415,19 +2415,16 @@ fn read_attributes_by_entity(
     Ok((by_entity, spilled, coverage))
 }
 
-/// What one column's share of a resolved chunk is: a scatter into its entity-major column, or —
-/// for a column that has none ([`takes_extents`]) — an extent written in the chunk's entity order.
+/// What one column's share of a resolved chunk is: a record pushed into its value partition, or,
+/// for a column that has none ([`takes_extents`]), an extent written in the chunk's entity order.
+/// Nothing here writes at a scattered entity: a value goes to the partition and is replayed into
+/// the column as a run, and a string's characters are appended to the arena in arrival order.
 ///
-/// The lanes share nothing. Each entity-order column is its own mapped array with its own
-/// presence bits, and each spilled column its own extent writer, so a chunk's work splits across
-/// them with no synchronisation: `resolved` is read-only and every write a lane makes lands in
-/// storage no other lane can name.
+/// The lanes share nothing. Each entity-order column has its own partition, each string column its
+/// own arena, and each spilled column its own extent writer, so a chunk's work splits across them
+/// with no synchronisation: `resolved` is read-only and every write a lane makes lands in storage
+/// no other lane can name.
 enum JoinLane<'a> {
-    Value {
-        column: usize,
-        src: &'a mut EntityColumn,
-        home: &'a mut EntityColumn,
-    },
     Partitioned {
         src: &'a mut EntityColumn,
         lane: &'a mut ValueLane,
@@ -2653,23 +2650,25 @@ fn read_one_attribute_source(
                 .zip(staged.iter_mut())
                 .map(|(&column, src)| match spills[column].take() {
                     Some(out) => JoinLane::Extent { src, out },
-                    None => match partitions[column].take() {
-                        Some(lane) if lane.chars => {
-                            let home = homes[column].take().expect(
-                                "an attribute is read from exactly one source, so one lane owns \
-                                 it",
-                            );
-                            JoinLane::Chars { src, home, lane }
+                    None => {
+                        // Every entity-order column has a value lane: a fixed-width one carries
+                        // its value and a string one the `at` word, and a column with neither is
+                        // spilled and was answered above.
+                        let lane = partitions[column].take().expect(
+                            "an entity-order column has a value lane, a spilled one an extent \
+                             writer, and no column has both",
+                        );
+                        match lane.chars {
+                            true => {
+                                let home = homes[column].take().expect(
+                                    "an attribute is read from exactly one source, so one lane \
+                                     owns it",
+                                );
+                                JoinLane::Chars { src, home, lane }
+                            }
+                            false => JoinLane::Partitioned { src, lane },
                         }
-                        Some(lane) => JoinLane::Partitioned { src, lane },
-                        None => {
-                            let home = homes[column].take().expect(
-                                "an attribute is read from exactly one source, so one lane owns \
-                                 it",
-                            );
-                            JoinLane::Value { column, src, home }
-                        }
-                    },
+                    }
                 })
                 .collect();
             // Collected per lane and folded in lane order, so a build that fails here fails with
@@ -2678,20 +2677,6 @@ fn read_one_attribute_source(
             let counted: Vec<Result<u64>> = lanes
                 .par_iter_mut()
                 .map(|lane| match lane {
-                    JoinLane::Value { column, src, home } => {
-                        let name = &args.schema.attributes[*column].name;
-                        let mut count = 0u64;
-                        for &(entity, pos) in resolved.iter() {
-                            if src.is_present(pos as usize) {
-                                count += 1;
-                            }
-                            // Not wrapped with the column's name: every error this can raise
-                            // already carries it (`column.rs`) or names the file it could not
-                            // write.
-                            home.take_from(entity as usize, src, pos as usize, name)?;
-                        }
-                        Ok(count)
-                    }
                     JoinLane::Partitioned { src, lane } => {
                         let mut count = 0u64;
                         let mut record = vec![0u8; 4 + lane.width];
