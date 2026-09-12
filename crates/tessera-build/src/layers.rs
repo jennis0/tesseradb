@@ -1780,7 +1780,13 @@ pub fn publish(
             for ordinal in batch_lo..batch_lo + batch_len {
                 store.vacate_members(layer, level, ordinal);
             }
-            crate::trim_heap();
+            // **No trim here.** A batch's bitmaps are freed above and the next batch allocates
+            // the same shapes straight back, so returning the pages to the kernel between two
+            // batches of one level buys a heap the level is about to ask for again — and
+            // `malloc_trim` walks every arena's free lists each time. What §4.5 asks for is the
+            // heap returned once the level's memberships are rehoused, which is where the trim is.
+            // Measured at 125,789,091 rows: the two trims together cost 3.16 s of the layers
+            // stage's 74.75 s and held 0.8 GiB back.
             start = end;
         }
         writer.finish().map_err(BuildError::Store)?;
@@ -2952,6 +2958,9 @@ fn write_membership_extents(
             }
         }
         rehoused += map_level_memberships(store, &path, &layer, level, &mut kept)?;
+        // **The heap back after the level's rehousing**, which is §4.5's own term: the level's
+        // owned bitmaps have just been replaced by views over the finished pack, and the pages
+        // they were in are the 34 GB glibc held for the rest of the run at rung 6.
         crate::trim_heap();
         published.paths.push(path);
         published.membership_extents.push(MembershipExtent {
