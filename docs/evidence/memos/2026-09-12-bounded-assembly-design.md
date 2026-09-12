@@ -48,6 +48,12 @@ at a scattered index.** Three consequences:
    bucket and one window; disk is one copy of the values, released bucket by bucket.
 3. Freed heap is returned to the system at every stage boundary.
 
+One exception is named, because it is a rate over the row count and the rule says there is
+none: writing `columns.arrow` in place runs Arrow's writer over the real row count, and the
+writer allocates an all-ones validity bitmap of `n / 8` bytes for every column, all alive at
+once, 2.2 GB at rung 6. The model charges it and the model's test subtracts it. It is the price
+of one encoder rather than two.
+
 Two models read the result and they are not the same model. The **batch plan** (`loop_fixed`,
 `per_batch` in `plan_build`) sets the signature stride, the stride partitions entity-id space,
 and a different stride is a different entity-id assignment, which I9 forbids. Its arithmetic

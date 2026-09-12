@@ -162,7 +162,26 @@ sort with a k-way merge over spilled runs, the shape the member and keyword merg
 holds one chunk rather than the corpus. The identity tiebreak is a pure function of the entity and
 survives the split.
 
-## 8. Open measurements
+## 8. Measured after the fact
+
+- **`manifests` is the artifact pass.** The stage's interval opens when `segment_write` ends and
+  closes after the digests, so it reports the artifact pass, containment and the scratch sweep;
+  the digests are 1.6 to 1.8% of it (0.115 s of 6.27 s at 16.3×10⁶ rows, 1.20 s of 74.2 s at
+  125.8×10⁶) and already run on twelve threads. The 1,637 s linear projection in the reference
+  table is the artifact pass's. Digest-on-write was modelled at about 1% of a rung-6 build and
+  not built.
+- **`dictionary` was a per-row string.** The access column is `RLE_DICTIONARY` with 251 values
+  and a dictionary page in every row group; the reader hydrated it to one `String` a row and both
+  passes did a per-row lookup, twice over the column. Read as a dictionary array with a per-batch
+  resolution: at 300×10⁶ rows `dictionary` 56.8 s to 14.1 s and `geometry_read` 57.1 s to 33.0 s,
+  bundle identical. Modelled at rung 6: about 580 s off `dictionary` and a comparable share of
+  `geometry_read`.
+- **Parquet decode is not the lever in the points passes.** `source_ids` and `geometry_read`
+  already decode row groups on a pool with a bounded channel; at 300×10⁶ rows the decoders sat
+  63 to 89 s a stage waiting on one consumer thread at 98%. `attribute_tail`'s decode is 16% of
+  the stage at that scale and its vocabulary minting is order-bearing, so it stays single-threaded.
+
+## 9. Open measurements
 
 - A `--limit` build reads the whole points file: at 2×10⁶ rows of the 3.5×10⁹, `attribute_tail`
   took 210 s and read 38 GB to grow the bundle by 0.19 GB (measured, `probes/2026-09-12-bounded-assembly/`
