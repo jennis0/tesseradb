@@ -674,13 +674,26 @@ pub fn read_access_vocabulary(
     }
     let mut unlabelled: u64 = 0;
     if let Some(field) = field {
-        scan_access_column(points, fields, field, limit, select, |_, terms| {
-            if terms.is_empty() {
-                unlabelled += 1;
+        // **Marked per row, inserted per distinct value.** A row contributes a bit to `used` and
+        // nothing else; the set takes the batch's distinct values once, and only those some
+        // selected row carries — a dictionary page holds the row group's values, not this
+        // prefix's, and a `--limit` build must not mint a term no row it read carried.
+        let mut used: Vec<bool> = Vec::new();
+        scan_access_column(points, fields, field, limit, select, |_, rows, batch| {
+            used.clear();
+            used.resize(batch.distinct.len(), false);
+            for &row in rows {
+                let terms = batch.row(row as usize);
+                if terms.is_empty() {
+                    unlabelled += 1;
+                }
+                for &term in terms {
+                    used[term as usize] = true;
+                }
             }
-            for term in terms {
-                if !distinct.contains(*term) {
-                    distinct.insert((*term).to_string());
+            for (term, &carried) in used.iter().enumerate() {
+                if carried && !distinct.contains(batch.distinct[term]) {
+                    distinct.insert(batch.distinct[term].to_string());
                 }
             }
             ControlFlow::Continue(())
@@ -744,38 +757,58 @@ pub fn scan_access_field<F: FnMut(u64, u64) -> ControlFlow<()>>(
     // build. Refused rather than assumed away: the two passes must see one relation, and the
     // second is what assigns the postings.
     let mut changed: Option<BuildError> = None;
-    scan_access_column(points, fields, field, limit, select, |source_id, terms| {
-        if terms.is_empty() {
-            let Some(default_term) = default_term else {
-                changed = Some(BuildError::Schema {
-                    path: points.to_path_buf(),
-                    detail: format!(
-                        "the access column '{field}' now carries a null or empty label, which it \
-                         did not when this build read its vocabulary, and the view declares no \
-                         `point_visibility.default` to fill it with. The file changed underneath \
-                         the build, and the two passes must see one relation"
-                    ),
-                });
-                return ControlFlow::Break(());
-            };
-            fill.filled += 1;
-            return visit(source_id, default_term);
-        }
-        fill.carried += 1;
-        for term in terms {
-            let Ok(position) = vocabulary.binary_search_by(|t| t.as_str().cmp(term)) else {
-                changed = Some(BuildError::Schema {
-                    path: points.to_path_buf(),
-                    detail: format!(
-                        "the access column '{field}' now carries the term '{term}', which it \
-                         did not when this build read its vocabulary. The file changed underneath \
-                         the build, and the two passes must see one relation"
-                    ),
-                });
-                return ControlFlow::Break(());
-            };
-            if visit(source_id, position as u64).is_break() {
-                return ControlFlow::Break(());
+    // **One search a distinct value a batch**, not one a row: `u64::MAX` stands for a value this
+    // batch has not needed yet, and a value no selected row carries is never looked up at all —
+    // which is what lets a dictionary page hold values this prefix does not read.
+    let mut positions: Vec<u64> = Vec::new();
+    scan_access_column(points, fields, field, limit, select, |ids, rows, batch| {
+        positions.clear();
+        positions.resize(batch.distinct.len(), u64::MAX);
+        for &row in rows {
+            let source_id = ids[row as usize];
+            let terms = batch.row(row as usize);
+            if terms.is_empty() {
+                let Some(default_term) = default_term else {
+                    changed = Some(BuildError::Schema {
+                        path: points.to_path_buf(),
+                        detail: format!(
+                            "the access column '{field}' now carries a null or empty label, which \
+                             it did not when this build read its vocabulary, and the view declares \
+                             no `point_visibility.default` to fill it with. The file changed \
+                             underneath the build, and the two passes must see one relation"
+                        ),
+                    });
+                    return ControlFlow::Break(());
+                };
+                fill.filled += 1;
+                if visit(source_id, default_term).is_break() {
+                    return ControlFlow::Break(());
+                }
+                continue;
+            }
+            fill.carried += 1;
+            for &term in terms {
+                let mut position = positions[term as usize];
+                if position == u64::MAX {
+                    let value = batch.distinct[term as usize];
+                    let Ok(at) = vocabulary.binary_search_by(|t| t.as_str().cmp(value)) else {
+                        changed = Some(BuildError::Schema {
+                            path: points.to_path_buf(),
+                            detail: format!(
+                                "the access column '{field}' now carries the term '{value}', \
+                                 which it did not when this build read its vocabulary. The file \
+                                 changed underneath the build, and the two passes must see one \
+                                 relation"
+                            ),
+                        });
+                        return ControlFlow::Break(());
+                    };
+                    position = at as u64;
+                    positions[term as usize] = position;
+                }
+                if visit(source_id, position).is_break() {
+                    return ControlFlow::Break(());
+                }
             }
         }
         ControlFlow::Continue(())
@@ -850,7 +883,22 @@ fn scan_identity<F: FnMut(u64) -> ControlFlow<()>>(
 /// Walk `(entity_id, access field)` in file order, handing each row its **trimmed, non-empty**
 /// terms. Single-threaded: one string column against geometry's decode cost, and both passes over
 /// it must see the same rows in the same order.
-fn scan_access_column<F: FnMut(u64, &[&str]) -> ControlFlow<()>>(
+/// Walk the access column, handing the caller **one batch at a time**: its distinct values, and
+/// each selected row's indices into them.
+///
+/// **A batch and not a row, because the column is a category.** The access column of a corpus
+/// this size names a compartment — 251 country codes over 3.5×10⁹ GBIF occurrences — and Parquet
+/// stores such a column dictionary-encoded, one page of values and a run of indices. The pass
+/// this replaced hydrated that back into one `String` a row and then asked the caller to look
+/// each one up: measured at the 3×10⁸ prefix, 14.8 s of allocation and 30.5 s of lookup in a
+/// 65.6 s `dictionary` stage, and the same again in `geometry_read`, which runs the second pass.
+/// Here the reader is asked for the dictionary itself ([`ArrowReaderOptions::with_schema`]), the
+/// distinct values are trimmed once a batch, and a row is an index.
+///
+/// A column the reader will not hand over as a dictionary — a `list<string>`, or a file whose
+/// pages are plain — falls back to building the same shape with a hash per row, which is still
+/// one allocation a *value* rather than one a row.
+fn scan_access_column<F: FnMut(&[u64], &[u32], &AccessBatch<'_>) -> ControlFlow<()>>(
     path: &Path,
     fields: &Fields,
     field: &str,
@@ -889,12 +937,14 @@ fn scan_access_column<F: FnMut(u64, &[&str]) -> ControlFlow<()>>(
         roots.push(discriminator_index(path, &schema, select)?);
     }
     let projection = parquet::arrow::ProjectionMask::roots(builder.parquet_schema(), roots);
-    let reader = builder
-        .with_row_groups(keep)
-        .with_projection(projection)
-        .with_batch_size(65_536)
-        .build()
-        .map_err(|e| BuildError::parquet(path, e))?;
+    drop(builder);
+
+    // **Ask for the dictionary, take the strings if it is refused.** `with_schema` is checked
+    // against the file's own types, so a column that is not a plain string — a `list<string>` —
+    // fails here and the plain route below reads it. Nothing downstream sees which route ran: the
+    // batch handed to the visitor has one shape.
+    let reader = open_access_reader(path, &schema, field, &keep, &projection, true)
+        .or_else(|_| open_access_reader(path, &schema, field, &keep, &projection, false))?;
     let projected = arrow::array::RecordBatchReader::schema(&reader);
     let id_idx = column_index(path, &projected, fields.of(ENTITY_ID))?;
     let access_idx = column_index(path, &projected, field)?;
@@ -903,7 +953,10 @@ fn scan_access_column<F: FnMut(u64, &[&str]) -> ControlFlow<()>>(
         None => None,
     };
 
-    for batch in reader {
+    let mut rows: Vec<u32> = Vec::with_capacity(ATTRIBUTE_BATCH_ROWS);
+    let mut reader = reader;
+    loop {
+        let Some(batch) = reader.next() else { break };
         let batch = batch.map_err(|e| BuildError::arrow(path, e))?;
         let ids = read_u64_column(path, &batch, id_idx, fields.of(ENTITY_ID))?;
         let terms = read_access_column(path, batch.column(access_idx), field)?;
@@ -911,74 +964,200 @@ fn scan_access_column<F: FnMut(u64, &[&str]) -> ControlFlow<()>>(
             (Some(select), Some(idx)) => Some(selected_rows(path, batch.column(idx), select)?),
             _ => None,
         };
-        let mut row: Vec<&str> = Vec::new();
-        for (i, &id) in ids.iter().enumerate() {
-            if limit.is_some_and(|l| id >= l)
-                || !selected.as_ref().is_none_or(|selected| selected[i])
-            {
-                continue;
-            }
-            row.clear();
-            row.extend(terms.terms_of(i));
-            if visit(id, &row).is_break() {
-                return Ok(());
-            }
+        rows.clear();
+        rows.extend(
+            ids.iter()
+                .enumerate()
+                .filter(|(row, &id)| {
+                    !limit.is_some_and(|l| id >= l)
+                        && selected.as_ref().is_none_or(|selected| selected[*row])
+                })
+                .map(|(row, _)| row as u32),
+        );
+        if visit(&ids, &rows, &terms).is_break() {
+            return Ok(());
         }
     }
     Ok(())
 }
 
-/// One batch's access column, flattened: row `i`'s terms are `terms[bounds[i]..bounds[i + 1]]`.
-struct AccessBatch {
-    bounds: Vec<usize>,
-    terms: Vec<String>,
-}
+/// The access column's reader, optionally asking for the column as a dictionary rather than as
+/// hydrated strings. Separate so the caller can try one and fall back to the other without two
+/// spellings of the projection.
+fn open_access_reader(
+    path: &Path,
+    schema: &arrow::datatypes::SchemaRef,
+    field: &str,
+    keep: &[usize],
+    projection: &parquet::arrow::ProjectionMask,
+    as_dictionary: bool,
+) -> Result<parquet::arrow::arrow_reader::ParquetRecordBatchReader> {
+    use arrow::datatypes::{DataType, Field, Schema};
+    use parquet::arrow::arrow_reader::ArrowReaderOptions;
+    use std::sync::Arc;
 
-impl AccessBatch {
-    fn terms_of(&self, row: usize) -> impl Iterator<Item = &str> {
-        self.terms[self.bounds[row]..self.bounds[row + 1]]
+    let file = File::open(path).map_err(|e| BuildError::io(path, e))?;
+    let mut options = ArrowReaderOptions::new();
+    if as_dictionary {
+        let fields: Vec<Arc<Field>> = schema
+            .fields()
             .iter()
-            .map(String::as_str)
+            .map(|f| {
+                if f.name() == field && matches!(f.data_type(), DataType::Utf8) {
+                    Arc::new(Field::new(
+                        f.name(),
+                        DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8)),
+                        f.is_nullable(),
+                    ))
+                } else {
+                    f.clone()
+                }
+            })
+            .collect();
+        options = options.with_schema(Arc::new(Schema::new(fields)));
     }
+    let builder = ParquetRecordBatchReaderBuilder::try_new_with_options(file, options)
+        .map_err(|e| BuildError::parquet(path, e))?;
+    builder
+        .with_row_groups(keep.to_vec())
+        .with_projection(projection.clone())
+        .with_batch_size(65_536)
+        .build()
+        .map_err(|e| BuildError::parquet(path, e))
 }
 
-/// Decode one batch of the access column, applying the trim and the empty rule.
-///
-/// **A `list<string>`, or a plain `string` where a point carries one term** (`configuration.md`
-/// §1). Any other type is refused rather than coerced: a column of integers or of a nested struct
-/// is not a term list, and guessing what its rows meant would mint access terms nobody wrote.
-fn read_access_column(path: &Path, column: &arrow::array::ArrayRef, name: &str) -> Result<AccessBatch> {
-    use arrow::array::{Array as _, LargeStringArray, ListArray, StringArray};
+/// One batch's access column: its distinct values, and each row's indices into them.
+struct AccessBatch<'a> {
+    /// The batch's distinct values, **trimmed**. A value that is empty after trimming is not a
+    /// term and is not here, which is what makes an empty string and a null one case downstream.
+    distinct: Vec<&'a str>,
+    /// Row `i`'s values are `indices[bounds[i]..bounds[i + 1]]`.
+    bounds: Vec<usize>,
+    indices: Vec<u32>,
+}
 
-    let rows = column.len();
-    let mut batch = AccessBatch {
-        bounds: Vec::with_capacity(rows + 1),
-        terms: Vec::new(),
-    };
-    batch.bounds.push(0);
-    fn push(batch: &mut AccessBatch, value: &str) {
+impl<'a> AccessBatch<'a> {
+    /// Row `row`'s values, as indices into [`Self::distinct`]. Empty where the row carries no
+    /// term — a null, an empty string, an empty list.
+    fn row(&self, row: usize) -> &[u32] {
+        &self.indices[self.bounds[row]..self.bounds[row + 1]]
+    }
+
+    fn with_rows(rows: usize) -> AccessBatch<'a> {
+        let mut batch = AccessBatch {
+            distinct: Vec::new(),
+            bounds: Vec::with_capacity(rows + 1),
+            indices: Vec::with_capacity(rows),
+        };
+        batch.bounds.push(0);
+        batch
+    }
+
+    /// Add one value to the row being built, under the distinct set `seen` indexes. Trimmed here,
+    /// once per distinct value on the dictionary route and once per row on the plain one.
+    fn push(&mut self, seen: &mut HashMap<&'a str, u32>, value: &'a str) {
         let term = value.trim();
         if term.is_empty() {
             return;
         }
-        batch.terms.push(term.to_string());
+        let next = self.distinct.len() as u32;
+        let at = *seen.entry(term).or_insert_with(|| {
+            self.distinct.push(term);
+            next
+        });
+        self.indices.push(at);
+    }
+
+    fn end_row(&mut self) {
+        self.bounds.push(self.indices.len());
+    }
+}
+
+/// Decode one batch of the access column into [`AccessBatch`], applying the trim and the empty
+/// rule.
+///
+/// **A `list<string>`, or a plain `string` where a point carries one term** (`configuration.md`
+/// §1) — and a dictionary of either, which is what [`scan_access_column`] asks the reader for.
+/// Any other type is refused rather than coerced: a column of integers or of a nested struct is
+/// not a term list, and guessing what its rows meant would mint access terms nobody wrote.
+fn read_access_column<'a>(
+    path: &Path,
+    column: &'a arrow::array::ArrayRef,
+    name: &str,
+) -> Result<AccessBatch<'a>> {
+    use arrow::array::{Array as _, DictionaryArray, LargeStringArray, ListArray, StringArray};
+    use arrow::datatypes::Int32Type;
+
+    let rows = column.len();
+    let mut batch = AccessBatch::with_rows(rows);
+    let mut seen: HashMap<&str, u32> = HashMap::new();
+
+    // **The dictionary route.** The keys are the indices already; all this pass does is trim each
+    // distinct value once and renumber, because a dictionary page may carry values no row uses
+    // and a trim may make two of them one.
+    if let Some(dictionary) = column
+        .as_any()
+        .downcast_ref::<DictionaryArray<Int32Type>>()
+    {
+        let values = dictionary
+            .values()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .ok_or_else(|| BuildError::Schema {
+                path: path.to_path_buf(),
+                detail: format!(
+                    "the access column '{name}' is a dictionary of {:?}, and an access term is a \
+                     string",
+                    dictionary.values().data_type()
+                ),
+            })?;
+        // One entry per dictionary value: where it landed in `distinct`, or absent where it is
+        // null or empty after trimming.
+        let mut mapped: Vec<Option<u32>> = Vec::with_capacity(values.len());
+        for key in 0..values.len() {
+            if values.is_null(key) {
+                mapped.push(None);
+                continue;
+            }
+            let term = values.value(key).trim();
+            if term.is_empty() {
+                mapped.push(None);
+                continue;
+            }
+            let next = batch.distinct.len() as u32;
+            let at = *seen.entry(term).or_insert_with(|| {
+                batch.distinct.push(term);
+                next
+            });
+            mapped.push(Some(at));
+        }
+        let keys = dictionary.keys();
+        for row in 0..rows {
+            if !keys.is_null(row) {
+                if let Some(at) = mapped[keys.value(row) as usize] {
+                    batch.indices.push(at);
+                }
+            }
+            batch.end_row();
+        }
+        return Ok(batch);
     }
 
     if let Some(values) = column.as_any().downcast_ref::<StringArray>() {
         for i in 0..rows {
             if !values.is_null(i) {
-                push(&mut batch, values.value(i));
+                batch.push(&mut seen, values.value(i));
             }
-            batch.bounds.push(batch.terms.len());
+            batch.end_row();
         }
         return Ok(batch);
     }
     if let Some(values) = column.as_any().downcast_ref::<LargeStringArray>() {
         for i in 0..rows {
             if !values.is_null(i) {
-                push(&mut batch, values.value(i));
+                batch.push(&mut seen, values.value(i));
             }
-            batch.bounds.push(batch.terms.len());
+            batch.end_row();
         }
         return Ok(batch);
     }
@@ -1001,11 +1180,11 @@ fn read_access_column(path: &Path, column: &arrow::array::ArrayRef, name: &str) 
                 for j in offsets[i]..offsets[i + 1] {
                     let j = j as usize;
                     if !strings.is_null(j) {
-                        push(&mut batch, strings.value(j));
+                        batch.push(&mut seen, strings.value(j));
                     }
                 }
             }
-            batch.bounds.push(batch.terms.len());
+            batch.end_row();
         }
         return Ok(batch);
     }
