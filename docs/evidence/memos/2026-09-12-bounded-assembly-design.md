@@ -209,12 +209,37 @@ Roaring containers are below the mmap threshold, and glibc releases free pages i
 on trim. Fragmentation against the records allocated above the bitmaps is the residual risk,
 which the batching bounds and the measurement in §7 checks.
 
-### 4.6 The artifact pass
+### 4.6 The artifact pass, and the fold with it
 
-`project_row_column` builds a level's label lane as a `vec![ROW_COLUMN_HOLE; row_count]`, 14 GB
-a level at rung 6, and a list lane's offset table the same way. Both become mapped scratch
-written front to back, and the entity-order model charges what remains. The row-column lanes
-were charged to the disk model only.
+**Built.** `project_row_column` built a level's label lane as a `vec![ROW_COLUMN_HOLE;
+row_count]`, 14 GB a level at rung 6, and a list lane's offset table the same way, and the
+engine composed the same column through the same function at every fold. Owner ruling,
+2026-09-12: **one implementation, disk-backed on both sides.** The partition primitive, its
+receipts and its anchors moved to `tessera-store`, which the build and the engine share; every
+membership entry is pushed as `(row, ordinal)` to buckets by row range, and each bucket is
+sorted by `(row, ordinal)` and replayed into a positional writer that puts the column front to
+back into the file it becomes. The sort is what makes the list form's byte order a property of
+the replay: a row's ordinals ascend because both walks hand them ascending, and now because
+they are sorted. The build's buckets live under `.build-tmp/`; the fold's under the
+deployment's cache directory, under a prefix an engine's open sweeps for what a process that
+died mid-fold left behind. The fold no longer builds a `RowColumn` to copy its bytes out of.
+
+The fold's cost is 8 B an entry written and read once — twice for the list form, whose offsets
+need a counting pass over the buckets before any value can be placed — in place of a 4 B a row
+heap array and two traversals, and its memory is one bucket. The other two routes considered:
+one byte writer fed by two traversals, which leaves the fold's memory as it is; and the
+partition with heap buckets on the engine, which costs 8 B an entry there. Neither taken.
+
+Measured, one fold of the 10⁶ MedCPT sample (`medcpt-1m`, the 10⁷ bundle on this box predating
+the current manifest format): anonymous RSS over the fold 259 MB before and 167 MB after, wall
+9.09 s and 8.48 s, one run each on a loaded box.
+
+The entity-order model charges the pass's partition as the primitive's constant in the assembly
+phase, and the disk model gains its buckets at 8 B a member entry of the largest layer beside
+the row-column lanes it already charged.
+
+The artifact pass also gets its own stage record, `manifests` having reported its interval: at
+`gbif-64p` that is 8.47 s of pass against 0.21 s of manifest.
 
 ### 4.7 The rest
 
