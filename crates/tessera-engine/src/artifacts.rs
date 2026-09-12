@@ -569,9 +569,11 @@ impl MembershipRows {
             .map(Arc::as_ref)
     }
 
-    /// A row form given directly — a spatial level's resolved rows at the fold, and the tests
-    /// whose subject is the hierarchy over a row form rather than the projection into one. Not a
-    /// route a stored membership takes: that goes through [`Self::put`] and the permutation.
+    /// A row form given directly — the tests whose subject is the hierarchy over a row form rather
+    /// than the projection into one. Not a route a stored membership takes: that goes through
+    /// [`Self::put`] and the permutation, and the fold composes a spatial level's column from its
+    /// resolved rows without a row form at all.
+    #[cfg(test)]
     pub(crate) fn of_rows(rows: Vec<Option<Bitmap>>) -> Self {
         MembershipRows {
             generating: vec![Vec::new(); rows.len()],
@@ -1818,6 +1820,15 @@ struct Held {
     rows: Arc<ArtifactRows>,
 }
 
+/// The engine cache directory's subdirectory for row-column compositions
+/// (`tessera_store::derived::project_row_column`). Its own directory rather than the cache root, so
+/// the open-time sweep cannot reach the fragment cache beside it.
+pub const ROW_COLUMN_SCRATCH_DIR: &str = "row-columns";
+
+// **`Default` is [`ArtifactProjections::new`]'s own scaffold and not a constructor.** Every field
+// but the scratch path is an empty cache, and the scratch path a default gives is empty, which is a
+// directory no composition can write through. `new` fills it in and nothing else calls `default`; a
+// caller that did would get a projection that declined every level it was asked for.
 #[derive(Debug, Default)]
 pub struct ArtifactProjections {
     cached: Mutex<BTreeMap<LevelAddress, Held>>,
@@ -1905,11 +1916,30 @@ pub struct ArtifactProjections {
     /// contributes one composition per prefix per view, not one per flush — the base is cached in
     /// [`Self::predicate_bases`] and the tail above it is what the geometry moves.
     columns_composed: std::sync::atomic::AtomicU64,
+    /// Where a composition's partition buckets and the column it writes live — the deployment's
+    /// cache directory, never the bundle.
+    ///
+    /// **A column is composed front to back into a file** and every pair it routes goes through a
+    /// disk partition (`tessera_store::derived::project_row_column`), so the engine needs scratch
+    /// of its own for the same reason a build needs `.build-tmp/`. The cache directory is where a
+    /// derived, undigested, rebuilt-every-open file belongs — contracts §2.1 fixes what a bundle
+    /// contains and this is not part of it, which is the argument the suggestion indexes already
+    /// make one directory along.
+    scratch: std::path::PathBuf,
 }
 
 impl ArtifactProjections {
-    pub fn new() -> Self {
-        Self::default()
+    /// `scratch` is the directory compositions write through — see [`Self::scratch`].
+    pub fn new(scratch: impl Into<std::path::PathBuf>) -> Self {
+        Self {
+            scratch: scratch.into(),
+            ..Self::default()
+        }
+    }
+
+    /// See [`Self::scratch`].
+    pub(crate) fn scratch(&self) -> &std::path::Path {
+        &self.scratch
     }
 
     /// See [`Self::builds`].
@@ -2977,6 +3007,7 @@ impl ArtifactProjections {
                     built.base_rows,
                     built.index().row_count(),
                     layout,
+                    self.scratch(),
                 )
                 .map(Arc::new);
                 if composed.is_some() {
@@ -3379,6 +3410,7 @@ impl ArtifactProjections {
             rows.base_rows,
             rows.index().row_count(),
             layout,
+            self.scratch(),
         )
         .map(Arc::new);
         if composed.is_some() {

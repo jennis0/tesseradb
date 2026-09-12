@@ -15202,7 +15202,7 @@ impl Executor {
                         level,
                         level_version,
                         layout: tessera_types::layer::ServingLayout::ArtifactMajor,
-                        bytes,
+                        bytes: tessera_store::derived::FiledBytes::InHand(bytes),
                     },
                 )
                 .collect(),
@@ -15517,15 +15517,21 @@ impl Executor {
             return Vec::new();
         }
 
-        // Projected under one borrow with the versions they are written at, and serialised outside
-        // it, exactly as the tile indexes are.
+        // Composed under one borrow with the versions they are written at, and filed outside it,
+        // exactly as the tile indexes are.
+        //
+        // **Straight to the file, not through a `RowColumn`.** The fold wants the column's bytes
+        // and nothing else, and `project_row_column` writes them front to back into a file under
+        // the engine's scratch; building a form here would hold the packed column and then copy it
+        // (`docs/evidence/memos/2026-09-12-bounded-assembly-design.md` §4.6).
+        let scratch = self.artifact_projections.scratch();
         let written: Vec<(
             String,
             String,
             u32,
             u64,
             tessera_types::layer::ServingLayout,
-            Vec<u8>,
+            std::path::PathBuf,
         )> = self.live.with_artifacts(|store| {
             let mut out = Vec::with_capacity(wanted.len() * spaces.len());
             for (layer, level, layout) in &wanted {
@@ -15536,7 +15542,7 @@ impl Executor {
                         == tessera_types::layer::MembershipSource::Spatial
                 });
                 for (view, space) in spaces {
-                    let column = if spatial {
+                    let composed = if spatial {
                         // The fold's segment is the whole base at row base 0, so the piece
                         // staged in `choose_layouts` is the level's membership in this view.
                         let piece = self.shapes.get(view, layer, *level).and_then(|held| {
@@ -15545,28 +15551,48 @@ impl Executor {
                                 .find(|(v, _)| v == view)
                                 .and_then(|(_, segment)| held.staged(&segment.seg_id))
                         });
-                        piece.and_then(|piece| {
-                            crate::row_column::RowColumn::compose(
-                                &crate::artifacts::MembershipRows::of_rows(piece.as_ref().clone()),
-                                space.base_rows(),
-                                *layout,
-                            )
-                        })
+                        match piece {
+                            Some(piece) => {
+                                let rows = piece.as_ref();
+                                tessera_store::derived::project_row_column(
+                                    rows.len() as u32,
+                                    space.base_rows(),
+                                    *layout,
+                                    scratch,
+                                    &|visit| {
+                                        for (ordinal, rows) in rows.iter().enumerate() {
+                                            if let Some(rows) = rows {
+                                                visit(ordinal as u32, rows);
+                                            }
+                                        }
+                                    },
+                                )
+                            }
+                            None => Ok(None),
+                        }
                     } else {
-                        crate::row_column::RowColumn::project(ordinals, space, *layout, || {
-                            pending.records(store, layer, *level)
-                        })
+                        tessera_store::derived::project_row_column(
+                            ordinals,
+                            space.base_rows(),
+                            *layout,
+                            scratch,
+                            &|visit| {
+                                for (ordinal, record) in pending.records(store, layer, *level) {
+                                    visit(ordinal, &space.project_base(&record.members));
+                                }
+                            },
+                        )
                     };
-                    match column {
-                        Some(column) => out.push((
+                    match composed {
+                        Ok(Some(path)) => out.push((
                             view.clone(),
                             layer.clone(),
                             *level,
                             version,
                             *layout,
-                            column.as_bytes().to_vec(),
+                            path,
                         )),
-                        None => tracing::warn!(
+                        Ok(None) => tracing::warn!(
                             layer = %layer,
                             level,
                             view = %view,
@@ -15574,6 +15600,14 @@ impl Executor {
                             "a row-major column would not compose at the fold — this level's \
                              memberships do not partition — so it is served artifact-major. \
                              Every answer is unchanged; the layout is not"
+                        ),
+                        Err(error) => tracing::warn!(
+                            layer = %layer,
+                            level,
+                            view = %view,
+                            %error,
+                            "a row-major column would not be composed at the fold; that level \
+                             derives it on first use"
                         ),
                     }
                 }
@@ -15592,10 +15626,13 @@ impl Executor {
             index,
             written
                 .into_iter()
-                .filter_map(|(view, layer, level, level_version, layout, bytes)| {
+                .filter_map(|(view, layer, level, level_version, layout, path)| {
                     // **No incarnation, no file** (decision 0115): a structure addressed by row
                     // and stamped with a guess would label another key's rows.
-                    let incarnation = *incarnations.get(&view)?;
+                    let Some(incarnation) = incarnations.get(&view).copied() else {
+                        let _ = std::fs::remove_file(&path);
+                        return None;
+                    };
                     Some(tessera_store::derived::Filed {
                         view,
                         incarnation,
@@ -15603,7 +15640,7 @@ impl Executor {
                         level,
                         level_version,
                         layout,
-                        bytes,
+                        bytes: tessera_store::derived::FiledBytes::Staged(path),
                     })
                 })
                 .collect(),
@@ -15750,7 +15787,9 @@ impl Executor {
                         level: *level,
                         level_version: version,
                         layout: tessera_types::layer::ServingLayout::ArtifactMajor,
-                        bytes: tessera_store::derived::shape_held_bytes(version, &shapes),
+                        bytes: tessera_store::derived::FiledBytes::InHand(
+                            tessera_store::derived::shape_held_bytes(version, &shapes),
+                        ),
                     });
                 }
             }
@@ -15849,7 +15888,7 @@ impl Executor {
                         level,
                         level_version,
                         layout: tessera_types::layer::ServingLayout::ArtifactMajor,
-                        bytes,
+                        bytes: tessera_store::derived::FiledBytes::InHand(bytes),
                     })
                 })
                 .collect(),

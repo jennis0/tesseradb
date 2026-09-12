@@ -830,3 +830,112 @@ fn every_declared_width_round_trips_including_a_packed_bool() {
         "13 packed bools should occupy 2 bytes, found {packed} — the column is not bit-packed"
     );
 }
+
+/// **The in-place route writes the bytes the whole-column route writes.** This is the assertion
+/// `tessera_store::columns` exists under: the build lays `columns.arrow` out before its first row
+/// and fills it from Morton buckets, and a file that differed from the one `write_columns`
+/// produces for the same rows would be a format two writers disagree about.
+///
+/// Over every declarable render width, including the bit-packed `bool` whose buffer is not a flat
+/// array of itself; over the two-column case a schema-less build writes; and over no rows at all.
+#[test]
+fn a_column_file_filled_in_place_is_byte_identical_to_one_written_whole() {
+    use tessera_spatial::tiler::ScalarType;
+    use tessera_store::columns::{ColumnsFile, ColumnsPlan};
+    use tessera_store::write::{write_columns, ScalarColumn};
+
+    let widths = [
+        ("flag", ScalarType::Bool),
+        ("byte", ScalarType::U8),
+        ("small", ScalarType::I16),
+        ("year", ScalarType::U32),
+        ("count", ScalarType::I64),
+        ("ratio", ScalarType::F32),
+        ("weight", ScalarType::F64),
+        ("seen_at", ScalarType::TimestampUs),
+    ];
+    let dir = tempfile::tempdir().expect("tempdir");
+    for scalars in [&widths[..], &[][..]] {
+        // 600,000 rows puts the all-ones validity bitmap arrow writes for each non-nullable
+        // column past the size the plan keeps a write's bytes at, which is the case the
+        // 25,846,007-row `gbif-64p` fixture found and the smaller row counts here do not.
+        for rows in [0usize, 1, 7, 1000, 600_000] {
+            let tessera: Vec<u64> = (0..rows as u64)
+                .map(|i| synthetic_tessera_id(i).raw())
+                .collect();
+            let residual: Vec<u32> = (0..rows)
+                .map(|i| (i as u32).wrapping_mul(2_654_435_761))
+                .collect();
+            // One deterministic byte pattern per column, at that column's width — a `bool`'s
+            // buffer is `rows` bits, every other is `rows` values.
+            let bytes_of = |index: usize, ty: ScalarType| -> Vec<u8> {
+                let width = match ty {
+                    ScalarType::Bool => return (0..rows.div_ceil(8))
+                        .map(|b| (b as u8).wrapping_mul(37).wrapping_add(index as u8))
+                        .collect(),
+                    ScalarType::U8 | ScalarType::I8 => 1,
+                    ScalarType::U16 | ScalarType::I16 => 2,
+                    ScalarType::U32 | ScalarType::I32 | ScalarType::F32 => 4,
+                    _ => 8,
+                };
+                (0..rows * width)
+                    .map(|b| (b as u8).wrapping_mul(31).wrapping_add(index as u8 * 7))
+                    .collect()
+            };
+
+            let whole = dir.path().join(format!("whole-{}-{rows}.arrow", scalars.len()));
+            write_columns(
+                &whole,
+                tessera.clone(),
+                residual.clone(),
+                scalars
+                    .iter()
+                    .enumerate()
+                    .map(|(index, (name, ty))| {
+                        (
+                            (*name).to_string(),
+                            ScalarColumn::of(
+                                *ty,
+                                rows,
+                                arrow::buffer::Buffer::from_vec(bytes_of(index, *ty)),
+                            )
+                            .expect("scalar column"),
+                        )
+                    })
+                    .collect(),
+            )
+            .expect("write_columns");
+
+            let declared: Vec<(String, ScalarType)> = scalars
+                .iter()
+                .map(|(name, ty)| ((*name).to_string(), *ty))
+                .collect();
+            let in_place = dir
+                .path()
+                .join(format!("in-place-{}-{rows}.arrow", scalars.len()));
+            let plan = ColumnsPlan::new(&declared, rows).expect("plan");
+            let file = ColumnsFile::create(&in_place, plan).expect("create");
+            // Filled in pieces and out of column order, which is what the build does: the two
+            // fixed columns arrive a Morton bucket at a time and each render column arrives
+            // later, a row bucket at a time.
+            for (row, id) in tessera.iter().enumerate() {
+                file.put(0, row as u64 * 8, &id.to_le_bytes()).expect("put");
+            }
+            for (row, value) in residual.iter().enumerate() {
+                file.put(1, row as u64 * 4, &value.to_le_bytes())
+                    .expect("put");
+            }
+            for (index, (_, ty)) in scalars.iter().enumerate() {
+                file.put(index + 2, 0, &bytes_of(index, *ty)).expect("put");
+            }
+            file.finish().expect("finish");
+
+            assert_eq!(
+                fs::read(&in_place).expect("read in-place"),
+                fs::read(&whole).expect("read whole"),
+                "{rows} rows, {} declared columns: the in-place file must be byte-identical",
+                scalars.len()
+            );
+        }
+    }
+}

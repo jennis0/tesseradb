@@ -60,13 +60,15 @@
 //! the heap is a Roaring container's descriptor and the members themselves are page cache. The
 //! publication's own window still holds them ([`BYTES_PER_MEMBER_ENTRY`]); nothing after it does.
 //!
-//! The segment's **row-order** tail moved the same way and at the same time
-//! ([`crate::pipeline::permute_attribute_tail`]): eight render columns at 7.4×10⁷ rows were ~2.4 GB
-//! of `Vec`, built by `push` immediately after the entity-order columns stopped being heap. ⊘ It
-//! was never a term of this model in either form — it lives in the segment write, not in the
-//! entity-order window this module covers — so what moved is its cost and not its accounting. What
-//! it is now is a mapped file per render column, priced by [`render_tail_bytes`] into the disk
-//! pre-flight's assembly phase.
+//! The segment's **row-order** tail went the same way and further: eight render columns at
+//! 7.4×10⁷ rows were ~2.4 GB of `Vec`, built by `push` immediately after the entity-order columns
+//! stopped being heap, and then a mapped file per column written at a scattered row index. It is
+//! now neither ([`crate::assembly`]): each render column is read in entity order out of one
+//! `(entity, row)` bucket at a time, pushed to a `(row, value)` partition, and each row bucket's
+//! window is written straight into `columns.arrow`'s own buffer. ⊘ The heap form was never a term
+//! of this model — it lived in the segment write, not in the entity-order window this module
+//! covers — so what the partitions are charged here is the assembly's constant, and the bytes they
+//! spill are charged to the disk model's assembly phase.
 //!
 //! They are still modelled, and still printed, as **mapped** terms: an operator whose disk is the
 //! constraint has the same right to see the number as one whose memory is. What changed is that
@@ -257,6 +259,11 @@ pub(crate) struct Term {
     /// The disk phases these bytes stand through. Meaningless for an anonymous term, which the
     /// memory model reads as one window.
     pub phases: Phases,
+    /// **A constant of the code rather than a rate over the corpus.** A partition's writer buffers
+    /// and the bucket the key type bounds, the Morton histogram, the allocator slack: these are the
+    /// terms that stop the anonymous total being linear in `n`, and the two tests that assert what
+    /// the model's shape is need to tell them apart from the terms that are a rate.
+    pub constant: bool,
 }
 
 /// The entity-order residency, term by term.
@@ -356,6 +363,11 @@ pub(crate) struct ColumnCost {
     /// Whether this column is the one a text index is built over — which costs the build a second
     /// set of files beside the column itself, and costs it them at the same time.
     pub text_index: bool,
+    /// Whether the segment write gathers this column into `columns.arrow` — which is what opens a
+    /// `(row, value)` partition for it in the assembly (`crate::assembly::RenderLane`). Read from
+    /// the declaration rather than inferred from [`Self::phases`]: a blob-resident column stands
+    /// through the same window and has no lane.
+    pub render: bool,
     /// The windows this column's storage stands through, which is **its last reader and not the
     /// release stage**: a `render` column is read by the segment write, a blob-resident one by the
     /// record blob, and a column that is neither has met its last reader when the filter postings
@@ -621,38 +633,31 @@ fn arena_capacity(payload: u64) -> u64 {
     payload.saturating_add(crate::spill::ARENA_GROWTH_STEP)
 }
 
-/// What one layer member **entry** — one `(artifact, source)` pair — costs the **machine**: about
-/// 4 bytes as Roaring, the store's own decoded copy, at the ~2 bytes an array container spends on a
-/// scattered member and less on a dense one, and the level being published beside it, whose
-/// incoming bitmaps and durable record bytes are the same membership twice more.
+/// What one layer member **entry** — one `(artifact, source)` pair — costs the **machine** while
+/// the batch holding it is in flight: **12 bytes**, measured.
 ///
-/// **Charged over one level's entries and not the layer's**, because [`crate::layers::publish`]
-/// walks the levels and drops each one's bitmaps when its record is written. A level draws at most
-/// one artifact per member row, so the file's row count is a ceiling on any one level's entries and
-/// is what this is charged over — where the disk terms below are charged over every entry, all of
-/// which are on the disk at once.
+/// A level whose members are scattered across entity space is Roaring array containers almost
+/// throughout, and 3.4×10⁹ entries came to 46 GB of anonymous memory over the two copies that
+/// stand at once — the bitmaps the publication builds, and the copy `prepare_publish` takes of
+/// each (`docs/evidence/memos/2026-09-12-gbif-whole-corpus-build-observations.md` §5). The figure
+/// was 4 until that measurement, which is where a level of that size passed a pre-flight it then
+/// exceeded elevenfold.
 ///
-/// It was 12 until 2026-08-30, the other 8 being the plan's `Vec<u64>` of source ids: one vector
-/// per artifact, every one of them live from the first row of the first member source until the
-/// last level was published. Those pairs go to disk now ([`SPILLED_BYTES_PER_MEMBER_ENTRY`]), so the
-/// plan holds a spill budget rather than the corpus and the term that is left is the published
-/// memberships alone.
-///
-/// **Only the store's copy was corpus-wide, and it is a mapping now** — see
-/// [`MAPPED_BYTES_PER_MEMBER_ENTRY`]. The store used to carry one heap Roaring bitmap per artifact
-/// from the layers stage to the artifact pass four stages later: **+1.2 GB of anonymous memory at
-/// the 10⁷ MedCPT sample**, 2.7 B per closed member row, measured across the build's peak
-/// (`probes/2026-09-02-mapped-memberships/README.md`). `layers.rs` reads each membership back
-/// through the extent it has just written, so what is left here is the publication's own window and
-/// this constant no longer describes anything the build holds to the end.
+/// **Charged over one batch's entries, not a level's and not the layer's.**
+/// [`crate::layers::publish`] publishes a level in batches sized by
+/// [`crate::layers::publication_batch_entries`] and encodes each batch into the level's membership
+/// pack before the next is built, so what stands is a batch. A level smaller than a batch is
+/// charged its own entries.
 ///
 /// ⊘ **The Roaring figure is the scattered case and is not measured per build.** A dense membership
 /// costs an eighth of it; the model takes the expensive one, because the refusal it feeds is meant
-/// to be wrong in the direction that costs a rerun rather than a kill. It is loose in one more
-/// direction since the packing was streamed: the constant charges the corpus for terms that are a
-/// level's, and it is left at 4 rather than lowered because a term that errs high refuses a build
-/// that would have fitted, where one that errs low is the kill this module exists to pre-empt.
-const BYTES_PER_MEMBER_ENTRY: u64 = 4;
+/// to be wrong in the direction that costs a rerun rather than a kill.
+///
+/// **It is [`crate::layers::PUBLICATION_BYTES_PER_ENTRY`] and not a second figure beside it.** The
+/// batch is cut at that rate, so charging any less here is charging half a batch and calling it the
+/// peak — which is what this constant did while it was 12, the one copy rather than the two that
+/// stand together. Derived rather than restated so the two cannot drift.
+const BYTES_PER_MEMBER_ENTRY: u64 = crate::layers::PUBLICATION_BYTES_PER_ENTRY;
 
 /// What one member entry costs the **disk**, and the process's page cache, as the packed membership
 /// extent the store then reads through: 3 bytes, an array container's own width and a little.
@@ -714,43 +719,31 @@ fn member_spill_bytes(entries: u64, ids: IdShape, n: u64) -> u64 {
     entries.saturating_mul(SPILLED_BYTES_PER_MEMBER_ENTRY + sparse)
 }
 
-/// What the segment's **row-order** tail costs on disk: one fixed-width slot per row per render
-/// column, in `.build-tmp/`, for the length of the segment write.
-///
-/// Not a term of [`entity_order_residency`], because it is not in that window: the tail is built
-/// after the release that ends it, and every column it covers is one the release *kept*. It is the
-/// assembly phase's, beside `columns.arrow` and the postings spool.
-///
-/// A `bool` is counted twice over, at a byte a row and again at a bit: the lane fills a byte per
-/// row and packs it into Arrow's bit layout on the way out, and both mappings stand while it does.
-/// Every other render column is its declared width and nothing else — a string one cannot be here,
-/// `render` being refused for the whole family at the declaration.
-pub(crate) fn render_tail_bytes(schema: &crate::config::Schema, n: u64) -> u64 {
-    schema
-        .attributes
-        .iter()
-        .filter(|a| a.render)
-        .map(|a| match a.ty {
-            ScalarType::Bool => n.saturating_add(n.div_ceil(8)),
-            ty => fixed_width(ty).saturating_mul(n),
-        })
-        .sum()
-}
-
 /// The residency of everything the batch loop's model does not cover.
 ///
 /// `member_entries` is every `(artifact, source)` pair the layers' member sources declare and
 /// `level_entries` a ceiling on any one level's, those being the two windows a member entry is held
-/// in: the spill holds every pair at once, the publication one level's. `n` is the item count, and
-/// `ids` the source ids' own shape ([`IdShape`]).
+/// in: the spill holds every pair at once, the publication one level's. `layer_entries` is the
+/// largest single layer's declared pairs, which is what the artifact pass partitions a level at a
+/// time. `n` is the item count, and `ids` the source ids' own shape ([`IdShape`]).
+///
+/// `scoped_render` is the group-scoped render columns of the view that carries the most of them
+/// ([`scoped_render_types`]). They are not in `columns`, which is the declaration's entity-scoped
+/// attributes, and they open a lane in the assembly exactly as those do.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn entity_order_residency(
     n: u64,
     ids: IdShape,
     columns: &[ColumnCost],
+    scoped_render: &[ScalarType],
     member_entries: u64,
     level_entries: u64,
+    layer_entries: u64,
+    memory_budget: u64,
 ) -> Residency {
-    let publication_bytes = level_entries.saturating_mul(BYTES_PER_MEMBER_ENTRY);
+    let batch_entries =
+        level_entries.min(crate::layers::publication_batch_entries(memory_budget));
+    let publication_bytes = batch_entries.saturating_mul(BYTES_PER_MEMBER_ENTRY);
     let mut terms = vec![
         // **A file under `.build-tmp/` where there is one at all**, and so charged to the disk
         // rather than to memory. The ids are read sequentially by every pass but one — the join's
@@ -773,6 +766,7 @@ pub(crate) fn entity_order_residency(
             bytes: 8u64.saturating_mul(ids.slots),
             mapped: true,
             phases: Phases::SPILL.and(Phases::BANDS).and(Phases::JOIN),
+            constant: false,
         },
         // **File-backed since 2026-09-09**, and so charged to the disk rather than to memory: the
         // map is written scattered once and read scattered thereafter, which is `MappedArray`'s
@@ -784,6 +778,7 @@ pub(crate) fn entity_order_residency(
             mapped: true,
             // Written by the assignment walk and read to the last view's permutation.
             phases: Phases::BANDS.onwards(),
+            constant: false,
         },
     ];
     for (index, column) in columns.iter().enumerate() {
@@ -833,7 +828,27 @@ pub(crate) fn entity_order_residency(
             bytes,
             mapped: true,
             phases: column.phases,
+            constant: false,
         });
+        // **The join's `(entity, at)` partition**, for a string column whose characters fill an
+        // arena (`docs/evidence/memos/2026-09-12-bounded-assembly-design.md` §4.3). The arena is
+        // appended in arrival order and the word that says where a value went is indexed by
+        // entity, so the word goes to a partition by entity range and each bucket is written into
+        // the offset array as one run — 12 B an item, standing from the join's first chunk to the
+        // replay and released bucket by bucket there. A spilled column has no offset array and
+        // pushes nothing.
+        if !spilled && carries_characters(column.ty) {
+            terms.push(Term {
+                what: format!(
+                    "declared column {index} ({ty}): the join's (entity, at) partition, 12 B/item, \
+                     in .build-tmp/"
+                ),
+                bytes: 12u64.saturating_mul(n),
+                mapped: true,
+                phases: Phases::JOIN,
+                constant: false,
+            });
+        }
         // The text index's sorted runs, **charged at the column they are tokenised from** rather
         // than at a constant of their own. The runs spill while the column is resident, so the two
         // stand on the disk together; and a run spends one varint on a `(term, entity)` pair where
@@ -857,19 +872,21 @@ pub(crate) fn entity_order_residency(
                 bytes: if spilled { column.payload_bytes } else { bytes },
                 mapped: true,
                 phases: Phases::INDEX,
+                constant: false,
             });
         }
     }
     if member_entries > 0 {
         terms.push(Term {
             what: format!(
-                "{level_entries} member entr(ies) in the largest level at \
-                 {BYTES_PER_MEMBER_ENTRY} B — the publication's own Roaring, while the level it is \
-                 publishing is in flight"
+                "{batch_entries} member entr(ies) in one publication batch at \
+                 {BYTES_PER_MEMBER_ENTRY} B — the publication's own Roaring, while the batch it \
+                 is publishing is in flight (the largest level holds {level_entries})"
             ),
             bytes: publication_bytes,
             mapped: false,
             phases: Phases::JOIN,
+            constant: false,
         });
         terms.push(Term {
             what: format!(
@@ -880,6 +897,7 @@ pub(crate) fn entity_order_residency(
             mapped: true,
             // The bundle's own extents: written at the publication and never released.
             phases: Phases::JOIN.onwards(),
+            constant: false,
         });
         terms.push(Term {
             what: format!(
@@ -890,13 +908,210 @@ pub(crate) fn entity_order_residency(
             bytes: member_spill_bytes(member_entries, ids, n),
             mapped: true,
             phases: Phases::JOIN,
+            constant: false,
         });
     }
+    // **The partitions, charged at the key type's ceiling and not at the corpus.** A bucket holds
+    // at most [`crate::spill::PARTITION_BUCKET_RECORDS`] records however many rows the build has,
+    // so what a partition costs is a constant: its writer buffers while it is open, and one loaded
+    // bucket and one window at the replay. Charging the ceiling over-charges a small corpus by up
+    // to the bucket count, which is the price of a model whose terms do not move with `n` — the
+    // whole of what `the_anonymous_total_does_not_grow_with_the_row_count` asserts, and the reason
+    // the design names 2 GiB as the budget floor (§3).
+    //
+    // **How many are open at the worst phase.** The attribute join opens one per column it fills
+    // in entity order and holds them all while it sweeps; the assembly opens the row partition,
+    // then the pairs beside it, then every render lane together — one pass over the pairs feeds
+    // them all (`crate::assembly::RenderLane`). Only one bucket is loaded at any moment in either,
+    // the replays being sequential.
+    //
+    // **A string column on the arena route has one too**, carrying the eight-byte `at` word where a
+    // fixed-width column carries its value (§4.3). A spilled column has no lane at all: its
+    // characters go straight to record-blob extents.
+    let join_partitions = columns.iter().filter(|column| !column.extents).count() as u64;
+    let join_width = columns
+        .iter()
+        .filter(|column| !column.extents)
+        .map(|column| match carries_characters(column.ty) {
+            true => 4 + 8,
+            false => 4 + fixed_width(column.ty),
+        })
+        .max()
+        .unwrap_or(0);
+    // The same arithmetic the partition itself sizes its writers by, so what the pre-flight
+    // charges is what the pass allocates.
+    let buffers = |buckets: u64, width: u64| {
+        buckets.saturating_mul(crate::spill::partition_buffer_bytes(n, width as usize, buckets)
+            as u64)
+    };
+    // **The corpus where it is smaller than the type's bound, the bound where it is not.** A
+    // bucket holds at most `n / 128` records and never more than 2³²/128 whatever `n` is, so the
+    // term rises with the corpus until the key type binds and is flat above it — which is the
+    // sense in which a partition's memory is a constant, and what
+    // `the_anonymous_total_does_not_grow_with_the_row_count` asserts by evaluating the model on
+    // both sides of that bound.
+    let records =
+        (n / crate::spill::PARTITION_BUCKETS as u64).clamp(1, crate::spill::PARTITION_BUCKET_RECORDS);
+    let bucket = |width: u64| records.saturating_mul(width);
+    if join_partitions > 0 {
+        terms.push(Term {
+            what: format!(
+                "the attribute join's {join_partitions} value partition(s): {} MiB of writer \
+                 buffers each, and one loaded bucket and window at the widest column's {join_width} \
+                 B a record over the {records} records a bucket holds",
+                buffers(crate::spill::PARTITION_BUCKETS as u64, join_width) >> 20
+            ),
+            bytes: buffers(crate::spill::PARTITION_BUCKETS as u64, join_width)
+                .saturating_mul(join_partitions)
+                .saturating_add(bucket(join_width))
+                .saturating_add(bucket(join_width.saturating_sub(4))),
+            mapped: false,
+            phases: Phases::JOIN,
+            constant: true,
+        });
+    }
+    // The keyword dictionary's `(row, ordinal)` partition, where a column is indexed at all.
+    if columns.iter().any(|column| matches!(column.ty, ScalarType::Keyword)) {
+        terms.push(Term {
+            what: "the keyword dictionary's (row, ordinal) partition: writer buffers, one loaded \
+                   bucket at 8 B a record and the u32 window it is scattered into"
+                .into(),
+            bytes: buffers(crate::spill::PARTITION_BUCKETS as u64, 8)
+                .saturating_add(bucket(8))
+                .saturating_add(bucket(4)),
+            mapped: false,
+            phases: Phases::INDEX,
+            constant: true,
+        });
+    }
+    // **The assembly** (`crate::assembly`): the Morton histogram, which is the `morton >> 8` space
+    // and so a constant of the code type; the row partition's counted buckets; and one loaded
+    // bucket sorted into 24 B records beside the 12 B it was read as. The 24 is
+    // `crate::assembly::RowRec`'s own size, which its `u64` alignment fixes there whatever order
+    // the fields are declared in.
+    terms.push(Term {
+        what: format!(
+            "the segment assembly: a {} MiB Morton histogram, the row \
+             partition's {} MiB of writer buffers, and one bucket of {records} records held as \
+             the 12 B it was written at and the 24 B it is sorted as",
+            crate::assembly::MortonHistogram::bytes_for_rows(n) >> 20,
+            buffers(crate::spill::PARTITION_COUNTED_BUCKETS, 12) >> 20
+        ),
+        bytes: crate::assembly::MortonHistogram::bytes_for_rows(n)
+            .saturating_add(buffers(crate::spill::PARTITION_COUNTED_BUCKETS, 12))
+            .saturating_add(bucket(12))
+            .saturating_add(bucket(24)),
+        mapped: false,
+        phases: Phases::ASSEMBLE,
+        constant: true,
+    });
+    // The widest render column is a ceiling over the fixed-width ones: `render` is refused at the
+    // declaration for every string type, so a render column is one of these and no wider. A
+    // group-scoped family is not in `columns` — its columns are read per view and never routed
+    // ([`crate::pipeline::may_take_extents`]) — so its types are measured beside them.
+    let widest_render = join_width.saturating_sub(4).max(
+        scoped_render
+            .iter()
+            .map(|&ty| fixed_width(ty))
+            .max()
+            .unwrap_or(0),
+    );
+    //
+    // **Every render lane's writer buffers stand together.** The `(entity, row)` bucket is loaded
+    // and sorted once and handed to the permutation and to every lane from that one sweep, rather
+    // than being loaded and sorted again per column, so each lane's buffers are open while the
+    // pairs are consumed. Counted at the columns the declaration renders; their width is
+    // [`widest_render`]'s ceiling, `render` being refused at the declaration for every string
+    // type. A view with no render column still pays one lane's worth here, which is the floor a
+    // build under a tight budget is charged rather than a lane it opens.
+    //
+    // **A group-scoped render family opens a lane of its own** in the row space of every view its
+    // scope reaches (`views.md` §5), so `scoped_render` carries the types of the view that opens
+    // the most. One view's row space is assembled at a time, and that view is the peak.
+    let render_lanes = (columns.iter().filter(|column| column.render).count()
+        + scoped_render.len())
+    .max(1) as u64;
+    terms.push(Term {
+        what: format!(
+            "the assembly's (entity, row) and {render_lanes} (row, value) partition(s): writer \
+             buffers, the loaded pairs bucket at 8 B a record, and one lane's bucket at up to {} B \
+             a record, the window it is placed in and a byte a row saying which rows it filled",
+            4 + widest_render
+        ),
+        bytes: buffers(crate::spill::PARTITION_BUCKETS as u64, 8)
+            .saturating_add(
+                buffers(crate::spill::PARTITION_BUCKETS as u64, 4 + widest_render)
+                    .saturating_mul(render_lanes),
+            )
+            .saturating_add(bucket(8))
+            .saturating_add(bucket(4 + widest_render))
+            .saturating_add(bucket(widest_render))
+            // The lane replay's `filled` flags: a byte a row of the bucket's range, alive while
+            // the window is, and what the presence bitmap beside the column is derived from.
+            .saturating_add(bucket(1)),
+        mapped: false,
+        phases: Phases::ASSEMBLE,
+        constant: true,
+    });
+    // **The artifact pass's `(row, ordinal)` partition** (the design memo §4.6). A level's column
+    // was composed into a row-sized lane — 4 B a row, 14 GB a level at rung 6 — and is now composed
+    // through a partition by row range, one level at a time: the writer buffers, one loaded bucket
+    // at 8 B a record, the 8 B keys that bucket is sorted into, and for the list form a `u32`
+    // window counting the bucket's rows.
+    //
+    // **A record is a member entry and not a row**, so this bucket is not bounded by the key type
+    // the way the other partitions' are. A row belongs to one artifact of a single-valued level and
+    // to many of a list-form one — MedCPT declares 47 entries a row — so the bucket holds the
+    // larger of the row space and the largest layer's entries, over the bucket count. The window is
+    // the row one: it counts the rows of the bucket's range and nothing else.
+    let pass_records = records.max(layer_entries / crate::spill::PARTITION_BUCKETS as u64);
+    terms.push(Term {
+        what: format!(
+            "the artifact pass's (row, ordinal) partition: {} MiB of writer buffers, one loaded \
+             bucket of {pass_records} member entries at 8 B each and the 8 B keys it is sorted \
+             into, and the u32 window the list form counts its rows in",
+            buffers(crate::spill::PARTITION_BUCKETS as u64, 8) >> 20
+        ),
+        bytes: buffers(crate::spill::PARTITION_BUCKETS as u64, 8)
+            .saturating_add(pass_records.saturating_mul(8))
+            .saturating_add(pass_records.saturating_mul(8))
+            .saturating_add(bucket(4)),
+        mapped: false,
+        phases: Phases::ASSEMBLE,
+        constant: true,
+    });
+    // **Arrow's all-ones validity bitmaps, during the `columns.arrow` layout pass.** Every column
+    // of the file is non-nullable and arrow writes a validity buffer for it all the same
+    // (`docs/evidence/memos/2026-09-11-arrow-all-ones-validity-buffers.md`). The file keeps them as
+    // three numbers (`tessera_store::columns::Fill`) but the layout pass does not: arrow's IPC
+    // writer builds every buffer of the batch before it writes any of them, so one `n / 8`-byte
+    // bitmap per column is alive at once — 437 MB a column at rung 6, anonymous, and a rate over
+    // `n` rather than a constant.
+    //
+    // **Two fixed columns plus the render columns**, counted here as every fixed-width declared
+    // column, which is the same ceiling [`widest_render`] takes: `render` is refused at the
+    // declaration for every string type, so a render column is one of these. A build that declares
+    // fixed-width columns it does not render is over-charged by `n / 8` each.
+    let render_columns = columns
+        .iter()
+        .filter(|column| !carries_characters(column.ty))
+        .count() as u64;
+    terms.push(Term {
+        what: format!(
+            "arrow's all-ones validity bitmaps over {} column(s) at n/8 bytes each, alive together              while the columns.arrow layout is learnt",
+            2 + render_columns
+        ),
+        bytes: (2 + render_columns).saturating_mul(n.div_ceil(8)),
+        mapped: false,
+        phases: Phases::ASSEMBLE,
+        constant: false,
+    });
     terms.push(Term {
         what: "slack for decode buffers, stage scratch and the allocator".into(),
         bytes: SLACK,
         mapped: false,
         phases: Phases::JOIN,
+        constant: true,
     });
     Residency { terms }
 }
@@ -917,7 +1132,7 @@ fn model_inputs(
     n: u64,
     payloads: &[f64],
     routes: &crate::pipeline::ColumnRoutes,
-) -> (Vec<ColumnCost>, u64, u64) {
+) -> (Vec<ColumnCost>, u64, u64, u64) {
     // Scaled by `n` rather than taken whole, so a `--limit` build is charged the prefix it builds
     // and not the file it reads from.
     let columns: Vec<ColumnCost> = args
@@ -943,6 +1158,7 @@ fn model_inputs(
             // earns an index exactly where it is owed postings.
             text_index: attribute.ty == ScalarType::Text
                 && crate::pipeline::postings_are_owed(&args.schema, attribute),
+            render: attribute.render,
             phases: if attribute.render {
                 Phases::JOIN.onwards()
             } else if crate::pipeline::blob_resident(&args.schema, attribute) {
@@ -952,13 +1168,17 @@ fn model_inputs(
             },
         })
         .collect();
-    // **Two denominators over the same member sources**, because a member entry is held in two
-    // windows of different sizes. Every entry is on the disk at once, as the spill's runs and the
-    // table they merge into: that is the file's key values. One *level's* are in memory at once, as
-    // the publication's Roaring, and a level draws at most one artifact per member row: that is the
-    // file's rows, which is a ceiling on any one level whatever the shape of its key lists.
+    // **Three denominators over the same member sources**, because a member entry is held in
+    // windows of three sizes. Every entry is on the disk at once, as the spill's runs and the table
+    // they merge into: that is the file's key values. One *level's* are in memory at once, as the
+    // publication's Roaring, and a level draws at most one artifact per member row: that is the
+    // file's rows, which is a ceiling on any one level whatever the shape of its key lists. One
+    // *layer's* are what the artifact pass partitions, a level at a time, and there a row carries
+    // one record per artifact it belongs to rather than one in all: that is the layer's declared
+    // pairs, and the largest layer is the ceiling over the pass.
     let mut entries = 0u64;
     let mut level_entries = 0u64;
+    let mut layer_entries = 0u64;
     for layer in &args.layer_inputs {
         let Some(members) = layer.members.as_ref() else {
             continue;
@@ -966,8 +1186,9 @@ fn model_inputs(
         let (declared, rows) = member_entries(members);
         entries = entries.saturating_add(declared);
         level_entries = level_entries.saturating_add(rows);
+        layer_entries = layer_entries.max(declared);
     }
-    (columns, entries, level_entries)
+    (columns, entries, level_entries, layer_entries)
 }
 
 /// **How much of the free space an arena has to fit inside to be worth filling.**
@@ -1033,8 +1254,21 @@ pub(crate) fn plan_routes(
     free: Option<u64>,
 ) -> (crate::pipeline::ColumnRoutes, Residency) {
     let spilled = crate::pipeline::ColumnRoutes::every_available(&args.schema);
-    let (columns, entries, level_entries) = model_inputs(args, n, payloads, &spilled);
-    choose_routes(&args.schema, n, ids, columns, entries, level_entries, free)
+    let (columns, entries, level_entries, layer_entries) =
+        model_inputs(args, n, payloads, &spilled);
+    choose_routes(
+        &args.schema,
+        n,
+        ids,
+        columns,
+        &scoped_render_types(args),
+        entries,
+        level_entries,
+        layer_entries,
+        free,
+        args.memory_budget
+            .unwrap_or_else(crate::pipeline::detect_memory_budget),
+    )
 }
 
 /// [`plan_routes`] unless the caller named the route ([`crate::ExtentRoute`]), in which case the
@@ -1055,9 +1289,64 @@ pub(crate) fn routes_for(
             crate::pipeline::ColumnRoutes::every_available(&args.schema)
         }
     };
-    let (columns, entries, level_entries) = model_inputs(args, n, payloads, &forced);
-    let tail = entity_order_residency(n, ids, &columns, entries, level_entries);
+    let (columns, entries, level_entries, layer_entries) =
+        model_inputs(args, n, payloads, &forced);
+    let budget = args
+        .memory_budget
+        .unwrap_or_else(crate::pipeline::detect_memory_budget);
+    let tail = entity_order_residency(
+        n,
+        ids,
+        &columns,
+        &scoped_render_types(args),
+        entries,
+        level_entries,
+        layer_entries,
+        budget,
+    );
     (forced, tail)
+}
+
+/// The **group-scoped render columns one view's row space carries**, at the view that carries the
+/// most of them (`views.md` §5).
+///
+/// A scoped family opens a `(row, value)` lane in the assembly exactly as a declared render column
+/// does, and it is not in [`ColumnCost`]: its columns are read per view, never routed, and never
+/// join a declared column's partition. One view's row space is assembled at a time, so the view
+/// with the widest set of lanes is the phase's peak.
+///
+/// **Which views a family reaches is `pipeline::scoped_render_targets`' rule**: a view of the
+/// family's own group, and a view of a group declaring `members` of it. Stated here over
+/// `BuildArgs` rather than shared, because that function is over the columns a pass has already
+/// read and this runs before any of them exist. The two disagreeing costs a forecast, not a
+/// bundle.
+fn scoped_render_types(args: &crate::BuildArgs) -> Vec<ScalarType> {
+    args.views
+        .iter()
+        .map(|view| {
+            let Some((group, _)) = view.view_id.split_once(tessera_store::GROUP_SEPARATOR) else {
+                // A plain view is in no group, so no scope reaches it.
+                return Vec::new();
+            };
+            let owner = args
+                .groups
+                .iter()
+                .find(|descriptor| descriptor.name == group)
+                .and_then(|descriptor| descriptor.members_of.as_deref())
+                .unwrap_or(group);
+            args.scoped_attributes
+                .iter()
+                .filter(|family| family.group == owner && family.attribute.render)
+                .map(|family| family.attribute.ty)
+                .collect::<Vec<ScalarType>>()
+        })
+        .max_by_key(|types| {
+            types
+                .iter()
+                .map(|&ty| 4 + fixed_width(ty))
+                .sum::<u64>()
+        })
+        .unwrap_or_default()
 }
 
 /// [`plan_routes`] over the model's inputs rather than the build's, so the rule can be tested at a
@@ -1069,9 +1358,12 @@ fn choose_routes(
     n: u64,
     ids: IdShape,
     mut columns: Vec<ColumnCost>,
+    scoped_render: &[ScalarType],
     entries: u64,
     level_entries: u64,
+    layer_entries: u64,
     free: Option<u64>,
+    memory_budget: u64,
 ) -> (crate::pipeline::ColumnRoutes, Residency) {
     let mut routes = crate::pipeline::ColumnRoutes::every_available(schema);
     let ceiling = free.unwrap_or(0) / ROUTE_HEADROOM;
@@ -1081,7 +1373,21 @@ fn choose_routes(
         }
         columns[index].extents = false;
         columns[index].framing_bytes = 0;
-        let candidate = entity_order_residency(n, ids, &columns, entries, level_entries);
+        let candidate = entity_order_residency(
+            n,
+            ids,
+            &columns,
+            scoped_render,
+            entries,
+            level_entries,
+            layer_entries,
+            memory_budget,
+        );
+        // **The arena route carries its offset lane's 12 B an item** — the `(entity, at)` records
+        // of the value partition the join replays the `at` words from (`crate::pipeline`'s
+        // `ValueLane`) — and that is disk in the same window as the arena itself. A string column
+        // whose arena sits just under the ceiling is answered here with the extent route because
+        // of it.
         if stage_scratch(&candidate) <= ceiling {
             routes.take_arena(index);
         } else {
@@ -1089,7 +1395,16 @@ fn choose_routes(
             columns[index].framing_bytes = extent_framing_bytes(n);
         }
     }
-    let tail = entity_order_residency(n, ids, &columns, entries, level_entries);
+    let tail = entity_order_residency(
+        n,
+        ids,
+        &columns,
+        scoped_render,
+        entries,
+        level_entries,
+        layer_entries,
+        memory_budget,
+    );
     (routes, tail)
 }
 
@@ -1145,6 +1460,7 @@ pub(crate) fn disk(
                 bytes,
                 mapped: true,
                 phases,
+                constant: false,
             });
         }
     };
@@ -1209,17 +1525,57 @@ pub(crate) fn disk(
             Phases::SPILL.and(Phases::BANDS),
         );
     }
+    // **The assembly's partitions** (`crate::assembly`), where the entity-order geometry and the
+    // row-order render tail used to be. The rows are written at 12 B and read into the
+    // `(entity, row)` pairs at 8; the pairs are then read once, and that one pass fills every
+    // render lane, deleting each pairs bucket as it is consumed. So what stands together is the
+    // rows, or the pairs, or all the lanes at `Σ(4 + wᵢ)` a row — the largest of the three, not
+    // their sum.
+    //
+    // **Charged as the sum anyway**, which over-states the phase by the two terms that are not
+    // the peak. A term is a file and a window here, and the shape that would say
+    // `max(12n, 8n, Σ(4 + wᵢ)n)` is a phase whose terms are alternatives; the model has no such
+    // shape, and an over-stated forecast routes a column to extents where it could have kept its
+    // arena rather than filling a disk.
     push(
-        "the row space's geometry in entity order, 8 B/item, in .build-tmp/ (one view at a time)"
+        "the assembly's row partition, 12 B/row — (morton, residual, entity) in .build-tmp/, one \
+         view at a time"
+            .into(),
+        12 * n,
+        Phases::ASSEMBLE,
+    );
+    push(
+        "the assembly's (entity, row) partition, 8 B/row, in .build-tmp/ — the permutation's and \
+         every render column's input"
             .into(),
         8 * n,
         Phases::ASSEMBLE,
     );
-    push(
-        "the row-order render tail, one mapped file per render column, in .build-tmp/".into(),
-        render_tail_bytes(&args.schema, n),
-        Phases::ASSEMBLE,
-    );
+    // **Every render lane, together.** One pass over the pairs fills them all, so they stand full
+    // at the same moment: the charge is a record a row in each — the key and the value — summed
+    // over the columns the view renders. A group-scoped family renders into the row spaces its
+    // scope reaches, at the view that carries the most of them ([`scoped_render_types`]).
+    let scoped_lanes = scoped_render_types(args);
+    let lane_widths: Vec<u64> = args
+        .schema
+        .attributes
+        .iter()
+        .filter(|a| a.render)
+        .map(|a| 4 + fixed_width(a.ty))
+        .chain(scoped_lanes.iter().map(|&ty| 4 + fixed_width(ty)))
+        .collect();
+    if !lane_widths.is_empty() {
+        let per_row: u64 = lane_widths.iter().sum();
+        push(
+            format!(
+                "the assembly's {} render (row, value) partition(s), {per_row} B/row in all, in \
+                 .build-tmp/ — every lane filled by the one pass over the pairs",
+                lane_widths.len()
+            ),
+            per_row * n,
+            Phases::ASSEMBLE,
+        );
+    }
 
     // ---- the attribute join's staging buffer -------------------------------------------------
     // A second set of columns per attribute source, [`crate::pipeline::JOIN_STAGE_BYTES`] wide in
@@ -1305,6 +1661,30 @@ pub(crate) fn disk(
             Phases::BANDS.onwards(),
         );
     }
+    // **The attribute join's value partitions**, one per fixed-width column it fills: `(entity,
+    // value)` at four bytes of entity and the column's own width, standing from the join's first
+    // chunk to the replay that writes each bucket into the column as a sequential run. Charged
+    // over every item, which is a ceiling — an absent row pushes nothing — and released bucket by
+    // bucket at the replay. A string column's lane is charged where its route is known, which is
+    // the entity-order model this carries the mapped terms of.
+    for attribute in &args.schema.attributes {
+        // A string column has no fixed-width lane: it is either an arena, whose `(entity, at)`
+        // partition the entity-order model charges, or record-blob extents, which never reach a
+        // column at all.
+        if carries_characters(attribute.ty) {
+            continue;
+        }
+        let width = fixed_width(attribute.ty);
+        push(
+            format!(
+                "attribute '{}': the join's (entity, value) partition, {} B/item, in .build-tmp/",
+                attribute.name,
+                4 + width
+            ),
+            (4 + width) * n,
+            Phases::JOIN,
+        );
+    }
     // **Blob residency and a token index are independent, and a `text` column is both.** A column
     // whose value lives in the record blob still owes `postings.arrow` and `dict.bin` wherever it
     // is indexed (`pipeline::blob_resident`), and those two files are in the bundle from the index
@@ -1368,16 +1748,17 @@ pub(crate) fn disk(
         );
         if matches!(attribute.ty, ScalarType::Utf8 | ScalarType::Keyword) {
             // The dictionary pass's own scratch, under the column's directory rather than
-            // `.build-tmp/`: a `u32` ordinal per row scattered out of the merge, and the sorted
-            // runs it merges, both gone by the end of the pass. Measured at 5.3 B/item over
-            // 125.8×10⁶ GBIF occurrences against the 8 this charges.
+            // `.build-tmp/`: the `(row, ordinal)` partition the merge fills, 8 B a row, and the
+            // sorted runs it merges, both gone by the end of the pass. The partition's buckets go
+            // back one at a time as the values file is written past them, so this is a ceiling
+            // and the pass's own peak is a bucket lower.
             push(
                 format!(
-                    "attribute '{}': the keyword dictionary's row ordinals and sorted runs, \
-                     4 B/item and a ceiling of half the column's characters",
+                    "attribute '{}': the keyword dictionary's (row, ordinal) partition and \
+                     sorted runs, 8 B/item and a ceiling of half the column's characters",
                     attribute.name
                 ),
-                4 * n + characters / EXTENT_SHARE,
+                8 * n + characters / EXTENT_SHARE,
                 Phases::INDEX,
             );
             // And the dictionary the pass leaves behind, which is in the bundle from there on.
@@ -1441,6 +1822,22 @@ pub(crate) fn disk(
          and the views each layer draws on"
             .into(),
         row_column_bytes(args, n, &member_entries_by_layer(args)),
+        Phases::ASSEMBLE,
+    );
+    // **The buckets the pass composes through**, at 8 B a `(row, ordinal)` record. One level at a
+    // time and released as each bucket is replayed, so the ceiling is the largest layer's declared
+    // entries — a ceiling over its levels rather than a sum of them.
+    push(
+        "the artifact pass's (row, ordinal) partition buckets, at 8 B a member entry of the \
+         largest layer, in .build-tmp/"
+            .into(),
+        8u64.saturating_mul(
+            member_entries_by_layer(args)
+                .into_iter()
+                .max()
+                .unwrap_or(0)
+                .max(n),
+        ),
         Phases::ASSEMBLE,
     );
     Residency { terms }
@@ -1765,6 +2162,58 @@ fn uncompressed_column_bytes(
 mod tests {
     use super::*;
 
+    /// The model at a budget no publication batch can be the binding term of, which is what every
+    /// test below wants: they read the per-entry arithmetic, and the batch sizing is
+    /// [`crate::layers::publication_batch_entries`]'s own to test.
+    #[allow(clippy::too_many_arguments)]
+    fn choose_routes(
+        schema: &crate::config::Schema,
+        n: u64,
+        ids: IdShape,
+        columns: Vec<ColumnCost>,
+        entries: u64,
+        level_entries: u64,
+        free: Option<u64>,
+    ) -> (crate::pipeline::ColumnRoutes, Residency) {
+        super::choose_routes(
+            schema,
+            n,
+            ids,
+            columns,
+            // No group-scoped family: the fixtures here are a schema, and a scoped column's lanes
+            // are `plan_routes`' own input from the view declarations.
+            &[],
+            entries,
+            level_entries,
+            // Every layer's entries as one layer's, which is exact for a single-layer fixture and
+            // over-charges the artifact pass for a many-layer one.
+            entries,
+            free,
+            u64::MAX,
+        )
+    }
+
+    fn entity_order_residency(
+        n: u64,
+        ids: IdShape,
+        columns: &[ColumnCost],
+        member_entries: u64,
+        level_entries: u64,
+    ) -> Residency {
+        super::entity_order_residency(
+            n,
+            ids,
+            columns,
+            // As above: the fixtures declare no group-scoped render family.
+            &[],
+            member_entries,
+            level_entries,
+            // As above: one layer, so the largest layer's entries are all of them.
+            member_entries,
+            u64::MAX,
+        )
+    }
+
     /// A column whose characters, if it has any, fill an arena — the shape a string column keeps
     /// while some pass reads it at an entity.
     fn column(ty: ScalarType, payload: u64) -> ColumnCost {
@@ -1774,6 +2223,7 @@ mod tests {
             extents: false,
             framing_bytes: 0,
             text_index: false,
+            render: false,
             phases: Phases::JOIN.and(Phases::INDEX).and(Phases::BLOB),
         }
     }
@@ -1806,13 +2256,24 @@ mod tests {
         entity_order_residency(n, IdShape::dense(n), &columns, entries, entries)
     }
 
+    /// Every anonymous term that is a **rate** over the corpus.
+    fn scaling_total(residency: &Residency) -> u64 {
+        residency
+            .terms
+            .iter()
+            .filter(|t| !t.mapped && !t.constant)
+            .map(|t| t.bytes)
+            .sum()
+    }
+
     #[test]
     fn the_tail_is_linear_in_the_item_count_and_the_batch_stride_reaches_none_of_it() {
         let small = campaign_residency(10_000_000, 200);
         let large = campaign_residency(50_000_000, 200);
-        // Five times the corpus, five times the residency — exactly, net of the one term that is
-        // not a function of the corpus at all.
-        let ratio = (large.total() - SLACK) as f64 / (small.total() - SLACK) as f64;
+        // Five times the corpus, five times the residency — exactly, net of the terms that are not
+        // a function of the corpus at all: the allocator slack, and the partitions, whose writer
+        // buffers and bucket the key type bounds rather than the row count.
+        let ratio = scaling_total(&large) as f64 / scaling_total(&small) as f64;
         assert!(
             (4.99..5.01).contains(&ratio),
             "the tail should scale with the corpus, got {ratio}"
@@ -1952,7 +2413,11 @@ mod tests {
             0,
             0,
         );
-        assert_eq!(with_keyword.total(), bare.total());
+        // **Net of the partitions the column opens.** Its storage is a file and is charged at
+        // nothing; what a declared column does cost the machine is the join's `(entity, value)`
+        // partition and, for a keyword one, the dictionary's `(row, ordinal)` partition — both
+        // constants of the key type, both named terms of their own.
+        assert_eq!(scaling_total(&with_keyword), scaling_total(&bare));
         let term = with_keyword
             .terms
             .iter()
@@ -2055,7 +2520,7 @@ mod tests {
             spilled.takes_extents(code),
             "an unflagged keyword column has the extent route"
         );
-        let (columns, _, _) = model_inputs(&args, n, &payloads, &spilled);
+        let (columns, _, _, _) = model_inputs(&args, n, &payloads, &spilled);
         assert_eq!(columns[code].framing_bytes, extent_framing_bytes(n));
         let weight = args
             .schema
@@ -2069,7 +2534,7 @@ mod tests {
         );
 
         let arena = crate::pipeline::ColumnRoutes::forced_only(&args.schema);
-        let (held, _, _) = model_inputs(&args, n, &payloads, &arena);
+        let (held, _, _, _) = model_inputs(&args, n, &payloads, &arena);
         assert_eq!(
             held[code].framing_bytes, 0,
             "a column that keeps its arena is not framed until the record blob itself"
@@ -2330,10 +2795,17 @@ mod tests {
         let rows = 64_000_000;
         let without = entity_order_residency(n, IdShape::dense(n), &[], 0, 0);
         let with = entity_order_residency(n, IdShape::dense(n), &[], rows, rows);
+        // The Roaring copies, and the artifact pass's bucket, which holds one record per member
+        // entry in its row range and so rises with the layer's entries where the rest of the
+        // model's partitions rise with the rows alone: 16 B a record over 128 buckets, net of the
+        // row-sized bucket a build with no members already charges.
+        let pass_bucket = 16
+            * (rows / crate::spill::PARTITION_BUCKETS as u64
+                - n / crate::spill::PARTITION_BUCKETS as u64);
         assert_eq!(
             with.total() - without.total(),
-            rows * BYTES_PER_MEMBER_ENTRY,
-            "only the Roaring copies are memory"
+            rows * BYTES_PER_MEMBER_ENTRY + pass_bucket,
+            "only the Roaring copies and the artifact pass's bucket are memory"
         );
         assert_eq!(
             with.at(Phase::Join) - without.at(Phase::Join),
@@ -3035,6 +3507,89 @@ require_member_visibility = "none"
         println!(
             "observed build peak: {} MiB",
             crate::observer::peak_rss_kib() / 1024
+        );
+    }
+
+    /// **The headline of the entity-order model: what anonymous memory grows with the corpus is
+    /// named, and it is two terms.**
+    ///
+    /// Every term the model charges against the machine is a constant or one publication batch — a
+    /// share of the budget — with two exceptions, and this test subtracts them rather than
+    /// pretending they are not there:
+    ///
+    /// - arrow's all-ones validity bitmaps during the `columns.arrow` layout pass, `n / 8` bytes a
+    ///   column alive together;
+    /// - the artifact pass's partition bucket, which holds one record per **member entry** in its
+    ///   row range and so is bounded by the largest layer's entries over 128 rather than by the
+    ///   `u32` row key. Every other partition pushes one record per key and is flat above the key
+    ///   type's bound; this one is not, and a layer of many ordinals a row is where it shows.
+    ///
+    /// What grows properly is the disk the same model reports beside it.
+    #[test]
+    fn the_anonymous_total_does_not_grow_with_the_row_count() {
+        // The floor a partition's own constant needs, and the budget both row counts here carry
+        // more member entries than one publication batch of.
+        const BUDGET: u64 = 2 << 30;
+        let residency = |n: u64| {
+            let columns = [
+                column(ScalarType::U8, 0),
+                column(ScalarType::U32, 0),
+                column(ScalarType::Keyword, 8 * n),
+                spilled(ScalarType::Text, 400 * n),
+            ];
+            super::entity_order_residency(
+                n,
+                IdShape::dense(n),
+                &columns,
+                &[],
+                3 * n,
+                3 * n,
+                // One layer, so its entries are all of them: three a row, which is the shape that
+                // makes the artifact pass's bucket the entry-bounded term it is.
+                3 * n,
+                BUDGET,
+            )
+        };
+        // Arrow's validity bitmaps: `tessera_id`, `residual` and the two fixed-width declared
+        // columns, at one bit a row each. The two that carry characters are not render columns and
+        // are not in `columns.arrow`.
+        let bitmaps = |n: u64| 4 * n.div_ceil(8);
+        let small = residency(10_000_000);
+        let large = residency(100_000_000);
+        // **The rate terms are equal net of the bitmaps**: one publication batch, whatever the
+        // level behind it.
+        assert_eq!(
+            scaling_total(&small) - bitmaps(10_000_000),
+            scaling_total(&large) - bitmaps(100_000_000),
+            "the anonymous rate is one publication batch and arrow's validity bitmaps:\nat 10⁷{}\nat 10⁸{}",
+            small.describe(),
+            large.describe()
+        );
+        // **And the constants are bounded by the key type, not by the corpus** — every one but the
+        // artifact pass's. A partition's bucket is `n / 128` records and never more than 2³²/128,
+        // so the total rises to that bound and is flat above it; the pass's bucket counts member
+        // entries rather than rows, so it goes on rising with them. The two row counts here
+        // straddle 2³², and above it the anonymous total moves by the validity bitmaps and that one
+        // bucket.
+        let pass_bucket = |n: u64| 16 * (3 * n / crate::spill::PARTITION_BUCKETS as u64);
+        let at_bound = residency(1u64 << 32);
+        let beyond = residency(1u64 << 34);
+        assert_eq!(
+            beyond.total() - at_bound.total(),
+            (bitmaps(1u64 << 34) - bitmaps(1u64 << 32))
+                + (pass_bucket(1u64 << 34) - pass_bucket(1u64 << 32)),
+            "above the key type's bound the anonymous total moves by the validity bitmaps and the \
+             artifact pass's bucket and nothing else:\nat 2³²{}\nat 2³⁴{}",
+            at_bound.describe(),
+            beyond.describe()
+        );
+        assert!(
+            small.total() <= at_bound.total() && large.total() <= at_bound.total(),
+            "no corpus costs more than the bound"
+        );
+        assert!(
+            large.peak().1 > small.peak().1,
+            "the disk the same model reports does grow with the corpus"
         );
     }
 }

@@ -282,7 +282,12 @@ mod tests {
         } else {
             ServingLayout::RowMajorLabel
         };
-        let column = RowColumn::compose(artifact_major.membership(), row_count, layout)
+        let column = RowColumn::compose(
+            artifact_major.membership(),
+            row_count,
+            layout,
+            &std::env::temp_dir(),
+        )
             .expect("the memberships compose in the form chosen for them");
         let row_major = Arc::new(ArtifactRows::synthetic(sets, Some(Arc::new(column))));
         let layer = |rows: Arc<ArtifactRows>| ServedLayer {

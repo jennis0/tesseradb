@@ -44,6 +44,21 @@
 //! caller's own name for it is the only address that survives a rebuild, and it is what an edge
 //! into the layer names.
 //!
+//! ## What the batched publication changed about `attached_to`
+//!
+//! A level is published in batches sized by the memory budget ([`publication_batch_entries`]), and
+//! `prepare_publish` resolves a parent against the batch in hand **plus the store**. So an
+//! `attached_to` naming an artifact in an *earlier batch of the same level* now resolves, where an
+//! unbatched publication refused it as a within-level edge. Whether that shape is accepted
+//! therefore depends on the budget the build ran under, which is not a property a declaration
+//! should have.
+//!
+//! Recorded rather than acted on. Levels carrying within-level hierarchy edges are published whole
+//! ([`within_level_edges`]) precisely so the resolution does not depend on the cut; what is left is
+//! that a level *without* declared within-level edges can still carry one through `attached_to`
+//! and have it resolve or not by budget. The fix is a refusal at validation, and it is an owner's
+//! call whether the shape is refused at all.
+//!
 //! ## The declarations are not read here
 //!
 //! [`crate::config`] parses them, out of the one document that also carries the attributes, the
@@ -202,6 +217,9 @@ pub struct LayerPlan {
     minted: BTreeMap<String, u64>,
     /// Every member row's `(artifact, source)` pair, on its way to disk.
     members: MemberSpill,
+    /// The build's memory budget, which is what the publication batch is sized against
+    /// ([`PUBLICATION_BUDGET_SHARE`]).
+    memory_budget: u64,
 }
 
 /// What one `(artifact, source)` pair is charged against the accumulator's budget: eight bytes of
@@ -578,6 +596,7 @@ pub fn read(
         unclustered: Vec::new(),
         minted: BTreeMap::new(),
         members: MemberSpill::new(scratch, memory_budget),
+        memory_budget,
     };
     for input in inputs {
         // An artifact source names artifacts *in a layer*, and a layer this build does not
@@ -1609,6 +1628,37 @@ pub fn publish(
         order.extend(batched.keys().filter(|(layer, _)| *layer == name).copied());
     }
 
+    // **A level is published in batches, and each batch's records go into the level's membership
+    // pack as soon as they are published.** A level of 3.4×10⁹ entries built whole is 46 GB of
+    // Roaring — the bitmaps this builds, the copy `prepare_publish` takes of each, and the store's
+    // own copy behind them — against a model term of 4 B an entry
+    // (`docs/evidence/memos/2026-09-12-gbif-whole-corpus-build-observations.md` §5). Encoding a
+    // batch at once and vacating its records ([`ArtifactStore::vacate_members`]) bounds all three
+    // at one batch.
+    //
+    // **Ordinals and entities are what they were.** A level's ordinals are dense and allocated
+    // from `next_ordinal` in the order the artifacts are handed over, which is the level's key
+    // order in every batch; the entity of an ordinal is a function of the level's reservation
+    // runs, and splitting the growth across batches appends the same runs in the same order
+    // because nothing else allocates between two batches of one level.
+    let members_dir = prefix_dir
+        .join("partitions")
+        .join(partition)
+        .join("members");
+    std::fs::create_dir_all(&members_dir).map_err(|e| BuildError::io(&members_dir, e))?;
+    let entries_per_batch = publication_batch_entries(plan.memory_budget);
+    eprintln!(
+        "layers: publishing in batches of at most {entries_per_batch} member entr(ies), \
+         {PUBLICATION_BYTES_PER_ENTRY} B an entry against a {}th of the {} MiB budget",
+        PUBLICATION_BUDGET_SHARE,
+        plan.memory_budget >> 20
+    );
+    // Each level's pack, written here under a name no final one can take and renamed at
+    // [`write_membership_extents`], which is where the extent index in a pack's filename is
+    // fixed. Renaming rather than naming it here keeps that index the one `pending_ranges`
+    // produces, whatever order the declarations put the levels in.
+    let mut streamed: BTreeMap<(String, u32), StreamedPack> = BTreeMap::new();
+
     for address in order {
         let (layer, level) = address;
         let artifacts = batched
@@ -1625,68 +1675,132 @@ pub fn publish(
         // indexed and its results are collected in the order `artifacts` holds — build in
         // parallel, publish in order. The refusals are sequenced the same way, so which artifact a
         // malformed extent is reported against is the level's order rather than the scheduler's.
-        let bodies: Vec<PublishableBody> = artifacts
-            .iter()
-            .map(|(_, index)| resolved[*index].take_body())
-            .collect();
-        let built: Vec<Result<IncomingArtifact>> = artifacts
-            .par_iter()
-            .zip(bodies)
-            // One artifact's bytes and one artifact's entities per task, reused across the
-            // artifacts in it — what keeps the publication's residency a level of Roaring bitmaps
-            // plus the largest single artifact per thread, rather than a level of entity vectors
-            // beside them.
-            .map_init(
-                || (Vec::<u8>::new(), Vec::<u64>::new()),
-                |(scratch, buf), ((key, index), body)| {
-                    incoming_artifact(
-                        key,
-                        body,
-                        &resolved[*index].members,
-                        *index,
-                        &table,
-                        scratch,
-                        buf,
-                    )
-                },
-            )
-            .collect();
-        let mut incoming = Vec::with_capacity(built.len());
-        for artifact in built {
-            incoming.push(artifact?);
+        //
+        // **The batch boundaries are fixed before a body is taken**, off the member table's own
+        // extents, so the sizing reads the entries an artifact has rather than the bitmap it
+        // will become.
+        let splits = publication_batches(
+            &artifacts,
+            &resolved,
+            &table,
+            entries_per_batch,
+            within_level_edges(&plan.declarations, layer),
+        );
+        let ordinal_lo = store.next_ordinal(layer, level);
+        let pack_path = members_dir.join(format!("streaming-{:03}.tsmb", streamed.len()));
+        let mut writer = tessera_store::membership::PackWriter::create(
+            &pack_path,
+            ordinal_lo,
+            artifacts.len() as u32,
+        )
+        .map_err(BuildError::Store)?;
+        let mut start = 0usize;
+        let batches = splits.len() as u64;
+        for end in splits {
+            let batch = &artifacts[start..end];
+            let bodies: Vec<PublishableBody> = batch
+                .iter()
+                .map(|(_, index)| resolved[*index].take_body())
+                .collect();
+            let built: Vec<Result<IncomingArtifact>> = batch
+                .par_iter()
+                .zip(bodies)
+                // One artifact's bytes and one artifact's entities per task, reused across the
+                // artifacts in it — what keeps the publication's residency a batch of Roaring
+                // bitmaps plus the largest single artifact per thread, rather than a batch of
+                // entity vectors beside them.
+                .map_init(
+                    || (Vec::<u8>::new(), Vec::<u64>::new()),
+                    |(scratch, buf), ((key, index), body)| {
+                        incoming_artifact(
+                            key,
+                            body,
+                            &resolved[*index].members,
+                            *index,
+                            &table,
+                            scratch,
+                            buf,
+                        )
+                    },
+                )
+                .collect();
+            let mut incoming = Vec::with_capacity(built.len());
+            for artifact in built {
+                incoming.push(artifact?);
+            }
+            let record = registry
+                .prepare_publish(
+                    layer,
+                    level,
+                    &incoming,
+                    &store,
+                    &mut alloc,
+                    &tessera_lifecycle::no_pending,
+                )
+                .map_err(|e| BuildError::Invalid(format!("publishing into {layer}: {e}")))?;
+            // The record carries its own copy of every membership, so the bitmaps this built are
+            // dead the moment `prepare_publish` returns — a batch's worth of them, held to the
+            // end of the iteration for nothing.
+            drop(incoming);
+            registry.apply(&record);
+            let refused = store.apply(&record, 0);
+            if refused > 0 {
+                // **Reached once, and not by a fault in the encoding.** The 5×10⁷ tier of
+                // `probes/2026-08-22-artifact-serving-e2e/` stopped here on one membership of
+                // `generator/treed`; the bytes carried exactly what the container held, and what
+                // the decoder's validation rejected was a container whose array was already out
+                // of order when it was serialised. The message says that rather than blaming the
+                // format, because an operator told the encoding failed will look at the wrong
+                // half.
+                //
+                // A refusal rather than an assertion because the alternative is a level published
+                // with artifacts silently missing, which serves as *absent* with nothing
+                // reporting a fault.
+                return Err(BuildError::Invalid(format!(
+                    "{refused} membership(s) of {layer} were not well-formed bitmaps when this \
+                     build encoded them — the bytes decode to nothing, so the level is refused \
+                     rather than published with those artifacts absent"
+                )));
+            }
+            // **Encoded now, while this batch is the only one in hand.** The blobs go into the
+            // level's pack in ordinal order, which is the order the batches are published in.
+            let batch_lo = ordinal_lo + start as u32;
+            let batch_len = (end - start) as u32;
+            for blob in store.encode_pending(layer, level, batch_lo, batch_len) {
+                let blob = blob.ok_or_else(|| {
+                    BuildError::Invalid(format!(
+                        "{layer} level {level} has no record at an ordinal this publication just \
+                         assigned"
+                    ))
+                })?;
+                writer.push(&blob).map_err(BuildError::Store)?;
+            }
+            // The bytes are in the writer, so the store's own bitmaps have one reader left — the
+            // rehousing that replaces them with a view over the finished pack.
+            for ordinal in batch_lo..batch_lo + batch_len {
+                store.vacate_members(layer, level, ordinal);
+            }
+            // **No trim here.** A batch's bitmaps are freed above and the next batch allocates
+            // the same shapes straight back, so returning the pages to the kernel between two
+            // batches of one level buys a heap the level is about to ask for again — and
+            // `malloc_trim` walks every arena's free lists each time. What §4.5 asks for is the
+            // heap returned once the level's memberships are rehoused, which is where the trim is.
+            // Measured at 125,789,091 rows: the two trims together cost 3.16 s of the layers
+            // stage's 74.75 s and held 0.8 GiB back.
+            start = end;
         }
-        let record = registry
-            .prepare_publish(
-                layer,
-                level,
-                &incoming,
-                &store,
-                &mut alloc,
-                &tessera_lifecycle::no_pending,
-            )
-            .map_err(|e| BuildError::Invalid(format!("publishing into {layer}: {e}")))?;
-        // The record carries its own copy of every membership, so the bitmaps this built are dead
-        // the moment `prepare_publish` returns — a level's worth of them, held to the end of the
-        // loop for nothing.
-        drop(incoming);
-        registry.apply(&record);
-        let refused = store.apply(&record, 0);
-        if refused > 0 {
-            // **Reached once, and not by a fault in the encoding.** The 5×10⁷ tier of
-            // `probes/2026-08-22-artifact-serving-e2e/` stopped here on one membership of
-            // `generator/treed`; the bytes carried exactly what the container held, and what the
-            // decoder's validation rejected was a container whose array was already out of order
-            // when it was serialised. The message says that rather than blaming the format,
-            // because an operator told the encoding failed will look at the wrong half.
-            //
-            // A refusal rather than an assertion because the alternative is a level published with
-            // artifacts silently missing, which serves as *absent* with nothing reporting a fault.
-            return Err(BuildError::Invalid(format!(
-                "{refused} membership(s) of {layer} were not well-formed bitmaps when this build \
-                 encoded them — the bytes decode to nothing, so the level is refused rather than \
-                 published with those artifacts absent"
-            )));
-        }
+        writer.finish().map_err(BuildError::Store)?;
+        // A level published in batches is one publication, and the level's version counter says
+        // so: how the publication was cut is a memory budget's business and never a bundle's.
+        store.fold_publication_versions(layer, level, batches);
+        streamed.insert(
+            (layer.to_string(), level),
+            StreamedPack {
+                path: pack_path,
+                ordinal_lo,
+                count: artifacts.len() as u32,
+            },
+        );
     }
 
     // **Which view's set each published artifact belongs to**, on a layer scoped to a group
@@ -1732,7 +1846,7 @@ pub fn publish(
             },
         )
         .collect();
-    write_membership_extents(&mut store, prefix_dir, partition, &mut published)?;
+    write_membership_extents(&mut store, prefix_dir, partition, &mut published, &mut streamed)?;
     write_content_extent(&store, prefix_dir, partition, &mut published)?;
     published.store = store;
     Ok(published)
@@ -2645,6 +2759,87 @@ fn load_members(
     }
 }
 
+/// The share of the build's memory budget one publication batch may hold.
+///
+/// A quarter. The publication runs between the join and the assembly, where the terms beside it
+/// are the member table's reads and the store's mapped extents rather than anything anonymous, so
+/// a quarter is headroom rather than a squeeze; and a batch larger than a few million entries buys
+/// nothing, the work per artifact being the same in any batch and the batch already built across
+/// the cores.
+pub(crate) const PUBLICATION_BUDGET_SHARE: u64 = 4;
+
+/// What one member entry costs while a batch is in flight: **24 bytes**.
+///
+/// Twelve measured for one copy — a level whose members are scattered across entity space is array
+/// containers almost throughout, and 3.4×10⁹ entries came to 46 GB over two copies
+/// (`docs/evidence/memos/2026-09-12-gbif-whole-corpus-build-observations.md` §5) — and two copies
+/// stand at once: the bitmaps [`incoming_artifact`] builds, and the copy `prepare_publish` takes
+/// of each before the first is dropped.
+pub(crate) const PUBLICATION_BYTES_PER_ENTRY: u64 = 24;
+
+/// How many member entries one publication batch takes at `memory_budget` — the one arithmetic
+/// [`publish`] cuts its batches by and [`crate::residency`] charges the stage at.
+pub(crate) fn publication_batch_entries(memory_budget: u64) -> u64 {
+    ((memory_budget / PUBLICATION_BUDGET_SHARE) / PUBLICATION_BYTES_PER_ENTRY).max(1)
+}
+
+/// One level's membership pack, written as the level was published and waiting to be named.
+struct StreamedPack {
+    path: PathBuf,
+    ordinal_lo: u32,
+    count: u32,
+}
+
+/// Whether a layer's hierarchy edges run **within** a level, which is what stops its levels being
+/// published in batches.
+///
+/// `prepare_publish` resolves a parent key against the batch it is handed and the store beneath
+/// it, so a child whose parent sits in a later batch of the same level would find nothing. A
+/// nested layer's edges and a dag layer's are exactly the ones that can do that; a tiered layer's
+/// parents sit at coarser levels, already published, and a flat or stacked layer has none.
+fn within_level_edges(declarations: &[LayerDeclaration], layer: &str) -> bool {
+    use tessera_types::layer::HierarchyKind;
+    declarations
+        .iter()
+        .find(|d| d.name == layer)
+        .map(|d| matches!(d.hierarchy.kind, HierarchyKind::Nested | HierarchyKind::Dag))
+        .unwrap_or(true)
+}
+
+/// Where one level's publication is cut into batches: the exclusive end of each, ascending, the
+/// last being the level's own length.
+///
+/// A batch takes artifacts in the level's key order until the next would put it over
+/// `entries_per_batch`, and always takes at least one — an artifact larger than a whole batch is
+/// published alone rather than refused, because it is one artifact's members and the alternative
+/// is a corpus that cannot be built at all.
+fn publication_batches(
+    artifacts: &[(&str, usize)],
+    resolved: &[ResolvedArtifact],
+    table: &spill::MemberTable,
+    entries_per_batch: u64,
+    whole_level: bool,
+) -> Vec<usize> {
+    if whole_level || artifacts.is_empty() {
+        return vec![artifacts.len()];
+    }
+    let mut splits = Vec::new();
+    let mut entries = 0u64;
+    for (position, (_, index)) in artifacts.iter().enumerate() {
+        let of_this = match &resolved[*index].members {
+            ResolvedMembers::Table => table.extent(*index).entries() as u64,
+            ResolvedMembers::Inline(ids) => ids.len() as u64,
+        };
+        if entries > 0 && entries.saturating_add(of_this) > entries_per_batch {
+            splits.push(position);
+            entries = 0;
+        }
+        entries = entries.saturating_add(of_this);
+    }
+    splits.push(artifacts.len());
+    splits
+}
+
 /// Pack every level's memberships into one extent, fsync it, and **read the store's copies back
 /// through the mapped file** — the same format, one file per level, that a control-plane
 /// publication writes.
@@ -2677,6 +2872,7 @@ fn write_membership_extents(
     prefix_dir: &Path,
     partition: &str,
     published: &mut PublishedLayers,
+    streamed: &mut BTreeMap<(String, u32), StreamedPack>,
 ) -> Result<()> {
     let (ready, skipped) = store.pending_ranges();
     if let Some((layer, level)) = skipped.first() {
@@ -2704,23 +2900,68 @@ fn write_membership_extents(
         // name-derived path would escape the directory, or collide after escaping.
         let name = format!("members-000000-{index:03}.tsmb");
         let path = dir.join(&name);
-        let mut writer = tessera_store::membership::PackWriter::create(&path, ordinal_lo, count)
-            .map_err(BuildError::Store)?;
-        for blob in store.encode_pending(&layer, level, ordinal_lo, count) {
-            // Unreachable: `pending_ranges` reports a level with a hole as skipped above rather
-            // than as a range. A refusal rather than an assertion because the alternative is an
-            // extent one blob short of the range it addresses, which serves every ordinal above
-            // the hole as another artifact's membership.
-            let blob = blob.ok_or_else(|| {
-                BuildError::Invalid(format!(
-                    "{layer} level {level} has no record at an ordinal inside the range it \
-                     reported as ready to pack"
-                ))
-            })?;
-            writer.push(&blob).map_err(BuildError::Store)?;
+        // **The level the publication streamed, renamed into the place its index names.** The
+        // filename's index is the order `pending_ranges` answers in, which is the store's own key
+        // order rather than the declaration order the publication ran in, so the pack is named
+        // here and nowhere else.
+        match streamed.remove(&(layer.clone(), level)) {
+            Some(pack) if pack.ordinal_lo == ordinal_lo && pack.count == count => {
+                std::fs::rename(&pack.path, &path).map_err(|e| BuildError::io(&path, e))?
+            }
+            // **A streamed pack that disagrees is a refusal, not a re-encode.** It used to fall
+            // through to the arm below, which encodes from a store whose published memberships
+            // have been vacated — the empty set — so the only thing standing between that and a
+            // bundle of empty artifacts was the vacated-count check at the end of this function,
+            // and a level every one of whose artifacts is legitimately empty would pass it. The
+            // disagreement is a defect in the publication's own bookkeeping either way, and there
+            // is nothing here to recover from it with.
+            Some(pack) => {
+                return Err(BuildError::Invalid(format!(
+                    "{layer} level {level}: the publication streamed a membership pack over \
+                     ordinals [{}, {}) and the store reports [{ordinal_lo}, {}) as ready to \
+                     pack. The two must be the same range — the pack is what the extent will \
+                     address",
+                    pack.ordinal_lo,
+                    pack.ordinal_lo as u64 + pack.count as u64,
+                    ordinal_lo as u64 + count as u64
+                )));
+            }
+            // A level the publication did not stream — a predicate layer's, derived and applied
+            // before that loop runs — is encoded from the store here, which is where every level
+            // was encoded before the publication was batched.
+            None => {
+                let mut writer =
+                    tessera_store::membership::PackWriter::create(&path, ordinal_lo, count)
+                        .map_err(BuildError::Store)?;
+                let mut pushed = 0u32;
+                for blob in store.encode_pending(&layer, level, ordinal_lo, count) {
+                    // Unreachable: `pending_ranges` reports a level with a hole as skipped above
+                    // rather than as a range. A refusal rather than an assertion because the
+                    // alternative is an extent one blob short of the range it addresses, which
+                    // serves every ordinal above the hole as another artifact's membership.
+                    let blob = blob.ok_or_else(|| {
+                        BuildError::Invalid(format!(
+                            "{layer} level {level} has no record at an ordinal inside the range \
+                             it reported as ready to pack"
+                        ))
+                    })?;
+                    writer.push(&blob).map_err(BuildError::Store)?;
+                    pushed += 1;
+                }
+                if pushed != count {
+                    return Err(BuildError::Invalid(format!(
+                        "{layer} level {level}: {pushed} membership(s) were encoded for a range \
+                         of {count}, so the extent would address records that are not there"
+                    )));
+                }
+                writer.finish().map_err(BuildError::Store)?;
+            }
         }
-        writer.finish().map_err(BuildError::Store)?;
         rehoused += map_level_memberships(store, &path, &layer, level, &mut kept)?;
+        // **The heap back after the level's rehousing**, which is §4.5's own term: the level's
+        // owned bitmaps have just been replaced by views over the finished pack, and the pages
+        // they were in are the 34 GB glibc held for the rest of the run at rung 6.
+        crate::trim_heap();
         published.paths.push(path);
         published.membership_extents.push(MembershipExtent {
             path: format!("partitions/{partition}/members/{name}"),
@@ -2730,7 +2971,24 @@ fn write_membership_extents(
             count,
         });
     }
+    // A pack nothing claimed is a level the publication streamed and `pending_ranges` did not
+    // report — which cannot happen, every published level being pending in a build. Removed
+    // rather than left, so no unnamed file stands in the bundle.
+    for (_, pack) in std::mem::take(streamed) {
+        let _ = std::fs::remove_file(&pack.path);
+    }
     tessera_store::fsync_dir(&dir).map_err(BuildError::Store)?;
+    // **A vacated artifact holds the empty set** ([`ArtifactStore::vacate_members`]), so one left
+    // standing is an artifact this bundle would serve as absent. The heap copy the publication
+    // encoded from is gone by now, so there is nothing to fall back to and the build refuses.
+    if store.vacated_count() > 0 {
+        return Err(BuildError::Invalid(format!(
+            "{} published membership(s) could not be read back through the extent this build just \
+             wrote, and the publication no longer holds them: the bundle would serve those \
+             artifacts as absent with nothing reporting it",
+            store.vacated_count()
+        )));
+    }
     if kept > 0 {
         eprintln!(
             "layers: {kept} of {} membership(s) stayed on the heap rather than being read back \
@@ -4350,5 +4608,49 @@ mod tests {
         let mut ahead = batches_ahead(&path, 1).unwrap();
         assert!(ahead.next().is_some(), "the first batch arrives");
         drop(ahead);
+    }
+
+    /// The batch cut: entries, not artifacts, and never an empty batch.
+    #[test]
+    fn a_level_is_cut_where_the_entries_run_out_and_never_before_one_artifact() {
+        let sizes = [3u64, 3, 3, 10, 1];
+        let resolved: Vec<ResolvedArtifact> = sizes
+            .iter()
+            .map(|&size| ResolvedArtifact {
+                view: None,
+                members: ResolvedMembers::Inline(vec![0; size as usize]),
+                contents: Vec::new(),
+                attached_to: None,
+                parent_keys: Vec::new(),
+                shape: None,
+            })
+            .collect();
+        let artifacts: Vec<(&str, usize)> = (0..sizes.len()).map(|i| ("k", i)).collect();
+        let table = spill::MemberTable::empty(sizes.len());
+        assert_eq!(
+            publication_batches(&artifacts, &resolved, &table, 6, false),
+            vec![2, 3, 4, 5],
+            "two artifacts of three fill a batch of six; the artifact of ten goes alone"
+        );
+        assert_eq!(
+            publication_batches(&artifacts, &resolved, &table, 6, true),
+            vec![5],
+            "a layer whose edges run within a level is published whole"
+        );
+        assert_eq!(
+            publication_batches(&artifacts, &resolved, &table, 1, false),
+            vec![1, 2, 3, 4, 5],
+            "a batch always takes an artifact, whatever it costs"
+        );
+    }
+
+    /// The publication batch is the budget's share divided by what an entry costs, and never zero.
+    #[test]
+    fn the_publication_batch_is_a_share_of_the_budget() {
+        assert_eq!(
+            publication_batch_entries(24 << 30),
+            (24u64 << 30) / PUBLICATION_BUDGET_SHARE / PUBLICATION_BYTES_PER_ENTRY
+        );
+        assert_eq!(publication_batch_entries(0), 1);
     }
 }

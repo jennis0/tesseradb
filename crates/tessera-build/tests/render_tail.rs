@@ -1,14 +1,13 @@
 //! The segment's **row-order tail** — one render column of every type the hot column can hold,
-//! built through a mapped file and handed to the segment writer as its Arrow values buffer.
+//! written into `columns.arrow`'s own values buffer a row bucket at a time.
 //!
-//! The tail was eight `Vec`s built by `push`; it is now one mapped array per render column, filled
-//! by row index across a lane per column and given to the record batch without a copy
-//! (`pipeline::permute_attribute_tail`, `column::EntityColumn::into_values`). Nothing about that
-//! is visible in a bundle comparison **unless a type's bytes are wrong**, which is exactly the
-//! failure mode a per-type handover has: a width taken from the wrong arm, a bit order reversed,
-//! a lane's output landing under another column's name. So every renderable type is declared here,
-//! given values a wrong width would mangle, and read back through `ColumnsRef` — the reader the
-//! serving path uses.
+//! The tail was eight `Vec`s built by `push`, then one mapped array per column written at a
+//! scattered row index; it is now two partitions a column and a sequential window write
+//! (`assembly::write_render_columns`). Nothing about that is visible in a bundle comparison **unless a
+//! type's bytes are wrong**, which is exactly the failure mode a per-type handover has: a width
+//! taken from the wrong arm, a bit order reversed, a lane's output landing under another column's
+//! name. So every renderable type is declared here, given values a wrong width would mangle, and
+//! read back through `ColumnsRef` — the reader the serving path uses.
 //!
 //! `bool` gets its own attention because it is the one member Arrow does not take as a flat array
 //! of itself: the lane fills a byte a row and packs it into `rows` bits on the way out, least

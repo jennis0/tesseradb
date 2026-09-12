@@ -24,7 +24,13 @@ members = [
 croaring = "2"
 rayon = "1"
 proptest = "1"
-arrow = { version = "59", default-features = false, features = ["ipc"] }
+# **Pinned exactly.** `tessera_store::columns` writes `columns.arrow` in place by learning the
+# file's layout from arrow's own `FileWriter` run into a recording sink, which depends on that
+# writer handing each buffer to the sink separately. A 59.x that encoded a batch contiguously
+# before writing it would materialise the whole body — ~70 GB at rung 6 — inside the layout pass.
+# The `Recorder`'s refusal above `MAX_FRAMING_WRITE` is what catches it; the pin is what stops a
+# `cargo update` from reaching it in the first place.
+arrow = { version = "=59.1.0", default-features = false, features = ["ipc"] }
 tempfile = "3"
 # Test-only, and dev-only everywhere it is used: compile-fail harness for the invariants that
 # are upheld by the type system (I4). See crates/tessera-types/tests/compile_fail.rs.

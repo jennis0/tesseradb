@@ -231,10 +231,14 @@ writing the ordinal at every row into a row-sized array, 14 GB a level at rung 6
 it. The engine composes the same column at every fold through the same function. Owner ruling,
 2026-09-12: **one implementation, disk-backed on both sides.** The partition primitive moves to
 the store crate; every membership entry is pushed as `(row, ordinal)` to buckets by row range,
-and each bucket is replayed in row order into the packed writer, which writes the column front
-to back into the file it becomes. The build's buckets live under `.build-tmp/`; the fold's under
+and each bucket is sorted by `(row, ordinal)` and replayed into the packed writer, which writes
+the column front to back into the file it becomes. The sort is what makes the list form's byte
+order a property of the replay: a row's ordinals ascend because both walks hand them ascending,
+and now because they are sorted. The build's buckets live under `.build-tmp/`; the fold's under
 the deployment's cache directory, and an open sweeps what a crashed fold left. The fold's cost
-becomes 8 B an entry written and read once in place of a 4 B a row heap array and two passes,
+becomes 8 B an entry written and read once — twice for the list form, whose offsets need a
+counting pass over the buckets before any value can be placed — in place of a 4 B a row heap
+array and two passes,
 and its memory is one bucket. The other two routes considered: one byte writer fed by two
 traversals, which leaves the fold's memory as it is; and the partition with heap buckets on the
 engine, which costs 8 B an entry there. Neither taken.

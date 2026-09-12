@@ -704,7 +704,7 @@ fn write_single_batch(path: &Path, schema: &Arc<Schema>, batch: &RecordBatch) ->
 /// The Arrow type each declared scalar width becomes in `columns.arrow`'s schema. Paired with
 /// `read::validate_schema`'s accepted set and [`ColumnKind::of`]: a type added to one and not the
 /// others is a segment one writer emits and the reader refuses.
-fn arrow_type_of(ty: ScalarType) -> DataType {
+pub(crate) fn arrow_type_of(ty: ScalarType) -> DataType {
     match ty {
         ScalarType::Bool => DataType::Boolean,
         ScalarType::U8 => DataType::UInt8,

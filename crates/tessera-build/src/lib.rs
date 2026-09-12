@@ -19,6 +19,7 @@
 //! optimisation added later. The rule lives in [`signature_sort_key`] as a free function so the
 //! serving allocator applies exactly the same rule to appended items.
 
+mod assembly;
 pub mod artifact_pass;
 pub mod check;
 mod column;
@@ -35,6 +36,28 @@ mod residency;
 pub mod shapes;
 pub(crate) mod spill;
 pub mod unique_key;
+
+/// The commit this binary was built from, or `"unknown"` where the source was not a git checkout.
+///
+/// `tessera --version` prints it and a build logs it on its first line, so a measurement can be
+/// tied to the source it came from. `build.rs` stamps it.
+pub const BUILD_COMMIT: &str = env!("TESSERA_BUILD_COMMIT");
+
+/// Return the allocator's free pages to the kernel.
+///
+/// glibc's main arena releases memory only from the top of the heap, so a stage that allocates a
+/// level of Roaring bitmaps and frees them leaves those pages resident behind whatever was
+/// allocated above them: 34 GB held for the rest of the run, and a page cache of 3 GB for the
+/// stages that depend on one
+/// (`docs/evidence/memos/2026-09-12-gbif-whole-corpus-build-observations.md` §5). A trim walks
+/// every arena's free lists and gives back what is whole pages.
+///
+/// Called at each stage boundary ([`observer::StageTimer::end`]) and after the layer publication
+/// rehouses its memberships.
+pub(crate) fn trim_heap() {
+    // SAFETY: asks the allocator to return free pages to the kernel; no pointer is involved.
+    unsafe { libc::malloc_trim(0) };
+}
 
 use rayon::prelude::*;
 use std::collections::{BTreeMap, HashMap};
@@ -537,23 +560,11 @@ impl Occupancy {
     /// beside. The order is asserted rather than assumed — out of order, a run count silently
     /// over-reports, and an over-report is a warning that does not fire.
     pub(crate) fn of_sorted_codes(codes: impl IntoIterator<Item = u32>) -> Occupancy {
-        let (mut points, mut cells) = (0u64, 0u64);
-        let mut previous: Option<u32> = None;
+        let mut run = OccupancyRun::default();
         for code in codes {
-            points += 1;
-            match previous {
-                Some(last) => {
-                    assert!(
-                        code >= last,
-                        "occupancy: Morton codes must arrive in tiler order ({last} then {code})"
-                    );
-                    cells += u64::from(code != last);
-                }
-                None => cells = 1,
-            }
-            previous = Some(code);
+            run.push(code);
         }
-        Occupancy { points, cells }
+        run.finish()
     }
 
     /// Points per occupied cell — one where every point has a cell to itself, and the factor by
@@ -891,8 +902,14 @@ pub(crate) fn report_attribute_coverage(coverage: &[AttributeCoverage]) {
                 );
             }
         }
+        // **Over the rows this build read, not over the source.** A `--limit` build prunes whole
+        // row groups on their statistics before a value is decoded, so a row in a pruned group is
+        // not counted here as unknown — it is not counted at all. Said rather than left to be
+        // inferred: the figure is a floor on a limited build and the exact count on a whole one,
+        // and a floor read as a count is an operator concluding their join is cleaner than it is.
         eprintln!(
-            "        {} source row(s) named entities this build did not load",
+            "        {} source row(s) named entities this build did not load, over the rows this \
+             build read (a --limit build prunes row groups before decoding them)",
             thousands(source.unknown_rows)
         );
         // The join did not meet at all. Emphatic and not a refusal: the ids may simply be another
@@ -1736,6 +1753,10 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
     // two call sites sit at different step numbers. See `crate::artifact_pass`.
     let artifact_store = std::mem::take(&mut published_layers.store);
     let mut derived_index = tessera_store::derived::DerivedIndex::default();
+    // **The pass's own `.build-tmp/`.** A row column is composed through a partition on disk, so
+    // the pass needs scratch of its own; the emit above closed the directory it used, and this is
+    // the last stage that wants one.
+    let artifact_tmp = spill::TmpDir::create(&args.out)?;
     let artifact_pass = crate::artifact_pass::run(
         &mut published_layers,
         &artifact_store,
@@ -1743,6 +1764,7 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
         PHASH,
         &view.view_id,
         n as u32,
+        artifact_tmp.path(),
         &mut derived_index,
     );
     // The containment partitions are not per view, so they are filed once for the prefix. The
@@ -1755,6 +1777,7 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
         &mut derived_index,
     );
     drop(artifact_store);
+    artifact_tmp.close()?;
     crate::artifact_pass::report(&artifact_pass);
     eprintln!(
         "  wrote {} containment partition(s)",
@@ -1844,8 +1867,8 @@ fn spilled_column_names(
 fn scalar_schema_of(
     schema: &crate::config::Schema,
 ) -> Vec<(String, tessera_spatial::tiler::ScalarType)> {
-    // Render columns only — the segment's tail and `permute_attribute_tail`'s output must name the
-    // same columns in the same order, or every row's values land under the wrong headings.
+    // Render columns only — the segment's tail and the assembly's render lanes must name the same
+    // columns in the same order, or every row's values land under the wrong headings.
     schema
         .attributes
         .iter()
@@ -2957,5 +2980,42 @@ mod tests {
             relative_to(prefix, &path).unwrap(),
             "partitions/default/SEGMENTS-0.json"
         );
+    }
+}
+
+/// [`Occupancy::of_sorted_codes`] fed one code at a time.
+///
+/// **The segment assembly emits its rows one Morton bucket at a time** and never holds the codes
+/// as a slice, so the run count that the other producer takes over an iterator is taken here over
+/// a stream. Same arithmetic and the same order assertion — it is the one implementation, and
+/// `of_sorted_codes` is the iterator wrapper over it.
+#[derive(Default)]
+pub(crate) struct OccupancyRun {
+    points: u64,
+    cells: u64,
+    previous: Option<u32>,
+}
+
+impl OccupancyRun {
+    pub(crate) fn push(&mut self, code: u32) {
+        self.points += 1;
+        match self.previous {
+            Some(last) => {
+                assert!(
+                    code >= last,
+                    "occupancy: Morton codes must arrive in tiler order ({last} then {code})"
+                );
+                self.cells += u64::from(code != last);
+            }
+            None => self.cells = 1,
+        }
+        self.previous = Some(code);
+    }
+
+    pub(crate) fn finish(self) -> Occupancy {
+        Occupancy {
+            points: self.points,
+            cells: self.cells,
+        }
     }
 }

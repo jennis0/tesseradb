@@ -3,12 +3,14 @@
 //! only legal EntityId→RowId path in the codebase (invariant I4).
 
 pub mod coalesce;
+pub mod columns;
 pub mod derived;
 pub mod entity_terms;
 pub mod error;
 pub mod flush;
 pub mod fold;
 mod locator;
+pub mod partition;
 pub mod manifest;
 pub mod manifest_write;
 pub mod membership;

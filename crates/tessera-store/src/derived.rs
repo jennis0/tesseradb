@@ -64,8 +64,8 @@ use crate::manifest::{
     ContainmentExtent, RowColumnExtent, ShapeHeldExtent, ShapeRowsExtent, TileIndexExtent,
 };
 use crate::membership::{
-    pack_containment, pack_label_column, pack_shape_rows, pack_tile_index, ListColumnWriter,
-    ShapeRowsPack, ROW_COLUMN_HOLE, TILE_INDEX_EMPTY, TILE_INDEX_HOLE,
+    pack_containment, pack_shape_rows, pack_tile_index, ShapeRowsPack, TILE_INDEX_EMPTY,
+    TILE_INDEX_HOLE,
 };
 
 /// One level's artifacts, visited in ascending ordinal with their **base** row projections.
@@ -351,84 +351,273 @@ pub fn project_tile_index(ordinals: u32, row_count: u32, each: LevelWalk<'_>) ->
     pack_tile_index(row_count, &spans)
 }
 
-/// One level's row-major column, framed — or `None` where the level cannot take the form asked
-/// for.
+/// One level's row-major column, **written front to back into a file under `scratch`** — or `None`
+/// where the level cannot take the form asked for.
+///
+/// # What it holds while it runs
+///
+/// Nothing sized by the row count. The composition used to fill a row-sized lane — a `u32` an
+/// ordinal for the label form, a `u32` an offset for the list form — at a scattered row index, and
+/// then pack it; at rung 6 that lane is 14 GB a level, and the engine's fold paid the same price at
+/// every fold. Every `(row, ordinal)` pair now goes to a [`crate::partition::Partition`] by row
+/// range, and the buckets are replayed in row order into the file the column becomes
+/// (`docs/evidence/memos/2026-09-12-bounded-assembly-design.md` §4.6, owner ruling: one
+/// implementation, disk-backed on both the build and the fold). What stands is one bucket, its
+/// sort, and for the list form one window of counts over the bucket's row range.
+///
+/// **The window is bounded by the `u32` row key over 128 buckets; the bucket is not.** A record is
+/// a `(row, ordinal)` pair and a row carries as many of them as it has ordinals, so a bucket holds
+/// one record per member entry in its row range: a level whose rows carry one ordinal each fills it
+/// in proportion to the row space, and a list-form level of many ordinals a row fills it in
+/// proportion to the level's entries. The pre-flight charges it at the larger of the two
+/// (`crates/tessera-build/src/residency.rs`).
+///
+/// **Each bucket is sorted by `(row, ordinal)` before it is replayed, and the list form's bytes
+/// depend on it.** A row's list is written in the order the ordinals reach it, and both walks that
+/// feed this — the build's artifact pass and the store's own level iteration — hand ordinals
+/// ascending, so today's bytes are a row's ordinals ascending. The sort is what makes that true of
+/// the replay too, whatever order the pairs were pushed in.
 ///
 /// `None` on [`ServingLayout::RowMajorLabel`] means the memberships do **not** partition: a row was
 /// claimed twice, which is the refusal a declaration could not make because single-valuedness is a
 /// property of the data. The caller serves the level artifact-major and says so.
 ///
+/// `None` on [`ServingLayout::RowMajorList`] means the level's member entries outrun the `u32` the
+/// format's offsets are, which no level of any corpus built so far reaches and a layer of tens of
+/// entries a row over 3.5×10⁹ rows would. The caller's answer is the same one.
+///
 /// `None` on an artifact-major or spatial layout is the caller asking for a file no writer
 /// produces.
+///
+/// The returned path is the caller's to move into place or to read back and delete; nothing here
+/// keeps it.
 pub fn project_row_column(
     ordinals: u32,
     row_count: u32,
     layout: ServingLayout,
+    scratch: &Path,
     each: LevelWalk<'_>,
-) -> Option<Vec<u8>> {
-    match layout {
-        ServingLayout::ArtifactMajor => None,
-        ServingLayout::RowMajorLabel => {
-            let mut labels = vec![ROW_COLUMN_HOLE; row_count as usize];
-            let mut overlapped = false;
-            each(&mut |ordinal, rows| {
-                for row in rows.iter() {
-                    let at = row as usize;
-                    // A row past the column is a member the projection placed above this view's
-                    // base row space, which `project_base` does not produce. Guarded rather than
-                    // trusted: the alternative is a panic on a shape nothing here controls.
-                    if at >= labels.len() {
-                        continue;
-                    }
-                    // **A double claim is not a partition**, and this is where the pin's second
-                    // refusal fires — the one that could not be checked at parse.
-                    if labels[at] != ROW_COLUMN_HOLE {
-                        overlapped = true;
-                        return;
-                    }
-                    labels[at] = ordinal;
-                }
-            });
-            if overlapped {
-                return None;
-            }
-            Some(pack_label_column(ordinals, &labels))
+) -> crate::Result<Option<std::path::PathBuf>> {
+    if matches!(layout, ServingLayout::ArtifactMajor) {
+        return Ok(None);
+    }
+    std::fs::create_dir_all(scratch).map_err(|source| crate::StoreError::Io {
+        path: scratch.to_path_buf(),
+        source,
+    })?;
+    let name = scratch_name();
+
+    // The pairs, pushed once. A record is `(row, ordinal)`, the row first because a partition
+    // routes on a record's first four bytes.
+    let buckets = crate::partition::boundaries_uniform(u64::from(row_count));
+    let mut partition = crate::partition::Partition::create(
+        scratch,
+        &name,
+        buckets.clone(),
+        ROW_ORDINAL_RECORD,
+        u64::from(row_count),
+    )?;
+    let mut entries: u64 = 0;
+    let mut pushed: crate::Result<()> = Ok(());
+    each(&mut |ordinal, rows| {
+        if pushed.is_err() {
+            return;
         }
-        ServingLayout::RowMajorList => {
-            // Pass one sizes each row's list; pass two fills it. Two passes rather than a
-            // vector per row, which at 10⁹ rows is the allocator's whole address space in
-            // headers alone.
-            let mut at = vec![0u32; row_count as usize + 1];
-            each(&mut |_, rows| {
-                for row in rows.iter() {
-                    if (row as usize) < row_count as usize {
-                        at[row as usize + 1] += 1;
-                    }
-                }
-            });
-            for i in 1..at.len() {
-                at[i] += at[i - 1];
+        for row in rows.iter() {
+            // A row past the column is a member the projection placed above this view's base row
+            // space, which `project_base` does not produce. Guarded rather than trusted: the
+            // alternative is a panic on a shape nothing here controls.
+            if row >= row_count {
+                continue;
             }
-            // **Pass two writes into the column itself**, not into a `Vec<u32>` the packer then
-            // narrows: at the 10⁷ MedCPT sample the MeSH level's 471,778,374 entries are 1.9 GB as
-            // `u32` beside the 0.9 GB of column they become, and that pair was the whole of the
-            // artifact pass's measured transient
-            // (`probes/2026-09-02-mapped-memberships/README.md`). The bytes are unchanged —
-            // [`crate::membership::ListColumnWriter`] frames what `pack_list_column` would have
-            // written and fills the same positions in the same order.
-            let mut writer = ListColumnWriter::frame(ordinals, &at);
-            let mut cursor = at;
-            each(&mut |ordinal, rows| {
-                for row in rows.iter() {
-                    let at = row as usize;
-                    if at >= row_count as usize {
-                        continue;
+            let mut record = [0u8; ROW_ORDINAL_RECORD];
+            record[..4].copy_from_slice(&row.to_le_bytes());
+            record[4..].copy_from_slice(&ordinal.to_le_bytes());
+            if let Err(error) = partition.push(&record) {
+                pushed = Err(error);
+                return;
+            }
+            entries += 1;
+        }
+    });
+    pushed?;
+    let mut store = partition.finish()?;
+    // Bucket `k`'s row range, clipped to the column: the boundaries ascend from zero and the last
+    // bucket runs to the end of the key type, so clipped they tile `[0, row_count)` in order.
+    let range = |k: usize| -> (u32, u32) {
+        let lo = buckets[k].min(row_count);
+        let hi = buckets
+            .get(k + 1)
+            .map(|first| (*first).min(row_count))
+            .unwrap_or(row_count)
+            .max(lo);
+        (lo, hi)
+    };
+
+    let path = scratch.join(format!("{name}.column"));
+    // **The file goes back unless the composition finished.** Every `?` below leaves a truncated
+    // column in the scratch directory otherwise, and the caller's answer to a failure is to derive
+    // the column on first use, so nothing would ever come back for it. Written as a closure so that
+    // one cleanup covers every exit, which is the shape [`crate::partition::Partition`]'s own
+    // `Drop` has.
+    let mut compose = || -> crate::Result<bool> {
+        match layout {
+            ServingLayout::ArtifactMajor => unreachable!("returned above"),
+            ServingLayout::RowMajorLabel => {
+                let mut file =
+                    crate::membership::LabelColumnFile::create(&path, ordinals, row_count)?;
+                let mut partitions = true;
+                for k in 0..buckets.len() {
+                    let sorted = sorted_pairs(&store, k)?;
+                    store.delete(k)?;
+                    for pair in sorted {
+                        if !file.put((pair >> 32) as u32, pair as u32)? {
+                            partitions = false;
+                            break;
+                        }
                     }
-                    writer.put(cursor[at], ordinal);
-                    cursor[at] += 1;
+                    if !partitions {
+                        break;
+                    }
                 }
-            });
-            Some(writer.finish())
+                if !partitions {
+                    return Ok(false);
+                }
+                file.finish()?;
+            }
+            ServingLayout::RowMajorList => {
+                // **The offsets, then the values**, which is the order the format lays them in
+                // and so the order they are written in. The offsets are a running count over the
+                // rows, and a bucket holds the rows of one contiguous range, so one pass over the
+                // buckets in order produces the whole array; the values then need a second pass
+                // over the same buckets. A bucket is read twice and sorted once — the alternative,
+                // a second scratch file of values to concatenate afterwards, copies the whole
+                // column instead.
+                //
+                // **A level with more entries than a `u32` counts has no list form.** The format's
+                // offsets are `u32`, so the total is one of them; a layer of 47 entries a row over
+                // 3.5×10⁹ rows is past it, and truncating the count would write a column whose
+                // offsets wrap. The caller serves the level artifact-major, which is the same
+                // answer the double-claim path gives and is unchanged in what any viewer is told.
+                let Some(entries) = list_form_entries(entries) else {
+                    return Ok(false);
+                };
+                let mut file = crate::membership::ListColumnFile::create(
+                    &path, ordinals, row_count, entries,
+                )?;
+                let mut at: u64 = 0;
+                file.offset(at as u32)?;
+                for k in 0..buckets.len() {
+                    let (lo, hi) = range(k);
+                    let mut counts = vec![0u32; (hi - lo) as usize];
+                    for record in store.load(k)?.chunks_exact(ROW_ORDINAL_RECORD) {
+                        let row = u32::from_le_bytes(record[..4].try_into().expect("four bytes"));
+                        counts[(row - lo) as usize] += 1;
+                    }
+                    for count in counts {
+                        at += u64::from(count);
+                        file.offset(at as u32)?;
+                    }
+                }
+                for k in 0..buckets.len() {
+                    let sorted = sorted_pairs(&store, k)?;
+                    store.delete(k)?;
+                    for pair in sorted {
+                        file.value(pair as u32)?;
+                    }
+                }
+                file.finish()?;
+            }
+        }
+        Ok(true)
+    };
+    match compose() {
+        Ok(true) => Ok(Some(path)),
+        Ok(false) => {
+            let _ = std::fs::remove_file(&path);
+            Ok(None)
+        }
+        Err(error) => {
+            let _ = std::fs::remove_file(&path);
+            Err(error)
+        }
+    }
+}
+
+/// A `(row, ordinal)` record: the row first, because a partition routes on a record's first four
+/// bytes.
+const ROW_ORDINAL_RECORD: usize = 8;
+
+/// A level's member entries as the list form's header holds them, or `None` where they outrun it.
+///
+/// The format's offsets are `u32` and the total is one of them, so a level of more entries than
+/// that has no list form at all — the composition declines it and the level is served
+/// artifact-major. Separate from its one caller so the boundary can be tested: the corpus that
+/// reaches it is 4.3×10⁹ member entries in one level, which no fixture can push.
+fn list_form_entries(entries: u64) -> Option<u32> {
+    u32::try_from(entries).ok()
+}
+
+/// Bucket `k`'s pairs as `row << 32 | ordinal`, ascending — the replay order every form depends on.
+///
+/// The bucket's bytes are dropped before the sort, so what stands is 8 bytes an entry in the
+/// bucket's row range and not sixteen.
+fn sorted_pairs(store: &crate::partition::PartitionStore, k: usize) -> crate::Result<Vec<u64>> {
+    let bytes = store.load(k)?;
+    let mut pairs: Vec<u64> = bytes
+        .chunks_exact(ROW_ORDINAL_RECORD)
+        .map(|record| {
+            let row = u32::from_le_bytes(record[..4].try_into().expect("four bytes"));
+            let ordinal = u32::from_le_bytes(record[4..].try_into().expect("four bytes"));
+            (u64::from(row) << 32) | u64::from(ordinal)
+        })
+        .collect();
+    drop(bytes);
+    pairs.sort_unstable();
+    Ok(pairs)
+}
+
+/// A name no two compositions share. A fold composes levels in parallel and a build runs beside
+/// whatever else holds the directory, so the partition's buckets and the column they become carry
+/// this process's id and a counter that never repeats within it.
+fn scratch_name() -> String {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    format!(
+        "{}{}-{:08}",
+        ROW_COLUMN_SCRATCH_PREFIX,
+        std::process::id(),
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    )
+}
+
+/// The name every file this composition leaves in a scratch directory begins with — the partition's
+/// buckets and the column itself alike.
+///
+/// **A crashed fold leaves them behind**, and an engine sweeps them at open
+/// ([`crate::derived::sweep_row_column_scratch`]). The prefix is what makes that sweep safe: the
+/// engine's cache directory holds the fragment cache and the suggestion indexes too, and a sweep by
+/// anything looser would take one of those with it.
+pub const ROW_COLUMN_SCRATCH_PREFIX: &str = "row-column-scratch-";
+
+/// Remove whatever a previous process's composition left in `scratch`.
+///
+/// Every file [`project_row_column`] creates is named from [`ROW_COLUMN_SCRATCH_PREFIX`], and a
+/// composition that finishes removes its own; what remains at an open is the leavings of a run that
+/// died part-way. Best effort and never a refusal: a scratch file that will not be removed costs
+/// disk, and refusing to open a node over it would trade a service for a tidy directory.
+pub fn sweep_row_column_scratch(scratch: &Path) {
+    let Ok(entries) = std::fs::read_dir(scratch) else {
+        return;
+    };
+    // **What this process wrote is not swept.** A name carries the writing process's id
+    // ([`scratch_name`]), and a second open over one cache directory — two nodes on a box, or one
+    // process opening twice — would otherwise delete the buckets of a composition running beside
+    // it. Only a pid that is not ours can be a run that died.
+    let ours = format!("{ROW_COLUMN_SCRATCH_PREFIX}{}-", std::process::id());
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.starts_with(ROW_COLUMN_SCRATCH_PREFIX) && !name.starts_with(&ours) {
+            let _ = std::fs::remove_file(entry.path());
         }
     }
 }
@@ -723,7 +912,60 @@ pub struct Filed {
     /// [`file_row_columns`] for the extension and for the manifest entry's tag; ignored by the
     /// kinds that have a single form.
     pub layout: ServingLayout,
-    pub bytes: Vec<u8>,
+    pub bytes: FiledBytes,
+}
+
+/// Where a filed structure's bytes are: in hand, or already written in a scratch directory.
+///
+/// **The row column is staged and every other kind is in hand**, and the asymmetry is the point:
+/// a column is composed front to back into the file it becomes
+/// ([`project_row_column`]), so there is no `Vec<u8>` to hand over — at rung 6 there could not be.
+/// The other kinds are bounded by the artifact count rather than by the row count and are built in
+/// memory as they always were.
+pub enum FiledBytes {
+    /// The bytes, to be written where the kind's naming rule puts them.
+    InHand(Vec<u8>),
+    /// A file already written, to be moved there. Renamed where the scratch and the bundle share a
+    /// filesystem and copied where they do not, which is a deployment's choice of cache directory
+    /// and not this module's to refuse. The staged file is gone either way once the move succeeds.
+    Staged(std::path::PathBuf),
+}
+
+impl FiledBytes {
+    /// Put the bytes at `dest`, durably — the one place the two forms differ.
+    fn place(&self, dest: &Path) -> crate::Result<()> {
+        match self {
+            FiledBytes::InHand(bytes) => crate::write_and_fsync(dest, bytes),
+            FiledBytes::Staged(staged) => {
+                if std::fs::rename(staged, dest).is_err() {
+                    std::fs::copy(staged, dest).map_err(|source| crate::StoreError::Io {
+                        path: dest.to_path_buf(),
+                        source,
+                    })?;
+                    let _ = std::fs::remove_file(staged);
+                }
+                let file = std::fs::File::open(dest).map_err(|source| crate::StoreError::Io {
+                    path: dest.to_path_buf(),
+                    source,
+                })?;
+                file.sync_all().map_err(|source| crate::StoreError::Io {
+                    path: dest.to_path_buf(),
+                    source,
+                })
+            }
+        }
+    }
+}
+
+impl Drop for Filed {
+    /// **A staged file that was never placed goes back.** A publication drops the items it could
+    /// not file — a directory that would not be created, a kind whose fsync failed — and a column
+    /// left in a scratch directory by such a drop is disk nothing will ever claim.
+    fn drop(&mut self) {
+        if let FiledBytes::Staged(path) = &self.bytes {
+            let _ = std::fs::remove_file(path);
+        }
+    }
 }
 
 /// Create `prefix_dir/partitions/<partition>/<kind>`, or say why not.
@@ -798,7 +1040,7 @@ fn file_all<T>(
     let mut entries = Vec::with_capacity(items.len());
     for (index, item) in items.iter().enumerate() {
         let name = derived_name(kind, n, start + index, extension_of(item));
-        if let Err(error) = crate::write_and_fsync(&dir.join(&name), &item.bytes) {
+        if let Err(error) = item.bytes.place(&dir.join(&name)) {
             tracing::warn!(
                 layer = %item.layer,
                 level = item.level,
@@ -2032,5 +2274,56 @@ mod derived_tests {
     fn overlapping_memberships_do_not_partition() {
         assert!(!observe_shape(4_096, &walk_of(&[vec![1, 2], vec![2, 3]])).partitions);
         assert!(observe_shape(4_096, &walk_of(&[vec![1, 2], vec![3, 4]])).partitions);
+    }
+
+    /// **A view with no rows composes an empty column of either form, and leaves no scratch.** The
+    /// degenerate end of the partition's arithmetic: the boundaries collapse to one bucket, no pair
+    /// is pushed because every row is past the column, and the file is a header.
+    #[test]
+    fn a_view_of_no_rows_composes_an_empty_column_and_leaves_nothing_behind() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        for layout in [ServingLayout::RowMajorLabel, ServingLayout::RowMajorList] {
+            let path = project_row_column(2, 0, layout, dir.path(), &walk_of(&[vec![0, 1], vec![2]]))
+                .expect("a column over no rows")
+                .expect("a column, not a refusal");
+            match layout {
+                ServingLayout::RowMajorLabel => {
+                    let pack =
+                        crate::membership::LabelColumnPack::open(&path).expect("the column frames");
+                    assert_eq!(pack.rows(), 0);
+                }
+                _ => {
+                    let pack =
+                        crate::membership::ListColumnPack::open(&path).expect("the column frames");
+                    assert_eq!(pack.rows(), 0);
+                }
+            }
+            std::fs::remove_file(&path).expect("the column is the caller's to remove");
+        }
+        let left: Vec<_> = std::fs::read_dir(dir.path())
+            .expect("the scratch directory")
+            .flatten()
+            .map(|entry| entry.file_name())
+            .collect();
+        assert!(
+            left.is_empty(),
+            "the buckets went back with the store: {left:?}"
+        );
+    }
+
+    /// **A level whose entries outrun the list form's `u32` has no list form.** The header states
+    /// the total as a `u32` and the offsets index it, so the entries above 2³² − 1 would be written
+    /// at wrapped offsets and read back as another row's. The composition declines and the level is
+    /// served artifact-major, which is the same answer a level whose memberships do not partition
+    /// gets and is unchanged in what any viewer is told.
+    ///
+    /// The boundary and not the path: pushing 2³² records through the partition is not a fixture.
+    #[test]
+    fn a_level_of_more_entries_than_the_list_forms_offsets_count_has_no_list_form() {
+        assert_eq!(super::list_form_entries(0), Some(0));
+        assert_eq!(super::list_form_entries(u64::from(u32::MAX)), Some(u32::MAX));
+        assert_eq!(super::list_form_entries(u64::from(u32::MAX) + 1), None);
+        // A layer of 47 entries a row over the rung-6 corpus, which is the case that reaches it.
+        assert_eq!(super::list_form_entries(47 * 3_495_729_729), None);
     }
 }

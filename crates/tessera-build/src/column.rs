@@ -505,6 +505,125 @@ impl EntityColumn {
         Ok(())
     }
 
+    /// What one value of this column occupies in its file, or `None` where the column is a string
+    /// one or carries no values at all.
+    ///
+    /// **The attribute join routes on this.** A fixed-width column's values go through a
+    /// `(entity, value)` partition and are written back as contiguous runs; a string column keeps
+    /// its scattered offset write, the arena beside it being appended in arrival order and the
+    /// route not taken at any scale where the cache would fail it.
+    pub(crate) fn fixed_width(&self) -> Option<usize> {
+        match &self.storage {
+            ColumnStorage::ByEntity { data, .. } => data.fixed_width(),
+            ColumnStorage::Empty => None,
+        }
+    }
+
+    /// **A string column holding its characters in an arena**, which is the route a declared string
+    /// column takes where it is not spilled as record-blob extents. What such a column holds at an
+    /// entity is the `at` word, and that is the lane the attribute join partitions
+    /// (`crate::pipeline::ValueLane`).
+    pub(crate) fn is_arena_strings(&self) -> bool {
+        matches!(
+            &self.storage,
+            ColumnStorage::ByEntity {
+                data: ColumnData::Utf8(_),
+                ..
+            }
+        )
+    }
+
+    /// One row's bytes exactly as the file holds them, or `None` where the row carries no value —
+    /// the payload the attribute join's partition pushes beside the entity.
+    pub(crate) fn raw_at(&self, pos: usize) -> Option<&[u8]> {
+        let width = self.fixed_width()?;
+        if !self.is_present(pos) {
+            return None;
+        }
+        let ColumnStorage::ByEntity { data, .. } = &self.storage else {
+            return None;
+        };
+        data.as_bytes().get(pos * width..(pos + 1) * width)
+    }
+
+    /// Move one string across from a staging column and **return the word its `at` lane carries**,
+    /// or `None` where the source row is absent.
+    ///
+    /// [`Self::take_from`] for a string column on the arena route, split in two: the characters go
+    /// into this column's arena in arrival order, as they always did, and the word that says where
+    /// they are goes back to the caller instead of being written at the entity. The join pushes it
+    /// to a partition and the replay writes a bucket's words as one run
+    /// (`docs/evidence/memos/2026-09-12-bounded-assembly-design.md` §4.3).
+    ///
+    /// **The presence bit is not set here**, for the same reason: it is a bit at the entity, and
+    /// the replay writes a bucket's bits as whole words beside the run.
+    pub(crate) fn take_chars_from(
+        &mut self,
+        entity: usize,
+        src: &mut EntityColumn,
+        pos: usize,
+        name: &str,
+    ) -> Result<Option<u64>> {
+        let ColumnStorage::ByEntity { data, present } = &mut src.storage else {
+            return Err(no_slot(src.ty, name));
+        };
+        if !present_bit(present.as_slice(), pos) {
+            return Ok(None);
+        }
+        clear_present(present.as_mut_slice(), pos);
+        let Some(text) = data.str_at(pos) else {
+            return Err(no_slot(src.ty, name));
+        };
+        // Borrowed from the source and appended to this column's arena, never owned: a `String` a
+        // row is what [`Self::take_from`]'s string arm exists to avoid.
+        let ty = self.ty;
+        let ColumnStorage::ByEntity { data, .. } = &mut self.storage else {
+            return Err(no_slot(ty, name));
+        };
+        Ok(Some(data.append_str(entity, text, ty, name)?))
+    }
+
+    /// Write one contiguous run of values and the presence bits beside them — the attribute
+    /// join's replay of one partition bucket.
+    ///
+    /// `lo` is the run's first entity and must be a multiple of 64, so that the presence words
+    /// this writes are whole words of the column's own bitmap and no read-modify-write is needed
+    /// at either end. `values` is the run's bytes at the column's width and `present` its bits,
+    /// least significant first.
+    ///
+    /// **This is the whole reason a value lane is a partition.** Writing each value at its entity
+    /// as it was joined scattered the writes over the column's whole span: 123 GB written to grow
+    /// the bundle by 34 in one stage at rung 6, every page of every value column written back and
+    /// re-dirtied many times over
+    /// (`docs/evidence/memos/2026-09-12-gbif-whole-corpus-build-observations.md` §4).
+    pub(crate) fn write_value_run(
+        &mut self,
+        lo: usize,
+        values: &[u8],
+        present: &[u64],
+        name: &str,
+    ) -> Result<()> {
+        let ty = self.ty;
+        let ColumnStorage::ByEntity {
+            data,
+            present: bits,
+        } = &mut self.storage
+        else {
+            return Err(no_slot(ty, name));
+        };
+        // **The values for a fixed-width column and the `at` words for a string one**, which is the
+        // one difference between the two lanes: a string column's characters are appended to its
+        // arena as the join reads them, and what is indexed by entity — and so what a run is
+        // written into — is the word that says where they went.
+        let (width, bytes) = data.lane_bytes_mut();
+        debug_assert_eq!(lo % 64, 0, "a run starts at a presence-word boundary");
+        let at = lo * width;
+        bytes[at..at + values.len()].copy_from_slice(values);
+        let words = bits.as_mut_slice();
+        words[lo / 64..lo / 64 + present.len()].copy_from_slice(present);
+        Ok(())
+    }
+
     pub(crate) fn is_present(&self, entity: usize) -> bool {
         match &self.storage {
             ColumnStorage::ByEntity { present, .. } => present_bit(present.as_slice(), entity),
@@ -672,85 +791,6 @@ impl EntityColumn {
         }
     }
 
-    /// The column's values as the segment writer takes them, **with no copy**: the mapping becomes
-    /// the record batch's Arrow values buffer, and the file is unlinked when the batch releases it.
-    ///
-    /// **This is what keeps the segment's row-order tail off the heap.** The tail was eight
-    /// `Vec`s built by `push` — ~2.4 GB of anonymous memory at 7.4×10⁷ rows, allocated immediately
-    /// after the entity-order columns moved to `.build-tmp/`, and it does not show in today's peak
-    /// only because another stage peaks higher. Filled by index into a mapping and handed over as
-    /// the buffer it will be written from, the same bytes are page cache; a conversion at this
-    /// boundary would give the memory back at exactly the wrong moment.
-    ///
-    /// **The string family is refused rather than carried.** `render` on `keyword` and on `text`
-    /// is refused at the declaration and `utf8` is not declarable at all, so a string column never
-    /// reaches the hot column's tail; reaching here with one is a build defect, and it says so.
-    ///
-    /// `bool` is the one member Arrow does not take as a flat array of itself: its values buffer
-    /// is `rows` bits, so the bytes are packed into a second mapped array on the way out. That
-    /// array is an eighth of the column and is unlinked with it.
-    pub(crate) fn into_values(
-        self,
-        scratch: &ColumnScratch,
-        name: &str,
-    ) -> Result<tessera_store::write::ScalarColumn> {
-        let EntityColumn { ty, storage, len } = self;
-        // The presence bits went out as the render presence bitmap beside the column
-        // (decision 0064); the tail itself is non-nullable (contracts R4) and carries no validity
-        // buffer, so this file has no reader left.
-        //
-        // **A column with no storage is refused rather than written as zeros.** Every caller
-        // builds this lane with [`Self::filled`] and fills it before it gets here, so reaching
-        // this arm means a row tail assembled from a column that carries no values — which on the
-        // wire is a render column of placeholders no reader can tell from real ones.
-        let ColumnStorage::ByEntity { data, present } = storage else {
-            return Err(BuildError::Invalid(format!(
-                "attribute column '{name}' has no values in entity order, so there is nothing to \
-                 permute into a row tail"
-            )));
-        };
-        drop(present);
-        macro_rules! arms {
-            ($(($v:ident, $t:ty)),* $(,)?) => {
-                match data {
-                    $(ColumnData::$v(values) => {
-                        tessera_store::write::ScalarColumn::of(ty, len, values.into_arrow_buffer())
-                    })*
-                    ColumnData::Bool(values) => {
-                        let mut bits = MappedArray::<u8>::zeroed(
-                            &scratch.dir,
-                            &scratch.name("bits"),
-                            len.div_ceil(8),
-                        )?;
-                        {
-                            // Least significant bit first within each byte, which is Arrow's own
-                            // boolean layout.
-                            let packed = bits.as_mut_slice();
-                            for (row, &value) in values.as_slice().iter().enumerate() {
-                                if value != 0 {
-                                    packed[row / 8] |= 1u8 << (row % 8);
-                                }
-                            }
-                        }
-                        drop(values);
-                        tessera_store::write::ScalarColumn::of(
-                            ty,
-                            len,
-                            bits.into_arrow_buffer(),
-                        )
-                    }
-                    ColumnData::Utf8(_) => tessera_store::write::ScalarColumn::of(
-                        ty,
-                        len,
-                        arrow::buffer::Buffer::from_vec(Vec::<u8>::new()),
-                    ),
-                }
-            };
-        }
-        fixed_width_columns!(arms)
-            .map_err(|e| BuildError::Invalid(format!("attribute column '{name}': {e}")))
-    }
-
     /// Forget a staging column's arena, keeping its file. The attribute join reuses one staging
     /// buffer per chunk and every string in it has been moved across by the time a chunk ends, so
     /// without this the buffer's arena would grow to the whole source's payload.
@@ -766,6 +806,72 @@ impl EntityColumn {
 }
 
 impl ColumnData {
+    /// What one value occupies, or `None` for the string member, whose values are in an arena.
+    fn fixed_width(&self) -> Option<usize> {
+        macro_rules! arms {
+            ($(($v:ident, $t:ty)),* $(,)?) => {
+                match self {
+                    $(ColumnData::$v(_) => Some(std::mem::size_of::<$t>()),)*
+                    // A byte a row in the file, packed to a bit only on the way into Arrow.
+                    ColumnData::Bool(_) => Some(1),
+                    ColumnData::Utf8(_) => None,
+                }
+            };
+        }
+        fixed_width_columns!(arms)
+    }
+
+    /// The values as the file holds them. Empty for the string member.
+    fn as_bytes(&self) -> &[u8] {
+        macro_rules! arms {
+            ($(($v:ident, $t:ty)),* $(,)?) => {
+                match self {
+                    $(ColumnData::$v(col) => col.as_bytes(),)*
+                    ColumnData::Bool(col) => col.as_bytes(),
+                    ColumnData::Utf8(_) => &[],
+                }
+            };
+        }
+        fixed_width_columns!(arms)
+    }
+
+    /// [`Self::as_bytes`], writable.
+    fn as_mut_bytes(&mut self) -> &mut [u8] {
+        macro_rules! arms {
+            ($(($v:ident, $t:ty)),* $(,)?) => {
+                match self {
+                    $(ColumnData::$v(col) => col.as_mut_bytes(),)*
+                    ColumnData::Bool(col) => col.as_mut_bytes(),
+                    ColumnData::Utf8(_) => &mut [],
+                }
+            };
+        }
+        fixed_width_columns!(arms)
+    }
+
+    /// **The lane a partition replay writes a bucket's run into, and what one record of it is
+    /// wide**: the values themselves for a fixed-width column, and the `at` words for a string
+    /// column on the arena route, whose characters are in the arena and whose word is the
+    /// entity-indexed thing (`StringColumn`).
+    ///
+    /// Eight bytes a record for the string lane, the type's width for every other.
+    fn lane_bytes_mut(&mut self) -> (usize, &mut [u8]) {
+        let width = self.fixed_width().unwrap_or(8);
+        match self {
+            ColumnData::Utf8(col) => (width, col.at.as_mut_bytes()),
+            _ => (width, self.as_mut_bytes()),
+        }
+    }
+
+    /// Append one string to the arena and return the word `at` holds for it — see
+    /// [`StringColumn::append`].
+    fn append_str(&mut self, entity: usize, value: &str, ty: ScalarType, name: &str) -> Result<u64> {
+        match self {
+            ColumnData::Utf8(col) => col.append(entity, value),
+            _ => Err(tag_mismatch(ty, name, &ScalarValue::Utf8(value.to_owned()))),
+        }
+    }
+
     /// Write one value at `entity`, refusing a tag that is not the column's: a coerced value gives
     /// one entity another's identity, with every value present and none its own.
     fn set(&mut self, entity: usize, value: ScalarValue, ty: ScalarType, name: &str) -> Result<()> {
@@ -822,7 +928,14 @@ impl ColumnData {
 }
 
 impl StringColumn {
-    fn set(&mut self, entity: usize, value: &str) -> Result<()> {
+    /// Append one value to the arena and return the word `at` holds for it.
+    ///
+    /// **Separate from [`Self::set`] because the word's home is written elsewhere.** The arena is
+    /// appended in arrival order and `at` is indexed by entity, which is the scattered write the
+    /// attribute join now routes through a partition
+    /// (`docs/evidence/memos/2026-09-12-bounded-assembly-design.md` §4.3): the join takes the word
+    /// from here and pushes it, and the replay writes a bucket's words as one sequential run.
+    fn append(&mut self, entity: usize, value: &str) -> Result<u64> {
         match self.shape {
             // Header and bytes in one write, so a value is never split across a growth and the
             // arena's own record marks land where a record starts.
@@ -843,8 +956,7 @@ impl StringColumn {
                 record.extend_from_slice(&tag.to_le_bytes());
                 record.extend_from_slice(&len.to_le_bytes());
                 record.extend_from_slice(value.as_bytes());
-                let offset = self.arena.append(&record)?;
-                self.at.as_mut_slice()[entity] = offset;
+                Ok(self.arena.append(&record)?)
             }
             // The characters alone, and the two numbers a reader needs in the word it already
             // reads to find them.
@@ -863,10 +975,16 @@ impl StringColumn {
                          {PACKED_OFFSET_LIMIT} its offsets can name"
                     )));
                 }
-                self.at.as_mut_slice()[entity] =
-                    offset | ((value.len() as u64) << PACKED_OFFSET_BITS);
+                Ok(offset | ((value.len() as u64) << PACKED_OFFSET_BITS))
             }
         }
+    }
+
+    /// Append one value and write its word at the entity — the direct route, which the attribute
+    /// join's staging buffers take and the home columns no longer do.
+    fn set(&mut self, entity: usize, value: &str) -> Result<()> {
+        let word = self.append(entity, value)?;
+        self.at.as_mut_slice()[entity] = word;
         Ok(())
     }
 

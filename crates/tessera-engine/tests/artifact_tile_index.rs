@@ -597,7 +597,7 @@ fn a_growth_between_two_reads_would_leave_the_extent_narrow() {
 
     // And what a request gets is the second arm, because the growth moved the level's version and
     // the whole family is rebuilt under one key.
-    let projections = ArtifactProjections::new();
+    let projections = ArtifactProjections::new(std::env::temp_dir());
     let before = projections.get_or_build(
         "v0",
         "s0",
@@ -711,7 +711,7 @@ fn a_tile_index_is_claimed_at_its_own_coordinate_and_at_no_other() {
     };
 
     // The coordinate holds: claimed, and the level's first request derives nothing.
-    let projections = ArtifactProjections::new();
+    let projections = ArtifactProjections::new(std::env::temp_dir());
     projections.adopt_indexes(tmp.path(), "v00000", &[entry("s0", projected_at)], &store);
     let rows = projections.get_or_build(
         "v00000",
@@ -730,7 +730,7 @@ fn a_tile_index_is_claimed_at_its_own_coordinate_and_at_no_other() {
 
     // The level has moved since, in either direction: dropped, and the index is derived.
     for moved in [projected_at + 1, projected_at - 1] {
-        let projections = ArtifactProjections::new();
+        let projections = ArtifactProjections::new(std::env::temp_dir());
         projections.adopt_indexes(tmp.path(), "v00000", &[entry("s0", moved)], &store);
         let _ = projections.get_or_build(
             "v00000",
@@ -753,7 +753,7 @@ fn a_tile_index_is_claimed_at_its_own_coordinate_and_at_no_other() {
 
     // Another prefix: row space renumbers wholesale at a fold, so an index held for one prefix must
     // not be claimed under another.
-    let projections = ArtifactProjections::new();
+    let projections = ArtifactProjections::new(std::env::temp_dir());
     projections.adopt_indexes(tmp.path(), "v00000", &[entry("s0", projected_at)], &store);
     let _ = projections.get_or_build(
         "v00001",
@@ -771,7 +771,7 @@ fn a_tile_index_is_claimed_at_its_own_coordinate_and_at_no_other() {
 
     // **Another view, which is the term a containment partition does not carry.** An extent is a
     // pair of rows, so a column belongs to exactly the row space it was projected through.
-    let projections = ArtifactProjections::new();
+    let projections = ArtifactProjections::new(std::env::temp_dir());
     projections.adopt_indexes(tmp.path(), "v00000", &[entry("s0", projected_at)], &store);
     let _ = projections.get_or_build(
         "v00000",
@@ -789,7 +789,7 @@ fn a_tile_index_is_claimed_at_its_own_coordinate_and_at_no_other() {
 
     // A file the manifest names that is not there is an absence, not a refusal: the level derives
     // its own, which is what every request did before the fold wrote anything.
-    let projections = ArtifactProjections::new();
+    let projections = ArtifactProjections::new(std::env::temp_dir());
     let mut missing = entry("s0", projected_at);
     missing.path = "partitions/default/tile-index/gone.tsti".to_string();
     projections.adopt_indexes(tmp.path(), "v00000", &[missing], &store);
@@ -898,6 +898,7 @@ fn an_entry_held_for_the_published_prefix_survives_a_claim_under_the_outgoing_on
         fx.rows().membership(),
         fx.row_space.base_rows(),
         ServingLayout::RowMajorLabel,
+        &std::env::temp_dir(),
     )
     .expect("a partitioned level composes a label column");
     std::fs::write(tmp.path().join(column_rel), column.as_bytes()).unwrap();
@@ -946,7 +947,7 @@ fn an_entry_held_for_the_published_prefix_survives_a_claim_under_the_outgoing_on
 
     // The index, for an artifact-major level. The outgoing prefix held an entry of its own; the
     // fold's adoption replaces it.
-    let projections = ArtifactProjections::new();
+    let projections = ArtifactProjections::new(std::env::temp_dir());
     projections.adopt_indexes(tmp.path(), "v00000", &[index_entry(10)], &before);
     projections.adopt_indexes(tmp.path(), "v00001", &[index_entry(11)], &store);
     // A request still on the outgoing generation: its prefix, the store's version. Nothing is
@@ -963,7 +964,7 @@ fn an_entry_held_for_the_published_prefix_survives_a_claim_under_the_outgoing_on
     assert_eq!(rows.index().as_bytes(), index.as_bytes());
 
     // The column, for a row-major level, the same way.
-    let projections = ArtifactProjections::new();
+    let projections = ArtifactProjections::new(std::env::temp_dir());
     projections.adopt_columns(tmp.path(), "v00000", &[column_entry(10)], &before);
     projections.adopt_columns(tmp.path(), "v00001", &[column_entry(11)], &store);
     let _ = build(&projections, "v00000", &store, ServingLayout::RowMajorLabel);
@@ -986,7 +987,7 @@ fn an_entry_held_for_the_published_prefix_survives_a_claim_under_the_outgoing_on
 
     // The retention rule stands: under the entry's own prefix, a version it does not carry drops
     // it, and a later claim at its version finds nothing.
-    let projections = ArtifactProjections::new();
+    let projections = ArtifactProjections::new(std::env::temp_dir());
     projections.adopt_indexes(tmp.path(), "v00001", &[index_entry(11)], &store);
     let _ = build(&projections, "v00001", &later, ServingLayout::ArtifactMajor);
     assert_eq!(projections.indexes_adopted(), 0);
@@ -1026,7 +1027,12 @@ fn a_transposed_row_form_is_the_projected_one() {
         let mut composed = 0;
         for layout in [ServingLayout::RowMajorLabel, ServingLayout::RowMajorList] {
             let Some(column) =
-                RowColumn::compose(projected.membership(), fx.row_space.base_rows(), layout)
+                RowColumn::compose(
+                    projected.membership(),
+                    fx.row_space.base_rows(),
+                    layout,
+                    &std::env::temp_dir(),
+                )
             else {
                 continue;
             };
@@ -1092,7 +1098,12 @@ fn a_transposed_row_form_is_the_projected_one() {
             // which is the round trip the serving path takes: the level is served from the very
             // bytes this membership was read out of.
             let again =
-                RowColumn::compose(transposed.membership(), fx.row_space.base_rows(), layout)
+                RowColumn::compose(
+                    transposed.membership(),
+                    fx.row_space.base_rows(),
+                    layout,
+                    &std::env::temp_dir(),
+                )
                     .expect("the same memberships compose the same form");
             assert_eq!(again.as_bytes(), column.as_bytes());
             for ordinal in 0..column.len() as u32 {

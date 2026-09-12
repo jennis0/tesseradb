@@ -1195,6 +1195,200 @@ impl ListColumnWriter {
     }
 }
 
+/// One row-major column written **front to back into the file it becomes**, rather than into a
+/// `Vec<u8>` a caller then hands to a writer.
+///
+/// # Why the file rather than the bytes
+///
+/// A level's column is composed the same way at a build and at a fold
+/// (`docs/evidence/memos/2026-09-12-bounded-assembly-design.md` §4.6), and the composition used to
+/// hold two structures sized by the row count: a row-sized lane the artifact walk scattered its
+/// ordinals into, and the packed column that lane became. At rung 6 the lane alone is 14 GB a
+/// level. The composition now routes every `(row, ordinal)` pair through a disk partition and
+/// replays the buckets in row order, which leaves nothing row-sized in memory — and nothing to
+/// replay *into* except the file, since the packed column is the last row-sized structure standing.
+///
+/// **The bytes are [`pack_label_column`]'s exactly**, and the test
+/// `a_label_column_file_is_the_packers_bytes` asserts it on a fixture: this writer is that function
+/// with the labels arriving one at a time instead of in a slice.
+pub struct LabelColumnFile {
+    out: std::io::BufWriter<std::fs::File>,
+    path: std::path::PathBuf,
+    width: u8,
+    hole: u32,
+    row_count: u32,
+    /// The next row the values region expects — what makes a gap a hole and a repeat a refusal.
+    next_row: u32,
+}
+
+impl LabelColumnFile {
+    /// Create the file and write its header. `row_count` is the column's length, holes included.
+    pub fn create(path: &std::path::Path, ordinals: u32, row_count: u32) -> Result<Self> {
+        let width = row_column_width(u64::from(ordinals));
+        let file = std::fs::File::create(path).map_err(|source| StoreError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        let mut out = std::io::BufWriter::with_capacity(1 << 20, file);
+        let mut header = Vec::with_capacity(LABEL_HEADER_LEN);
+        header.extend_from_slice(LABEL_MAGIC);
+        header.extend_from_slice(&ROW_COLUMN_VERSION.to_le_bytes());
+        header.push(width);
+        header.push(0);
+        header.extend_from_slice(&row_count.to_le_bytes());
+        header.extend_from_slice(&ordinals.to_le_bytes());
+        out.write_all(&header).map_err(|source| StoreError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        Ok(LabelColumnFile {
+            out,
+            path: path.to_path_buf(),
+            width,
+            hole: hole_at(width),
+            row_count,
+            next_row: 0,
+        })
+    }
+
+    /// Claim `row` for `ordinal`. Rows arrive ascending; every row skipped is a hole.
+    ///
+    /// `Ok(false)` where `row` was already claimed — **a double claim is not a partition**, which
+    /// is the refusal a declaration could not make because single-valuedness is a property of the
+    /// data. The caller abandons the file and serves the level artifact-major.
+    pub fn put(&mut self, row: u32, ordinal: u32) -> Result<bool> {
+        if row >= self.row_count {
+            return Ok(true);
+        }
+        if row < self.next_row {
+            return Ok(false);
+        }
+        self.fill_to(row)?;
+        // Defensive: a walk hands a live artifact's ordinal and never the sentinel, so this maps
+        // nothing today. Left because the sentinel is the file's and a caller that did hand it one
+        // would otherwise write it as an ordinal at the column's width.
+        let value = if ordinal == ROW_COLUMN_HOLE {
+            self.hole
+        } else {
+            ordinal
+        };
+        self.put_narrow(value)?;
+        self.next_row = row + 1;
+        Ok(true)
+    }
+
+    /// Pad the tail with holes and flush. The file is the column.
+    pub fn finish(mut self) -> Result<()> {
+        let row_count = self.row_count;
+        self.fill_to(row_count)?;
+        self.out
+            .into_inner()
+            .map_err(|e| StoreError::Io {
+                path: self.path.clone(),
+                source: e.into_error(),
+            })?
+            .sync_all()
+            .map_err(|source| StoreError::Io {
+                path: self.path.clone(),
+                source,
+            })
+    }
+
+    fn fill_to(&mut self, row: u32) -> Result<()> {
+        while self.next_row < row {
+            self.put_narrow(self.hole)?;
+            self.next_row += 1;
+        }
+        Ok(())
+    }
+
+    fn put_narrow(&mut self, value: u32) -> Result<()> {
+        let bytes = value.to_le_bytes();
+        self.out
+            .write_all(&bytes[..usize::from(self.width)])
+            .map_err(|source| StoreError::Io {
+                path: self.path.clone(),
+                source,
+            })
+    }
+}
+
+/// [`LabelColumnFile`] for the list form: the header, then the offset array in row order, then the
+/// values in `(row, ordinal)` order — each region written once, front to back.
+///
+/// **The bytes are [`pack_list_column`]'s exactly**, asserted by
+/// `a_list_column_file_is_the_packers_bytes`. The offsets are little-endian `u32` and the values
+/// are narrowed to the column's width, which is what [`ListColumnWriter::frame`] and
+/// [`ListColumnWriter::put`] do between them.
+pub struct ListColumnFile {
+    out: std::io::BufWriter<std::fs::File>,
+    path: std::path::PathBuf,
+    width: u8,
+}
+
+impl ListColumnFile {
+    /// Create the file and write its header. `entries` is how many values will follow the offsets
+    /// — known before the first byte because the composition counted its pushes.
+    pub fn create(
+        path: &std::path::Path,
+        ordinals: u32,
+        row_count: u32,
+        entries: u32,
+    ) -> Result<Self> {
+        let width = row_column_width(u64::from(ordinals));
+        let file = std::fs::File::create(path).map_err(|source| StoreError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        let mut out = std::io::BufWriter::with_capacity(1 << 20, file);
+        let mut header = Vec::with_capacity(LIST_HEADER_LEN);
+        header.extend_from_slice(LIST_MAGIC);
+        header.extend_from_slice(&ROW_COLUMN_VERSION.to_le_bytes());
+        header.push(width);
+        header.push(0);
+        header.extend_from_slice(&row_count.to_le_bytes());
+        header.extend_from_slice(&ordinals.to_le_bytes());
+        header.extend_from_slice(&entries.to_le_bytes());
+        out.write_all(&header).map_err(|source| StoreError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        Ok(ListColumnFile {
+            out,
+            path: path.to_path_buf(),
+            width,
+        })
+    }
+
+    /// The next entry of the offset array. Called `row_count + 1` times, in row order.
+    pub fn offset(&mut self, at: u32) -> Result<()> {
+        self.write(&at.to_le_bytes())
+    }
+
+    /// The next value. Called `entries` times, in `(row, ordinal)` order, after every offset.
+    pub fn value(&mut self, ordinal: u32) -> Result<()> {
+        let bytes = ordinal.to_le_bytes();
+        self.write(&bytes[..usize::from(self.width)])
+    }
+
+    pub fn finish(mut self) -> Result<()> {
+        self.out
+            .flush()
+            .and_then(|()| self.out.get_ref().sync_all())
+            .map_err(|source| StoreError::Io {
+                path: self.path.clone(),
+                source,
+            })
+    }
+
+    fn write(&mut self, bytes: &[u8]) -> Result<()> {
+        self.out.write_all(bytes).map_err(|source| StoreError::Io {
+            path: self.path.clone(),
+            source,
+        })
+    }
+}
+
 /// One `(view, layer, level)`'s label column, framed and checked once at open.
 ///
 /// **Mapped, not decoded** — [`ContainmentPack`]'s argument, and here it is the whole point of the
@@ -2139,6 +2333,61 @@ mod tests {
         assert_eq!(row_column_width(65_534), 2);
         assert_eq!(row_column_width(65_535), 4);
         assert_eq!(row_column_width(10_000_000), 4);
+    }
+
+    /// **The file writer and the packer are one column.** The composition writes a level's column
+    /// front to back into a file and every other producer packs a slice; the bytes have to be the
+    /// same bytes, or a fold and a build would disagree about what a level's column is.
+    #[test]
+    fn a_label_column_file_is_the_packers_bytes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        for ordinals in [3u32, 300, 70_000] {
+            let labels: Vec<u32> = vec![0, ROW_COLUMN_HOLE, 2, ROW_COLUMN_HOLE, 1, ROW_COLUMN_HOLE];
+            let path = dir.path().join(format!("label-{ordinals}"));
+            let mut file =
+                LabelColumnFile::create(&path, ordinals, labels.len() as u32).expect("create");
+            for (row, label) in labels.iter().enumerate() {
+                if *label != ROW_COLUMN_HOLE {
+                    assert!(file.put(row as u32, *label).expect("put"));
+                }
+            }
+            file.finish().expect("finish");
+            assert_eq!(
+                std::fs::read(&path).expect("read"),
+                pack_label_column(ordinals, &labels),
+                "the label file at {ordinals} ordinals"
+            );
+        }
+    }
+
+    /// [`a_label_column_file_is_the_packers_bytes`] for the list form, offsets and all.
+    #[test]
+    fn a_list_column_file_is_the_packers_bytes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        for ordinals in [3u32, 300, 70_000] {
+            let at: Vec<u32> = vec![0, 2, 2, 3, 5];
+            let values: Vec<u32> = vec![0, 1, 2, 0, 1];
+            let path = dir.path().join(format!("list-{ordinals}"));
+            let mut file = ListColumnFile::create(
+                &path,
+                ordinals,
+                at.len() as u32 - 1,
+                *at.last().expect("an offset array ends somewhere"),
+            )
+            .expect("create");
+            for offset in &at {
+                file.offset(*offset).expect("offset");
+            }
+            for value in &values {
+                file.value(*value).expect("value");
+            }
+            file.finish().expect("finish");
+            assert_eq!(
+                std::fs::read(&path).expect("read"),
+                pack_list_column(ordinals, &at, &values),
+                "the list file at {ordinals} ordinals"
+            );
+        }
     }
 
     /// **A mapped file and the same bytes in memory are read by one reader**, and the hole survives

@@ -1697,7 +1697,17 @@ impl Engine {
         // coordinate does not match is dropped and the level recomposes on first use — see
         // [`crate::artifacts::ArtifactProjections::adopt`], and note that the direction of the
         // mistake this forbids is permissive.
-        let artifact_projections = Arc::new(crate::artifacts::ArtifactProjections::new());
+        // **The row columns' scratch, swept at open.** A composition writes its partition buckets
+        // and the column itself here and removes them as it goes; what survives an open is what a
+        // process that died mid-fold left behind, under a prefix nothing else in the cache
+        // directory uses. Swept rather than adopted, for `TmpDir`'s reason in the build: these
+        // files are meaningless outside the run that wrote them.
+        let row_column_scratch = cache_dir.join(crate::artifacts::ROW_COLUMN_SCRATCH_DIR);
+        let _ = std::fs::create_dir_all(&row_column_scratch);
+        tessera_store::derived::sweep_row_column_scratch(&row_column_scratch);
+        let artifact_projections = Arc::new(crate::artifacts::ArtifactProjections::new(
+            row_column_scratch,
+        ));
         artifact_projections.adopt_all(
             &prefix_dir,
             generation.load().prefix.as_str(),

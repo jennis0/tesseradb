@@ -10,7 +10,13 @@ use tessera_store::manifest::identity_key_fingerprint;
 use tessera_types::{IdentityKey, IDENTITY_CONSTRUCTION, IDENTITY_ROUNDS};
 
 #[derive(Parser)]
-#[command(name = "tessera", about = "Tessera: a permission-masked point service")]
+#[command(
+    name = "tessera",
+    about = "Tessera: a permission-masked point service",
+    // The commit rather than the crate version: a measurement is read against a tree, and the
+    // crate version does not move between two of them.
+    version = tessera_build::BUILD_COMMIT
+)]
 struct Cli {
     #[command(subcommand)]
     command: Command,

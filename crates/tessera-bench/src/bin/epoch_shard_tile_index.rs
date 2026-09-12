@@ -761,6 +761,7 @@ fn histogram_shard(
                 fixture.ordinals,
                 &shard.space,
                 ServingLayout::RowMajorList,
+                &std::env::temp_dir(),
                 || records.iter().map(|(o, r)| (*o, r)),
             )
             .expect("a list column always composes");

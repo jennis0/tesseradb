@@ -77,6 +77,15 @@ pub enum BuildStage {
     TilerSort,
     /// 10. Segment files: `morton.u32`, `permutation.bin`, `columns.arrow`, and their fsyncs.
     SegmentWrite,
+    /// 10b. The artifact pass: each level's layout chosen, its tile index or row-major column
+    ///    written, every spatial level's resolution and its decomposition filed, and the prefix's
+    ///    containment partitions composed.
+    ///
+    ///    **Its own stage because it ran inside [`BuildStage::Manifests`]**, which is a re-read and
+    ///    a digest of the whole bundle and says nothing about a pass that resolves polygons and
+    ///    composes a column per level per view. One number over the two is a number an operator
+    ///    cannot act on.
+    ArtifactPass,
     /// 11. Manifests — including a full SHA-256 re-read of every byte written.
     Manifests,
 }
@@ -100,11 +109,12 @@ impl BuildStage {
             BuildStage::Layers => "layers",
             BuildStage::TilerSort => "tiler_sort",
             BuildStage::SegmentWrite => "segment_write",
+            BuildStage::ArtifactPass => "artifact_pass",
             BuildStage::Manifests => "manifests",
         }
     }
 
-    pub const ALL: [BuildStage; 17] = [
+    pub const ALL: [BuildStage; 18] = [
         BuildStage::SourceIds,
         BuildStage::Dictionary,
         BuildStage::PairsPack,
@@ -121,6 +131,7 @@ impl BuildStage {
         BuildStage::ColumnRelease,
         BuildStage::TilerSort,
         BuildStage::SegmentWrite,
+        BuildStage::ArtifactPass,
         BuildStage::Manifests,
     ];
 }
@@ -170,7 +181,12 @@ impl<'a> StageTimer<'a> {
     }
 
     /// Close the current stage and open the next. `rows` is this stage's count.
+    ///
+    /// **The allocator's free pages go back to the kernel here**, which is what makes a stage
+    /// boundary the point the next stage's page cache is decided at ([`crate::trim_heap`]). The
+    /// trim runs before the report, so the peak this reads is the stage's own.
     pub(crate) fn end(&mut self, stage: BuildStage, rows: u64) {
+        crate::trim_heap();
         self.observer
             .stage_end(stage, self.start.elapsed(), rows, peak_rss_kib());
         self.start = std::time::Instant::now();
@@ -225,7 +241,7 @@ pub struct StageRecord {
 /// Collects every stage's record, for writing as JSON at the end of the build.
 ///
 /// `Mutex` rather than `RefCell` because [`BuildObserver`] is `Send + Sync`; the lock is taken
-/// once per stage, seventeen times in a build, so it costs nothing measurable.
+/// once per stage, eighteen times in a build, so it costs nothing measurable.
 #[derive(Default)]
 pub struct JsonStageTimings {
     records: std::sync::Mutex<Vec<StageRecord>>,

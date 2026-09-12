@@ -141,7 +141,9 @@ At 10⁷ the abstracts cost **+9,594 MiB of `VmHWM` and +562 MiB of anonymous me
 apparent peak is evictable — and under a 6 GB budget the anonymous cost is **+208 MiB**, the text
 pass spilling 298 runs against 96 and cascading them in one pass to 3. The anonymous high-water is
 the `manifests` stage in *every* arm, which is the artifact layout over this corpus's 471,778,374
-MeSH member rows and not the prose at all.
+MeSH member rows and not the prose at all. **The stage has since been split**: the artifact layout
+is its own record, `artifact_pass`, and `manifests` reports the manifests alone, so the figures
+here name a stage that no longer covers the work they attribute to it.
 
 Extrapolating **anonymous memory only**, linearly per row from 10⁷ — **modelled, not measured**:
 16.4 GB at 36M without abstracts, **18.6 GB with them** (17.2 GB at a 6 GB budget), against the

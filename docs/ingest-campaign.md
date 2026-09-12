@@ -1284,7 +1284,8 @@ is now the only path an item's labels take at either entry point, and the driver
   Anonymous memory alone extrapolates to **18.6 GB at 36M with abstracts against 16.4 GB without** —
   modelled, and the without-figure is 2% from the real whole-corpus build's 16.03 GB (§4.6). The
   anonymous high-water is the `manifests` stage in every arm, which is the MeSH DAG's layout and not
-  the prose. So the ruling turns on a 27.7 GB bundle and roughly double the wall time, not on a
+  the prose — the stage has since been split, and that layout is now `artifact_pass`, so the figure
+  predates the name it is stated under. So the ruling turns on a 27.7 GB bundle and roughly double the wall time, not on a
   memory wall, and the "streaming text column" the plan called for is machinery that already exists.
   The built rung takes them off, which is `prepare.py`'s default; `--abstracts` is the other run and
   needs no code change.

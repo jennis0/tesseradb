@@ -183,6 +183,33 @@ impl<T: Zeroable> MappedArray<T> {
         }
     }
 
+    /// The array's bytes, as the file holds them: `len * size_of::<T>()` little-endian values.
+    ///
+    /// For the passes that move a whole run of values at once and do not care what `T` is — the
+    /// attribute join's replay writes one bucket's window into the column file as a single
+    /// sequential run, and a run of `u16`s and a run of `i64`s are the same `memcpy`.
+    pub(crate) fn as_bytes(&self) -> &[u8] {
+        match &self.map {
+            // SAFETY: the mapping is `len * size_of::<T>()` bytes and every byte of it is a byte
+            // of the array; `&self` bars a concurrent write.
+            Some(map) => unsafe {
+                std::slice::from_raw_parts(map.as_ptr(), self.len * std::mem::size_of::<T>())
+            },
+            None => &[],
+        }
+    }
+
+    /// [`Self::as_bytes`], writable.
+    pub(crate) fn as_mut_bytes(&mut self) -> &mut [u8] {
+        let len = self.len * std::mem::size_of::<T>();
+        match &mut self.map {
+            // SAFETY: as `as_bytes`, and `&mut self` gives exclusive access. `T: Zeroable` makes
+            // every byte pattern a caller writes a value of `T`.
+            Some(map) => unsafe { std::slice::from_raw_parts_mut(map.as_mut_ptr(), len) },
+            None => &mut [],
+        }
+    }
+
     /// The array, writable. Taken once by the caller and held as an ordinary slice for the rest of
     /// the pass where the pass both fills and reads it — one binding for both is what keeps the
     /// mapping's exclusivity obvious.
@@ -194,38 +221,6 @@ impl<T: Zeroable> MappedArray<T> {
             },
             None => &mut [],
         }
-    }
-}
-
-/// The handover to Arrow, which asks of an allocation exactly what a mapped array of a plain-old
-/// element already is: shareable across threads, and free of the interior mutability a
-/// `catch_unwind` boundary would have to reason about. Stated as bounds here rather than as
-/// supertraits of [`Zeroable`], because they are Arrow's requirement and not the storage's.
-impl<T: Zeroable + Send + Sync + std::panic::RefUnwindSafe + 'static> MappedArray<T> {
-    /// Hand the mapping to Arrow as a values buffer, **without copying a byte**.
-    ///
-    /// The buffer owns this array, so the file lives exactly as long as the record batch reading
-    /// it and is unlinked with it — which is what lets a row-order column be built on disk and
-    /// still reach the segment writer as the values buffer it will be written from. `mmap` returns
-    /// a page-aligned pointer, so every element type's alignment holds (`write_columns_from_parts`
-    /// argues the same for its own two columns).
-    ///
-    /// A zero-length array holds no mapping and answers with an empty buffer.
-    pub(crate) fn into_arrow_buffer(self) -> arrow::buffer::Buffer {
-        let Some(map) = self.map.as_ref() else {
-            return arrow::buffer::Buffer::from_vec(Vec::<u8>::new());
-        };
-        let bytes = self.len * std::mem::size_of::<T>();
-        let ptr = std::ptr::NonNull::new(map.as_ptr() as *mut u8)
-            .expect("a mapping's address is never null");
-        // The array itself is the allocation: dropping the last reference to the buffer drops the
-        // mapping and unlinks the file, in that order (see `Drop` below).
-        let owner = std::sync::Arc::new(self);
-        // SAFETY: `ptr` addresses the start of a mapping of `len * size_of::<T>()` bytes, which is
-        // `bytes`; `owner` holds that mapping for as long as the buffer lives, and nothing else
-        // holds a reference to it — `self` was taken by value, and the only `&mut` route into the
-        // mapping (`as_mut_slice`) needs a `&mut MappedArray` no caller can now obtain.
-        unsafe { arrow::buffer::Buffer::from_custom_allocation(ptr, bytes, owner) }
     }
 }
 
@@ -638,51 +633,23 @@ impl Drop for MappedArena {
 /// [`MappedArray`] and the one whose doc comment argued the case.
 pub(crate) type MappedU32 = MappedArray<u32>;
 
-/// Buffer size for spill I/O, both directions. Four mebibytes: large enough that the syscall
-/// cost is noise against the encode/decode work, small enough to be irrelevant against the
-/// build's peak memory.
-const SPILL_BUF_BYTES: usize = 4 << 20;
-
-/// splitmix64's finalizer — a private **twin of `pipeline::mix64`**, same constants (the ones
-/// contracts §2.6 fixes for the identity construction).
+/// The partition, the receipts and the anchors — **one implementation, in the crate the build and
+/// the engine's fold share** (owner ruling, 2026-09-12;
+/// `docs/evidence/memos/2026-09-12-bounded-assembly-design.md` §4.6). Re-imported under the names
+/// this module always had, so no call site here changed when they moved.
 ///
-/// Duplicated rather than shared or passed in: the pipeline's copy is private to a file this
-/// task may not modify, and threading a fn pointer through every writer just to avoid a
-/// three-line pure function would couple this module's API to its first caller. The constants
-/// are pinned by [`tests::mix64_matches_the_splitmix64_test_vector`], so the twins cannot
-/// drift silently.
-///
-/// Why a mixed sum and not a plain one: a plain sum of raw values can be *compensated* —
-/// replace records `{1, 3}` with `{2, 2}` and count and sum both survive — so each record is
-/// put through a full-avalanche mixer first. Not cryptographic, and not meant to be: this
-/// defends against torn writes, truncation and accidental double-appends, not an adversary
-/// with write access to the build's own scratch directory.
-fn mix64(mut x: u64) -> u64 {
-    x = x.wrapping_add(0x9E37_79B9_7F4A_7C15);
-    x = (x ^ (x >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-    x = (x ^ (x >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-    x ^ (x >> 31)
-}
+/// What stays behind is what only a build has: [`boundaries_from_histogram`] and the Morton
+/// routing above it, for a key no engine partitions on.
+pub(crate) use tessera_store::partition::{
+    boundaries_uniform, mix64, partition_buffer_bytes, read_bucket, Partition, PartitionStore,
+    SPILL_BUF_BYTES,
+    SpillReceipt, SpillWriter, PARTITION_BUCKETS, PARTITION_BUCKET_RECORDS,
+    PARTITION_COUNTED_BUCKETS,
+};
 
 /// The value a band file's anchor mixes per pair: `term` in the high half, `entity` in the low.
 fn pack_pair(term: u32, entity: u32) -> u64 {
     ((term as u64) << 32) | entity as u64
-}
-
-/// What `finish` hands back and every read path verifies against: the file, how many records
-/// it holds, and the content anchor over those records.
-///
-/// The receipt lives in the build's memory, never on disk — a receipt stored beside the file
-/// it vouches for could be tampered with in the same incident, and the build that wrote the
-/// spill is the only reader it will ever have.
-#[derive(Debug, Clone)]
-pub(crate) struct SpillReceipt {
-    pub(crate) path: PathBuf,
-    /// Records written: `u64` values for a bucket file, `(term, entity)` pairs for a band file.
-    pub(crate) count: u64,
-    /// Wrapping sum of [`mix64`] over each record — the raw `u64` for a bucket file,
-    /// [`pack_pair`] for a band file.
-    pub(crate) anchor: u64,
 }
 
 // --------------------------------------------------------------------------------------------
@@ -748,102 +715,55 @@ impl Drop for TmpDir {
     }
 }
 
-// --------------------------------------------------------------------------------------------
-// Bucket files
-// --------------------------------------------------------------------------------------------
 
-/// Appends one bucket file: packed `u64` values (`ordinal << 32 | term`).
+
+/// Boundaries for a key whose distribution is known only by counting it.
 ///
-/// **On disk:** each value as 8 bytes little-endian, concatenated; no header, no trailer, no
-/// padding — `count * 8` bytes exactly. Integrity is external, via the [`SpillReceipt`].
-pub(crate) struct SpillWriter {
-    path: PathBuf,
-    writer: BufWriter<File>,
-    count: u64,
-    anchor: u64,
+/// `counts` is the histogram — ascending keys with their counts, zeros omitted — and the result is
+/// the first key of each bucket, starting at `first`, together with the largest bucket the
+/// boundaries admit.
+///
+/// **Greedy, closing a bucket when the next key would take it past `target`.** A key whose own
+/// count is over the target gets a bucket to itself and is still over it: one key cannot be split
+/// by a boundary over that key, which is what a caller's refinement is for. The segment assembly
+/// counts `morton >> 8`, counts a bin over the target again over its full codes, and counts a code
+/// over the target again over the `priority` prefix beneath it, offering the refined keys here
+/// (`docs/evidence/memos/2026-09-12-bounded-assembly-design.md` §3).
+///
+/// **At most `2 × total / target + 1` buckets**, because a closed bucket and the key that closed it
+/// together exceed the target, so consecutive buckets sum to more than one target. With
+/// `target = n / 128` that is 257, and it is what the residency model charges the writer buffers
+/// against rather than [`PARTITION_BUCKETS`].
+///
+/// **Generic in the key** because the assembly's is a `(morton, priority)` pair and the uniform
+/// constructor's is a `u32`. One greedy fill, so a second key cannot come with a second rule.
+pub(crate) fn boundaries_from_histogram<K: Copy + Ord>(
+    first: K,
+    counts: impl IntoIterator<Item = (K, u64)>,
+    target: u64,
+) -> (Vec<K>, u64) {
+    let target = target.max(1);
+    let mut boundaries = vec![first];
+    let mut running = 0u64;
+    let mut largest = 0u64;
+    for (key, count) in counts {
+        if count == 0 {
+            continue;
+        }
+        if running > 0 && running.saturating_add(count) > target {
+            debug_assert!(
+                *boundaries.last().expect("the first boundary is laid at entry") < key,
+                "a histogram's keys must ascend"
+            );
+            boundaries.push(key);
+            running = 0;
+        }
+        running = running.saturating_add(count);
+        largest = largest.max(running);
+    }
+    (boundaries, largest)
 }
 
-impl SpillWriter {
-    pub(crate) fn create(path: &Path) -> Result<SpillWriter> {
-        let file = File::create(path).map_err(|e| BuildError::io(path, e))?;
-        Ok(SpillWriter {
-            path: path.to_path_buf(),
-            writer: BufWriter::with_capacity(SPILL_BUF_BYTES, file),
-            count: 0,
-            anchor: 0,
-        })
-    }
-
-    pub(crate) fn push(&mut self, value: u64) -> Result<()> {
-        self.writer
-            .write_all(&value.to_le_bytes())
-            .map_err(|e| BuildError::io(&self.path, e))?;
-        self.count += 1;
-        self.anchor = self.anchor.wrapping_add(mix64(value));
-        Ok(())
-    }
-
-    /// Flush, fsync, and hand back the receipt the eventual [`read_bucket`] must be given.
-    pub(crate) fn finish(self) -> Result<SpillReceipt> {
-        let SpillWriter {
-            path,
-            writer,
-            count,
-            anchor,
-        } = self;
-        let file = writer
-            .into_inner()
-            .map_err(|e| BuildError::io(&path, e.into_error()))?;
-        file.sync_all().map_err(|e| BuildError::io(&path, e))?;
-        Ok(SpillReceipt {
-            path,
-            count,
-            anchor,
-        })
-    }
-}
-
-/// Read a whole bucket file back, verifying byte length *and* content anchor against the
-/// receipt before returning a single value. Loading whole is by design — the caller's
-/// pre-flight arithmetic sized the batch so its buckets fit in RAM.
-pub(crate) fn read_bucket(receipt: &SpillReceipt) -> Result<Vec<u64>> {
-    // Checked: `count` comes from our own receipt, but a length computation that can wrap is a
-    // length computation that can be made to lie, so the multiply is guarded regardless of
-    // provenance. (No `count <= u32::MAX` cap here — callers enforce their own.)
-    let expected_bytes = receipt.count.checked_mul(8).ok_or_else(|| {
-        BuildError::Invalid(format!(
-            "bucket file {}: receipt count {} overflows the byte-length computation",
-            receipt.path.display(),
-            receipt.count
-        ))
-    })?;
-    let bytes = fs::read(&receipt.path).map_err(|e| BuildError::io(&receipt.path, e))?;
-    if bytes.len() as u64 != expected_bytes {
-        return Err(BuildError::Invalid(format!(
-            "bucket file {}: length mismatch: file is {} bytes but the receipt's count {} \
-             requires exactly {expected_bytes}",
-            receipt.path.display(),
-            bytes.len(),
-            receipt.count
-        )));
-    }
-    let mut values = Vec::with_capacity(bytes.len() / 8);
-    let mut anchor = 0u64;
-    for chunk in bytes.chunks_exact(8) {
-        let value = u64::from_le_bytes(chunk.try_into().expect("chunks_exact(8) yields 8 bytes"));
-        anchor = anchor.wrapping_add(mix64(value));
-        values.push(value);
-    }
-    if anchor != receipt.anchor {
-        return Err(BuildError::Invalid(format!(
-            "bucket file {}: content anchor mismatch: recomputed {anchor:#018x} but the \
-             receipt says {:#018x} — the file's bytes are not the bytes that were written",
-            receipt.path.display(),
-            receipt.anchor
-        )));
-    }
-    Ok(values)
-}
 
 // --------------------------------------------------------------------------------------------
 // Band files
@@ -1957,6 +1877,14 @@ pub(crate) struct MemberExtent {
     anchor: u64,
 }
 
+impl MemberExtent {
+    /// How many members the extent holds — what the publication sizes its batch against, read
+    /// before the extent is decoded into a bitmap.
+    pub(crate) fn entries(&self) -> u32 {
+        self.entries
+    }
+}
+
 /// Writes the merged member table: every artifact's members, contiguous, in ascending index
 /// order.
 ///
@@ -2244,14 +2172,6 @@ mod tests {
     use super::*;
     use proptest::prelude::*;
 
-    fn write_bucket(path: &Path, values: &[u64]) -> SpillReceipt {
-        let mut writer = SpillWriter::create(path).unwrap();
-        for &value in values {
-            writer.push(value).unwrap();
-        }
-        writer.finish().unwrap()
-    }
-
     fn write_band(path: &Path, term_lo: u32, pairs: &[(u32, u32)]) -> SpillReceipt {
         let mut writer = BandWriter::create(path, term_lo).unwrap();
         for &(term, entity) in pairs {
@@ -2290,13 +2210,6 @@ mod tests {
         result.expect_err("expected an error").to_string()
     }
 
-    /// Pins the constants against `pipeline::mix64`'s (both are splitmix64's finalizer): the
-    /// widely published first output of splitmix64 seeded with 0. If either twin's constants
-    /// drift, one of the two crates' copies of this vector fails.
-    #[test]
-    fn mix64_matches_the_splitmix64_test_vector() {
-        assert_eq!(mix64(0), 0xE220_A839_7B1D_CDAF);
-    }
 
     // ---- mapped arrays and the arena --------------------------------------------------
 
@@ -2397,90 +2310,6 @@ mod tests {
         }
         assert!(used > ARENA_MIN_BYTES, "the arena must have grown at all");
     }
-
-    // ---- bucket files -----------------------------------------------------------------
-
-    #[test]
-    fn bucket_round_trips() {
-        let temp = tempfile::TempDir::new().unwrap();
-        let cases: Vec<Vec<u64>> = vec![
-            vec![],
-            vec![0],
-            vec![42],
-            vec![u64::MAX],
-            // The packed shape the pipeline writes: ordinal << 32 | term, at u32 boundaries.
-            vec![
-                0,
-                1,
-                u32::MAX as u64,
-                (1u64 << 32) | 7,
-                ((u32::MAX as u64) << 32) | u32::MAX as u64,
-            ],
-            (0..10_000).map(|i| i * 0x9E37).collect(),
-        ];
-        for (i, values) in cases.iter().enumerate() {
-            let path = temp.path().join(format!("bucket-{i}.u64"));
-            let receipt = write_bucket(&path, values);
-            assert_eq!(receipt.count, values.len() as u64);
-            assert_eq!(read_bucket(&receipt).unwrap(), *values);
-        }
-    }
-
-    #[test]
-    fn bucket_flip_is_an_anchor_mismatch() {
-        let temp = tempfile::TempDir::new().unwrap();
-        let path = temp.path().join("bucket.u64");
-        let receipt = write_bucket(&path, &[1, 2, 3, 4]);
-        flip_byte(&path, 9);
-        let message = err_string(read_bucket(&receipt));
-        assert!(message.contains("anchor mismatch"), "got: {message}");
-        assert!(message.contains("bucket.u64"), "got: {message}");
-    }
-
-    #[test]
-    fn bucket_truncation_is_a_length_mismatch() {
-        let temp = tempfile::TempDir::new().unwrap();
-        let path = temp.path().join("bucket.u64");
-        let receipt = write_bucket(&path, &[1, 2, 3]);
-        for cut in [1usize, 8] {
-            let receipt = receipt.clone();
-            write_bucket(&path, &[1, 2, 3]);
-            truncate_by(&path, cut);
-            let message = err_string(read_bucket(&receipt));
-            assert!(message.contains("length mismatch"), "got: {message}");
-        }
-    }
-
-    #[test]
-    fn bucket_trailing_garbage_is_a_length_mismatch() {
-        let temp = tempfile::TempDir::new().unwrap();
-        let path = temp.path().join("bucket.u64");
-        let receipt = write_bucket(&path, &[5, 6]);
-        // A whole extra value as well as a ragged byte: both must fail on length.
-        for extra in [&[0u8; 8][..], &[0xAB][..]] {
-            write_bucket(&path, &[5, 6]);
-            append(&path, extra);
-            let message = err_string(read_bucket(&receipt));
-            assert!(message.contains("length mismatch"), "got: {message}");
-        }
-    }
-
-    #[test]
-    fn bucket_length_multiply_cannot_overflow() {
-        let temp = tempfile::TempDir::new().unwrap();
-        let path = temp.path().join("bucket.u64");
-        write_bucket(&path, &[]);
-        let receipt = SpillReceipt {
-            path,
-            count: u64::MAX / 2,
-            anchor: 0,
-        };
-        let message = err_string(read_bucket(&receipt));
-        assert!(message.contains("overflows"), "got: {message}");
-    }
-
-    // ---- band files -------------------------------------------------------------------
-
     #[test]
     fn band_round_trips() {
         let temp = tempfile::TempDir::new().unwrap();
@@ -3192,4 +3021,5 @@ mod tests {
             }
         }
     }
+
 }
