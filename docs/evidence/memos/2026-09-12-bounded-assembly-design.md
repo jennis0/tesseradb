@@ -48,6 +48,12 @@ at a scattered index.** Three consequences:
    bucket and one window; disk is one copy of the values, released bucket by bucket.
 3. Freed heap is returned to the system at every stage boundary.
 
+One exception is named, because it is a rate over the row count and the rule says there is
+none: writing `columns.arrow` in place runs Arrow's writer over the real row count, and the
+writer allocates an all-ones validity bitmap of `n / 8` bytes for every column, all alive at
+once, 2.2 GB at rung 6. The model charges it and the model's test subtracts it. It is the price
+of one encoder rather than two.
+
 Two models read the result and they are not the same model. The **batch plan** (`loop_fixed`,
 `per_batch` in `plan_build`) sets the signature stride, the stride partitions entity-id space,
 and a different stride is a different entity-id assignment, which I9 forbids. Its arithmetic
@@ -145,11 +151,12 @@ goes.
 5), the occupancy state. Nothing sized by `n`.
 
 **Disk, at rung 6.** The row partition stands whole at 42 GB when step 2 ends, with the
-28 GB of ordinal geometry just released. Each partition after it is written while the one
-before is consumed, so the stage's transient never exceeds that figure. Against today: the
-28 GB of entity-order geometry is not written and the 42 GB of column scratch that a
-vector-backed writer would need does not exist. The stage's transient rises by 14 GB; §7 has
-the phase arithmetic.
+28 GB of ordinal geometry just released, and is consumed while the `(entity, row)` partition
+grows. That partition is then read once per render column, so it stands for the whole render
+tail beside the lane being built: `(8 + 4 + w)` B a row, 45 GB for `kingdom` at 1 B and 56 GB
+for a `u32` column. Against today: the 28 GB of entity-order geometry is not written and the
+42 GB of column scratch a vector-backed writer would need does not exist. The stage's
+transient rises by about 17 GB at rung 6; §7 has the phase arithmetic.
 
 ### 4.2 The keyword dictionary's ordinals
 
@@ -211,35 +218,24 @@ which the batching bounds and the measurement in §7 checks.
 
 ### 4.6 The artifact pass, and the fold with it
 
-**Built.** `project_row_column` built a level's label lane as a `vec![ROW_COLUMN_HOLE;
-row_count]`, 14 GB a level at rung 6, and a list lane's offset table the same way, and the
-engine composed the same column through the same function at every fold. Owner ruling,
-2026-09-12: **one implementation, disk-backed on both sides.** The partition primitive, its
-receipts and its anchors moved to `tessera-store`, which the build and the engine share; every
-membership entry is pushed as `(row, ordinal)` to buckets by row range, and each bucket is
-sorted by `(row, ordinal)` and replayed into a positional writer that puts the column front to
-back into the file it becomes. The sort is what makes the list form's byte order a property of
-the replay: a row's ordinals ascend because both walks hand them ascending, and now because
-they are sorted. The build's buckets live under `.build-tmp/`; the fold's under the
-deployment's cache directory, under a prefix an engine's open sweeps for what a process that
-died mid-fold left behind. The fold no longer builds a `RowColumn` to copy its bytes out of.
+`project_row_column` builds a level's row column by walking each artifact's row bitmap and
+writing the ordinal at every row into a row-sized array, 14 GB a level at rung 6, then packs
+it. The engine composes the same column at every fold through the same function. Owner ruling,
+2026-09-12: **one implementation, disk-backed on both sides.** The partition primitive moves to
+the store crate; every membership entry is pushed as `(row, ordinal)` to buckets by row range,
+and each bucket is sorted by `(row, ordinal)` and replayed into the packed writer, which writes
+the column front to back into the file it becomes. The sort is what makes the list form's byte
+order a property of the replay: a row's ordinals ascend because both walks hand them ascending,
+and now because they are sorted. The build's buckets live under `.build-tmp/`; the fold's under
+the deployment's cache directory, and an open sweeps what a crashed fold left. The fold's cost
+becomes 8 B an entry written and read once — twice for the list form, whose offsets need a
+counting pass over the buckets before any value can be placed — in place of a 4 B a row heap
+array and two passes,
+and its memory is one bucket. The other two routes considered: one byte writer fed by two
+traversals, which leaves the fold's memory as it is; and the partition with heap buckets on the
+engine, which costs 8 B an entry there. Neither taken.
 
-The fold's cost is 8 B an entry written and read once — twice for the list form, whose offsets
-need a counting pass over the buckets before any value can be placed — in place of a 4 B a row
-heap array and two traversals, and its memory is one bucket. The other two routes considered:
-one byte writer fed by two traversals, which leaves the fold's memory as it is; and the
-partition with heap buckets on the engine, which costs 8 B an entry there. Neither taken.
-
-Measured, one fold of the 10⁶ MedCPT sample (`medcpt-1m`, the 10⁷ bundle on this box predating
-the current manifest format): anonymous RSS over the fold 259 MB before and 167 MB after, wall
-9.09 s and 8.48 s, one run each on a loaded box.
-
-The entity-order model charges the pass's partition as the primitive's constant in the assembly
-phase, and the disk model gains its buckets at 8 B a member entry of the largest layer beside
-the row-column lanes it already charged.
-
-The artifact pass also gets its own stage record, `manifests` having reported its interval: at
-`gbif-64p` that is 8.47 s of pass against 0.21 s of manifest.
+The artifact pass also gets its own stage record, since `manifests` today reports its interval.
 
 ### 4.7 The rest
 
@@ -285,13 +281,14 @@ What this design moves, by phase:
 |---|---|---|
 | join | the value columns scattered in place | + `(entity, value)` partitions, 5 B and 6 B a row for `kingdom` and `year`, 38 GB, consumed into the same column files; the phase's peak, 281 GB forecast, stays below assembly's |
 | index | `keyword-ordinals.scratch`, 13 GB | + `(row, ordinal)` partition, 26 GB; 335 GB forecast, below assembly's |
-| assembly | entity-order geometry 28 GB, and 70 GB of heap | row partition 42 GB, the later partitions growing as it is consumed: **+14 GB** |
+| assembly | entity-order geometry 28 GB, and 70 GB of heap | row partition 42 GB while the ordinal geometry is released; then the `(entity, row)` partition beside each render lane, 45 GB at `kingdom`: **+17 GB** |
 
-Two model corrections come with it and are worth more than the increase: `dict.bin` is charged
-at the sampled distinct-key estimate the census already provides rather than at one key a row
-(−30 GB), and `--no-oracle-pairs` is the campaign's setting, the file serving only the test
-oracle (−14 GB). The forecast the plan prints for rung 6 is then about 406 GB against 438 GB
-free, and the modelled peak about 354 GB. No archive and no second volume.
+`--no-oracle-pairs` is the campaign's setting, the file serving only the test oracle, and the
+model already drops its term under the flag (−14 GB). The `dict.bin` term stays a ceiling of one
+key a row: no distinct-key estimate exists before the dictionary is built, one taken from a
+sample errs low, and an operator hint is complexity nobody should carry. The forecast is a
+warning and the build goes on. The forecast the plan prints for rung 6 is then about 440 GB
+against 438 GB free, and the modelled peak about 357 GB. No archive and no second volume.
 
 **The entity-id assignment stays.** Assigning entities in Morton order would make row order
 and entity order agree and remove the permutation, but entity order is signature-major so that
@@ -312,14 +309,15 @@ each and one full gate at the end:
 | | scope | why this order |
 |---|---|---|
 | A | §4.5, §4.7 | without the batched publication the pre-flight refuses rung 6 outright once the term is honest, and without the trim nothing after `layers` has a cache |
-| B | §3, §4.1, §4.6, the two model corrections of §7 | the stage that cannot complete at rung 6 under any budget |
+| B | §3, §4.1, §4.6 | the stage that cannot complete at rung 6 under any budget |
 | C | §4.2, §4.3 | the eight-hour stage and the 3.6× write amplification |
 | D | §4.4 | the smallest gain; last |
 
 ## 9. Decisions
 
-- **Disk.** Taken by the design: `columns.arrow` written in place, the two model corrections,
-  no archive and no second volume.
+- **Disk.** Taken by the design: `columns.arrow` written in place, `--no-oracle-pairs`, no
+  archive and no second volume. The `dict.bin` ceiling stands (owner ruling, 2026-09-12: no
+  operator hint).
 - **The render gather.** Always two partitions (§4.1 step 5), or direct when the column fits
   a share of the budget. The design says always; at rung 6 it costs nothing at the peak.
 - **The heap.** `malloc_trim` at stage boundaries, measured, before any allocator change.
