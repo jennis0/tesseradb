@@ -1633,7 +1633,8 @@ pub fn publish(
     std::fs::create_dir_all(&members_dir).map_err(|e| BuildError::io(&members_dir, e))?;
     let entries_per_batch = publication_batch_entries(plan.memory_budget);
     eprintln!(
-        "layers: publishing in batches of at most {entries_per_batch} member entr(ies),          {PUBLICATION_BYTES_PER_ENTRY} B an entry against a {}th of the {} MiB budget",
+        "layers: publishing in batches of at most {entries_per_batch} member entr(ies), \
+         {PUBLICATION_BYTES_PER_ENTRY} B an entry against a {}th of the {} MiB budget",
         PUBLICATION_BUDGET_SHARE,
         plan.memory_budget >> 20
     );

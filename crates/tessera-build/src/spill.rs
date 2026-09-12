@@ -224,38 +224,6 @@ impl<T: Zeroable> MappedArray<T> {
     }
 }
 
-/// The handover to Arrow, which asks of an allocation exactly what a mapped array of a plain-old
-/// element already is: shareable across threads, and free of the interior mutability a
-/// `catch_unwind` boundary would have to reason about. Stated as bounds here rather than as
-/// supertraits of [`Zeroable`], because they are Arrow's requirement and not the storage's.
-impl<T: Zeroable + Send + Sync + std::panic::RefUnwindSafe + 'static> MappedArray<T> {
-    /// Hand the mapping to Arrow as a values buffer, **without copying a byte**.
-    ///
-    /// The buffer owns this array, so the file lives exactly as long as the record batch reading
-    /// it and is unlinked with it — which is what lets a row-order column be built on disk and
-    /// still reach the segment writer as the values buffer it will be written from. `mmap` returns
-    /// a page-aligned pointer, so every element type's alignment holds (`write_columns_from_parts`
-    /// argues the same for its own two columns).
-    ///
-    /// A zero-length array holds no mapping and answers with an empty buffer.
-    pub(crate) fn into_arrow_buffer(self) -> arrow::buffer::Buffer {
-        let Some(map) = self.map.as_ref() else {
-            return arrow::buffer::Buffer::from_vec(Vec::<u8>::new());
-        };
-        let bytes = self.len * std::mem::size_of::<T>();
-        let ptr = std::ptr::NonNull::new(map.as_ptr() as *mut u8)
-            .expect("a mapping's address is never null");
-        // The array itself is the allocation: dropping the last reference to the buffer drops the
-        // mapping and unlinks the file, in that order (see `Drop` below).
-        let owner = std::sync::Arc::new(self);
-        // SAFETY: `ptr` addresses the start of a mapping of `len * size_of::<T>()` bytes, which is
-        // `bytes`; `owner` holds that mapping for as long as the buffer lives, and nothing else
-        // holds a reference to it — `self` was taken by value, and the only `&mut` route into the
-        // mapping (`as_mut_slice`) needs a `&mut MappedArray` no caller can now obtain.
-        unsafe { arrow::buffer::Buffer::from_custom_allocation(ptr, bytes, owner) }
-    }
-}
-
 impl<T: Zeroable> Drop for MappedArray<T> {
     fn drop(&mut self) {
         // Unlinked as the array is released rather than at `TmpDir::close`, so the disk comes back
@@ -801,13 +769,13 @@ impl SpillWriter {
         })
     }
 
-    /// A [`Partition`]'s bucket writer: the same file with a mebibyte of buffer rather than four,
-    /// there being 128 of them open at once.
-    pub(crate) fn create_wide(path: &Path) -> Result<SpillWriter> {
+    /// A [`Partition`]'s bucket writer: the same file at whatever buffer the partition sized for
+    /// it ([`partition_buffer_bytes`]), there being 128 or more of them open at once.
+    pub(crate) fn create_sized(path: &Path, buffer: usize) -> Result<SpillWriter> {
         let file = File::create(path).map_err(|e| BuildError::io(path, e))?;
         Ok(SpillWriter {
             path: path.to_path_buf(),
-            writer: BufWriter::with_capacity(PARTITION_BUF_BYTES, file),
+            writer: BufWriter::with_capacity(buffer, file),
             count: 0,
             anchor: 0,
         })
@@ -912,8 +880,40 @@ pub(crate) fn read_bucket(receipt: &SpillReceipt) -> Result<Vec<u64>> {
 /// cheap enough that there is nothing to buy by deriving it.
 pub(crate) const PARTITION_BUCKETS: usize = 128;
 
-/// One bucket writer's buffer. A mebibyte, 128 MiB over the partition.
+/// The largest a bucket writer's buffer gets. A mebibyte, 128 MiB over a uniform partition — and
+/// what a corpus large enough to fill them gets; see [`partition_buffer_bytes`].
 pub(crate) const PARTITION_BUF_BYTES: usize = 1 << 20;
+
+/// The smallest. A page, so a partition over a handful of rows costs a page a bucket and not a
+/// mebibyte: at 4,000 rows the full-size buffers are 257 MiB of anonymous memory against 48 kB of
+/// records, which is a pre-flight refusal on a fixture that fits in a cache line's worth of disk.
+pub(crate) const PARTITION_MIN_BUF_BYTES: usize = 4096;
+
+/// One bucket writer's buffer, for a partition expecting `records` records of `record_width` over
+/// `buckets` buckets: what one bucket will hold, clamped to [`PARTITION_MIN_BUF_BYTES`] and
+/// [`PARTITION_BUF_BYTES`].
+///
+/// **The residency model computes the same number from the same inputs**, so what the pre-flight
+/// charges is what the pass allocates.
+pub(crate) fn partition_buffer_bytes(records: u64, record_width: usize, buckets: u64) -> usize {
+    let per_bucket = records
+        .saturating_mul(record_width as u64)
+        .div_ceil(buckets.max(1));
+    (per_bucket as usize).clamp(PARTITION_MIN_BUF_BYTES, PARTITION_BUF_BYTES)
+}
+
+/// The most records one bucket can hold, **whatever the corpus**: every key a partition routes on
+/// is a `u32`, so 2³² keys over [`PARTITION_BUCKETS`] buckets is 33.55×10⁶ records. This is the
+/// constant the residency model charges a partition's loaded bucket and window at — the type's
+/// bound, not the corpus's, which is what makes the whole primitive's memory a constant
+/// (`docs/evidence/memos/2026-09-12-bounded-assembly-design.md` §3).
+pub(crate) const PARTITION_BUCKET_RECORDS: u64 = (1u64 << 32) / PARTITION_BUCKETS as u64;
+
+/// The buckets a partition over a **counted** key can come to, against the 128 a uniform one has:
+/// [`boundaries_from_histogram`] closes a bucket only when the next key would pass the target, so a
+/// closed bucket and the key that closed it exceed it together and consecutive buckets sum to more
+/// than one target. With a target of `n / 128` that is at most 257.
+pub(crate) const PARTITION_COUNTED_BUCKETS: u64 = 2 * PARTITION_BUCKETS as u64 + 1;
 
 /// Boundaries for a key that is **dense and uniform** over `[0, key_bound)`: an entity index, a
 /// row index, an ordinal.
@@ -932,6 +932,53 @@ pub(crate) fn boundaries_uniform(key_bound: u64) -> Vec<u32> {
         .collect::<std::collections::BTreeSet<u32>>()
         .into_iter()
         .collect()
+}
+
+/// Boundaries for a key whose distribution is known only by counting it.
+///
+/// `counts` is the histogram — ascending keys with their counts, zeros omitted — and the result is
+/// the first key of each bucket, starting at `first`, together with the largest bucket the
+/// boundaries admit.
+///
+/// **Greedy, closing a bucket when the next key would take it past `target`.** A key whose own
+/// count is over the target gets a bucket to itself and is still over it: one key cannot be split
+/// by a boundary over that key, which is what a caller's refinement is for. The segment assembly
+/// counts `morton >> 8`, counts a bin over the target again over its full codes, and counts a code
+/// over the target again over the `priority` prefix beneath it, offering the refined keys here
+/// (`docs/evidence/memos/2026-09-12-bounded-assembly-design.md` §3).
+///
+/// **At most `2 × total / target + 1` buckets**, because a closed bucket and the key that closed it
+/// together exceed the target, so consecutive buckets sum to more than one target. With
+/// `target = n / 128` that is 257, and it is what the residency model charges the writer buffers
+/// against rather than [`PARTITION_BUCKETS`].
+///
+/// **Generic in the key** because the assembly's is a `(morton, priority)` pair and the uniform
+/// constructor's is a `u32`. One greedy fill, so a second key cannot come with a second rule.
+pub(crate) fn boundaries_from_histogram<K: Copy + Ord>(
+    first: K,
+    counts: impl IntoIterator<Item = (K, u64)>,
+    target: u64,
+) -> (Vec<K>, u64) {
+    let target = target.max(1);
+    let mut boundaries = vec![first];
+    let mut running = 0u64;
+    let mut largest = 0u64;
+    for (key, count) in counts {
+        if count == 0 {
+            continue;
+        }
+        if running > 0 && running.saturating_add(count) > target {
+            debug_assert!(
+                *boundaries.last().expect("the first boundary is laid at entry") < key,
+                "a histogram's keys must ascend"
+            );
+            boundaries.push(key);
+            running = 0;
+        }
+        running = running.saturating_add(count);
+        largest = largest.max(running);
+    }
+    (boundaries, largest)
 }
 
 /// The bucket a key belongs to: the last boundary at or below it.
@@ -967,6 +1014,8 @@ fn route(boundaries: &[u32], key: u32) -> usize {
 pub(crate) struct Partition {
     /// One writer per bucket, in bucket order.
     writers: Vec<SpillWriter>,
+    /// The first key of each bucket, for a partition that routes its own records — empty for one
+    /// whose caller routes them ([`Partition::create_routed`]).
     boundaries: Vec<u32>,
     record_width: usize,
 }
@@ -987,6 +1036,7 @@ impl Partition {
         name: &str,
         boundaries: Vec<u32>,
         record_width: usize,
+        records: u64,
     ) -> Result<Partition> {
         if record_width < 4 {
             return Err(BuildError::Invalid(format!(
@@ -998,8 +1048,11 @@ impl Partition {
                 "partition {name}: the boundaries must ascend from 0 and be distinct"
             )));
         }
+        let buffer = partition_buffer_bytes(records, record_width, boundaries.len() as u64);
         let writers = (0..boundaries.len())
-            .map(|k| SpillWriter::create_wide(&dir.join(format!("{name}-{k:03}.part"))))
+            .map(|k| {
+                SpillWriter::create_sized(&dir.join(format!("{name}-{k:03}.part")), buffer)
+            })
             .collect::<Result<_>>()?;
         Ok(Partition {
             writers,
@@ -1013,6 +1066,46 @@ impl Partition {
         debug_assert_eq!(record.len(), self.record_width);
         let key = u32::from_le_bytes(record[..4].try_into().expect("a record is at least 4 bytes"));
         self.writers[route(&self.boundaries, key)].push_bytes(record)
+    }
+
+    /// A partition whose buckets the **caller** routes to, by whatever key of its own it holds.
+    ///
+    /// The row partition of the segment assembly is the one caller: its key is a Morton code
+    /// refined, where one code carries more rows than a bucket should, by the `priority` prefix of
+    /// the identity — a composite that does not fit the four bytes a record's key is. Its
+    /// boundaries are the caller's and so is the binary search over them; what the partition still
+    /// owns is the one-writer-per-bucket append, the receipts, and the read-once load.
+    ///
+    /// [`Partition::push`] and [`Partition::range`] are not available on one of these: there is no
+    /// key range here for the partition to know.
+    pub(crate) fn create_routed(
+        dir: &Path,
+        name: &str,
+        buckets: usize,
+        record_width: usize,
+        records: u64,
+    ) -> Result<Partition> {
+        if buckets == 0 {
+            return Err(BuildError::Invalid(format!(
+                "partition {name}: a routed partition has at least one bucket"
+            )));
+        }
+        let buffer = partition_buffer_bytes(records, record_width, buckets as u64);
+        let writers = (0..buckets)
+            .map(|k| SpillWriter::create_sized(&dir.join(format!("{name}-{k:03}.part")), buffer))
+            .collect::<Result<_>>()?;
+        Ok(Partition {
+            writers,
+            boundaries: Vec::new(),
+            record_width,
+        })
+    }
+
+    /// Append one record to the bucket the caller routed it to — the counterpart of
+    /// [`Partition::create_routed`].
+    pub(crate) fn push_to(&mut self, bucket: usize, record: &[u8]) -> Result<()> {
+        debug_assert_eq!(record.len(), self.record_width);
+        self.writers[bucket].push_bytes(record)
     }
 
     /// How many buckets this partition has.
@@ -3502,7 +3595,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let boundaries = boundaries_uniform(1_000);
         let mut part =
-            Partition::create(dir.path(), "rows", boundaries.clone(), 8).expect("create");
+            Partition::create(dir.path(), "rows", boundaries.clone(), 8, 64).expect("create");
         // Pushed in an order that is neither the key's nor a bucket's.
         for i in 0..1_000u32 {
             let key = (i * 617) % 1_000;
@@ -3544,7 +3637,7 @@ mod tests {
     fn a_flipped_byte_in_a_bucket_is_an_anchor_mismatch() {
         let dir = tempfile::tempdir().expect("tempdir");
         let mut part =
-            Partition::create(dir.path(), "rows", boundaries_uniform(8), 8).expect("create");
+            Partition::create(dir.path(), "rows", boundaries_uniform(8), 8, 64).expect("create");
         for key in 0..8u32 {
             part.push(&record(key, key)).expect("push");
         }
@@ -3565,7 +3658,7 @@ mod tests {
     fn a_truncated_bucket_is_a_length_mismatch() {
         let dir = tempfile::tempdir().expect("tempdir");
         let mut part =
-            Partition::create(dir.path(), "rows", boundaries_uniform(8), 8).expect("create");
+            Partition::create(dir.path(), "rows", boundaries_uniform(8), 8, 64).expect("create");
         for key in 0..8u32 {
             part.push(&record(key, key)).expect("push");
         }
@@ -3597,8 +3690,8 @@ mod tests {
     #[test]
     fn a_partition_refuses_a_record_without_room_for_a_key_and_boundaries_that_repeat() {
         let dir = tempfile::tempdir().expect("tempdir");
-        assert!(Partition::create(dir.path(), "rows", vec![0], 3).is_err());
-        assert!(Partition::create(dir.path(), "rows", vec![1, 2], 8).is_err());
-        assert!(Partition::create(dir.path(), "rows", vec![0, 2, 2], 8).is_err());
+        assert!(Partition::create(dir.path(), "rows", vec![0], 3, 1 << 20).is_err());
+        assert!(Partition::create(dir.path(), "rows", vec![1, 2], 8, 1 << 20).is_err());
+        assert!(Partition::create(dir.path(), "rows", vec![0, 2, 2], 8, 1 << 20).is_err());
     }
 }

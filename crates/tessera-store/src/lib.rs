@@ -3,6 +3,7 @@
 //! only legal EntityId→RowId path in the codebase (invariant I4).
 
 pub mod coalesce;
+pub mod columns;
 pub mod derived;
 pub mod entity_terms;
 pub mod error;

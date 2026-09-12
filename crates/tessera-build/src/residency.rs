@@ -257,6 +257,11 @@ pub(crate) struct Term {
     /// The disk phases these bytes stand through. Meaningless for an anonymous term, which the
     /// memory model reads as one window.
     pub phases: Phases,
+    /// **A constant of the code rather than a rate over the corpus.** A partition's writer buffers
+    /// and the bucket the key type bounds, the Morton histogram, the allocator slack: these are the
+    /// terms that stop the anonymous total being linear in `n`, and the two tests that assert what
+    /// the model's shape is need to tell them apart from the terms that are a rate.
+    pub constant: bool,
 }
 
 /// The entity-order residency, term by term.
@@ -640,7 +645,12 @@ fn arena_capacity(payload: u64) -> u64 {
 /// ⊘ **The Roaring figure is the scattered case and is not measured per build.** A dense membership
 /// costs an eighth of it; the model takes the expensive one, because the refusal it feeds is meant
 /// to be wrong in the direction that costs a rerun rather than a kill.
-const BYTES_PER_MEMBER_ENTRY: u64 = 12;
+///
+/// **It is [`crate::layers::PUBLICATION_BYTES_PER_ENTRY`] and not a second figure beside it.** The
+/// batch is cut at that rate, so charging any less here is charging half a batch and calling it the
+/// peak — which is what this constant did while it was 12, the one copy rather than the two that
+/// stand together. Derived rather than restated so the two cannot drift.
+const BYTES_PER_MEMBER_ENTRY: u64 = crate::layers::PUBLICATION_BYTES_PER_ENTRY;
 
 /// What one member entry costs the **disk**, and the process's page cache, as the packed membership
 /// extent the store then reads through: 3 bytes, an array container's own width and a little.
@@ -702,29 +712,6 @@ fn member_spill_bytes(entries: u64, ids: IdShape, n: u64) -> u64 {
     entries.saturating_mul(SPILLED_BYTES_PER_MEMBER_ENTRY + sparse)
 }
 
-/// What the segment's **row-order** tail costs on disk: one fixed-width slot per row per render
-/// column, in `.build-tmp/`, for the length of the segment write.
-///
-/// Not a term of [`entity_order_residency`], because it is not in that window: the tail is built
-/// after the release that ends it, and every column it covers is one the release *kept*. It is the
-/// assembly phase's, beside `columns.arrow` and the postings spool.
-///
-/// A `bool` is counted twice over, at a byte a row and again at a bit: the lane fills a byte per
-/// row and packs it into Arrow's bit layout on the way out, and both mappings stand while it does.
-/// Every other render column is its declared width and nothing else — a string one cannot be here,
-/// `render` being refused for the whole family at the declaration.
-pub(crate) fn render_tail_bytes(schema: &crate::config::Schema, n: u64) -> u64 {
-    schema
-        .attributes
-        .iter()
-        .filter(|a| a.render)
-        .map(|a| match a.ty {
-            ScalarType::Bool => n.saturating_add(n.div_ceil(8)),
-            ty => fixed_width(ty).saturating_mul(n),
-        })
-        .sum()
-}
-
 /// The residency of everything the batch loop's model does not cover.
 ///
 /// `member_entries` is every `(artifact, source)` pair the layers' member sources declare and
@@ -764,6 +751,7 @@ pub(crate) fn entity_order_residency(
             bytes: 8u64.saturating_mul(ids.slots),
             mapped: true,
             phases: Phases::SPILL.and(Phases::BANDS).and(Phases::JOIN),
+            constant: false,
         },
         // **File-backed since 2026-09-09**, and so charged to the disk rather than to memory: the
         // map is written scattered once and read scattered thereafter, which is `MappedArray`'s
@@ -775,6 +763,7 @@ pub(crate) fn entity_order_residency(
             mapped: true,
             // Written by the assignment walk and read to the last view's permutation.
             phases: Phases::BANDS.onwards(),
+            constant: false,
         },
     ];
     for (index, column) in columns.iter().enumerate() {
@@ -824,6 +813,7 @@ pub(crate) fn entity_order_residency(
             bytes,
             mapped: true,
             phases: column.phases,
+            constant: false,
         });
         // The text index's sorted runs, **charged at the column they are tokenised from** rather
         // than at a constant of their own. The runs spill while the column is resident, so the two
@@ -848,6 +838,7 @@ pub(crate) fn entity_order_residency(
                 bytes: if spilled { column.payload_bytes } else { bytes },
                 mapped: true,
                 phases: Phases::INDEX,
+                constant: false,
             });
         }
     }
@@ -861,6 +852,7 @@ pub(crate) fn entity_order_residency(
             bytes: publication_bytes,
             mapped: false,
             phases: Phases::JOIN,
+            constant: false,
         });
         terms.push(Term {
             what: format!(
@@ -871,6 +863,7 @@ pub(crate) fn entity_order_residency(
             mapped: true,
             // The bundle's own extents: written at the publication and never released.
             phases: Phases::JOIN.onwards(),
+            constant: false,
         });
         terms.push(Term {
             what: format!(
@@ -881,16 +874,123 @@ pub(crate) fn entity_order_residency(
             bytes: member_spill_bytes(member_entries, ids, n),
             mapped: true,
             phases: Phases::JOIN,
+            constant: false,
         });
     }
+    // **The partitions, charged at the key type's ceiling and not at the corpus.** A bucket holds
+    // at most [`crate::spill::PARTITION_BUCKET_RECORDS`] records however many rows the build has,
+    // so what a partition costs is a constant: its writer buffers while it is open, and one loaded
+    // bucket and one window at the replay. Charging the ceiling over-charges a small corpus by up
+    // to the bucket count, which is the price of a model whose terms do not move with `n` — the
+    // whole of what `the_anonymous_total_does_not_grow_with_the_row_count` asserts, and the reason
+    // the design names 2 GiB as the budget floor (§3).
+    //
+    // **Two open at once at the worst phase.** The attribute join opens one per fixed-width column
+    // and holds them all while it sweeps; the assembly opens the row partition, then the pairs
+    // beside it, then one render lane at a time. Only one bucket is loaded at any moment in either,
+    // the replays being sequential.
+    let join_partitions = columns
+        .iter()
+        .filter(|column| !carries_characters(column.ty))
+        .count() as u64;
+    let join_width = columns
+        .iter()
+        .filter(|column| !carries_characters(column.ty))
+        .map(|column| 4 + fixed_width(column.ty))
+        .max()
+        .unwrap_or(0);
+    // The same arithmetic the partition itself sizes its writers by, so what the pre-flight
+    // charges is what the pass allocates.
+    let buffers = |buckets: u64, width: u64| {
+        buckets.saturating_mul(crate::spill::partition_buffer_bytes(n, width as usize, buckets)
+            as u64)
+    };
+    // **The corpus where it is smaller than the type's bound, the bound where it is not.** A
+    // bucket holds at most `n / 128` records and never more than 2³²/128 whatever `n` is, so the
+    // term rises with the corpus until the key type binds and is flat above it — which is the
+    // sense in which a partition's memory is a constant, and what
+    // `the_anonymous_total_does_not_grow_with_the_row_count` asserts by evaluating the model on
+    // both sides of that bound.
+    let records =
+        (n / crate::spill::PARTITION_BUCKETS as u64).clamp(1, crate::spill::PARTITION_BUCKET_RECORDS);
+    let bucket = |width: u64| records.saturating_mul(width);
+    if join_partitions > 0 {
+        terms.push(Term {
+            what: format!(
+                "the attribute join's {join_partitions} value partition(s): {} MiB of writer \
+                 buffers each, and one loaded bucket and window at the widest column's {join_width} \
+                 B a record over the {records} records a bucket holds",
+                buffers(crate::spill::PARTITION_BUCKETS as u64, join_width) >> 20
+            ),
+            bytes: buffers(crate::spill::PARTITION_BUCKETS as u64, join_width)
+                .saturating_mul(join_partitions)
+                .saturating_add(bucket(join_width))
+                .saturating_add(bucket(join_width.saturating_sub(4))),
+            mapped: false,
+            phases: Phases::JOIN,
+            constant: true,
+        });
+    }
+    // The keyword dictionary's `(row, ordinal)` partition, where a column is indexed at all.
+    if columns.iter().any(|column| matches!(column.ty, ScalarType::Keyword)) {
+        terms.push(Term {
+            what: "the keyword dictionary's (row, ordinal) partition: writer buffers, one loaded \
+                   bucket at 8 B a record and the u32 window it is scattered into"
+                .into(),
+            bytes: buffers(crate::spill::PARTITION_BUCKETS as u64, 8)
+                .saturating_add(bucket(8))
+                .saturating_add(bucket(4)),
+            mapped: false,
+            phases: Phases::INDEX,
+            constant: true,
+        });
+    }
+    // **The assembly** (`crate::assembly`): the Morton histogram, which is the `morton >> 8` space
+    // and so a constant of the code type; the row partition's counted buckets; and one loaded
+    // bucket sorted into 16 B records beside the 12 B it was read as.
+    terms.push(Term {
+        what: format!(
+            "the segment assembly: a {} MiB Morton histogram, the row \
+             partition's {} MiB of writer buffers, and one bucket of {records} records held as \
+             the 12 B it was written at and the 16 B it is sorted as",
+            crate::assembly::MortonHistogram::bytes_for_rows(n) >> 20,
+            buffers(crate::spill::PARTITION_COUNTED_BUCKETS, 12) >> 20
+        ),
+        bytes: crate::assembly::MortonHistogram::bytes_for_rows(n)
+            .saturating_add(buffers(crate::spill::PARTITION_COUNTED_BUCKETS, 12))
+            .saturating_add(bucket(12))
+            .saturating_add(bucket(16)),
+        mapped: false,
+        phases: Phases::ASSEMBLE,
+        constant: true,
+    });
+    // The widest render column is a ceiling over the fixed-width ones: `render` is refused at the
+    // declaration for every string type, so a render column is one of these and no wider.
+    let widest_render = join_width.saturating_sub(4);
+    terms.push(Term {
+        what: format!(
+            "the assembly's (entity, row) and (row, value) partitions: writer buffers, one loaded \
+             bucket at up to {} B a record and the window it is placed in",
+            4 + widest_render
+        ),
+        bytes: buffers(crate::spill::PARTITION_BUCKETS as u64, 8)
+            .saturating_add(buffers(crate::spill::PARTITION_BUCKETS as u64, 4 + widest_render))
+            .saturating_add(bucket(4 + widest_render))
+            .saturating_add(bucket(widest_render)),
+        mapped: false,
+        phases: Phases::ASSEMBLE,
+        constant: true,
+    });
     terms.push(Term {
         what: "slack for decode buffers, stage scratch and the allocator".into(),
         bytes: SLACK,
         mapped: false,
         phases: Phases::JOIN,
+        constant: true,
     });
     Residency { terms }
 }
+
 
 /// What the entity-order model is arithmetic over for this build: one [`ColumnCost`] per declared
 /// column, every member entry the layers declare, and a ceiling on any one level's.
@@ -1151,6 +1251,7 @@ pub(crate) fn disk(
                 bytes,
                 mapped: true,
                 phases,
+                constant: false,
             });
         }
     };
@@ -1215,17 +1316,44 @@ pub(crate) fn disk(
             Phases::SPILL.and(Phases::BANDS),
         );
     }
+    // **The assembly's partitions** (`crate::assembly`), where the entity-order geometry and the
+    // row-order render tail used to be. The row partition stands whole when the ordinal geometry
+    // is released, and every partition after it is written while the one before is consumed, so
+    // the phase's peak is the largest pair rather than the sum: the rows at 12 B and the
+    // `(entity, row)` pairs at 8 growing beneath them, then one render column's `(row, value)`
+    // lane at a time.
     push(
-        "the row space's geometry in entity order, 8 B/item, in .build-tmp/ (one view at a time)"
+        "the assembly's row partition, 12 B/row — (morton, residual, entity) in .build-tmp/, one \
+         view at a time"
+            .into(),
+        12 * n,
+        Phases::ASSEMBLE,
+    );
+    push(
+        "the assembly's (entity, row) partition, 8 B/row, in .build-tmp/ — the permutation's and \
+         every render column's input"
             .into(),
         8 * n,
         Phases::ASSEMBLE,
     );
-    push(
-        "the row-order render tail, one mapped file per render column, in .build-tmp/".into(),
-        render_tail_bytes(&args.schema, n),
-        Phases::ASSEMBLE,
-    );
+    if let Some(widest) = args
+        .schema
+        .attributes
+        .iter()
+        .filter(|a| a.render)
+        .map(|a| fixed_width(a.ty))
+        .max()
+    {
+        push(
+            format!(
+                "the widest render column's (row, value) partition, {} B/row, in .build-tmp/ — \
+                 one column at a time",
+                4 + widest
+            ),
+            (4 + widest) * n,
+            Phases::ASSEMBLE,
+        );
+    }
 
     // ---- the attribute join's staging buffer -------------------------------------------------
     // A second set of columns per attribute source, [`crate::pipeline::JOIN_STAGE_BYTES`] wide in
@@ -1871,13 +1999,24 @@ mod tests {
         entity_order_residency(n, IdShape::dense(n), &columns, entries, entries)
     }
 
+    /// Every anonymous term that is a **rate** over the corpus.
+    fn scaling_total(residency: &Residency) -> u64 {
+        residency
+            .terms
+            .iter()
+            .filter(|t| !t.mapped && !t.constant)
+            .map(|t| t.bytes)
+            .sum()
+    }
+
     #[test]
     fn the_tail_is_linear_in_the_item_count_and_the_batch_stride_reaches_none_of_it() {
         let small = campaign_residency(10_000_000, 200);
         let large = campaign_residency(50_000_000, 200);
-        // Five times the corpus, five times the residency — exactly, net of the one term that is
-        // not a function of the corpus at all.
-        let ratio = (large.total() - SLACK) as f64 / (small.total() - SLACK) as f64;
+        // Five times the corpus, five times the residency — exactly, net of the terms that are not
+        // a function of the corpus at all: the allocator slack, and the partitions, whose writer
+        // buffers and bucket the key type bounds rather than the row count.
+        let ratio = scaling_total(&large) as f64 / scaling_total(&small) as f64;
         assert!(
             (4.99..5.01).contains(&ratio),
             "the tail should scale with the corpus, got {ratio}"
@@ -2017,7 +2156,11 @@ mod tests {
             0,
             0,
         );
-        assert_eq!(with_keyword.total(), bare.total());
+        // **Net of the partitions the column opens.** Its storage is a file and is charged at
+        // nothing; what a declared column does cost the machine is the join's `(entity, value)`
+        // partition and, for a keyword one, the dictionary's `(row, ordinal)` partition — both
+        // constants of the key type, both named terms of their own.
+        assert_eq!(scaling_total(&with_keyword), scaling_total(&bare));
         let term = with_keyword
             .terms
             .iter()
@@ -3132,12 +3275,30 @@ require_member_visibility = "none"
         };
         let small = residency(10_000_000);
         let large = residency(100_000_000);
+        // **The rate terms are equal**: one publication batch, whatever the level behind it.
         assert_eq!(
-            small.total(),
-            large.total(),
-            "the anonymous terms are a constant and one publication batch:\nat 10⁷{}\nat 10⁸{}",
+            scaling_total(&small),
+            scaling_total(&large),
+            "the anonymous rate is one publication batch:\nat 10⁷{}\nat 10⁸{}",
             small.describe(),
             large.describe()
+        );
+        // **And the constants are bounded by the key type, not by the corpus.** A partition's
+        // bucket is `n / 128` records and never more than 2³²/128, so the total rises to that
+        // bound and is flat above it — the two row counts here straddle 2³², and beyond it the
+        // whole anonymous total is one number.
+        let at_bound = residency(1u64 << 32);
+        let beyond = residency(1u64 << 34);
+        assert_eq!(
+            at_bound.total(),
+            beyond.total(),
+            "above the key type's bound the anonymous total is a constant:\nat 2³²{}\nat 2³⁴{}",
+            at_bound.describe(),
+            beyond.describe()
+        );
+        assert!(
+            small.total() <= at_bound.total() && large.total() <= at_bound.total(),
+            "no corpus costs more than the bound"
         );
         assert!(
             large.peak().1 > small.peak().1,

@@ -19,6 +19,7 @@
 //! optimisation added later. The rule lives in [`signature_sort_key`] as a free function so the
 //! serving allocator applies exactly the same rule to appended items.
 
+mod assembly;
 pub mod artifact_pass;
 pub mod check;
 mod column;
@@ -559,23 +560,11 @@ impl Occupancy {
     /// beside. The order is asserted rather than assumed — out of order, a run count silently
     /// over-reports, and an over-report is a warning that does not fire.
     pub(crate) fn of_sorted_codes(codes: impl IntoIterator<Item = u32>) -> Occupancy {
-        let (mut points, mut cells) = (0u64, 0u64);
-        let mut previous: Option<u32> = None;
+        let mut run = OccupancyRun::default();
         for code in codes {
-            points += 1;
-            match previous {
-                Some(last) => {
-                    assert!(
-                        code >= last,
-                        "occupancy: Morton codes must arrive in tiler order ({last} then {code})"
-                    );
-                    cells += u64::from(code != last);
-                }
-                None => cells = 1,
-            }
-            previous = Some(code);
+            run.push(code);
         }
-        Occupancy { points, cells }
+        run.finish()
     }
 
     /// Points per occupied cell — one where every point has a cell to itself, and the factor by
@@ -2979,5 +2968,42 @@ mod tests {
             relative_to(prefix, &path).unwrap(),
             "partitions/default/SEGMENTS-0.json"
         );
+    }
+}
+
+/// [`Occupancy::of_sorted_codes`] fed one code at a time.
+///
+/// **The segment assembly emits its rows one Morton bucket at a time** and never holds the codes
+/// as a slice, so the run count that the other producer takes over an iterator is taken here over
+/// a stream. Same arithmetic and the same order assertion — it is the one implementation, and
+/// `of_sorted_codes` is the iterator wrapper over it.
+#[derive(Default)]
+pub(crate) struct OccupancyRun {
+    points: u64,
+    cells: u64,
+    previous: Option<u32>,
+}
+
+impl OccupancyRun {
+    pub(crate) fn push(&mut self, code: u32) {
+        self.points += 1;
+        match self.previous {
+            Some(last) => {
+                assert!(
+                    code >= last,
+                    "occupancy: Morton codes must arrive in tiler order ({last} then {code})"
+                );
+                self.cells += u64::from(code != last);
+            }
+            None => self.cells = 1,
+        }
+        self.previous = Some(code);
+    }
+
+    pub(crate) fn finish(self) -> Occupancy {
+        Occupancy {
+            points: self.points,
+            cells: self.cells,
+        }
     }
 }

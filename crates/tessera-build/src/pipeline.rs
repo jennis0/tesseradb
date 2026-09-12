@@ -166,10 +166,7 @@ use tessera_filter::{
 use tessera_plugin::{Passthrough, Plugin};
 use tessera_spatial::split32;
 use tessera_spatial::tiler::{ScalarType, ScalarValue};
-use tessera_store::write::{
-    write_columns, write_morton_codes, write_permutation_iter, ScalarColumn,
-};
-use tessera_types::{EntityId, IdentityKey, SMALL_TERM_THRESHOLD_DEFAULT};
+use tessera_types::SMALL_TERM_THRESHOLD_DEFAULT;
 
 use crate::column::EntityColumn;
 use crate::error::{BuildError, Result};
@@ -210,51 +207,6 @@ struct SortRec {
 impl SortRec {
     fn order(&self) -> (u32, u32, u32, u32) {
         (self.key_hi, self.key_lo, self.morton, self.ordinal)
-    }
-}
-
-/// One item's position in the tiler sort: Morton code, the `tessera_id` prefix (`priority`),
-/// and the entity id needed to recompute the full identity on a prefix tie (contracts §2.6).
-/// Still 12 bytes, four-byte aligned — a `u64` `tessera_id` here would be 16 B/row, +3.7 GiB at
-/// 10⁹, immediately re-spending what dropping `NODE_NONE` just freed (2026-07-30 fold).
-#[derive(Clone, Copy)]
-#[repr(C)]
-struct RowRec {
-    morton: u32,
-    entity: u32,
-    priority: u16,
-    _pad: u16,
-}
-
-impl RowRec {
-    /// `(morton, tessera_id)` ascending, with no further tiebreak (contracts §2.6 r6) —
-    /// `priority` is compared first as a cheap, physically contiguous prefix (this record's
-    /// point, and §2.6's "why the column exists at all"), and the full identity is recomputed
-    /// from `entity` only on a prefix tie. `forward` is a pure function, so this is exact: the
-    /// tie path costs eight `splitmix64` rounds, not an approximation of the order.
-    ///
-    /// Comparing `priority` first and refining on a tie is **identical** to comparing the full
-    /// `tessera_id` at every row — it is not merely "usually agrees" — because `priority` is
-    /// defined as `tessera_id`'s leading 16 bits (`TesseraId::priority`), so two rows can only
-    /// disagree in `priority` if they already disagree in `tessera_id`. A unit test below
-    /// checks this comparator against a naive full-`tessera_id` sort over a batch engineered to
-    /// contain prefix ties.
-    fn cmp(&self, other: &Self, key: &IdentityKey, shard: u32) -> std::cmp::Ordering {
-        self.morton.cmp(&other.morton).then_with(|| {
-            self.priority.cmp(&other.priority).then_with(|| {
-                // Unreachable in practice (the allocator cap makes `forward` infallible for any
-                // entity a build ever assigns), but `expect` rather than `unwrap_or` — a
-                // silently wrong tiebreak here is a silently wrong row order, and that must be
-                // loud if it is ever reached.
-                let a = key
-                    .forward(shard, EntityId::new(self.entity as u64))
-                    .expect("entity ids are capped below u32::MAX by the allocator (I-1)");
-                let b = key
-                    .forward(shard, EntityId::new(other.entity as u64))
-                    .expect("entity ids are capped below u32::MAX by the allocator (I-1)");
-                a.cmp(&b)
-            })
-        })
     }
 }
 
@@ -2090,155 +2042,100 @@ fn build_bundle(
         let segment_dir = view_dir.join("segments").join(SEG_ID);
         std::fs::create_dir_all(&segment_dir).map_err(|e| BuildError::io(&segment_dir, e))?;
 
-        // The view's geometry, permuted from ordinal into entity space — the one scatter this
-        // costs, against a parquet re-read per view (`views.md` §8's file arithmetic).
-        let mut x_map = spill::MappedU32::zeroed(tmp.path(), "x-of-entity.u32", n as usize)?;
-        let mut y_map = spill::MappedU32::zeroed(tmp.path(), "y-of-entity.u32", n as usize)?;
-        {
-            let xs = x_map.as_mut_slice();
-            let ys = y_map.as_mut_slice();
-            let (view_x, view_y) = (geometry[index].x.as_slice(), geometry[index].y.as_slice());
-            for (ordinal, &entity) in entity_of_ordinal.iter().enumerate() {
-                xs[entity as usize] = view_x[ordinal];
-                ys[entity as usize] = view_y[ordinal];
-            }
-        }
-        // Membership in entity space, from the same permutation of the ordinal-space bits.
-        let mut member: Vec<u64> = vec![0; (n as usize).div_ceil(64)];
-        for (ordinal, &entity) in entity_of_ordinal.iter().enumerate() {
-            if bit_get(&geometry[index].present, ordinal) {
-                bit_set(&mut member, entity as usize);
-            }
-        }
-        // **This view's ordinal-space geometry has served its only reader.** The permutation above
-        // is the whole of what pass two wants it for; the two files that stay are the entity-space
-        // ones the tiler sorts. 8 B/item per view, and holding them to the `drop(geometry)` after
-        // the loop kept them through the tiler sort, both segment writes and the artifact pass —
-        // 1.01 GB over 125,789,091 GBIF occurrences, a fifth of the build after its last read
-        // (`probes/2026-09-10-build-disk/`). The presence bits and the row count are read below and
-        // are a bit an item, not eight bytes.
-        geometry[index].x = spill::MappedU32::empty();
-        geometry[index].y = spill::MappedU32::empty();
-        let x_of_entity = x_map.as_slice();
-        let y_of_entity = y_map.as_slice();
-
-        // §2.6 r6: `(morton, tessera_id)` ascending, no further tiebreak. `tessera_id` is
-        // computed BEFORE the sort (2026-07-30 fold, memo §6) — `priority = high16(tessera_id)`
-        // is a sort key, so the identity must exist before `sort_unstable_by` runs.
-        let mut rows: Vec<RowRec> = (0..n as usize)
-            .into_par_iter()
-            .filter(|entity| bit_get(&member, *entity))
-            .map(|entity| {
-                let tessera_id = args
-                    .identity_key
-                    .forward(args.shard_id, EntityId::new(entity as u64))?;
-                Ok(RowRec {
-                    // From the quantised form directly: `split32`'s cell half is by
-                    // construction the code `morton_of` would give for the same point.
-                    morton: split32(x_of_entity[entity], y_of_entity[entity]).0.raw(),
-                    entity: entity as u32,
-                    priority: tessera_id.priority(),
-                    _pad: 0,
-                })
-            })
-            .collect::<Result<_>>()?;
-        rows.par_sort_unstable_by(|a, b| a.cmp(b, &args.identity_key, args.shard_id));
-        let rows_in_view = rows.len() as u32;
-        if rows_in_view as u64 != geometry[index].rows {
+        // ---- the assembly: the view's rows, Morton-partitioned, straight from ordinal order ----
+        //
+        // **No entity-order geometry.** What stood here permuted `x` and `y` into two
+        // entity-indexed files at a scattered index, sorted a 12 B record per row of the view on
+        // the heap, and built the row→entity, residual and `tessera_id` columns as three more
+        // vectors beside it. At rung 6 that was a 70 GB peak the residency model had no term for.
+        // `crate::assembly` is the same rows in the same order with one bucket held at a time.
+        let (partitioned, boundaries, page_plan) = {
+            let source = crate::assembly::RowSource {
+                view_dir: &view_dir,
+                view: &view.view_id,
+                tmp: tmp.path(),
+                x: geometry[index].x.as_slice(),
+                y: geometry[index].y.as_slice(),
+                present: &geometry[index].present,
+                entity_of_ordinal,
+                n,
+                identity_key: &args.identity_key,
+                shard_id: args.shard_id,
+                rows_hint: geometry[index].rows,
+            };
+            crate::assembly::partition_rows(&source)?
+        };
+        if partitioned.rows() != geometry[index].rows {
             return Err(input_changed(&format!(
-                "view '{}': {rows_in_view} rows in the segment for the {} its points file \
-                 selected",
-                view.view_id, geometry[index].rows
+                "view '{}': {} rows in the segment for the {} its points file selected",
+                view.view_id,
+                partitioned.rows(),
+                geometry[index].rows
             )));
         }
-        timer.end(BuildStage::TilerSort, rows_in_view as u64);
+        // **This view's ordinal-space geometry has served its only reader.** The row partition
+        // carries each row's residual, so nothing after this reads a coordinate — 8 B/item per
+        // view, released before the segment write rather than after the artifact pass.
+        geometry[index].x = spill::MappedU32::empty();
+        geometry[index].y = spill::MappedU32::empty();
+        timer.end(BuildStage::TilerSort, partitioned.rows());
 
-        let morton_path = segment_dir.join("morton.u32");
-        // **The resolution this frame actually gave the corpus**, counted off the same sorted
-        // codes that are about to become `morton.u32`. Nothing is retained: `rows` is already
-        // `(morton, tessera_id)` ascending, so distinct cells is a comparison per row.
-        occupancies.push(crate::Occupancy::of_sorted_codes(
-            rows.iter().map(|r| r.morton),
-        ));
-        write_morton_codes(&morton_path, rows.iter().map(|r| r.morton))
-            .map_err(|e| BuildError::io(&morton_path, e))?;
-
-        // **Bounded by entity space, populated by the view.** An entity this view does not hold
-        // keeps the row-absent sentinel `PermutationWriter::create` laid down, which is exactly
-        // what a sparse view is (`views.md` §8).
-        let permutation_path = view_dir.join("permutation.bin");
-        write_permutation_iter(
-            &permutation_path,
-            rows.iter().map(|r| EntityId::new(r.entity as u64)),
-            n,
-        )
-        .map_err(|e| BuildError::io(&permutation_path, e))?;
-        fsync_file(&permutation_path)?;
-
-        // The row→entity direction beside it (`tessera_store::row_entity`), from the same sorted
-        // rows the permutation was scattered from.
-        let row_entity_path = view_dir.join(tessera_store::ROW_ENTITY_FILE);
-        let entity_row: Vec<u32> = rows.iter().map(|r| r.entity).collect();
-        tessera_store::write_row_entity(&row_entity_path, &entity_row)
-            .map_err(|e| BuildError::io(&row_entity_path, e))?;
-        fsync_file(&row_entity_path)?;
-
-        let columns_path = segment_dir.join("columns.arrow");
-        let mut presence_paths: Vec<PathBuf> = Vec::new();
-        {
-            // The residual is the low half of the same `split32` whose high half became the
-            // row's Morton code above — one splitting of one fixed-point position, so
-            // `columns.arrow` and `morton.u32` cannot describe different points.
-            let residual_row: Vec<u32> = rows
-                .par_iter()
-                .map(|r| {
-                    let entity = r.entity as usize;
-                    split32(x_of_entity[entity], y_of_entity[entity]).1
-                })
-                .collect();
-            drop(rows);
-            // `forward` is fallible (Important I-1): a checked conversion, never `as u32`.
-            let tessera_row: Vec<u64> = entity_row
-                .par_iter()
-                .map(|&e| {
-                    args.identity_key
-                        .forward(args.shard_id, EntityId::new(e as u64))
-                        .map(|id| id.raw())
-                })
-                .collect::<std::result::Result<_, _>>()
-                .map_err(BuildError::Identity)?;
-            // The declared attribute tail, permuted into this view's row order. Gathered per
-            // entity and then permuted — the values are entity space and are shared by every
-            // view, which is the whole of `views.md` §1's factoring.
-            let tail = permute_attribute_tail(
-                &args.schema,
-                &attributes_by_entity,
-                &scoped_render_targets[index]
-                    .iter()
-                    .map(|&c| &scoped_render[c])
-                    .collect::<Vec<_>>(),
-                &entity_row,
-                &scratch,
-            )?;
-            for (column, rows) in tail.presence {
-                if let Some(path) = tessera_store::flush::write_render_presence(
-                    &segment_dir,
-                    &column,
-                    rows,
-                    rows_in_view,
-                )
-                .map_err(|e| BuildError::Invalid(format!("attribute '{column}': {e}")))?
-                {
-                    presence_paths.push(path);
+        let assembled = {
+            // The declared render columns in schema order, then this view's scoped ones — the
+            // order `columns.arrow` carries them in, and the order every reader that resolves a
+            // tail column by name is indifferent to but the bytes are not.
+            let mut render: Vec<crate::assembly::RenderColumn<'_>> = Vec::new();
+            for (attribute, values) in args
+                .schema
+                .attributes
+                .iter()
+                .zip(attributes_by_entity.iter())
+            {
+                if attribute.render {
+                    render.push(crate::assembly::RenderColumn {
+                        name: attribute.name.clone(),
+                        ty: attribute.ty,
+                        values,
+                    });
                 }
             }
-            write_columns(&columns_path, tessera_row, residual_row, tail.columns)
-                .map_err(|e| BuildError::io(&columns_path, e))?;
-        }
+            for &column in &scoped_render_targets[index] {
+                render.push(crate::assembly::RenderColumn {
+                    name: scoped_render[column].name.clone(),
+                    ty: scoped_render[column].ty,
+                    values: &scoped_render[column].values,
+                });
+            }
+            let job = crate::assembly::Assembly {
+                view_dir: &view_dir,
+                view: &view.view_id,
+                segment_dir: &segment_dir,
+                tmp: tmp.path(),
+                n,
+                identity_key: &args.identity_key,
+                shard_id: args.shard_id,
+                render,
+            };
+            crate::assembly::write_segment(&job, partitioned, &boundaries, page_plan)?
+        };
+        eprintln!(
+            "  view '{}': {} rows, largest Morton bucket {} rows over {} buckets",
+            view.view_id,
+            assembled.rows_in_view,
+            assembled.largest_bucket,
+            boundaries.buckets()
+        );
+        let rows_in_view = assembled.rows_in_view;
+        occupancies.push(assembled.occupancy);
+        let presence_paths = assembled.presence_paths;
+        let morton_path = assembled.morton_path;
+        let row_entity_path = assembled.row_entity_path;
+        let columns_path = assembled.columns_path;
+        let permutation_path = assembled.permutation_path;
+        fsync_file(&permutation_path)?;
+        fsync_file(&row_entity_path)?;
         fsync_file(&columns_path)?;
         fsync_file(&morton_path)?;
-        drop(x_map);
-        drop(y_map);
         timer.end(BuildStage::SegmentWrite, rows_in_view as u64);
 
         // ---- 10b. the post-bundle artifact pass, per view (decision 0094's first half) ----
@@ -2437,6 +2334,7 @@ fn read_attributes_by_entity(
                         &format!("value-{index}"),
                         boundaries.clone(),
                         4 + width,
+                        n,
                     )?,
                     boundaries,
                 }))
@@ -4486,6 +4384,7 @@ fn write_keyword_column(
         KEYWORD_ORDINAL_PARTITION,
         spill::boundaries_uniform(rows),
         KEYWORD_ORDINAL_RECORD,
+        rows,
     )?;
     let partition = merge_keyword_runs(&dict_path, attribute, &receipts, rows, partition)?;
     for receipt in &receipts {
@@ -5576,113 +5475,6 @@ fn category_code(value: &ScalarValue, column: &str) -> Result<u32> {
     }
 }
 
-/// Permute the entity-major columns into **row order**, ready for `write_columns`, and record
-/// which rows carry a value.
-///
-/// `entity_row[r]` is the entity whose values row `r` carries — the same permutation
-/// `residual_row` and `tessera_row` are built through, applied to the same arrays, so a row's
-/// geometry, identity and attributes cannot come from different items.
-fn permute_attribute_tail(
-    schema: &crate::config::Schema,
-    by_entity: &[EntityColumn],
-    scoped: &[&ScopedRenderColumn],
-    entity_row: &[u32],
-    scratch: &crate::column::ColumnScratch,
-) -> Result<AttributeTail> {
-    // **One lane per render column.** The columns are independent all the way down — each is
-    // permuted from its own entity-order column into its own mapped file, and neither the gather
-    // nor the presence sweep touches anything another lane can name — so the loop over them is the
-    // split, exactly as it is in the attribute join. `collect` over an indexed parallel iterator
-    // preserves declared order, which the tail's column order is.
-    //
-    // **Borrowed, not consumed**: the values are entity space and every view's row space is a
-    // permutation of the same columns (`views.md` §1), so pass two calls this once per view.
-    let lanes: Vec<Result<Option<Lane>>> = schema
-        .attributes
-        .par_iter()
-        .zip(by_entity.par_iter())
-        .map(|(attribute, values)| {
-            // **The tail is exactly the render columns.** An `index`-only column is entity-space
-            // and has already been written there; including it here would give it a slot in every
-            // row as well, which is the per-row cost §10.3's routing exists to avoid and — for a
-            // `utf8` column — the one `render` on `utf8` is refused for outright.
-            if !attribute.render {
-                return Ok(None);
-            }
-            render_lane(&attribute.name, attribute.ty, values, entity_row, scratch).map(Some)
-        })
-        .collect();
-    // **The scoped render columns, after the declared ones** (`views.md` §5). Their order in the
-    // file decides nothing — every reader resolves a tail column by name — but appending keeps a
-    // view outside every scope writing byte-identical bytes to the build that declared no family.
-    let scoped_lanes: Vec<Result<Option<Lane>>> = scoped
-        .par_iter()
-        .map(|column| {
-            render_lane(&column.name, column.ty, &column.values, entity_row, scratch).map(Some)
-        })
-        .collect();
-    let mut presence = Vec::new();
-    let mut out = Vec::with_capacity(schema.attributes.len() + scoped.len());
-    for lane in lanes.into_iter().chain(scoped_lanes) {
-        let Some(lane) = lane? else { continue };
-        if let Some(rows) = lane.presence {
-            presence.push((lane.name.clone(), rows));
-        }
-        out.push((lane.name, lane.values));
-    }
-    Ok(AttributeTail {
-        columns: out,
-        presence,
-    })
-}
-
-/// One render column's lane: an entity-space column permuted into this view's row order, with the
-/// bitmap that says which of those rows carry a value.
-///
-/// **One body for both kinds of render column** — a declared entity-scoped one and a group-scoped
-/// family's column for this view — because the difference between them is which file the values
-/// were read from and nothing about how a row's slot is filled.
-///
-/// **The absent slot is left as the mapping's zero, which *is* the render placeholder.** The
-/// column is non-nullable on the wire (contracts R4), so an absent value has to be written as
-/// something; `ScalarValue::or_render_placeholder` gives the type's zero for every renderable
-/// type, and a fresh mapping reads as zeros. Writing the placeholder explicitly would store the
-/// same bytes and lose the presence bit that says the zero means nothing — which is the bitmap
-/// beside it. `the_render_placeholder_is_the_zero_a_mapping_reads_as` holds the two together.
-fn render_lane(
-    name: &str,
-    ty: ScalarType,
-    values: &EntityColumn,
-    entity_row: &[u32],
-    scratch: &crate::column::ColumnScratch,
-) -> Result<Lane> {
-    let mut column = EntityColumn::filled(scratch, ty, entity_row.len())?;
-    for (row, &entity) in entity_row.iter().enumerate() {
-        column.set(row, values.value_at(entity as usize), name)?;
-    }
-    let presence = render_presence_of((0..entity_row.len()).map(|row| column.is_present(row)));
-    Ok(Lane {
-        name: name.to_string(),
-        presence,
-        values: column.into_values(scratch, name)?,
-    })
-}
-
-/// One render column, built by the lane that owns it.
-struct Lane {
-    name: String,
-    /// `None` where every row carries a value — the case that writes no file (decision 0064).
-    presence: Option<Bitmap>,
-    values: ScalarColumn,
-}
-
-/// A segment's attribute tail: the columns `write_columns` takes, and the presence bitmaps that go
-/// beside them (decision 0064) — one per render column that has an absence, in row order.
-struct AttributeTail {
-    columns: Vec<(String, ScalarColumn)>,
-    presence: Vec<(String, Bitmap)>,
-}
-
 /// Which rows of one render column carry a value, from that column's values **in row order** —
 /// `None` where every row does, which is the case that writes no file (decision 0064).
 ///
@@ -6610,7 +6402,6 @@ pub(crate) fn distinct_codes(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tessera_types::IdentityKey;
 
     /// **The extent route is decided by the order a column's readers want, not by its type.**
     ///
@@ -7942,53 +7733,4 @@ mod tests {
         assert!(!range(&[0, 1, 2, 63]));
     }
 
-    /// The tie path (Step 3a fold): comparing the `priority` prefix first and refining on a tie
-    /// by recomputing the full `tessera_id` from `entity` must produce **exactly** the same row
-    /// order as sorting by the full `tessera_id` directly — not merely "usually agrees". Fixed
-    /// `morton` across every row so the fixture ties on the first comparator field too, forcing
-    /// the comparison down to `priority` and then, on a further tie, the full identity.
-    #[test]
-    fn row_rec_comparator_agrees_with_a_full_tessera_id_sort_over_engineered_ties() {
-        let key = IdentityKey::from_hex("000102030405060708090a0b0c0d0e0f").unwrap();
-        let shard = 0u32;
-        let morton = 42u32;
-
-        let rows: Vec<RowRec> = (0..4000u32)
-            .map(|entity| {
-                let tessera_id = key.forward(shard, EntityId::new(entity as u64)).unwrap();
-                RowRec {
-                    morton,
-                    entity,
-                    priority: tessera_id.priority(),
-                    _pad: 0,
-                }
-            })
-            .collect();
-
-        // The fixture must actually exercise a prefix tie, or this test would prove nothing:
-        // 4000 rows over a 16-bit prefix puts us well past the birthday bound.
-        let mut priorities: Vec<u16> = rows.iter().map(|r| r.priority).collect();
-        priorities.sort_unstable();
-        assert!(
-            priorities.windows(2).any(|w| w[0] == w[1]),
-            "fixture must contain at least one priority-prefix tie"
-        );
-
-        let mut via_comparator = rows.clone();
-        via_comparator.sort_by(|a, b| a.cmp(b, &key, shard));
-
-        let mut naive = rows;
-        naive.sort_by_key(|r| {
-            key.forward(shard, EntityId::new(r.entity as u64))
-                .unwrap()
-                .raw()
-        });
-
-        let via_comparator_entities: Vec<u32> = via_comparator.iter().map(|r| r.entity).collect();
-        let naive_entities: Vec<u32> = naive.iter().map(|r| r.entity).collect();
-        assert_eq!(
-            via_comparator_entities, naive_entities,
-            "the prefix-then-recompute comparator must agree with a full tessera_id sort"
-        );
-    }
 }
