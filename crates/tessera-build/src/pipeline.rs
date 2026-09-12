@@ -4243,9 +4243,13 @@ impl KeywordChunk {
     }
 }
 
-/// Where the merge scatters each row's ordinal, under the column's own directory and unlinked when
-/// the array is released.
-const KEYWORD_ORDINAL_SCRATCH: &str = "keyword-ordinals.scratch";
+/// The partition the merge pushes `(row, ordinal)` into, under the column's own directory. Its
+/// buckets go back as the values file is written past them.
+const KEYWORD_ORDINAL_PARTITION: &str = "keyword-ordinals";
+
+/// One `(row, ordinal)` record of that partition: two little-endian `u32`s, the row first because
+/// it is the key the partition routes on.
+const KEYWORD_ORDINAL_RECORD: usize = 8;
 
 /// One indexed keyword column's dictionary and its ordinal values file. Returns the dictionary's
 /// path.
@@ -4275,18 +4279,19 @@ const KEYWORD_ORDINAL_SCRATCH: &str = "keyword-ordinals.scratch";
 ///    [`tessera_filter::SortedDictWriter`], which streams the dictionary and holds only its
 ///    restart table, and the ordinal it returns is written to every row the merge then drains for
 ///    that key.
-/// 5. **Scatter.** The ordinals leave the merge in key order and the values file needs them in row
-///    order, so the merge writes them into a `u32` array addressed by row, and the values file is
-///    then that array read front to back in [`VALUE_CHUNK`] slices.
+/// 5. **Partition.** The ordinals leave the merge in key order and the values file needs them in
+///    row order, so the merge pushes `(row, ordinal)` to a [`crate::spill::Partition`] by row
+///    range. Each bucket is then read whole, scattered into a `u32` window over its own row range,
+///    and pushed to the values writer in [`VALUE_CHUNK`] slices.
 ///
-/// **The array is a [`crate::spill::MappedArray`] and not a `Vec`**, which is the whole of what
-/// keeps step 5 from putting back the ceiling steps 1 to 4 removed: 4 bytes per present row is
-/// 932 MB at rung 5 and 12 GB at 3×10⁹, and as anonymous memory that is a figure a machine must
-/// simply have. Mapped, it is page cache the kernel evicts under pressure — the argument
-/// `MappedArray` was added for, and the same file-backed scratch the geometry pass and every
-/// declared column already use. The alternative considered was a second external sort: spill
-/// `(row, ordinal)` and merge it back into row order. It is bounded too, and it costs a second
-/// spill of 8 bytes per row, a sort and a merge, to avoid a scatter over a file the box holds.
+/// **A partition and not a scatter into a mapped array addressed by row**, which is what step 5
+/// was. A mapped array is bounded in memory only while the page cache holds it, and the cache is
+/// whatever the rest of the build leaves: on a run whose `layers` stage had left 3 GB of cache,
+/// the scatter over a 12.9 GB array read **16 TB from disk in four hours** to get 49% of the way
+/// through one column, at 100 to 180 major faults a second
+/// (`docs/evidence/memos/2026-09-12-gbif-whole-corpus-build-observations.md` §6). A partition
+/// costs 8 bytes a row of spill and one more pass, and its cost does not depend on what else the
+/// build holds. What is resident is one bucket and one window, both a 128th of the column.
 ///
 /// **The output is a function of the corpus alone, never of the plan.** The dictionary is the
 /// sorted distinct key set and a row's ordinal is its key's position in it; neither depends on
@@ -4335,24 +4340,49 @@ fn write_keyword_column(
 
     // ---- 4. the merge: the dictionary, and each row's ordinal ---------------------------------
     let dict_path = column_dir.join(tessera_filter::DICT_FILE);
-    let mut ordinals =
-        spill::MappedArray::<u32>::zeroed(column_dir, KEYWORD_ORDINAL_SCRATCH, rows as usize)?;
-    merge_keyword_runs(
-        &dict_path,
-        attribute,
-        &receipts,
-        rows,
-        ordinals.as_mut_slice(),
+    let partition = spill::Partition::create(
+        column_dir,
+        KEYWORD_ORDINAL_PARTITION,
+        spill::boundaries_uniform(rows),
+        KEYWORD_ORDINAL_RECORD,
     )?;
+    let partition = merge_keyword_runs(&dict_path, attribute, &receipts, rows, partition)?;
     for receipt in &receipts {
         std::fs::remove_file(&receipt.path).map_err(|e| BuildError::io(&receipt.path, e))?;
     }
 
     // ---- 5. the values file, in row order ----------------------------------------------------
-    for slice in ordinals.as_slice().chunks(VALUE_CHUNK) {
-        writer
-            .push(&Codes::U32(slice.to_vec().into()))
-            .map_err(|e| BuildError::io(values_path, e))?;
+    //
+    // **A bucket at a time, front to back.** The buckets partition the rows in ascending ranges,
+    // so walking them in order is walking the rows in order; each is scattered into a window over
+    // its own range and pushed on, and its file is released before the next is read.
+    let mut store = partition.store;
+    for k in 0..partition.ranges.len() {
+        let (lo, hi) = partition.ranges[k];
+        let mut window = vec![0u32; (hi - lo) as usize];
+        for record in store.load(k)?.chunks_exact(KEYWORD_ORDINAL_RECORD) {
+            let row = u32::from_le_bytes(record[..4].try_into().expect("a record is 8 bytes"));
+            let ordinal = u32::from_le_bytes(record[4..].try_into().expect("a record is 8 bytes"));
+            // The bucket-range check the row-bound check became: a record outside the range its
+            // bucket addresses would be written over another bucket's row, or past the window.
+            let slot = (row as u64)
+                .checked_sub(lo)
+                .and_then(|at| window.get_mut(at as usize))
+                .ok_or_else(|| {
+                    BuildError::Invalid(format!(
+                        "attribute '{}': bucket {k} of the keyword ordinals holds row {row}, \
+                         outside the range [{lo}, {hi}) it addresses",
+                        attribute.name
+                    ))
+                })?;
+            *slot = ordinal;
+        }
+        store.delete(k)?;
+        for slice in window.chunks(VALUE_CHUNK) {
+            writer
+                .push(&Codes::U32(slice.to_vec().into()))
+                .map_err(|e| BuildError::io(values_path, e))?;
+        }
     }
     Ok(dict_path)
 }
@@ -4366,8 +4396,8 @@ fn merge_keyword_runs(
     attribute: &crate::config::Attribute,
     receipts: &[spill::SpillReceipt],
     rows: u64,
-    ordinals: &mut [u32],
-) -> Result<u64> {
+    mut partition: spill::Partition,
+) -> Result<KeywordOrdinals> {
     let spilled: u64 = receipts.iter().map(|receipt| receipt.count).sum();
     if spilled != rows {
         return Err(BuildError::Invalid(format!(
@@ -4410,14 +4440,17 @@ fn merge_keyword_runs(
         }
         keys += 1;
         merge.drain(&mut |row| {
-            let slot = ordinals.get_mut(row as usize).ok_or_else(|| {
-                BuildError::Invalid(format!(
+            if row as u64 >= rows {
+                return Err(BuildError::Invalid(format!(
                     "attribute '{}': the key {key:?} is carried by row {row}, which is past the \
                      {rows} rows the column has",
                     attribute.name
-                ))
-            })?;
-            *slot = ordinal;
+                )));
+            }
+            let mut record = [0u8; KEYWORD_ORDINAL_RECORD];
+            record[..4].copy_from_slice(&row.to_le_bytes());
+            record[4..].copy_from_slice(&ordinal.to_le_bytes());
+            partition.push(&record)?;
             emitted += 1;
             Ok(())
         })?;
@@ -4432,7 +4465,23 @@ fn merge_keyword_runs(
             attribute.name
         )));
     }
-    Ok(keys)
+    let ranges = (0..partition.buckets())
+        .map(|k| {
+            let (lo, hi) = partition.range(k);
+            (lo as u64, hi.min(rows))
+        })
+        .collect();
+    Ok(KeywordOrdinals {
+        ranges,
+        store: partition.finish()?,
+    })
+}
+
+/// The `(row, ordinal)` partition the merge filled, with each bucket's row range clipped to the
+/// column's own row count — which is what sizes the window the bucket is scattered into.
+struct KeywordOrdinals {
+    ranges: Vec<(u64, u64)>,
+    store: spill::PartitionStore,
 }
 
 /// Values pushed to the column writer at a time. The writer spools each chunk as it arrives, so
