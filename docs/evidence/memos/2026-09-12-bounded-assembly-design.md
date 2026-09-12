@@ -216,12 +216,22 @@ Roaring containers are below the mmap threshold, and glibc releases free pages i
 on trim. Fragmentation against the records allocated above the bitmaps is the residual risk,
 which the batching bounds and the measurement in §7 checks.
 
-### 4.6 The artifact pass
+### 4.6 The artifact pass, and the fold with it
 
-`project_row_column` builds a level's label lane as a `vec![ROW_COLUMN_HOLE; row_count]`, 14 GB
-a level at rung 6, and a list lane's offset table the same way. Both become mapped scratch
-written front to back, and the entity-order model charges what remains. The row-column lanes
-were charged to the disk model only.
+`project_row_column` builds a level's row column by walking each artifact's row bitmap and
+writing the ordinal at every row into a row-sized array, 14 GB a level at rung 6, then packs
+it. The engine composes the same column at every fold through the same function. Owner ruling,
+2026-09-12: **one implementation, disk-backed on both sides.** The partition primitive moves to
+the store crate; every membership entry is pushed as `(row, ordinal)` to buckets by row range,
+and each bucket is replayed in row order into the packed writer, which writes the column front
+to back into the file it becomes. The build's buckets live under `.build-tmp/`; the fold's under
+the deployment's cache directory, and an open sweeps what a crashed fold left. The fold's cost
+becomes 8 B an entry written and read once in place of a 4 B a row heap array and two passes,
+and its memory is one bucket. The other two routes considered: one byte writer fed by two
+traversals, which leaves the fold's memory as it is; and the partition with heap buckets on the
+engine, which costs 8 B an entry there. Neither taken.
+
+The artifact pass also gets its own stage record, since `manifests` today reports its interval.
 
 ### 4.7 The rest
 
