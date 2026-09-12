@@ -135,6 +135,7 @@ pub fn run(
     partition: &str,
     view: &str,
     row_count: u32,
+    scratch_dir: &Path,
     index: &mut DerivedIndex,
 ) -> ArtifactPass {
     let started = Instant::now();
@@ -369,7 +370,10 @@ pub fn run(
             level: *level,
             level_version: store.level_version(layer, *level),
             layout: *layout,
-            bytes: derived::project_tile_index(ordinals, space.base_rows(), &|visit| {
+            bytes: derived::FiledBytes::InHand(derived::project_tile_index(
+                ordinals,
+                space.base_rows(),
+                &|visit| {
                 if let Some(rows) = resolved.get(&(layer.clone(), *level)) {
                     walk_resolved(rows, visit);
                     return;
@@ -383,7 +387,8 @@ pub fn run(
                         &space.project_base_with(&record.members, &mut scratch.borrow_mut()),
                     );
                 }
-            }),
+                },
+            )),
         });
     }
     pass.tile_index_extents =
@@ -411,39 +416,52 @@ pub fn run(
             continue;
         }
         let ordinals = store.level(layer, *level).count() as u32;
-        let bytes = derived::project_row_column(ordinals, space.base_rows(), *layout, &|visit| {
-            if let Some(rows) = resolved.get(&(layer.clone(), *level)) {
-                walk_resolved(rows, visit);
-                return;
-            }
-            for (ordinal, record) in store.level(layer, *level) {
-                if elsewhere(layer, *level, ordinal) {
-                    continue;
+        let staged = derived::project_row_column(
+            ordinals,
+            space.base_rows(),
+            *layout,
+            scratch_dir,
+            &|visit| {
+                if let Some(rows) = resolved.get(&(layer.clone(), *level)) {
+                    walk_resolved(rows, visit);
+                    return;
                 }
-                visit(
-                    ordinal,
-                    &space.project_base_with(&record.members, &mut scratch.borrow_mut()),
-                );
-            }
-        });
-        match bytes {
-            Some(bytes) => columns.push(Filed {
+                for (ordinal, record) in store.level(layer, *level) {
+                    if elsewhere(layer, *level, ordinal) {
+                        continue;
+                    }
+                    visit(
+                        ordinal,
+                        &space.project_base_with(&record.members, &mut scratch.borrow_mut()),
+                    );
+                }
+            },
+        );
+        match staged {
+            Ok(Some(path)) => columns.push(Filed {
                 view: view.to_string(),
                 incarnation: tessera_store::manifest::DECLARED_INCARNATION,
                 layer: layer.clone(),
                 level: *level,
                 level_version: store.level_version(layer, *level),
                 layout: *layout,
-                bytes,
+                bytes: derived::FiledBytes::Staged(path),
             }),
             // The build-time half of the refusal the declaration could not make: whether an
             // attribute is single-valued is a property of the data. The level is served
             // artifact-major, every answer unchanged.
-            None => eprintln!(
+            Ok(None) => eprintln!(
                 "artifact pass: {layer} level {level} was recorded {} and its memberships do not \
                  partition, so it is served artifact-major. Every answer is unchanged; the layout \
                  is not",
                 layout.pin_word()
+            ),
+            // **A derived structure, so a failure is a dropped file and not a refused build.** The
+            // level composes its column on first request, which is what every request did before
+            // the file existed.
+            Err(error) => eprintln!(
+                "artifact pass: {layer} level {level}'s row-major column would not be composed \
+                 ({error}); that level derives it on first use"
             ),
         }
     }
@@ -509,7 +527,7 @@ pub fn run(
                 level: *level,
                 level_version,
                 layout: ServingLayout::ArtifactMajor,
-                bytes: derived::shape_held_bytes(level_version, &entries),
+                bytes: derived::FiledBytes::InHand(derived::shape_held_bytes(level_version, &entries)),
             }
         })
         .collect();
@@ -660,7 +678,7 @@ pub fn containment(
             level: *level,
             level_version: store.level_version(layer, *level),
             layout: ServingLayout::ArtifactMajor,
-            bytes: derived::compose_containment(&contents, &signatures),
+            bytes: derived::FiledBytes::InHand(derived::compose_containment(&contents, &signatures)),
         });
     }
     derived::file_containment(prefix_dir, partition, MANIFEST_N, index, composed)

@@ -10,6 +10,7 @@ pub mod error;
 pub mod flush;
 pub mod fold;
 mod locator;
+pub mod partition;
 pub mod manifest;
 pub mod manifest_write;
 pub mod membership;

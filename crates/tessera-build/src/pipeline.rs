@@ -527,7 +527,7 @@ impl BucketSink {
                 batch_items,
             } => {
                 let batch = ((value >> 32) / *batch_items) as usize;
-                writers[batch].push(value)
+                writers[batch].push(value).map_err(BuildError::from)
             }
         }
     }
@@ -539,7 +539,7 @@ impl BucketSink {
                 writers
                     .into_iter()
                     .map(|w| w.finish().map(Some))
-                    .collect::<Result<_>>()?,
+                    .collect::<tessera_store::Result<_>>()?,
             )),
         }
     }
@@ -563,7 +563,7 @@ impl BucketStore {
                 let receipt = receipts[k as usize]
                     .as_ref()
                     .ok_or_else(|| BuildError::Invalid(format!("bucket {k} loaded twice")))?;
-                spill::read_bucket(receipt)
+                Ok(spill::read_bucket(receipt)?)
             }
         }
     }
@@ -2151,6 +2151,7 @@ fn build_bundle(
             crate::PHASH,
             &view.view_id,
             rows_in_view,
+            tmp.path(),
             &mut derived_index,
         );
         published_layers.store = artifact_store;

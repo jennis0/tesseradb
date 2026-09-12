@@ -504,7 +504,7 @@ pub(crate) fn partition_rows(
         record[0..4].copy_from_slice(&code.to_le_bytes());
         record[4..8].copy_from_slice(&residual.to_le_bytes());
         record[8..12].copy_from_slice(&entity.to_le_bytes());
-        pushed = partition.push_to(bucket, &record);
+        pushed = partition.push_to(bucket, &record).map_err(BuildError::from);
     });
     pushed?;
     Ok((

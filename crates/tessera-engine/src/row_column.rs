@@ -262,6 +262,7 @@ impl RowColumn {
         membership: &MembershipRows,
         row_count: u32,
         layout: ServingLayout,
+        scratch: &std::path::Path,
     ) -> Option<Self> {
         let ordinals = membership.len() as u32;
         let each = |visit: &mut dyn FnMut(u32, &Bitmap)| {
@@ -271,7 +272,7 @@ impl RowColumn {
                 }
             }
         };
-        Self::assemble(ordinals, row_count, layout, &each)
+        Self::assemble(ordinals, row_count, layout, scratch, &each)
     }
 
     /// [`Self::compose`] with **the pack over the base rows alone and every row above them in the
@@ -293,6 +294,7 @@ impl RowColumn {
         base_rows: u32,
         row_count: u32,
         layout: ServingLayout,
+        scratch: &std::path::Path,
     ) -> Option<Self> {
         let ordinals = membership.len() as u32;
         let reaches_above = |rows: &Bitmap| rows.maximum().is_some_and(|max| max >= base_rows);
@@ -309,7 +311,7 @@ impl RowColumn {
                 }
             }
         };
-        let mut column = Self::assemble(ordinals, base_rows, layout, &each)?;
+        let mut column = Self::assemble(ordinals, base_rows, layout, scratch, &each)?;
         if row_count <= base_rows {
             return Some(column);
         }
@@ -345,6 +347,7 @@ impl RowColumn {
         ordinals: u32,
         space: &RowSpace,
         layout: ServingLayout,
+        scratch: &std::path::Path,
         level: impl Fn() -> I,
     ) -> Option<Self>
     where
@@ -355,7 +358,7 @@ impl RowColumn {
                 visit(ordinal, &space.project_base(&record.members));
             }
         };
-        Self::assemble(ordinals, space.base_rows(), layout, &each)
+        Self::assemble(ordinals, space.base_rows(), layout, scratch, &each)
     }
 
     /// Open a fold-written column, mapped in place, and check it is the form the manifest claims.
@@ -997,11 +1000,42 @@ impl RowColumn {
         ordinals: u32,
         row_count: u32,
         layout: ServingLayout,
+        scratch: &std::path::Path,
         each: LevelWalk<'_>,
     ) -> Option<Self> {
-        let bytes =
-            tessera_store::derived::project_row_column(ordinals, row_count, layout, each)?;
-        Some(Self::of_bytes(bytes, layout))
+        // **The composition writes the column into a file and this reads it back**, which is what
+        // it costs to have one implementation of the column on both sides (owner ruling,
+        // 2026-09-12; `docs/evidence/memos/2026-09-12-bounded-assembly-design.md` §4.6). What the
+        // file buys is the row-sized lane it replaces: the pass held four bytes a row while it
+        // composed, and now holds one partition bucket. The bytes it reads back are the column the
+        // form was going to hold anyway.
+        let path = match tessera_store::derived::project_row_column(
+            ordinals, row_count, layout, scratch, each,
+        ) {
+            Ok(Some(path)) => path,
+            Ok(None) => return None,
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    "a row-major column would not be composed; the level is served artifact-major"
+                );
+                return None;
+            }
+        };
+        let bytes = std::fs::read(&path);
+        let _ = std::fs::remove_file(&path);
+        match bytes {
+            Ok(bytes) => Some(Self::of_bytes(bytes, layout)),
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    path = %path.display(),
+                    "a row-major column this process just composed would not be read back; the \
+                     level is served artifact-major"
+                );
+                None
+            }
+        }
     }
 
     /// Frame a column this process just produced and read it back through the same checks a mapped
@@ -1028,6 +1062,31 @@ mod tests {
     use super::*;
     use crate::compose::MaskedSet;
 
+    /// The scratch a composition partitions through. One directory for the whole test binary: a
+    /// composition names its own files and removes them, so they cannot collide.
+    fn scratch() -> &'static std::path::Path {
+        static DIR: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+        DIR.get_or_init(|| tempfile::tempdir().expect("a scratch directory"))
+            .path()
+    }
+
+    fn composed(
+        membership: &MembershipRows,
+        row_count: u32,
+        layout: ServingLayout,
+    ) -> Option<RowColumn> {
+        RowColumn::compose(membership, row_count, layout, scratch())
+    }
+
+    fn composed_over_base(
+        membership: &MembershipRows,
+        base_rows: u32,
+        row_count: u32,
+        layout: ServingLayout,
+    ) -> Option<RowColumn> {
+        RowColumn::compose_over_base(membership, base_rows, row_count, layout, scratch())
+    }
+
     fn rows_of(sets: &[Option<&[u32]>]) -> MembershipRows {
         MembershipRows::of_rows(
             sets.iter()
@@ -1048,7 +1107,7 @@ mod tests {
         // live with an empty projection. Rows 4, 7, 8, 9 belong to nobody.
         let membership = rows_of(&[Some(&[0, 1, 2]), Some(&[5, 6]), None, Some(&[])]);
         let column =
-            RowColumn::compose(&membership, 10, ServingLayout::RowMajorLabel).expect("partitions");
+            composed(&membership, 10, ServingLayout::RowMajorLabel).expect("partitions");
 
         assert_eq!(column.layout(), ServingLayout::RowMajorLabel);
         assert_eq!(column.len(), 4);
@@ -1081,7 +1140,7 @@ mod tests {
     fn a_list_column_carries_a_row_that_several_artifacts_claim() {
         let membership = rows_of(&[Some(&[0, 1]), Some(&[1, 2]), Some(&[])]);
         let column =
-            RowColumn::compose(&membership, 4, ServingLayout::RowMajorList).expect("always builds");
+            composed(&membership, 4, ServingLayout::RowMajorList).expect("always builds");
         assert_eq!(column.layout(), ServingLayout::RowMajorList);
         assert_eq!(column.declared_size(0), 2);
         assert_eq!(column.declared_size(1), 2);
@@ -1101,10 +1160,10 @@ mod tests {
     #[test]
     fn a_double_claim_declines_the_label_form_and_not_the_list_form() {
         let overlapping = rows_of(&[Some(&[0, 1]), Some(&[1, 2])]);
-        assert!(RowColumn::compose(&overlapping, 4, ServingLayout::RowMajorLabel).is_none());
-        assert!(RowColumn::compose(&overlapping, 4, ServingLayout::RowMajorList).is_some());
+        assert!(composed(&overlapping, 4, ServingLayout::RowMajorLabel).is_none());
+        assert!(composed(&overlapping, 4, ServingLayout::RowMajorList).is_some());
         // And artifact-major has no column at all, in either builder.
-        assert!(RowColumn::compose(&overlapping, 4, ServingLayout::ArtifactMajor).is_none());
+        assert!(composed(&overlapping, 4, ServingLayout::ArtifactMajor).is_none());
     }
 
     /// **A composed column and a mapped one are the same structure**, so the fold's consolidation is
@@ -1118,7 +1177,7 @@ mod tests {
             (ServingLayout::RowMajorList, "c.tsll"),
         ] {
             let membership = rows_of(&[Some(&[0, 1, 2]), None, Some(&[5, 6]), Some(&[])]);
-            let composed = RowColumn::compose(&membership, 8, layout).expect("builds");
+            let composed = composed(&membership, 8, layout).expect("builds");
             let path = tmp.path().join(name);
             std::fs::write(&path, composed.as_bytes()).unwrap();
             let mapped = RowColumn::open(&path, layout).unwrap();
@@ -1168,7 +1227,7 @@ mod tests {
             (&partitioned, ServingLayout::RowMajorList),
             (&overlapping, ServingLayout::RowMajorList),
         ] {
-            let column = RowColumn::compose(membership, 10, layout).expect("composes");
+            let column = composed(membership, 10, layout).expect("composes");
             let transposed = column.transpose().expect("a column with no tail transposes");
             assert_eq!(transposed.len(), column.len());
             for ordinal in 0..transposed.len() as u32 {
@@ -1202,7 +1261,7 @@ mod tests {
         let refs: Vec<Option<&[u32]>> = sets.iter().map(|s| Some(s.as_slice())).collect();
         let membership = rows_of(&refs);
         for layout in [ServingLayout::RowMajorLabel, ServingLayout::RowMajorList] {
-            let column = RowColumn::compose(&membership, ROWS, layout).expect("partitions");
+            let column = composed(&membership, ROWS, layout).expect("partitions");
             let transposed = column.transpose().expect("no tail");
             for ordinal in 0..ORDINALS {
                 assert_eq!(
@@ -1221,7 +1280,7 @@ mod tests {
     #[test]
     fn a_tailed_column_does_not_transpose() {
         let membership = rows_of(&[Some(&[0, 1]), Some(&[2])]);
-        let base = RowColumn::compose(&membership, 4, ServingLayout::RowMajorLabel).expect("builds");
+        let base = composed(&membership, 4, ServingLayout::RowMajorLabel).expect("builds");
         assert!(base.transpose().is_some());
         let tailed = base.with_tail(TailLabels::new(4, vec![1, ROW_COLUMN_HOLE]));
         assert!(tailed.transpose().is_none());
@@ -1239,7 +1298,7 @@ mod tests {
         let membership = rows_of(&refs);
         let row_count = 64 * 7;
         for layout in [ServingLayout::RowMajorLabel, ServingLayout::RowMajorList] {
-            let column = RowColumn::compose(&membership, row_count, layout).expect("partitions");
+            let column = composed(&membership, row_count, layout).expect("partitions");
             let mask: Bitmap = (0..row_count).filter(|r| r % 3 == 0).collect();
             let histogram = column.histogram(&mask);
             for ordinal in 0..64u32 {
@@ -1308,7 +1367,7 @@ mod tests {
                 None,
                 Some(three.as_slice()),
             ]);
-            let base = RowColumn::compose(&membership, 64, layout).expect("composes");
+            let base = composed(&membership, 64, layout).expect("composes");
 
             let mut writes: Vec<(Vec<(u32, u32)>, u32)> = vec![
                 // A flush's rows, above everything held: an append.
@@ -1385,9 +1444,9 @@ mod tests {
             Some(&[12, 13, 15]),
         ]);
         for layout in [ServingLayout::RowMajorLabel, ServingLayout::RowMajorList] {
-            let whole = RowColumn::compose(&membership, 16, layout).expect("partitions");
+            let whole = composed(&membership, 16, layout).expect("partitions");
             let split =
-                RowColumn::compose_over_base(&membership, 8, 16, layout).expect("partitions");
+                composed_over_base(&membership, 8, 16, layout).expect("partitions");
             assert_eq!(every_pair(&split), every_pair(&whole), "{layout:?}");
             assert_eq!(split.declared, whole.declared, "{layout:?}");
             assert_eq!(split.row_count(), 16, "{layout:?}");
@@ -1406,7 +1465,7 @@ mod tests {
         }
         // Nothing above the base: no amendment at all, so the column can still transpose.
         let base_only =
-            RowColumn::compose_over_base(&membership, 16, 16, ServingLayout::RowMajorList)
+            composed_over_base(&membership, 16, 16, ServingLayout::RowMajorList)
                 .expect("builds");
         assert!(base_only.added.is_none());
         assert!(base_only.transpose().is_some());
@@ -1432,10 +1491,10 @@ mod tests {
         ]);
         for layout in [ServingLayout::RowMajorLabel, ServingLayout::RowMajorList] {
             let mut column =
-                RowColumn::compose_over_base(&before, 8, 24, layout).expect("partitions");
+                composed_over_base(&before, 8, 24, layout).expect("partitions");
             let span: Vec<(u32, u32)> = vec![(13, 0), (12, 0), (8, 1), (9, 1), (15, 3), (14, 3)];
             assert!(column.rebase(8, 16, &span, 24), "{layout:?}");
-            let expected = RowColumn::compose_over_base(&after, 8, 24, layout).expect("partitions");
+            let expected = composed_over_base(&after, 8, 24, layout).expect("partitions");
             assert_eq!(every_pair(&column), every_pair(&expected), "{layout:?}");
             assert_eq!(column.declared, expected.declared, "{layout:?}");
             assert_eq!(amendment(&column), amendment(&expected), "{layout:?}");
@@ -1454,7 +1513,7 @@ mod tests {
     #[test]
     fn a_growth_into_a_row_already_amended_is_refused_on_the_label_form() {
         let membership = rows_of(&[Some(&[0, 1]), Some(&[4, 5])]);
-        let mut label = RowColumn::compose(&membership, 8, ServingLayout::RowMajorLabel)
+        let mut label = composed(&membership, 8, ServingLayout::RowMajorLabel)
             .expect("partitions");
         assert!(label.amend(&[(2, 0), (9, 1)], 10));
         let before = amendment(&label);
@@ -1474,7 +1533,7 @@ mod tests {
         );
         assert_eq!(amendment(&label), before);
 
-        let mut list = RowColumn::compose(&membership, 8, ServingLayout::RowMajorList)
+        let mut list = composed(&membership, 8, ServingLayout::RowMajorList)
             .expect("always builds");
         assert!(list.amend(&[(2, 0), (9, 1)], 10));
         assert!(

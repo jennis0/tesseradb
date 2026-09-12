@@ -384,7 +384,7 @@ fn no_partition_is_built_under_a_plugin_that_is_not_the_builtin() {
     assert!(signature_shaped(&builtin));
     assert!(!signature_shaped("a plugin nobody here has seen"));
 
-    let projections = ArtifactProjections::new();
+    let projections = ArtifactProjections::new(std::env::temp_dir());
     let foreign = PartitionSource {
         postings: &fx.postings,
         data_plugin_hash: "a plugin nobody here has seen",
@@ -413,7 +413,7 @@ fn no_partition_is_built_under_a_plugin_that_is_not_the_builtin() {
 
     // The same level under the builtin does get one, so the case above is the gate and not an
     // accident of the fixture.
-    let projections = ArtifactProjections::new();
+    let projections = ArtifactProjections::new(std::env::temp_dir());
     let native = PartitionSource {
         postings: &fx.postings,
         data_plugin_hash: &builtin,
@@ -513,7 +513,7 @@ fn a_partition_is_adopted_at_its_own_coordinate_and_at_no_other() {
     };
 
     // The coordinate holds: mapped, and the level's first request composes nothing.
-    let projections = ArtifactProjections::new();
+    let projections = ArtifactProjections::new(std::env::temp_dir());
     projections.adopt_all(tmp.path(), "v00000", &[entry(composed_at)], &store);
     assert_eq!(projections.adopted(), 1);
     let rows = projections.get_or_build(
@@ -537,7 +537,7 @@ fn a_partition_is_adopted_at_its_own_coordinate_and_at_no_other() {
 
     // The level has moved since: dropped, and the level recomposes on first use.
     for moved in [composed_at + 1, composed_at.saturating_sub(1)] {
-        let projections = ArtifactProjections::new();
+        let projections = ArtifactProjections::new(std::env::temp_dir());
         projections.adopt_all(tmp.path(), "v00000", &[entry(moved)], &store);
         assert_eq!(
             projections.adopted(),
@@ -562,7 +562,7 @@ fn a_partition_is_adopted_at_its_own_coordinate_and_at_no_other() {
 
     // And a file the manifest names that is not there is an absence, not a refusal to open: the
     // level recomposes, which is what every request did before the fold wrote anything.
-    let projections = ArtifactProjections::new();
+    let projections = ArtifactProjections::new(std::env::temp_dir());
     let mut missing = entry(composed_at);
     missing.path = "partitions/default/containment/gone.tscp".to_string();
     projections.adopt_all(tmp.path(), "v00000", &[missing], &store);
@@ -580,7 +580,7 @@ fn an_adopted_partition_does_not_answer_under_another_prefix() {
     let rel = "partitions/default/containment/p.tscp";
     std::fs::write(tmp.path().join(rel), fx.partition().as_bytes()).unwrap();
 
-    let projections = ArtifactProjections::new();
+    let projections = ArtifactProjections::new(std::env::temp_dir());
     projections.adopt_all(
         tmp.path(),
         "v00000",

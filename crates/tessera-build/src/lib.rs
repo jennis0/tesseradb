@@ -1753,6 +1753,10 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
     // two call sites sit at different step numbers. See `crate::artifact_pass`.
     let artifact_store = std::mem::take(&mut published_layers.store);
     let mut derived_index = tessera_store::derived::DerivedIndex::default();
+    // **The pass's own `.build-tmp/`.** A row column is composed through a partition on disk, so
+    // the pass needs scratch of its own; the emit above closed the directory it used, and this is
+    // the last stage that wants one.
+    let artifact_tmp = spill::TmpDir::create(&args.out)?;
     let artifact_pass = crate::artifact_pass::run(
         &mut published_layers,
         &artifact_store,
@@ -1760,6 +1764,7 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
         PHASH,
         &view.view_id,
         n as u32,
+        artifact_tmp.path(),
         &mut derived_index,
     );
     // The containment partitions are not per view, so they are filed once for the prefix. The
@@ -1772,6 +1777,7 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
         &mut derived_index,
     );
     drop(artifact_store);
+    artifact_tmp.close()?;
     crate::artifact_pass::report(&artifact_pass);
     eprintln!(
         "  wrote {} containment partition(s)",

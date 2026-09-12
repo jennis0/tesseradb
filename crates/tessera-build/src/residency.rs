@@ -983,6 +983,26 @@ pub(crate) fn entity_order_residency(
         phases: Phases::ASSEMBLE,
         constant: true,
     });
+    // **The artifact pass's `(row, ordinal)` partition** (the design memo §4.6). A level's column
+    // was composed into a row-sized lane — 4 B a row, 14 GB a level at rung 6 — and is now composed
+    // through a partition by row range, one level at a time, so what it holds is the primitive's
+    // constant: the writer buffers, one loaded bucket at 8 B a record, the 8 B keys that bucket is
+    // sorted into, and for the list form a `u32` window counting the bucket's rows.
+    terms.push(Term {
+        what: format!(
+            "the artifact pass's (row, ordinal) partition: {} MiB of writer buffers, one loaded \
+             bucket of {records} records at 8 B each and the 8 B keys it is sorted into, and the \
+             u32 window the list form counts its rows in",
+            buffers(crate::spill::PARTITION_BUCKETS as u64, 8) >> 20
+        ),
+        bytes: buffers(crate::spill::PARTITION_BUCKETS as u64, 8)
+            .saturating_add(bucket(8))
+            .saturating_add(bucket(8))
+            .saturating_add(bucket(4)),
+        mapped: false,
+        phases: Phases::ASSEMBLE,
+        constant: true,
+    });
     // **Arrow's all-ones validity bitmaps, during the `columns.arrow` layout pass.** Every column
     // of the file is non-nullable and arrow writes a validity buffer for it all the same
     // (`docs/evidence/memos/2026-09-11-arrow-all-ones-validity-buffers.md`). The file keeps them as
@@ -1626,6 +1646,22 @@ pub(crate) fn disk(
          and the views each layer draws on"
             .into(),
         row_column_bytes(args, n, &member_entries_by_layer(args)),
+        Phases::ASSEMBLE,
+    );
+    // **The buckets the pass composes through**, at 8 B a `(row, ordinal)` record. One level at a
+    // time and released as each bucket is replayed, so the ceiling is the largest layer's declared
+    // entries — a ceiling over its levels rather than a sum of them.
+    push(
+        "the artifact pass's (row, ordinal) partition buckets, at 8 B a member entry of the \
+         largest layer, in .build-tmp/"
+            .into(),
+        8u64.saturating_mul(
+            member_entries_by_layer(args)
+                .into_iter()
+                .max()
+                .unwrap_or(0)
+                .max(n),
+        ),
         Phases::ASSEMBLE,
     );
     Residency { terms }
