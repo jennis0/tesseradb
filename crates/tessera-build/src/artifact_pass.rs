@@ -448,13 +448,18 @@ pub fn run(
                 bytes: derived::FiledBytes::Staged(path),
             }),
             // The build-time half of the refusal the declaration could not make: whether an
-            // attribute is single-valued is a property of the data. The level is served
+            // attribute is single-valued is a property of the data, and so is whether a level's
+            // entries fit the `u32` the list form's offsets are. The level is served
             // artifact-major, every answer unchanged.
             Ok(None) => eprintln!(
-                "artifact pass: {layer} level {level} was recorded {} and its memberships do not \
-                 partition, so it is served artifact-major. Every answer is unchanged; the layout \
-                 is not",
-                layout.pin_word()
+                "artifact pass: {layer} level {level} was recorded {} and {}, so it is served \
+                 artifact-major. Every answer is unchanged; the layout is not",
+                layout.pin_word(),
+                match layout {
+                    ServingLayout::RowMajorList =>
+                        "its member entries outrun the u32 its offsets are",
+                    _ => "its memberships do not partition",
+                }
             ),
             // **A derived structure, so a failure is a dropped file and not a refused build.** The
             // level composes its column on first request, which is what every request did before

@@ -1825,6 +1825,10 @@ struct Held {
 /// the open-time sweep cannot reach the fragment cache beside it.
 pub const ROW_COLUMN_SCRATCH_DIR: &str = "row-columns";
 
+// **`Default` is [`ArtifactProjections::new`]'s own scaffold and not a constructor.** Every field
+// but the scratch path is an empty cache, and the scratch path a default gives is empty, which is a
+// directory no composition can write through. `new` fills it in and nothing else calls `default`; a
+// caller that did would get a projection that declined every level it was asked for.
 #[derive(Debug, Default)]
 pub struct ArtifactProjections {
     cached: Mutex<BTreeMap<LevelAddress, Held>>,

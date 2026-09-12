@@ -343,6 +343,12 @@ impl RowColumn {
     /// **`level` is called more than once**, and it has to be: a list column is an offset table and
     /// a value array, and sizing the first needs a pass the second then fills. A label column takes
     /// one pass and is handed the same closure.
+    ///
+    /// ⊘ **No production caller.** The fold writes its columns through
+    /// `tessera_store::derived::project_row_column` and the engine composes through the same
+    /// function, so what reaches this is `crates/tessera-bench/src/bin/epoch_shard_tile_index.rs`
+    /// and this crate's tests. Kept because it is the projection the two routes are asserted equal
+    /// against.
     pub fn project<'a, I>(
         ordinals: u32,
         space: &RowSpace,
@@ -1022,10 +1028,21 @@ impl RowColumn {
                 return None;
             }
         };
-        let bytes = std::fs::read(&path);
+        // **Mapped, not read into a heap vector.** The column is 4 B a row for the label form and
+        // more for the list one — 14 GB a level at rung 6 — and reading it back would put the
+        // row-sized array the composition just stopped holding straight back on the heap, on the
+        // serving side. The pack frames a mapping and an owned buffer through the same checks, so
+        // what is served is the same structure either way.
+        //
+        // **Unlinked as soon as it is mapped**: the mapping holds the bytes after the directory
+        // entry goes, and the entry is this process's scratch that nothing else reads.
+        let pack = match layout {
+            ServingLayout::RowMajorLabel => LabelColumnPack::open(&path).map(Pack::Label),
+            _ => ListColumnPack::open(&path).map(Pack::List),
+        };
         let _ = std::fs::remove_file(&path);
-        match bytes {
-            Ok(bytes) => Some(Self::of_bytes(bytes, layout)),
+        match pack {
+            Ok(pack) => Some(Self::over(pack)),
             Err(error) => {
                 tracing::warn!(
                     %error,

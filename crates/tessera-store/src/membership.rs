@@ -1264,6 +1264,9 @@ impl LabelColumnFile {
             return Ok(false);
         }
         self.fill_to(row)?;
+        // Defensive: a walk hands a live artifact's ordinal and never the sentinel, so this maps
+        // nothing today. Left because the sentinel is the file's and a caller that did hand it one
+        // would otherwise write it as an ordinal at the column's width.
         let value = if ordinal == ROW_COLUMN_HOLE {
             self.hole
         } else {

@@ -718,14 +718,16 @@ fn member_spill_bytes(entries: u64, ids: IdShape, n: u64) -> u64 {
 ///
 /// `member_entries` is every `(artifact, source)` pair the layers' member sources declare and
 /// `level_entries` a ceiling on any one level's, those being the two windows a member entry is held
-/// in: the spill holds every pair at once, the publication one level's. `n` is the item count, and
-/// `ids` the source ids' own shape ([`IdShape`]).
+/// in: the spill holds every pair at once, the publication one level's. `layer_entries` is the
+/// largest single layer's declared pairs, which is what the artifact pass partitions a level at a
+/// time. `n` is the item count, and `ids` the source ids' own shape ([`IdShape`]).
 pub(crate) fn entity_order_residency(
     n: u64,
     ids: IdShape,
     columns: &[ColumnCost],
     member_entries: u64,
     level_entries: u64,
+    layer_entries: u64,
     memory_budget: u64,
 ) -> Residency {
     let batch_entries =
@@ -985,19 +987,26 @@ pub(crate) fn entity_order_residency(
     });
     // **The artifact pass's `(row, ordinal)` partition** (the design memo §4.6). A level's column
     // was composed into a row-sized lane — 4 B a row, 14 GB a level at rung 6 — and is now composed
-    // through a partition by row range, one level at a time, so what it holds is the primitive's
-    // constant: the writer buffers, one loaded bucket at 8 B a record, the 8 B keys that bucket is
-    // sorted into, and for the list form a `u32` window counting the bucket's rows.
+    // through a partition by row range, one level at a time: the writer buffers, one loaded bucket
+    // at 8 B a record, the 8 B keys that bucket is sorted into, and for the list form a `u32`
+    // window counting the bucket's rows.
+    //
+    // **A record is a member entry and not a row**, so this bucket is not bounded by the key type
+    // the way the other partitions' are. A row belongs to one artifact of a single-valued level and
+    // to many of a list-form one — MedCPT declares 47 entries a row — so the bucket holds the
+    // larger of the row space and the largest layer's entries, over the bucket count. The window is
+    // the row one: it counts the rows of the bucket's range and nothing else.
+    let pass_records = records.max(layer_entries / crate::spill::PARTITION_BUCKETS as u64);
     terms.push(Term {
         what: format!(
             "the artifact pass's (row, ordinal) partition: {} MiB of writer buffers, one loaded \
-             bucket of {records} records at 8 B each and the 8 B keys it is sorted into, and the \
-             u32 window the list form counts its rows in",
+             bucket of {pass_records} member entries at 8 B each and the 8 B keys it is sorted \
+             into, and the u32 window the list form counts its rows in",
             buffers(crate::spill::PARTITION_BUCKETS as u64, 8) >> 20
         ),
         bytes: buffers(crate::spill::PARTITION_BUCKETS as u64, 8)
-            .saturating_add(bucket(8))
-            .saturating_add(bucket(8))
+            .saturating_add(pass_records.saturating_mul(8))
+            .saturating_add(pass_records.saturating_mul(8))
             .saturating_add(bucket(4)),
         mapped: false,
         phases: Phases::ASSEMBLE,
@@ -1055,7 +1064,7 @@ fn model_inputs(
     n: u64,
     payloads: &[f64],
     routes: &crate::pipeline::ColumnRoutes,
-) -> (Vec<ColumnCost>, u64, u64) {
+) -> (Vec<ColumnCost>, u64, u64, u64) {
     // Scaled by `n` rather than taken whole, so a `--limit` build is charged the prefix it builds
     // and not the file it reads from.
     let columns: Vec<ColumnCost> = args
@@ -1090,13 +1099,17 @@ fn model_inputs(
             },
         })
         .collect();
-    // **Two denominators over the same member sources**, because a member entry is held in two
-    // windows of different sizes. Every entry is on the disk at once, as the spill's runs and the
-    // table they merge into: that is the file's key values. One *level's* are in memory at once, as
-    // the publication's Roaring, and a level draws at most one artifact per member row: that is the
-    // file's rows, which is a ceiling on any one level whatever the shape of its key lists.
+    // **Three denominators over the same member sources**, because a member entry is held in
+    // windows of three sizes. Every entry is on the disk at once, as the spill's runs and the table
+    // they merge into: that is the file's key values. One *level's* are in memory at once, as the
+    // publication's Roaring, and a level draws at most one artifact per member row: that is the
+    // file's rows, which is a ceiling on any one level whatever the shape of its key lists. One
+    // *layer's* are what the artifact pass partitions, a level at a time, and there a row carries
+    // one record per artifact it belongs to rather than one in all: that is the layer's declared
+    // pairs, and the largest layer is the ceiling over the pass.
     let mut entries = 0u64;
     let mut level_entries = 0u64;
+    let mut layer_entries = 0u64;
     for layer in &args.layer_inputs {
         let Some(members) = layer.members.as_ref() else {
             continue;
@@ -1104,8 +1117,9 @@ fn model_inputs(
         let (declared, rows) = member_entries(members);
         entries = entries.saturating_add(declared);
         level_entries = level_entries.saturating_add(rows);
+        layer_entries = layer_entries.max(declared);
     }
-    (columns, entries, level_entries)
+    (columns, entries, level_entries, layer_entries)
 }
 
 /// **How much of the free space an arena has to fit inside to be worth filling.**
@@ -1171,7 +1185,8 @@ pub(crate) fn plan_routes(
     free: Option<u64>,
 ) -> (crate::pipeline::ColumnRoutes, Residency) {
     let spilled = crate::pipeline::ColumnRoutes::every_available(&args.schema);
-    let (columns, entries, level_entries) = model_inputs(args, n, payloads, &spilled);
+    let (columns, entries, level_entries, layer_entries) =
+        model_inputs(args, n, payloads, &spilled);
     choose_routes(
         &args.schema,
         n,
@@ -1179,6 +1194,7 @@ pub(crate) fn plan_routes(
         columns,
         entries,
         level_entries,
+        layer_entries,
         free,
         args.memory_budget
             .unwrap_or_else(crate::pipeline::detect_memory_budget),
@@ -1203,11 +1219,20 @@ pub(crate) fn routes_for(
             crate::pipeline::ColumnRoutes::every_available(&args.schema)
         }
     };
-    let (columns, entries, level_entries) = model_inputs(args, n, payloads, &forced);
+    let (columns, entries, level_entries, layer_entries) =
+        model_inputs(args, n, payloads, &forced);
     let budget = args
         .memory_budget
         .unwrap_or_else(crate::pipeline::detect_memory_budget);
-    let tail = entity_order_residency(n, ids, &columns, entries, level_entries, budget);
+    let tail = entity_order_residency(
+        n,
+        ids,
+        &columns,
+        entries,
+        level_entries,
+        layer_entries,
+        budget,
+    );
     (forced, tail)
 }
 
@@ -1222,6 +1247,7 @@ fn choose_routes(
     mut columns: Vec<ColumnCost>,
     entries: u64,
     level_entries: u64,
+    layer_entries: u64,
     free: Option<u64>,
     memory_budget: u64,
 ) -> (crate::pipeline::ColumnRoutes, Residency) {
@@ -1233,8 +1259,15 @@ fn choose_routes(
         }
         columns[index].extents = false;
         columns[index].framing_bytes = 0;
-        let candidate =
-            entity_order_residency(n, ids, &columns, entries, level_entries, memory_budget);
+        let candidate = entity_order_residency(
+            n,
+            ids,
+            &columns,
+            entries,
+            level_entries,
+            layer_entries,
+            memory_budget,
+        );
         if stage_scratch(&candidate) <= ceiling {
             routes.take_arena(index);
         } else {
@@ -1242,7 +1275,15 @@ fn choose_routes(
             columns[index].framing_bytes = extent_framing_bytes(n);
         }
     }
-    let tail = entity_order_residency(n, ids, &columns, entries, level_entries, memory_budget);
+    let tail = entity_order_residency(
+        n,
+        ids,
+        &columns,
+        entries,
+        level_entries,
+        layer_entries,
+        memory_budget,
+    );
     (routes, tail)
 }
 
@@ -2006,6 +2047,9 @@ mod tests {
             columns,
             entries,
             level_entries,
+            // Every layer's entries as one layer's, which is exact for a single-layer fixture and
+            // over-charges the artifact pass for a many-layer one.
+            entries,
             free,
             u64::MAX,
         )
@@ -2018,7 +2062,16 @@ mod tests {
         member_entries: u64,
         level_entries: u64,
     ) -> Residency {
-        super::entity_order_residency(n, ids, columns, member_entries, level_entries, u64::MAX)
+        super::entity_order_residency(
+            n,
+            ids,
+            columns,
+            member_entries,
+            level_entries,
+            // As above: one layer, so the largest layer's entries are all of them.
+            member_entries,
+            u64::MAX,
+        )
     }
 
     /// A column whose characters, if it has any, fill an arena — the shape a string column keeps
@@ -2326,7 +2379,7 @@ mod tests {
             spilled.takes_extents(code),
             "an unflagged keyword column has the extent route"
         );
-        let (columns, _, _) = model_inputs(&args, n, &payloads, &spilled);
+        let (columns, _, _, _) = model_inputs(&args, n, &payloads, &spilled);
         assert_eq!(columns[code].framing_bytes, extent_framing_bytes(n));
         let weight = args
             .schema
@@ -2340,7 +2393,7 @@ mod tests {
         );
 
         let arena = crate::pipeline::ColumnRoutes::forced_only(&args.schema);
-        let (held, _, _) = model_inputs(&args, n, &payloads, &arena);
+        let (held, _, _, _) = model_inputs(&args, n, &payloads, &arena);
         assert_eq!(
             held[code].framing_bytes, 0,
             "a column that keeps its arena is not framed until the record blob itself"
@@ -2601,10 +2654,17 @@ mod tests {
         let rows = 64_000_000;
         let without = entity_order_residency(n, IdShape::dense(n), &[], 0, 0);
         let with = entity_order_residency(n, IdShape::dense(n), &[], rows, rows);
+        // The Roaring copies, and the artifact pass's bucket, which holds one record per member
+        // entry in its row range and so rises with the layer's entries where the rest of the
+        // model's partitions rise with the rows alone: 16 B a record over 128 buckets, net of the
+        // row-sized bucket a build with no members already charges.
+        let pass_bucket = 16
+            * (rows / crate::spill::PARTITION_BUCKETS as u64
+                - n / crate::spill::PARTITION_BUCKETS as u64);
         assert_eq!(
             with.total() - without.total(),
-            rows * BYTES_PER_MEMBER_ENTRY,
-            "only the Roaring copies are memory"
+            rows * BYTES_PER_MEMBER_ENTRY + pass_bucket,
+            "only the Roaring copies and the artifact pass's bucket are memory"
         );
         assert_eq!(
             with.at(Phase::Join) - without.at(Phase::Join),
@@ -3310,14 +3370,20 @@ require_member_visibility = "none"
     }
 
     /// **The headline of the entity-order model: what anonymous memory grows with the corpus is
-    /// named, and it is one bit a row a column.**
+    /// named, and it is two terms.**
     ///
-    /// Every term the model charges against the machine is a constant or one publication batch —
-    /// a share of the budget — with one exception, and the exception is arrow's all-ones validity
-    /// bitmaps during the `columns.arrow` layout pass, `n / 8` bytes a column alive together. So
-    /// the same schema at two row counts an order of magnitude apart asks the machine for the same
-    /// number *plus* those bitmaps, and this test subtracts them rather than pretending they are
-    /// not there. What grows properly is the disk the same model reports beside it.
+    /// Every term the model charges against the machine is a constant or one publication batch — a
+    /// share of the budget — with two exceptions, and this test subtracts them rather than
+    /// pretending they are not there:
+    ///
+    /// - arrow's all-ones validity bitmaps during the `columns.arrow` layout pass, `n / 8` bytes a
+    ///   column alive together;
+    /// - the artifact pass's partition bucket, which holds one record per **member entry** in its
+    ///   row range and so is bounded by the largest layer's entries over 128 rather than by the
+    ///   `u32` row key. Every other partition pushes one record per key and is flat above the key
+    ///   type's bound; this one is not, and a layer of many ordinals a row is where it shows.
+    ///
+    /// What grows properly is the disk the same model reports beside it.
     #[test]
     fn the_anonymous_total_does_not_grow_with_the_row_count() {
         // The floor a partition's own constant needs, and the budget both row counts here carry
@@ -3335,6 +3401,9 @@ require_member_visibility = "none"
                 IdShape::dense(n),
                 &columns,
                 3 * n,
+                3 * n,
+                // One layer, so its entries are all of them: three a row, which is the shape that
+                // makes the artifact pass's bucket the entry-bounded term it is.
                 3 * n,
                 BUDGET,
             )
@@ -3354,17 +3423,21 @@ require_member_visibility = "none"
             small.describe(),
             large.describe()
         );
-        // **And the constants are bounded by the key type, not by the corpus.** A partition's
-        // bucket is `n / 128` records and never more than 2³²/128, so the total rises to that
-        // bound and is flat above it — the two row counts here straddle 2³², and beyond it the
-        // whole anonymous total is one number.
+        // **And the constants are bounded by the key type, not by the corpus** — every one but the
+        // artifact pass's. A partition's bucket is `n / 128` records and never more than 2³²/128,
+        // so the total rises to that bound and is flat above it; the pass's bucket counts member
+        // entries rather than rows, so it goes on rising with them. The two row counts here
+        // straddle 2³², and above it the anonymous total moves by the validity bitmaps and that one
+        // bucket.
+        let pass_bucket = |n: u64| 16 * (3 * n / crate::spill::PARTITION_BUCKETS as u64);
         let at_bound = residency(1u64 << 32);
         let beyond = residency(1u64 << 34);
         assert_eq!(
             beyond.total() - at_bound.total(),
-            bitmaps(1u64 << 34) - bitmaps(1u64 << 32),
-            "above the key type's bound the anonymous total moves by the validity bitmaps and \
-             nothing else:\nat 2³²{}\nat 2³⁴{}",
+            (bitmaps(1u64 << 34) - bitmaps(1u64 << 32))
+                + (pass_bucket(1u64 << 34) - pass_bucket(1u64 << 32)),
+            "above the key type's bound the anonymous total moves by the validity bitmaps and the \
+             artifact pass's bucket and nothing else:\nat 2³²{}\nat 2³⁴{}",
             at_bound.describe(),
             beyond.describe()
         );

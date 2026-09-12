@@ -363,8 +363,14 @@ pub fn project_tile_index(ordinals: u32, row_count: u32, each: LevelWalk<'_>) ->
 /// range, and the buckets are replayed in row order into the file the column becomes
 /// (`docs/evidence/memos/2026-09-12-bounded-assembly-design.md` §4.6, owner ruling: one
 /// implementation, disk-backed on both the build and the fold). What stands is one bucket, its
-/// sort, and for the list form one window of counts over the bucket's row range — each bounded by
-/// the `u32` key over 128 buckets rather than by the corpus.
+/// sort, and for the list form one window of counts over the bucket's row range.
+///
+/// **The window is bounded by the `u32` row key over 128 buckets; the bucket is not.** A record is
+/// a `(row, ordinal)` pair and a row carries as many of them as it has ordinals, so a bucket holds
+/// one record per member entry in its row range: a level whose rows carry one ordinal each fills it
+/// in proportion to the row space, and a list-form level of many ordinals a row fills it in
+/// proportion to the level's entries. The pre-flight charges it at the larger of the two
+/// (`crates/tessera-build/src/residency.rs`).
 ///
 /// **Each bucket is sorted by `(row, ordinal)` before it is replayed, and the list form's bytes
 /// depend on it.** A row's list is written in the order the ordinals reach it, and both walks that
@@ -375,6 +381,10 @@ pub fn project_tile_index(ordinals: u32, row_count: u32, each: LevelWalk<'_>) ->
 /// `None` on [`ServingLayout::RowMajorLabel`] means the memberships do **not** partition: a row was
 /// claimed twice, which is the refusal a declaration could not make because single-valuedness is a
 /// property of the data. The caller serves the level artifact-major and says so.
+///
+/// `None` on [`ServingLayout::RowMajorList`] means the level's member entries outrun the `u32` the
+/// format's offsets are, which no level of any corpus built so far reaches and a layer of tens of
+/// entries a row over 3.5×10⁹ rows would. The caller's answer is the same one.
 ///
 /// `None` on an artifact-major or spatial layout is the caller asking for a file no writer
 /// produces.
@@ -445,70 +455,108 @@ pub fn project_row_column(
     };
 
     let path = scratch.join(format!("{name}.column"));
-    match layout {
-        ServingLayout::ArtifactMajor => unreachable!("returned above"),
-        ServingLayout::RowMajorLabel => {
-            let mut file = crate::membership::LabelColumnFile::create(&path, ordinals, row_count)?;
-            let mut partitions = true;
-            for k in 0..buckets.len() {
-                let sorted = sorted_pairs(&store, k)?;
-                store.delete(k)?;
-                for pair in sorted {
-                    if !file.put((pair >> 32) as u32, pair as u32)? {
-                        partitions = false;
+    // **The file goes back unless the composition finished.** Every `?` below leaves a truncated
+    // column in the scratch directory otherwise, and the caller's answer to a failure is to derive
+    // the column on first use, so nothing would ever come back for it. Written as a closure so that
+    // one cleanup covers every exit, which is the shape [`crate::partition::Partition`]'s own
+    // `Drop` has.
+    let mut compose = || -> crate::Result<bool> {
+        match layout {
+            ServingLayout::ArtifactMajor => unreachable!("returned above"),
+            ServingLayout::RowMajorLabel => {
+                let mut file =
+                    crate::membership::LabelColumnFile::create(&path, ordinals, row_count)?;
+                let mut partitions = true;
+                for k in 0..buckets.len() {
+                    let sorted = sorted_pairs(&store, k)?;
+                    store.delete(k)?;
+                    for pair in sorted {
+                        if !file.put((pair >> 32) as u32, pair as u32)? {
+                            partitions = false;
+                            break;
+                        }
+                    }
+                    if !partitions {
                         break;
                     }
                 }
                 if !partitions {
-                    break;
+                    return Ok(false);
                 }
+                file.finish()?;
             }
-            if !partitions {
-                drop(file);
-                let _ = std::fs::remove_file(&path);
-                return Ok(None);
+            ServingLayout::RowMajorList => {
+                // **The offsets, then the values**, which is the order the format lays them in
+                // and so the order they are written in. The offsets are a running count over the
+                // rows, and a bucket holds the rows of one contiguous range, so one pass over the
+                // buckets in order produces the whole array; the values then need a second pass
+                // over the same buckets. A bucket is read twice and sorted once — the alternative,
+                // a second scratch file of values to concatenate afterwards, copies the whole
+                // column instead.
+                //
+                // **A level with more entries than a `u32` counts has no list form.** The format's
+                // offsets are `u32`, so the total is one of them; a layer of 47 entries a row over
+                // 3.5×10⁹ rows is past it, and truncating the count would write a column whose
+                // offsets wrap. The caller serves the level artifact-major, which is the same
+                // answer the double-claim path gives and is unchanged in what any viewer is told.
+                let Some(entries) = list_form_entries(entries) else {
+                    return Ok(false);
+                };
+                let mut file = crate::membership::ListColumnFile::create(
+                    &path, ordinals, row_count, entries,
+                )?;
+                let mut at: u64 = 0;
+                file.offset(at as u32)?;
+                for k in 0..buckets.len() {
+                    let (lo, hi) = range(k);
+                    let mut counts = vec![0u32; (hi - lo) as usize];
+                    for record in store.load(k)?.chunks_exact(ROW_ORDINAL_RECORD) {
+                        let row = u32::from_le_bytes(record[..4].try_into().expect("four bytes"));
+                        counts[(row - lo) as usize] += 1;
+                    }
+                    for count in counts {
+                        at += u64::from(count);
+                        file.offset(at as u32)?;
+                    }
+                }
+                for k in 0..buckets.len() {
+                    let sorted = sorted_pairs(&store, k)?;
+                    store.delete(k)?;
+                    for pair in sorted {
+                        file.value(pair as u32)?;
+                    }
+                }
+                file.finish()?;
             }
-            file.finish()?;
+            }
+            Ok(true)
+    };
+    match compose() {
+        Ok(true) => Ok(Some(path)),
+        Ok(false) => {
+            let _ = std::fs::remove_file(&path);
+            Ok(None)
         }
-        ServingLayout::RowMajorList => {
-            // **The offsets, then the values**, which is the order the format lays them in and so
-            // the order they are written in. The offsets are a running count over the rows, and a
-            // bucket holds the rows of one contiguous range, so one pass over the buckets in order
-            // produces the whole array; the values then need a second pass over the same buckets.
-            // A bucket is read twice and sorted once — the alternative, a second scratch file of
-            // values to concatenate afterwards, copies the whole column instead.
-            let mut file =
-                crate::membership::ListColumnFile::create(&path, ordinals, row_count, entries as u32)?;
-            let mut at: u64 = 0;
-            file.offset(at as u32)?;
-            for k in 0..buckets.len() {
-                let (lo, hi) = range(k);
-                let mut counts = vec![0u32; (hi - lo) as usize];
-                for record in store.load(k)?.chunks_exact(ROW_ORDINAL_RECORD) {
-                    let row = u32::from_le_bytes(record[..4].try_into().expect("four bytes"));
-                    counts[(row - lo) as usize] += 1;
-                }
-                for count in counts {
-                    at += u64::from(count);
-                    file.offset(at as u32)?;
-                }
-            }
-            for k in 0..buckets.len() {
-                let sorted = sorted_pairs(&store, k)?;
-                store.delete(k)?;
-                for pair in sorted {
-                    file.value(pair as u32)?;
-                }
-            }
-            file.finish()?;
+        Err(error) => {
+            let _ = std::fs::remove_file(&path);
+            Err(error)
         }
     }
-    Ok(Some(path))
 }
 
 /// A `(row, ordinal)` record: the row first, because a partition routes on a record's first four
 /// bytes.
 const ROW_ORDINAL_RECORD: usize = 8;
+
+/// A level's member entries as the list form's header holds them, or `None` where they outrun it.
+///
+/// The format's offsets are `u32` and the total is one of them, so a level of more entries than
+/// that has no list form at all — the composition declines it and the level is served
+/// artifact-major. Separate from its one caller so the boundary can be tested: the corpus that
+/// reaches it is 4.3×10⁹ member entries in one level, which no fixture can push.
+fn list_form_entries(entries: u64) -> Option<u32> {
+    u32::try_from(entries).ok()
+}
 
 /// Bucket `k`'s pairs as `row << 32 | ordinal`, ascending — the replay order every form depends on.
 ///
@@ -561,12 +609,14 @@ pub fn sweep_row_column_scratch(scratch: &Path) {
     let Ok(entries) = std::fs::read_dir(scratch) else {
         return;
     };
+    // **What this process wrote is not swept.** A name carries the writing process's id
+    // ([`scratch_name`]), and a second open over one cache directory — two nodes on a box, or one
+    // process opening twice — would otherwise delete the buckets of a composition running beside
+    // it. Only a pid that is not ours can be a run that died.
+    let ours = format!("{ROW_COLUMN_SCRATCH_PREFIX}{}-", std::process::id());
     for entry in entries.flatten() {
-        if entry
-            .file_name()
-            .to_string_lossy()
-            .starts_with(ROW_COLUMN_SCRATCH_PREFIX)
-        {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.starts_with(ROW_COLUMN_SCRATCH_PREFIX) && !name.starts_with(&ours) {
             let _ = std::fs::remove_file(entry.path());
         }
     }
@@ -2224,5 +2274,56 @@ mod derived_tests {
     fn overlapping_memberships_do_not_partition() {
         assert!(!observe_shape(4_096, &walk_of(&[vec![1, 2], vec![2, 3]])).partitions);
         assert!(observe_shape(4_096, &walk_of(&[vec![1, 2], vec![3, 4]])).partitions);
+    }
+
+    /// **A view with no rows composes an empty column of either form, and leaves no scratch.** The
+    /// degenerate end of the partition's arithmetic: the boundaries collapse to one bucket, no pair
+    /// is pushed because every row is past the column, and the file is a header.
+    #[test]
+    fn a_view_of_no_rows_composes_an_empty_column_and_leaves_nothing_behind() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        for layout in [ServingLayout::RowMajorLabel, ServingLayout::RowMajorList] {
+            let path = project_row_column(2, 0, layout, dir.path(), &walk_of(&[vec![0, 1], vec![2]]))
+                .expect("a column over no rows")
+                .expect("a column, not a refusal");
+            match layout {
+                ServingLayout::RowMajorLabel => {
+                    let pack =
+                        crate::membership::LabelColumnPack::open(&path).expect("the column frames");
+                    assert_eq!(pack.rows(), 0);
+                }
+                _ => {
+                    let pack =
+                        crate::membership::ListColumnPack::open(&path).expect("the column frames");
+                    assert_eq!(pack.rows(), 0);
+                }
+            }
+            std::fs::remove_file(&path).expect("the column is the caller's to remove");
+        }
+        let left: Vec<_> = std::fs::read_dir(dir.path())
+            .expect("the scratch directory")
+            .flatten()
+            .map(|entry| entry.file_name())
+            .collect();
+        assert!(
+            left.is_empty(),
+            "the buckets went back with the store: {left:?}"
+        );
+    }
+
+    /// **A level whose entries outrun the list form's `u32` has no list form.** The header states
+    /// the total as a `u32` and the offsets index it, so the entries above 2³² − 1 would be written
+    /// at wrapped offsets and read back as another row's. The composition declines and the level is
+    /// served artifact-major, which is the same answer a level whose memberships do not partition
+    /// gets and is unchanged in what any viewer is told.
+    ///
+    /// The boundary and not the path: pushing 2³² records through the partition is not a fixture.
+    #[test]
+    fn a_level_of_more_entries_than_the_list_forms_offsets_count_has_no_list_form() {
+        assert_eq!(super::list_form_entries(0), Some(0));
+        assert_eq!(super::list_form_entries(u64::from(u32::MAX)), Some(u32::MAX));
+        assert_eq!(super::list_form_entries(u64::from(u32::MAX) + 1), None);
+        // A layer of 47 entries a row over the rung-6 corpus, which is the case that reaches it.
+        assert_eq!(super::list_form_entries(47 * 3_495_729_729), None);
     }
 }
