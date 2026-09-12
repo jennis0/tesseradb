@@ -1311,6 +1311,29 @@ pub(crate) fn disk(
             Phases::BANDS.onwards(),
         );
     }
+    // **The attribute join's value partitions**, one per fixed-width column it fills: `(entity,
+    // value)` at four bytes of entity and the column's own width, standing from the join's first
+    // chunk to the replay that writes each bucket into the column as a sequential run. Charged
+    // over every item, which is a ceiling — an absent row pushes nothing — and released bucket by
+    // bucket at the replay. A string column on the arena route pushes nothing here, its offsets
+    // being written where they belong (`crate::column::EntityColumn::write_value_run`).
+    for attribute in &args.schema.attributes {
+        // A string column is the one family that has no fixed-width lane: it is either an arena,
+        // which keeps its offset write, or record-blob extents, which never reach a column at all.
+        if carries_characters(attribute.ty) {
+            continue;
+        }
+        let width = fixed_width(attribute.ty);
+        push(
+            format!(
+                "attribute '{}': the join's (entity, value) partition, {} B/item, in .build-tmp/",
+                attribute.name,
+                4 + width
+            ),
+            (4 + width) * n,
+            Phases::JOIN,
+        );
+    }
     // **Blob residency and a token index are independent, and a `text` column is both.** A column
     // whose value lives in the record blob still owes `postings.arrow` and `dict.bin` wherever it
     // is indexed (`pipeline::blob_resident`), and those two files are in the bundle from the index
@@ -1374,16 +1397,17 @@ pub(crate) fn disk(
         );
         if matches!(attribute.ty, ScalarType::Utf8 | ScalarType::Keyword) {
             // The dictionary pass's own scratch, under the column's directory rather than
-            // `.build-tmp/`: a `u32` ordinal per row scattered out of the merge, and the sorted
-            // runs it merges, both gone by the end of the pass. Measured at 5.3 B/item over
-            // 125.8×10⁶ GBIF occurrences against the 8 this charges.
+            // `.build-tmp/`: the `(row, ordinal)` partition the merge fills, 8 B a row, and the
+            // sorted runs it merges, both gone by the end of the pass. The partition's buckets go
+            // back one at a time as the values file is written past them, so this is a ceiling
+            // and the pass's own peak is a bucket lower.
             push(
                 format!(
-                    "attribute '{}': the keyword dictionary's row ordinals and sorted runs, \
-                     4 B/item and a ceiling of half the column's characters",
+                    "attribute '{}': the keyword dictionary's (row, ordinal) partition and \
+                     sorted runs, 8 B/item and a ceiling of half the column's characters",
                     attribute.name
                 ),
-                4 * n + characters / EXTENT_SHARE,
+                8 * n + characters / EXTENT_SHARE,
                 Phases::INDEX,
             );
             // And the dictionary the pass leaves behind, which is in the bundle from there on.
@@ -3076,6 +3100,48 @@ require_member_visibility = "none"
         println!(
             "observed build peak: {} MiB",
             crate::observer::peak_rss_kib() / 1024
+        );
+    }
+
+    /// **The headline of the entity-order model: nothing anonymous grows with the corpus.**
+    ///
+    /// Every term the model charges against the machine is either a constant or one publication
+    /// batch, and a batch is a share of the budget. So the same schema at two row counts an order
+    /// of magnitude apart asks the machine for the same number, and what grows is the disk the
+    /// same model reports beside it.
+    #[test]
+    fn the_anonymous_total_does_not_grow_with_the_row_count() {
+        // The floor a partition's own constant needs, and the budget both row counts here carry
+        // more member entries than one publication batch of.
+        const BUDGET: u64 = 2 << 30;
+        let residency = |n: u64| {
+            let columns = [
+                column(ScalarType::U8, 0),
+                column(ScalarType::U32, 0),
+                column(ScalarType::Keyword, 8 * n),
+                spilled(ScalarType::Text, 400 * n),
+            ];
+            super::entity_order_residency(
+                n,
+                IdShape::dense(n),
+                &columns,
+                3 * n,
+                3 * n,
+                BUDGET,
+            )
+        };
+        let small = residency(10_000_000);
+        let large = residency(100_000_000);
+        assert_eq!(
+            small.total(),
+            large.total(),
+            "the anonymous terms are a constant and one publication batch:\nat 10⁷{}\nat 10⁸{}",
+            small.describe(),
+            large.describe()
+        );
+        assert!(
+            large.peak().1 > small.peak().1,
+            "the disk the same model reports does grow with the corpus"
         );
     }
 }
