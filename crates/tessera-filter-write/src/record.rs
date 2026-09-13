@@ -56,7 +56,9 @@ use arrow::array::{ArrayRef, RecordBatch, UInt32Array, UInt64Array};
 use arrow::datatypes::{DataType, Field, Schema};
 use croaring::{Bitmap, Portable};
 
-use tessera_filter::{encode_block_header, encode_row, RecordBlob, RecordField};
+use tessera_filter::{
+    encode_block_header, encode_row, encode_row_with, RecordBlob, RecordFieldRef, RowFields,
+};
 
 /// zstd's default level — the operating point the string-storage probe measured its block ratios
 /// at. A writer's choice, not a format fact: the reader decompresses whatever level wrote the
@@ -121,7 +123,30 @@ impl RecordBlobWriter {
     /// Append one entity's row. Entities must ascend strictly; the fields are one entity's whole
     /// blob-resident record, encoded by the format's owner (which refuses an empty field list, a
     /// duplicate tag, and — until epic 3 — a list value).
-    pub fn push_row(&mut self, entity: u32, fields: &[RecordField]) -> io::Result<()> {
+    pub fn push_row(&mut self, entity: u32, fields: &[RecordFieldRef<'_>]) -> io::Result<()> {
+        self.push_encoded(entity, &mut |buf| encode_row(entity, fields, buf))
+    }
+
+    /// Append one entity's row, its fields handed over one at a time in ascending tag order.
+    ///
+    /// What a merge has: one entity's fields are spread across streams that each own the bytes
+    /// they lend, so collecting them would be a vector of borrows of several streams at once and
+    /// could not be reused row to row. This encodes straight into the open block.
+    pub fn push_row_with(
+        &mut self,
+        entity: u32,
+        fields: &mut dyn FnMut(&mut RowFields<'_>) -> Result<(), tessera_filter::RecordError>,
+    ) -> io::Result<()> {
+        self.push_encoded(entity, &mut |buf| encode_row_with(entity, buf, fields))
+    }
+
+    /// The block cutting and the bookkeeping around one encoded row, whichever way its fields
+    /// arrived.
+    fn push_encoded(
+        &mut self,
+        entity: u32,
+        encode: &mut dyn FnMut(&mut Vec<u8>) -> Result<(), tessera_filter::RecordError>,
+    ) -> io::Result<()> {
         if self.last_entity.is_some_and(|last| last >= entity) {
             return Err(invalid(format!(
                 "entity {entity} arrived at or below its predecessor {}; rows are in entity \
@@ -130,7 +155,7 @@ impl RecordBlobWriter {
             )));
         }
         let row_start = self.buf.len();
-        encode_row(entity, fields, &mut self.buf)?;
+        encode(&mut self.buf)?;
 
         // The row was appended to the open block optimistically; if it belongs in the next block
         // — the open block is non-empty and now past the target — move it. A row past the target
@@ -350,9 +375,26 @@ fn write_merged_rows(
 ///
 /// A build's producer is not a blob: its rows come from the columns it has just joined and from
 /// the extents it spilled while joining them, so the merge takes a stream rather than a layer.
+///
+/// **A row is lent, not handed over.** A stream that owned each row would copy every string out
+/// of the bytes it read and free it a row later: over the 3.5×10⁹-row GBIF rung that was
+/// 6.4×10⁹ allocate-and-free pairs across this merge and the keyword pass reading the same
+/// extents, for characters that are copied again into the output block a moment afterwards. So
+/// the stream stays at a row while the merge reads its fields, and the fields borrow whatever
+/// buffer the stream holds: a decompressed block, a column's arena. A borrow is valid until the
+/// next [`RecordRows::advance`] on that stream.
 pub trait RecordRows {
-    /// The next row, ascending strictly in the entity. `None` ends the stream.
-    fn next_row(&mut self) -> io::Result<Option<(u32, Vec<RecordField>)>>;
+    /// Walk to the next row, ascending strictly in the entity. `false` ends the stream.
+    fn advance(&mut self) -> io::Result<bool>;
+
+    /// The entity of the row the stream is at.
+    fn entity(&self) -> u32;
+
+    /// How many fields that row carries.
+    fn field_count(&self) -> usize;
+
+    /// Field `i` of that row, borrowed from the stream's own buffer.
+    fn field(&self, i: usize) -> io::Result<RecordFieldRef<'_>>;
 }
 
 /// A [`RecordBlob`]'s own rows as such a stream.
@@ -377,8 +419,17 @@ impl<'a> BlobRows<'a> {
 }
 
 impl RecordRows for BlobRows<'_> {
-    fn next_row(&mut self) -> io::Result<Option<(u32, Vec<RecordField>)>> {
-        self.cursor.next_row().map_err(io::Error::from)
+    fn advance(&mut self) -> io::Result<bool> {
+        self.cursor.advance().map_err(io::Error::from)
+    }
+    fn entity(&self) -> u32 {
+        self.cursor.entity()
+    }
+    fn field_count(&self) -> usize {
+        self.cursor.field_count()
+    }
+    fn field(&self, i: usize) -> io::Result<RecordFieldRef<'_>> {
+        self.cursor.field(i).map_err(io::Error::from)
     }
 }
 
@@ -391,7 +442,10 @@ impl RecordRows for BlobRows<'_> {
 /// else. The fold and the coalesce pass streams their own guard has already proved disjoint, so
 /// for them the merge is a concatenation and the bytes are the ones a single stream wrote.
 ///
-/// Held at once: one open row per stream, and the writer's open block.
+/// Held at once: the entity each stream is at, a list of which stream holds which of the row's
+/// tags, and the writer's open block. The fields themselves are never collected — they are lent
+/// by the streams and encoded straight into the block ([`RecordRows`]), so a row of any width
+/// costs no allocation.
 pub fn merge_record_rows(
     sources: &mut [&mut dyn RecordRows],
     tombstones: &Bitmap,
@@ -400,54 +454,77 @@ pub fn merge_record_rows(
     directory_path: &Path,
     target: usize,
 ) -> io::Result<()> {
-    let mut heads: Vec<Option<(u32, Vec<RecordField>)>> = Vec::with_capacity(sources.len());
+    let mut heads: Vec<Option<u32>> = Vec::with_capacity(sources.len());
     let mut heap: BinaryHeap<Reverse<(u32, usize)>> = BinaryHeap::with_capacity(sources.len());
     for (i, source) in sources.iter_mut().enumerate() {
-        let head = source.next_row()?;
-        if let Some((entity, _)) = &head {
-            heap.push(Reverse((*entity, i)));
+        let head = source.advance()?.then(|| source.entity());
+        if let Some(entity) = head {
+            heap.push(Reverse((entity, i)));
         }
         heads.push(head);
     }
     let mut writer = RecordBlobWriter::create(blocks_path, hasrow_path, directory_path, target)?;
-    let mut fields: Vec<RecordField> = Vec::new();
+    // Which stream holds which tag of the row being assembled, `(tag, stream, field)`. Reused row
+    // after row, so the merge allocates once however many rows it writes.
+    let mut picks: Vec<(u16, usize, usize)> = Vec::new();
+    // The streams that were at this entity, to be walked on once the row is written — they cannot
+    // move while the row's fields are borrowed out of them.
+    let mut at_entity: Vec<usize> = Vec::new();
     while let Some(Reverse((entity, _))) = heap.peek().copied() {
-        fields.clear();
+        picks.clear();
+        at_entity.clear();
         while let Some(&Reverse((head, source))) = heap.peek() {
             if head != entity {
                 break;
             }
             heap.pop();
-            let taken = heads[source]
-                .take()
-                .expect("a stream in the heap has a head");
-            for field in taken.1 {
-                match fields.iter_mut().find(|held| held.tag == field.tag) {
+            heads[source] = None;
+            at_entity.push(source);
+            for field in 0..sources[source].field_count() {
+                let tag = sources[source].field(field)?.tag;
+                match picks.iter_mut().find(|held| held.0 == tag) {
                     // A later stream is the later write. The build's streams carry disjoint tags
                     // for one entity, so this arm is the refusal's absence rather than a route
                     // anything takes.
-                    Some(held) => held.value = field.value,
-                    None => fields.push(field),
+                    Some(held) => {
+                        held.1 = source;
+                        held.2 = field;
+                    }
+                    None => picks.push((tag, source, field)),
                 }
             }
-            let next = sources[source].next_row()?;
-            if let Some((next_entity, _)) = &next {
-                if *next_entity <= entity {
+        }
+        if !tombstones.contains(entity) {
+            // Rule F's remove-emit-no-bytes is the other arm: a tombstoned row leaves the artefact
+            // by never being written, not by being overwritten.
+            picks.sort_by_key(|pick| pick.0);
+            let lent = &*sources;
+            let mut at = 0usize;
+            writer.push_row_with(entity, &mut |row| {
+                while let Some(&(_, source, field)) = picks.get(at) {
+                    at += 1;
+                    row.field(
+                        lent[source]
+                            .field(field)
+                            .map_err(|e| tessera_filter::RecordError::Malformed(e.to_string()))?,
+                    )?;
+                }
+                Ok(())
+            })?;
+        }
+        for &source in &at_entity {
+            let next = sources[source].advance()?.then(|| sources[source].entity());
+            if let Some(next_entity) = next {
+                if next_entity <= entity {
                     return Err(invalid(format!(
-                        "a row stream yielded entity {next_entity} at or below its predecessor                          {entity}; the merge reads streams that ascend"
+                        "a row stream yielded entity {next_entity} at or below its predecessor \
+                         {entity}; the merge reads streams that ascend"
                     )));
                 }
-                heap.push(Reverse((*next_entity, source)));
+                heap.push(Reverse((next_entity, source)));
             }
             heads[source] = next;
         }
-        if tombstones.contains(entity) {
-            // Rule F's remove-emit-no-bytes: the row leaves the artefact by never being written,
-            // not by being overwritten.
-            continue;
-        }
-        fields.sort_by_key(|field| field.tag);
-        writer.push_row(entity, &fields)?;
     }
     writer.finish()
 }
@@ -459,7 +536,7 @@ fn invalid(message: impl Into<String>) -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tessera_filter::{Access, RecordValue, RECORD_BLOCK_TARGET};
+    use tessera_filter::{Access, RecordField, RecordValue, RECORD_BLOCK_TARGET};
 
     /// One layer's three paths under `dir`, tagged so a test can hold several.
     fn paths_of(dir: &Path, tag: &str) -> (PathBuf, PathBuf, PathBuf) {
@@ -481,13 +558,13 @@ mod tests {
                 .push_row(
                     *entity,
                     &[
-                        RecordField {
+                        RecordFieldRef {
                             tag: 0,
-                            value: RecordValue::Utf8((*note).to_string()),
+                            value: tessera_filter::RecordValueRef::Utf8(note),
                         },
-                        RecordField {
+                        RecordFieldRef {
                             tag: 1,
-                            value: RecordValue::I64(i64::from(*entity) * 7),
+                            value: tessera_filter::RecordValueRef::I64(i64::from(*entity) * 7),
                         },
                     ],
                 )

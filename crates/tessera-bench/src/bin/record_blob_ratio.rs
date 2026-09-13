@@ -359,9 +359,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 })
                 .sum::<u64>();
             encoded.clear();
-            tessera_filter::encode_row(entity as u32, &fields, &mut encoded)?;
+            let borrowed: Vec<tessera_filter::RecordFieldRef<'_>> = fields
+                .iter()
+                .map(|f| tessera_filter::RecordFieldRef {
+                    tag: f.tag,
+                    value: f.value.as_ref().expect("the shapes carry no list"),
+                })
+                .collect();
+            tessera_filter::encode_row(entity as u32, &borrowed, &mut encoded)?;
             framed_bytes += encoded.len() as u64;
-            writer.push_row(entity as u32, &fields)?;
+            writer.push_row(entity as u32, &borrowed)?;
             rows += 1;
         }
         writer.finish()?;

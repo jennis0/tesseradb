@@ -38,7 +38,7 @@
 use std::path::{Path, PathBuf};
 
 use croaring::Bitmap;
-use tessera_filter::{Access, RecordBlob, RecordField, RecordValue, RECORD_BLOCK_TARGET};
+use tessera_filter::{Access, RecordBlob, RecordFieldRef, RecordValueRef, RECORD_BLOCK_TARGET};
 use tessera_filter_write::RecordBlobWriter;
 
 use crate::error::{BuildError, Result};
@@ -105,9 +105,9 @@ impl ExtentColumn {
             writer
                 .push_row(
                     entity,
-                    &[RecordField {
+                    &[RecordFieldRef {
                         tag,
-                        value: RecordValue::Utf8(value.to_string()),
+                        value: RecordValueRef::Utf8(value),
                     }],
                 )
                 .map_err(|e| BuildError::io(&paths.blocks, e))?;
@@ -279,11 +279,12 @@ impl OpenExtents {
         let blob = &self.blobs[window.extent];
         let live = &self.live[window.extent];
         let mut cursor = blob.rows_cursor_over(window.lo, window.hi);
-        while let Some((entity, fields)) = cursor.next_row().map_err(record_error)? {
+        while cursor.advance().map_err(record_error)? {
+            let entity = cursor.entity();
             if !live.contains(entity) {
                 continue;
             }
-            let value = field_value(&fields, self.column)?;
+            let value = field_value(&cursor, self.column)?;
             visit(entity as usize, value)?;
         }
         Ok(())
@@ -302,32 +303,25 @@ impl OpenExtents {
     ) -> Result<()> {
         let mut cursors: Vec<tessera_filter::RecordRowCursor<'_>> =
             self.blobs.iter().map(RecordBlob::rows_cursor).collect();
-        let mut heads: Vec<Option<(u32, Vec<RecordField>)>> = Vec::with_capacity(cursors.len());
         let mut heap: std::collections::BinaryHeap<std::cmp::Reverse<(u32, usize)>> =
             std::collections::BinaryHeap::with_capacity(cursors.len());
         for (i, cursor) in cursors.iter_mut().enumerate() {
-            let head = next_live(cursor, &self.live[i])?;
-            if let Some((entity, _)) = &head {
-                heap.push(std::cmp::Reverse((*entity, i)));
+            if next_live(cursor, &self.live[i])? {
+                heap.push(std::cmp::Reverse((cursor.entity(), i)));
             }
-            heads.push(head);
         }
         while let Some(std::cmp::Reverse((entity, source))) = heap.pop() {
-            let taken = heads[source]
-                .take()
-                .expect("a stream in the heap has a head");
-            visit(entity, field_value(&taken.1, self.column)?)?;
-            let next = next_live(&mut cursors[source], &self.live[source])?;
-            if let Some((next_entity, _)) = &next {
-                if *next_entity <= entity {
+            visit(entity, field_value(&cursors[source], self.column)?)?;
+            if next_live(&mut cursors[source], &self.live[source])? {
+                let next_entity = cursors[source].entity();
+                if next_entity <= entity {
                     return Err(BuildError::Invalid(format!(
                         "an extent yielded entity {next_entity} at or below its predecessor \
                          {entity}; an extent is written in the chunk's entity order"
                     )));
                 }
-                heap.push(std::cmp::Reverse((*next_entity, source)));
+                heap.push(std::cmp::Reverse((next_entity, source)));
             }
-            heads[source] = next;
         }
         Ok(())
     }
@@ -335,33 +329,35 @@ impl OpenExtents {
 
 /// The next row of one extent that its live set holds — a row outside it is a value a later chunk
 /// overwrote, skipped here for the reason [`OpenExtents::for_each_record_in`] skips it.
-fn next_live(
-    cursor: &mut tessera_filter::RecordRowCursor<'_>,
-    live: &Bitmap,
-) -> Result<Option<(u32, Vec<RecordField>)>> {
+fn next_live(cursor: &mut tessera_filter::RecordRowCursor<'_>, live: &Bitmap) -> Result<bool> {
     loop {
-        let Some((entity, fields)) = cursor.next_row().map_err(record_error)? else {
-            return Ok(None);
-        };
-        if live.contains(entity) {
-            return Ok(Some((entity, fields)));
+        if !cursor.advance().map_err(record_error)? {
+            return Ok(false);
+        }
+        if live.contains(cursor.entity()) {
+            return Ok(true);
         }
     }
 }
 
-/// The one field an extent's row carries, as a string.
-fn field_value(fields: &[RecordField], column: usize) -> Result<&str> {
+/// The one field the row a cursor is at carries, borrowed out of the cursor's own block.
+fn field_value<'a>(
+    cursor: &'a tessera_filter::RecordRowCursor<'a>,
+    column: usize,
+) -> Result<&'a str> {
     let tag = column as u16;
-    match fields.iter().find(|field| field.tag == tag) {
-        Some(RecordField {
-            value: RecordValue::Utf8(value),
-            ..
-        }) => Ok(value),
-        _ => Err(BuildError::Invalid(format!(
-            "an extent's row carries no utf8 value at field tag {tag}; the extent was written \
-             by this build and holds one field per row"
-        ))),
+    for i in 0..cursor.field_count() {
+        let field = cursor.field(i).map_err(record_error)?;
+        if field.tag == tag {
+            if let RecordValueRef::Utf8(value) = field.value {
+                return Ok(value);
+            }
+        }
     }
+    Err(BuildError::Invalid(format!(
+        "an extent's row carries no utf8 value at field tag {tag}; the extent was written \
+         by this build and holds one field per row"
+    )))
 }
 
 fn record_error(e: tessera_filter::RecordError) -> BuildError {
@@ -389,16 +385,24 @@ impl<'a> ExtentRows<'a> {
 }
 
 impl tessera_filter_write::RecordRows for ExtentRows<'_> {
-    fn next_row(&mut self) -> std::io::Result<Option<(u32, Vec<RecordField>)>> {
+    fn advance(&mut self) -> std::io::Result<bool> {
         loop {
-            let Some((entity, fields)) = self.cursor.next_row().map_err(std::io::Error::from)?
-            else {
-                return Ok(None);
-            };
-            if self.live.contains(entity) {
-                return Ok(Some((entity, fields)));
+            if !self.cursor.advance().map_err(std::io::Error::from)? {
+                return Ok(false);
+            }
+            if self.live.contains(self.cursor.entity()) {
+                return Ok(true);
             }
         }
+    }
+    fn entity(&self) -> u32 {
+        self.cursor.entity()
+    }
+    fn field_count(&self) -> usize {
+        self.cursor.field_count()
+    }
+    fn field(&self, i: usize) -> std::io::Result<RecordFieldRef<'_>> {
+        self.cursor.field(i).map_err(std::io::Error::from)
     }
 }
 

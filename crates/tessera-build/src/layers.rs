@@ -3087,11 +3087,11 @@ fn write_content_extent(
                 entity.raw()
             ))
         })?;
-        let fields: Vec<tessera_filter::RecordField> = fields
-            .into_iter()
-            .map(|(tag, value)| tessera_filter::RecordField {
-                tag,
-                value: tessera_filter::RecordValue::Utf8(value),
+        let fields: Vec<tessera_filter::RecordFieldRef<'_>> = fields
+            .iter()
+            .map(|(tag, value)| tessera_filter::RecordFieldRef {
+                tag: *tag,
+                value: tessera_filter::RecordValueRef::Utf8(value),
             })
             .collect();
         writer

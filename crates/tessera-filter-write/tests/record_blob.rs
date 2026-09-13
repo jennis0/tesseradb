@@ -14,7 +14,7 @@ use arrow::record_batch::RecordBatch;
 use croaring::{Bitmap, Portable};
 
 use tessera_filter::{
-    Access, RecordBlob, RecordError, RecordField, RecordValue, RECORD_BLOCKS_FILE,
+    Access, RecordBlob, RecordError, RecordField, RecordFieldRef, RecordValue, RECORD_BLOCKS_FILE,
     RECORD_DIRECTORY_FILE, RECORD_HASROW_FILE,
 };
 use tessera_filter_write::RecordBlobWriter;
@@ -55,6 +55,22 @@ fn fields_for(e: u32) -> Vec<RecordField> {
 
 const ROW_BYTES: usize = 23;
 
+/// Owned fields as the writer takes them.
+fn borrowed(fields: &[RecordField]) -> Vec<RecordFieldRef<'_>> {
+    fields
+        .iter()
+        .map(|f| RecordFieldRef {
+            tag: f.tag,
+            value: f.value.as_ref().expect("the fixture carries no list"),
+        })
+        .collect()
+}
+
+/// One owned row, pushed.
+fn push(writer: &mut RecordBlobWriter, entity: u32, fields: &[RecordField]) -> std::io::Result<()> {
+    writer.push_row(entity, &borrowed(fields))
+}
+
 /// Entities deliberately not dense from zero: rank is not entity, and a reader that conflated
 /// them would fail here first.
 fn entity_of_rank(rank: u32) -> u32 {
@@ -67,9 +83,7 @@ fn write_fixture(dir: &Path, rows: u32, target: usize) -> Paths {
         .expect("create the writer");
     for rank in 0..rows {
         let entity = entity_of_rank(rank);
-        writer
-            .push_row(entity, &fields_for(entity))
-            .expect("push a row");
+        push(&mut writer, entity, &fields_for(entity)).expect("push a row");
     }
     writer.finish().expect("finish");
     p
@@ -114,13 +128,11 @@ fn an_oversize_row_gets_a_block_of_its_own() {
         tag: 0,
         value: RecordValue::Utf8("x".repeat(500)),
     };
-    writer.push_row(1, &fields_for(1)).expect("a small row");
+    push(&mut writer, 1, &fields_for(1)).expect("a small row");
     writer
-        .push_row(2, std::slice::from_ref(&huge))
+        .push_row(2, &borrowed(std::slice::from_ref(&huge)))
         .expect("the oversize row");
-    writer
-        .push_row(3, &fields_for(3))
-        .expect("another small row");
+    push(&mut writer, 3, &fields_for(3)).expect("another small row");
     writer.finish().expect("finish");
 
     let blob = open(&p).expect("the blob opens");
@@ -172,9 +184,12 @@ fn out_of_order_rows_are_refused() {
     let p = paths(dir.path());
     let mut writer =
         RecordBlobWriter::create(&p.blocks, &p.hasrow, &p.directory, 1024).expect("create");
-    writer.push_row(5, &fields_for(5)).expect("in order");
-    assert!(writer.push_row(5, &fields_for(5)).is_err(), "a repeat");
-    assert!(writer.push_row(4, &fields_for(4)).is_err(), "a regression");
+    push(&mut writer, 5, &fields_for(5)).expect("in order");
+    assert!(push(&mut writer, 5, &fields_for(5)).is_err(), "a repeat");
+    assert!(
+        push(&mut writer, 4, &fields_for(4)).is_err(),
+        "a regression"
+    );
 }
 
 /// The directory's five columns, lifted into plain vectors, doctored, and written back — the
@@ -598,7 +613,7 @@ fn a_stack_of_disjoint_layers_answers_each_from_its_own() {
         let mut writer =
             RecordBlobWriter::create(&p.blocks, &p.hasrow, &p.directory, 90).expect("create");
         for &e in entities {
-            writer.push_row(e, &fields_for(e)).expect("push");
+            push(&mut writer, e, &fields_for(e)).expect("push");
         }
         writer.finish().expect("finish");
         RecordExtentPaths {

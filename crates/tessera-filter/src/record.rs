@@ -220,6 +220,95 @@ pub struct RecordField {
     pub value: RecordValue,
 }
 
+/// A field's value **borrowed from the bytes it came out of**: the form every producer of a blob
+/// row speaks, and the form the row walk yields.
+///
+/// A string is where this matters. A merge reading rows out of one blob and writing them into
+/// another touches every character three times if the value is owned — out of the decompressed
+/// block into a `String`, out of the `String` into the row buffer, and the free — and once if it
+/// is borrowed. Over the 3.5×10⁹-row GBIF rung the owned form was 6.4×10⁹ allocate-and-free
+/// pairs across the blob's merge and the keyword pass that reads the same extents. Lists are
+/// absent here because no writer produces one (records §5); a decoded list becomes a
+/// [`RecordValue`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum RecordValueRef<'a> {
+    Bool(bool),
+    U8(u8),
+    U16(u16),
+    U32(u32),
+    U64(u64),
+    I8(i8),
+    I16(i16),
+    I32(i32),
+    I64(i64),
+    F32(f32),
+    F64(f64),
+    TimestampUs(i64),
+    Utf8(&'a str),
+}
+
+/// One field of a row, its value borrowed ([`RecordValueRef`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RecordFieldRef<'a> {
+    /// The column's position in the manifest's `declared_scalars`.
+    pub tag: u16,
+    pub value: RecordValueRef<'a>,
+}
+
+impl RecordValue {
+    /// This value borrowed, or `None` for a list — which [`encode_row`] refuses anyway, the multi
+    /// surface not having landed (records §5).
+    pub fn as_ref(&self) -> Option<RecordValueRef<'_>> {
+        Some(match self {
+            RecordValue::Bool(v) => RecordValueRef::Bool(*v),
+            RecordValue::U8(v) => RecordValueRef::U8(*v),
+            RecordValue::U16(v) => RecordValueRef::U16(*v),
+            RecordValue::U32(v) => RecordValueRef::U32(*v),
+            RecordValue::U64(v) => RecordValueRef::U64(*v),
+            RecordValue::I8(v) => RecordValueRef::I8(*v),
+            RecordValue::I16(v) => RecordValueRef::I16(*v),
+            RecordValue::I32(v) => RecordValueRef::I32(*v),
+            RecordValue::I64(v) => RecordValueRef::I64(*v),
+            RecordValue::F32(v) => RecordValueRef::F32(*v),
+            RecordValue::F64(v) => RecordValueRef::F64(*v),
+            RecordValue::TimestampUs(v) => RecordValueRef::TimestampUs(*v),
+            RecordValue::Utf8(v) => RecordValueRef::Utf8(v.as_str()),
+            RecordValue::List(_) => return None,
+        })
+    }
+}
+
+impl RecordValueRef<'_> {
+    /// This value owned, for a caller that keeps it past the bytes it borrows.
+    pub fn to_owned(&self) -> RecordValue {
+        match *self {
+            RecordValueRef::Bool(v) => RecordValue::Bool(v),
+            RecordValueRef::U8(v) => RecordValue::U8(v),
+            RecordValueRef::U16(v) => RecordValue::U16(v),
+            RecordValueRef::U32(v) => RecordValue::U32(v),
+            RecordValueRef::U64(v) => RecordValue::U64(v),
+            RecordValueRef::I8(v) => RecordValue::I8(v),
+            RecordValueRef::I16(v) => RecordValue::I16(v),
+            RecordValueRef::I32(v) => RecordValue::I32(v),
+            RecordValueRef::I64(v) => RecordValue::I64(v),
+            RecordValueRef::F32(v) => RecordValue::F32(v),
+            RecordValueRef::F64(v) => RecordValue::F64(v),
+            RecordValueRef::TimestampUs(v) => RecordValue::TimestampUs(v),
+            RecordValueRef::Utf8(v) => RecordValue::Utf8(v.to_string()),
+        }
+    }
+}
+
+impl RecordFieldRef<'_> {
+    /// This field owned.
+    pub fn to_owned(&self) -> RecordField {
+        RecordField {
+            tag: self.tag,
+            value: self.value.to_owned(),
+        }
+    }
+}
+
 const KIND_BOOL: u8 = 0;
 const KIND_U8: u8 = 1;
 const KIND_U16: u8 = 2;
@@ -457,20 +546,14 @@ impl BlockScan {
 /// row in a second file that a reader must hold resident and check against these bytes.
 ///
 /// Refuses: an empty field list (a row with no fields is an absence, and absence is absence from
-/// the has-row bitmap — see records §3); a duplicate tag; and a list value (specified for epic 3,
-/// produced by nothing until the multi surface lands — records §5). `entity` names the row in
-/// those refusals and is not encoded.
+/// the has-row bitmap — see records §3); a duplicate tag; and a list value, which
+/// [`RecordValueRef`] cannot spell (specified for epic 3, produced by nothing until the multi
+/// surface lands — records §5). `entity` names the row in those refusals and is not encoded.
 pub fn encode_row(
     entity: u32,
-    fields: &[RecordField],
+    fields: &[RecordFieldRef<'_>],
     out: &mut Vec<u8>,
 ) -> Result<(), RecordError> {
-    if fields.is_empty() {
-        return Err(malformed(format!(
-            "entity {entity} was given a row with no fields; an entity with no blob-resident \
-             value has no row at all (records §3)"
-        )));
-    }
     for (i, field) in fields.iter().enumerate() {
         if fields[..i].iter().any(|f| f.tag == field.tag) {
             return Err(malformed(format!(
@@ -479,12 +562,59 @@ pub fn encode_row(
             )));
         }
     }
+    encode_row_from(entity, fields.iter().copied(), out)
+}
+
+/// [`encode_row`] over a stream of fields that **ascend strictly in the tag**, which is what a
+/// merge has in hand once it has ordered one entity's fields: the ascent is the duplicate check,
+/// so the row is encoded without being collected first.
+pub fn encode_row_from<'a>(
+    entity: u32,
+    fields: impl Iterator<Item = RecordFieldRef<'a>>,
+    out: &mut Vec<u8>,
+) -> Result<(), RecordError> {
+    let mut fields = fields;
+    encode_row_with(entity, out, &mut |row| {
+        for field in fields.by_ref() {
+            row.field(field)?;
+        }
+        Ok(())
+    })
+}
+
+/// [`encode_row`] where the fields are handed over one at a time, in ascending tag order, by a
+/// producer that cannot collect them first.
+///
+/// A merge over several row streams is that producer: the fields of one entity's row are spread
+/// across streams that each own the bytes they lend, so a collected row would be a vector of
+/// borrows of several streams at once and could not be reused between rows. Handing them over one
+/// at a time encodes straight into the block buffer and holds nothing.
+pub fn encode_row_with(
+    entity: u32,
+    out: &mut Vec<u8>,
+    fields: &mut dyn FnMut(&mut RowFields<'_>) -> Result<(), RecordError>,
+) -> Result<(), RecordError> {
     let start = out.len();
-    for field in fields {
-        out.extend_from_slice(&field.tag.to_le_bytes());
-        encode_value(entity, &field.value, out)?;
+    let mut row = RowFields {
+        out,
+        entity,
+        last: None,
+    };
+    let result = fields(&mut row);
+    let any = row.last.is_some();
+    if let Err(e) = result {
+        out.truncate(start);
+        return Err(e);
+    }
+    if !any {
+        out.truncate(start);
+        return Err(malformed(format!(
+            "entity {entity} was given a row with no fields; an entity with no blob-resident \
+             value has no row at all (records §3)"
+        )));
     }
     let Ok(len) = u32::try_from(out.len() - start) else {
+        out.truncate(start);
         return Err(malformed(format!(
             "entity {entity}'s row is past u32::MAX bytes of fields"
         )));
@@ -499,69 +629,63 @@ pub fn encode_row(
     Ok(())
 }
 
-fn encode_value(entity: u32, value: &RecordValue, out: &mut Vec<u8>) -> Result<(), RecordError> {
-    match value {
-        RecordValue::Bool(b) => out.extend_from_slice(&[KIND_BOOL, u8::from(*b)]),
-        RecordValue::U8(v) => out.extend_from_slice(&[KIND_U8, *v]),
-        RecordValue::U16(v) => {
-            out.push(KIND_U16);
-            out.extend_from_slice(&v.to_le_bytes());
-        }
-        RecordValue::U32(v) => {
-            out.push(KIND_U32);
-            out.extend_from_slice(&v.to_le_bytes());
-        }
-        RecordValue::U64(v) => {
-            out.push(KIND_U64);
-            out.extend_from_slice(&v.to_le_bytes());
-        }
-        RecordValue::I8(v) => {
-            out.push(KIND_I8);
-            out.extend_from_slice(&v.to_le_bytes());
-        }
-        RecordValue::I16(v) => {
-            out.push(KIND_I16);
-            out.extend_from_slice(&v.to_le_bytes());
-        }
-        RecordValue::I32(v) => {
-            out.push(KIND_I32);
-            out.extend_from_slice(&v.to_le_bytes());
-        }
-        RecordValue::I64(v) => {
-            out.push(KIND_I64);
-            out.extend_from_slice(&v.to_le_bytes());
-        }
-        RecordValue::F32(v) => {
-            out.push(KIND_F32);
-            out.extend_from_slice(&v.to_le_bytes());
-        }
-        RecordValue::F64(v) => {
-            out.push(KIND_F64);
-            out.extend_from_slice(&v.to_le_bytes());
-        }
-        RecordValue::TimestampUs(v) => {
-            out.push(KIND_TIMESTAMP_US);
-            out.extend_from_slice(&v.to_le_bytes());
-        }
-        RecordValue::Utf8(s) => {
-            let Ok(len) = u32::try_from(s.len()) else {
-                return Err(malformed(format!(
-                    "entity {entity} carries a string past u32::MAX bytes"
-                )));
-            };
-            out.push(KIND_UTF8);
-            out.extend_from_slice(&len.to_le_bytes());
-            out.extend_from_slice(s.as_bytes());
-        }
-        RecordValue::List(_) => {
+/// One row's fields being appended, in ascending tag order ([`encode_row_with`]).
+pub struct RowFields<'o> {
+    out: &'o mut Vec<u8>,
+    entity: u32,
+    last: Option<u16>,
+}
+
+impl RowFields<'_> {
+    /// Append one field. Tags must ascend strictly; a tag at or below its predecessor is a field
+    /// with two values, or a producer that did not order them.
+    pub fn field(&mut self, field: RecordFieldRef<'_>) -> Result<(), RecordError> {
+        if self.last.is_some_and(|last| last >= field.tag) {
             return Err(malformed(format!(
-                "entity {entity} carries a list value; the list encoding is specified but \
-                 populated only when the multi surface lands (records §5), so writing one is \
-                 refused"
+                "entity {}'s fields arrived at tag {} after tag {}; a row's fields ascend \
+                 strictly and a repeated tag is a field with two values",
+                self.entity,
+                field.tag,
+                self.last.expect("checked is_some")
             )));
         }
+        self.last = Some(field.tag);
+        self.out.extend_from_slice(&field.tag.to_le_bytes());
+        encode_value(&field.value, self.out);
+        Ok(())
     }
-    Ok(())
+}
+
+fn encode_value(value: &RecordValueRef<'_>, out: &mut Vec<u8>) {
+    macro_rules! fixed {
+        ($kind:expr, $v:expr) => {{
+            out.push($kind);
+            out.extend_from_slice(&$v.to_le_bytes());
+        }};
+    }
+    match *value {
+        RecordValueRef::Bool(b) => out.extend_from_slice(&[KIND_BOOL, u8::from(b)]),
+        RecordValueRef::U8(v) => out.extend_from_slice(&[KIND_U8, v]),
+        RecordValueRef::U16(v) => fixed!(KIND_U16, v),
+        RecordValueRef::U32(v) => fixed!(KIND_U32, v),
+        RecordValueRef::U64(v) => fixed!(KIND_U64, v),
+        RecordValueRef::I8(v) => fixed!(KIND_I8, v),
+        RecordValueRef::I16(v) => fixed!(KIND_I16, v),
+        RecordValueRef::I32(v) => fixed!(KIND_I32, v),
+        RecordValueRef::I64(v) => fixed!(KIND_I64, v),
+        RecordValueRef::F32(v) => fixed!(KIND_F32, v),
+        RecordValueRef::F64(v) => fixed!(KIND_F64, v),
+        RecordValueRef::TimestampUs(v) => fixed!(KIND_TIMESTAMP_US, v),
+        RecordValueRef::Utf8(s) => {
+            // A string past u32::MAX is unreachable: the row it sits in is bounded by the same
+            // width and [`encode_row_from`] refuses there, so this saturates rather than
+            // carrying a second refusal for the same condition.
+            let len = u32::try_from(s.len()).unwrap_or(u32::MAX);
+            out.push(KIND_UTF8);
+            out.extend_from_slice(&len.to_le_bytes());
+            out.extend_from_slice(&s.as_bytes()[..len as usize]);
+        }
+    }
 }
 
 /// A bounds-checked little-endian read out of a row's payload.
@@ -578,6 +702,114 @@ macro_rules! take {
         *$cursor = hi;
         &$payload[lo..hi]
     }};
+}
+
+/// One field's value out of `payload`, borrowed. A list refuses here: the multi surface has not
+/// landed, so no artefact carries one, and the borrowing walk is the hot path
+/// ([`decode_row_fields`]). [`decode_row`] is the route that decodes one.
+fn decode_value_ref<'a>(
+    payload: &'a [u8],
+    cursor: &mut usize,
+    kind: u8,
+) -> Result<RecordValueRef<'a>, RecordError> {
+    macro_rules! fixed {
+        ($variant:ident, $t:ty, $what:expr) => {{
+            let bytes = take!(payload, cursor, std::mem::size_of::<$t>(), $what);
+            RecordValueRef::$variant(<$t>::from_le_bytes(
+                bytes.try_into().expect("take! returned the exact width"),
+            ))
+        }};
+    }
+    Ok(match kind {
+        KIND_BOOL => {
+            let byte = take!(payload, cursor, 1, "bool value")[0];
+            match byte {
+                0 => RecordValueRef::Bool(false),
+                1 => RecordValueRef::Bool(true),
+                other => {
+                    return Err(malformed(format!(
+                        "a bool field holds byte {other}; only 0 and 1 are bools"
+                    )))
+                }
+            }
+        }
+        KIND_U8 => RecordValueRef::U8(take!(payload, cursor, 1, "u8 value")[0]),
+        KIND_U16 => fixed!(U16, u16, "u16 value"),
+        KIND_U32 => fixed!(U32, u32, "u32 value"),
+        KIND_U64 => fixed!(U64, u64, "u64 value"),
+        KIND_I8 => RecordValueRef::I8(take!(payload, cursor, 1, "i8 value")[0] as i8),
+        KIND_I16 => fixed!(I16, i16, "i16 value"),
+        KIND_I32 => fixed!(I32, i32, "i32 value"),
+        KIND_I64 => fixed!(I64, i64, "i64 value"),
+        KIND_F32 => fixed!(F32, f32, "f32 value"),
+        KIND_F64 => fixed!(F64, f64, "f64 value"),
+        KIND_TIMESTAMP_US => fixed!(TimestampUs, i64, "timestamp value"),
+        KIND_UTF8 => {
+            let len = take!(payload, cursor, 4, "string length");
+            let len = u32::from_le_bytes(len.try_into().expect("four bytes")) as usize;
+            let bytes = take!(payload, cursor, len, "string bytes");
+            RecordValueRef::Utf8(
+                std::str::from_utf8(bytes)
+                    .map_err(|_| malformed("a utf8 field holds bytes that are not UTF-8"))?,
+            )
+        }
+        KIND_LIST => {
+            return Err(malformed(
+                "a row carries a list value; the list encoding is specified but populated only \
+                 when the multi surface lands (records §5)",
+            ))
+        }
+        other => {
+            return Err(malformed(format!(
+                "a field carries kind byte {other}, which names no value kind"
+            )))
+        }
+    })
+}
+
+/// Walk one row's fields into `out` as `(tag, kind, value start, value end)`, positions relative
+/// to `payload`.
+///
+/// **The walk a row cursor makes, which holds no borrow of the bytes it walked.** A cursor owns
+/// the decompressed block it reads, so it cannot hold decoded values pointing into it; it holds
+/// these positions instead and builds a [`RecordFieldRef`] when a caller asks for a field. The
+/// table is reused row after row, so a whole blob walks with no allocation past the first row.
+///
+/// Every check [`decode_row`] makes is made here: the walk consumes the row exactly, a duplicate
+/// tag refuses, and each value is decoded as it is passed so an unknown kind or an out-of-bounds
+/// length refuses now rather than when a field is read.
+fn decode_row_fields(
+    payload: &[u8],
+    entity: u32,
+    out: &mut Vec<(u16, u8, u32, u32)>,
+) -> Result<(), RecordError> {
+    out.clear();
+    let mut cursor = 0usize;
+    while cursor < payload.len() {
+        let tag = take!(payload, &mut cursor, 2, "field tag");
+        let tag = u16::from_le_bytes(tag.try_into().expect("two bytes"));
+        if out.iter().any(|held| held.0 == tag) {
+            return Err(malformed(format!(
+                "entity {entity}'s row carries field tag {tag} twice"
+            )));
+        }
+        let kind = take!(payload, &mut cursor, 1, "field kind")[0];
+        let start = cursor;
+        decode_value_ref(payload, &mut cursor, kind)?;
+        let (Ok(start), Ok(end)) = (u32::try_from(start), u32::try_from(cursor)) else {
+            return Err(malformed(format!(
+                "entity {entity}'s row is past u32::MAX bytes"
+            )));
+        };
+        out.push((tag, kind, start, end));
+    }
+    if out.is_empty() {
+        return Err(malformed(format!(
+            "entity {entity}'s row carries no fields; an entity with no blob-resident value has \
+             no row at all"
+        )));
+    }
+    Ok(())
 }
 
 fn decode_value(
@@ -1143,6 +1375,10 @@ pub struct RecordRowCursor<'a> {
     bytes: Vec<u8>,
     header: Option<BlockHeader>,
     scan: BlockScan,
+    /// The row the cursor is at: its entity, and its fields as positions into `bytes`. The table
+    /// is reused row after row ([`decode_row_fields`]), so a walk allocates once.
+    row: Option<(u32, usize)>,
+    fields: Vec<(u16, u8, u32, u32)>,
     /// Whether the has-row bitmap must be exhausted when the last block is done, which holds of a
     /// walk over the whole blob and not of one over a block range.
     whole: bool,
@@ -1167,13 +1403,33 @@ impl<'a> RecordRowCursor<'a> {
                 entity: 0,
                 gaps_at: 0,
             },
+            row: None,
+            fields: Vec::new(),
             whole,
         }
     }
 
     /// The next row, or `None` at the end of the cursor's blocks.
+    ///
+    /// The owned form, for a caller that keeps the row past the next block. A merge wants the
+    /// borrowed one ([`Self::advance`]).
     #[allow(clippy::should_implement_trait)]
     pub fn next_row(&mut self) -> Result<Option<(u32, Vec<RecordField>)>, RecordError> {
+        if !self.advance()? {
+            return Ok(None);
+        }
+        let entity = self.entity();
+        let fields = (0..self.field_count())
+            .map(|i| self.field(i).map(|f| f.to_owned()))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Some((entity, fields)))
+    }
+
+    /// Walk to the next row, or `Ok(false)` at the end of the cursor's blocks. The row's fields
+    /// are then [`Self::field_count`] and [`Self::field`], borrowed from the block the cursor
+    /// holds and valid until the next call.
+    pub fn advance(&mut self) -> Result<bool, RecordError> {
+        self.row = None;
         loop {
             if self.block >= self.end_block {
                 if self.whole && self.entities.has_value() {
@@ -1181,7 +1437,7 @@ impl<'a> RecordRowCursor<'a> {
                         "the has-row bitmap holds entities the directory never addresses",
                     ));
                 }
-                return Ok(None);
+                return Ok(false);
             }
             let header = match self.header {
                 Some(header) => header,
@@ -1194,9 +1450,9 @@ impl<'a> RecordRowCursor<'a> {
                 }
             };
             if self.scan.local == header.row_count {
-                // **The tiling check.** A block carries nothing but whole rows, so the walk over
-                // the rows the block claims must end exactly where the block does. A row length
-                // that was wrong in either direction lands here.
+                // The rows tile the block, which `header_of` proved of these bytes before the
+                // first row was read. Reaching the block's end here is the cursor's own walk
+                // agreeing with that.
                 if self.scan.at != self.bytes.len() {
                     return Err(malformed(format!(
                         "block {} holds {} row bytes but its rows end at {}; a block carries \
@@ -1226,10 +1482,46 @@ impl<'a> RecordRowCursor<'a> {
             }
             self.entities.move_next();
             let (start, end) = self.scan.extent(&self.bytes, self.block)?;
-            let fields = decode_row(&self.bytes[start..end], entity)?;
+            decode_row_fields(&self.bytes[start..end], entity, &mut self.fields)?;
             self.scan.advance(&self.bytes, &header, self.block)?;
-            return Ok(Some((entity, fields)));
+            self.row = Some((entity, start));
+            return Ok(true);
         }
+    }
+
+    /// The entity of the row the cursor is at. Zero before the first [`Self::advance`].
+    pub fn entity(&self) -> u32 {
+        self.row.map_or(0, |(entity, _)| entity)
+    }
+
+    /// How many fields the row the cursor is at carries.
+    pub fn field_count(&self) -> usize {
+        if self.row.is_some() {
+            self.fields.len()
+        } else {
+            0
+        }
+    }
+
+    /// Field `i` of the row the cursor is at, borrowed from the block the cursor holds.
+    ///
+    /// The value is decoded here rather than at [`Self::advance`] because a decoded value borrows
+    /// the block and the cursor owns it. Every check is already made at advance, so the only
+    /// failure reachable here is a caller asking for a field the row does not carry.
+    pub fn field(&self, i: usize) -> Result<RecordFieldRef<'_>, RecordError> {
+        let (entity, at) = self
+            .row
+            .ok_or_else(|| malformed("a field was asked for before the cursor reached a row"))?;
+        let &(tag, kind, start, end) = self.fields.get(i).ok_or_else(|| {
+            malformed(format!(
+                "field {i} was asked for of entity {entity}'s row, which carries {}",
+                self.fields.len()
+            ))
+        })?;
+        let payload = &self.bytes[at + start as usize..at + end as usize];
+        let mut cursor = 0usize;
+        let value = decode_value_ref(payload, &mut cursor, kind)?;
+        Ok(RecordFieldRef { tag, value })
     }
 }
 
@@ -1290,6 +1582,22 @@ mod tests {
         RecordField { tag, value }
     }
 
+    /// Owned fields as the encoder takes them.
+    fn borrowed(fields: &[RecordField]) -> Vec<RecordFieldRef<'_>> {
+        fields
+            .iter()
+            .map(|f| RecordFieldRef {
+                tag: f.tag,
+                value: f.value.as_ref().expect("the tests carry no list"),
+            })
+            .collect()
+    }
+
+    /// Encode one owned row, as the tests around the format spell it.
+    fn encode(entity: u32, fields: &[RecordField], out: &mut Vec<u8>) -> Result<(), RecordError> {
+        encode_row(entity, &borrowed(fields), out)
+    }
+
     /// Every scalar kind survives the round trip, including the empty string — a value, not an
     /// absence.
     #[test]
@@ -1314,7 +1622,7 @@ mod tests {
             field(13, RecordValue::Utf8(String::new())),
         ];
         let mut buf = Vec::new();
-        encode_row(42, &fields, &mut buf).expect("encode");
+        encode(42, &fields, &mut buf).expect("encode");
         assert_eq!(decode_row(payload(&buf), 42).expect("decode"), fields);
     }
 
@@ -1324,9 +1632,9 @@ mod tests {
     fn a_row_carries_no_entity_of_its_own() {
         let fields = vec![field(0, RecordValue::U8(1))];
         let mut buf = Vec::new();
-        encode_row(7, &fields, &mut buf).expect("encode");
+        encode(7, &fields, &mut buf).expect("encode");
         let mut other = Vec::new();
-        encode_row(8, &fields, &mut other).expect("encode");
+        encode(8, &fields, &mut other).expect("encode");
         assert_eq!(buf, other);
         assert_eq!(buf.len(), 5, "a length byte, then tag, kind and value");
     }
@@ -1339,7 +1647,7 @@ mod tests {
         for (chars, width) in [(1usize, 1usize), (100, 1), (200, 2), (20_000, 3)] {
             let fields = vec![field(0, RecordValue::Utf8("x".repeat(chars)))];
             let mut buf = Vec::new();
-            encode_row(1, &fields, &mut buf).expect("encode");
+            encode(1, &fields, &mut buf).expect("encode");
             // tag, kind and the utf8 length prefix are seven bytes around the characters.
             assert_eq!(buf.len(), width + 7 + chars, "{chars} characters");
             assert_eq!(decode_row(payload(&buf), 1).expect("decode"), fields);
@@ -1422,7 +1730,7 @@ mod tests {
     #[test]
     fn a_truncated_row_refuses() {
         let mut buf = Vec::new();
-        encode_row(3, &[field(0, RecordValue::Utf8("hello".into()))], &mut buf).expect("encode");
+        encode(3, &[field(0, RecordValue::Utf8("hello".into()))], &mut buf).expect("encode");
         let buf = payload(&buf).to_vec();
         for cut in [buf.len() - 1, 5, 3, 2, 1] {
             let err = decode(&buf[..cut], 3).expect_err("a short row must refuse");
@@ -1437,7 +1745,7 @@ mod tests {
     fn a_duplicate_tag_refuses_at_encode_and_decode() {
         let fields = vec![field(5, RecordValue::U8(1)), field(5, RecordValue::U8(2))];
         let mut buf = Vec::new();
-        let err = encode_row(1, &fields, &mut buf).expect_err("duplicate tags refuse");
+        let err = encode(1, &fields, &mut buf).expect_err("duplicate tags refuse");
         assert!(err.to_string().contains("twice"), "{err}");
 
         // And at decode, over hand-crafted bytes the encoder refuses to produce.
@@ -1474,17 +1782,13 @@ mod tests {
         assert!(decode(&crafted, 1).is_err());
     }
 
-    /// The writer refuses a list until epic 3's multi surface lands (records §5).
+    /// A list cannot be written until epic 3's multi surface lands (records §5): the encoder takes
+    /// borrowed values and [`RecordValueRef`] has no list arm, so a producer holding a decoded
+    /// list cannot hand one over.
     #[test]
-    fn encoding_a_list_refuses() {
-        let mut buf = Vec::new();
-        let err = encode_row(
-            1,
-            &[field(0, RecordValue::List(vec![RecordValue::U8(1)]))],
-            &mut buf,
-        )
-        .expect_err("lists are epic 3's");
-        assert!(err.to_string().contains("multi"), "{err}");
+    fn a_list_cannot_be_handed_to_the_encoder() {
+        let list = RecordValue::List(vec![RecordValue::U8(1)]);
+        assert!(list.as_ref().is_none(), "a list does not borrow");
     }
 
     /// The list encoding is pinned from crafted bytes, since no writer may produce it yet: the
