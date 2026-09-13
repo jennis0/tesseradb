@@ -403,7 +403,7 @@ fn walk(
     // `ArtifactRows::candidacy`, which is what `serve_artifacts` calls — so this drives the route
     // choice as well as the classification. These fixtures are all artifact-major, so the walk is
     // the route taken and the node count is real.
-    let candidates = rows.candidacy(&viewport);
+    let candidates = rows.candidacy(&viewport, None);
     let tessera_engine::artifacts::Candidacy::Indexed(walked) = &candidates else {
         panic!("an artifact-major level is answered by the walk");
     };

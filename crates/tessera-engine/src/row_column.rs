@@ -824,6 +824,11 @@ impl RowColumn {
     /// a scattered layer's rows hit the same handful of ordinals over and over, and a set insert per
     /// row is the cost the marking array exists to remove. It is one byte per artifact for the
     /// length of the call.
+    ///
+    /// Where the viewport covers the whole mask this is not called: the level's masked-count
+    /// histogram already holds the answer, and [`crate::artifacts::ArtifactRows::candidacy`]
+    /// carries the argument. What reaches here is a viewport narrower than the mask, and a filtered
+    /// request's narrower set again ([`crate::artifacts::ArtifactRows::matched`]).
     pub fn candidates(&self, here: &Bitmap) -> Bitmap {
         let mut seen = vec![false; self.len()];
         let base_rows = self.base_rows();

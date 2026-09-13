@@ -249,6 +249,29 @@ impl MaskedCounts {
             .unwrap_or(0)
     }
 
+    /// Every ordinal whose count is non-zero, ascending.
+    ///
+    /// This is candidacy for a row-major level at a viewport covering the whole mask.
+    /// [`crate::artifacts::ArtifactRows::candidacy`] carries the argument for why the two are the
+    /// same set.
+    ///
+    /// Collected and added in one call rather than one `add` per ordinal. At the rung 6 corpus's
+    /// 1.65×10⁶ ordinals the per-ordinal form is 1.65×10⁶ crossings of the bitmap library's
+    /// boundary, for a set the library can build from a sorted slice in one.
+    pub fn populated(&self) -> croaring::Bitmap {
+        let hits: Vec<u32> = self
+            .counts
+            .iter()
+            .enumerate()
+            .filter(|(_, &count)| count > 0)
+            .map(|(ordinal, _)| ordinal as u32)
+            .collect();
+        let mut out = croaring::Bitmap::new();
+        out.add_many(&hits);
+        out.run_optimize();
+        out
+    }
+
     /// How many ordinals this covers.
     pub fn len(&self) -> usize {
         self.counts.len()

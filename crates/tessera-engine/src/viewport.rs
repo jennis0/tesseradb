@@ -6420,7 +6420,7 @@ impl Engine {
                 // `viewport ∩ M_auth` marking labels, which answers the same question at a cost in
                 // *points* rather than in artifacts (`ArtifactRows::candidacy`). Which route is
                 // taken is a property of the level and never of the request.
-                let candidates = rows.candidacy(&viewport);
+                let candidates = rows.candidacy(&viewport, accumulated.as_deref());
                 for ordinal in candidates.iter() {
                     // **Every candidate pays a masked probe**, on whichever of the three routes the
                     // classification makes cheapest — see `ArtifactRows::candidate_in`, which is
