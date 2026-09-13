@@ -84,7 +84,7 @@ use tessera_store::write::{write_permutation, write_segment};
 use tessera_store::{write_current, write_manifest_json, PairsParquetWriter};
 use tessera_types::{
     EntityId, IdentityKey, TermId, BUNDLE_FORMAT, IDENTITY_CONSTRUCTION, IDENTITY_ROUNDS,
-    SMALL_TERM_THRESHOLD_DEFAULT,
+    ROW_ABSENT, SMALL_TERM_THRESHOLD_DEFAULT,
 };
 
 pub use deep::{verify_deep, VerifyDeepReport, VerifyOpts};
@@ -2247,12 +2247,25 @@ pub struct VerifyReport {
 /// row disagrees (contracts §2.6 r6: "`tessera verify` checks the whole column against" the
 /// key).
 pub fn verify(root: &Path) -> Result<VerifyReport> {
-    verified_open(root).map(|(_, report)| report)
+    verified_open(root, DIRECT_WINDOW_ROWS).map(|(_, report)| report)
+}
+
+/// [`verify`] with the identity check's window threshold given rather than taken from
+/// [`DIRECT_WINDOW_ROWS`].
+///
+/// **The only way to put a fixture through the partition route.** That route is what every bundle
+/// at corpus scale takes and what no bundle a test can afford to build does, so without a threshold
+/// a test can lower it would be reached by nothing that runs. Zero puts every view through it.
+pub fn verify_with_window_rows(root: &Path, direct_window_rows: u64) -> Result<VerifyReport> {
+    verified_open(root, direct_window_rows).map(|(_, report)| report)
 }
 
 /// The pass behind [`verify`] and [`deep::verify_deep`], returning the opened bundle so the deep
 /// mode does not pay a second full open (the open re-hashes every named file).
-fn verified_open(root: &Path) -> Result<(tessera_store::read::Bundle, VerifyReport)> {
+fn verified_open(
+    root: &Path,
+    direct_window_rows: u64,
+) -> Result<(tessera_store::read::Bundle, VerifyReport)> {
     let bundle = tessera_store::read::open_bundle(root)?;
     // The key is parsed here, not by `open_bundle`: `IdentityDescriptor::validate` (run at
     // open) checks `construction`/`rounds`/`idset` but never parses `key`'s hex, since
@@ -2262,6 +2275,9 @@ fn verified_open(root: &Path) -> Result<(tessera_store::read::Bundle, VerifyRepo
         .map_err(|e| BuildError::Invalid(format!("MANIFEST identity.key: {e}")))?;
     let shard_id = bundle.manifest.identity.shard_id;
 
+    // Created on the first view that needs it, and by nothing else: a bundle small enough for the
+    // direct route verifies on a read-only root exactly as it did.
+    let mut scratch: Option<VerifyTmp> = None;
     let mut views = 0usize;
     let mut segments = 0usize;
     let mut rows = 0u64;
@@ -2273,82 +2289,20 @@ fn verified_open(root: &Path) -> Result<(tessera_store::read::Bundle, VerifyRepo
             rows += total_rows;
             // `open_bundle` already ran `validate_rows` on the base and `is_well_formed` on
             // every extent (no aliasing, no out-of-range row). The remaining half of
-            // bijectivity is surjectivity: every row of every segment must be claimed by some
-            // entity, or `columns.arrow` holds a row no entity can ever address. Swept over the
-            // whole row space — base *and* extents — because a bundle that has flushed holds
-            // rows above the base permutation, and a sweep of the base alone refuses every such
-            // bundle as "not a bijection" (the false refusal §18 obligation 10 names). Built as
-            // a row-indexed array (rather than just a count) so the identity check below can
-            // reuse it instead of inverting the row space a second time.
+            // bijectivity is surjectivity, and the identity column is checked against the key;
+            // both are `check_view_identity`'s.
             view.row_space
                 .base()
                 .validate_rows(view.row_space.base_rows())?;
-            let entity_bound = view
-                .row_space
-                .extents()
-                .last()
-                .map(|extent| extent.entity_hi + 1)
-                .unwrap_or_else(|| view.row_space.base().bound());
-            let total_rows_usize = usize::try_from(total_rows).map_err(|_| {
-                BuildError::Invalid(format!(
-                    "view '{view_id}': {total_rows} rows does not fit usize"
-                ))
-            })?;
-            let mut entity_of_row: Vec<Option<u64>> = vec![None; total_rows_usize];
-            let mut claimed = 0u64;
-            for entity in 0..entity_bound {
-                if let Some(row) = view.row_space.row_of(tessera_types::EntityId::new(entity)) {
-                    entity_of_row[row.raw() as usize] = Some(entity);
-                    claimed += 1;
-                }
-            }
-            if claimed != total_rows {
-                return Err(BuildError::Invalid(format!(
-                    "view '{view_id}': the row space claims {claimed} rows but the segments \
-                     hold {total_rows} — not a bijection"
-                )));
-            }
-
-            // The identity column, per segment **at that segment's own row offset**. A segment's
-            // `columns.arrow` rows are local `0..row_count`; in the view's row space they begin
-            // at the extent's `row_base` (the base segment's at 0). The offset is looked up from
-            // the row space rather than accumulated in iteration order, so this cannot silently
-            // depend on the segment list's ordering.
-            for segment in &view.segments {
-                let row_base = view
-                    .row_space
-                    .extents()
-                    .iter()
-                    .find(|extent| extent.seg_id == segment.seg_id)
-                    .map(|extent| extent.row_base as usize)
-                    .unwrap_or(0);
-                let ids = segment.columns.tessera_id();
-                for (local, id) in ids.iter().enumerate() {
-                    let entity = entity_of_row
-                        .get(row_base + local)
-                        .copied()
-                        .flatten()
-                        .ok_or_else(|| {
-                            BuildError::Invalid(format!(
-                                "view '{view_id}' segment '{}' row {local}: no entity claims \
-                                 this row",
-                                segment.seg_id
-                            ))
-                        })?;
-                    let expected = identity_key
-                        .forward(shard_id, tessera_types::EntityId::new(entity))
-                        .map_err(BuildError::Identity)?
-                        .raw();
-                    if *id != expected {
-                        return Err(BuildError::Invalid(format!(
-                            "view '{view_id}' segment '{}' row {local}: tessera_id {id:#x} \
-                             does not match identity.key's derivation {expected:#x} for entity \
-                             {entity}",
-                            segment.seg_id
-                        )));
-                    }
-                }
-            }
+            check_view_identity(
+                root,
+                &mut scratch,
+                direct_window_rows,
+                view_id,
+                view,
+                &identity_key,
+                shard_id,
+            )?;
         }
     }
     let current: CurrentPointer = {
@@ -2390,6 +2344,358 @@ fn verified_open(root: &Path) -> Result<(tessera_store::read::Bundle, VerifyRepo
         keyword_cardinalities,
     };
     Ok((bundle, report))
+}
+
+/// One row-partition record: the row in the first four bytes, which is what the partition routes
+/// on, and the entity that claims it in the next eight.
+const ROW_ENTITY_RECORD: usize = 12;
+
+/// The most rows the identity check crosses in one window.
+///
+/// At or below it the window covers the view's whole row space and there is nothing to route, so
+/// the pass writes no scratch at all — which is every fixture and every small deployment. Above
+/// it the claims go through a [`Partition`] and the window covers one bucket. 2²² rows is 33 MB,
+/// under what a single bucket's window and loaded bytes come to at the `u32` row ceiling, so the
+/// direct route is never the more expensive of the two.
+const DIRECT_WINDOW_ROWS: u64 = 1 << 22;
+
+/// A window slot no entity claims. An entity id this large is not reachable: a permutation's
+/// `bound` is the entity span its directory covers, and a directory covering 2⁶⁴ − 1 entities is
+/// 2⁵⁰ bytes, which `Permutation::load` refuses against the file's length.
+const NO_ENTITY: u64 = u64::MAX;
+
+/// Scratch for the row partition, `<root>/.verify-tmp.<pid>.<serial>`.
+///
+/// **Beside the bundle first, the system temporary directory only if that fails.** The partition
+/// writes twelve bytes a row, and a system temporary directory is a tmpfs on many hosts — where
+/// those bytes would be the anonymous memory this pass exists to give up. A read-only bundle root
+/// is the case the fallback is for.
+///
+/// The pid and a serial are in the name, so two verifiers over one bundle — in one process or in
+/// two — do not sweep away each other's buckets, and neither touches a build's `.build-tmp`.
+///
+/// **A killed verify's scratch is swept by the next one**, not adopted: a directory named for a pid
+/// that no longer exists can only be the leavings of a verify that died between creation and drop,
+/// and it holds up to twelve bytes for every row of the bundle. A directory named for a live pid is
+/// left where it is, whether or not that process is a verify — the risk of taking a running pass's
+/// buckets is not worth the disk.
+pub(crate) struct VerifyTmp {
+    path: PathBuf,
+}
+
+impl VerifyTmp {
+    pub(crate) fn create(root: &Path) -> Result<VerifyTmp> {
+        static SERIAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let serial = SERIAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let name = format!(".verify-tmp.{}.{serial}", std::process::id());
+        for base in [root.to_path_buf(), std::env::temp_dir()] {
+            sweep_dead_scratch(&base);
+            let path = base.join(&name);
+            let _ = fs::remove_dir_all(&path);
+            if fs::create_dir_all(&path).is_ok() {
+                return Ok(VerifyTmp { path });
+            }
+        }
+        Err(BuildError::Invalid(format!(
+            "the identity check has nowhere to put its row partition: neither {} nor the system \
+             temporary directory would take '{name}'",
+            root.display()
+        )))
+    }
+
+    pub(crate) fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for VerifyTmp {
+    fn drop(&mut self) {
+        // The tree, not its files: `PartitionStore` unlinks each bucket as the pass releases it,
+        // but the external-id check's `ext-run-entities.u32` is still here. Best effort, as the
+        // build's own scratch sweep is — what this misses, the next verify's sweep takes.
+        let _ = fs::remove_dir_all(&self.path);
+    }
+}
+
+/// Remove every `.verify-tmp.<pid>.<serial>` under `base` whose pid is no longer a live process.
+///
+/// Best effort throughout: a directory whose name does not parse, a pid this process may not
+/// signal, and a removal the filesystem refuses are all left alone. `kill(pid, 0)` distinguishes
+/// the three answers that matter — alive, alive but another user's, and gone — and only the third
+/// is swept.
+fn sweep_dead_scratch(base: &Path) {
+    let Ok(entries) = fs::read_dir(base) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        let Some(rest) = name.strip_prefix(".verify-tmp.") else {
+            continue;
+        };
+        let Some((pid, _serial)) = rest.split_once('.') else {
+            continue;
+        };
+        let Ok(pid) = pid.parse::<i32>() else {
+            continue;
+        };
+        if pid <= 0 || pid == std::process::id() as i32 {
+            continue;
+        }
+        // SAFETY: `kill` with signal 0 sends nothing; it reports whether the pid could be
+        // signalled. ESRCH is the one answer that says the process is gone.
+        let gone = unsafe { libc::kill(pid, 0) } == -1
+            && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
+        if gone {
+            let _ = fs::remove_dir_all(entry.path());
+        }
+    }
+}
+
+/// One segment's rows in view row space: where they begin, how many there are, and the segment.
+type SegmentRows<'a> = (u64, u32, &'a tessera_store::read::SegmentData);
+
+/// A view id as a filename component: letters, digits, `-` and `_` kept, everything else one
+/// underscore.
+///
+/// The name is for whoever reads a killed run's leavings before the next verify sweeps them; a
+/// view's partition is finished and its store dropped before the next view's is created, so two
+/// views sharing a name after the substitution would still not share a file.
+fn scratch_name(view_id: &str) -> String {
+    view_id
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+/// Surjectivity of one view's row space onto its segments' rows, and every row's `tessera_id`
+/// against `identity.key`.
+///
+/// **Both halves in one pass over a window, so neither costs a row-indexed array over the view.**
+/// Surjectivity is a count: the row space claims a row at most once (`validate_rows` on the base,
+/// `is_well_formed` on each extent, both at open, over disjoint row ranges), so as many claims as
+/// there are rows is a claim on every row. The identity check needs the entity at each row, and
+/// entity order is staging order where row order is Morton — the two disagree, which is what an
+/// array over the whole view was buying.
+///
+/// Above [`DIRECT_WINDOW_ROWS`] each claim is instead appended to a [`Partition`] bucketed by row
+/// range, and a bucket is read back, scattered into a window over its own rows, and walked there.
+/// Memory is then one bucket and one window, both a 128th of row space, and the disk is twelve
+/// bytes a row released bucket by bucket.
+///
+/// The sweep is over the whole row space, base *and* extents: a bundle that has flushed holds rows
+/// above the base permutation, and a sweep of the base alone would refuse every such bundle as
+/// "not a bijection" (the false refusal §18 obligation 10 names).
+///
+/// **What the identity half actually covers is the base's rows.** An extent has no stored mapping:
+/// `SegmentExtent::rebuild` recovers one at open by inverting each row's `tessera_id` under the
+/// deployment key (contracts §2.1). Comparing that `tessera_id` back against what the key derives
+/// for the entity the inversion produced is therefore a tautology over an extent's rows — it
+/// restates the inversion. Over the base's rows, whose mapping is `permutation.bin`, the comparison
+/// is between two artefacts and is the check contracts §2.6 r6 describes. The extent rows are still
+/// walked, because their surjectivity is not tautological and because the walk is what refuses a
+/// row no entity claims.
+///
+/// **Where the offender is reported from moved.** The walk is in row order, so for a view with
+/// more than one segment the first row that disagrees is the first in row space, where it used to
+/// be the first in the order the manifest listed the segments. Every message is unchanged; which
+/// one comes out of a bundle with more than one defect can differ.
+///
+/// **Not built: the partition route has no free-space pre-flight.** It writes twelve bytes a row
+/// and finds out that the filesystem is full by failing the write, where a build's passes size
+/// their spill against the free space first. A verifier that fills the disk reports an I/O error
+/// and leaves nothing behind ([`VerifyTmp`] sweeps), so this is a poor message rather than a
+/// hazard.
+fn check_view_identity(
+    root: &Path,
+    scratch: &mut Option<VerifyTmp>,
+    direct_window_rows: u64,
+    view_id: &str,
+    view: &tessera_store::read::ViewData,
+    identity_key: &IdentityKey,
+    shard_id: u32,
+) -> Result<()> {
+    let total_rows = view.row_space.total_rows();
+
+    // Each segment's rows in view row space. A segment's `columns.arrow` rows are local
+    // `0..row_count`; in the view they begin at the extent's `row_base` (the base segment's at 0).
+    // The offset is looked up from the row space and then sorted on, so the walk below is in row
+    // order however the manifest happened to list the segments.
+    let mut layout: Vec<SegmentRows<'_>> = view
+        .segments
+        .iter()
+        .map(|segment| {
+            let row_base = view
+                .row_space
+                .extents()
+                .iter()
+                .find(|extent| extent.seg_id == segment.seg_id)
+                .map(|extent| u64::from(extent.row_base))
+                .unwrap_or(0);
+            (row_base, segment.columns.row_count(), segment.as_ref())
+        })
+        .collect();
+    layout.sort_by_key(|(row_base, _, _)| *row_base);
+    // A segment holding rows past where the row space ends is the defect the per-row refusal
+    // below reports, so the window covers those rows rather than leaving them unwalked.
+    let row_bound = layout
+        .iter()
+        .map(|(row_base, rows, _)| row_base + u64::from(*rows))
+        .chain(std::iter::once(total_rows))
+        .max()
+        .unwrap_or(0);
+
+    let surjective = |claimed: u64| -> Result<()> {
+        if claimed != total_rows {
+            return Err(BuildError::Invalid(format!(
+                "view '{view_id}': the row space claims {claimed} rows but the segments hold \
+                 {total_rows} — not a bijection"
+            )));
+        }
+        Ok(())
+    };
+
+    if row_bound <= direct_window_rows {
+        let mut window = vec![NO_ENTITY; row_bound as usize];
+        let claimed = claim_rows(view, |row, entity| {
+            window[row as usize] = entity;
+            Ok(())
+        })?;
+        surjective(claimed)?;
+        return walk_window(
+            view_id,
+            &layout,
+            &window,
+            0,
+            row_bound,
+            identity_key,
+            shard_id,
+        );
+    }
+
+    // The one place the pass writes anything, so the one place the scratch directory is made.
+    if scratch.is_none() {
+        *scratch = Some(VerifyTmp::create(root)?);
+    }
+    let scratch = scratch.as_ref().expect("the scratch was just created");
+    let boundaries = spill::boundaries_uniform(row_bound);
+    let mut partition = spill::Partition::create(
+        scratch.path(),
+        &format!("verify-rows-{}", scratch_name(view_id)),
+        boundaries.clone(),
+        ROW_ENTITY_RECORD,
+        total_rows,
+    )?;
+    let claimed = claim_rows(view, |row, entity| {
+        let mut record = [0u8; ROW_ENTITY_RECORD];
+        record[..4].copy_from_slice(&row.to_le_bytes());
+        record[4..].copy_from_slice(&entity.to_le_bytes());
+        partition.push(&record)?;
+        Ok(())
+    })?;
+    surjective(claimed)?;
+
+    let mut store = partition.finish()?;
+    let mut window: Vec<u64> = Vec::new();
+    for k in 0..boundaries.len() {
+        let lo = u64::from(boundaries[k]);
+        let hi = boundaries
+            .get(k + 1)
+            .map(|&first| u64::from(first))
+            .unwrap_or(row_bound)
+            .min(row_bound);
+        if hi <= lo {
+            store.delete(k)?;
+            continue;
+        }
+        window.clear();
+        window.resize((hi - lo) as usize, NO_ENTITY);
+        for record in store.load(k)?.chunks_exact(ROW_ENTITY_RECORD) {
+            let row = u32::from_le_bytes(record[..4].try_into().expect("four bytes")) as u64;
+            let entity = u64::from_le_bytes(record[4..].try_into().expect("eight bytes"));
+            window[(row - lo) as usize] = entity;
+        }
+        // The bucket's disk comes back before its rows are walked: the window holds everything
+        // the walk needs.
+        store.delete(k)?;
+        walk_window(view_id, &layout, &window, lo, hi, identity_key, shard_id)?;
+    }
+    Ok(())
+}
+
+/// Every `(row, entity)` the view's row space claims, base first and then each extent, to `claim`.
+/// Returns how many there were.
+fn claim_rows(
+    view: &tessera_store::read::ViewData,
+    mut claim: impl FnMut(u32, u64) -> Result<()>,
+) -> Result<u64> {
+    let mut claimed = 0u64;
+    view.row_space.base().try_for_each_slot(|entity, row| {
+        claimed += 1;
+        claim(row.raw(), entity)
+    })?;
+    for extent in view.row_space.extents() {
+        for (offset, &slot) in extent.rows.iter().enumerate() {
+            if slot == ROW_ABSENT {
+                continue;
+            }
+            claimed += 1;
+            claim(extent.row_base + slot, extent.entity_lo + offset as u64)?;
+        }
+    }
+    Ok(claimed)
+}
+
+/// The rows of `[lo, hi)` that a segment holds, in row order: each one's entity from `window`, and
+/// its stored `tessera_id` against what the key derives for that entity.
+fn walk_window(
+    view_id: &str,
+    layout: &[SegmentRows<'_>],
+    window: &[u64],
+    lo: u64,
+    hi: u64,
+    identity_key: &IdentityKey,
+    shard_id: u32,
+) -> Result<()> {
+    for (row_base, rows, segment) in layout {
+        let from = (*row_base).max(lo);
+        let to = (row_base + u64::from(*rows)).min(hi);
+        if from >= to {
+            continue;
+        }
+        let ids = segment.columns.tessera_id();
+        for row in from..to {
+            let local = (row - row_base) as usize;
+            let entity = window[(row - lo) as usize];
+            if entity == NO_ENTITY {
+                return Err(BuildError::Invalid(format!(
+                    "view '{view_id}' segment '{}' row {local}: no entity claims this row",
+                    segment.seg_id
+                )));
+            }
+            let expected = identity_key
+                .forward(shard_id, EntityId::new(entity))
+                .map_err(BuildError::Identity)?
+                .raw();
+            let id = ids[local];
+            if id != expected {
+                return Err(BuildError::Invalid(format!(
+                    "view '{view_id}' segment '{}' row {local}: tessera_id {id:#x} does not \
+                     match identity.key's derivation {expected:#x} for entity {entity}",
+                    segment.seg_id
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn write_pairs_parquet(path: &Path, per_term: &[Vec<u32>]) -> Result<()> {

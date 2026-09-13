@@ -17,13 +17,13 @@ use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use arrow::array::{Array, Float64Array, UInt32Array, UInt64Array};
+use arrow::array::{Array, BinaryArray, Float64Array, UInt32Array, UInt64Array};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
 use sha2::{Digest, Sha256};
 
-use tessera_build::{build, verify, verify_deep, BuildArgs, VerifyOpts};
+use tessera_build::{build, verify, verify_deep, verify_with_window_rows, BuildArgs, VerifyOpts};
 use tessera_spatial::Bounds;
 use tessera_store::flush::{write_flush_segment, FlushInput, FlushRow};
 use tessera_store::manifest::{CurrentPointer, FileDigest, SegmentsManifest};
@@ -345,6 +345,81 @@ fn a_flushed_and_reingested_bundle_verifies_shallow_and_deep() {
     assert_eq!(deep.external_id_bindings, N_ITEMS + 2);
 }
 
+/// **Both routes of the identity check, over one fixture.**
+///
+/// Above `DIRECT_WINDOW_ROWS` the check goes through a row partition on disk and below it through
+/// a window over the whole row space. Every bundle a test can afford to build is below, and every
+/// bundle at corpus scale is above, so without a threshold a test can lower, the route that runs
+/// in anger runs nowhere in CI. `verify_with_window_rows(root, 0)` puts every view through the
+/// partition; the two routes must agree on an accepted bundle's report and on a damaged one's
+/// refusal.
+#[test]
+fn the_partition_route_and_the_window_route_agree() {
+    let temp = tempfile::TempDir::new().unwrap();
+    flushed_bundle(temp.path());
+    let root = bundle_root(&temp);
+
+    let window = verify(&root).expect("the window route accepts a valid bundle");
+    let partition =
+        verify_with_window_rows(&root, 0).expect("the partition route accepts the same bundle");
+    assert_eq!(window.rows, partition.rows);
+    assert_eq!(window.segments, partition.segments);
+    assert_eq!(window.views, partition.views);
+    assert_eq!(window.partitions, partition.partitions);
+    assert_eq!(window.entity_id_high_water, partition.entity_id_high_water);
+    assert_eq!(window.bundle_bytes, partition.bundle_bytes);
+
+    // The deep pass reaches the same route through its options, and reports the same figures.
+    let deep = verify_deep(
+        &root,
+        &VerifyOpts {
+            direct_window_rows: 0,
+            ..VerifyOpts::default()
+        },
+    )
+    .expect("the partition route accepts the same bundle deep");
+    assert_eq!(deep.shallow.rows, window.rows);
+    assert_eq!(deep.external_id_bindings, N_ITEMS + 2);
+
+    // One `tessera_id` of the *base* segment is replaced by another entity's, so the row is
+    // claimed — surjectivity still holds — and what refuses is the derivation. The base is the
+    // segment where the comparison is between two artefacts rather than a restatement of the
+    // extent inversion the open performs.
+    let rel = "partitions/default/views/s0/segments/seg-0/columns.arrow";
+    let path = root.join("v00000").join(rel);
+    let reader = arrow::ipc::reader::FileReader::try_new(File::open(&path).unwrap(), None).unwrap();
+    let schema = reader.schema();
+    let batches: Vec<RecordBatch> = reader.map(|b| b.unwrap()).collect();
+    let ids = batches[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<UInt64Array>()
+        .expect("column 0 is the u64 tessera_id");
+    let mut values: Vec<u64> = ids.values().to_vec();
+    assert!(values.len() >= 2 && values[0] != values[1]);
+    values[0] = values[1];
+    let mut columns = batches[0].columns().to_vec();
+    columns[0] = Arc::new(UInt64Array::from(values));
+    let damaged = RecordBatch::try_new(batches[0].schema(), columns).unwrap();
+    let mut writer =
+        arrow::ipc::writer::FileWriter::try_new(File::create(&path).unwrap(), &schema).unwrap();
+    writer.write(&damaged).unwrap();
+    writer.finish().unwrap();
+    drop(writer);
+    refresh_digest(&root, rel);
+
+    let window = verify(&root).expect_err("the window route refuses the damaged column");
+    let partition =
+        verify_with_window_rows(&root, 0).expect_err("the partition route refuses it too");
+    assert!(
+        window
+            .to_string()
+            .contains("does not match identity.key's derivation"),
+        "expected the derivation refusal, got: {window}"
+    );
+    assert_eq!(window.to_string(), partition.to_string());
+}
+
 /// The damage helper's own premise, asserted once: the fixture's re-bound key really does appear
 /// in two runs, so the accept test above is exercising 0047's retained superseded binding rather
 /// than a corpus where every key is unique.
@@ -522,6 +597,81 @@ fn a_locator_slot_addressing_another_entitys_binding_is_refused() {
     expect_refusal(&root, "the locator and the runs disagree");
 }
 
+/// A run whose external ids stop ascending. The sidecar binary-searches each run, so a key out
+/// of order makes a binding unreachable; the scan holds no key but the previous one, and the pair
+/// it compares is the whole check.
+#[test]
+fn a_run_whose_external_ids_stop_ascending_is_refused() {
+    let temp = tempfile::TempDir::new().unwrap();
+    flushed_bundle(temp.path());
+    let root = bundle_root(&temp);
+
+    rewrite_first_run_keys(&root, |values| values.swap(0, 1));
+
+    expect_refusal(&root, "external ids are not strictly ascending at row 1");
+}
+
+/// Rewrite the first external-id run's key column through `damage`, leaving its entity column
+/// where it was, and repair the run's manifest digest. What then fails is the ordering check and
+/// never the digest sweep in front of it.
+fn rewrite_first_run_keys(root: &Path, damage: impl FnOnce(&mut Vec<Vec<u8>>)) {
+    let prefix_dir = root.join("v00000");
+    let segments: serde_json::Value = serde_json::from_slice(
+        &fs::read(prefix_dir.join("partitions/default/SEGMENTS-1.json")).unwrap(),
+    )
+    .unwrap();
+    let rel = segments["external_id_runs"][0]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let path = prefix_dir.join(&rel);
+
+    let reader = arrow::ipc::reader::FileReader::try_new(File::open(&path).unwrap(), None).unwrap();
+    let schema = reader.schema();
+    let batches: Vec<RecordBatch> = reader.map(|batch| batch.unwrap()).collect();
+    assert!(
+        batches[0].num_rows() >= 2,
+        "the run must hold two keys for there to be an order to break"
+    );
+    let keys = batches[0]
+        .column_by_name("external_id")
+        .and_then(|c| c.as_any().downcast_ref::<BinaryArray>())
+        .expect("the run carries a binary 'external_id' column");
+    let mut values: Vec<Vec<u8>> = (0..keys.len()).map(|i| keys.value(i).to_vec()).collect();
+    damage(&mut values);
+    let damaged: Vec<&[u8]> = values.iter().map(|v| v.as_slice()).collect();
+    let at = batches[0].schema().index_of("external_id").unwrap();
+    let mut columns = batches[0].columns().to_vec();
+    columns[at] = Arc::new(BinaryArray::from(damaged));
+    let first = RecordBatch::try_new(batches[0].schema(), columns).unwrap();
+
+    let mut writer =
+        arrow::ipc::writer::FileWriter::try_new(File::create(&path).unwrap(), &schema).unwrap();
+    writer.write(&first).unwrap();
+    for batch in &batches[1..] {
+        writer.write(batch).unwrap();
+    }
+    writer.finish().unwrap();
+    drop(writer);
+    refresh_digest(root, &rel);
+}
+
+/// The same external id twice in one run. A duplicate is not merely out of order: a check written
+/// as `previous > key` accepts it and the sidecar's binary search then reaches one of the two rows
+/// and never the other. Strictly ascending is the requirement, and this is the case that says so.
+#[test]
+fn a_run_repeating_an_external_id_is_refused() {
+    let temp = tempfile::TempDir::new().unwrap();
+    flushed_bundle(temp.path());
+    let root = bundle_root(&temp);
+
+    rewrite_first_run_keys(&root, |values| {
+        values[1] = values[0].clone();
+    });
+
+    expect_refusal(&root, "external ids are not strictly ascending at row 1");
+}
+
 /// A sidecar file whose bytes stopped matching the manifest: the family is exempt from the
 /// open-time digest sweep (contracts §0.3 deviation 9), so the deep pass must be the one that
 /// catches it at rest. The damage here is *not* followed by a digest repair — that is the test.
@@ -664,6 +814,7 @@ fn a_source_binding_request_is_refused_until_the_contract_carries_the_field() {
 
     let opts = VerifyOpts {
         source: Some(root.join("points.parquet")),
+        ..VerifyOpts::default()
     };
     let err = verify_deep(&root, &opts).expect_err("the unimplemented binding must refuse");
     assert!(
