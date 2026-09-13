@@ -561,11 +561,11 @@ async fn open(tmp: TempDir, config: EngineConfig) -> Served {
     Served { server, token, tmp }
 }
 
-/// Reopen the same bundle and the same WAL. The old server is dropped first so its executor
-/// releases the log.
+/// Reopen the same bundle and the same WAL. The old server is stopped and waited for first, so its
+/// executor has released the bundle root's write lock before the new one takes it.
 async fn restart(served: Served, config: EngineConfig) -> Served {
     let Served { server, tmp, .. } = served;
-    drop(server);
+    server.shutdown().await;
     open(tmp, config).await
 }
 

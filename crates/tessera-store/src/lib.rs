@@ -44,7 +44,8 @@ pub use manifest_write::{
 pub use pairs::PairsParquetWriter;
 pub use permutation::{Permutation, RowSpace, SegmentExtent};
 pub use read::{
-    open_bundle, open_written_prefix, tile_ranges, tile_ranges_all, tile_ranges_within, Bundle,
+    highest_side_manifest_n, open_bundle, open_written_prefix, tile_ranges, tile_ranges_all,
+    tile_ranges_within, Bundle,
     ColumnsRef, MortonSlice, PartitionData, ScalarSlice, SegmentData, ViewData,
 };
 pub use reclaim::{hard_link_forward, reclaim_prefix, reclaim_unpublished_prefix};

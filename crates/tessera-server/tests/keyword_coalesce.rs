@@ -352,7 +352,7 @@ async fn a_keyword_filter_serves_the_same_set_before_and_after_the_coalesce() {
     assert_eq!(after, before, "a served answer moved across the coalesce");
 
     // A restart opens the coalesced extent from the manifest entry.
-    drop(server);
+    server.shutdown().await;
     let server = spawn_server(
         &root,
         &tmp.path().join("cache"),

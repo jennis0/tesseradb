@@ -455,15 +455,24 @@ async fn a_spent_walk_budget_reports_more_even_on_a_short_page() {
     let viewer_router = tessera_server::viewer::router(Arc::clone(&state));
     let session_router = tessera_server::session::router(Arc::clone(&state));
     let control_router = tessera_server::control::router(Arc::clone(&state));
-    tokio::spawn(async move { axum::serve(viewer_listener, viewer_router).await });
-    tokio::spawn(async move { axum::serve(session_listener, session_router).await });
-    tokio::spawn(async move { axum::serve(control_listener, control_router).await });
+    let serve_tasks = vec![
+        tokio::spawn(async move {
+            let _ = axum::serve(viewer_listener, viewer_router).await;
+        }),
+        tokio::spawn(async move {
+            let _ = axum::serve(session_listener, session_router).await;
+        }),
+        tokio::spawn(async move {
+            let _ = axum::serve(control_listener, control_router).await;
+        }),
+    ];
     let server = TestServer {
         viewer_addr,
         session_addr,
         control_addr,
         client: reqwest::Client::new(),
         state,
+        serve_tasks,
     };
 
     let auth = authorise(&server, &["0"]).await;

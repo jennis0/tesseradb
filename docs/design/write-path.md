@@ -131,10 +131,54 @@ version** — process-local, carried on the generation, bumped only by a geometr
 (flush; merge when it publishes), and the row-projection cache key component. `overlay_version`
 moves on every accepted change. An accepted deny never moves `segments_version`, so **no deny
 ever rotates a session's row-projection key** (spec §5.8). On disc there is a third counter of a
-different kind: `n`, the side-manifest sequence number, per partition, monotone, allocated by the
-executor at each write and living **in the filename alone** — the manifest field that once
-duplicated it is deleted (contracts §2.3). `n` advances faster than the geometry version, because
-overlay publications take an `n` and move no geometry.
+different kind: `n`, the side-manifest sequence number, allocated by the executor at each write and
+living **in the filename alone** — the manifest field that once duplicated it is deleted (contracts
+§2.3). One counter serves the whole bundle, so a number is unique bundle-wide, and monotone per
+partition as a consequence of that. `n` advances faster than the geometry version, because overlay
+publications take an `n` and move no geometry.
+
+**One executor owns a bundle root.** Every name a publication allocates comes from state one
+executor holds — `n`, an entity id, a `seg_id` — so a second writer over the same root takes the
+same names from the same seed, and publishes complete current state over manifests the first is
+rebasing on. The executor takes an exclusive `flock` on the bundle root directory at start and
+holds it until its thread has ended; a second executor refuses to start, naming the holder's process
+where `/proc/locks` gives it. `flock` rather than a `fcntl` record lock, because a record lock is
+held per process and the two executors that provoked this were in one process: a restart whose
+predecessor was still serving. The directory rather than `CURRENT`, which a fold replaces by rename,
+or the WAL, which is per node and so shared by neither of two nodes over one bundle. Readers take no
+lock. **The guarantee is same-host**: `flock` over SMB and NFS is unreliable, and a bundle is never
+served from a share. A filesystem that refuses `flock` outright refuses every write to that bundle
+at start, which is the fail-closed side of the same decision: a writer that cannot take the lock
+cannot know it is alone.
+
+Every writer of a side-manifest — flush, merge, coalesce, fold, overlay publication — takes its `n`
+from one counter on the executor thread, and the counter is raised over every `SEGMENTS-<n>.json`
+present under the bundle root at each allocation: one scan per publication, whatever it allocates.
+A counter says what this executor has written; the filenames say which numbers are taken, and the
+two differ only where something else has written. Two executors seeded from one disc state advance
+in lockstep and collide at every publication either makes, and each collision discards a publication
+whose files are already written.
+
+**The floor makes that state survivable, not safe.** It is what keeps the node publishing; it does
+not reconcile what the other writer published with what this one holds, and both are still writing
+complete current state over each other's manifests. The writer is refused at the lock above, so a
+floor that rises is positive evidence of one that got past it: in single-writer operation the
+highest number on disc is the last one this executor took. It is alarmed and counted: `foreign_side_manifests`, in
+`/control/status`'s `write_executor` block beside the queue gauges rather than in its `flush`
+block, because it is a property of the bundle root and not of the flush cadence.
+
+Seeding from a manifest would leave the gap the counter has: a manifest names the files of its own
+publication, so a side-manifest another writer left is named by nothing. A collision that does
+happen is refused by name (§4.2), not merged. A scan that cannot read a directory fails the
+allocation, and so the publication: an allocator that cannot see which files are present cannot say
+a number is free. The publication's files become orphans and the tick re-plans, which is the posture
+every other publication failure on this path takes.
+
+**"Never reused" is a statement about the side-manifests present.** A number an unpublished
+compaction prefix held becomes allocatable once the startup sweep has removed that prefix. That is
+safe for the reason the sweep is: `CURRENT` never named the swept prefix, so nothing a reader can
+resolve is in it, and any file at that number a reader *can* resolve is named by a live manifest at
+`n` or above — which is on disc, and therefore under the floor.
 
 ### 1.3 The WAL
 
@@ -439,10 +483,17 @@ un-poisons the node but leaves it holding dispositions no record backs) publishe
 rotates nothing until restarted, alarmed throughout — publishing from that overlay would make a
 500'd, never-acked deny permanent, contradicting what contracts §3.1's 500 promises.
 
-**One plan per dispatch.** Every plan in a dispatch would take the same side-manifest name, so
-one view publishes per tick, chosen by oldest unflushed row; the side-manifest write **refuses
-to replace** an existing `SEGMENTS-<n>.json` (`hard_link`, atomic, `AlreadyExists` on collision)
-as the guard at the format boundary.
+**One plan per dispatch.** A flush unit is per view, and a publication rebases on the generation
+the one before it swapped: two in flight would leave the second with a row space that has moved
+under it, discarded at its rebase with its files already written. So one plan is dispatched per
+tick, chosen by oldest unflushed row, and the rest re-plan at the next one. The side-manifest name
+is not the reason — each publication allocates its own `n` when it commits (§1.2), so two dispatched
+plans would take two names — but the write **refuses to replace** an existing `SEGMENTS-<n>.json`
+(`hard_link`, atomic, `AlreadyExists` on collision) whatever reaches it, which is the guard at the
+format boundary. The refusal names the file and is its own error rather than a filesystem fault: a
+side-manifest is complete current state, so a write through one drops the rows the manifest it
+replaced named. The publication is discarded, its files are orphans, and the next tick re-plans — at
+a number above what is on disc, never at the one that was refused (§1.2).
 
 ### 4.3 Execution on the pool: the files, and descriptor promotion
 

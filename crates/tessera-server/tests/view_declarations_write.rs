@@ -132,7 +132,7 @@ async fn reauthorise(served: &mut Served) {
 
 async fn restart(served: Served) -> Served {
     let Served { server, tmp, .. } = served;
-    drop(server);
+    server.shutdown().await;
     open(tmp).await
 }
 

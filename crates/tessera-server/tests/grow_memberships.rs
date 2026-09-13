@@ -51,10 +51,10 @@ async fn serve(tmp: &TempDir) -> TestServer {
     open(tmp).await
 }
 
-/// Reopen the same bundle and the same WAL. The old server is dropped first so its executor
-/// releases the log.
+/// Reopen the same bundle and the same WAL. The old server is stopped and waited for first, so its
+/// executor has released the bundle root's write lock before the new one takes it.
 async fn restart(server: TestServer, tmp: &TempDir) -> TestServer {
-    drop(server);
+    server.shutdown().await;
     open(tmp).await
 }
 

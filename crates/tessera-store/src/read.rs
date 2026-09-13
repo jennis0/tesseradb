@@ -1098,6 +1098,98 @@ fn list_segments_manifests(partition_dir: &Path, partition_label: &str) -> Resul
     Ok(found)
 }
 
+/// The highest `n` any `SEGMENTS-<n>.json` under `bundle_root` is named with — over every prefix
+/// directory and every partition directory beneath them — or `None` where the tree holds none.
+///
+/// **The floor a writer's next `n` must clear** (write-path §1.2). `n` is allocated once and never
+/// reused, and the only complete record of which numbers are taken is the set of filenames present:
+/// a manifest names the files of its own publication, not the side-manifests of any other, and a
+/// prefix an in-flight compaction is building is named by nothing at all until it flips `CURRENT`.
+/// An allocator seeded from what a manifest names is therefore seeded below files that exist, and
+/// the first publication at such an `n` is refused by
+/// [`StoreError::SideManifestExists`](crate::StoreError::SideManifestExists).
+///
+/// Symlinked prefix and partition directories are followed. A link whose target is absent is
+/// skipped, a target that cannot be stat'd for any other reason is an error: see
+/// [`sub_directories`].
+///
+/// **A non-canonical name raises the floor rather than refusing here.** The reader refuses one
+/// ([`list_segments_manifests`], contracts §2.1) because it must not read a manifest under a name
+/// it cannot reconstruct; this asks only which numbers may be taken, and a padded `SEGMENTS-01.json`
+/// says `1` may be. Refusing would stop a node writing over a file it can already read past.
+///
+/// A directory that cannot be listed is an error rather than an omission: an allocator that cannot
+/// see the files present cannot say a number is free.
+pub fn highest_side_manifest_n(bundle_root: &Path) -> Result<Option<u64>> {
+    let mut highest: Option<u64> = None;
+    for prefix in sub_directories(bundle_root)? {
+        for partition in sub_directories(&prefix.join("partitions"))? {
+            for entry in read_dir_if_present(&partition)? {
+                let entry = entry.map_err(|source| StoreError::Io {
+                    path: partition.clone(),
+                    source,
+                })?;
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                let Some(rest) = name
+                    .strip_prefix("SEGMENTS-")
+                    .and_then(|r| r.strip_suffix(".json"))
+                else {
+                    continue;
+                };
+                if let Ok(n) = rest.parse::<u64>() {
+                    highest = Some(highest.map_or(n, |h: u64| h.max(n)));
+                }
+            }
+        }
+    }
+    Ok(highest)
+}
+
+/// The directories directly under `dir`, empty where `dir` does not exist.
+///
+/// `metadata` rather than the entry's own `file_type`, so a symlinked prefix or partition directory
+/// is walked: the entry's type says "symlink" where the target is the directory the numbers live
+/// in, and an allocator that skipped it would allocate over files that are there.
+///
+/// A target that is not there — a broken link, or an entry removed between the listing and the
+/// stat — is skipped, because neither holds a number. Any other stat failure is an error, on the
+/// rule this whole scan follows: an allocator that cannot see what is present cannot say a number
+/// is free.
+fn sub_directories(dir: &Path) -> Result<Vec<PathBuf>> {
+    let mut found = Vec::new();
+    for entry in read_dir_if_present(dir)? {
+        let entry = entry.map_err(|source| StoreError::Io {
+            path: dir.to_path_buf(),
+            source,
+        })?;
+        let path = entry.path();
+        // `NotFound` is the broken link and the entry removed between the listing and the stat,
+        // neither of which holds numbers. Every other failure is reported: an entry that may be a
+        // directory full of side-manifests, unread, is the same fail-open as a directory that
+        // could not be listed.
+        match std::fs::metadata(&path) {
+            Ok(metadata) if metadata.is_dir() => found.push(path),
+            Ok(_) => {}
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => {}
+            Err(source) => return Err(StoreError::Io { path, source }),
+        }
+    }
+    Ok(found)
+}
+
+/// `read_dir`, with an absent directory reading as empty and every other failure an error.
+fn read_dir_if_present(dir: &Path) -> Result<Vec<std::io::Result<std::fs::DirEntry>>> {
+    match std::fs::read_dir(dir) {
+        Ok(entries) => Ok(entries.collect()),
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(source) => Err(StoreError::Io {
+            path: dir.to_path_buf(),
+            source,
+        }),
+    }
+}
+
 /// **The one path-escape rule in this crate**, shared with [`crate::reclaim`] rather than copied:
 /// a second implementation of what counts as a safe manifest path is a second thing to get right,
 /// on the boundary where getting it wrong walks outside the bundle root.

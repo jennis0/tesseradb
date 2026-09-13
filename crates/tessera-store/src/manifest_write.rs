@@ -250,7 +250,13 @@ pub fn write_segments_manifest(
     // rubbish. Unlinked before the error surfaces so a refused write leaves nothing behind for the
     // next attempt at this `n` to trip over.
     let _ = std::fs::remove_file(&tmp);
-    linked.map_err(|e| io("link (a side-manifest is never replaced)", e))?;
+    // **A collision is its own error, naming the file.** The generic form reads as a filesystem
+    // fault, and this is a statement about `n`: one was allocated that another writer had already
+    // published at. See [`StoreError::SideManifestExists`].
+    linked.map_err(|e| match e.kind() {
+        std::io::ErrorKind::AlreadyExists => StoreError::SideManifestExists { path: path.clone() },
+        _ => io("link (a side-manifest is never replaced)", e),
+    })?;
     File::open(&dir)
         .and_then(|d| d.sync_all())
         .map_err(|e| io("dir fsync", e))?;

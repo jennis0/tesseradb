@@ -2415,6 +2415,10 @@ async fn status_stage_barriers_move_when_their_stages_run() {
     assert_eq!(before["write_executor"]["coalesces"], 0);
     assert_eq!(before["write_executor"]["merges"], 0);
     assert_eq!(before["write_executor"]["flush"]["refreshes"], 0);
+    // A node whose bundle root is its own: no allocation has had to rise over a side-manifest it
+    // did not write (write-path §1.2). Beside the executor's own gauges rather than in `flush`,
+    // because every publication allocates.
+    assert_eq!(before["write_executor"]["foreign_side_manifests"], 0);
 
     // Pull ticks until every stage has run. Four tiny flush extents are one size tier (they all
     // clamp to the merge floor), so the merge becomes eligible at the fifth pulled tick; eight
@@ -3158,8 +3162,18 @@ async fn backpressure_is_invisible_before_auth() {
     // Server B: the *queue* 429 and the *row cap* 422 — the two signals server A cannot produce.
     // Its admission bound refuses before `run_ingest` runs at all, which is itself the ordering
     // under test, so a row-cap leg on server A can only ever observe the 429.
+    //
+    // **Its own bundle**, because both servers run write executors and one executor owns a bundle
+    // root (write-path §1.2). Nothing here is about the two sharing a corpus: each server's
+    // subject is the order of its own refusals.
+    let bundle_root_b = tmp.path().join("bundle-b");
+    build_fixture(
+        &bundle_root_b,
+        &tmp.path().join("points-b.parquet"),
+        &tmp.path().join("pairs-b.parquet"),
+    );
     let mut engine_b = Engine::open(
-        &bundle_root,
+        &bundle_root_b,
         &tmp.path().join("cache-b"),
         &tmp.path().join("wal-b.log"),
         Passthrough::new(),

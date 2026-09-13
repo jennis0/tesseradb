@@ -330,7 +330,7 @@ async fn one_key_in_two_views_is_two_artifacts_each_drawn_on_its_own_view() {
 
     // The identity comes back off the log, so a re-`PUT` of the same key in the same view is the
     // held artifact rather than a third.
-    drop(server);
+    server.shutdown().await;
     let server = open(&tmp).await;
     assert_eq!(
         served(&server, "quarter:q1", SCOPED).await,
@@ -513,7 +513,7 @@ async fn a_group_scoped_level_survives_a_fold_and_a_reopen_with_its_views() {
 
     // Reopened from the packed extents, with the log's publication behind the fold's high-water:
     // the views come back off the blob.
-    drop(server);
+    server.shutdown().await;
     let server = open(&tmp).await;
     assert_eq!(
         served(&server, "quarter:q1", SCOPED).await,
