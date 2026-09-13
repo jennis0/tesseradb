@@ -5332,7 +5332,10 @@ impl Engine {
             level_version,
             &rows,
             mask,
-            Some(segments),
+            // **Only where the layer's derived content is an accumulation** — a level serving a
+            // count alone has no use for a position per visible row.
+            crate::artifacts::derives_accumulated_geometry(&layer.declaration)
+                .then_some(segments),
         );
         let carried_counts = counts.clone();
         // The same containment answers the viewport builds, from the same partition: an identifier
@@ -6372,7 +6375,8 @@ impl Engine {
                     level_version,
                     &rows,
                     mask,
-                    Some(&segments),
+                    crate::artifacts::derives_accumulated_geometry(&layer.declaration)
+                        .then_some(&segments[..]),
                 );
                 // Kept beside the view below, which takes the `Arc` — the derived geometry reads
                 // the accumulation this same entry carries.

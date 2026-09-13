@@ -241,7 +241,10 @@ impl<'a> RowLocator<'a> {
 /// **The same two quantities by another route, not two definitions of them.** A centroid is the
 /// mean of `membership ∩ M_auth`'s positions and a box their extremes; summing and comparing as the
 /// rows are read gives the same numbers as materialising the rows and traversing them, which is
-/// what `tests/artifact_row_major.rs` asserts against the artifact-major route.
+/// what `tests/artifact_row_major.rs` asserts against the artifact-major route. **Exactly the same
+/// numbers**: both sum in `u64` — the sum cannot overflow one and is exact in one — so the chunked
+/// reduction and the sequential walk agree bit for bit, which floating-point addition past 2^53
+/// would not give.
 ///
 /// ⊘ **A hull is not here**, and cannot be: it is a function of the positions themselves rather
 /// than an accumulation over them. A layer deriving one keeps the artifact-major form
@@ -294,13 +297,16 @@ pub fn compute(
         }
     }
 
-    // Summed as `f64` rather than `u64`: the grid is 2^32 wide, so a membership past ~2^32 members
-    // would overflow a `u64` sum, and the mean is fractional in any case.
-    let (mut sx, mut sy) = (0.0f64, 0.0f64);
+    // **Summed as `u64`, which is exact and cannot overflow**: a membership is a set of rows, a
+    // row space is `u32`-addressed and a coordinate is a `u32`, so a per-axis sum is at most
+    // `(2^32 - 1)^2`. The mean is fractional and the division is the only floating-point step, so
+    // this and `crate::histogram::MaskedGeometry`'s accumulation produce the same number rather
+    // than two roundings of it.
+    let (mut sx, mut sy) = (0u64, 0u64);
     let mut b = [u32::MAX, u32::MAX, 0u32, 0u32];
     for p in &positions {
-        sx += p[0] as f64;
-        sy += p[1] as f64;
+        sx += u64::from(p[0]);
+        sy += u64::from(p[1]);
         b[0] = b[0].min(p[0]);
         b[1] = b[1].min(p[1]);
         b[2] = b[2].max(p[0]);
@@ -309,7 +315,7 @@ pub fn compute(
 
     if want_centroid {
         let n = positions.len() as f64;
-        out.centroid = Some([sx / n, sy / n]);
+        out.centroid = Some([sx as f64 / n, sy as f64 / n]);
     }
     if want_box {
         out.bbox = Some(b);

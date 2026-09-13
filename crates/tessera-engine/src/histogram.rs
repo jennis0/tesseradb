@@ -51,9 +51,26 @@
 //! (`crate::cache`), and it is what makes a byte budget a residency policy rather than a
 //! correctness one.
 //!
-//! The budget is ~4 B per artifact per resident entry, which is 4 MB at 10⁶ artifacts and 40 MB at
-//! 10⁷ — the figures 0093 quotes — and it is answered to by eviction of the least recently used
-//! entry, exactly as the row-projection cache's is.
+//! The budget is ~4 B per artifact for an entry of counts alone, which is 4 MB at 10⁶ artifacts and
+//! 40 MB at 10⁷ — the figures 0093 quotes — and it is answered to by eviction of the least recently
+//! used entry, exactly as the row-projection cache's is.
+//!
+//! **An entry carrying the accumulated geometry is 36 B an artifact, nine times that**: a `u32`
+//! count, two `u64` sums and four `u32` box bounds beside the 4 B count
+//! ([`MaskedGeometry`]). At the rung 6 corpus's 1.65×10⁶ artifacts that is **59 MB a level per
+//! session** against the counts' 6.6, and against `tessera-server`'s 256 MB default bound. **The
+//! default does not move for it**: the bound is a residency policy and not a correctness one — an
+//! entry too large for the whole bound is handed to its caller and simply not admitted — so a
+//! deployment that holds fewer levels resident is slower and never wrong, and raising the default
+//! would spend memory on every deployment for the few that hold several such levels at once. An
+//! operator who wants them resident raises `selection.masked_count_cache_bytes`.
+//!
+//! **Two entries for one level is by design, not a duplication.** A viewport over a layer deriving
+//! a centroid or a box wants the geometry; a browse page over the same level wants the counts and
+//! nothing else, and building the geometry for it would read a position per visible row for a
+//! number no browse row carries. The `geometry` term of the key is what keeps the two apart, so a
+//! browse page cannot be handed an entry without the geometry a viewport then needs, nor made to
+//! pay for one it does not.
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -157,12 +174,13 @@ pub struct MaskedGeometry {
     /// How many of the counted rows the row space could place — the divisor for the mean. Not the
     /// masked count, which counts every visible row.
     placed: Vec<u32>,
-    sums: Vec<[f64; 2]>,
+    /// Exact: see [`crate::row_column::LevelAccumulation::sums`].
+    sums: Vec<[u64; 2]>,
     boxes: Vec<[u32; 4]>,
 }
 
 impl MaskedGeometry {
-    pub(crate) fn new(placed: Vec<u32>, sums: Vec<[f64; 2]>, boxes: Vec<[u32; 4]>) -> Self {
+    pub(crate) fn new(placed: Vec<u32>, sums: Vec<[u64; 2]>, boxes: Vec<[u32; 4]>) -> Self {
         MaskedGeometry {
             placed,
             sums,
@@ -178,7 +196,7 @@ impl MaskedGeometry {
             return None;
         }
         let s = self.sums.get(i)?;
-        Some([s[0] / n, s[1] / n])
+        Some([s[0] as f64 / n, s[1] as f64 / n])
     }
 
     /// `[x_min, y_min, x_max, y_max]` over the members this viewer may see, or `None` where they

@@ -900,9 +900,12 @@ impl ArtifactRows {
         // generating sets containment is tested against were projected above, being nowhere in the
         // column, and every other per-artifact question goes through [`Self::visible_rows`].
         //
-        // **Only with no extents**, which is the condition the column's adoption already takes: a
-        // flushed segment's rows lie above the base and the column does not label them. A form that
-        // has to take a flush gives this up first ([`Self::hold_rows`]).
+        // **Only with no extents, and that is a condition on this build route alone**: the column
+        // adopted here is addressed over the base rows and a flushed segment's rows lie above them,
+        // so a form built while the row space already carries extents has a column that does not
+        // label all of it. A form *built* with none goes on taking every later flush through the
+        // column and the extents beside it ([`ArtifactProjections::extend_flushed`]); nothing gives
+        // this up afterwards.
         if column_only && space.extent_count() == 0 {
             let live: Vec<bool> = membership.live_slots();
             let index = TileIndex::of_bytes(tessera_store::membership::pack_tile_index(
@@ -1582,6 +1585,14 @@ impl ArtifactRows {
         let crate::tile_index::Extent::Span { lo, hi } = self.index.extent(ordinal) else {
             return Bitmap::new();
         };
+        // ⊘ **The span's visible rows are materialised before they are walked**, so a scattered
+        // artifact — whose span is the row space — costs a copy of `M_auth` on top of the walk:
+        // 78.5 B a Roaring container at the residency campaign's measured constant, ~125 MB at 10⁹
+        // visible rows. Walking the mask in place instead would need an iterator over
+        // `M_auth ∩ range` on [`MaskedSet`], and that trait's whole point is that
+        // [`MaskedSet::visible_rows`] is the **only** route to a visible row set (**I2**) — a
+        // second one is a second thing that could come to be called with an uncomposed mask. The
+        // copy is what that costs, and it is paid once a request by a leaf that names one artifact.
         let visible = mask.visible_rows(&Bitmap::from_range(lo..=hi));
         let mut out = Bitmap::new();
         for row in visible.iter() {
@@ -1593,7 +1604,6 @@ impl ArtifactRows {
         }
         out
     }
-
 
     /// How many ordinals this level covers, holes included.
     pub fn len(&self) -> usize {
@@ -2169,6 +2179,25 @@ pub struct ArtifactProjections {
     /// contains and this is not part of it, which is the argument the suggestion indexes already
     /// make one directory along.
     scratch: std::path::PathBuf,
+}
+
+/// **Whether this layer's derived content is an accumulation over the mask** — a centroid or a
+/// bounding box, which are the two [`crate::histogram::MaskedGeometry`] answers.
+///
+/// A layer that declares neither pays nothing for one: the accumulation reads a grid position per
+/// visible row and holds 36 B an ordinal, and a layer serving a count alone has no use for either.
+pub fn derives_accumulated_geometry(declaration: &LayerDeclaration) -> bool {
+    declaration
+        .content
+        .computed
+        .iter()
+        .filter_map(|name| crate::derived::ComputedProperty::parse(name))
+        .any(|p| {
+            matches!(
+                p,
+                crate::derived::ComputedProperty::Centroid | crate::derived::ComputedProperty::Box
+            )
+        })
 }
 
 /// **Whether a level of this layer may be served from its column alone** — the one place the rule

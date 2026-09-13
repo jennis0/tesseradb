@@ -159,7 +159,11 @@ pub struct RowColumn {
 /// this one is never served as a count.
 pub struct LevelAccumulation {
     pub counts: Vec<u32>,
-    pub sums: Vec<[f64; 2]>,
+    /// **`u64` and not `f64`**, so the sum is exact and the reduction is associative: the chunks
+    /// are summed in whatever order the pool finishes them, and floating-point addition past 2^53
+    /// would make the answer depend on that order. A row space is `u32`-addressed and a grid
+    /// coordinate is a `u32`, so a per-axis sum is at most `(2^32 - 1)^2`, which is inside `u64`.
+    pub sums: Vec<[u64; 2]>,
     pub boxes: Vec<[u32; 4]>,
 }
 
@@ -434,13 +438,31 @@ impl RowColumn {
         row_count: u32,
         scratch: &std::path::Path,
     ) -> Option<Self> {
+        // **Each pair once, whatever the caller offered.** `added` is deliberately a superset of
+        // the pairs an amendment gave the column — a growth on a form that holds no rows offers
+        // the artifact's whole membership, because it has no held set to subtract — and
+        // [`Self::amend`] absorbs that by skipping a pair the column already carries. This feed
+        // has to make the same subtraction itself: a list row naming one ordinal twice counts that
+        // artifact twice in the histogram, twice in the declared size the proportional criterion
+        // divides by, and twice in the accumulated centroid.
+        let mut fresh: Vec<(u32, u32)> = extra
+            .iter()
+            .copied()
+            .filter(|(row, ordinal)| {
+                let mut carried = false;
+                self.for_each_label(*row, |held| carried |= held == *ordinal);
+                !carried
+            })
+            .collect();
+        fresh.sort_unstable();
+        fresh.dedup();
         let ordinals = self
             .len()
-            .max(extra.iter().map(|(_, o)| *o as usize + 1).max().unwrap_or(0))
+            .max(fresh.iter().map(|(_, o)| *o as usize + 1).max().unwrap_or(0))
             as u32;
         let pairs = |visit: &mut dyn FnMut(u32, u32)| {
             self.for_each_pair(Some(base_rows), visit);
-            for (row, ordinal) in extra {
+            for (row, ordinal) in &fresh {
                 if *row < base_rows {
                     visit(*row, *ordinal);
                 }
@@ -462,7 +484,10 @@ impl RowColumn {
                 above.push((row, ordinal));
             }
         });
-        above.extend(extra.iter().copied().filter(|(row, _)| *row >= base_rows));
+        // The rows above the base go in through `amend`, which makes the same subtraction against
+        // the column being built — so these are the pairs this column does not yet carry, and the
+        // two halves cannot disagree about which they are.
+        above.extend(fresh.iter().copied().filter(|(row, _)| *row >= base_rows));
         // A list column refuses nothing, so this cannot fail for a reason the form can express.
         if !column.amend(&above, row_count) {
             return None;
@@ -1115,9 +1140,13 @@ impl RowColumn {
     /// `(0, 0)` is a real position and a row the space cannot place would pull the mean to the
     /// origin.
     ///
-    /// ⊘ **The transient is one accumulator set per worker** — a `u32`, two `f64` and four `u32` an
-    /// ordinal, 36 B, so 58 MB a level at 1.6×10⁶ artifacts times the pool's width while the pass
-    /// runs. That is the shape [`Self::histogram_over`] already has at 4 B an ordinal.
+    /// ⊘ **The transient is one accumulator set per chunk in flight plus the reduction's** — a
+    /// `u32`, two `u64` and four `u32` an ordinal, 36 B, so 58 MB a level at 1.6×10⁶ artifacts
+    /// times the pool's width, and once more for the value being reduced into. That is the shape
+    /// [`Self::histogram_over`] already has at 4 B an ordinal, at nine times the constant. **It is
+    /// per build in flight and a build is per `(session, level)`**, so a deployment serving *s*
+    /// sessions that each touch a level at once pays it *s* times over; the cache below is what
+    /// keeps a second request on the same key from paying it again.
     pub fn accumulate_over(
         &self,
         visible: &croaring::Bitmap,
@@ -1128,7 +1157,7 @@ impl RowColumn {
         let ordinals = self.len();
         let empty = || LevelAccumulation {
             counts: vec![0u32; ordinals],
-            sums: vec![[0.0f64; 2]; ordinals],
+            sums: vec![[0u64; 2]; ordinals],
             boxes: vec![[u32::MAX, u32::MAX, 0, 0]; ordinals],
         };
         let Some(last) = visible.maximum() else {
@@ -1157,8 +1186,8 @@ impl RowColumn {
                     self.for_each_label(row, |ordinal| {
                         let i = ordinal as usize;
                         acc.counts[i] += 1;
-                        acc.sums[i][0] += x as f64;
-                        acc.sums[i][1] += y as f64;
+                        acc.sums[i][0] += u64::from(x);
+                        acc.sums[i][1] += u64::from(y);
                         let b = &mut acc.boxes[i];
                         b[0] = b[0].min(x);
                         b[1] = b[1].min(y);

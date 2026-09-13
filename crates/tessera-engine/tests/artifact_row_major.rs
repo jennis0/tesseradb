@@ -1359,3 +1359,92 @@ fn a_publication_that_costs_a_label_column_its_partition_recomposes_it_as_a_list
     assert!(!form.membership().rows_held());
     assert_eq!(form.layout(), ServingLayout::RowMajorList);
 }
+
+/// **A growth in the same tick as the overlap that recomposes the column.**
+///
+/// A growth on a form that holds no rows offers the artifact's **whole** membership as the pairs
+/// the column gains — it has no held set to subtract one from — and the recomposition's feed is the
+/// column's own pairs plus those. A feed that concatenated the two would give a list row naming one
+/// ordinal twice, which counts that artifact twice in the histogram, twice in the declared size the
+/// proportional criterion divides by, and twice in the accumulated centroid. Every one of those is
+/// a number a viewer sees, and none of them is an error anywhere.
+///
+/// So the same tick carries both, and every answer is compared against the twin that holds its
+/// bitmaps.
+#[test]
+fn a_growth_in_the_tick_that_recomposes_the_column_counts_each_row_once() {
+    let major_fx = fixture();
+    let minor_fx = fixture();
+    let major = published(
+        &major_fx,
+        Some(ServingLayout::ArtifactMajor),
+        Some(ServingLayout::ArtifactMajor),
+    );
+    let minor = published(&minor_fx, Some(ServingLayout::RowMajorLabel), None);
+    fold(&major);
+    fold(&minor);
+    drop(major);
+    drop(minor);
+    let major = major_fx.open();
+    let minor = minor_fx.open();
+    assert_same(&sweep(&major), &sweep(&minor), "after a fold and a restart");
+    assert!(
+        !minor
+            .held_artifact_form_for_test("s0", FLAT, 0)
+            .expect("the sweep left the level's form held")
+            .membership()
+            .rows_held(),
+        "the level is served from its column alone"
+    );
+
+    // **One tick, two writes**: a growth of an artifact the level already holds — whose pairs the
+    // column already carries, so every one of them is a repeat — and a publication that makes the
+    // memberships overlap, which is what sends the level through the recomposition.
+    for (fx, engine) in [(&major_fx, &major), (&minor_fx, &minor)] {
+        engine.set_background_refresh_for_test(false);
+        engine
+            .grow_memberships(
+                FLAT.into(),
+                0,
+                vec![tessera_lifecycle::IncomingGrowth::from_entities(
+                    "p0".into(),
+                    fx.members(0..500),
+                )],
+            )
+            .expect("the growth is accepted");
+        engine
+            .publish_artifacts(
+                FLAT.into(),
+                0,
+                vec![labelled(fx, "overlapping", (0..N_ITEMS).collect(), vec![0])],
+            )
+            .unwrap();
+        tick(engine);
+    }
+    assert_same(
+        &sweep(&major),
+        &sweep(&minor),
+        "after a growth and an overlap in one tick",
+    );
+    let form = minor
+        .held_artifact_form_for_test("s0", FLAT, 0)
+        .expect("the level's form is still held");
+    assert!(
+        !form.membership().rows_held(),
+        "the level took the list form rather than materialising the bitmaps it never held"
+    );
+    assert_eq!(form.layout(), ServingLayout::RowMajorList);
+    // **The declared size is the criterion's denominator**, and it is where a repeated pair shows
+    // up as a number rather than as a set: it must be what the twin's membership cardinality is.
+    let column = form.column().expect("served from a column");
+    let twin = major
+        .held_artifact_form_for_test("s0", FLAT, 0)
+        .expect("the twin's form is held");
+    for ordinal in 0..form.len() as u32 {
+        assert_eq!(
+            column.declared_size(ordinal),
+            twin.get(ordinal).map(croaring::Bitmap::cardinality).unwrap_or(0),
+            "ordinal {ordinal}: the recomposed column counts a row twice"
+        );
+    }
+}

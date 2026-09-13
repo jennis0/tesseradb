@@ -450,6 +450,17 @@ the request needs one or all. Holding that histogram per `(session, layer)` is ~
 on the session-geometry cadence (owner ruling, 2026-08-21, recorded in 0093). Nothing else per token
 is sized by the artifact population.
 
+**An entry that carries the accumulated geometry is 36 B an artifact rather than 4** — the count,
+two `u64` position sums and four `u32` box bounds — which is **59 MB a level per session** at the
+rung 6 corpus's 1.65×10⁶ artifacts, against a 256 MB default bound. It is built only for a level
+served from its column whose layer derives a centroid or a box, and only for the requests that serve
+one: a browse page over the same level asks for the counts alone and gets an entry without it, which
+is two entries for one level by design rather than a duplication. **The default bound does not move
+for it**: the bound is a residency policy and not a correctness one — an entry larger than the whole
+bound is served to its caller and not admitted — so a deployment holding fewer of them resident is
+slower and never wrong, and raising the default would spend memory on every deployment for the few
+that hold several such levels at once.
+
 **Measured over 10⁸ points on the `partition` arm**, 10⁵ artifacts, full mask, milliseconds per
 request *(medians of three runs; `r1e8-p1e5-partition-medians.csv`)*:
 
@@ -858,7 +869,7 @@ decides the layout there, and it does not depend on a serving figure.
 | containment partition, one expression per artifact | 10⁶ artifacts *(§4.2's census)* | ~306 MB |
 | label column *(row-major, partitioning layer)* | 10⁸ rows at `k = 1` | 400 MB |
 | list column *(row-major, overlapping layer)* | 10⁸ rows at `k = 1` | 800 MB |
-| **per session** | | **nothing artifact-major**; a row-major layer holds ~4 B per artifact (§5.1) |
+| **per session** | | **nothing artifact-major**; a row-major layer holds ~4 B per artifact, or 36 B where the layer derives a centroid or a box (§4, §5.1) |
 
 ⊘ The tile index at 10⁷ artifacts over 10⁹ points is not in this table: it is the cell the box could
 not build (§7.1). The earlier campaign measured 42.3 MB there, on a layer covering a tenth of the
