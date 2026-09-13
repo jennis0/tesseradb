@@ -19,8 +19,8 @@
 //! optimisation added later. The rule lives in [`signature_sort_key`] as a free function so the
 //! serving allocator applies exactly the same rule to appended items.
 
-pub mod artifact_pass;
 mod assembly;
+pub mod artifact_pass;
 pub mod check;
 mod column;
 pub mod config;
@@ -1533,14 +1533,10 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
                 // free-space figure: a column the streaming pipeline spills and this one placed at
                 // an entity would put the same value in the blob under two tags.
                 if routes.takes_extents(index) {
-                    return column::EntityColumn::spilled(
-                        &scratch,
-                        attribute.ty,
-                        tiler_items.len(),
-                    )
-                    .map_err(|e| {
-                        BuildError::Invalid(format!("attribute '{}': {e}", attribute.name))
-                    });
+                    return column::EntityColumn::spilled(&scratch, attribute.ty, tiler_items.len())
+                        .map_err(|e| {
+                            BuildError::Invalid(format!("attribute '{}': {e}", attribute.name))
+                        });
                 }
                 column::EntityColumn::from_values(
                     &scratch,
@@ -2251,12 +2247,25 @@ pub struct VerifyReport {
 /// row disagrees (contracts §2.6 r6: "`tessera verify` checks the whole column against" the
 /// key).
 pub fn verify(root: &Path) -> Result<VerifyReport> {
-    verified_open(root).map(|(_, report)| report)
+    verified_open(root, DIRECT_WINDOW_ROWS).map(|(_, report)| report)
+}
+
+/// [`verify`] with the identity check's window threshold given rather than taken from
+/// [`DIRECT_WINDOW_ROWS`].
+///
+/// **The only way to put a fixture through the partition route.** That route is what every bundle
+/// at corpus scale takes and what no bundle a test can afford to build does, so without a threshold
+/// a test can lower it would be reached by nothing that runs. Zero puts every view through it.
+pub fn verify_with_window_rows(root: &Path, direct_window_rows: u64) -> Result<VerifyReport> {
+    verified_open(root, direct_window_rows).map(|(_, report)| report)
 }
 
 /// The pass behind [`verify`] and [`deep::verify_deep`], returning the opened bundle so the deep
 /// mode does not pay a second full open (the open re-hashes every named file).
-fn verified_open(root: &Path) -> Result<(tessera_store::read::Bundle, VerifyReport)> {
+fn verified_open(
+    root: &Path,
+    direct_window_rows: u64,
+) -> Result<(tessera_store::read::Bundle, VerifyReport)> {
     let bundle = tessera_store::read::open_bundle(root)?;
     // The key is parsed here, not by `open_bundle`: `IdentityDescriptor::validate` (run at
     // open) checks `construction`/`rounds`/`idset` but never parses `key`'s hex, since
@@ -2266,7 +2275,9 @@ fn verified_open(root: &Path) -> Result<(tessera_store::read::Bundle, VerifyRepo
         .map_err(|e| BuildError::Invalid(format!("MANIFEST identity.key: {e}")))?;
     let shard_id = bundle.manifest.identity.shard_id;
 
-    let scratch = VerifyTmp::create(root)?;
+    // Created on the first view that needs it, and by nothing else: a bundle small enough for the
+    // direct route verifies on a read-only root exactly as it did.
+    let mut scratch: Option<VerifyTmp> = None;
     let mut views = 0usize;
     let mut segments = 0usize;
     let mut rows = 0u64;
@@ -2283,7 +2294,15 @@ fn verified_open(root: &Path) -> Result<(tessera_store::read::Bundle, VerifyRepo
             view.row_space
                 .base()
                 .validate_rows(view.row_space.base_rows())?;
-            check_view_identity(scratch.path(), view_id, view, &identity_key, shard_id)?;
+            check_view_identity(
+                root,
+                &mut scratch,
+                direct_window_rows,
+                view_id,
+                view,
+                &identity_key,
+                shard_id,
+            )?;
         }
     }
     let current: CurrentPointer = {
@@ -2354,6 +2373,12 @@ const NO_ENTITY: u64 = u64::MAX;
 ///
 /// The pid and a serial are in the name, so two verifiers over one bundle — in one process or in
 /// two — do not sweep away each other's buckets, and neither touches a build's `.build-tmp`.
+///
+/// **A killed verify's scratch is swept by the next one**, not adopted: a directory named for a pid
+/// that no longer exists can only be the leavings of a verify that died between creation and drop,
+/// and it holds up to twelve bytes for every row of the bundle. A directory named for a live pid is
+/// left where it is, whether or not that process is a verify — the risk of taking a running pass's
+/// buckets is not worth the disk.
 pub(crate) struct VerifyTmp {
     path: PathBuf,
 }
@@ -2364,6 +2389,7 @@ impl VerifyTmp {
         let serial = SERIAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let name = format!(".verify-tmp.{}.{serial}", std::process::id());
         for base in [root.to_path_buf(), std::env::temp_dir()] {
+            sweep_dead_scratch(&base);
             let path = base.join(&name);
             let _ = fs::remove_dir_all(&path);
             if fs::create_dir_all(&path).is_ok() {
@@ -2384,14 +2410,71 @@ impl VerifyTmp {
 
 impl Drop for VerifyTmp {
     fn drop(&mut self) {
-        // Best effort, as the build's own scratch sweep is: every bucket file inside is already
-        // unlinked by `PartitionStore`, so what is left is an empty directory.
+        // The tree, not its files: `PartitionStore` unlinks each bucket as the pass releases it,
+        // but the external-id check's `ext-run-entities.u32` is still here. Best effort, as the
+        // build's own scratch sweep is — what this misses, the next verify's sweep takes.
         let _ = fs::remove_dir_all(&self.path);
+    }
+}
+
+/// Remove every `.verify-tmp.<pid>.<serial>` under `base` whose pid is no longer a live process.
+///
+/// Best effort throughout: a directory whose name does not parse, a pid this process may not
+/// signal, and a removal the filesystem refuses are all left alone. `kill(pid, 0)` distinguishes
+/// the three answers that matter — alive, alive but another user's, and gone — and only the third
+/// is swept.
+fn sweep_dead_scratch(base: &Path) {
+    let Ok(entries) = fs::read_dir(base) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        let Some(rest) = name.strip_prefix(".verify-tmp.") else {
+            continue;
+        };
+        let Some((pid, _serial)) = rest.split_once('.') else {
+            continue;
+        };
+        let Ok(pid) = pid.parse::<i32>() else {
+            continue;
+        };
+        if pid <= 0 || pid == std::process::id() as i32 {
+            continue;
+        }
+        // SAFETY: `kill` with signal 0 sends nothing; it reports whether the pid could be
+        // signalled. ESRCH is the one answer that says the process is gone.
+        let gone = unsafe { libc::kill(pid, 0) } == -1
+            && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
+        if gone {
+            let _ = fs::remove_dir_all(entry.path());
+        }
     }
 }
 
 /// One segment's rows in view row space: where they begin, how many there are, and the segment.
 type SegmentRows<'a> = (u64, u32, &'a tessera_store::read::SegmentData);
+
+/// A view id as a filename component: letters, digits, `-` and `_` kept, everything else one
+/// underscore.
+///
+/// The name is for whoever reads a killed run's leavings before the next verify sweeps them; a
+/// view's partition is finished and its store dropped before the next view's is created, so two
+/// views sharing a name after the substitution would still not share a file.
+fn scratch_name(view_id: &str) -> String {
+    view_id
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
 
 /// Surjectivity of one view's row space onto its segments' rows, and every row's `tessera_id`
 /// against `identity.key`.
@@ -2411,8 +2494,30 @@ type SegmentRows<'a> = (u64, u32, &'a tessera_store::read::SegmentData);
 /// The sweep is over the whole row space, base *and* extents: a bundle that has flushed holds rows
 /// above the base permutation, and a sweep of the base alone would refuse every such bundle as
 /// "not a bijection" (the false refusal §18 obligation 10 names).
+///
+/// **What the identity half actually covers is the base's rows.** An extent has no stored mapping:
+/// `SegmentExtent::rebuild` recovers one at open by inverting each row's `tessera_id` under the
+/// deployment key (contracts §2.1). Comparing that `tessera_id` back against what the key derives
+/// for the entity the inversion produced is therefore a tautology over an extent's rows — it
+/// restates the inversion. Over the base's rows, whose mapping is `permutation.bin`, the comparison
+/// is between two artefacts and is the check contracts §2.6 r6 describes. The extent rows are still
+/// walked, because their surjectivity is not tautological and because the walk is what refuses a
+/// row no entity claims.
+///
+/// **Where the offender is reported from moved.** The walk is in row order, so for a view with
+/// more than one segment the first row that disagrees is the first in row space, where it used to
+/// be the first in the order the manifest listed the segments. Every message is unchanged; which
+/// one comes out of a bundle with more than one defect can differ.
+///
+/// **Not built: the partition route has no free-space pre-flight.** It writes twelve bytes a row
+/// and finds out that the filesystem is full by failing the write, where a build's passes size
+/// their spill against the free space first. A verifier that fills the disk reports an I/O error
+/// and leaves nothing behind ([`VerifyTmp`] sweeps), so this is a poor message rather than a
+/// hazard.
 fn check_view_identity(
-    scratch: &Path,
+    root: &Path,
+    scratch: &mut Option<VerifyTmp>,
+    direct_window_rows: u64,
     view_id: &str,
     view: &tessera_store::read::ViewData,
     identity_key: &IdentityKey,
@@ -2458,7 +2563,7 @@ fn check_view_identity(
         Ok(())
     };
 
-    if row_bound <= DIRECT_WINDOW_ROWS {
+    if row_bound <= direct_window_rows {
         let mut window = vec![NO_ENTITY; row_bound as usize];
         let claimed = claim_rows(view, |row, entity| {
             window[row as usize] = entity;
@@ -2476,10 +2581,15 @@ fn check_view_identity(
         );
     }
 
+    // The one place the pass writes anything, so the one place the scratch directory is made.
+    if scratch.is_none() {
+        *scratch = Some(VerifyTmp::create(root)?);
+    }
+    let scratch = scratch.as_ref().expect("the scratch was just created");
     let boundaries = spill::boundaries_uniform(row_bound);
     let mut partition = spill::Partition::create(
-        scratch,
-        "verify-rows",
+        scratch.path(),
+        &format!("verify-rows-{}", scratch_name(view_id)),
         boundaries.clone(),
         ROW_ENTITY_RECORD,
         total_rows,

@@ -59,7 +59,7 @@
 
 use std::collections::HashSet;
 use std::fs::{self, File};
-use std::io::{BufWriter, Read, Write};
+use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 
 use arrow::array::{Array, BinaryArray, UInt32Array, UInt64Array};
@@ -74,7 +74,7 @@ use crate::error::{BuildError, Result};
 use crate::VerifyReport;
 
 /// Options for [`verify_deep`].
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct VerifyOpts {
     /// The points file this bundle claims to have been built from (correctness-suite §11.1).
     ///
@@ -83,6 +83,20 @@ pub struct VerifyOpts {
     /// `Some` is refused rather than silently ignored, so no harness can believe a binding was
     /// checked when nothing exists to check it against.
     pub source: Option<PathBuf>,
+    /// The identity check's window threshold, in rows ([`crate::verify_with_window_rows`]).
+    ///
+    /// [`Default`] is [`crate::DIRECT_WINDOW_ROWS`], which is what an operator's `verify --deep`
+    /// runs. A test lowers it to reach the partition route with a fixture it can afford to build.
+    pub direct_window_rows: u64,
+}
+
+impl Default for VerifyOpts {
+    fn default() -> VerifyOpts {
+        VerifyOpts {
+            source: None,
+            direct_window_rows: crate::DIRECT_WINDOW_ROWS,
+        }
+    }
 }
 
 /// What [`verify_deep`] checked, beyond the shallow pass.
@@ -125,7 +139,7 @@ pub fn verify_deep(root: &Path, opts: &VerifyOpts) -> Result<VerifyDeepReport> {
         ));
     }
 
-    let (bundle, shallow) = crate::verified_open(root)?;
+    let (bundle, shallow) = crate::verified_open(root, opts.direct_window_rows)?;
     let prefix_dir = root.join(&shallow.prefix);
 
     let mut report = VerifyDeepReport {
@@ -551,11 +565,18 @@ fn check_record_blobs(
         // Mapped, not read: `Access::Read` pulls `blocks.bin` and `directory.arrow` into the
         // heap whole, and a corpus's record blocks are the corpus. The open-time digest sweep
         // has already vouched for both files, so nothing here needs a private copy of them.
+        //
+        // Sequential because the walk visits each block exactly once and wants the drop-behind:
+        // without it a deep verify on a serving box leaves the whole blob resident in the cache
+        // the request path is using. `RecordBlob::open` takes one access for both files, so the
+        // hint reaches `directory.arrow` as well — it is decoded at open and then read in block
+        // order, so the most a drop-behind costs there is one re-fault of a file whose size is a
+        // handful of bytes per block.
         let blob = tessera_filter::RecordBlob::open(
             &blocks,
             &hasrow,
             &directory,
-            tessera_filter::Access::Mapped,
+            tessera_filter::Access::MappedSequential,
         )
         .map_err(|e| BuildError::Invalid(format!("{name}: {e}")))?;
         let mut rows = 0u64;
@@ -582,6 +603,13 @@ fn check_record_blobs(
 /// across the list, which after a restart renumbers everything past the repeat. The reader
 /// (`Dict::load`) tolerates a repeat by skipping it, deliberately; this is the artefact-side
 /// statement that no correct writer produces one.
+///
+/// **This is the pass's remaining unbounded arm.** It reads each extent whole and holds a
+/// `HashSet` of every descriptor it has seen, so its memory is the term vocabulary's — not the
+/// corpus's, which is why it survived the bounding of the row space, the record blob and the
+/// external-id sidecar, but a deployment whose vocabulary is itself corpus-scale would find it
+/// here. Bounding it needs the descriptors sorted rather than hashed, which is a partition pass
+/// like the identity check's.
 fn check_dict_extents(
     prefix_dir: &Path,
     partition_manifest: &SegmentsManifest,
@@ -656,41 +684,68 @@ struct ExtentSlots {
     slots: Slots,
 }
 
-/// A little-endian `u32` array, mapped: a locator from the bundle, or the concatenated run entity
-/// columns this pass writes beside it.
+/// One file of the sidecar family, mapped.
+///
+/// **The bytes are checked through the mapping the pass then reads from.** This family is the one
+/// exemption from the open-time digest sweep (contracts §0.3 deviation 9), so a deep verify is the
+/// only place its bytes are checked at all; hashing a file, closing it and opening it again would
+/// leave a same-length rewrite between the two used unverified. There is one mapping, the digest is
+/// taken over it, and every read below comes out of it.
+struct Mapped {
+    map: Option<memmap2::Mmap>,
+    len: u64,
+}
+
+impl Mapped {
+    /// Map `path`. A zero-length file maps to nothing, which `memmap2` refuses and which has no
+    /// bytes to read anyway.
+    fn open(path: &Path) -> Result<Mapped> {
+        let file = File::open(path).map_err(|e| BuildError::io(path, e))?;
+        let len = file.metadata().map_err(|e| BuildError::io(path, e))?.len();
+        if len == 0 {
+            return Ok(Mapped { map: None, len: 0 });
+        }
+        // SAFETY: the mapping is read-only and no reference into it outlives it. A bundle file
+        // rewritten under a running verify is the race §12.4 records for the whole pass; this
+        // mapping neither adds to it nor is shared with another process.
+        let map = unsafe { memmap2::Mmap::map(&file) }.map_err(|e| BuildError::io(path, e))?;
+        Ok(Mapped {
+            map: Some(map),
+            len,
+        })
+    }
+
+    fn bytes(&self) -> &[u8] {
+        self.map.as_ref().map(|map| &map[..]).unwrap_or(&[])
+    }
+}
+
+/// A little-endian `u32` array over a mapping: a locator from the bundle, or the concatenated run
+/// entity columns this pass writes beside it.
 ///
 /// Both are addressed at an index the *other* side hands over — a locator at an entity a run row
 /// names, a run row at an ordinal a locator slot names — so neither can be streamed, and both are
 /// four bytes for every entity or every binding in the corpus. A mapping gives the random access
 /// without the heap.
 struct Slots {
-    map: Option<memmap2::Mmap>,
+    bytes: Mapped,
     len: usize,
 }
 
 impl Slots {
-    /// Map `path`, which must hold exactly `declared_len` slots.
-    fn open(rel: &str, path: &Path, declared_len: u64) -> Result<Slots> {
-        let file = File::open(path).map_err(|e| BuildError::io(path, e))?;
-        let bytes = file.metadata().map_err(|e| BuildError::io(path, e))?.len();
+    /// Read `bytes` as exactly `declared_len` slots.
+    fn over(rel: &str, bytes: Mapped, declared_len: u64) -> Result<Slots> {
         let expected = declared_len.saturating_mul(4);
-        if bytes != expected {
+        if bytes.len != expected {
             return Err(BuildError::Invalid(format!(
-                "{rel}: {bytes} bytes where the manifest-implied length is {declared_len} u32 \
-                 slots ({expected} bytes)"
+                "{rel}: {} bytes where the manifest-implied length is {declared_len} u32 slots \
+                 ({expected} bytes)",
+                bytes.len
             )));
         }
-        let len = declared_len as usize;
-        if len == 0 {
-            return Ok(Slots { map: None, len: 0 });
-        }
-        // SAFETY: the mapping is read-only and outlives no reference into it. A bundle file
-        // rewritten under a running verify is the race §12.4 records for the whole pass; this
-        // mapping neither adds to it nor is exposed to another process.
-        let map = unsafe { memmap2::Mmap::map(&file) }.map_err(|e| BuildError::io(path, e))?;
         Ok(Slots {
-            map: Some(map),
-            len,
+            bytes,
+            len: declared_len as usize,
         })
     }
 
@@ -702,8 +757,11 @@ impl Slots {
     /// page's, but a file's contents are not this code's to make claims about.
     fn get(&self, i: usize) -> u32 {
         let at = i * 4;
-        let map = self.map.as_ref().expect("a non-empty array is mapped");
-        u32::from_le_bytes(map[at..at + 4].try_into().expect("four bytes"))
+        u32::from_le_bytes(
+            self.bytes.bytes()[at..at + 4]
+                .try_into()
+                .expect("four bytes"),
+        )
     }
 }
 
@@ -725,10 +783,10 @@ fn check_external_ids(
     }
     let high_water = partition_manifest.entity_id_high_water;
 
-    // The sidecar family is exempt from the open-time digest sweep (deviation 9), so this pass
-    // digests each file against the manifest before believing a byte of it. Streamed: the base
-    // locator is four bytes an entity, and hashing it is no reason to hold it.
-    let verified_path = |rel: &str| -> Result<PathBuf> {
+    // Map each file and digest it against the manifest through that mapping, which is what the
+    // reads below then come out of ([`Mapped`]). Nothing is read into the heap: the base locator
+    // is four bytes an entity.
+    let verified_map = |rel: &str| -> Result<Mapped> {
         let digest: &FileDigest = partition_manifest
             .files
             .get(rel)
@@ -739,26 +797,17 @@ fn check_external_ids(
                 ))
             })?;
         let path = join_rel(prefix_dir, rel)?;
-        let mut file = File::open(&path).map_err(|e| BuildError::io(&path, e))?;
-        let mut hasher = Sha256::new();
-        let mut buf = vec![0u8; 1 << 20];
-        let mut size = 0u64;
-        loop {
-            let read = file.read(&mut buf).map_err(|e| BuildError::io(&path, e))?;
-            if read == 0 {
-                break;
-            }
-            size += read as u64;
-            hasher.update(&buf[..read]);
-        }
-        if size != digest.size || crate::hex_digest(hasher.finalize().as_slice()) != digest.sha256 {
+        let mapped = Mapped::open(&path)?;
+        if mapped.len != digest.size
+            || crate::hex_digest(Sha256::digest(mapped.bytes()).as_slice()) != digest.sha256
+        {
             return Err(BuildError::Invalid(format!(
                 "{rel}: bytes do not match the manifest digest — this family is exempt from the \
                  open-time sweep (contracts §0.3 deviation 9), so the deep pass is where a \
                  corrupt sidecar file is caught at rest"
             )));
         }
-        Ok(path)
+        Ok(mapped)
     };
 
     // One pass over the runs: each one's keys ascend, each one's entities are below the high
@@ -773,8 +822,13 @@ fn check_external_ids(
         let file = File::create(&bound_path).map_err(|e| BuildError::io(&bound_path, e))?;
         let mut out = BufWriter::with_capacity(1 << 20, file);
         for rel in runs_rel {
-            let path = verified_path(rel)?;
-            let rows = scan_run(rel, &path, high_water, &mut out)?;
+            let rows = scan_run(
+                rel,
+                verified_map(rel)?.bytes(),
+                high_water,
+                &mut out,
+                &bound_path,
+            )?;
             runs.push(RunRows {
                 rel: rel.clone(),
                 rows,
@@ -784,7 +838,7 @@ fn check_external_ids(
         }
         out.flush().map_err(|e| BuildError::io(&bound_path, e))?;
     }
-    let bound = Slots::open("the run entity columns", &bound_path, total)?;
+    let bound = Slots::over("the run entity columns", Mapped::open(&bound_path)?, total)?;
 
     // The base locator lives beside the first run under the same derivation the sidecar uses.
     let locator_rel = match runs_rel[0].rsplit_once('/') {
@@ -792,7 +846,7 @@ fn check_external_ids(
         None => "ext-locator.u32".to_string(),
     };
     let base_len = bundle_manifest.entity_id_high_water;
-    let base = Slots::open(&locator_rel, &verified_path(&locator_rel)?, base_len)?;
+    let base = Slots::over(&locator_rel, verified_map(&locator_rel)?, base_len)?;
 
     let mut extents: Vec<ExtentSlots> =
         Vec::with_capacity(partition_manifest.locator_extents.len());
@@ -814,7 +868,7 @@ fn check_external_ids(
                 ))
             })?;
         let span = extent.entity_hi - extent.entity_lo + 1;
-        let slots = Slots::open(&extent.path, &verified_path(&extent.path)?, span)?;
+        let slots = Slots::over(&extent.path, verified_map(&extent.path)?, span)?;
         extents.push(ExtentSlots {
             rel: extent.path.clone(),
             entity_lo: extent.entity_lo,
@@ -918,10 +972,16 @@ fn check_external_ids(
 /// keys are the caller's own ids: holding them all is what made this pass's memory the corpus's.
 /// The high-water fault is carried to the end of the run rather than raised where it is found, so
 /// a run with both faults still reports the ordering one, which is the first a reader can act on.
-fn scan_run(rel: &str, path: &Path, high_water: u64, out: &mut BufWriter<File>) -> Result<u64> {
+fn scan_run(
+    rel: &str,
+    bytes: &[u8],
+    high_water: u64,
+    out: &mut BufWriter<File>,
+    out_path: &Path,
+) -> Result<u64> {
     let arrow_err = |detail: String| BuildError::Invalid(format!("{rel}: {detail}"));
-    let file = File::open(path).map_err(|e| BuildError::io(path, e))?;
-    let reader = ArrowFileReader::try_new(file, None).map_err(|e| arrow_err(e.to_string()))?;
+    let reader = ArrowFileReader::try_new(std::io::Cursor::new(bytes), None)
+        .map_err(|e| arrow_err(e.to_string()))?;
     let mut rows = 0u64;
     let mut previous: Vec<u8> = Vec::new();
     let mut first_over_water: Option<(u64, u32)> = None;
@@ -951,7 +1011,7 @@ fn scan_run(rel: &str, path: &Path, high_water: u64, out: &mut BufWriter<File>) 
                 first_over_water = Some((rows, entity));
             }
             out.write_all(&entity.to_le_bytes())
-                .map_err(|e| BuildError::io(path, e))?;
+                .map_err(|e| BuildError::io(out_path, e))?;
             rows += 1;
         }
     }
