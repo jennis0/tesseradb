@@ -1251,7 +1251,31 @@ at zoom 0 under the 100% principal: the deployment's `token_max_lifetime` is 3,6
 `serve_battery.py` authorises once and never re-authorises — a harness defect at this scale, not a
 serving one. The second run raises the lifetime to 43,200 s and 40 candidates a zoom.
 
-<!-- BATTERY TABLE: to be filled by the orchestrator -->
+⊘ **The battery itself was stopped after three of its six principals.** Its figures are dominated
+by a zoom 0 anomaly now under investigation, so the owner stopped the run after the 10% principal
+to use the server for that investigation; the battery will be re-run after the fix.
+
+`serve_battery.py --view geo --zooms 0,6,12 --deciles 9 --candidates 40 --samples 10
+--cold-samples 3 --text-samples 0` against the running capped server, ranks from
+`country-ranks.json`, token lifetime 43,200 s. The 100% principal sees all 3,495,729,729 rows at
+zoom 0 over the whole extent. Candidate boxes at zoom 6: visible min 0, median 4,075, max
+25,845,590 over 40; at zoom 12: min 0, median 5,703, max 28,088,143.
+
+p50, ms unless marked; two decile-9 cells a zoom, both given as *a* / *b*:
+
+| principal | terms | authorise | first viewport | zoom 0 cold | zoom 0 warm | zoom 0 hot | zoom 6 cold | zoom 6 warm | zoom 6 hot | zoom 12 cold | zoom 12 warm | zoom 12 hot |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 1% (AI, MC, MX, SM, XZ) | 5 | 8 ms | 6.45 s | 7,923 / 7,878 | 4,922 / 4,650 | 268 / 267 | 5,102 / 4,960 | 84 / 134 | 6.4 / 6.1 | 4,642 / 4,730 | 101 / 290 | 2.6 / 4.4 |
+| 5% (EC, GW, IS, SE, SM, XZ) | 6 | 16 ms | 14.21 s | 12,321 / 12,821 | 6,455 / 6,392 | 1,269 / 1,263 | 7,824 / 7,726 | 88 / 83 | 6.3 / 1.0 | 8,141 / 8,116 | 152 / 302 | 2.7 / 3.1 |
+| 10% (AU, ES, RU, SH, VA, XZ, ZM) | 7 | 31 ms | 20.92 s | 20,899 / 20,630 | 8,728 / 8,823 | 2,653 / 2,661 | 14,405 / 14,125 | 110 / 100 | 6.3 / 6.1 | — | — | — |
+
+**Hot zoom 0 grows linearly with the visible share**: 0.27 s at 1%, 1.27 s at 5%, 2.65 s at 10%,
+about 20 s at 100% (the single-request figure above) — about 6 ns a visible row. The zoom 0 path
+walks the visible rows rather than working per container. **Cold zoom 6 and zoom 12 also grow
+with the principal**, 5.0 s, 7.8 s and 14.4 s at zoom 6 across the three principals measured, so a
+cold request re-reads the principal's mask or the memberships behind it, and not only the tile.
+Hot zoom 6 and zoom 12 stay at 1–6 ms at every principal measured. The zoom 0 investigation is
+open at the time of writing.
 
 ## 5. The machinery this campaign built
 
