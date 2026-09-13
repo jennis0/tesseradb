@@ -38,19 +38,21 @@
 //! than sorted, for `merge_order`'s reason: a sort here would paper over a broken allocator, and
 //! the symptom would be rows addressed against the wrong ranks.
 //!
-//! Block bytes stream to `blocks.bin` as blocks seal, so the writer holds one uncompressed block
-//! plus the directory's bookkeeping — a handful of words per block, and nothing per row. The
+//! Block bytes stream to `blocks.bin` as blocks seal and compress, so the writer holds the block
+//! being filled, the few that are compressing ([`COMPRESS_WORKERS`]) and the directory's
+//! bookkeeping — a handful of words per block, and nothing per row. The
 //! blob's rows are delimited by their own lengths, so the writer holds no rank-indexed offset
 //! array: over the 3.5×10⁹-row GBIF rung that array was 14 GB of anonymous memory held for the
 //! whole stage, against a 13.9 GB `blocks.bin`. A writer abandoned part-way leaves a partial
 //! `blocks.bin` behind; no manifest names it, and the next build truncates it at create.
 
 use std::cmp::Reverse;
-use std::collections::BinaryHeap;
+use std::collections::{BinaryHeap, HashMap};
 use std::fs::File;
 use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
+use std::sync::{Arc, Mutex};
 
 use arrow::array::{ArrayRef, RecordBatch, UInt32Array, UInt64Array};
 use arrow::datatypes::{DataType, Field, Schema};
@@ -64,6 +66,125 @@ use tessera_filter::{
 /// at. A writer's choice, not a format fact: the reader decompresses whatever level wrote the
 /// frame.
 const ZSTD_LEVEL: i32 = 3;
+
+/// How many sealed blocks may be compressing at once, beyond the one the caller is filling.
+///
+/// Compressing a sealed block needs nothing but the block, so it does not have to happen on the
+/// thread that is cutting the next one. The bound is what keeps that from costing memory: three
+/// workers and a queue of two is at most five blocks in flight, 1.25 MB at the 256 KiB target,
+/// whatever the corpus. The pool is started at the first block a writer seals, so a writer that
+/// seals none — an extent of one short chunk — starts no thread.
+const COMPRESS_WORKERS: usize = 3;
+const COMPRESS_QUEUE: usize = 2;
+
+/// Sealed blocks compressing on a small pool, written in the order they were sealed.
+///
+/// **Order is the whole of the contract.** A block's compressed bytes are a function of its
+/// uncompressed bytes and the level, so the pool changes when a block is compressed and nothing
+/// about what it compresses to; writing them back in seal order then makes `blocks.bin` the file
+/// a single thread would have written, byte for byte. The directory is built here too, so its
+/// rows are in that order for the same reason.
+struct CompressPool {
+    jobs: SyncSender<(u64, Vec<u8>)>,
+    results: Receiver<(u64, io::Result<Vec<u8>>)>,
+    workers: Vec<std::thread::JoinHandle<()>>,
+    /// Blocks compressed out of order, held until the blocks before them are written.
+    ready: HashMap<u64, Vec<u8>>,
+    /// How many blocks have been handed over, and how many have been written.
+    submitted: u64,
+    written: u64,
+}
+
+impl CompressPool {
+    fn start() -> Self {
+        let (jobs, jobs_rx) = sync_channel::<(u64, Vec<u8>)>(COMPRESS_QUEUE);
+        // Unbounded, so a worker never blocks handing a block back. What bounds the memory is the
+        // job queue: a result can only exist for a block that was submitted, and at most
+        // `COMPRESS_QUEUE + COMPRESS_WORKERS` are outstanding at any moment. A bounded result
+        // channel would deadlock instead — the writer waiting to submit, the workers waiting to
+        // hand back.
+        let (done, results) = std::sync::mpsc::channel();
+        let jobs_rx = Arc::new(Mutex::new(jobs_rx));
+        let mut workers = Vec::with_capacity(COMPRESS_WORKERS);
+        for _ in 0..COMPRESS_WORKERS {
+            let jobs_rx = Arc::clone(&jobs_rx);
+            let done = done.clone();
+            workers.push(std::thread::spawn(move || loop {
+                let job = {
+                    let rx = jobs_rx
+                        .lock()
+                        .expect("the job queue's lock is never poisoned");
+                    rx.recv()
+                };
+                let Ok((seq, block)) = job else { return };
+                if done
+                    .send((seq, zstd::bulk::compress(&block, ZSTD_LEVEL)))
+                    .is_err()
+                {
+                    return;
+                }
+            }));
+        }
+        CompressPool {
+            jobs,
+            results,
+            workers,
+            ready: HashMap::new(),
+            submitted: 0,
+            written: 0,
+        }
+    }
+
+    /// Hand one sealed block over, blocking while the queue is full.
+    fn submit(&mut self, block: Vec<u8>) -> io::Result<()> {
+        let seq = self.submitted;
+        self.submitted += 1;
+        self.jobs
+            .send((seq, block))
+            .map_err(|_| invalid("a block compressor stopped before the blob was written"))
+    }
+
+    /// The next block in seal order, or `None` where there is not one to write.
+    ///
+    /// `wait` says what `None` means: waiting, it is the end of the blob and every submitted
+    /// block has come back; not waiting, it is also the case where the next block is still
+    /// compressing, which is what lets the caller seal the block after it meanwhile.
+    fn next(&mut self, wait: bool) -> io::Result<Option<Vec<u8>>> {
+        loop {
+            if let Some(bytes) = self.ready.remove(&self.written) {
+                self.written += 1;
+                return Ok(Some(bytes));
+            }
+            if self.written == self.submitted {
+                return Ok(None);
+            }
+            let received = if wait {
+                self.results.recv().map_err(|_| ())
+            } else {
+                match self.results.try_recv() {
+                    Ok(received) => Ok(received),
+                    Err(std::sync::mpsc::TryRecvError::Empty) => return Ok(None),
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => Err(()),
+                }
+            };
+            let (seq, result) = received
+                .map_err(|()| invalid("a block compressor stopped before the blob was written"))?;
+            self.ready.insert(seq, result?);
+        }
+    }
+}
+
+impl Drop for CompressPool {
+    fn drop(&mut self) {
+        // Closing the queue is what ends the workers' loops; joining them keeps the threads from
+        // outliving the writer that started them.
+        let (dead, _) = sync_channel(1);
+        let _ = std::mem::replace(&mut self.jobs, dead);
+        for worker in self.workers.drain(..) {
+            let _ = worker.join();
+        }
+    }
+}
 
 /// Streams one record blob: `blocks.bin` as rows arrive, `hasrow.roaring` and `directory.arrow`
 /// at [`RecordBlobWriter::finish`]. Every producer — the batch build now, flush, coalesce and
@@ -86,6 +207,10 @@ pub struct RecordBlobWriter {
     /// Sealed blocks:
     /// `(compressed_offset, compressed_len, uncompressed_len, first_rank, row_count)`.
     directory: Vec<(u64, u64, u32, u32, u32)>,
+    /// What each block in flight states about itself, in seal order, paired with its compressed
+    /// bytes as they come back from the pool ([`CompressPool`]).
+    in_flight: std::collections::VecDeque<(u32, u32, u32)>,
+    pool: Option<CompressPool>,
     hasrow: Bitmap,
     rank: u32,
     last_entity: Option<u32>,
@@ -114,6 +239,8 @@ impl RecordBlobWriter {
             current_entities: Vec::new(),
             block_first_rank: 0,
             directory: Vec::new(),
+            in_flight: std::collections::VecDeque::new(),
+            pool: None,
             hasrow: Bitmap::new(),
             rank: 0,
             last_entity: None,
@@ -188,21 +315,43 @@ impl RecordBlobWriter {
         block.extend_from_slice(&self.buf);
         let uncompressed = u32::try_from(block.len())
             .map_err(|_| invalid("a block exceeds u32::MAX uncompressed bytes"))?;
-        let compressed = zstd::bulk::compress(&block, ZSTD_LEVEL)?;
-        self.blocks.write_all(&compressed)?;
         let rows = u32::try_from(self.current_entities.len())
             .map_err(|_| invalid("more rows in one block than the u32 rank space holds"))?;
-        self.directory.push((
-            self.written,
-            compressed.len() as u64,
-            uncompressed,
-            self.block_first_rank,
-            rows,
-        ));
-        self.written += compressed.len() as u64;
+        self.in_flight
+            .push_back((uncompressed, self.block_first_rank, rows));
+        self.pool
+            .get_or_insert_with(CompressPool::start)
+            .submit(block)?;
         self.current_entities.clear();
         self.block_first_rank = self.rank;
         self.buf.clear();
+        // Write whatever the pool has already finished, and do not wait for the rest: what bounds
+        // the blocks in flight is the pool's own queue, which is where this thread waits.
+        self.drain_blocks(false)?;
+        Ok(())
+    }
+
+    /// Write every block the pool has finished, in seal order, and record its directory row.
+    /// With `wait`, every block it has been given.
+    fn drain_blocks(&mut self, wait: bool) -> io::Result<()> {
+        let Some(pool) = self.pool.as_mut() else {
+            return Ok(());
+        };
+        while let Some(compressed) = pool.next(wait)? {
+            let (uncompressed, first_rank, rows) = self
+                .in_flight
+                .pop_front()
+                .ok_or_else(|| invalid("a compressed block arrived for no sealed block"))?;
+            self.blocks.write_all(&compressed)?;
+            self.directory.push((
+                self.written,
+                compressed.len() as u64,
+                uncompressed,
+                first_rank,
+                rows,
+            ));
+            self.written += compressed.len() as u64;
+        }
         Ok(())
     }
 
@@ -210,6 +359,14 @@ impl RecordBlobWriter {
     /// directory that addresses into it exists.
     pub fn finish(mut self) -> io::Result<()> {
         self.seal_block()?;
+        self.drain_blocks(true)?;
+        self.pool = None;
+        if !self.in_flight.is_empty() {
+            return Err(invalid(format!(
+                "{} sealed block(s) were never compressed",
+                self.in_flight.len()
+            )));
+        }
         let file = self
             .blocks
             .into_inner()

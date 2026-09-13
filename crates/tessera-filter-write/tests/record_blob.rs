@@ -78,6 +78,7 @@ fn entity_of_rank(rank: u32) -> u32 {
 }
 
 fn write_fixture(dir: &Path, rows: u32, target: usize) -> Paths {
+    std::fs::create_dir_all(dir).expect("the fixture's directory");
     let p = paths(dir);
     let mut writer = RecordBlobWriter::create(&p.blocks, &p.hasrow, &p.directory, target)
         .expect("create the writer");
@@ -113,6 +114,42 @@ fn rows_round_trip_across_block_boundaries() {
     for boundary_rank in [0u32, 2, 3, 5, 6, 8, 9] {
         let entity = entity_of_rank(boundary_rank);
         assert!(blob.fields_of(entity).expect("read").is_some());
+    }
+}
+
+/// **A blob of many blocks is the same bytes every time it is written.** Sealed blocks compress
+/// on a small pool and are written back in seal order, so which worker finishes first must not
+/// reach `blocks.bin`. Two hundred blocks is enough for the workers to interleave; the two runs
+/// agree byte for byte and both read back as the rows that went in.
+///
+/// Mutation killed: writing a block as its compressor returns it rather than in seal order.
+#[test]
+fn many_blocks_compress_to_the_same_bytes_every_run() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let rows = 200 * 4;
+    let first = write_fixture(&dir.path().join("a"), rows, 4 * ROW_BYTES);
+    let second = write_fixture(&dir.path().join("b"), rows, 4 * ROW_BYTES);
+    for (a, b) in [
+        (&first.blocks, &second.blocks),
+        (&first.hasrow, &second.hasrow),
+        (&first.directory, &second.directory),
+    ] {
+        assert_eq!(
+            std::fs::read(a).expect("read"),
+            std::fs::read(b).expect("read"),
+            "two runs of the same rows wrote different bytes"
+        );
+    }
+    let blob = open(&first).expect("opens");
+    assert_eq!(blob.block_count(), 200, "{rows} rows at 4 per block");
+    blob.self_check().expect("the artefact is self-consistent");
+    for rank in 0..rows {
+        let entity = entity_of_rank(rank);
+        assert_eq!(
+            blob.fields_of(entity).expect("read"),
+            Some(fields_for(entity)),
+            "rank {rank}"
+        );
     }
 }
 
