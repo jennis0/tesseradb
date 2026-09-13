@@ -4681,6 +4681,10 @@ struct GatedArtifact {
     rows: Arc<crate::artifacts::ArtifactRows>,
     masked_count: u64,
     rank: Option<u32>,
+    /// The level's masked counts where it has them, carried so the drill-down's derived geometry
+    /// reads the accumulation this gate already built rather than walking the mask again
+    /// (`crate::histogram::MaskedGeometry`).
+    counts: Option<Arc<crate::histogram::MaskedCounts>>,
 }
 
 struct DependencyContext<'a> {
@@ -4947,6 +4951,7 @@ impl Engine {
                                     recorded,
                                     predicate.as_ref(),
                                     generation.segments_version,
+                                    crate::artifacts::serves_column_only(&layer.declaration),
                                 ),
                                 store.level_version(&layer.declaration.name, level),
                                 store.lineage_version(&layer.declaration.name, level),
@@ -5195,18 +5200,37 @@ impl Engine {
         level_version: u64,
         rows: &crate::artifacts::ArtifactRows,
         mask: &crate::compose::EffectiveMask,
+        segments: Option<&[(&SegmentData, u32)]>,
     ) -> Option<Arc<crate::histogram::MaskedCounts>> {
         let column = rows.column()?;
-        Some(
-            self.masked_counts
-                .get_or_build(identity.key(view, layer, level, level_version), || {
-                    // On the engine's own pool, because the walk inside is split across it
-                    // (`RowColumn::histogram_over`) and a request must not spill onto rayon's
-                    // global pool, which nothing here sizes.
-                    self.pool
-                        .install(|| crate::histogram::MaskedCounts::new(column.histogram(mask)))
-                }),
-        )
+        // **The accumulated geometry rides the same walk, on a level that has no other route to
+        // it**: a column-only form holds no per-artifact membership, so a centroid or a box taken
+        // one artifact at a time costs the visible rows inside that artifact's extent — the whole
+        // visible set for a scattered artifact, per served artifact. Where the form holds its
+        // bitmaps the per-artifact route is one intersection and this is not built.
+        let accumulate = segments.filter(|_| !rows.membership().rows_held());
+        Some(self.masked_counts.get_or_build(
+            identity.key(view, layer, level, level_version, accumulate.is_some()),
+            || {
+                // On the engine's own pool, because the walk inside is split across it
+                // (`RowColumn::histogram_over`) and a request must not spill onto rayon's
+                // global pool, which nothing here sizes.
+                self.pool.install(|| match accumulate {
+                    None => crate::histogram::MaskedCounts::new(column.histogram(mask)),
+                    Some(segments) => {
+                        use crate::compose::WholeMask;
+                        let locator = crate::derived::RowLocator::new(segments.to_vec());
+                        let visible = mask.visible_all();
+                        let counts = column.histogram_over(&visible);
+                        let acc = column.accumulate_over(&visible, &|row| locator.position(row));
+                        crate::histogram::MaskedCounts::with_geometry(
+                            counts,
+                            crate::histogram::MaskedGeometry::new(acc.counts, acc.sums, acc.boxes),
+                        )
+                    }
+                })
+            },
+        ))
     }
 
     /// **One artifact, located and gated for one principal** — the predicate
@@ -5293,6 +5317,7 @@ impl Engine {
                     recorded,
                     predicate.as_ref(),
                     generation.segments_version,
+                    self.serves_column_only(&name),
                 ),
                 store.level_version(&name, level),
             )
@@ -5307,7 +5332,9 @@ impl Engine {
             level_version,
             &rows,
             mask,
+            Some(segments),
         );
+        let carried_counts = counts.clone();
         // The same containment answers the viewport builds, from the same partition: an identifier
         // route that resolved containment by a different arm would be a second ranking nobody
         // wrote. Lazily, because this route resolves one identifier — see `answer_for_one`.
@@ -5354,6 +5381,7 @@ impl Engine {
             rows,
             masked_count,
             rank,
+            counts: carried_counts,
         }))
     }
 
@@ -5627,6 +5655,7 @@ impl Engine {
             rows,
             masked_count,
             rank,
+            counts,
         } = gated;
         // Same resolution as the viewport's, by the same call — an identifier route that served a
         // different content would be a second ranking nobody wrote.
@@ -5679,17 +5708,27 @@ impl Engine {
                 fragment_watermark: mask_identity.fragment_watermark,
                 properties: crate::derived_cache::properties_bits(&declared_derived),
             };
-            let content = self.derived_geometry.get_or_derive(key, || {
-                let Ok(segments) = segments_with_row_bases(view, view_data) else {
-                    // Unreachable in practice — the view resolved above — and an empty content is
-                    // the fail-closed reading of a row space that cannot be assembled.
-                    return crate::derived::DerivedContent::default();
-                };
-                let locator = crate::derived::RowLocator::new(segments);
-                let visible = rows.visible_rows(ordinal, &mask);
-                crate::derived::compute(&declared_derived, &visible, &locator)
-            });
-            (*content).clone()
+            match counts.as_ref().and_then(|c| c.geometry()) {
+                // The accumulation the level's own counts carry — see
+                // `crate::histogram::MaskedGeometry`.
+                Some(geometry) => {
+                    crate::derived::accumulated(&declared_derived, geometry, ordinal)
+                }
+                None => {
+                    let content = self.derived_geometry.get_or_derive(key, || {
+                        let Ok(segments) = segments_with_row_bases(view, view_data) else {
+                            // Unreachable in practice — the view resolved above — and an empty
+                            // content is the fail-closed reading of a row space that cannot be
+                            // assembled.
+                            return crate::derived::DerivedContent::default();
+                        };
+                        let locator = crate::derived::RowLocator::new(segments);
+                        let visible = rows.visible_rows(ordinal, &mask);
+                        crate::derived::compute(&declared_derived, &visible, &locator)
+                    });
+                    (*content).clone()
+                }
+            }
         };
         // The one drawn geometry of the other two kinds (`polygon-membership.md` §7.1): this
         // route is asked for the one shape a client draws, so it always answers.
@@ -6040,6 +6079,7 @@ impl Engine {
                     recorded,
                     predicate.as_ref(),
                     ctx.generation.segments_version,
+                    self.serves_column_only(&attachment.layer),
                 ),
                 store.level_version(&attachment.layer, attachment.level),
             )
@@ -6055,6 +6095,8 @@ impl Engine {
             level_version,
             &rows,
             ctx.mask,
+            // A prerequisite asks whether the target is *served*, never for its geometry.
+            None,
         );
         let nested = |a: &tessera_lifecycle::membership::Attachment| {
             self.dependency_served(ctx, a, depth - 1)
@@ -6179,7 +6221,7 @@ impl Engine {
         // Built once per request rather than per layer: it is the same view's segment list for
         // every artifact in the response, and a layer declaring no derived content never asks it
         // anything.
-        let locator = crate::derived::RowLocator::new(segments);
+        let locator = crate::derived::RowLocator::new(segments.clone());
         let mut tile_rows = croaring::Bitmap::new();
         for span in crossing_domain(ranges, &row_bases) {
             tile_rows.add_range(span);
@@ -6311,6 +6353,7 @@ impl Engine {
                             recorded,
                             predicate.as_ref(),
                             generation.segments_version,
+                            self.serves_column_only(&name),
                         ),
                         store.level_version(&name, level),
                         store.lineage_version(&name, level),
@@ -6329,7 +6372,11 @@ impl Engine {
                     level_version,
                     &rows,
                     mask,
+                    Some(&segments),
                 );
+                // Kept beside the view below, which takes the `Arc` — the derived geometry reads
+                // the accumulation this same entry carries.
+                let accumulated = counts.clone();
                 let containment = rows.partition().map(|p| p.answers(&session.satisfied));
                 // Captured before the shadow below: `view` becomes the artifact predicate's value,
                 // and the derived-geometry key needs the view's *name*.
@@ -6555,11 +6602,21 @@ impl Engine {
                             fragment_watermark: mask_identity.fragment_watermark,
                             properties: crate::derived_cache::properties_bits(&declared_derived),
                         };
-                        (*self.derived_geometry.get_or_derive(key, || {
-                            let visible = rows.visible_rows(ordinal, mask);
-                            crate::derived::compute(&declared_derived, &visible, &locator)
-                        }))
-                        .clone()
+                        // **The accumulation where the level has one** — see
+                        // `crate::histogram::MaskedGeometry`. It was built with this request's
+                        // counts, under the same key, so nothing here walks the mask again.
+                        match accumulated.as_ref().and_then(|c| c.geometry()) {
+                            Some(geometry) => crate::derived::accumulated(
+                                &declared_derived,
+                                geometry,
+                                ordinal,
+                            ),
+                            None => (*self.derived_geometry.get_or_derive(key, || {
+                                let visible = rows.visible_rows(ordinal, mask);
+                                crate::derived::compute(&declared_derived, &visible, &locator)
+                            }))
+                            .clone(),
+                        }
                     };
                     // The predicate or the authored shape, **only where the request asked for the
                     // shape** (`polygon-membership.md` §7.1) and the row is materialised — the

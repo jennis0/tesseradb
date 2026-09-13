@@ -149,15 +149,23 @@ bundle), so step 1 is a lookup and step 2 is an intersection with
 the tile ranges — no postings read, no entity-space verdict, no crossing. A root descriptor's
 27 million members cost the same as a leaf's fifty: containers touched inside the viewport.
 
-**And that is the route whatever the level's serving layout is.** A row-major level (decisions
-0093/0094) carries the artifact-major form beside its column — the residency saving that would
-drop it is ⊘ not taken — so the leaf reads the bitmap there too. Reading the *column* instead is a
-walk of every visible row of the view asking each of its labels whether it is this ordinal, which is a
-correct answer at the wrong price: **measured at 2.85 s against 22 ms** on rung 3's
-`mesh/descriptors`, a `dag` served `RowMajorList` at ~46 labels over 3.6 × 10⁷ rows (2026-09-02).
-The walk survives only as the fallback for a level with no artifact-major form, which no level is,
-and `Engine::member_of_column_walks` counts the times it is taken so that stays checkable rather
-than remembered.
+**A row-major level reads its column instead, and that leaf is not cheap.** A level whose column
+the prefix holds builds no artifact-major form at all (decisions 0093/0094;
+`artifact-serving-at-scale.md` §5.1), so there is no bitmap to intersect: the leaf walks the rows
+this viewer may see **inside the artifact's extent**, asking each row's labels whether it is this
+ordinal. The extent bounds the walk only as far as the artifact is clustered — a *scattered*
+artifact's extent is the whole row space, so the walk is `|M_auth|`. Measured unbounded at
+**2.85 s against 22 ms** on rung 3's `mesh/descriptors`, a `dag` served `RowMajorList` at ~46 labels
+over 3.6 × 10⁷ rows (2026-09-02). `Engine::member_of_column_walks` counts the leaves that take it,
+so which levels pay that difference stays checkable rather than remembered.
+
+**One leaf a request, which is what makes the price payable at all.** A `member_of` leaf and a
+region leaf by artifact each name one artifact, so a request pays this walk once. Nothing that runs
+*per served artifact* may take it: the viewport's derived centroid and box come from one pass over
+`M_auth` that accumulates every artifact's count, position sum and box together, held per
+`(session, level)` beside the masked counts (`crate::histogram::MaskedGeometry`). A layer deriving a
+**hull** is served artifact-major for this reason — a hull is a function of the positions rather
+than an accumulation over them.
 
 **A highlight change re-sends bits, not points.** Because the served set does not depend on the
 highlight, a client that changes only the highlight holds every point it needs and wants only the
@@ -352,6 +360,18 @@ after masking exactly as before; `highlight` adds a bit to sampled points and ne
 **No row for `member_of`.** It is a row-space operand over a membership the principal may already
 count, composed like every other leaf; `selection-operand.md` §7's argument for the `region` leaf
 holds unchanged, and the empty-operand rule of §3 is what keeps it from becoming an oracle.
+
+**⊘ Its latency is a function of the artifact's unmasked extent width, and that is registered here
+rather than as a row.** On a level served from its column
+(`artifact-serving-at-scale.md` §5.1) both this leaf and the region leaf by artifact walk the rows
+the viewer may see **inside the artifact's extent** — its lowest to its highest row over the whole
+corpus, not over `M_auth`. So the time the leaf takes varies with how widely the artifact's members
+are spread in row space, which is unmasked geometry: a viewer timing two leaves learns which of the
+two artifacts is the more scattered. It is accepted on the same terms as the C4/C24–C26 family
+above: the *answer* discloses nothing the masked count does not, the artifact is one the principal
+is already served, and what varies is work rather than outcome. It is not closed, and the
+alternative — padding every leaf to the whole row space — would make a clustered artifact's leaf as
+slow as a scattered one's. `Engine::member_of_column_walks` counts the leaves that take this route.
 
 ## 7. What it costs
 

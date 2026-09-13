@@ -2128,6 +2128,16 @@ impl Engine {
         self.filter_row_routed.load(Ordering::Relaxed)
     }
 
+    /// **Whether this layer's levels may be served from their column alone** — the registry's
+    /// answer to [`crate::artifacts::serves_column_only`], asked here so every call site agrees.
+    /// A layer this engine does not carry keeps the artifact-major form, which is the conservative
+    /// reading of a name the registry cannot resolve.
+    pub(crate) fn serves_column_only(&self, layer: &str) -> bool {
+        self.write
+            .registered_layer(layer)
+            .is_some_and(|registered| crate::artifacts::serves_column_only(&registered.declaration))
+    }
+
     /// `member_of` leaves served by the row-column walk rather than by the artifact-major
     /// membership — see [`Self::member_of_column_walks`].
     pub fn member_of_column_walks(&self) -> u64 {

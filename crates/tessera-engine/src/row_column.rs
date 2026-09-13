@@ -27,16 +27,17 @@
 //! from: both are per-artifact row-space questions with no row-addressed form, and both go on being
 //! answered from [`crate::artifacts::MembershipRows`] exactly as they were.
 //!
-//! **The residency half of §5.1 is taken where the prefix holds the extents too.** A level whose
-//! row column *and* whose tile-index extents the manifest names is served from the two files
-//! alone: the column answers candidacy, the masked counts and the declared sizes, the extents bound
-//! the walk that reads one artifact's rows back out of the column
-//! ([`crate::artifacts::ArtifactRows::visible_rows`]), and the artifact-major bitmaps are never
-//! built ([`crate::artifacts::MembershipRows::rows_held`]). At the rung 6 corpus — 1,646,192
-//! artifacts over ~3.4×10⁹ member entries a level — the transpose that stands in for them was a
-//! measured ~28 GB retained and ~10 GB transient per level.
+//! **The residency half of §5.1 is taken.** A level whose column the manifest names is served from
+//! that one file: the column answers candidacy, the masked counts and the declared sizes, each
+//! artifact's extent is folded out of its own bytes in the pass that already walks it
+//! ([`RowColumn::extents`]), and the artifact-major bitmaps are never built
+//! ([`crate::artifacts::MembershipRows::rows_held`]). At the rung 6 corpus — 1,646,192 artifacts
+//! over ~3.4×10⁹ member entries a level — the form that replaces was a measured ~28 GB retained and
+//! ~10 GB transient per level. Every write reaches the column and the extents beside it; nothing is
+//! transposed back.
 //!
-//! **Where only the column is held, the artifact-major form is transposed out of it** rather than
+//! **Where a layer derives a hull, the artifact-major form is transposed out of the column** rather
+//! than
 //! projected a second time from the level's memberships ([`RowColumn::transpose`], and
 //! [`crate::artifacts::ArtifactRows::build_from_column`] is the caller): the column already holds
 //! the membership, addressed by row, so reaching the other address is one sequential pass instead
@@ -70,7 +71,8 @@ use croaring::Bitmap;
 
 use tessera_lifecycle::membership::ArtifactRecord;
 use tessera_store::membership::{
-    pack_label_column, LabelColumnPack, ListColumnPack, ROW_COLUMN_HOLE,
+    pack_label_column, LabelColumnPack, ListColumnPack, ROW_COLUMN_HOLE, TILE_INDEX_EMPTY,
+    TILE_INDEX_HOLE,
 };
 use tessera_store::permutation::RowSpace;
 use tessera_types::layer::ServingLayout;
@@ -109,6 +111,15 @@ pub struct RowColumn {
     /// The base's own half of `declared`, kept so [`RowColumn::with_tail`] can add a tail's counts
     /// without re-walking four bytes a row.
     base_declared: Arc<Vec<u32>>,
+    /// Per ordinal, the lowest and highest **base** row carrying this artifact's label — folded up
+    /// in the same pass as `base_declared` and read by [`Self::extents`].
+    ///
+    /// **The extents are a function of the column's own bytes**, which is what makes a level served
+    /// from the column alone need no second file: a fold-written extent column and this one could
+    /// disagree, and a hole in the index would make an artifact's rows read as absent where the
+    /// membership has them — a silently short answer. Derived here, the two cannot part company,
+    /// which is [`crate::tile_index`]'s rule for the node hierarchy one structure along.
+    base_extents: Arc<Vec<(u32, u32)>>,
     /// **The rows above the base a fold has not yet absorbed**, where this column has any.
     tail: Option<TailLabels>,
     /// **The labels a write added to a column that was already built**, where any were added.
@@ -133,6 +144,20 @@ pub struct RowColumn {
     /// structure does. What has accumulated bounds the memory and not the write: a write costs its
     /// own batch ([`RowColumn::amend`]) while the column is unshared, however much is already held.
     added: Option<Added>,
+}
+
+/// What one pass over a viewer's visible rows folded up, per ordinal — see
+/// [`RowColumn::accumulate_over`].
+///
+/// **A count a row contributes to here is a count over rows the locator could place**, which is
+/// every row of a well-formed generation and is the same set the positions came from. The masked
+/// count served beside an artifact comes from [`RowColumn::histogram_over`] and counts every
+/// visible row, placeable or not; the two are equal wherever the row space places its own rows, and
+/// this one is never served as a count.
+pub struct LevelAccumulation {
+    pub counts: Vec<u32>,
+    pub sums: Vec<[f64; 2]>,
+    pub boxes: Vec<[u32; 4]>,
 }
 
 /// Labels added to rows a column already addresses — see [`RowColumn::added`].
@@ -432,6 +457,7 @@ impl RowColumn {
             pack: Arc::clone(&self.pack),
             declared,
             base_declared: Arc::clone(&self.base_declared),
+            base_extents: Arc::clone(&self.base_extents),
             tail: Some(tail),
             // A predicate base is never amended — `bring_forward` and `extend_flushed` take a
             // stored level only — so there is no amendment to carry, and `declared` above counts
@@ -958,6 +984,93 @@ impl RowColumn {
             )
     }
 
+    /// **One pass over the visible rows accumulating every artifact's count, position sum and
+    /// bounding box at once** — the masked count and the two derived properties a level served
+    /// from its column alone has no per-artifact membership to compute one at a time.
+    ///
+    /// [`Self::histogram_over`]'s walk with two more accumulators on it, chunked and reduced the
+    /// same way and for the same reason. The row is read once and its position once, whatever the
+    /// layer declares: reading it again per property would multiply the only expensive term.
+    ///
+    /// **Why an accumulation and not a per-artifact walk.** The alternative is to take one
+    /// artifact's rows out of the column and compute over them, which costs the visible rows inside
+    /// that artifact's extent — and a *scattered* artifact's extent is the whole row space, so the
+    /// walk is `|M_auth|` per artifact and a viewport serving a hundred of them pays it a hundred
+    /// times. This pays it once for the level, per session, under the same key and the same byte
+    /// budget the counts are under (`crate::histogram`).
+    ///
+    /// `position` answers a row's grid position, or `None` for a row no segment places — dropped
+    /// rather than defaulted, exactly as [`crate::derived::RowLocator::position`]'s caller drops it:
+    /// `(0, 0)` is a real position and a row the space cannot place would pull the mean to the
+    /// origin.
+    ///
+    /// ⊘ **The transient is one accumulator set per worker** — a `u32`, two `f64` and four `u32` an
+    /// ordinal, 36 B, so 58 MB a level at 1.6×10⁶ artifacts times the pool's width while the pass
+    /// runs. That is the shape [`Self::histogram_over`] already has at 4 B an ordinal.
+    pub fn accumulate_over(
+        &self,
+        visible: &croaring::Bitmap,
+        position: &(dyn Fn(u32) -> Option<(u32, u32)> + Sync),
+    ) -> LevelAccumulation {
+        use rayon::prelude::*;
+
+        let ordinals = self.len();
+        let empty = || LevelAccumulation {
+            counts: vec![0u32; ordinals],
+            sums: vec![[0.0f64; 2]; ordinals],
+            boxes: vec![[u32::MAX, u32::MAX, 0, 0]; ordinals],
+        };
+        let Some(last) = visible.maximum() else {
+            return empty();
+        };
+        const MIN_CHUNK: u64 = 1 << 21;
+        let span = last as u64 + 1;
+        let workers = rayon::current_num_threads().max(1) as u64;
+        let chunk = (span.div_ceil(workers)).max(MIN_CHUNK);
+        let chunks = span.div_ceil(chunk);
+        (0..chunks)
+            .into_par_iter()
+            .map(|c| {
+                let lo = u32::try_from(c * chunk).unwrap_or(u32::MAX);
+                let end = (c + 1) * chunk;
+                let mut acc = empty();
+                let mut rows = visible.iter();
+                rows.reset_at_or_after(lo);
+                for row in rows {
+                    if (row as u64) >= end {
+                        break;
+                    }
+                    let Some((x, y)) = position(row) else {
+                        continue;
+                    };
+                    self.for_each_label(row, |ordinal| {
+                        let i = ordinal as usize;
+                        acc.counts[i] += 1;
+                        acc.sums[i][0] += x as f64;
+                        acc.sums[i][1] += y as f64;
+                        let b = &mut acc.boxes[i];
+                        b[0] = b[0].min(x);
+                        b[1] = b[1].min(y);
+                        b[2] = b[2].max(x);
+                        b[3] = b[3].max(y);
+                    });
+                }
+                acc
+            })
+            .reduce(empty, |mut a, b| {
+                for i in 0..a.counts.len() {
+                    a.counts[i] += b.counts[i];
+                    a.sums[i][0] += b.sums[i][0];
+                    a.sums[i][1] += b.sums[i][1];
+                    a.boxes[i][0] = a.boxes[i][0].min(b.boxes[i][0]);
+                    a.boxes[i][1] = a.boxes[i][1].min(b.boxes[i][1]);
+                    a.boxes[i][2] = a.boxes[i][2].max(b.boxes[i][2]);
+                    a.boxes[i][3] = a.boxes[i][3].max(b.boxes[i][3]);
+                }
+                a
+            })
+    }
+
     /// The durable bytes — what the fold writes into the prefix.
     ///
     /// **The base alone**, and that is the same rule the layout rests on: a fold renumbers the base
@@ -977,12 +1090,23 @@ impl RowColumn {
             Pack::List(pack) => pack.ordinals(),
         };
         let mut declared = vec![0u32; ordinals as usize];
+        // **The extents come off the same walk**, so a level served from the column alone pays no
+        // second pass for them: `u32::MAX, 0` is the empty accumulator and reads back as the
+        // *empty* sentinel, which is what an ordinal no row labels is.
+        let mut extents = vec![(u32::MAX, 0u32); ordinals as usize];
+        let mut widen = |ordinal: u32, row: usize| {
+            let e = &mut extents[ordinal as usize];
+            let row = row as u32;
+            e.0 = e.0.min(row);
+            e.1 = e.1.max(row);
+        };
         match &pack {
             Pack::Label(pack) => {
                 for row in 0..pack.rows() as usize {
                     let label = pack.label(row);
                     if label != ROW_COLUMN_HOLE {
                         declared[label as usize] += 1;
+                        widen(label, row);
                     }
                 }
             }
@@ -990,6 +1114,7 @@ impl RowColumn {
                 for row in 0..pack.rows() as usize {
                     for ordinal in pack.list(row) {
                         declared[ordinal as usize] += 1;
+                        widen(ordinal, row);
                     }
                 }
             }
@@ -997,10 +1122,67 @@ impl RowColumn {
         RowColumn {
             pack: Arc::new(pack),
             base_declared: Arc::new(declared.clone()),
+            base_extents: Arc::new(extents),
             declared,
             tail: None,
             added: None,
         }
+    }
+
+    /// **Each artifact's lowest and highest row, from the column's own bytes** — the extents a
+    /// level served from the column alone is placed in the tile index by.
+    ///
+    /// `live` marks the ordinals the level has a record for, parallel to the level's ordinals: the
+    /// column cannot tell a **hole** from an artifact whose membership projects to nothing, both
+    /// labelling no row, and the two are different things (`crate::tile_index::Extent`). An ordinal
+    /// `live` does not mark is a hole; one it marks that no row labels is empty.
+    ///
+    /// The base half is folded at construction ([`Self::base_extents`]); the tail and the labels a
+    /// write added are walked here, and both are bounded by what has arrived since the last fold
+    /// rather than by the row space.
+    pub fn extents(&self, live: &[bool]) -> Vec<(u32, u32)> {
+        let mut out: Vec<(u32, u32)> = self
+            .base_extents
+            .iter()
+            .enumerate()
+            .map(|(ordinal, &(lo, hi))| {
+                match live.get(ordinal) {
+                    Some(true) | None if lo <= hi => (lo, hi),
+                    Some(true) | None => TILE_INDEX_EMPTY,
+                    Some(false) => TILE_INDEX_HOLE,
+                }
+            })
+            .collect();
+        let mut widen = |ordinal: u32, row: u32| {
+            let Some(e) = out.get_mut(ordinal as usize) else {
+                return;
+            };
+            if *e == TILE_INDEX_HOLE {
+                return;
+            }
+            if *e == TILE_INDEX_EMPTY {
+                *e = (row, row);
+            } else {
+                e.0 = e.0.min(row);
+                e.1 = e.1.max(row);
+            }
+        };
+        if let Some(tail) = &self.tail {
+            for row in tail.row_base..tail.row_end() {
+                let label = tail.label(row);
+                if label != ROW_COLUMN_HOLE {
+                    widen(label, row);
+                }
+            }
+        }
+        if let Some(added) = &self.added {
+            for row in added.rows.iter() {
+                for (_, ordinal) in added.at(row) {
+                    widen(*ordinal, row);
+                }
+            }
+        }
+        out
     }
 
     /// The two builders, sharing one walk protocol: `each` calls `visit` once per live artifact with

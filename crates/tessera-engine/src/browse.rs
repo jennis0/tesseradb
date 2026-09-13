@@ -380,6 +380,7 @@ impl crate::Engine {
                         recorded,
                         predicate.as_ref(),
                         generation.segments_version,
+                        self.serves_column_only(req.layer),
                     ),
                     store.level_version(req.layer, walked),
                 )
@@ -392,6 +393,8 @@ impl crate::Engine {
                 level_version,
                 &rows,
                 &mask,
+                // A browse page carries a name and a count, never a derived geometry.
+                None,
             );
             let containment = rows.partition().map(|p| p.answers(&session.satisfied));
             let view_of = crate::artifacts::ArtifactView {

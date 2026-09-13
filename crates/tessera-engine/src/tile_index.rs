@@ -263,6 +263,46 @@ impl TileIndex {
         }
     }
 
+    /// **Widen each named artifact's extent by the rows it has gained** — what a flush, a growth,
+    /// a publication or a merge's rebase does to the extents of a level served from its column
+    /// alone ([`crate::artifacts::MembershipRows::rows_held`]).
+    ///
+    /// `added` is the `(row, ordinal)` pairs the amendment gave the column, and `ordinals` is the
+    /// level's length afterwards, which a publication grows.
+    ///
+    /// **Exact where rows are only added, and a superset where a merge renumbers them.** An
+    /// extension and a publication add rows, so the union of the old span with the new rows is the
+    /// new minimum and maximum. A merge clears a row span and refills it, and the old span's
+    /// contribution inside it cannot be subtracted from two numbers — so the result is at least the
+    /// true extent and sometimes wider.
+    ///
+    /// **A wider extent is the safe direction here**, and it is the only direction that matters: on
+    /// a column-only level candidacy is the column's own scan and never this hierarchy, so the one
+    /// reader of an extent is [`crate::artifacts::ArtifactRows::visible_rows`], which uses it to
+    /// bound a walk. A wide extent walks more rows for the same answer. A *narrow* one would miss
+    /// members, which is why nothing here ever shrinks a span.
+    pub fn amend(&mut self, added: &[(u32, u32)], ordinals: u32, row_count: u32) {
+        let mut spans: Vec<(u32, u32)> = (0..self.pack.ordinals())
+            .map(|ordinal| self.pack.span(ordinal as usize))
+            .collect();
+        if spans.len() < ordinals as usize {
+            // **An ordinal a publication has just claimed is live and empty, never a hole**: the
+            // rows below give it its extent, and a hole would keep it out of every walk.
+            spans.resize(ordinals as usize, TILE_INDEX_EMPTY);
+        }
+        for (row, ordinal) in added {
+            let Some(span) = spans.get_mut(*ordinal as usize) else {
+                continue;
+            };
+            *span = match *span {
+                TILE_INDEX_HOLE => TILE_INDEX_HOLE,
+                TILE_INDEX_EMPTY => (*row, *row),
+                (lo, hi) => (lo.min(*row), hi.max(*row)),
+            };
+        }
+        *self = Self::of_bytes(pack_tile_index(row_count, &spans));
+    }
+
     /// The durable bytes — what the fold writes into the prefix.
     pub fn as_bytes(&self) -> &[u8] {
         self.pack.as_bytes()

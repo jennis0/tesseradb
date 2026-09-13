@@ -234,6 +234,35 @@ impl<'a> RowLocator<'a> {
 /// `visible` comes from the composed mask and nothing else — see this module's doc. `declared` is
 /// the layer's parsed vocabulary; an empty one costs one branch and no position read, which is what
 /// keeps a count-only layer at count-only cost.
+/// [`compute`]'s answer for a level served from its column alone, read out of the accumulation one
+/// pass over the mask produced for every artifact at once
+/// ([`crate::histogram::MaskedGeometry`]).
+///
+/// **The same two quantities by another route, not two definitions of them.** A centroid is the
+/// mean of `membership ∩ M_auth`'s positions and a box their extremes; summing and comparing as the
+/// rows are read gives the same numbers as materialising the rows and traversing them, which is
+/// what `tests/artifact_row_major.rs` asserts against the artifact-major route.
+///
+/// ⊘ **A hull is not here**, and cannot be: it is a function of the positions themselves rather
+/// than an accumulation over them. A layer deriving one keeps the artifact-major form
+/// ([`crate::artifacts::serves_column_only`]), so this is never asked for one.
+pub fn accumulated(
+    declared: &[ComputedProperty],
+    geometry: &crate::histogram::MaskedGeometry,
+    ordinal: u32,
+) -> DerivedContent {
+    let mut out = DerivedContent::default();
+    for property in declared {
+        match property {
+            ComputedProperty::Centroid => out.centroid = geometry.centroid(ordinal),
+            ComputedProperty::Box => out.bbox = geometry.bbox(ordinal),
+            // Unreachable: such a layer is never served column-only.
+            ComputedProperty::Hull => {}
+        }
+    }
+    out
+}
+
 pub fn compute(
     declared: &[ComputedProperty],
     visible: &Bitmap,

@@ -492,19 +492,44 @@ label column beside it is **400 MB**, 4 B per row, at 13.4 s and 3.6 s to build 
 **~8 GB at 10⁹ rows for the list form and ~4 GB for the label form** *(derived from the measured
 per-row constant)*, and a residency line quoted for a layer is a figure about its `k`.
 
-**And the residency half is taken where the prefix holds the extents too.** A level recorded
-row-major arrives with the column the build or the fold wrote, and that column *is* its membership —
-addressed by row; the extent column beside it is `minimum` and `maximum` over the same set. Where
-both are named, the level is served from the two files and no artifact-major form is built at all:
-the column answers candidacy, the masked counts and the per-artifact declared size, and the extents
-bound the walk that reads one artifact's rows back out of the column for the three readers that ask
-for them — derived content, a `member_of` leaf and a region leaf by artifact. At the rung 6 corpus
-(1,646,192 artifacts over ~3.4×10⁹ member entries a level) the form that walk replaces was a
-measured ~28 GB retained and ~10 GB transient per level. A level that has to take a flush, a merge
-or a publication transposes the column back first, every amendment being expressed over the
-artifact-major half.
+**And the residency half is taken.** A level recorded row-major arrives with the column the build
+or the fold wrote, and that column *is* its membership — addressed by row. Such a level is served
+from that one file and builds no artifact-major form at all: the column answers candidacy, the
+masked counts and the per-artifact declared size, and **each artifact's extent is folded out of the
+column's own bytes** in the pass that already walks it for the declared sizes. At the rung 6 corpus
+(1,646,192 artifacts over ~3.4×10⁹ member entries a level) the form this replaces was a measured
+~28 GB retained and ~10 GB transient per level.
 
-**Where only the column is named, the artifact-major form is transposed out of it** rather than
+**The extents come off the column and never off a second file.** A fold-written extent column is a
+separate artefact whose agreement with the column nothing checks, and a hole in it would make an
+artifact's rows read as absent where the membership has them — a silently short membership. Derived
+from the bytes beside them, the two cannot part company.
+
+**The extent bounds a per-artifact walk only as far as the artifact is clustered.** Two readers
+still take one artifact's rows out of the column — a `member_of` leaf and a region leaf by artifact
+— by walking the rows the viewer may see inside that artifact's extent. For a *scattered* artifact
+that extent is the whole row space, so the walk is `|M_auth|`: **2.85 s** at rung 3's
+`mesh/descriptors` against 22 ms for the bitmap it replaces. Each of those leaves names one
+artifact, so a request pays it once.
+
+**Nothing that runs per served artifact may take that walk**, which is why the derived centroid and
+box do not. One pass over `M_auth` accumulates every artifact's count, position sum and bounding box
+together — the masked histogram's walk with two more accumulators on it — and is held per
+`(session, level)` under the same key and the same byte budget as the counts. A layer deriving a
+**hull** is the exception and is served artifact-major: a hull is a function of the member positions
+themselves rather than an accumulation over them, so it needs one artifact's rows materialised.
+
+**Every write reaches the column, and the form is never transposed back.** A flush, a growth, a
+publication and a merge's rebase each give the column the `(row, ordinal)` pairs they added and
+widen the extents by the rows those pairs name — exact where rows are only added, a superset where a
+merge renumbers a span, and never narrow. A deny moves nothing here: suppression and deletion are
+asked of the overlay at every verdict, as they are on any level. The one write such a level cannot
+take is an amendment that makes a **label** column's memberships overlap: its column is its
+membership, so it has nothing left to serve from, and the form is dropped for the next request to
+project whole — which is what a level with no column has always done.
+
+**Where only the column is named on a hull-deriving layer, the artifact-major form is transposed
+out of it** rather than
 projected a second time from the level's memberships: one sequential pass over bytes already on
 disk, against a decode and a permutation of every artifact's members. ⊘
 Measured at rung 3 only (`mesh/descriptors`, 30,217 artifacts over 1.66×10⁹ membership entries,
