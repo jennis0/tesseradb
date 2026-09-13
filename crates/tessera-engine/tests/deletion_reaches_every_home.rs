@@ -791,7 +791,9 @@ fn a_deletion_reaches_every_home() {
         "Home::TextIndex (a word the survivors carry too)"
     );
     assert!(
-        record_blob(&root).has_row(deleted.raw() as u32),
+        record_blob(&root)
+            .has_row(deleted.raw() as u32)
+            .expect("a served blob holds its has-row bitmap"),
         "Home::RecordBlob"
     );
     assert_eq!(
@@ -1060,7 +1062,9 @@ fn a_deletion_reaches_every_home() {
     // half's (`tessera-filter-write`'s `a_blanked_rows_bytes_are_not_in_the_folded_blob`).
     let blob = record_blob(&root);
     assert!(
-        !blob.has_row(deleted_u32),
+        !blob
+            .has_row(deleted_u32)
+            .expect("a served blob holds its has-row bitmap"),
         "Home::RecordBlob: the deleted entity is still in the has-row bitmap"
     );
     assert_eq!(

@@ -275,7 +275,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if reads > 0 {
         // A cheap deterministic spread over the has-row bitmap: every (cardinality / reads)-th
         // member, which touches a different block almost every time.
-        let entities: Vec<u32> = blob.hasrow().iter().collect();
+        let entities: Vec<u32> = blob.hasrow()?.iter().collect();
         let stride = entities.len().checked_div(reads).unwrap_or(1).max(1);
         let sample: Vec<u32> = entities.iter().step_by(stride).copied().take(reads).collect();
         let start = std::time::Instant::now();

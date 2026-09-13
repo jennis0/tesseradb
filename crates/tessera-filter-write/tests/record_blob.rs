@@ -193,7 +193,9 @@ fn an_entity_with_no_row_answers_none() {
     let blob = open(&p).expect("the blob opens");
     // Entity 4 sits between ranks 0 (entity 3) and 1 (entity 10) and has no row.
     assert_eq!(blob.fields_of(4).expect("a clean read"), None);
-    assert!(!blob.has_row(4));
+    assert!(!blob
+        .has_row(4)
+        .expect("a blob opened whole holds its has-row bitmap"));
 }
 
 /// A blob with declared columns but no values anywhere is three well-formed files, not an
