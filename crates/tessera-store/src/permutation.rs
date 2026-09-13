@@ -547,6 +547,37 @@ impl Permutation {
         Ok(())
     }
 
+    /// Every entity that holds a row here, ascending, with the row it holds.
+    ///
+    /// **The route across a whole permutation**, where [`Self::row_of`] is the route to one
+    /// entity. A sweep by `row_of` repeats the directory lookup at every slot and visits each
+    /// entity of an absent page one at a time; this reads the directory once a page and each
+    /// present page end to end, so a sparse view costs its own slots and not its entity span.
+    /// `tessera verify` crosses entity space this way.
+    pub fn try_for_each_slot<E>(
+        &self,
+        mut f: impl FnMut(u64, RowId) -> std::result::Result<(), E>,
+    ) -> std::result::Result<(), E> {
+        for page in 0..self.page_count {
+            let Some(slots) = self.page_of(page) else {
+                continue;
+            };
+            for (offset, &slot) in slots.iter().enumerate() {
+                let entity = ((page as u64) << PAGE_SHIFT) | offset as u64;
+                // The last page covers `bound` rounded up, so its tail slots address entities
+                // this permutation does not have. `row_of` refuses them and so does this.
+                if entity >= self.bound {
+                    return Ok(());
+                }
+                if slot == ROW_ABSENT {
+                    continue;
+                }
+                f(entity, RowId::new(slot))?;
+            }
+        }
+        Ok(())
+    }
+
     /// Row ID currently occupied by `e` in this segment, or `None` if `e` is out of bound, falls
     /// in an absent page, or holds the row-absent sentinel (never allocated a row here — including
     /// entities that exist but live in a different segment, or don't exist at all).
