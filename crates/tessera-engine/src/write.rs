@@ -9743,12 +9743,16 @@ impl Executor {
         // schema below is per view, because a family's lanes and columns are its group's views'
         // and no others'.
         let scoped_by_view = scoped_families_by_view(manifest);
-        // **One plan per dispatch.** Every context a dispatch builds takes `next_n` from the same
-        // unchanging `partition_data`, so they would all write `SEGMENTS-<next_n>.json` at one
-        // path and only one could commit. Dispatching one makes that structurally unreachable and
-        // saves the losers' segment writes; `write_segments_manifest`'s refuse-to-replace stands
-        // behind it at the format boundary. The rest re-plan at the next tick, against a
-        // `segments_version` the winner has advanced.
+        // **One plan per dispatch.** A publication rebases on the generation the one before it
+        // swapped ([`Bundle::with_segment`]), so a second unit in flight over the same view's row
+        // space is discarded at its rebase with its files already written. Dispatching one makes
+        // that unreachable and saves the losers' segment writes; the rest re-plan at the next
+        // tick, against a `segments_version` the winner has advanced.
+        //
+        // **Not because they would share a name**: `n` is allocated at publication from the
+        // executor's counter ([`Executor::allocate_manifest_n`]), so two dispatched plans would
+        // take two numbers. `write_segments_manifest`'s refuse-to-replace stands at the format
+        // boundary behind whatever reaches it, and is not the reason for this rule.
         //
         // **Chosen by oldest unflushed row, not by view name.** `views_of` sorts
         // lexicographically, so taking the first would let a continuously-fed `s0` deny `s1` a
@@ -9766,8 +9770,8 @@ impl Executor {
             tracing::warn!(
                 deferred,
                 dispatched = %view,
-                "a flush unit is per view and every plan in a dispatch shares one side-manifest \
-                 name, so one view publishes per tick; the rest re-plan at the next one"
+                "a flush unit is per view and a second unit in flight would be discarded at its \
+                 rebase, so one view publishes per tick; the rest re-plan at the next one"
             );
         }
 
@@ -17823,9 +17827,9 @@ mod dispatch_rules_tests {
         }
     }
 
-    /// **Obligation 9.** Every context a dispatch builds shares `next_n`, so only one can commit
-    /// its side-manifest. The one sent is the view whose oldest waiting row is oldest — not the
-    /// first by name, which is what `views_of`'s lexicographic sort would give and which would
+    /// **Obligation 9.** One plan is dispatched per tick, because a second unit in flight is
+    /// discarded at its rebase. The one sent is the view whose oldest waiting row is oldest — not
+    /// the first by name, which is what `views_of`'s lexicographic sort would give and which would
     /// let a continuously-fed `s0` deny `s1` a flush for ever.
     ///
     /// **Mutation:** replace this with `plans.into_iter().next()` and the assertion below fails —

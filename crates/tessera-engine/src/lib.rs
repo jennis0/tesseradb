@@ -10,7 +10,7 @@ pub mod artifact_content;
 pub mod artifacts;
 mod attributes;
 pub mod browse;
-pub mod bundle_lock;
+mod bundle_lock;
 mod cache;
 pub mod cancel;
 mod categories;
@@ -141,6 +141,7 @@ pub use tessera_store::manifest::Quantisation;
 // `Engine::accept_change` — blocking calls, hence inside `spawn_blocking`. What it needs from here
 // is how to answer: `AcceptError` for the status mapping, and `ExecutorPosture`/`ExecutorStats`
 // for `readyz` and `/control/status`.
+pub use bundle_lock::BundleLockError;
 pub use write::{
     AcceptError, ExecutorHealth, ExecutorPosture, ExecutorStartError, ExecutorStats, FoldRefusal,
     PendingChange, PublishGeometryError, ValuesReceipt, WalGauge, WriteStage,

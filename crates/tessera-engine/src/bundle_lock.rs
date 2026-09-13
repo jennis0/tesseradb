@@ -36,8 +36,8 @@ pub(crate) struct BundleWriteLock {
     path: PathBuf,
 }
 
-/// Why a bundle root could not be locked. Public because it is what
-/// `ExecutorStartError::BundleLocked` carries to an operator.
+/// Why a bundle root could not be locked. Public — re-exported at the crate root — because it is
+/// what `ExecutorStartError::BundleLocked` carries to an operator.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BundleLockError {
     /// Another open file description holds the lock. `holder` is the pid `/proc/locks` names for
@@ -46,11 +46,11 @@ pub enum BundleLockError {
         path: PathBuf,
         holder: Option<u32>,
     },
-    /// The directory could not be opened or locked for any other reason.
-    Io {
-        path: PathBuf,
-        kind: std::io::ErrorKind,
-    },
+    /// The directory could not be opened or locked for any other reason — a filesystem that does
+    /// not implement `flock` among them, which refuses every write to that bundle at start. The
+    /// error is carried formatted, because what an operator needs here is the kernel's sentence and
+    /// not a variant name.
+    Io { path: PathBuf, detail: String },
 }
 
 impl std::fmt::Display for BundleLockError {
@@ -63,8 +63,8 @@ impl std::fmt::Display for BundleLockError {
                     None => Ok(()),
                 }
             }
-            BundleLockError::Io { path, kind } => {
-                write!(f, "{} could not be locked ({kind:?})", path.display())
+            BundleLockError::Io { path, detail } => {
+                write!(f, "{} could not be locked ({detail})", path.display())
             }
         }
     }
@@ -78,7 +78,7 @@ impl BundleWriteLock {
     pub(crate) fn acquire(bundle_root: &Path) -> Result<Self, BundleLockError> {
         let dir = File::open(bundle_root).map_err(|e| BundleLockError::Io {
             path: bundle_root.to_path_buf(),
-            kind: e.kind(),
+            detail: e.to_string(),
         })?;
         // SAFETY: `dir` owns the descriptor and outlives the call.
         let locked = unsafe { libc::flock(dir.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
@@ -89,9 +89,9 @@ impl BundleWriteLock {
                     path: bundle_root.to_path_buf(),
                     holder: holder_pid(&dir),
                 },
-                kind => BundleLockError::Io {
+                _ => BundleLockError::Io {
                     path: bundle_root.to_path_buf(),
-                    kind,
+                    detail: error.to_string(),
                 },
             });
         }

@@ -55,9 +55,17 @@ fn a_second_executor_over_one_bundle_root_refuses_to_start() {
     let refused = second
         .start_write_executor(8)
         .expect_err("the second executor must refuse");
-    assert!(
-        matches!(refused, ExecutorStartError::BundleLocked(_)),
-        "the refusal says the bundle is held, not that this engine started twice: {refused}"
+    let ExecutorStartError::BundleLocked(held) = &refused else {
+        panic!("the refusal says the bundle is held, not that this engine started twice: {refused}");
+    };
+    assert_eq!(
+        *held,
+        tessera_engine::BundleLockError::Held {
+            path: root.clone(),
+            holder: Some(std::process::id()),
+        },
+        "the refusal names the root and the process holding it — here this one, both executors \
+         being in one process"
     );
     assert!(
         refused.to_string().contains("bundle"),

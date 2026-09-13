@@ -1109,7 +1109,9 @@ fn list_segments_manifests(partition_dir: &Path, partition_label: &str) -> Resul
 /// the first publication at such an `n` is refused by
 /// [`StoreError::SideManifestExists`](crate::StoreError::SideManifestExists).
 ///
-/// Symlinked prefix and partition directories are followed; a broken link is skipped.
+/// Symlinked prefix and partition directories are followed. A link whose target is absent is
+/// skipped, a target that cannot be stat'd for any other reason is an error: see
+/// [`sub_directories`].
 ///
 /// **A non-canonical name raises the floor rather than refusing here.** The reader refuses one
 /// ([`list_segments_manifests`], contracts §2.1) because it must not read a manifest under a name
@@ -1148,8 +1150,12 @@ pub fn highest_side_manifest_n(bundle_root: &Path) -> Result<Option<u64>> {
 ///
 /// `metadata` rather than the entry's own `file_type`, so a symlinked prefix or partition directory
 /// is walked: the entry's type says "symlink" where the target is the directory the numbers live
-/// in, and an allocator that skipped it would allocate over files that are there. An entry whose
-/// target cannot be stat'd — a broken link — is not a directory and is skipped.
+/// in, and an allocator that skipped it would allocate over files that are there.
+///
+/// A target that is not there — a broken link, or an entry removed between the listing and the
+/// stat — is skipped, because neither holds a number. Any other stat failure is an error, on the
+/// rule this whole scan follows: an allocator that cannot see what is present cannot say a number
+/// is free.
 fn sub_directories(dir: &Path) -> Result<Vec<PathBuf>> {
     let mut found = Vec::new();
     for entry in read_dir_if_present(dir)? {
@@ -1158,8 +1164,15 @@ fn sub_directories(dir: &Path) -> Result<Vec<PathBuf>> {
             source,
         })?;
         let path = entry.path();
-        if std::fs::metadata(&path).map(|m| m.is_dir()).unwrap_or(false) {
-            found.push(path);
+        // `NotFound` is the broken link and the entry removed between the listing and the stat,
+        // neither of which holds numbers. Every other failure is reported: an entry that may be a
+        // directory full of side-manifests, unread, is the same fail-open as a directory that
+        // could not be listed.
+        match std::fs::metadata(&path) {
+            Ok(metadata) if metadata.is_dir() => found.push(path),
+            Ok(_) => {}
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => {}
+            Err(source) => return Err(StoreError::Io { path, source }),
         }
     }
     Ok(found)

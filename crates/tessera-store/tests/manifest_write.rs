@@ -474,3 +474,54 @@ fn the_side_manifest_floor_is_every_file_present() {
         Some(12)
     );
 }
+
+/// **The floor follows a symlinked prefix and a symlinked partition directory, and a broken link
+/// is not a failure.**
+///
+/// The entry's own file type says "symlink" where the target is the directory the numbers live in,
+/// so a scan driven off `file_type` would walk past a whole prefix and hand a writer a number that
+/// is already a file. A link to nothing holds no numbers and must not stop a node starting.
+#[test]
+fn the_side_manifest_floor_follows_symlinked_directories() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path();
+
+    // The real tree, outside the bundle root: `v00000` and one partition reach it only by link.
+    let elsewhere = tmp.path().join("elsewhere");
+    let real_partition = elsewhere.join("v00000").join("partitions").join("default");
+    std::fs::create_dir_all(&real_partition).unwrap();
+    std::fs::write(real_partition.join("SEGMENTS-5.json"), b"{}").unwrap();
+    let bundle = root.join("bundle");
+    std::fs::create_dir_all(&bundle).unwrap();
+    std::os::unix::fs::symlink(elsewhere.join("v00000"), bundle.join("v00000")).unwrap();
+    assert_eq!(
+        tessera_store::highest_side_manifest_n(&bundle).unwrap(),
+        Some(5),
+        "a symlinked prefix directory is walked"
+    );
+
+    // A symlinked partition directory inside a real prefix.
+    let real_second = elsewhere.join("second");
+    std::fs::create_dir_all(&real_second).unwrap();
+    std::fs::write(real_second.join("SEGMENTS-8.json"), b"{}").unwrap();
+    let live = root.join("live");
+    std::fs::create_dir_all(live.join("v00000").join("partitions")).unwrap();
+    std::os::unix::fs::symlink(
+        &real_second,
+        live.join("v00000").join("partitions").join("second"),
+    )
+    .unwrap();
+    assert_eq!(
+        tessera_store::highest_side_manifest_n(&live).unwrap(),
+        Some(8),
+        "a symlinked partition directory is walked"
+    );
+
+    // A link to nothing: skipped, not an error.
+    std::os::unix::fs::symlink(elsewhere.join("gone"), live.join("v00001")).unwrap();
+    assert_eq!(
+        tessera_store::highest_side_manifest_n(&live).unwrap(),
+        Some(8),
+        "a broken link holds no numbers and is not a failure"
+    );
+}

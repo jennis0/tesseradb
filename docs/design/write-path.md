@@ -147,7 +147,9 @@ held per process and the two executors that provoked this were in one process: a
 predecessor was still serving. The directory rather than `CURRENT`, which a fold replaces by rename,
 or the WAL, which is per node and so shared by neither of two nodes over one bundle. Readers take no
 lock. **The guarantee is same-host**: `flock` over SMB and NFS is unreliable, and a bundle is never
-served from a share.
+served from a share. A filesystem that refuses `flock` outright refuses every write to that bundle
+at start, which is the fail-closed side of the same decision: a writer that cannot take the lock
+cannot know it is alone.
 
 Every writer of a side-manifest — flush, merge, coalesce, fold, overlay publication — takes its `n`
 from one counter on the executor thread, and the counter is raised over every `SEGMENTS-<n>.json`
@@ -161,8 +163,9 @@ whose files are already written.
 not reconcile what the other writer published with what this one holds, and both are still writing
 complete current state over each other's manifests. The writer is refused at the lock above, so a
 floor that rises is positive evidence of one that got past it: in single-writer operation the
-highest number on disc is the last one this executor took. It is alarmed and counted
-(`foreign_side_manifests` on `/control/status`).
+highest number on disc is the last one this executor took. It is alarmed and counted: `foreign_side_manifests`, in
+`/control/status`'s `write_executor` block beside the queue gauges rather than in its `flush`
+block, because it is a property of the bundle root and not of the flush cadence.
 
 Seeding from a manifest would leave the gap the counter has: a manifest names the files of its own
 publication, so a side-manifest another writer left is named by nothing. A collision that does
@@ -480,13 +483,17 @@ un-poisons the node but leaves it holding dispositions no record backs) publishe
 rotates nothing until restarted, alarmed throughout — publishing from that overlay would make a
 500'd, never-acked deny permanent, contradicting what contracts §3.1's 500 promises.
 
-**One plan per dispatch.** Every plan in a dispatch would take the same side-manifest name, so
-one view publishes per tick, chosen by oldest unflushed row; the side-manifest write **refuses
-to replace** an existing `SEGMENTS-<n>.json` (`hard_link`, atomic, `AlreadyExists` on collision)
-as the guard at the format boundary. The refusal names the file and is its own error rather than a
-filesystem fault: a side-manifest is complete current state, so a write through one drops the rows
-the manifest it replaced named. The publication is discarded, its files are orphans, and the next
-tick re-plans — at a number above what is on disc, never at the one that was refused (§1.2).
+**One plan per dispatch.** A flush unit is per view, and a publication rebases on the generation
+the one before it swapped: two in flight would leave the second with a row space that has moved
+under it, discarded at its rebase with its files already written. So one plan is dispatched per
+tick, chosen by oldest unflushed row, and the rest re-plan at the next one. The side-manifest name
+is not the reason — each publication allocates its own `n` when it commits (§1.2), so two dispatched
+plans would take two names — but the write **refuses to replace** an existing `SEGMENTS-<n>.json`
+(`hard_link`, atomic, `AlreadyExists` on collision) whatever reaches it, which is the guard at the
+format boundary. The refusal names the file and is its own error rather than a filesystem fault: a
+side-manifest is complete current state, so a write through one drops the rows the manifest it
+replaced named. The publication is discarded, its files are orphans, and the next tick re-plans — at
+a number above what is on disc, never at the one that was refused (§1.2).
 
 ### 4.3 Execution on the pool: the files, and descriptor promotion
 

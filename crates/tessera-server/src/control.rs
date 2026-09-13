@@ -5584,6 +5584,12 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::V
             // `work_depth` is a snapshot of two independently-advancing counters — see
             // `ExecutorStats::work_depth` — and `work_service_nanos_ewma` is an estimator, not a
             // bound; `estimate_retry_after_s`'s doc says what makes it one.
+            // Positive evidence of a second writer over this bundle root (write-path §1.2): a
+            // side-manifest allocation that had to rise over a file this node did not write. Here
+            // rather than in the `flush` block below, because every publication allocates and the
+            // subject is the bundle root rather than the flush cadence. Zero on a node whose
+            // bundle is its own.
+            "foreign_side_manifests": executor.foreign_side_manifests,
             "work_completed": executor.work_completed,
             "work_depth": executor.work_depth,
             "work_service_nanos_ewma": executor.work_service_nanos_ewma,
@@ -5598,10 +5604,6 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::V
                 "flushes": executor.flushes,
                 "flush_skips": executor.flush_skips,
                 "flush_failures": executor.flush_failures,
-                // Positive evidence of a second writer over this bundle root (write-path §1.2):
-                // a side-manifest allocation that had to rise over a file this node did not
-                // write. Zero on a node whose bundle is its own.
-                "foreign_side_manifests": executor.foreign_side_manifests,
                 "flushable_items": executor.flushable_items,
                 "flush_requested": executor.flush_requested,
                 // Whether a flush unit is on the pool now. `flushes` counts publications and

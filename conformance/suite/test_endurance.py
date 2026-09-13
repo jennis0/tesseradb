@@ -646,6 +646,11 @@ def observe(
     # -- nothing failed its way to a low number -------------------------------------------------
     flush = executor["flush"]
     assert flush["flush_failures"] == 0, f"{label}: flush failures: {flush}"
+    assert executor["foreign_side_manifests"] == 0, (
+        f"{label}: {executor['foreign_side_manifests']} side-manifest allocation(s) rose over a "
+        f"file this node did not write — a second writer held this bundle root, which the write "
+        f"lock refuses (write-path §1.2)"
+    )
     assert executor["wal_recoveries"] == 0, (
         f"{label}: the WAL recovered {executor['wal_recoveries']} time(s) mid-run — denies were "
         f"answered 500 somewhere in this plan"
