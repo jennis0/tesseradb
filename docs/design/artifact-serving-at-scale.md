@@ -473,9 +473,15 @@ request *(medians of three runs; `r1e8-p1e5-partition-medians.csv`)*:
 | 0.024% | 26.6 | **0.3** | 1.0 |
 
 **The crossover is a viewport, not an artifact count**, and that is the restatement this campaign
-forced. A row-major scan costs `O(k × visible rows)`, so it is dearest at whole-map zoom — exactly
-where the extent test settles an artifact-major layer without scanning anything — and cheapest at the
-narrow zooms where the artifact-major route is paying its per-candidate floor. **Flat in the artifact
+forced. A row-major scan costs `O(k × visible rows)`, so it is dearest where the viewport is widest
+and cheapest at the narrow zooms where the artifact-major route is paying its per-candidate floor.
+**At whole-map zoom it is not paid at all.** Where the viewport holds every row the viewer may see,
+`viewport ∩ M_auth` is `M_auth`, and the masked-count histogram this layout already builds once per
+`(session, level)` says which artifacts have a visible row. The scan runs at the viewports narrower
+than the mask, at a measured **3.2 ns a visible row** (`gbif-64p`, 25,846,007 rows,
+`taxonomy/tree` levels 0 and 1, hot, 2026-09-14; 6.6 ns before the mask was read a block of rows at
+a time instead of one call into the bitmap library per row). A whole-map zoom-0 request over that
+corpus is **210 ms of server CPU against 40 ms**. **Flat in the artifact
 count** is the other half and it holds: the list column measures **710 ms at 10⁴ scattered artifacts
 and 744 ms at 10⁵** at whole-map zoom, ten times the population for a 5% difference
 *(`r1e8-s1e4-scattered-medians.csv`, `r1e8-s1e5-scattered-medians.csv`)*. So the rule is **take the
