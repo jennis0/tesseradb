@@ -1109,7 +1109,7 @@ impl RowColumn {
     /// the cache holding these is byte-budgeted (`crate::histogram`). A count cannot exceed the row
     /// space, which is `u32`-addressed.
     pub fn histogram(&self, mask: &impl WholeMask) -> Vec<u32> {
-        self.histogram_over(&mask.visible_all())
+        self.histogram_over(mask.visible_all())
     }
 
     /// The same walk over a row set the caller already holds — [`Self::histogram`]'s body, and its

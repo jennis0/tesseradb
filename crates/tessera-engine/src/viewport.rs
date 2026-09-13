@@ -5221,8 +5221,8 @@ impl Engine {
                         use crate::compose::WholeMask;
                         let locator = crate::derived::RowLocator::new(segments.to_vec());
                         let visible = mask.visible_all();
-                        let counts = column.histogram_over(&visible);
-                        let acc = column.accumulate_over(&visible, &|row| locator.position(row));
+                        let counts = column.histogram_over(visible);
+                        let acc = column.accumulate_over(visible, &|row| locator.position(row));
                         crate::histogram::MaskedCounts::with_geometry(
                             counts,
                             crate::histogram::MaskedGeometry::new(acc.counts, acc.sums, acc.boxes),

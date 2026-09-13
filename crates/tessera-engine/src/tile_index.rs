@@ -47,7 +47,7 @@ use tessera_store::membership::{
 };
 
 use crate::artifacts::MembershipRows;
-use crate::compose::MaskedSet;
+use crate::compose::{MaskedSet, WholeMask};
 
 // **What is corpus-relative here and what is not.** §4.4's first bullet — *a hierarchy, not a
 // granularity* — is about a flat index at a fixed block size, which settles nothing at mid-zoom
@@ -441,15 +441,30 @@ impl TileIndex {
 pub struct Viewport<'a> {
     rows: &'a Bitmap,
     cardinality: u64,
-    here: Bitmap,
+    here: std::borrow::Cow<'a, Bitmap>,
+    covers_mask: bool,
 }
 
 impl<'a> Viewport<'a> {
-    pub fn compose(rows: &'a Bitmap, mask: &impl MaskedSet) -> Self {
+    /// Compose `viewport ∩ M_auth` for this request.
+    ///
+    /// A viewport holding every row the viewer may see intersects to the mask itself, and the mask
+    /// already holds that set ([`WholeMask::visible_all`]): 437 MB at the rung 6 corpus, which a
+    /// copy per request pays for again each time. So that case borrows. The test for it is
+    /// `|viewport ∩ M_auth| = |M_auth|`, which costs O(containers touched) and allocates nothing.
+    /// `viewport ∩ M_auth ⊆ M_auth`, so the two cardinalities are equal exactly when the two sets
+    /// are.
+    pub fn compose(rows: &'a Bitmap, mask: &'a (impl MaskedSet + WholeMask)) -> Self {
+        let covers_mask = mask.count_intersection(rows) == mask.visible_count();
         Viewport {
             cardinality: rows.cardinality(),
-            here: mask.visible_rows(rows),
+            here: if covers_mask {
+                std::borrow::Cow::Borrowed(mask.visible_all())
+            } else {
+                std::borrow::Cow::Owned(mask.visible_rows(rows))
+            },
             rows,
+            covers_mask,
         }
     }
 
@@ -461,6 +476,16 @@ impl<'a> Viewport<'a> {
     /// `viewport ∩ M_auth`.
     pub fn here(&self) -> &Bitmap {
         &self.here
+    }
+
+    /// Whether [`Self::here`] is the whole of `M_auth`: the viewport holds every row this viewer
+    /// may see, so no visible row is out of view.
+    ///
+    /// A property of the authorised mask alone. `here` is composed from `base`, `minus` and `plus`,
+    /// never from the request's filter or highlight, so a filtered request and an unfiltered one at
+    /// the same viewport get the same answer (I12).
+    pub fn covers_mask(&self) -> bool {
+        self.covers_mask
     }
 
     /// `|viewport|`, taken once — the extent test's cheap refusal.
