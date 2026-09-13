@@ -29,7 +29,7 @@
 use std::path::PathBuf;
 
 use tessera_filter::{
-    encode_block_header, extent_digest, Access, RecordBlob, RecordField, RecordValue,
+    encode_block_header, Access, RecordBlob, RecordField, RecordValue,
 };
 
 /// The writer's level (`tessera_filter_write`'s `ZSTD_LEVEL`), so a candidate is priced at the
@@ -176,8 +176,7 @@ fn encode_block(s: &Scheme, rows: &[(u32, Vec<RecordField>)], first_rank: u32) -
     if s.id == Id::BlockHeader {
         // The shipped header, through the format's own writer, so `as shipped` is exact.
         let entities: Vec<u32> = rows.iter().map(|(e, _)| *e).collect();
-        let digest = extent_digest(&offsets, at);
-        encode_block_header(first_rank, &entities, digest, &mut out).expect("ascending entities");
+        encode_block_header(first_rank, &entities, &mut out).expect("ascending entities");
     }
     if s.len == Len::BlockHeader {
         for p in &payloads {

@@ -39,9 +39,11 @@
 //! the symptom would be rows addressed against the wrong ranks.
 //!
 //! Block bytes stream to `blocks.bin` as blocks seal, so the writer holds one uncompressed block
-//! plus the directory's bookkeeping (a handful of words per block, 4 B per row) — never the blob.
-//! A writer abandoned part-way leaves a partial `blocks.bin` behind; no manifest names it, and
-//! the next build truncates it at create.
+//! plus the directory's bookkeeping — a handful of words per block, and nothing per row. The
+//! blob's rows are delimited by their own lengths, so the writer holds no rank-indexed offset
+//! array: over the 3.5×10⁹-row GBIF rung that array was 14 GB of anonymous memory held for the
+//! whole stage, against a 13.9 GB `blocks.bin`. A writer abandoned part-way leaves a partial
+//! `blocks.bin` behind; no manifest names it, and the next build truncates it at create.
 
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
@@ -50,14 +52,11 @@ use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use arrow::array::{ArrayRef, LargeListArray, RecordBatch, UInt32Array, UInt64Array};
-use arrow::buffer::{OffsetBuffer, ScalarBuffer};
+use arrow::array::{ArrayRef, RecordBatch, UInt32Array, UInt64Array};
 use arrow::datatypes::{DataType, Field, Schema};
 use croaring::{Bitmap, Portable};
 
-use tessera_filter::{
-    encode_block_header, encode_row, extent_digest, RecordBlob, RecordField,
-};
+use tessera_filter::{encode_block_header, encode_row, RecordBlob, RecordField};
 
 /// zstd's default level — the operating point the string-storage probe measured its block ratios
 /// at. A writer's choice, not a format fact: the reader decompresses whatever level wrote the
@@ -77,18 +76,14 @@ pub struct RecordBlobWriter {
     written: u64,
     /// The current, unsealed block's uncompressed bytes.
     buf: Vec<u8>,
-    /// The current block's within-block row offsets, moved into `row_offsets` at seal.
-    current_offsets: Vec<u32>,
     /// The current block's entities, in the order their rows were appended. The block header
     /// states them as gaps at seal, which is what makes identity the block's own statement.
     current_entities: Vec<u32>,
     /// The rank of the current block's first row.
     block_first_rank: u32,
-    /// Sealed blocks: `(compressed_offset, compressed_len, uncompressed_len, first_rank)`.
-    directory: Vec<(u64, u64, u32, u32)>,
-    /// Every sealed block's row offsets, flattened; `list_offsets` carries the block boundaries.
-    row_offsets: Vec<u32>,
-    list_offsets: Vec<i64>,
+    /// Sealed blocks:
+    /// `(compressed_offset, compressed_len, uncompressed_len, first_rank, row_count)`.
+    directory: Vec<(u64, u64, u32, u32, u32)>,
     hasrow: Bitmap,
     rank: u32,
     last_entity: Option<u32>,
@@ -114,12 +109,9 @@ impl RecordBlobWriter {
             blocks: BufWriter::new(file),
             written: 0,
             buf: Vec::new(),
-            current_offsets: Vec::new(),
             current_entities: Vec::new(),
             block_first_rank: 0,
             directory: Vec::new(),
-            row_offsets: Vec::new(),
-            list_offsets: vec![0],
             hasrow: Bitmap::new(),
             rank: 0,
             last_entity: None,
@@ -139,7 +131,6 @@ impl RecordBlobWriter {
         }
         let row_start = self.buf.len();
         encode_row(entity, fields, &mut self.buf)?;
-        let row_len = self.buf.len() - row_start;
 
         // The row was appended to the open block optimistically; if it belongs in the next block
         // — the open block is non-empty and now past the target — move it. A row past the target
@@ -149,14 +140,6 @@ impl RecordBlobWriter {
             self.seal_block()?;
             self.buf = row;
         }
-        let offset = self.buf.len() - row_len;
-        let offset = u32::try_from(offset).map_err(|_| {
-            invalid(format!(
-                "entity {entity}'s row starts past u32::MAX bytes into its block; the \
-                 within-block offsets are u32 (records §3)"
-            ))
-        })?;
-        self.current_offsets.push(offset);
         self.current_entities.push(entity);
         self.hasrow.add(entity);
         self.last_entity = Some(entity);
@@ -169,38 +152,29 @@ impl RecordBlobWriter {
     /// Compress and stream the open block, and record its directory row.
     ///
     /// The header goes on the front here rather than at [`Self::push_row`] because it cannot be
-    /// written until the block is closed: it states the row count, and it carries the digest of
-    /// the row offsets the directory is about to be given. That digest is the only place the two
-    /// files meet, so the reader can tell a directory that disagrees with these bytes from one
-    /// that addresses them (`tessera_filter::extent_digest`).
+    /// written until the block is closed: it states the row count and the entities of the rows,
+    /// as one first entity and a gap apiece.
     fn seal_block(&mut self) -> io::Result<()> {
         if self.buf.is_empty() {
             return Ok(());
         }
-        let rows_len = u32::try_from(self.buf.len())
-            .map_err(|_| invalid("a block exceeds u32::MAX uncompressed bytes"))?;
-        let digest = extent_digest(&self.current_offsets, rows_len);
         let mut block = Vec::with_capacity(self.buf.len() + 32 + self.current_entities.len());
-        encode_block_header(
-            self.block_first_rank,
-            &self.current_entities,
-            digest,
-            &mut block,
-        )?;
+        encode_block_header(self.block_first_rank, &self.current_entities, &mut block)?;
         block.extend_from_slice(&self.buf);
         let uncompressed = u32::try_from(block.len())
             .map_err(|_| invalid("a block exceeds u32::MAX uncompressed bytes"))?;
         let compressed = zstd::bulk::compress(&block, ZSTD_LEVEL)?;
         self.blocks.write_all(&compressed)?;
+        let rows = u32::try_from(self.current_entities.len())
+            .map_err(|_| invalid("more rows in one block than the u32 rank space holds"))?;
         self.directory.push((
             self.written,
             compressed.len() as u64,
             uncompressed,
             self.block_first_rank,
+            rows,
         ));
         self.written += compressed.len() as u64;
-        self.row_offsets.append(&mut self.current_offsets);
-        self.list_offsets.push(self.row_offsets.len() as i64);
         self.current_entities.clear();
         self.block_first_rank = self.rank;
         self.buf.clear();
@@ -223,18 +197,8 @@ impl RecordBlobWriter {
             Field::new("compressed_len", DataType::UInt64, false),
             Field::new("uncompressed_len", DataType::UInt32, false),
             Field::new("first_rank", DataType::UInt32, false),
-            Field::new(
-                "row_offsets",
-                DataType::LargeList(Arc::new(Field::new("item", DataType::UInt32, false))),
-                false,
-            ),
+            Field::new("row_count", DataType::UInt32, false),
         ]));
-        let lists = LargeListArray::new(
-            Arc::new(Field::new("item", DataType::UInt32, false)),
-            OffsetBuffer::new(ScalarBuffer::from(self.list_offsets)),
-            Arc::new(UInt32Array::from(self.row_offsets)),
-            None,
-        );
         let columns: Vec<ArrayRef> = vec![
             Arc::new(UInt64Array::from_iter_values(
                 self.directory.iter().map(|d| d.0),
@@ -248,7 +212,9 @@ impl RecordBlobWriter {
             Arc::new(UInt32Array::from_iter_values(
                 self.directory.iter().map(|d| d.3),
             )),
-            Arc::new(lists),
+            Arc::new(UInt32Array::from_iter_values(
+                self.directory.iter().map(|d| d.4),
+            )),
         ];
         let batch = RecordBatch::try_new(schema.clone(), columns)
             .map_err(|e| invalid(format!("assembling the block directory ({n} blocks): {e}")))?;
@@ -452,7 +418,9 @@ pub fn merge_record_rows(
                 break;
             }
             heap.pop();
-            let taken = heads[source].take().expect("a stream in the heap has a head");
+            let taken = heads[source]
+                .take()
+                .expect("a stream in the heap has a head");
             for field in taken.1 {
                 match fields.iter_mut().find(|held| held.tag == field.tag) {
                     // A later stream is the later write. The build's streams carry disjoint tags

@@ -443,8 +443,11 @@ fn record_framing_bytes(schema: &crate::config::Schema, rows: u64) -> u64 {
     rows.saturating_mul(RECORD_ROW_BYTES + fields)
 }
 
-/// `entity u32 | payload_len u32` before a record-blob row's first field.
-const RECORD_ROW_BYTES: u64 = 8;
+/// What a record-blob row costs the block around its fields: the entity gap the block header
+/// carries for it and the length the row itself carries, both LEB128 varints. One byte each for a
+/// row under 128 bytes whose entity follows its predecessor's within 128, charged at three so a
+/// wider corpus is not under-charged.
+const RECORD_ROW_BYTES: u64 = 3;
 
 /// `tag u16 | kind u8` before a record-blob field's value.
 const RECORD_FIELD_BYTES: u64 = 3;
@@ -1782,22 +1785,21 @@ pub(crate) fn disk(
             );
         }
     }
-    // The blocks are charged at half the characters **and half the row framing**: a row is
-    // `entity | payload_len` and each field a `tag | kind`, plus a `u32` length on a `utf8` one,
-    // and for a short value that is more than the value ([`record_framing_bytes`]). The framing is
-    // zero exactly where no column is blob-resident, which is where there is no blob.
+    // The blocks are charged at half the characters **and half the row framing**: a row is an
+    // entity gap and a length, each field a `tag | kind`, plus a `u32` length on a `utf8` one, and
+    // for a short value that is more than the value ([`record_framing_bytes`]). The framing is
+    // zero exactly where no column is blob-resident, which is where there is no blob. The
+    // directory costs nothing an item: it holds a handful of words a block and nothing a row.
     let framing = record_framing_bytes(&args.schema, n);
     if framing > 0 {
         push(
             format!(
-                "the record blob: {} MiB of directory at 4 B/item, and its blocks modelled at half \
-                 the {} MiB of characters its columns carry and the {} MiB of row framing around \
-                 them",
-                (4 * n) >> 20,
+                "the record blob: its blocks modelled at half the {} MiB of characters its \
+                 columns carry and the {} MiB of row framing around them",
                 blob_payload >> 20,
                 framing >> 20
             ),
-            4 * n + (blob_payload + framing) / EXTENT_SHARE,
+            (blob_payload + framing) / EXTENT_SHARE,
             Phases::BLOB.onwards(),
         );
     }

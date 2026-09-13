@@ -206,9 +206,18 @@ block of its own — the target is a target, not a cap.
 
 **Addressing is has-row rank, and it is specified because both obvious readings of an earlier
 draft were wrong** (review B5). A **has-row Roaring bitmap** marks the entities that have a blob
-row; an entity's rank in it indexes a compacted array of `u32` within-block offsets; a block
-directory of `(compressed offset, first rank)` locates the block by binary search. An entity with
-no blob-resident field is absent from the bitmap and occupies nothing. A blob **field** needs no
+row; a block directory of `(compressed offset, first rank, row count)` locates the block holding a
+rank by binary search; the row is that rank less the block's first rank rows into the block, found
+by walking the block's rows, each of which states its own length. An entity with
+no blob-resident field is absent from the bitmap and occupies nothing.
+
+**The directory holds nothing per row** *(2026-09-13, owner ruling)*. A rank-indexed array of
+within-block offsets is 4 B for every row in the blob: 14 GB over the 3.5×10⁹-row GBIF rung,
+against a 13.9 GB `blocks.bin`, held anonymous for the whole of the build's blob stage and
+resident for every read after it. It buys no read. Reaching any row of a block costs that block's
+decompress either way, and walking past `k` rows of the decompressed bytes costs a varint and an
+addition each over bytes already in cache. So the delimiter is a LEB128 length the row itself
+carries — one byte on a row under 128 bytes, inside the block's own compression. A blob **field** needs no
 per-field presence structure — a field's absence is its absence from the row — but the blob as a
 whole carries the one has-row bitmap; the two statements are about different things and both hold.
 One block read returns an entity's whole residual record; drill-down assembles the rest from the
@@ -216,10 +225,10 @@ other two homes by array index.
 
 **A block states whose rows it holds** *(2026-09-11, owner ruling;
 [decision 0141](../decisions/0141-the-record-blob-states-identity-once-per-block.md))*. Its header
-carries the row count, the first rank, the first entity and a 64-bit digest over the directory's
-row offsets for the block, then one LEB128 varint per row after the first holding that row's entity
-as a distance from its predecessor, less the one that strict ascent already gives. A row is its
-fields and nothing else. The entity id and payload length that used to head every row are gone:
+carries the row count, the first rank and the first entity, then one LEB128 varint per row after
+the first holding that row's entity as a distance from its predecessor, less the one that strict
+ascent already gives. A row is a length and the fields it covers. The four-byte entity id that
+used to head every row is gone, and the four-byte payload length beside it is now a varint:
 they were **42.6% of `blocks.bin` on `gbif-64p` and 54.7% on `treeoflife-1m`** compressed, where a
 page-oriented store spends a fraction of a percent. Rebuilding both corpora under the block form
 takes **38.1% off `gbif-64p`'s `blocks.bin` and 41.5% off `treeoflife-1m`'s**, and 9.6% off a prose
@@ -239,19 +248,21 @@ with no list costs nothing) — read after the visibility verdict like every oth
 
 **The blob read is fail-closed against its one new failure class** (review B6). The other two
 homes are positional, so there is no offset to get wrong; the blob's indirection is new, and a
-build or fold defect the digest cannot catch — digests cover bytes, not addressing consistency —
-would otherwise serve a *neighbour's* record for a visible entity, from blocks that also hold
+build or fold defect a file digest cannot catch — digests cover bytes, not addressing consistency
+— would otherwise serve a *neighbour's* record for a visible entity, from blocks that also hold
 entities the principal cannot see. Reaching a row is three derived steps, and each is checked
-against something a different file states:
+against something else the artefact states:
 
 | the step | what could be wrong | what refuses |
 |---|---|---|
 | `hasrow.rank(entity)` | the bitmap names a different entity at a rank | the block's first entity against the bitmap's member at that rank, and every row's own entity against the entity the rank resolved to |
 | `block_of(rank)` | a corrupt compressed offset, or an off-by-one | the block's first rank against the directory's, and the rank's distance from it against the row count |
-| `row_offsets[…]` | the directory disagrees with the bytes it addresses | the block's digest over the directory's whole row-offset slice for it, and the rows section's length |
+| the walk to the row | a length that swallows its neighbour, putting a later row's bytes under this entity | the rows tiling the block: walking exactly the block's stated row count must land on its last byte, checked when the block is decompressed and before any row is served |
 
-Every offset and length is bounds-checked against its block, a row's fields must consume its extent
-exactly, and a mismatch refuses the request rather than answering. **Entity ids in a block are
+Two of the three steps cross files and the third does not: the delimiters and the bytes they
+delimit are the same block, so there is no second file for them to address past. Every length is
+bounds-checked against its block, a row's fields must consume its own length exactly, and a
+mismatch refuses the request rather than answering. **Entity ids in a block are
 never serialised to any client** (I10 as corrected by 0065 — the blob is an index internal, not a
 gather artefact). §10's catalogue gains the block-boundary cases.
 
@@ -1027,7 +1038,7 @@ attrs/<column>/dict.bin            keyword, text: the layer's front-coded sorted
 attrs/<column>/postings.arrow      categories (built); keyword/text terms — hybrid singleton encoding
 attrs/record/blocks.bin            the record blob: zstd blocks in entity order (§3)
 attrs/record/hasrow.roaring        entities that have a blob row (§3's rank addressing)
-attrs/record/directory.arrow       block directory and rank-indexed within-block offsets
+attrs/record/directory.arrow       block directory: compressed extent, first rank, row count
 attrs/*/extents/<flush_id>.*       one set per flush, the blob included; every file digested; absence refuses
 ```
 
