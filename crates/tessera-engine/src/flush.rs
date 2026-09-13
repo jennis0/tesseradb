@@ -2396,8 +2396,27 @@ fn push_record_row(
     if fields.is_empty() {
         return Ok(());
     }
+    let borrowed: Vec<tessera_filter::RecordFieldRef<'_>> = fields
+        .iter()
+        .map(|field| {
+            field
+                .value
+                .as_ref()
+                .map(|value| tessera_filter::RecordFieldRef {
+                    tag: field.tag,
+                    value,
+                })
+                .ok_or_else(|| {
+                    FlushFailed(format!(
+                        "record extent: entity {entity} carries a list at field tag {}; the \
+                         multi surface has not landed (records §5)",
+                        field.tag
+                    ))
+                })
+        })
+        .collect::<Result<_, _>>()?;
     writer
-        .push_row(entity, fields)
+        .push_row(entity, &borrowed)
         .map_err(|e| FlushFailed(format!("record extent: {e}")))
 }
 

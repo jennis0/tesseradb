@@ -2,20 +2,19 @@
 //! blocks, has-row rank addressing, and — most of the file — the fail-closed refusals of review
 //! B6. The corruption cases doctor the artefact on disk and assert the reader refuses with the
 //! typed error rather than serving a neighbour's row, because that substitution is the one
-//! failure the digest cannot catch.
+//! failure a file digest cannot catch.
 
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use arrow::array::{Array, ArrayRef, LargeListArray, UInt32Array, UInt64Array};
-use arrow::buffer::{OffsetBuffer, ScalarBuffer};
+use arrow::array::{ArrayRef, UInt32Array, UInt64Array};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use croaring::{Bitmap, Portable};
 
 use tessera_filter::{
-    Access, RecordBlob, RecordError, RecordField, RecordValue, RECORD_BLOCKS_FILE,
+    Access, RecordBlob, RecordError, RecordField, RecordFieldRef, RecordValue, RECORD_BLOCKS_FILE,
     RECORD_DIRECTORY_FILE, RECORD_HASROW_FILE,
 };
 use tessera_filter_write::RecordBlobWriter;
@@ -39,7 +38,7 @@ fn open(p: &Paths) -> Result<RecordBlob, RecordError> {
 }
 
 /// The fixture's generation function: entity `e` carries a `u64` and a four-byte string, so every
-/// row is exactly 22 bytes — 11 + 11, a row carrying no header of its own — and block cutting is
+/// row is exactly 23 bytes — a one-byte length and 11 + 11 of fields — and block cutting is
 /// arithmetic the test can state.
 fn fields_for(e: u32) -> Vec<RecordField> {
     vec![
@@ -54,7 +53,23 @@ fn fields_for(e: u32) -> Vec<RecordField> {
     ]
 }
 
-const ROW_BYTES: usize = 22;
+const ROW_BYTES: usize = 23;
+
+/// Owned fields as the writer takes them.
+fn borrowed(fields: &[RecordField]) -> Vec<RecordFieldRef<'_>> {
+    fields
+        .iter()
+        .map(|f| RecordFieldRef {
+            tag: f.tag,
+            value: f.value.as_ref().expect("the fixture carries no list"),
+        })
+        .collect()
+}
+
+/// One owned row, pushed.
+fn push(writer: &mut RecordBlobWriter, entity: u32, fields: &[RecordField]) -> std::io::Result<()> {
+    writer.push_row(entity, &borrowed(fields))
+}
 
 /// Entities deliberately not dense from zero: rank is not entity, and a reader that conflated
 /// them would fail here first.
@@ -63,14 +78,13 @@ fn entity_of_rank(rank: u32) -> u32 {
 }
 
 fn write_fixture(dir: &Path, rows: u32, target: usize) -> Paths {
+    std::fs::create_dir_all(dir).expect("the fixture's directory");
     let p = paths(dir);
     let mut writer = RecordBlobWriter::create(&p.blocks, &p.hasrow, &p.directory, target)
         .expect("create the writer");
     for rank in 0..rows {
         let entity = entity_of_rank(rank);
-        writer
-            .push_row(entity, &fields_for(entity))
-            .expect("push a row");
+        push(&mut writer, entity, &fields_for(entity)).expect("push a row");
     }
     writer.finish().expect("finish");
     p
@@ -103,6 +117,42 @@ fn rows_round_trip_across_block_boundaries() {
     }
 }
 
+/// **A blob of many blocks is the same bytes every time it is written.** Sealed blocks compress
+/// on a small pool and are written back in seal order, so which worker finishes first must not
+/// reach `blocks.bin`. Two hundred blocks is enough for the workers to interleave; the two runs
+/// agree byte for byte and both read back as the rows that went in.
+///
+/// Mutation killed: writing a block as its compressor returns it rather than in seal order.
+#[test]
+fn many_blocks_compress_to_the_same_bytes_every_run() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let rows = 200 * 4;
+    let first = write_fixture(&dir.path().join("a"), rows, 4 * ROW_BYTES);
+    let second = write_fixture(&dir.path().join("b"), rows, 4 * ROW_BYTES);
+    for (a, b) in [
+        (&first.blocks, &second.blocks),
+        (&first.hasrow, &second.hasrow),
+        (&first.directory, &second.directory),
+    ] {
+        assert_eq!(
+            std::fs::read(a).expect("read"),
+            std::fs::read(b).expect("read"),
+            "two runs of the same rows wrote different bytes"
+        );
+    }
+    let blob = open(&first).expect("opens");
+    assert_eq!(blob.block_count(), 200, "{rows} rows at 4 per block");
+    blob.self_check().expect("the artefact is self-consistent");
+    for rank in 0..rows {
+        let entity = entity_of_rank(rank);
+        assert_eq!(
+            blob.fields_of(entity).expect("read"),
+            Some(fields_for(entity)),
+            "rank {rank}"
+        );
+    }
+}
+
 /// A row larger than the target gets an oversized block of its own — the target is a target, not
 /// a cap (records §3) — and its neighbours still read back from their own blocks.
 #[test]
@@ -115,13 +165,11 @@ fn an_oversize_row_gets_a_block_of_its_own() {
         tag: 0,
         value: RecordValue::Utf8("x".repeat(500)),
     };
-    writer.push_row(1, &fields_for(1)).expect("a small row");
+    push(&mut writer, 1, &fields_for(1)).expect("a small row");
     writer
-        .push_row(2, std::slice::from_ref(&huge))
+        .push_row(2, &borrowed(std::slice::from_ref(&huge)))
         .expect("the oversize row");
-    writer
-        .push_row(3, &fields_for(3))
-        .expect("another small row");
+    push(&mut writer, 3, &fields_for(3)).expect("another small row");
     writer.finish().expect("finish");
 
     let blob = open(&p).expect("the blob opens");
@@ -173,19 +221,22 @@ fn out_of_order_rows_are_refused() {
     let p = paths(dir.path());
     let mut writer =
         RecordBlobWriter::create(&p.blocks, &p.hasrow, &p.directory, 1024).expect("create");
-    writer.push_row(5, &fields_for(5)).expect("in order");
-    assert!(writer.push_row(5, &fields_for(5)).is_err(), "a repeat");
-    assert!(writer.push_row(4, &fields_for(4)).is_err(), "a regression");
+    push(&mut writer, 5, &fields_for(5)).expect("in order");
+    assert!(push(&mut writer, 5, &fields_for(5)).is_err(), "a repeat");
+    assert!(
+        push(&mut writer, 4, &fields_for(4)).is_err(),
+        "a regression"
+    );
 }
 
 /// The directory's five columns, lifted into plain vectors, doctored, and written back — the
-/// corruption a digest would catch in a bundle but the reader must also refuse on its own.
+/// corruption a file digest would catch in a bundle but the reader must also refuse on its own.
 struct Directory {
     compressed_offset: Vec<u64>,
     compressed_len: Vec<u64>,
     uncompressed_len: Vec<u32>,
     first_rank: Vec<u32>,
-    row_offsets: Vec<Vec<u32>>,
+    row_count: Vec<u32>,
 }
 
 fn read_directory(path: &Path) -> Directory {
@@ -196,7 +247,7 @@ fn read_directory(path: &Path) -> Directory {
         compressed_len: Vec::new(),
         uncompressed_len: Vec::new(),
         first_rank: Vec::new(),
-        row_offsets: Vec::new(),
+        row_count: Vec::new(),
     };
     for batch in reader {
         let batch = batch.expect("batch");
@@ -204,15 +255,13 @@ fn read_directory(path: &Path) -> Directory {
         let cl: &UInt64Array = batch.column(1).as_any().downcast_ref().expect("u64");
         let ul: &UInt32Array = batch.column(2).as_any().downcast_ref().expect("u32");
         let fr: &UInt32Array = batch.column(3).as_any().downcast_ref().expect("u32");
-        let lists: &LargeListArray = batch.column(4).as_any().downcast_ref().expect("list");
+        let rc: &UInt32Array = batch.column(4).as_any().downcast_ref().expect("u32");
         for i in 0..batch.num_rows() {
             out.compressed_offset.push(co.value(i));
             out.compressed_len.push(cl.value(i));
             out.uncompressed_len.push(ul.value(i));
             out.first_rank.push(fr.value(i));
-            let row = lists.value(i);
-            let row: &UInt32Array = row.as_any().downcast_ref().expect("u32 items");
-            out.row_offsets.push(row.values().to_vec());
+            out.row_count.push(rc.value(i));
         }
     }
     out
@@ -224,30 +273,14 @@ fn write_directory(path: &Path, dir: &Directory) {
         Field::new("compressed_len", DataType::UInt64, false),
         Field::new("uncompressed_len", DataType::UInt32, false),
         Field::new("first_rank", DataType::UInt32, false),
-        Field::new(
-            "row_offsets",
-            DataType::LargeList(Arc::new(Field::new("item", DataType::UInt32, false))),
-            false,
-        ),
+        Field::new("row_count", DataType::UInt32, false),
     ]));
-    let mut offsets: Vec<i64> = vec![0];
-    let mut flat: Vec<u32> = Vec::new();
-    for block in &dir.row_offsets {
-        flat.extend_from_slice(block);
-        offsets.push(flat.len() as i64);
-    }
-    let lists = LargeListArray::new(
-        Arc::new(Field::new("item", DataType::UInt32, false)),
-        OffsetBuffer::new(ScalarBuffer::from(offsets)),
-        Arc::new(UInt32Array::from(flat)),
-        None,
-    );
     let columns: Vec<ArrayRef> = vec![
         Arc::new(UInt64Array::from(dir.compressed_offset.clone())),
         Arc::new(UInt64Array::from(dir.compressed_len.clone())),
         Arc::new(UInt32Array::from(dir.uncompressed_len.clone())),
         Arc::new(UInt32Array::from(dir.first_rank.clone())),
-        Arc::new(lists),
+        Arc::new(UInt32Array::from(dir.row_count.clone())),
     ];
     let batch = RecordBatch::try_new(schema.clone(), columns).expect("batch");
     let file = File::create(path).expect("create");
@@ -294,32 +327,33 @@ fn doctor_block(p: &Paths, block: usize, doctor: impl FnOnce(&mut Vec<u8>)) {
     write_directory(&p.directory, &dir);
 }
 
-/// **The B6 case, caught a file earlier.** A directory offset redirected at another entity's row
-/// must refuse — the typed error, never the neighbour's fields. The block carries a digest of the
-/// row offsets it was written beside, so a directory that disagrees with the bytes it addresses is
-/// refused for the whole block rather than one row at a time, and the redirected read never
-/// reaches the row it was pointed at.
+/// **The B6 case, caught before a row is framed.** A row length doctored to swallow its
+/// neighbour would put the row after next under this entity's identity — the substitution the
+/// format exists to refuse. The rows of a block must tile it exactly, which is checked when the
+/// block is decompressed, so the redirected read never reaches the row it was pointed at.
+///
+/// Mutation killed: dropping the tiling walk from `header_of`, after which rank 1 answers with
+/// rank 2's fields.
 #[test]
-fn a_redirected_offset_refuses_and_never_serves_the_neighbour() {
+fn a_row_length_that_swallows_its_neighbour_refuses() {
     let dir = tempfile::tempdir().expect("tempdir");
     let p = write_fixture(dir.path(), 3, 1024);
-    // Rank 1 (entity 10) now points at rank 0's row (entity 3), inside the same block.
-    doctor_directory(&p.directory, |d| d.row_offsets[0][1] = d.row_offsets[0][0]);
+    // Row 0's length covers its own fields and the whole of row 1, so the walk would take row 2's
+    // bytes as rank 1's row. Every row is the same width, so the arithmetic is the test's.
+    doctor_block(&p, 0, |block| {
+        let rows_at = block.len() - 3 * ROW_BYTES;
+        assert_eq!(block[rows_at], (ROW_BYTES - 1) as u8, "row 0's length");
+        block[rows_at] = (2 * ROW_BYTES - 1) as u8;
+    });
 
-    let blob = open(&p).expect("the doctored directory still opens; the defect is per-block");
+    let blob = open(&p).expect("the doctored block still opens; the defect is inside it");
     let err = blob
         .fields_of(entity_of_rank(1))
         .expect_err("a redirected row refuses");
     assert!(matches!(err, RecordError::Malformed(_)), "{err}");
-    assert!(err.to_string().contains("extent digest"), "{err}");
-    // The neighbour whose row was pointed at refuses too: the disagreement is the block's, and
-    // refusing more than the minimum is fail-closed's direction. What neither may do is answer
-    // with anything but its own fields.
-    match blob.fields_of(entity_of_rank(0)) {
-        Ok(fields) => assert_eq!(fields, Some(fields_for(entity_of_rank(0)))),
-        Err(e) => assert!(matches!(e, RecordError::Malformed(_)), "{e}"),
-    }
-    // And the exhaustive check finds the inconsistency the single read found.
+    // The whole block refuses, which is fail-closed's direction: what no read may do is answer
+    // with anything but its own entity's fields.
+    assert!(blob.fields_of(entity_of_rank(0)).is_err());
     assert!(blob.self_check().is_err());
 }
 
@@ -372,7 +406,10 @@ fn a_hasrow_renaming_a_blocks_first_entity_refuses() {
     let mut bitmap = Bitmap::try_deserialize::<Portable>(&bytes).expect("portable");
     assert!(bitmap.remove_checked(entity_of_rank(0)), "rank 0 was there");
     bitmap.add(entity_of_rank(0) + 1);
-    assert!(entity_of_rank(0) + 1 < entity_of_rank(1), "rank 1 is unmoved");
+    assert!(
+        entity_of_rank(0) + 1 < entity_of_rank(1),
+        "rank 1 is unmoved"
+    );
     std::fs::write(&p.hasrow, bitmap.serialize::<Portable>()).expect("doctor");
 
     let blob = open(&p).expect("cardinality is unchanged, so the open-time checks pass");
@@ -412,6 +449,7 @@ fn a_block_holding_another_blocks_rows_refuses() {
     doctor_directory(&p.directory, |d| {
         d.compressed_len.swap(0, 1);
         d.uncompressed_len.swap(0, 1);
+        d.row_count.swap(0, 1);
         d.compressed_offset[1] = d.compressed_len[0];
     });
 
@@ -424,10 +462,41 @@ fn a_block_holding_another_blocks_rows_refuses() {
     assert!(blob.self_check().is_err());
 }
 
-/// **A block that does not tile.** A byte appended to a block's rows section: every row still
-/// starts where the directory puts it, but the section is a byte longer than the rows account
-/// for. The extent digest covers that length as well as the offsets, so the block refuses before
-/// a row is framed.
+/// **A block that states the wrong row count.** The header's first word alone is doctored, the
+/// gaps and the rows left as they were, so nothing about the block's bytes has moved and only the
+/// count the block claims disagrees with the count the directory's first ranks imply. The block is
+/// refused before a row is framed: the count is what bounds the walk, so a block read against the
+/// wrong one would stop short of its own rows or run past them.
+///
+/// Mutation killed: dropping the `row_count` comparison in `header_of`.
+#[test]
+fn a_block_that_states_the_wrong_row_count_refuses() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let p = write_fixture(dir.path(), 3, 1024);
+    doctor_block(&p, 0, |block| {
+        assert_eq!(
+            u32::from_le_bytes(block[..4].try_into().expect("four bytes")),
+            3,
+            "the block holds three rows"
+        );
+        block[..4].copy_from_slice(&2u32.to_le_bytes());
+    });
+
+    let blob = open(&p).expect("opens; the directory and the bitmap are untouched");
+    let err = blob
+        .fields_of(entity_of_rank(0))
+        .expect_err("the block and the directory count different rows");
+    assert!(matches!(err, RecordError::Malformed(_)), "{err}");
+    assert!(
+        err.to_string().contains("rows where the directory"),
+        "{err}"
+    );
+    assert!(blob.self_check().is_err());
+}
+
+/// **A block that does not tile.** A byte appended to a block's rows section: every row is still
+/// as long as it says, but the section is a byte longer than the rows account for. The block's
+/// rows must end where the block does, so it refuses before a row is framed.
 #[test]
 fn a_block_longer_than_its_rows_refuses() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -439,13 +508,13 @@ fn a_block_longer_than_its_rows_refuses() {
         .fields_of(entity_of_rank(2))
         .expect_err("the rows do not account for the block");
     assert!(matches!(err, RecordError::Malformed(_)), "{err}");
-    assert!(err.to_string().contains("extent digest"), "{err}");
+    assert!(err.to_string().contains("whole rows"), "{err}");
     assert!(blob.self_check().is_err());
 }
 
 /// **A row that does not fill its extent.** One row's string length shortened by a byte, which
-/// moves neither the row offsets nor the section's length, so the digest still agrees. The field
-/// walk has to consume the extent exactly, and a byte left over is what refuses.
+/// moves neither the row's own length nor the section's, so the block still tiles. The field walk
+/// has to consume the row exactly, and a byte left over is what refuses.
 ///
 /// Mutation killed: ending the field loop while fewer than three bytes remain, which would
 /// tolerate a trailing byte and serve the short row as if it were whole.
@@ -453,16 +522,16 @@ fn a_block_longer_than_its_rows_refuses() {
 fn a_row_that_does_not_fill_its_extent_refuses() {
     let dir = tempfile::tempdir().expect("tempdir");
     let p = write_fixture(dir.path(), 3, 1024);
-    // Row 1 is [tag 0, kind u64, 8 bytes][tag 1, kind utf8, len u32, 4 bytes]; the length prefix
-    // sits 22 + 3 + 8 + 3 bytes into the rows section.
+    // Row 1 is [len][tag 0, kind u64, 8 bytes][tag 1, kind utf8, len u32, 4 bytes]; the string's
+    // length prefix sits 23 + 1 + 3 + 8 + 3 bytes into the rows section.
     doctor_block(&p, 0, |block| {
         let rows_at = block.len() - 3 * ROW_BYTES;
-        let len_at = rows_at + ROW_BYTES + 3 + 8 + 3;
+        let len_at = rows_at + ROW_BYTES + 1 + 3 + 8 + 3;
         assert_eq!(block[len_at], 4, "the string length prefix");
         block[len_at] = 3;
     });
 
-    let blob = open(&p).expect("opens; the offsets and the section length are untouched");
+    let blob = open(&p).expect("opens; the row lengths and the section length are untouched");
     let err = blob
         .fields_of(entity_of_rank(1))
         .expect_err("a row that leaves a byte over refuses");
@@ -493,16 +562,25 @@ fn a_block_cut_short_refuses() {
     assert!(blob.self_check().is_err());
 }
 
-/// An offset past its block's bytes refuses by bounds, not by reading whatever lies there.
+/// A row length running past its block's bytes refuses by bounds, not by reading whatever lies
+/// there.
 #[test]
-fn an_out_of_bounds_offset_refuses() {
+fn a_row_length_past_the_block_refuses() {
     let dir = tempfile::tempdir().expect("tempdir");
     let p = write_fixture(dir.path(), 3, 1024);
-    doctor_directory(&p.directory, |d| d.row_offsets[0][2] = 60_000);
-    let blob = open(&p).expect("opens; the defect is per-row");
+    // The last row's length raised to a two-byte varint far past the block. Every length in this
+    // fixture is one byte, so raising one widens the row and the block stops tiling either way;
+    // what this asserts is that the bounds refuse rather than a slice panicking.
+    doctor_block(&p, 0, |block| {
+        let rows_at = block.len() - 3 * ROW_BYTES;
+        let last = rows_at + 2 * ROW_BYTES;
+        block[last] = 0xd0;
+        block.insert(last + 1, 0x0f);
+    });
+    let blob = open(&p).expect("opens; the defect is inside the block");
     let err = blob
         .fields_of(entity_of_rank(2))
-        .expect_err("an out-of-bounds offset refuses");
+        .expect_err("a length past the block refuses");
     assert!(matches!(err, RecordError::Malformed(_)), "{err}");
     assert!(blob.self_check().is_err());
 }
@@ -604,7 +682,7 @@ fn a_stack_of_disjoint_layers_answers_each_from_its_own() {
         let mut writer =
             RecordBlobWriter::create(&p.blocks, &p.hasrow, &p.directory, 90).expect("create");
         for &e in entities {
-            writer.push_row(e, &fields_for(e)).expect("push");
+            push(&mut writer, e, &fields_for(e)).expect("push");
         }
         writer.finish().expect("finish");
         RecordExtentPaths {
@@ -616,12 +694,8 @@ fn a_stack_of_disjoint_layers_answers_each_from_its_own() {
     let extent_a = write_extent("flush-a", &[1_000, 1_004, 1_010]);
     let extent_b = write_extent("flush-b", &[1_001, 1_002, 1_020]);
 
-    let stack = RecordStack::open(
-        Some(&base),
-        &[extent_a.clone(), extent_b],
-        Access::Mapped,
-    )
-    .expect("open the stack");
+    let stack = RecordStack::open(Some(&base), &[extent_a.clone(), extent_b], Access::Mapped)
+        .expect("open the stack");
 
     for entity in [3u32, 52, 1_000, 1_010, 1_001, 1_020] {
         let fields = stack
@@ -641,7 +715,10 @@ fn a_stack_of_disjoint_layers_answers_each_from_its_own() {
     let bytes = std::fs::read(&extent_a.blocks).expect("read blocks");
     std::fs::write(&extent_a.blocks, &bytes[..bytes.len() - 1]).expect("truncate");
     let refused = RecordStack::open(Some(&base), &[extent_a], Access::Mapped);
-    assert!(refused.is_err(), "a truncated extent refuses the whole stack");
+    assert!(
+        refused.is_err(),
+        "a truncated extent refuses the whole stack"
+    );
 }
 
 /// **The set read and the single read agree, row for row, and the set read decompresses each block

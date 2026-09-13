@@ -157,7 +157,7 @@ fn build_fixture(root: &Path, n: u64, created_at: &str) -> (Manifest, std::path:
     .expect("write SEGMENTS-0.json");
 
     let manifest = Manifest {
-        bundle_format: 9,
+        bundle_format: 10,
         created_at: created_at.to_string(),
         data_plugin_hash: tessera_plugin::Passthrough::new().data_plugin_hash(),
         declared_bounds: serde_json::json!({}),
@@ -214,7 +214,7 @@ fn write_manifest_json_then_write_current_round_trips_through_open_bundle() {
     write_current(dir.path(), "v00000", &digest).expect("write_current");
 
     let bundle = open_bundle(dir.path()).expect("open_bundle over a bundle these writers built");
-    assert_eq!(bundle.manifest.bundle_format, 9);
+    assert_eq!(bundle.manifest.bundle_format, 10);
     assert_eq!(bundle.manifest.entity_id_high_water, 64);
     assert_eq!(bundle.manifest.identity.idset, 1);
 

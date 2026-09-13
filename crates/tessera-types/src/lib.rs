@@ -137,9 +137,15 @@ pub struct GenerationStamp {
 // as a row count and address the rest of the blob against it; an 8 reader handed a 9 block would
 // read the block header as a row and serve its bytes as an entity's fields. The number is what
 // stops either opening.
+// 10: the record blob delimits a row by a length the row states, and the directory holds nothing
+// per row. A 9 directory's fifth column is the blocks' row offsets as a list; a 10 directory's is
+// one row count a block, so a reader at either takes the other's fifth column for its own and
+// mis-reads every block boundary. A 9 block's rows carry no length, so a 10 reader would take the
+// first two bytes of a row's first field tag as a length and frame the rest against it. The number
+// is what stops either opening.
 // Each bump makes a stale local bundle a loud refusal rather than a silent misread — a fail-closed
 // guard, not compatibility (decision 0048).
-pub const BUNDLE_FORMAT: u32 = 9;
+pub const BUNDLE_FORMAT: u32 = 10;
 pub const API_VERSION: u32 = 1;
 pub const ABI_VERSION: u32 = 1;
 pub const ROW_ABSENT: u32 = 0xFFFF_FFFF;
@@ -163,7 +169,7 @@ mod tests {
     }
     #[test]
     fn constants() {
-        assert_eq!(BUNDLE_FORMAT, 9);
+        assert_eq!(BUNDLE_FORMAT, 10);
         assert_eq!(ROW_ABSENT, 0xFFFF_FFFF);
     }
 }

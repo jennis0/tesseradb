@@ -160,7 +160,7 @@ use rustc_hash::FxHashMap;
 
 use tessera_authz::encode_posting;
 use tessera_filter::{
-    Codes, ColumnKind, RecordField, RecordValue, ValueColumnWriter, RECORD_BLOCKS_FILE,
+    Codes, ColumnKind, RecordFieldRef, RecordValueRef, ValueColumnWriter, RECORD_BLOCKS_FILE,
     RECORD_BLOCK_TARGET, RECORD_DIRECTORY_FILE, RECORD_HASROW_FILE,
 };
 use tessera_plugin::{Passthrough, Plugin};
@@ -1943,9 +1943,11 @@ fn build_bundle(
     // attribute values exist.
     // The extents the join spilled, opened once for every reader: the record blob merges them,
     // and a `text` column's token index tokenises them in block windows first (`crate::extents`).
-    // Folded first where a column spilled more than one merge holds open.
+    // Folded first only where a column spilled more extents than the budget lets one merge hold
+    // open, which no corpus built so far reaches.
+    let fan_in = crate::extents::merge_fan_in(plan.budget);
     for column in spilled.iter_mut() {
-        column.cascade()?;
+        column.cascade(fan_in)?;
     }
     let open_extents: Vec<crate::extents::OpenExtents> = spilled
         .iter()
@@ -3507,6 +3509,8 @@ pub(crate) fn write_record_blob(
         columns: &column_tags,
         entity: 0,
         n,
+        row: Vec::new(),
+        at: 0,
     };
     // **Only a blob-resident column's extents are the blob's.** An indexed keyword spills its
     // characters the same way and its reader is the dictionary pass, which has already run and
@@ -3717,14 +3721,18 @@ struct ColumnRows<'a> {
     columns: &'a [usize],
     entity: usize,
     n: usize,
+    /// The row the stream is at. A string field borrows the column's arena, which outlives this
+    /// stream, so the row is held rather than rebuilt when the merge reads it.
+    row: Vec<RecordFieldRef<'a>>,
+    at: u32,
 }
 
-impl tessera_filter_write::RecordRows for ColumnRows<'_> {
-    fn next_row(&mut self) -> std::io::Result<Option<(u32, Vec<RecordField>)>> {
+impl<'a> tessera_filter_write::RecordRows for ColumnRows<'a> {
+    fn advance(&mut self) -> std::io::Result<bool> {
         while self.entity < self.n {
             let entity = self.entity;
             self.entity += 1;
-            let mut fields: Vec<RecordField> = Vec::with_capacity(self.columns.len());
+            self.row.clear();
             for &column in self.columns {
                 let attribute = &self.schema.attributes[column];
                 let value = record_value_of(&self.by_entity[column], entity, attribute)
@@ -3737,14 +3745,31 @@ impl tessera_filter_write::RecordRows for ColumnRows<'_> {
                         attribute.name
                     ))
                 })?;
-                fields.push(RecordField { tag, value });
+                self.row.push(RecordFieldRef { tag, value });
             }
-            if fields.is_empty() {
+            if self.row.is_empty() {
                 continue;
             }
-            return Ok(Some((entity as u32, fields)));
+            self.at = entity as u32;
+            return Ok(true);
         }
-        Ok(None)
+        self.row.clear();
+        Ok(false)
+    }
+    fn entity(&self) -> u32 {
+        self.at
+    }
+    fn field_count(&self) -> usize {
+        self.row.len()
+    }
+    fn field(&self, i: usize) -> std::io::Result<RecordFieldRef<'_>> {
+        self.row.get(i).copied().ok_or_else(|| {
+            std::io::Error::other(format!(
+                "field {i} was asked for of entity {}'s row, which carries {}",
+                self.at,
+                self.row.len()
+            ))
+        })
     }
 }
 
@@ -3752,14 +3777,14 @@ impl tessera_filter_write::RecordRows for ColumnRows<'_> {
 /// this column — the per-family absence rule `write_record_blob`'s doc states.
 ///
 /// **The column and the entity, not the value**, so that the string arm can borrow: reading through
-/// `EntityColumn::value_at` clones the `String` and [`RecordValue::Utf8`] then owns a second copy,
-/// which over a text column is two allocations and two copies of every value in the corpus. One
-/// clone remains and is unavoidable — the record value owns its bytes.
-fn record_value_of(
-    values: &EntityColumn,
+/// `EntityColumn::value_at` clones the `String` out of the arena, and the row that carried it
+/// owned a second copy. Both are gone — the value the blob's merge is handed borrows the arena
+/// and is copied once, into the block it is encoded in.
+fn record_value_of<'a>(
+    values: &'a EntityColumn,
     entity: usize,
     attribute: &crate::config::Attribute,
-) -> Result<Option<RecordValue>> {
+) -> Result<Option<RecordValueRef<'a>>> {
     if attribute.vocabulary.is_some() {
         let code = category_code(&values.value_at(entity), &attribute.name)?;
         if code == tessera_store::vocabulary::ABSENT_CODE {
@@ -3769,32 +3794,41 @@ fn record_value_of(
         // resolved to its key at drill-down through the manifest's vocabulary, never in the
         // artefact.
         return Ok(Some(match attribute.ty {
-            ScalarType::U8 => RecordValue::U8(code as u8),
-            ScalarType::U16 => RecordValue::U16(code as u16),
-            _ => RecordValue::U32(code),
+            ScalarType::U8 => RecordValueRef::U8(code as u8),
+            ScalarType::U16 => RecordValueRef::U16(code as u16),
+            _ => RecordValueRef::U32(code),
         }));
     }
     // The string families first, borrowed. `str_at` answers `None` for an absent entity and for a
     // column that is not string-backed, and the match below then reads the same absence out of
     // `value_at` — so the two agree without either having to know which family it is looking at.
     if let Some(text) = values.str_at(entity) {
-        return Ok(Some(RecordValue::Utf8(text.to_string())));
+        return Ok(Some(RecordValueRef::Utf8(text)));
     }
     Ok(match values.value_at(entity) {
         ScalarValue::Null => None,
-        ScalarValue::Bool(v) => Some(RecordValue::Bool(v)),
-        ScalarValue::U8(v) => Some(RecordValue::U8(v)),
-        ScalarValue::U16(v) => Some(RecordValue::U16(v)),
-        ScalarValue::U32(v) => Some(RecordValue::U32(v)),
-        ScalarValue::U64(v) => Some(RecordValue::U64(v)),
-        ScalarValue::I8(v) => Some(RecordValue::I8(v)),
-        ScalarValue::I16(v) => Some(RecordValue::I16(v)),
-        ScalarValue::I32(v) => Some(RecordValue::I32(v)),
-        ScalarValue::I64(v) => Some(RecordValue::I64(v)),
-        ScalarValue::F32(v) => Some(RecordValue::F32(v)),
-        ScalarValue::F64(v) => Some(RecordValue::F64(v)),
-        ScalarValue::TimestampUs(v) => Some(RecordValue::TimestampUs(v)),
-        ScalarValue::Utf8(v) => Some(RecordValue::Utf8(v)),
+        ScalarValue::Bool(v) => Some(RecordValueRef::Bool(v)),
+        ScalarValue::U8(v) => Some(RecordValueRef::U8(v)),
+        ScalarValue::U16(v) => Some(RecordValueRef::U16(v)),
+        ScalarValue::U32(v) => Some(RecordValueRef::U32(v)),
+        ScalarValue::U64(v) => Some(RecordValueRef::U64(v)),
+        ScalarValue::I8(v) => Some(RecordValueRef::I8(v)),
+        ScalarValue::I16(v) => Some(RecordValueRef::I16(v)),
+        ScalarValue::I32(v) => Some(RecordValueRef::I32(v)),
+        ScalarValue::I64(v) => Some(RecordValueRef::I64(v)),
+        ScalarValue::F32(v) => Some(RecordValueRef::F32(v)),
+        ScalarValue::F64(v) => Some(RecordValueRef::F64(v)),
+        ScalarValue::TimestampUs(v) => Some(RecordValueRef::TimestampUs(v)),
+        // Unreachable: a string-backed column answered `str_at` above, and no other storage
+        // yields a string. A column that reached here carrying one would be a column whose two
+        // accessors disagree about its family.
+        ScalarValue::Utf8(_) => {
+            return Err(BuildError::Invalid(format!(
+                "attribute '{}' answered a string at entity {entity} through the scalar \
+                 accessor and not through the arena; its storage and its family disagree",
+                attribute.name
+            )))
+        }
     })
 }
 
@@ -6717,7 +6751,8 @@ mod tests {
     #[test]
     fn folding_the_extents_leaves_the_same_rows() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let extents = crate::extents::ExtentColumn::MERGE_FAN_IN * 2 + 3;
+        let fan_in = 8usize;
+        let extents = fan_in * 2 + 3;
         let mut spilled = crate::extents::ExtentColumn::new(dir.path(), 0, "abstract");
         // One row per extent, walking entity space in a stride so the extents interleave, plus a
         // second value for one entity in a later extent than the one that first carried it.
@@ -6732,7 +6767,7 @@ mod tests {
             .push_extent(&[(3u32, "the later value")])
             .expect("an extent");
         let before = prose_rows(&spilled);
-        spilled.cascade().expect("the cascade");
+        spilled.cascade(fan_in).expect("the cascade");
         assert_eq!(before, prose_rows(&spilled), "the fold moved a value");
         assert_eq!(before.get(&3).map(String::as_str), Some("the later value"));
     }

@@ -206,26 +206,39 @@ block of its own — the target is a target, not a cap.
 
 **Addressing is has-row rank, and it is specified because both obvious readings of an earlier
 draft were wrong** (review B5). A **has-row Roaring bitmap** marks the entities that have a blob
-row; an entity's rank in it indexes a compacted array of `u32` within-block offsets; a block
-directory of `(compressed offset, first rank)` locates the block by binary search. An entity with
-no blob-resident field is absent from the bitmap and occupies nothing. A blob **field** needs no
-per-field presence structure — a field's absence is its absence from the row — but the blob as a
-whole carries the one has-row bitmap; the two statements are about different things and both hold.
-One block read returns an entity's whole residual record; drill-down assembles the rest from the
-other two homes by array index.
+row; a block directory of `(compressed offset, first rank, row count)` locates the block holding a
+rank by binary search; the row is that rank less the block's first rank rows into the block, found
+by walking the block's rows, each of which states its own length. An entity with no blob-resident
+field is absent from the bitmap and occupies nothing. A blob **field** needs no per-field presence
+structure — a field's absence is its absence from the row — but the blob as a whole carries the one
+has-row bitmap; the two statements are about different things and both hold. One block read returns
+an entity's whole residual record; drill-down assembles the rest from the other two homes by array
+index.
+
+**The directory holds nothing per row** *(2026-09-13, owner ruling;
+[decision 0142](../decisions/0142-the-record-blob-delimits-a-row-by-a-length-the-row-states.md))*.
+A rank-indexed array of within-block offsets is 4 B for every row in the blob: 14.4 GB over the
+3.5×10⁹-row GBIF rung against a 13.9 GB `blocks.bin`, and 14 GB of it anonymous in the writer for
+the whole of the build's blob stage. It buys no read. Reaching any row of a block costs that
+block's decompress either way, and walking past `k` rows of the decompressed bytes costs a varint
+and an addition each over bytes already in cache. So the delimiter is a LEB128 length the row
+itself carries — one byte on a row under 128 bytes, inside the block's own compression — and the
+directory's fifth column is one row count a block.
 
 **A block states whose rows it holds** *(2026-09-11, owner ruling;
 [decision 0141](../decisions/0141-the-record-blob-states-identity-once-per-block.md))*. Its header
-carries the row count, the first rank, the first entity and a 64-bit digest over the directory's
-row offsets for the block, then one LEB128 varint per row after the first holding that row's entity
-as a distance from its predecessor, less the one that strict ascent already gives. A row is its
-fields and nothing else. The entity id and payload length that used to head every row are gone:
+carries the row count, the first rank and the first entity, then one LEB128 varint per row after
+the first holding that row's entity as a distance from its predecessor, less the one that strict
+ascent already gives. A row is a length and the fields it covers. The four-byte entity id that
+used to head every row is gone, and the four-byte payload length beside it is now a varint:
 they were **42.6% of `blocks.bin` on `gbif-64p` and 54.7% on `treeoflife-1m`** compressed, where a
-page-oriented store spends a fraction of a percent. Rebuilding both corpora under the block form
-takes **38.1% off `gbif-64p`'s `blocks.bin` and 41.5% off `treeoflife-1m`'s**, and 9.6% off a prose
-corpus whose rows are four times longer (measured, decision 0141). The identity is checked as often
-as it was, once per row read; it is *stored* once per block, which is where every other storage
-engine puts it.
+page-oriented store spends a fraction of a percent. Moving the identity to the block took
+**38.1% off `gbif-64p`'s `blocks.bin` and 41.5% off `treeoflife-1m`'s**, and 9.6% off a prose
+corpus whose rows are four times longer (measured, decision 0141) — that is the r93 step alone,
+with the directory unchanged. Moving the delimiter into the row after it takes **38.0% and 58.6%
+off the whole of `attrs/record/`** on the same two corpora, `blocks.bin` rising 18.3% and 5.3% as
+the varint enters it (measured, decision 0142). The identity is checked as often as it was, once
+per row read; it is *stored* once per block, which is where every other storage engine puts it.
 
 **The drill-down carries the item's satisfied labels beside its record** *(2026-08-31,
 [decision 0114](../decisions/0114-the-drill-down-serves-the-satisfied-labels-only.md),
@@ -239,37 +252,53 @@ with no list costs nothing) — read after the visibility verdict like every oth
 
 **The blob read is fail-closed against its one new failure class** (review B6). The other two
 homes are positional, so there is no offset to get wrong; the blob's indirection is new, and a
-build or fold defect the digest cannot catch — digests cover bytes, not addressing consistency —
-would otherwise serve a *neighbour's* record for a visible entity, from blocks that also hold
+build or fold defect a file digest cannot catch — digests cover bytes, not addressing consistency
+— would otherwise serve a *neighbour's* record for a visible entity, from blocks that also hold
 entities the principal cannot see. Reaching a row is three derived steps, and each is checked
-against something a different file states:
+against something else the artefact states:
 
 | the step | what could be wrong | what refuses |
 |---|---|---|
 | `hasrow.rank(entity)` | the bitmap names a different entity at a rank | the block's first entity against the bitmap's member at that rank, and every row's own entity against the entity the rank resolved to |
 | `block_of(rank)` | a corrupt compressed offset, or an off-by-one | the block's first rank against the directory's, and the rank's distance from it against the row count |
-| `row_offsets[…]` | the directory disagrees with the bytes it addresses | the block's digest over the directory's whole row-offset slice for it, and the rows section's length |
+| the walk to the row | a length that swallows its neighbour, putting a later row's bytes under this entity | the rows tiling the block: walking exactly the block's stated row count must land on its last byte, checked when the block is decompressed and before any row is served |
 
-Every offset and length is bounds-checked against its block, a row's fields must consume its extent
-exactly, and a mismatch refuses the request rather than answering. **Entity ids in a block are
+Two of the three steps cross files and the third does not: the delimiters and the bytes they
+delimit are the same block, so there is no second file for them to address past. Every length is
+bounds-checked against its block, a row's fields must consume its own length exactly, and a
+mismatch refuses the request rather than answering. **Entity ids in a block are
 never serialised to any client** (I10 as corrected by 0065 — the blob is an index internal, not a
 gather artefact). §10's catalogue gains the block-boundary cases.
 
-What is **not** caught is corruption inside a row's bytes that still frames as a whole field
-sequence filling the row's extent: the self-description refuses an unknown kind, a length past the
-extent or a walk that ends short of it, and past that the file digest is the guard. `tessera verify
---deep` walks every block of every layer offline, so a fold or coalesce that corrupted the
-addressing is reported by a verifier rather than first seen by a viewer receiving another
-principal's record.
+What is **not** caught is a rows section rewritten so that it still tiles. The self-description
+refuses an unknown kind, a length past the block or a field walk that ends short of the row's own
+length, and the walk refuses a block whose rows do not account for it exactly — but bytes that
+satisfy all of those do not refuse. This is wider than the class the per-row payload length left
+uncaught, which was a wrong value for the right entity: someone who rewrites a block may re-cut
+the rows as well as their contents, and the entities come from the gaps, which are untouched, so a
+neighbour's bytes can be presented under an earlier entity's identity where the tags permit. **The
+manifest's SHA-256 over `blocks.bin` is what stands against forged block bytes** (§7: a blob file
+that is missing, short, or fails its digest refuses at open), and it was already the only guard
+against the narrower class. Whether the wider one takes a leak-register row is the owner's call
+([decision 0142](../decisions/0142-the-record-blob-delimits-a-row-by-a-length-the-row-states.md)).
+`tessera verify --deep` walks every block of every layer offline, so a fold or coalesce that
+corrupted the addressing is reported by a verifier rather than first seen by a viewer receiving
+another principal's record.
 
 Three honesty notes travel with the format. The mixed row's ratio was *assumed* to match the
 per-column 2.44× and is now **measured better than it**: 3.00× against a 2.54× title control
 through the same writer, the shared context between neighbouring rows buying more than
-interleaving costs, with addressing at **4.13 B per has-row entity** ([the epic-1 measurements](../evidence/memos/2026-08-12-records-and-search-epic-1-measurements.md)). The
+interleaving costs, with addressing measured at **4.13 B per has-row entity** ([the epic-1 measurements](../evidence/memos/2026-08-12-records-and-search-epic-1-measurements.md)).
+Four of those bytes were the directory's rank-indexed offset, which the format no longer carries:
+addressing is now the has-row bitmap and a handful of words a block, **about 0.13 B per has-row
+entity** (modelled — the epic-1 figure less its offset; that measurement has not been re-run under
+this format), and what delimits a row is a varint inside the compressed block instead, measured at
+**0.83 compressed bytes a row** on `gbif-64p`. The
 blob-versus-dictionary comparison is per column shape (review N7): on a near-sequential identifier
-(`id`) the blob's compressed content is ~0.6 B/entity and the whole blob row ~4.6 B under this
-addressing — *cheaper* than DICT+C's 6.1 — while on `doi`/`submitter` shapes the blob costs ~11.7
-and the dictionary wins decisively; "`index = true` is cheaper *and* searchable" holds for the
+(`id`) the blob's compressed content is ~0.6 B/entity and the whole blob row **~1.6 B** under this
+addressing (modelled, the same substitution) — *cheaper* than DICT+C's 6.1, where the old
+addressing already made it cheaper at ~4.6 — while on `doi`/`submitter` shapes the blob costs
+~8.5 and the dictionary wins decisively; "`index = true` is cheaper *and* searchable" holds for the
 latter shapes, not the sequential-identifier one. And flipping a field to `index = true` later is
 a derivation pass over the blob — attrs §2.2's existing "build pass, no row rewrite" class —
 where under the old surface it was free; that is the price of not storing every field twice.
@@ -285,8 +314,8 @@ fixture's own generation functions, so a build that wrote wrong bytes and then s
 by them *disagrees* with the oracle instead of being agreed with — strictly stronger than reading
 the artefact, and this design inherits that construction rather than the weaker one an earlier
 draft claimed. The one narrow artefact-level check the blob adds is its own **addressing
-self-consistency** — rank, offsets, identities — which the fixture cannot see and B6's
-refusals depend on. Within the system, the artefact-of-record rule stands as stated: derived
+self-consistency** — rank, the rows tiling their block, identities — which the fixture cannot see
+and B6's refusals depend on. Within the system, the artefact-of-record rule stands as stated: derived
 structures are rebuilt from the record, never trusted beside it.
 
 ---
@@ -514,10 +543,11 @@ writers at 21.75–22.97 across three scales — the model was conservative by u
 index is **22.58 B/entity on disk against the flat column's 83.6** — smaller than the column it
 replaces,
 stable across a 9.6× scale range, because a head token's posting densifies as a tail token's
-spreads and the two cancel. With the blob record and its addressing beside it, **~59 GB at 10⁹
-against 83.6 GB flat** — the compressed value bytes (~31 GB) plus the blob's own offsets, has-row
-bitmap and directory (~4.4 GB; review B5's correction of an earlier ~55 GB that omitted the
-addressing) plus the index; the ~1.4× win stands.
+spreads and the two cancel. With the blob record and its addressing beside it, **~55.6 GB at 10⁹
+against 83.6 GB flat** — the compressed value bytes (~31 GB) plus the row lengths inside them
+(~0.8 GB) plus the has-row bitmap and block directory (~0.2 GB) plus the index. Modelled: review
+B5's correction put the addressing at ~4.4 GB when the directory carried a `u32` an entity, and
+dropping that array is what moves the total from ~59 GB. The ~1.4× win stands and widens.
 
 ⊘ **Two limits on that sizing, and the second is not a scale caveat.** The 10⁹ figure is a linear
 extrapolation of a per-entity cost measured to 2.4M; §11 gates promotion on extending it, and no
@@ -1027,7 +1057,7 @@ attrs/<column>/dict.bin            keyword, text: the layer's front-coded sorted
 attrs/<column>/postings.arrow      categories (built); keyword/text terms — hybrid singleton encoding
 attrs/record/blocks.bin            the record blob: zstd blocks in entity order (§3)
 attrs/record/hasrow.roaring        entities that have a blob row (§3's rank addressing)
-attrs/record/directory.arrow       block directory and rank-indexed within-block offsets
+attrs/record/directory.arrow       block directory: compressed extent, first rank, row count
 attrs/*/extents/<flush_id>.*       one set per flush, the blob included; every file digested; absence refuses
 ```
 
@@ -1120,7 +1150,7 @@ The oracle keeps the fixture-input relation (§3, review B7): expected values an
 derive from the fixture's own generation functions, with text passed through the linked analyser
 by invoking the `tessera tokenise` verb. The blob is checked through the served surface, plus one
 narrow artefact-level check the fixture cannot see — the addressing self-consistency B6's refusals
-depend on: rank, offsets, block bounds, identities. The analyser is pinned by golden
+depend on: rank, the rows tiling their block, block bounds, identities. The analyser is pinned by golden
 known-answer vectors per script family, dictionary-segmented scripts included. Where scoring
 lands, the oracle recomputes the mask-local statistics independently — DF as
 `|posting ∩ candidate|` from its own relation — and asserts the served cap selection is the

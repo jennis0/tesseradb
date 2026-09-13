@@ -58,9 +58,9 @@ pub use dict::{
 };
 pub use extent::{extent_paths, open_extent, write_extent, EXTENTS_DIR};
 pub use record::{
-    encode_block_header, encode_row, extent_digest, RecordBlob, RecordError, RecordField,
-    RecordRowCursor, RecordValue, RECORD_BLOCKS_FILE, RECORD_BLOCK_TARGET, RECORD_DIRECTORY_FILE,
-    RECORD_HASROW_FILE,
+    encode_block_header, encode_row, encode_row_from, encode_row_with, RecordBlob, RecordError,
+    RecordField, RecordFieldRef, RecordRowCursor, RecordValue, RecordValueRef, RowFields,
+    RECORD_BLOCKS_FILE, RECORD_BLOCK_TARGET, RECORD_DIRECTORY_FILE, RECORD_HASROW_FILE,
 };
 pub use record_stack::{RecordExtentPaths, RecordStack};
 pub use values::{

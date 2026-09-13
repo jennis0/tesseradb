@@ -416,12 +416,12 @@ fn carries_characters(ty: ScalarType) -> bool {
 /// against a charge of 23.5, 2% low.
 const EXTENT_SHARE: u64 = 2;
 
-/// What one record-blob row costs beyond its characters: **8 bytes a row and 3 a field**, plus a
-/// `u32` length on each `utf8` one (`tessera_filter::record` — `entity u32 | payload_len u32`,
+/// What one record-blob row costs beyond its characters: **3 bytes a row and 3 a field**, plus a
+/// `u32` length on each `utf8` one (`tessera_filter::record` — an entity gap and a row length,
 /// then `tag u16 | kind u8 | value` a field).
 ///
 /// Charged over the blob-resident columns and their rows because for a short value it is more
-/// than the value: an 8-character key in one `utf8` field is 15 bytes of framing against 8 of
+/// than the value: an 8-character key in one `utf8` field is 10 bytes of framing against 8 of
 /// characters. It rides through the same zstd the blocks do, so it is charged at [`EXTENT_SHARE`]
 /// with them.
 fn record_framing_bytes(schema: &crate::config::Schema, rows: u64) -> u64 {
@@ -443,16 +443,19 @@ fn record_framing_bytes(schema: &crate::config::Schema, rows: u64) -> u64 {
     rows.saturating_mul(RECORD_ROW_BYTES + fields)
 }
 
-/// `entity u32 | payload_len u32` before a record-blob row's first field.
-const RECORD_ROW_BYTES: u64 = 8;
+/// What a record-blob row costs the block around its fields: the entity gap the block header
+/// carries for it and the length the row itself carries, both LEB128 varints. One byte each for a
+/// row under 128 bytes whose entity follows its predecessor's within 128, charged at three so a
+/// wider corpus is not under-charged.
+const RECORD_ROW_BYTES: u64 = 3;
 
 /// `tag u16 | kind u8` before a record-blob field's value.
 const RECORD_FIELD_BYTES: u64 = 3;
 
 /// What one **extent** row costs beyond its characters, for `rows` of one spilled column.
 ///
-/// An extent row carries that column alone (`crate::extents`), so it is one row header and one
-/// `utf8` field — 15 bytes around a value an unindexed `keyword` column can hold in 8. Charged for
+/// An extent row carries that column alone (`crate::extents`), so it is one row's framing and one
+/// `utf8` field — 10 bytes around a value an unindexed `keyword` column can hold in 8. Charged for
 /// every column the routing spills and not for the type: a `keyword` or `utf8` column the record
 /// blob alone reads spills the same extents a `text` column does.
 fn extent_framing_bytes(rows: u64) -> u64 {
@@ -1782,22 +1785,21 @@ pub(crate) fn disk(
             );
         }
     }
-    // The blocks are charged at half the characters **and half the row framing**: a row is
-    // `entity | payload_len` and each field a `tag | kind`, plus a `u32` length on a `utf8` one,
-    // and for a short value that is more than the value ([`record_framing_bytes`]). The framing is
-    // zero exactly where no column is blob-resident, which is where there is no blob.
+    // The blocks are charged at half the characters **and half the row framing**: a row is an
+    // entity gap and a length, each field a `tag | kind`, plus a `u32` length on a `utf8` one, and
+    // for a short value that is more than the value ([`record_framing_bytes`]). The framing is
+    // zero exactly where no column is blob-resident, which is where there is no blob. The
+    // directory costs nothing an item: it holds a handful of words a block and nothing a row.
     let framing = record_framing_bytes(&args.schema, n);
     if framing > 0 {
         push(
             format!(
-                "the record blob: {} MiB of directory at 4 B/item, and its blocks modelled at half \
-                 the {} MiB of characters its columns carry and the {} MiB of row framing around \
-                 them",
-                (4 * n) >> 20,
+                "the record blob: its blocks modelled at half the {} MiB of characters its \
+                 columns carry and the {} MiB of row framing around them",
                 blob_payload >> 20,
                 framing >> 20
             ),
-            4 * n + (blob_payload + framing) / EXTENT_SHARE,
+            (blob_payload + framing) / EXTENT_SHARE,
             Phases::BLOB.onwards(),
         );
     }

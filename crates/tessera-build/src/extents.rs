@@ -38,7 +38,7 @@
 use std::path::{Path, PathBuf};
 
 use croaring::Bitmap;
-use tessera_filter::{Access, RecordBlob, RecordField, RecordValue, RECORD_BLOCK_TARGET};
+use tessera_filter::{Access, RecordBlob, RecordFieldRef, RecordValueRef, RECORD_BLOCK_TARGET};
 use tessera_filter_write::RecordBlobWriter;
 
 use crate::error::{BuildError, Result};
@@ -62,6 +62,15 @@ pub(crate) struct ExtentColumn {
     /// How many cascade rounds have run, so a folded extent's name cannot collide with the one it
     /// was folded from.
     folds: usize,
+    /// The compressor threads every one of this column's extents is written over.
+    ///
+    /// **One set per column, not one per extent.** A column spills an extent per join chunk — 964
+    /// of them on the widest column of the 3.5×10⁹-row GBIF rung — and a pool started inside each
+    /// writer would start and stop its threads that many times. Held here and handed from one
+    /// extent's writer to the next, they are started once, by the first extent that seals a block.
+    /// The columns are written from one rayon lane each, so what the build holds is one pool a
+    /// spilled column ([`tessera_filter_write::BlockPool`]).
+    pool: Option<tessera_filter_write::BlockPool>,
 }
 
 impl ExtentColumn {
@@ -72,6 +81,7 @@ impl ExtentColumn {
             dir: dir.to_path_buf(),
             extents: Vec::new(),
             folds: 0,
+            pool: None,
         }
     }
 
@@ -94,48 +104,50 @@ impl ExtentColumn {
                 self.name, self.column
             ))
         })?;
-        let mut writer = RecordBlobWriter::create(
+        let mut writer = RecordBlobWriter::create_with(
             &paths.blocks,
             &paths.hasrow,
             &paths.directory,
             RECORD_BLOCK_TARGET,
+            self.pool.take(),
         )
         .map_err(|e| BuildError::io(&paths.blocks, e))?;
         for &(entity, value) in rows {
             writer
                 .push_row(
                     entity,
-                    &[RecordField {
+                    &[RecordFieldRef {
                         tag,
-                        value: RecordValue::Utf8(value.to_string()),
+                        value: RecordValueRef::Utf8(value),
                     }],
                 )
                 .map_err(|e| BuildError::io(&paths.blocks, e))?;
         }
-        writer
+        self.pool = writer
             .finish()
             .map_err(|e| BuildError::io(&paths.blocks, e))?;
         self.extents.push(paths);
         Ok(())
     }
 
-    /// How many extents one merge holds open, and the number above which they are folded into
-    /// intermediates first: **128**.
-    ///
-    /// What an open extent costs the merge is one uncompressed block, 256 KiB, so 128 of them is
-    /// 32 MB. The cascade above that is a second write of the group's characters, which is why
-    /// the bound is not tighter: a join chunk is `JOIN_STAGE_BYTES` of staged rows, so a corpus
-    /// reaches 128 extents of one column only at ten times the 10⁸ rung's prose.
-    pub(crate) const MERGE_FAN_IN: usize = 128;
-
-    /// Fold the extents in groups until at most [`Self::MERGE_FAN_IN`] are left.
+    /// Fold the extents in groups until at most `max_open` are left ([`merge_fan_in`]).
     ///
     /// A group is a contiguous run in write order and is merged by the same row merge the blob
     /// itself is written by, so an entity written twice inside one group comes out carrying the
     /// later value and the ordering the live sets rest on survives.
-    pub(crate) fn cascade(&mut self) -> Result<()> {
-        while self.extents.len() > Self::MERGE_FAN_IN {
-            let groups = self.extents.len().div_ceil(Self::MERGE_FAN_IN);
+    ///
+    /// A fold buys nothing but the memory bound. Both of a column's readers are themselves
+    /// merges over every extent at once, so neither of them reads fewer bytes for having had the
+    /// extents folded first, and the fold is a second decompress, decode, re-encode and
+    /// recompress of the whole column. Measured on the 125,789,091-row GBIF prefix, the record
+    /// blob took 40.6 s over folded extents against 39.1 s over unfolded ones, with every output
+    /// byte identical; at rung 6 the fold was 1,951 s of the filter-postings stage's 3,677 s,
+    /// 44.8 GB written and 51.3 GB read. So `max_open` is set by the budget rather than by a
+    /// constant, and a corpus whose extents fit the budget never folds.
+    pub(crate) fn cascade(&mut self, max_open: usize) -> Result<()> {
+        let max_open = max_open.max(2);
+        while self.extents.len() > max_open {
+            let groups = self.extents.len().div_ceil(max_open);
             let per_group = self.extents.len().div_ceil(groups);
             let taken: Vec<ExtentPaths> = self.extents.drain(..).collect();
             let mut folded: Vec<ExtentPaths> = Vec::with_capacity(groups);
@@ -211,6 +223,35 @@ impl ExtentColumn {
     }
 }
 
+/// How many extents one merge may hold open under `budget`, above which
+/// [`ExtentColumn::cascade`] folds them into intermediates first.
+///
+/// What an open extent costs the merge **per extent** is one uncompressed block,
+/// [`RECORD_BLOCK_TARGET`], and the share allowed for them is a sixty-fourth of the budget: 32 MB
+/// of blocks, 128 extents, at the smallest budget a build is run under, and 1,281 at the 21.5 GB
+/// rung 6 was built under, which is past the 964 extents that build's widest column spilled. The
+/// extent count rises with the corpus and the budget does not, so the bound is what keeps the
+/// merge's memory off the corpus; the fold below it is the cost of that bound and is paid only
+/// where the bound bites.
+///
+/// **The other two per-extent costs do not scale with the extent count and are not what this
+/// bounds.** Opening an extent also brings in its has-row bitmap and builds its live set
+/// ([`OpenExtents`]), and both are shares of one column's entity set: cutting the same rows into
+/// twice as many extents halves each one's, so the bytes are the column's however the chunks fell.
+///
+/// The live-set loop in [`ExtentColumn::open`] is not free of the extent count — it is O(E·C)
+/// container steps over E extents and C containers, the running union being walked once per
+/// extent — but each step is a container header compared, and an extent's own containers are the
+/// only ones it copies. A join chunk stages a contiguous run of entities, so those are a 1/E share
+/// of the column. Beside E block buffers of 256 KiB apiece, the loop is not what the bound is
+/// about.
+pub(crate) fn merge_fan_in(budget: u64) -> usize {
+    let share = budget / 64;
+    usize::try_from(share / RECORD_BLOCK_TARGET as u64)
+        .unwrap_or(usize::MAX)
+        .max(2)
+}
+
 /// One column's extents, open, with each one's live set.
 pub(crate) struct OpenExtents {
     /// The declaration position, which is the field tag the rows carry.
@@ -262,11 +303,12 @@ impl OpenExtents {
         let blob = &self.blobs[window.extent];
         let live = &self.live[window.extent];
         let mut cursor = blob.rows_cursor_over(window.lo, window.hi);
-        while let Some((entity, fields)) = cursor.next_row().map_err(record_error)? {
+        while cursor.advance().map_err(record_error)? {
+            let entity = cursor.entity();
             if !live.contains(entity) {
                 continue;
             }
-            let value = field_value(&fields, self.column)?;
+            let value = field_value(&cursor, self.column)?;
             visit(entity as usize, value)?;
         }
         Ok(())
@@ -285,32 +327,25 @@ impl OpenExtents {
     ) -> Result<()> {
         let mut cursors: Vec<tessera_filter::RecordRowCursor<'_>> =
             self.blobs.iter().map(RecordBlob::rows_cursor).collect();
-        let mut heads: Vec<Option<(u32, Vec<RecordField>)>> = Vec::with_capacity(cursors.len());
         let mut heap: std::collections::BinaryHeap<std::cmp::Reverse<(u32, usize)>> =
             std::collections::BinaryHeap::with_capacity(cursors.len());
         for (i, cursor) in cursors.iter_mut().enumerate() {
-            let head = next_live(cursor, &self.live[i])?;
-            if let Some((entity, _)) = &head {
-                heap.push(std::cmp::Reverse((*entity, i)));
+            if next_live(cursor, &self.live[i])? {
+                heap.push(std::cmp::Reverse((cursor.entity(), i)));
             }
-            heads.push(head);
         }
         while let Some(std::cmp::Reverse((entity, source))) = heap.pop() {
-            let taken = heads[source]
-                .take()
-                .expect("a stream in the heap has a head");
-            visit(entity, field_value(&taken.1, self.column)?)?;
-            let next = next_live(&mut cursors[source], &self.live[source])?;
-            if let Some((next_entity, _)) = &next {
-                if *next_entity <= entity {
+            visit(entity, field_value(&cursors[source], self.column)?)?;
+            if next_live(&mut cursors[source], &self.live[source])? {
+                let next_entity = cursors[source].entity();
+                if next_entity <= entity {
                     return Err(BuildError::Invalid(format!(
                         "an extent yielded entity {next_entity} at or below its predecessor \
                          {entity}; an extent is written in the chunk's entity order"
                     )));
                 }
-                heap.push(std::cmp::Reverse((*next_entity, source)));
+                heap.push(std::cmp::Reverse((next_entity, source)));
             }
-            heads[source] = next;
         }
         Ok(())
     }
@@ -318,33 +353,35 @@ impl OpenExtents {
 
 /// The next row of one extent that its live set holds — a row outside it is a value a later chunk
 /// overwrote, skipped here for the reason [`OpenExtents::for_each_record_in`] skips it.
-fn next_live(
-    cursor: &mut tessera_filter::RecordRowCursor<'_>,
-    live: &Bitmap,
-) -> Result<Option<(u32, Vec<RecordField>)>> {
+fn next_live(cursor: &mut tessera_filter::RecordRowCursor<'_>, live: &Bitmap) -> Result<bool> {
     loop {
-        let Some((entity, fields)) = cursor.next_row().map_err(record_error)? else {
-            return Ok(None);
-        };
-        if live.contains(entity) {
-            return Ok(Some((entity, fields)));
+        if !cursor.advance().map_err(record_error)? {
+            return Ok(false);
+        }
+        if live.contains(cursor.entity()) {
+            return Ok(true);
         }
     }
 }
 
-/// The one field an extent's row carries, as a string.
-fn field_value(fields: &[RecordField], column: usize) -> Result<&str> {
+/// The one field the row a cursor is at carries, borrowed out of the cursor's own block.
+fn field_value<'a>(
+    cursor: &'a tessera_filter::RecordRowCursor<'a>,
+    column: usize,
+) -> Result<&'a str> {
     let tag = column as u16;
-    match fields.iter().find(|field| field.tag == tag) {
-        Some(RecordField {
-            value: RecordValue::Utf8(value),
-            ..
-        }) => Ok(value),
-        _ => Err(BuildError::Invalid(format!(
-            "an extent's row carries no utf8 value at field tag {tag}; the extent was written \
-             by this build and holds one field per row"
-        ))),
+    for i in 0..cursor.field_count() {
+        let field = cursor.field(i).map_err(record_error)?;
+        if field.tag == tag {
+            if let RecordValueRef::Utf8(value) = field.value {
+                return Ok(value);
+            }
+        }
     }
+    Err(BuildError::Invalid(format!(
+        "an extent's row carries no utf8 value at field tag {tag}; the extent was written \
+         by this build and holds one field per row"
+    )))
 }
 
 fn record_error(e: tessera_filter::RecordError) -> BuildError {
@@ -372,16 +409,24 @@ impl<'a> ExtentRows<'a> {
 }
 
 impl tessera_filter_write::RecordRows for ExtentRows<'_> {
-    fn next_row(&mut self) -> std::io::Result<Option<(u32, Vec<RecordField>)>> {
+    fn advance(&mut self) -> std::io::Result<bool> {
         loop {
-            let Some((entity, fields)) = self.cursor.next_row().map_err(std::io::Error::from)?
-            else {
-                return Ok(None);
-            };
-            if self.live.contains(entity) {
-                return Ok(Some((entity, fields)));
+            if !self.cursor.advance().map_err(std::io::Error::from)? {
+                return Ok(false);
+            }
+            if self.live.contains(self.cursor.entity()) {
+                return Ok(true);
             }
         }
+    }
+    fn entity(&self) -> u32 {
+        self.cursor.entity()
+    }
+    fn field_count(&self) -> usize {
+        self.cursor.field_count()
+    }
+    fn field(&self, i: usize) -> std::io::Result<RecordFieldRef<'_>> {
+        self.cursor.field(i).map_err(std::io::Error::from)
     }
 }
 

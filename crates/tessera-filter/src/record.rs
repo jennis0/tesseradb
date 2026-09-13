@@ -13,9 +13,9 @@
 //!
 //! ```text
 //! block   := row_count u32 LE | first_rank u32 LE | first_entity u32 LE
-//!            | extent_digest u64 LE | gap × (row_count - 1) | row × row_count
+//!            | gap × (row_count - 1) | row × row_count
 //! gap     := LEB128 varint: the row's entity less its predecessor's, less one
-//! row     := field*
+//! row     := payload_len LEB128 varint | field*
 //! field   := tag u16 LE | kind u8 | value
 //! kinds   := 0 bool (one byte, 0 or 1 — anything else refuses)
 //!            1 u8   2 u16   3 u32   4 u64   5 i8   6 i16   7 i32   8 i64
@@ -24,11 +24,12 @@
 //!            13 list (elem_kind u8 | count u32 LE | count values, element encoding only)
 //! ```
 //!
-//! A row has no header. It begins where the directory's rank-indexed offset places it, relative to
-//! the block's rows section, and ends where the next row begins or where the block does; a row's
-//! fields must consume that extent exactly. Rows carry no entity id of their own: the block states
-//! the first entity once and one varint per row after it, so the identity of every row is in the
-//! block that holds it at about a byte apiece rather than four ([decision 0141](../../../docs/decisions/0141-the-record-blob-states-identity-once-per-block.md)).
+//! A row states how many bytes of fields follow it and nothing else; its fields must consume
+//! exactly that many. Rows therefore tile a block's rows section end to end and are reached by
+//! walking it, which costs a varint and an addition apiece over rows already in cache. Rows carry
+//! no entity id of their own: the block states the first entity once and one varint per row after
+//! it, so the identity of every row is in the block that holds it at about a byte apiece rather
+//! than four ([decision 0141](../../../docs/decisions/0141-the-record-blob-states-identity-once-per-block.md)).
 //!
 //! `tag` is the column's position in the manifest's `declared_scalars` — an index internal, like
 //! the entity ids beside it, resolved to a column name server-side and never serialised to any
@@ -49,56 +50,71 @@
 //! would pass the target, so a row larger than the target gets an oversized block of its own — the
 //! target is a target, not a cap (records §3). Whole-row blocks are what make drill-down one block
 //! read and one decompress; the 256 KiB point is the string-storage probe's measured operating
-//! point on *title-shaped* bytes (2.44× at 169 µs/read), and the mixed-field row ratio is
-//! **assumed, not measured** — records §3 says so and §11 item 6 owes the measurement, so this
-//! module quotes neither figure as this format's.
+//! point on *title-shaped* bytes (2.44× at 169 µs/read), and the mixed-field row ratio records §3
+//! once marked assumed is measured there at 3.00× against a 2.54× title control through this
+//! writer. Neither figure is quoted here as this format's: both were taken before the row form
+//! moved twice.
 //!
 //! # Addressing is has-row rank (records §3, review B5)
 //!
-//! A **has-row Roaring bitmap** marks the entities that have a row; an entity's rank in it indexes
-//! a compacted `u32` array of within-block offsets; a block directory of
-//! `(compressed offset, first rank)` locates the block by binary search. An entity with no
-//! blob-resident value is absent from the bitmap and occupies nothing anywhere. Both obvious
-//! alternatives were wrong: a per-entity offset array pays 4 B for every entity that has no row,
-//! and a per-field presence structure re-buys per-column addressing for bytes that share a row.
+//! A **has-row Roaring bitmap** marks the entities that have a row; a block directory of
+//! `(compressed offset, first rank)` locates the block holding an entity's rank by binary search;
+//! the row is then the rank less the block's first rank rows into the block's rows section. An
+//! entity with no blob-resident value is absent from the bitmap and occupies nothing anywhere.
+//! Both obvious alternatives were wrong: a per-entity offset array pays 4 B for every entity that
+//! has no row, and a per-field presence structure re-buys per-column addressing for bytes that
+//! share a row.
 //!
 //! On disk the directory is one Arrow batch, one row per block: the compressed offset **and
-//! length**, the uncompressed length, the first rank, and the block's row offsets as a
-//! `LargeList<u32>` — large offsets because the flattened child is one element per has-row entity,
-//! and the 2³² entity ceiling does not fit an `i32` list. The lengths are derivable from the
-//! neighbouring offsets and are carried anyway: redundancy the reader *checks* is what turns an
-//! addressing defect into a refusal instead of a wrong answer.
+//! length**, the uncompressed length, the first rank **and the row count**. It holds nothing per
+//! row. A rank-indexed
+//! array of within-block offsets would be 4 B for every row in the blob, held resident for the
+//! whole of a build's blob stage and of every read after it — 14 GB over the 3.5×10⁹-row GBIF
+//! rung against a 13.9 GB `blocks.bin` — and it buys no read: reaching any row in a block costs
+//! that block's decompress, and walking the rows section past `k` rows costs a varint and an
+//! addition each over bytes already in cache. So the delimiter lives in the row, where it is a
+//! varint inside the block's own compression rather than four uncompressed bytes in a second file.
+//! The compressed lengths are derivable from the neighbouring offsets and are carried anyway:
+//! redundancy the reader *checks* is what turns an addressing defect into a refusal instead of a
+//! wrong answer.
 //!
 //! # The read is fail-closed (records §3, review B6)
 //!
 //! The blob's indirection is the one new failure class the attribute artefacts acquire: the other
-//! homes are positional, so there is no offset to get wrong, and the digest covers bytes, not
-//! addressing consistency. A build or fold defect here would otherwise serve a *neighbour's*
-//! record for a visible entity, out of blocks that also hold entities the principal cannot see.
-//! Reaching a row is three derived indirections — the has-row rank, the block that holds it, the
-//! offset within that block — and each is checked against something the other file states.
+//! homes are positional, so there is no offset to get wrong. A build or fold defect here would
+//! otherwise serve a *neighbour's* record for a visible entity, out of blocks that also hold
+//! entities the principal cannot see. Reaching a row is two derived indirections across files —
+//! the has-row rank and the block that holds it — and each is checked against something the other
+//! file states. The third, where the row sits inside the block, is no longer derived from a
+//! second file at all: the delimiters are the block's own bytes, so the class of defect where two
+//! files address past each other has nothing to address with.
 //!
 //! **The block header is that something.** Its `first_rank` is the directory's claim restated in
 //! the bytes the directory addresses, so a corrupt compressed offset or a mis-chosen block refuses
 //! instead of answering. Its `first_entity` is the has-row bitmap's rank-`first_rank` member
 //! restated in the block, so a corrupt bitmap refuses rather than shifting every row of the blob by
-//! one. Its `extent_digest` covers the directory's whole row-offset slice for the block and the
-//! rows section's length, so a directory that disagrees with the bytes it addresses refuses before
-//! a row is read, whichever of the two files moved. The gaps then give each row its own entity,
-//! checked against the entity the caller resolved through the rank, so a wrong rank inside the
-//! right block refuses too. Every offset and length is bounds-checked against its block, and any
+//! one. Its `row_count` is the count the directory's first ranks imply for the block, so a
+//! directory whose blocks and ranks disagree refuses before a row is read. The gaps then give each
+//! row its own entity, checked against the entity the caller resolved through the rank, so a wrong
+//! rank inside the right block refuses too. Every row length is bounds-checked against its block
+//! as the walk reaches it, the walk must reach the block's end exactly at its last row, and any
 //! mismatch, short file or malformed directory is a typed [`RecordError`] — never a neighbour's
 //! row, never a silent absence.
 //!
 //! Entity ids in the block are an index internal and are never serialised to any client (**I10**
 //! as corrected by decision 0065: the blob is an index internal, not a gather artefact).
 //!
-//! **What this does not catch**: a block whose *bytes* are corrupt inside a row, in a way that
-//! still frames as a field sequence consuming the row's extent exactly. The field walk is what
-//! stands there — a kind byte naming no kind, a length running past the extent, a walk that ends
-//! short of it all refuse — and the manifest's digest is what stands behind that (records §7: a
-//! blob file that fails its digest refuses at open). [`RecordBlob::self_check`] walks the whole
-//! artefact — ranks, offsets, block bounds, identities — for the conformance suite and for
+//! **What this does not catch**: a block's rows section rewritten so that it still tiles. The
+//! field walk is what stands inside a row — a kind byte naming no kind, a length running past the
+//! block, a walk that ends short of the row's own length all refuse — and the tiling walk stands
+//! around it, but bytes that satisfy both do not refuse. Someone who rewrites a block may re-cut
+//! its rows as well as their contents: as long as the walk visits the row count the header states
+//! and lands on the block's last byte, the entities still come from the gaps, which are untouched,
+//! so a neighbour's bytes can be presented under an earlier entity's identity where the tags
+//! permit. **The manifest's SHA-256 over `blocks.bin` is what stands there** (records §7: a blob
+//! file that fails its digest refuses at open), and decision 0142 leaves open whether that takes a
+//! leak-register row. [`RecordBlob::self_check`] walks the whole artefact — ranks, the rows tiling
+//! their block, block bounds, identities — for the conformance suite and for
 //! `tessera verify --deep`, neither of which can see addressing from the served surface
 //! (records §10).
 //!
@@ -111,7 +127,7 @@ use std::io;
 use std::path::Path;
 use std::sync::Arc;
 
-use arrow::array::{Array, LargeListArray, UInt32Array, UInt64Array};
+use arrow::array::{Array, UInt32Array, UInt64Array};
 use arrow::buffer::{Buffer, ScalarBuffer};
 use croaring::{Bitmap, Portable};
 
@@ -210,6 +226,95 @@ pub struct RecordField {
     pub value: RecordValue,
 }
 
+/// A field's value **borrowed from the bytes it came out of**: the form every producer of a blob
+/// row speaks, and the form the row walk yields.
+///
+/// A string is where this matters. A merge reading rows out of one blob and writing them into
+/// another touches every character three times if the value is owned — out of the decompressed
+/// block into a `String`, out of the `String` into the row buffer, and the free — and once if it
+/// is borrowed. Over the 3.5×10⁹-row GBIF rung the owned form was 6.4×10⁹ allocate-and-free
+/// pairs across the blob's merge and the keyword pass that reads the same extents. Lists are
+/// absent here because no writer produces one (records §5); a decoded list becomes a
+/// [`RecordValue`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum RecordValueRef<'a> {
+    Bool(bool),
+    U8(u8),
+    U16(u16),
+    U32(u32),
+    U64(u64),
+    I8(i8),
+    I16(i16),
+    I32(i32),
+    I64(i64),
+    F32(f32),
+    F64(f64),
+    TimestampUs(i64),
+    Utf8(&'a str),
+}
+
+/// One field of a row, its value borrowed ([`RecordValueRef`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RecordFieldRef<'a> {
+    /// The column's position in the manifest's `declared_scalars`.
+    pub tag: u16,
+    pub value: RecordValueRef<'a>,
+}
+
+impl RecordValue {
+    /// This value borrowed, or `None` for a list — which [`encode_row`] refuses anyway, the multi
+    /// surface not having landed (records §5).
+    pub fn as_ref(&self) -> Option<RecordValueRef<'_>> {
+        Some(match self {
+            RecordValue::Bool(v) => RecordValueRef::Bool(*v),
+            RecordValue::U8(v) => RecordValueRef::U8(*v),
+            RecordValue::U16(v) => RecordValueRef::U16(*v),
+            RecordValue::U32(v) => RecordValueRef::U32(*v),
+            RecordValue::U64(v) => RecordValueRef::U64(*v),
+            RecordValue::I8(v) => RecordValueRef::I8(*v),
+            RecordValue::I16(v) => RecordValueRef::I16(*v),
+            RecordValue::I32(v) => RecordValueRef::I32(*v),
+            RecordValue::I64(v) => RecordValueRef::I64(*v),
+            RecordValue::F32(v) => RecordValueRef::F32(*v),
+            RecordValue::F64(v) => RecordValueRef::F64(*v),
+            RecordValue::TimestampUs(v) => RecordValueRef::TimestampUs(*v),
+            RecordValue::Utf8(v) => RecordValueRef::Utf8(v.as_str()),
+            RecordValue::List(_) => return None,
+        })
+    }
+}
+
+impl RecordValueRef<'_> {
+    /// This value owned, for a caller that keeps it past the bytes it borrows.
+    pub fn to_owned(&self) -> RecordValue {
+        match *self {
+            RecordValueRef::Bool(v) => RecordValue::Bool(v),
+            RecordValueRef::U8(v) => RecordValue::U8(v),
+            RecordValueRef::U16(v) => RecordValue::U16(v),
+            RecordValueRef::U32(v) => RecordValue::U32(v),
+            RecordValueRef::U64(v) => RecordValue::U64(v),
+            RecordValueRef::I8(v) => RecordValue::I8(v),
+            RecordValueRef::I16(v) => RecordValue::I16(v),
+            RecordValueRef::I32(v) => RecordValue::I32(v),
+            RecordValueRef::I64(v) => RecordValue::I64(v),
+            RecordValueRef::F32(v) => RecordValue::F32(v),
+            RecordValueRef::F64(v) => RecordValue::F64(v),
+            RecordValueRef::TimestampUs(v) => RecordValue::TimestampUs(v),
+            RecordValueRef::Utf8(v) => RecordValue::Utf8(v.to_string()),
+        }
+    }
+}
+
+impl RecordFieldRef<'_> {
+    /// This field owned.
+    pub fn to_owned(&self) -> RecordField {
+        RecordField {
+            tag: self.tag,
+            value: self.value.to_owned(),
+        }
+    }
+}
+
 const KIND_BOOL: u8 = 0;
 const KIND_U8: u8 = 1;
 const KIND_U16: u8 = 2;
@@ -225,36 +330,9 @@ const KIND_TIMESTAMP_US: u8 = 11;
 const KIND_UTF8: u8 = 12;
 const KIND_LIST: u8 = 13;
 
-/// A block's fixed header: the row count, the first rank and the first entity, four bytes each,
-/// then the eight-byte extent digest. The per-row entity gaps follow it, and the rows follow
-/// those.
-const BLOCK_HEADER_FIXED: usize = 20;
-
-/// The digest a block carries of the extents the directory addresses it by: FNV-1a over 64 bits,
-/// folded over every row's start within the block's rows section, in order, then over that
-/// section's length.
-///
-/// The writer takes it over the offsets it is about to hand the directory; the reader takes it
-/// over the offsets the directory holds. The two files therefore disagree loudly rather than
-/// addressing past each other, which neither file can state on its own.
-///
-/// An addressing check, not an integrity one: it says the directory's offsets are the ones
-/// written beside these bytes, and says nothing about a file that was rewritten wholesale. The
-/// manifest's SHA-256 answers that question (records §7).
-pub fn extent_digest(offsets: &[u32], rows_len: u32) -> u64 {
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    let mut fold = |value: u32| {
-        for byte in value.to_le_bytes() {
-            hash ^= u64::from(byte);
-            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-        }
-    };
-    for offset in offsets {
-        fold(*offset);
-    }
-    fold(rows_len);
-    hash
-}
+/// A block's fixed header: the row count, the first rank and the first entity, four bytes each.
+/// The per-row entity gaps follow it, and the rows follow those.
+const BLOCK_HEADER_FIXED: usize = 12;
 
 fn put_varint(mut value: u32, out: &mut Vec<u8>) {
     loop {
@@ -270,33 +348,35 @@ fn put_varint(mut value: u32, out: &mut Vec<u8>) {
 
 /// One LEB128 varint out of `bytes`, refusing a truncated or over-wide one. The caller passes the
 /// bound the varint may not cross: the whole block while the gap section's own end is still being
-/// found, the end of that section once it is known.
+/// found, the end of that section once it is known, and the whole block again for the length that
+/// heads a row.
 fn take_varint(bytes: &[u8], cursor: &mut usize) -> Result<u32, RecordError> {
     let mut value: u32 = 0;
     let mut shift = 0u32;
     loop {
         let Some(byte) = bytes.get(*cursor).copied() else {
-            return Err(malformed(
-                "a block's entity gaps end in the middle of a varint",
-            ));
+            return Err(malformed("a block ends in the middle of a varint"));
         };
         *cursor += 1;
         let payload = u32::from(byte & 0x7f);
-        let Some(shifted) = payload.checked_shl(shift).filter(|v| (v >> shift) == payload) else {
-            return Err(malformed("a block's entity gap does not fit u32"));
+        let Some(shifted) = payload
+            .checked_shl(shift)
+            .filter(|v| (v >> shift) == payload)
+        else {
+            return Err(malformed("a block's varint does not fit u32"));
         };
         value |= shifted;
         if byte & 0x80 == 0 {
             if shift > 0 && byte == 0 {
                 return Err(malformed(
-                    "a block's entity gap is padded with a redundant continuation byte",
+                    "a block's varint is padded with a redundant continuation byte",
                 ));
             }
             return Ok(value);
         }
         shift += 7;
         if shift >= 32 {
-            return Err(malformed("a block's entity gap does not fit u32"));
+            return Err(malformed("a block's varint does not fit u32"));
         }
     }
 }
@@ -310,7 +390,6 @@ fn take_varint(bytes: &[u8], cursor: &mut usize) -> Result<u32, RecordError> {
 pub fn encode_block_header(
     first_rank: u32,
     entities: &[u32],
-    extent_digest: u64,
     out: &mut Vec<u8>,
 ) -> Result<(), RecordError> {
     let Some((&first, rest)) = entities.split_first() else {
@@ -326,7 +405,6 @@ pub fn encode_block_header(
     out.extend_from_slice(&row_count.to_le_bytes());
     out.extend_from_slice(&first_rank.to_le_bytes());
     out.extend_from_slice(&first.to_le_bytes());
-    out.extend_from_slice(&extent_digest.to_le_bytes());
     let mut previous = first;
     for &entity in rest {
         let Some(gap) = entity.checked_sub(previous).filter(|g| *g > 0) else {
@@ -347,7 +425,6 @@ struct BlockHeader {
     row_count: usize,
     first_rank: u32,
     first_entity: u32,
-    extent_digest: u64,
     /// Where the entity gaps begin in the uncompressed block.
     gaps_at: usize,
     /// Where the rows begin, one past the last gap.
@@ -370,7 +447,6 @@ fn decode_block_header(bytes: &[u8], block: usize) -> Result<BlockHeader, Record
     }
     let first_rank = word(4);
     let first_entity = word(8);
-    let extent_digest = u64::from_le_bytes(bytes[12..20].try_into().expect("eight bytes"));
     let gaps_at = BLOCK_HEADER_FIXED;
     let mut cursor = gaps_at;
     for _ in 1..row_count {
@@ -380,51 +456,112 @@ fn decode_block_header(bytes: &[u8], block: usize) -> Result<BlockHeader, Record
         row_count,
         first_rank,
         first_entity,
-        extent_digest,
         gaps_at,
         rows_at: cursor,
     })
 }
 
-impl BlockHeader {
-    /// The entity of the row at `local` within the block, walked from the first entity through
-    /// the gaps. The walk is what makes the identity the *block's* statement rather than the
-    /// bitmap's, which is the whole of the wrong-rank check.
-    fn entity_at(&self, bytes: &[u8], local: usize) -> Result<u32, RecordError> {
-        let mut entity = self.first_entity;
-        let mut cursor = self.gaps_at;
-        let gaps = &bytes[..self.rows_at];
-        for _ in 0..local {
-            let gap = take_varint(gaps, &mut cursor)?;
-            entity = entity
+/// A position in one decompressed block: which row is next, where its length varint begins, and
+/// the entity the block's gaps say that row belongs to.
+///
+/// **Every read of a row goes through one of these.** A block's rows are delimited by their own
+/// lengths and its entities by their own gaps, so a row is reached by walking to it, and the walk
+/// is where the bounds and the identity are checked. Holding the position lets a reader that wants
+/// several rows of one block walk it once: [`RecordBlob::for_each_row_in`] and
+/// [`RecordRowCursor`] carry a scan across rows, and [`RecordBlob::fields_of`], which wants one
+/// row and holds nothing between calls, starts a fresh one.
+#[derive(Debug, Clone, Copy)]
+struct BlockScan {
+    /// The index within the block of the row the scan is at.
+    local: usize,
+    /// Where that row's length varint begins in the uncompressed block.
+    at: usize,
+    /// The entity the gaps give that row.
+    entity: u32,
+    /// Where the gap walk has reached.
+    gaps_at: usize,
+}
+
+impl BlockScan {
+    /// The scan at a block's first row.
+    fn start(header: &BlockHeader) -> Self {
+        BlockScan {
+            local: 0,
+            at: header.rows_at,
+            entity: header.first_entity,
+            gaps_at: header.gaps_at,
+        }
+    }
+
+    /// Where the current row's fields begin and end in the block, bounds-checked against it.
+    ///
+    /// The length is the row's own statement, so a length that runs past the block refuses here
+    /// rather than reading a neighbour's bytes, and a zero length refuses because an entity with
+    /// no field has no row at all.
+    fn extent(&self, bytes: &[u8], block: usize) -> Result<(usize, usize), RecordError> {
+        let mut cursor = self.at;
+        let len = take_varint(bytes, &mut cursor)? as usize;
+        let end = cursor
+            .checked_add(len)
+            .filter(|end| *end <= bytes.len())
+            .ok_or_else(|| {
+                malformed(format!(
+                    "block {block} row {} states {len} bytes of fields, which run past the \
+                     {}-byte block",
+                    self.local,
+                    bytes.len()
+                ))
+            })?;
+        if len == 0 {
+            return Err(malformed(format!(
+                "block {block} row {} states no fields; an entity with no blob-resident value \
+                 has no row at all",
+                self.local
+            )));
+        }
+        Ok((cursor, end))
+    }
+
+    /// Step past the current row to the next, taking that row's entity from the gaps.
+    fn advance(
+        &mut self,
+        bytes: &[u8],
+        header: &BlockHeader,
+        block: usize,
+    ) -> Result<(), RecordError> {
+        let (_, end) = self.extent(bytes, block)?;
+        self.at = end;
+        self.local += 1;
+        if self.local < header.row_count {
+            let gap = take_varint(&bytes[..header.rows_at], &mut self.gaps_at)?;
+            self.entity = self
+                .entity
                 .checked_add(gap)
                 .and_then(|e| e.checked_add(1))
                 .ok_or_else(|| malformed("a block's entity gaps run past the entity ceiling"))?;
         }
-        Ok(entity)
+        Ok(())
     }
 }
 
-
 /// Append one entity's row to `out` — the writer's half of the format, kept beside the decoder so
-/// the layout exists in one module. A row is its fields and nothing else; the block header states
-/// whose row it is and the directory states where it starts.
+/// the layout exists in one module. A row is how many bytes of fields follow and then those
+/// fields; the block header states whose row it is.
+///
+/// The length is written as a LEB128 varint ahead of the fields, which costs one byte on a row
+/// under 128 bytes and two under 16 KiB, inside the block's own compression. It is what delimits
+/// the row: the alternative is a rank-indexed offset in the directory, four uncompressed bytes a
+/// row in a second file that a reader must hold resident and check against these bytes.
 ///
 /// Refuses: an empty field list (a row with no fields is an absence, and absence is absence from
-/// the has-row bitmap — see records §3); a duplicate tag; and a list value (specified for epic 3,
-/// produced by nothing until the multi surface lands — records §5). `entity` names the row in
-/// those refusals and is not encoded.
+/// the has-row bitmap — see records §3); a duplicate tag; and a list value, which
+/// [`RecordValueRef`] cannot spell (specified for epic 3, produced by nothing until the multi
+/// surface lands — records §5). `entity` names the row in those refusals and is not encoded.
 pub fn encode_row(
     entity: u32,
-    fields: &[RecordField],
+    fields: &[RecordFieldRef<'_>],
     out: &mut Vec<u8>,
 ) -> Result<(), RecordError> {
-    if fields.is_empty() {
-        return Err(malformed(format!(
-            "entity {entity} was given a row with no fields; an entity with no blob-resident \
-             value has no row at all (records §3)"
-        )));
-    }
     for (i, field) in fields.iter().enumerate() {
         if fields[..i].iter().any(|f| f.tag == field.tag) {
             return Err(malformed(format!(
@@ -433,76 +570,130 @@ pub fn encode_row(
             )));
         }
     }
-    for field in fields {
-        out.extend_from_slice(&field.tag.to_le_bytes());
-        encode_value(entity, &field.value, out)?;
+    encode_row_from(entity, fields.iter().copied(), out)
+}
+
+/// [`encode_row`] over a stream of fields that **ascend strictly in the tag**, which is what a
+/// merge has in hand once it has ordered one entity's fields: the ascent is the duplicate check,
+/// so the row is encoded without being collected first.
+pub fn encode_row_from<'a>(
+    entity: u32,
+    fields: impl Iterator<Item = RecordFieldRef<'a>>,
+    out: &mut Vec<u8>,
+) -> Result<(), RecordError> {
+    let mut fields = fields;
+    encode_row_with(entity, out, &mut |row| {
+        for field in fields.by_ref() {
+            row.field(field)?;
+        }
+        Ok(())
+    })
+}
+
+/// [`encode_row`] where the fields are handed over one at a time, in ascending tag order, by a
+/// producer that cannot collect them first.
+///
+/// A merge over several row streams is that producer: the fields of one entity's row are spread
+/// across streams that each own the bytes they lend, so a collected row would be a vector of
+/// borrows of several streams at once and could not be reused between rows. Handing them over one
+/// at a time encodes straight into the block buffer and holds nothing.
+pub fn encode_row_with(
+    entity: u32,
+    out: &mut Vec<u8>,
+    fields: &mut dyn FnMut(&mut RowFields<'_>) -> Result<(), RecordError>,
+) -> Result<(), RecordError> {
+    let start = out.len();
+    let mut row = RowFields {
+        out,
+        entity,
+        last: None,
+    };
+    let result = fields(&mut row);
+    let any = row.last.is_some();
+    if let Err(e) = result {
+        out.truncate(start);
+        return Err(e);
     }
+    if !any {
+        out.truncate(start);
+        return Err(malformed(format!(
+            "entity {entity} was given a row with no fields; an entity with no blob-resident \
+             value has no row at all (records §3)"
+        )));
+    }
+    let Ok(len) = u32::try_from(out.len() - start) else {
+        out.truncate(start);
+        return Err(malformed(format!(
+            "entity {entity}'s row is past u32::MAX bytes of fields"
+        )));
+    };
+    // The length is known only once the fields are encoded, and its own width only once it is
+    // known, so it is appended and rotated to the front of the row it heads. The rotation moves
+    // the row's bytes and nothing before them.
+    let before = out.len();
+    put_varint(len, out);
+    let width = out.len() - before;
+    out[start..].rotate_right(width);
     Ok(())
 }
 
-fn encode_value(entity: u32, value: &RecordValue, out: &mut Vec<u8>) -> Result<(), RecordError> {
-    match value {
-        RecordValue::Bool(b) => out.extend_from_slice(&[KIND_BOOL, u8::from(*b)]),
-        RecordValue::U8(v) => out.extend_from_slice(&[KIND_U8, *v]),
-        RecordValue::U16(v) => {
-            out.push(KIND_U16);
-            out.extend_from_slice(&v.to_le_bytes());
-        }
-        RecordValue::U32(v) => {
-            out.push(KIND_U32);
-            out.extend_from_slice(&v.to_le_bytes());
-        }
-        RecordValue::U64(v) => {
-            out.push(KIND_U64);
-            out.extend_from_slice(&v.to_le_bytes());
-        }
-        RecordValue::I8(v) => {
-            out.push(KIND_I8);
-            out.extend_from_slice(&v.to_le_bytes());
-        }
-        RecordValue::I16(v) => {
-            out.push(KIND_I16);
-            out.extend_from_slice(&v.to_le_bytes());
-        }
-        RecordValue::I32(v) => {
-            out.push(KIND_I32);
-            out.extend_from_slice(&v.to_le_bytes());
-        }
-        RecordValue::I64(v) => {
-            out.push(KIND_I64);
-            out.extend_from_slice(&v.to_le_bytes());
-        }
-        RecordValue::F32(v) => {
-            out.push(KIND_F32);
-            out.extend_from_slice(&v.to_le_bytes());
-        }
-        RecordValue::F64(v) => {
-            out.push(KIND_F64);
-            out.extend_from_slice(&v.to_le_bytes());
-        }
-        RecordValue::TimestampUs(v) => {
-            out.push(KIND_TIMESTAMP_US);
-            out.extend_from_slice(&v.to_le_bytes());
-        }
-        RecordValue::Utf8(s) => {
-            let Ok(len) = u32::try_from(s.len()) else {
-                return Err(malformed(format!(
-                    "entity {entity} carries a string past u32::MAX bytes"
-                )));
-            };
-            out.push(KIND_UTF8);
-            out.extend_from_slice(&len.to_le_bytes());
-            out.extend_from_slice(s.as_bytes());
-        }
-        RecordValue::List(_) => {
+/// One row's fields being appended, in ascending tag order ([`encode_row_with`]).
+pub struct RowFields<'o> {
+    out: &'o mut Vec<u8>,
+    entity: u32,
+    last: Option<u16>,
+}
+
+impl RowFields<'_> {
+    /// Append one field. Tags must ascend strictly; a tag at or below its predecessor is a field
+    /// with two values, or a producer that did not order them.
+    pub fn field(&mut self, field: RecordFieldRef<'_>) -> Result<(), RecordError> {
+        if self.last.is_some_and(|last| last >= field.tag) {
             return Err(malformed(format!(
-                "entity {entity} carries a list value; the list encoding is specified but \
-                 populated only when the multi surface lands (records §5), so writing one is \
-                 refused"
+                "entity {}'s fields arrived at tag {} after tag {}; a row's fields ascend \
+                 strictly and a repeated tag is a field with two values",
+                self.entity,
+                field.tag,
+                self.last.expect("checked is_some")
             )));
         }
+        self.last = Some(field.tag);
+        self.out.extend_from_slice(&field.tag.to_le_bytes());
+        encode_value(&field.value, self.out);
+        Ok(())
     }
-    Ok(())
+}
+
+fn encode_value(value: &RecordValueRef<'_>, out: &mut Vec<u8>) {
+    macro_rules! fixed {
+        ($kind:expr, $v:expr) => {{
+            out.push($kind);
+            out.extend_from_slice(&$v.to_le_bytes());
+        }};
+    }
+    match *value {
+        RecordValueRef::Bool(b) => out.extend_from_slice(&[KIND_BOOL, u8::from(b)]),
+        RecordValueRef::U8(v) => out.extend_from_slice(&[KIND_U8, v]),
+        RecordValueRef::U16(v) => fixed!(KIND_U16, v),
+        RecordValueRef::U32(v) => fixed!(KIND_U32, v),
+        RecordValueRef::U64(v) => fixed!(KIND_U64, v),
+        RecordValueRef::I8(v) => fixed!(KIND_I8, v),
+        RecordValueRef::I16(v) => fixed!(KIND_I16, v),
+        RecordValueRef::I32(v) => fixed!(KIND_I32, v),
+        RecordValueRef::I64(v) => fixed!(KIND_I64, v),
+        RecordValueRef::F32(v) => fixed!(KIND_F32, v),
+        RecordValueRef::F64(v) => fixed!(KIND_F64, v),
+        RecordValueRef::TimestampUs(v) => fixed!(KIND_TIMESTAMP_US, v),
+        RecordValueRef::Utf8(s) => {
+            // A string past u32::MAX is unreachable: the row it sits in is bounded by the same
+            // width and [`encode_row_from`] refuses there, so this saturates rather than
+            // carrying a second refusal for the same condition.
+            let len = u32::try_from(s.len()).unwrap_or(u32::MAX);
+            out.push(KIND_UTF8);
+            out.extend_from_slice(&len.to_le_bytes());
+            out.extend_from_slice(&s.as_bytes()[..len as usize]);
+        }
+    }
 }
 
 /// A bounds-checked little-endian read out of a row's payload.
@@ -519,6 +710,114 @@ macro_rules! take {
         *$cursor = hi;
         &$payload[lo..hi]
     }};
+}
+
+/// One field's value out of `payload`, borrowed. A list refuses here: the multi surface has not
+/// landed, so no artefact carries one, and the borrowing walk is the hot path
+/// ([`decode_row_fields`]). [`decode_row`] is the route that decodes one.
+fn decode_value_ref<'a>(
+    payload: &'a [u8],
+    cursor: &mut usize,
+    kind: u8,
+) -> Result<RecordValueRef<'a>, RecordError> {
+    macro_rules! fixed {
+        ($variant:ident, $t:ty, $what:expr) => {{
+            let bytes = take!(payload, cursor, std::mem::size_of::<$t>(), $what);
+            RecordValueRef::$variant(<$t>::from_le_bytes(
+                bytes.try_into().expect("take! returned the exact width"),
+            ))
+        }};
+    }
+    Ok(match kind {
+        KIND_BOOL => {
+            let byte = take!(payload, cursor, 1, "bool value")[0];
+            match byte {
+                0 => RecordValueRef::Bool(false),
+                1 => RecordValueRef::Bool(true),
+                other => {
+                    return Err(malformed(format!(
+                        "a bool field holds byte {other}; only 0 and 1 are bools"
+                    )))
+                }
+            }
+        }
+        KIND_U8 => RecordValueRef::U8(take!(payload, cursor, 1, "u8 value")[0]),
+        KIND_U16 => fixed!(U16, u16, "u16 value"),
+        KIND_U32 => fixed!(U32, u32, "u32 value"),
+        KIND_U64 => fixed!(U64, u64, "u64 value"),
+        KIND_I8 => RecordValueRef::I8(take!(payload, cursor, 1, "i8 value")[0] as i8),
+        KIND_I16 => fixed!(I16, i16, "i16 value"),
+        KIND_I32 => fixed!(I32, i32, "i32 value"),
+        KIND_I64 => fixed!(I64, i64, "i64 value"),
+        KIND_F32 => fixed!(F32, f32, "f32 value"),
+        KIND_F64 => fixed!(F64, f64, "f64 value"),
+        KIND_TIMESTAMP_US => fixed!(TimestampUs, i64, "timestamp value"),
+        KIND_UTF8 => {
+            let len = take!(payload, cursor, 4, "string length");
+            let len = u32::from_le_bytes(len.try_into().expect("four bytes")) as usize;
+            let bytes = take!(payload, cursor, len, "string bytes");
+            RecordValueRef::Utf8(
+                std::str::from_utf8(bytes)
+                    .map_err(|_| malformed("a utf8 field holds bytes that are not UTF-8"))?,
+            )
+        }
+        KIND_LIST => {
+            return Err(malformed(
+                "a row carries a list value; the list encoding is specified but populated only \
+                 when the multi surface lands (records §5)",
+            ))
+        }
+        other => {
+            return Err(malformed(format!(
+                "a field carries kind byte {other}, which names no value kind"
+            )))
+        }
+    })
+}
+
+/// Walk one row's fields into `out` as `(tag, kind, value start, value end)`, positions relative
+/// to `payload`.
+///
+/// **The walk a row cursor makes, which holds no borrow of the bytes it walked.** A cursor owns
+/// the decompressed block it reads, so it cannot hold decoded values pointing into it; it holds
+/// these positions instead and builds a [`RecordFieldRef`] when a caller asks for a field. The
+/// table is reused row after row, so a whole blob walks with no allocation past the first row.
+///
+/// Every check [`decode_row`] makes is made here: the walk consumes the row exactly, a duplicate
+/// tag refuses, and each value is decoded as it is passed so an unknown kind or an out-of-bounds
+/// length refuses now rather than when a field is read.
+fn decode_row_fields(
+    payload: &[u8],
+    entity: u32,
+    out: &mut Vec<(u16, u8, u32, u32)>,
+) -> Result<(), RecordError> {
+    out.clear();
+    let mut cursor = 0usize;
+    while cursor < payload.len() {
+        let tag = take!(payload, &mut cursor, 2, "field tag");
+        let tag = u16::from_le_bytes(tag.try_into().expect("two bytes"));
+        if out.iter().any(|held| held.0 == tag) {
+            return Err(malformed(format!(
+                "entity {entity}'s row carries field tag {tag} twice"
+            )));
+        }
+        let kind = take!(payload, &mut cursor, 1, "field kind")[0];
+        let start = cursor;
+        decode_value_ref(payload, &mut cursor, kind)?;
+        let (Ok(start), Ok(end)) = (u32::try_from(start), u32::try_from(cursor)) else {
+            return Err(malformed(format!(
+                "entity {entity}'s row is past u32::MAX bytes"
+            )));
+        };
+        out.push((tag, kind, start, end));
+    }
+    if out.is_empty() {
+        return Err(malformed(format!(
+            "entity {entity}'s row carries no fields; an entity with no blob-resident value has \
+             no row at all"
+        )));
+    }
+    Ok(())
 }
 
 fn decode_value(
@@ -591,13 +890,13 @@ fn decode_value(
     })
 }
 
-/// Decode one row's fields out of the extent the directory places it at.
+/// Decode one row's fields out of the bytes its own length covers.
 ///
-/// The extent is the whole of the row: the field walk must consume it exactly. A walk that runs
-/// past the extent refuses on bounds, and one that ends short of it cannot — the loop runs until
-/// the cursor reaches the end — so a directory offset that lands mid-row refuses unless the bytes
-/// there happen to frame as a whole field sequence. `entity` names the row in the refusals; it is
-/// checked against the block's own statement of identity before this is called.
+/// That length is the whole of the row: the field walk must consume it exactly. A walk that runs
+/// past it refuses on bounds, and one that ends short of it cannot — the loop runs until the
+/// cursor reaches the end — so a length that does not frame a whole field sequence refuses.
+/// `entity` names the row in the refusals; it is checked against the block's own statement of
+/// identity before this is called.
 fn decode_row(payload: &[u8], entity: u32) -> Result<Vec<RecordField>, RecordError> {
     let mut fields = Vec::new();
     let mut cursor = 0usize;
@@ -628,8 +927,8 @@ fn decode_row(payload: &[u8], entity: u32) -> Result<Vec<RecordField>, RecordErr
 /// Everything the directory claims about itself is verified at open — blocks contiguous and
 /// exactly covering `blocks.bin`, first ranks agreeing with the per-block row counts, the total
 /// agreeing with the has-row cardinality — so a truncated or doctored artefact refuses before any
-/// request reads through it. What open cannot see (row offsets against uncompressed bytes, the
-/// discriminants) is checked per read, and exhaustively by [`Self::self_check`].
+/// request reads through it. What open cannot see (a block's rows tiling it, the discriminants) is
+/// checked when the block is decompressed and exhaustively by [`Self::self_check`].
 #[derive(Debug)]
 pub struct RecordBlob {
     hasrow: Bitmap,
@@ -638,11 +937,10 @@ pub struct RecordBlob {
     compressed_len: ScalarBuffer<u64>,
     uncompressed_len: ScalarBuffer<u32>,
     first_rank: ScalarBuffer<u32>,
-    /// Per-block boundaries into `row_offsets` — the list offsets of the directory's
-    /// `row_offsets` column, `block_count + 1` entries.
-    list_offsets: ScalarBuffer<i64>,
-    /// The compacted rank-indexed within-block offsets, one per has-row entity (records §3).
-    row_offsets: ScalarBuffer<u32>,
+    /// How many rows each block holds. Derivable from the neighbouring first ranks and carried
+    /// anyway, at four bytes a block: it is what lets the has-row cardinality be checked against
+    /// the directory at open rather than at the first read of the last block.
+    row_count: ScalarBuffer<u32>,
 }
 
 impl RecordBlob {
@@ -705,22 +1003,12 @@ impl RecordBlob {
         let compressed_len = dir_column(1)?.values().clone();
         let uncompressed_len = dir_column_u32(2)?.values().clone();
         let first_rank = dir_column_u32(3)?.values().clone();
-        let lists: &LargeListArray = batch.column(4).as_any().downcast_ref().ok_or_else(|| {
-            malformed("directory column 4 is not the LargeList<u32> the format states")
-        })?;
-        let offsets_child: &UInt32Array =
-            lists.values().as_any().downcast_ref().ok_or_else(|| {
-                malformed("the directory's row offsets are not the u32 the format states")
-            })?;
-        if (0..batch.num_columns()).any(|i| batch.column(i).null_count() != 0)
-            || offsets_child.null_count() != 0
-        {
+        let row_count = dir_column_u32(4)?.values().clone();
+        if (0..batch.num_columns()).any(|i| batch.column(i).null_count() != 0) {
             return Err(malformed(
                 "the block directory carries nulls; every directory value is required",
             ));
         }
-        let list_offsets = lists.offsets().clone().into_inner();
-        let row_offsets = offsets_child.values().clone();
 
         let blob = RecordBlob {
             hasrow,
@@ -729,8 +1017,7 @@ impl RecordBlob {
             compressed_len,
             uncompressed_len,
             first_rank,
-            list_offsets,
-            row_offsets,
+            row_count,
         };
         blob.check_directory()?;
         Ok(blob)
@@ -742,10 +1029,14 @@ impl RecordBlob {
     /// redundancy is for.
     fn check_directory(&self) -> Result<(), RecordError> {
         let blocks = self.block_count();
-        if self.list_offsets.len() != blocks + 1 {
-            return Err(malformed(format!(
-                "the directory's row-offset lists disagree with its {blocks} blocks"
-            )));
+        if self.compressed_len.len() != blocks
+            || self.uncompressed_len.len() != blocks
+            || self.first_rank.len() != blocks
+            || self.row_count.len() != blocks
+        {
+            return Err(malformed(
+                "the block directory's columns are of unequal length",
+            ));
         }
         let mut at: u64 = 0;
         let mut rank: u64 = 0;
@@ -768,11 +1059,6 @@ impl RecordBlob {
                 )));
             }
             let rows = self.rows_in_block(block)?;
-            if rows == 0 {
-                return Err(malformed(format!(
-                    "block {block} holds no rows; an empty block is never written"
-                )));
-            }
             rank += rows as u64;
         }
         if at != self.blocks.len() as u64 {
@@ -809,15 +1095,16 @@ impl RecordBlob {
         self.hasrow.contains(entity)
     }
 
+    /// How many rows block `block` holds, as the directory states it. The block's own header
+    /// states it too, and [`Self::header_of`] compares them.
     fn rows_in_block(&self, block: usize) -> Result<usize, RecordError> {
-        let lo = self.list_offsets[block];
-        let hi = self.list_offsets[block + 1];
-        if lo < 0 || hi < lo || hi as usize > self.row_offsets.len() {
+        let rows = self.row_count[block] as usize;
+        if rows == 0 {
             return Err(malformed(format!(
-                "block {block}'s row-offset list bounds ({lo}..{hi}) are malformed"
+                "block {block} holds no rows; an empty block is never written"
             )));
         }
-        Ok((hi - lo) as usize)
+        Ok(rows)
     }
 
     /// One block, decompressed, its length checked against the directory's claim. The compressed
@@ -849,15 +1136,16 @@ impl RecordBlob {
     }
 
     /// A decompressed block's header, checked against everything the other two files say about
-    /// the block: the directory's row count and first rank, the has-row bitmap's member at that
-    /// rank, and the directory's own row-offset slice through the extent digest. Past this, the
-    /// block and the files that address it are known to be describing the same rows.
+    /// the block — the directory's row count and first rank, the has-row bitmap's member at that
+    /// rank — and against the block's own bytes through the tiling walk below. Past this, the
+    /// block and the files that address it are known to be describing the same rows, and every
+    /// row of the block is known to be reachable inside it.
     fn header_of(&self, block: usize, bytes: &[u8]) -> Result<BlockHeader, RecordError> {
         let header = decode_block_header(bytes, block)?;
         let rows = self.rows_in_block(block)?;
-        // The extent digest below covers the count as well, so this comparison detects nothing
-        // that one would miss. What it does is bound the row index `extent_of` takes from the
-        // header against the offsets the directory actually holds, and name the disagreement.
+        // The count the block states against the count the directory's first ranks imply. It is
+        // what bounds the walk: every row a block claims must be reachable inside it, and the
+        // last must end exactly where the block does.
         if header.row_count != rows {
             return Err(malformed(format!(
                 "block {block} states {} rows where the directory addresses {rows}",
@@ -884,61 +1172,43 @@ impl RecordBlob {
                 header.first_entity, header.first_rank
             )));
         }
-        let list_lo = self.list_offsets[block] as usize;
-        let offsets = &self.row_offsets[list_lo..list_lo + rows];
-        let rows_len = bytes.len() - header.rows_at;
-        let Ok(rows_len) = u32::try_from(rows_len) else {
+        // **The rows tile the block, checked once per block rather than once per row.** Each row
+        // states how many bytes of fields follow it, so the block's delimiters are checkable
+        // against nothing but the block: walking exactly `row_count` of them must land on the
+        // block's last byte. Without this a length doctored to swallow its neighbour would put a
+        // later row's bytes under an earlier row's entity, which is the substitution records §3
+        // makes a refusal. It costs a varint a row over bytes just decompressed, against the
+        // decompress itself.
+        let mut scan = BlockScan::start(&header);
+        for _ in 0..header.row_count {
+            scan.advance(bytes, &header, block)?;
+        }
+        if scan.at != bytes.len() {
             return Err(malformed(format!(
-                "block {block}'s rows exceed u32::MAX bytes"
-            )));
-        };
-        if extent_digest(offsets, rows_len) != header.extent_digest {
-            return Err(malformed(format!(
-                "block {block}'s extent digest does not match the directory's row offsets for it; \
-                 the directory and the block disagree about where this block's rows begin and the \
-                 read is refused rather than answered out of the wrong bytes"
+                "block {block} holds {} row bytes but its {} rows end at {}; a block carries \
+                 nothing but whole rows",
+                bytes.len() - header.rows_at,
+                header.row_count,
+                scan.at - header.rows_at
             )));
         }
         Ok(header)
     }
 
-    /// Where the row at `local` starts and ends within a block's rows section, bounds-checked.
-    /// The offsets were proved to be the ones written beside these bytes by the extent digest;
-    /// this is the arithmetic that turns two of them into a slice.
-    fn extent_of(
-        &self,
-        block: usize,
-        header: &BlockHeader,
-        block_len: usize,
-        local: usize,
-    ) -> Result<(usize, usize), RecordError> {
-        let list_lo = self.list_offsets[block] as usize;
-        let start = self.row_offsets[list_lo + local] as usize;
-        let end = if local + 1 < header.row_count {
-            self.row_offsets[list_lo + local + 1] as usize
-        } else {
-            block_len - header.rows_at
-        };
-        if start >= end || header.rows_at + end > block_len {
-            return Err(malformed(format!(
-                "block {block} row {local} is placed at [{start}, {end}) in a {}-byte rows \
-                 section; the directory does not address this block's bytes",
-                block_len - header.rows_at
-            )));
-        }
-        Ok((header.rows_at + start, header.rows_at + end))
-    }
-
-    /// One row out of an already-decompressed block, addressed by its rank.
+    /// One row out of an already-decompressed block, addressed by its rank, walking `scan`
+    /// forward to it.
     ///
     /// **The per-read half of the fail-closed rule, stated once.** Both readers that address a
     /// single row — [`Self::fields_of`] and [`Self::for_each_row_in`] — come through here, so the
-    /// identity check cannot hold on one route and not the other.
+    /// identity check cannot hold on one route and not the other. `scan` is where the caller has
+    /// already walked to in this block; it never walks backwards, which is what makes a reader
+    /// wanting many rows of one block cost one walk rather than one per row.
     fn row_at(
         &self,
         bytes: &[u8],
         block: usize,
         header: &BlockHeader,
+        scan: &mut BlockScan,
         rank: u32,
         entity: u32,
     ) -> Result<Vec<RecordField>, RecordError> {
@@ -954,24 +1224,34 @@ impl RecordBlob {
                 header.row_count, header.first_rank
             )));
         }
-        let carried = header.entity_at(bytes, local)?;
-        if carried != entity {
+        if local < scan.local {
             return Err(malformed(format!(
-                "the row addressed for entity {entity} is block {block}'s row {local}, which the \
-                 block says belongs to entity {carried}; the addressing is inconsistent and the \
-                 request is refused rather than answered with another entity's record \
-                 (records §3, review B6)"
+                "rank {rank} was addressed into block {block} behind the row {} the walk has \
+                 reached; a block is read forwards",
+                scan.local
             )));
         }
-        let (start, end) = self.extent_of(block, header, bytes.len(), local)?;
+        while scan.local < local {
+            scan.advance(bytes, header, block)?;
+        }
+        if scan.entity != entity {
+            return Err(malformed(format!(
+                "the row addressed for entity {entity} is block {block}'s row {local}, which the \
+                 block says belongs to entity {}; the addressing is inconsistent and the \
+                 request is refused rather than answered with another entity's record \
+                 (records §3, review B6)",
+                scan.entity
+            )));
+        }
+        let (start, end) = scan.extent(bytes, block)?;
         decode_row(&bytes[start..end], entity)
     }
 
     /// The whole row `entity` carries, decoded — or `None` where it has none.
     ///
     /// One block read and one decompress (records §3's cost shape). Every failure of the
-    /// addressing — an offset outside the block, a row that does not tile against its neighbour,
-    /// a discriminant naming another entity — refuses rather than answers.
+    /// addressing — a length running past the block, rows that do not account for the block, a
+    /// discriminant naming another entity — refuses rather than answers.
     ///
     /// **One entity per call, one decompress per call**, with nothing held between calls: a
     /// caller that wants many rows must not loop this, and [`Self::for_each_row_in`] is the read
@@ -986,7 +1266,9 @@ impl RecordBlob {
         let block = self.block_of(rank);
         let bytes = self.block_bytes(block)?;
         let header = self.header_of(block, &bytes)?;
-        self.row_at(&bytes, block, &header, rank, entity).map(Some)
+        let mut scan = BlockScan::start(&header);
+        self.row_at(&bytes, block, &header, &mut scan, rank, entity)
+            .map(Some)
     }
 
     /// The rows of the entities in `wanted` that this blob holds, **decompressing each block it
@@ -1008,17 +1290,23 @@ impl RecordBlob {
     ) -> Result<(), RecordError> {
         let mut present = wanted.clone();
         present.and_inplace(&self.hasrow);
-        let mut loaded: Option<(usize, BlockHeader)> = None;
+        let mut loaded: Option<(usize, BlockHeader, BlockScan)> = None;
         let mut bytes: Vec<u8> = Vec::new();
         for entity in present.iter() {
             let rank = (self.hasrow.rank(entity) - 1) as u32;
             let block = self.block_of(rank);
-            if loaded.map(|(b, _)| b) != Some(block) {
+            if loaded.map(|(b, _, _)| b) != Some(block) {
                 bytes = self.block_bytes(block)?;
-                loaded = Some((block, self.header_of(block, &bytes)?));
+                let header = self.header_of(block, &bytes)?;
+                let scan = BlockScan::start(&header);
+                loaded = Some((block, header, scan));
             }
-            let header = loaded.expect("just loaded").1;
-            f(entity, self.row_at(&bytes, block, &header, rank, entity)?)?;
+            let (_, header, scan) = loaded.as_mut().expect("just loaded");
+            let header = *header;
+            f(
+                entity,
+                self.row_at(&bytes, block, &header, scan, rank, entity)?,
+            )?;
         }
         Ok(())
     }
@@ -1092,16 +1380,14 @@ pub struct RecordRowCursor<'a> {
     /// The block being read, and one past the last this cursor covers.
     block: usize,
     end_block: usize,
-    /// The open block's bytes and its checked header.
+    /// The open block's bytes, its checked header, and where the walk has reached in it.
     bytes: Vec<u8>,
     header: Option<BlockHeader>,
-    /// The next row's index within the open block, the entity the block says it belongs to, and
-    /// where the gap walk has reached.
-    local: usize,
-    entity: u32,
-    gaps_at: usize,
-    /// The byte the previous row ended at, in the block's rows section.
-    tiled_to: usize,
+    scan: BlockScan,
+    /// The row the cursor is at: its entity, and its fields as positions into `bytes`. The table
+    /// is reused row after row ([`decode_row_fields`]), so a walk allocates once.
+    row: Option<(u32, usize)>,
+    fields: Vec<(u16, u8, u32, u32)>,
     /// Whether the has-row bitmap must be exhausted when the last block is done, which holds of a
     /// walk over the whole blob and not of one over a block range.
     whole: bool,
@@ -1120,17 +1406,39 @@ impl<'a> RecordRowCursor<'a> {
             end_block: hi,
             bytes: Vec::new(),
             header: None,
-            local: 0,
-            entity: 0,
-            gaps_at: 0,
-            tiled_to: 0,
+            scan: BlockScan {
+                local: 0,
+                at: 0,
+                entity: 0,
+                gaps_at: 0,
+            },
+            row: None,
+            fields: Vec::new(),
             whole,
         }
     }
 
     /// The next row, or `None` at the end of the cursor's blocks.
+    ///
+    /// The owned form, for a caller that keeps the row past the next block. A merge wants the
+    /// borrowed one ([`Self::advance`]).
     #[allow(clippy::should_implement_trait)]
     pub fn next_row(&mut self) -> Result<Option<(u32, Vec<RecordField>)>, RecordError> {
+        if !self.advance()? {
+            return Ok(None);
+        }
+        let entity = self.entity();
+        let fields = (0..self.field_count())
+            .map(|i| self.field(i).map(|f| f.to_owned()))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Some((entity, fields)))
+    }
+
+    /// Walk to the next row, or `Ok(false)` at the end of the cursor's blocks. The row's fields
+    /// are then [`Self::field_count`] and [`Self::field`], borrowed from the block the cursor
+    /// holds and valid until the next call.
+    pub fn advance(&mut self) -> Result<bool, RecordError> {
+        self.row = None;
         loop {
             if self.block >= self.end_block {
                 if self.whole && self.entities.has_value() {
@@ -1138,7 +1446,7 @@ impl<'a> RecordRowCursor<'a> {
                         "the has-row bitmap holds entities the directory never addresses",
                     ));
                 }
-                return Ok(None);
+                return Ok(false);
             }
             let header = match self.header {
                 Some(header) => header,
@@ -1146,70 +1454,83 @@ impl<'a> RecordRowCursor<'a> {
                     self.bytes = self.blob.block_bytes(self.block)?;
                     let header = self.blob.header_of(self.block, &self.bytes)?;
                     self.header = Some(header);
-                    self.local = 0;
-                    self.entity = header.first_entity;
-                    self.gaps_at = header.gaps_at;
-                    self.tiled_to = 0;
+                    self.scan = BlockScan::start(&header);
                     header
                 }
             };
-            if self.local == header.row_count {
-                if self.tiled_to != self.bytes.len() - header.rows_at {
+            if self.scan.local == header.row_count {
+                // The rows tile the block, which `header_of` proved of these bytes before the
+                // first row was read. Reaching the block's end here is the cursor's own walk
+                // agreeing with that.
+                if self.scan.at != self.bytes.len() {
                     return Err(malformed(format!(
                         "block {} holds {} row bytes but its rows end at {}; a block carries \
                          nothing but whole rows",
                         self.block,
                         self.bytes.len() - header.rows_at,
-                        self.tiled_to
+                        self.scan.at - header.rows_at
                     )));
                 }
                 self.block += 1;
                 self.header = None;
                 continue;
             }
-            if self.local > 0 {
-                let gap = take_varint(&self.bytes[..header.rows_at], &mut self.gaps_at)?;
-                self.entity = self
-                    .entity
-                    .checked_add(gap)
-                    .and_then(|e| e.checked_add(1))
-                    .ok_or_else(|| {
-                        malformed("a block's entity gaps run past the entity ceiling")
-                    })?;
-            }
-            let (start, end) = self
-                .blob
-                .extent_of(self.block, &header, self.bytes.len(), self.local)?;
-            if start - header.rows_at != self.tiled_to {
-                return Err(malformed(format!(
-                    "block {} row {} starts at byte {} where the previous row ends at {}; rows \
-                     must tile the block",
-                    self.block,
-                    self.local,
-                    start - header.rows_at,
-                    self.tiled_to
-                )));
-            }
             let entity = self.entities.current().ok_or_else(|| {
                 malformed("the directory addresses more rows than the has-row bitmap holds")
             })?;
-            if entity != self.entity {
+            if entity != self.scan.entity {
                 return Err(malformed(format!(
                     "block {}'s row {} belongs to entity {} where the has-row bitmap's rank-{} \
                      member is {entity}; the bitmap and the blocks disagree about which entity a \
                      rank names",
                     self.block,
-                    self.local,
-                    self.entity,
-                    header.first_rank as usize + self.local
+                    self.scan.local,
+                    self.scan.entity,
+                    header.first_rank as usize + self.scan.local
                 )));
             }
             self.entities.move_next();
-            let fields = decode_row(&self.bytes[start..end], entity)?;
-            self.tiled_to = end - header.rows_at;
-            self.local += 1;
-            return Ok(Some((entity, fields)));
+            let (start, end) = self.scan.extent(&self.bytes, self.block)?;
+            decode_row_fields(&self.bytes[start..end], entity, &mut self.fields)?;
+            self.scan.advance(&self.bytes, &header, self.block)?;
+            self.row = Some((entity, start));
+            return Ok(true);
         }
+    }
+
+    /// The entity of the row the cursor is at. Zero before the first [`Self::advance`].
+    pub fn entity(&self) -> u32 {
+        self.row.map_or(0, |(entity, _)| entity)
+    }
+
+    /// How many fields the row the cursor is at carries.
+    pub fn field_count(&self) -> usize {
+        if self.row.is_some() {
+            self.fields.len()
+        } else {
+            0
+        }
+    }
+
+    /// Field `i` of the row the cursor is at, borrowed from the block the cursor holds.
+    ///
+    /// The value is decoded here rather than at [`Self::advance`] because a decoded value borrows
+    /// the block and the cursor owns it. Every check is already made at advance, so the only
+    /// failure reachable here is a caller asking for a field the row does not carry.
+    pub fn field(&self, i: usize) -> Result<RecordFieldRef<'_>, RecordError> {
+        let (entity, at) = self
+            .row
+            .ok_or_else(|| malformed("a field was asked for before the cursor reached a row"))?;
+        let &(tag, kind, start, end) = self.fields.get(i).ok_or_else(|| {
+            malformed(format!(
+                "field {i} was asked for of entity {entity}'s row, which carries {}",
+                self.fields.len()
+            ))
+        })?;
+        let payload = &self.bytes[at + start as usize..at + end as usize];
+        let mut cursor = 0usize;
+        let value = decode_value_ref(payload, &mut cursor, kind)?;
+        Ok(RecordFieldRef { tag, value })
     }
 }
 
@@ -1253,8 +1574,37 @@ mod tests {
         decode_row(buf, entity)
     }
 
+    /// The fields of an encoded row, less the length that heads it — and the length checked
+    /// against what follows, which is the whole of the delimiter's contract.
+    fn payload(buf: &[u8]) -> &[u8] {
+        let mut cursor = 0usize;
+        let len = take_varint(buf, &mut cursor).expect("the row states its length") as usize;
+        assert_eq!(
+            cursor + len,
+            buf.len(),
+            "a row's length covers its fields exactly"
+        );
+        &buf[cursor..]
+    }
+
     fn field(tag: u16, value: RecordValue) -> RecordField {
         RecordField { tag, value }
+    }
+
+    /// Owned fields as the encoder takes them.
+    fn borrowed(fields: &[RecordField]) -> Vec<RecordFieldRef<'_>> {
+        fields
+            .iter()
+            .map(|f| RecordFieldRef {
+                tag: f.tag,
+                value: f.value.as_ref().expect("the tests carry no list"),
+            })
+            .collect()
+    }
+
+    /// Encode one owned row, as the tests around the format spell it.
+    fn encode(entity: u32, fields: &[RecordField], out: &mut Vec<u8>) -> Result<(), RecordError> {
+        encode_row(entity, &borrowed(fields), out)
     }
 
     /// Every scalar kind survives the round trip, including the empty string — a value, not an
@@ -1281,8 +1631,8 @@ mod tests {
             field(13, RecordValue::Utf8(String::new())),
         ];
         let mut buf = Vec::new();
-        encode_row(42, &fields, &mut buf).expect("encode");
-        assert_eq!(decode_row(&buf, 42).expect("decode"), fields);
+        encode(42, &fields, &mut buf).expect("encode");
+        assert_eq!(decode_row(payload(&buf), 42).expect("decode"), fields);
     }
 
     /// A row is its fields and nothing else: the entity names it in a refusal and is not encoded,
@@ -1291,11 +1641,26 @@ mod tests {
     fn a_row_carries_no_entity_of_its_own() {
         let fields = vec![field(0, RecordValue::U8(1))];
         let mut buf = Vec::new();
-        encode_row(7, &fields, &mut buf).expect("encode");
+        encode(7, &fields, &mut buf).expect("encode");
         let mut other = Vec::new();
-        encode_row(8, &fields, &mut other).expect("encode");
+        encode(8, &fields, &mut other).expect("encode");
         assert_eq!(buf, other);
-        assert_eq!(buf.len(), 4, "tag, kind, value and no header");
+        assert_eq!(buf.len(), 5, "a length byte, then tag, kind and value");
+    }
+
+    /// The length that heads a row is a varint, so it is one byte on a row under 128 bytes and
+    /// two under 16 KiB. That is what it saves against the four uncompressed bytes a rank-indexed
+    /// offset costs in the directory.
+    #[test]
+    fn a_row_states_its_length_as_a_varint() {
+        for (chars, width) in [(1usize, 1usize), (100, 1), (200, 2), (20_000, 3)] {
+            let fields = vec![field(0, RecordValue::Utf8("x".repeat(chars)))];
+            let mut buf = Vec::new();
+            encode(1, &fields, &mut buf).expect("encode");
+            // tag, kind and the utf8 length prefix are seven bytes around the characters.
+            assert_eq!(buf.len(), width + 7 + chars, "{chars} characters");
+            assert_eq!(decode_row(payload(&buf), 1).expect("decode"), fields);
+        }
     }
 
     /// The block header round-trips the row count, the first rank and every row's entity, and the
@@ -1309,15 +1674,27 @@ mod tests {
             (0..300).map(|i| i * 3 + 11).collect::<Vec<_>>(),
         ] {
             let mut out = Vec::new();
-            encode_block_header(13, &entities, 0xdead_beef_0bad_f00d, &mut out).expect("header");
+            encode_block_header(13, &entities, &mut out).expect("header");
             let header = decode_block_header(&out, 0).expect("decode");
             assert_eq!(header.row_count, entities.len());
             assert_eq!(header.first_rank, 13);
             assert_eq!(header.first_entity, entities[0]);
-            assert_eq!(header.extent_digest, 0xdead_beef_0bad_f00d);
-            assert_eq!(header.rows_at, out.len(), "the gaps end where the rows begin");
-            for (local, expect) in entities.iter().enumerate() {
-                assert_eq!(header.entity_at(&out, local).expect("walk"), *expect);
+            assert_eq!(
+                header.rows_at,
+                out.len(),
+                "the gaps end where the rows begin"
+            );
+            // The gaps walked through a scan that never reads a row, which is how a reader
+            // recovers an entity without decoding one.
+            let mut scan = BlockScan::start(&header);
+            for expect in &entities {
+                assert_eq!(scan.entity, *expect);
+                scan.local += 1;
+                if scan.local < header.row_count {
+                    let gap =
+                        take_varint(&out[..header.rows_at], &mut scan.gaps_at).expect("a gap");
+                    scan.entity += gap + 1;
+                }
             }
         }
     }
@@ -1329,8 +1706,8 @@ mod tests {
     fn a_repeated_or_descending_entity_refuses_at_the_header() {
         for entities in [vec![5u32, 5], vec![5, 4], vec![1, 9, 9]] {
             let mut out = Vec::new();
-            let err = encode_block_header(0, &entities, 0, &mut out)
-                .expect_err("entities ascend strictly");
+            let err =
+                encode_block_header(0, &entities, &mut out).expect_err("entities ascend strictly");
             assert!(err.to_string().contains("ascending"), "{err}");
         }
     }
@@ -1339,7 +1716,7 @@ mod tests {
     #[test]
     fn an_empty_block_refuses_at_both_ends() {
         let mut out = Vec::new();
-        assert!(encode_block_header(0, &[], 0, &mut out).is_err());
+        assert!(encode_block_header(0, &[], &mut out).is_err());
         let mut crafted = vec![0u8; BLOCK_HEADER_FIXED];
         assert!(decode_block_header(&crafted, 0).is_err());
         crafted.truncate(BLOCK_HEADER_FIXED - 1);
@@ -1351,29 +1728,19 @@ mod tests {
     #[test]
     fn a_header_whose_gaps_run_past_the_block_refuses() {
         let mut out = Vec::new();
-        encode_block_header(0, &[1, 2, 3], 0, &mut out).expect("header");
+        encode_block_header(0, &[1, 2, 3], &mut out).expect("header");
         out[0..4].copy_from_slice(&40u32.to_le_bytes());
         let err = decode_block_header(&out, 0).expect_err("the gaps are short");
         assert!(err.to_string().contains("varint"), "{err}");
     }
 
-    /// The extent digest is over the offsets and the rows section's length together, so moving a
-    /// row's start, adding a row or changing the section's length all change it.
-    #[test]
-    fn the_extent_digest_covers_every_offset_and_the_length() {
-        let base = extent_digest(&[0, 10, 25], 40);
-        assert_ne!(base, extent_digest(&[0, 11, 25], 40));
-        assert_ne!(base, extent_digest(&[0, 10, 25], 41));
-        assert_ne!(base, extent_digest(&[0, 10, 25, 30], 40));
-        assert_ne!(base, extent_digest(&[0, 25, 10], 40));
-        assert_eq!(base, extent_digest(&[0, 10, 25], 40));
-    }
-
-    /// A truncated payload refuses: the field walk is bounded by the extent the directory gave it.
+    /// A truncated payload refuses: the field walk is bounded by the extent the row's own length
+    /// gave it.
     #[test]
     fn a_truncated_row_refuses() {
         let mut buf = Vec::new();
-        encode_row(3, &[field(0, RecordValue::Utf8("hello".into()))], &mut buf).expect("encode");
+        encode(3, &[field(0, RecordValue::Utf8("hello".into()))], &mut buf).expect("encode");
+        let buf = payload(&buf).to_vec();
         for cut in [buf.len() - 1, 5, 3, 2, 1] {
             let err = decode(&buf[..cut], 3).expect_err("a short row must refuse");
             assert!(
@@ -1387,7 +1754,7 @@ mod tests {
     fn a_duplicate_tag_refuses_at_encode_and_decode() {
         let fields = vec![field(5, RecordValue::U8(1)), field(5, RecordValue::U8(2))];
         let mut buf = Vec::new();
-        let err = encode_row(1, &fields, &mut buf).expect_err("duplicate tags refuse");
+        let err = encode(1, &fields, &mut buf).expect_err("duplicate tags refuse");
         assert!(err.to_string().contains("twice"), "{err}");
 
         // And at decode, over hand-crafted bytes the encoder refuses to produce.
@@ -1424,17 +1791,13 @@ mod tests {
         assert!(decode(&crafted, 1).is_err());
     }
 
-    /// The writer refuses a list until epic 3's multi surface lands (records §5).
+    /// A list cannot be written until epic 3's multi surface lands (records §5): the encoder takes
+    /// borrowed values and [`RecordValueRef`] has no list arm, so a producer holding a decoded
+    /// list cannot hand one over.
     #[test]
-    fn encoding_a_list_refuses() {
-        let mut buf = Vec::new();
-        let err = encode_row(
-            1,
-            &[field(0, RecordValue::List(vec![RecordValue::U8(1)]))],
-            &mut buf,
-        )
-        .expect_err("lists are epic 3's");
-        assert!(err.to_string().contains("multi"), "{err}");
+    fn a_list_cannot_be_handed_to_the_encoder() {
+        let list = RecordValue::List(vec![RecordValue::U8(1)]);
+        assert!(list.as_ref().is_none(), "a list does not borrow");
     }
 
     /// The list encoding is pinned from crafted bytes, since no writer may produce it yet: the

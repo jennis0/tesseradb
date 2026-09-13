@@ -38,31 +38,191 @@
 //! than sorted, for `merge_order`'s reason: a sort here would paper over a broken allocator, and
 //! the symptom would be rows addressed against the wrong ranks.
 //!
-//! Block bytes stream to `blocks.bin` as blocks seal, so the writer holds one uncompressed block
-//! plus the directory's bookkeeping (a handful of words per block, 4 B per row) — never the blob.
-//! A writer abandoned part-way leaves a partial `blocks.bin` behind; no manifest names it, and
-//! the next build truncates it at create.
+//! Block bytes stream to `blocks.bin` as blocks seal and compress, so the writer holds the block
+//! being filled, the few that are compressing ([`COMPRESS_WORKERS`]) and the directory's
+//! bookkeeping — a handful of words per block, and nothing per row. The
+//! blob's rows are delimited by their own lengths, so the writer holds no rank-indexed offset
+//! array: over the 3.5×10⁹-row GBIF rung that array was 14 GB of anonymous memory held for the
+//! whole stage, against a 13.9 GB `blocks.bin`. A writer abandoned part-way leaves a partial
+//! `blocks.bin` behind; no manifest names it, and the next build truncates it at create.
 
 use std::cmp::Reverse;
-use std::collections::BinaryHeap;
+use std::collections::{BinaryHeap, HashMap};
 use std::fs::File;
 use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
+use std::sync::{Arc, Mutex};
 
-use arrow::array::{ArrayRef, LargeListArray, RecordBatch, UInt32Array, UInt64Array};
-use arrow::buffer::{OffsetBuffer, ScalarBuffer};
+use arrow::array::{ArrayRef, RecordBatch, UInt32Array, UInt64Array};
 use arrow::datatypes::{DataType, Field, Schema};
 use croaring::{Bitmap, Portable};
 
 use tessera_filter::{
-    encode_block_header, encode_row, extent_digest, RecordBlob, RecordField,
+    encode_block_header, encode_row, encode_row_with, RecordBlob, RecordFieldRef, RowFields,
 };
 
 /// zstd's default level — the operating point the string-storage probe measured its block ratios
 /// at. A writer's choice, not a format fact: the reader decompresses whatever level wrote the
 /// frame.
 const ZSTD_LEVEL: i32 = 3;
+
+/// How many sealed blocks may be compressing at once, beyond the one the caller is filling.
+///
+/// Compressing a sealed block needs nothing but the block, so it does not have to happen on the
+/// thread that is cutting the next one. The bound is what keeps that from costing memory: three
+/// workers and a queue of two is at most five blocks in flight.
+///
+/// **The figure is per pool, and a pool is per producer, so it multiplies by however many run at
+/// once.** The build's attribute join writes its spilled columns from one rayon lane each
+/// (`tessera_build::pipeline`), so a schema with four spilled columns has four pools: twelve
+/// threads and 1.25 MB apiece at the 256 KiB target. A pool is therefore started once per column
+/// and handed from one extent's writer to the next ([`BlockPool`]), not started per writer; a
+/// producer that seals no block starts no thread at all.
+///
+/// **1.25 MB is the target, not a cap.** A row larger than the target gets an oversized block of
+/// its own (records §3), so a corpus with a 4 MB row has up to five of those in flight instead.
+/// The bound in bytes is five times the largest row, and the target is what it is for every
+/// corpus whose rows are ordinary.
+///
+/// **The per-column pool covers the spill path only.** The fold a column takes when it spills more
+/// extents than one merge may hold open runs through [`merge_record_rows`], which makes its own
+/// writer and so its own pool, per merge group. That path is bounded by the fold's own group count
+/// and runs where the extent cap bites, which no corpus built so far reaches
+/// (`build-column-extents.md` §4).
+const COMPRESS_WORKERS: usize = 3;
+const COMPRESS_QUEUE: usize = 2;
+
+/// Sealed blocks compressing on a small pool, written in the order they were sealed.
+///
+/// **Order is the whole of the contract.** A block's compressed bytes are a function of its
+/// uncompressed bytes and the level, so the pool changes when a block is compressed and nothing
+/// about what it compresses to; writing them back in seal order then makes `blocks.bin` the file
+/// a single thread would have written, byte for byte. The directory is built here too, so its
+/// rows are in that order for the same reason.
+///
+/// **One pool serves any number of blobs, one after another.** A producer that writes many small
+/// artefacts — the join, spilling one extent per chunk per column — starts its pool once and
+/// hands it from writer to writer ([`RecordBlobWriter::finish`] returns it), so the threads are
+/// started once per column rather than once per extent. It cannot be shared between two writers
+/// at the same time: the sequence numbers are one blob's.
+#[derive(Debug)]
+pub struct BlockPool {
+    jobs: SyncSender<(u64, Vec<u8>)>,
+    results: Receiver<(u64, io::Result<Vec<u8>>)>,
+    workers: Vec<std::thread::JoinHandle<()>>,
+    /// Blocks compressed out of order, held until the blocks before them are written.
+    ready: HashMap<u64, Vec<u8>>,
+    /// How many blocks have been handed over, and how many have been written.
+    submitted: u64,
+    written: u64,
+}
+
+impl BlockPool {
+    /// Start the workers. Called once per producer, not once per blob.
+    pub fn start() -> Self {
+        let (jobs, jobs_rx) = sync_channel::<(u64, Vec<u8>)>(COMPRESS_QUEUE);
+        // Unbounded, so a worker never blocks handing a block back. What bounds the memory is the
+        // job queue: a result can only exist for a block that was submitted, and at most
+        // `COMPRESS_QUEUE + COMPRESS_WORKERS` are outstanding at any moment. A bounded result
+        // channel would deadlock instead — the writer waiting to submit, the workers waiting to
+        // hand back.
+        let (done, results) = std::sync::mpsc::channel();
+        let jobs_rx = Arc::new(Mutex::new(jobs_rx));
+        let mut workers = Vec::with_capacity(COMPRESS_WORKERS);
+        for _ in 0..COMPRESS_WORKERS {
+            let jobs_rx = Arc::clone(&jobs_rx);
+            let done = done.clone();
+            workers.push(std::thread::spawn(move || loop {
+                let job = {
+                    let rx = jobs_rx
+                        .lock()
+                        .expect("the job queue's lock is never poisoned");
+                    rx.recv()
+                };
+                let Ok((seq, block)) = job else { return };
+                if done
+                    .send((seq, zstd::bulk::compress(&block, ZSTD_LEVEL)))
+                    .is_err()
+                {
+                    return;
+                }
+            }));
+        }
+        BlockPool {
+            jobs,
+            results,
+            workers,
+            ready: HashMap::new(),
+            submitted: 0,
+            written: 0,
+        }
+    }
+
+    /// Hand one sealed block over, blocking while the queue is full.
+    fn submit(&mut self, block: Vec<u8>) -> io::Result<()> {
+        let seq = self.submitted;
+        self.submitted += 1;
+        self.jobs
+            .send((seq, block))
+            .map_err(|_| invalid("a block compressor stopped before the blob was written"))
+    }
+
+    /// Ready for the next blob: every block handed over has been written back, so the sequence
+    /// numbers start again. Called by [`RecordBlobWriter::finish`] before it hands the pool on,
+    /// which is after it has drained, so nothing is held.
+    fn reset(&mut self) {
+        debug_assert!(
+            self.ready.is_empty(),
+            "a pool being reset still holds a compressed block; the writer drains before it \
+             hands the pool on"
+        );
+        self.ready.clear();
+        self.submitted = 0;
+        self.written = 0;
+    }
+
+    /// The next block in seal order, or `None` where there is not one to write.
+    ///
+    /// `wait` says what `None` means: waiting, it is the end of the blob and every submitted
+    /// block has come back; not waiting, it is also the case where the next block is still
+    /// compressing, which is what lets the caller seal the block after it meanwhile.
+    fn next(&mut self, wait: bool) -> io::Result<Option<Vec<u8>>> {
+        loop {
+            if let Some(bytes) = self.ready.remove(&self.written) {
+                self.written += 1;
+                return Ok(Some(bytes));
+            }
+            if self.written == self.submitted {
+                return Ok(None);
+            }
+            let received = if wait {
+                self.results.recv().map_err(|_| ())
+            } else {
+                match self.results.try_recv() {
+                    Ok(received) => Ok(received),
+                    Err(std::sync::mpsc::TryRecvError::Empty) => return Ok(None),
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => Err(()),
+                }
+            };
+            let (seq, result) = received
+                .map_err(|()| invalid("a block compressor stopped before the blob was written"))?;
+            self.ready.insert(seq, result?);
+        }
+    }
+}
+
+impl Drop for BlockPool {
+    fn drop(&mut self) {
+        // Closing the queue is what ends the workers' loops; joining them keeps the threads from
+        // outliving the writer that started them.
+        let (dead, _) = sync_channel(1);
+        let _ = std::mem::replace(&mut self.jobs, dead);
+        for worker in self.workers.drain(..) {
+            let _ = worker.join();
+        }
+    }
+}
 
 /// Streams one record blob: `blocks.bin` as rows arrive, `hasrow.roaring` and `directory.arrow`
 /// at [`RecordBlobWriter::finish`]. Every producer — the batch build now, flush, coalesce and
@@ -77,18 +237,18 @@ pub struct RecordBlobWriter {
     written: u64,
     /// The current, unsealed block's uncompressed bytes.
     buf: Vec<u8>,
-    /// The current block's within-block row offsets, moved into `row_offsets` at seal.
-    current_offsets: Vec<u32>,
     /// The current block's entities, in the order their rows were appended. The block header
     /// states them as gaps at seal, which is what makes identity the block's own statement.
     current_entities: Vec<u32>,
     /// The rank of the current block's first row.
     block_first_rank: u32,
-    /// Sealed blocks: `(compressed_offset, compressed_len, uncompressed_len, first_rank)`.
-    directory: Vec<(u64, u64, u32, u32)>,
-    /// Every sealed block's row offsets, flattened; `list_offsets` carries the block boundaries.
-    row_offsets: Vec<u32>,
-    list_offsets: Vec<i64>,
+    /// Sealed blocks:
+    /// `(compressed_offset, compressed_len, uncompressed_len, first_rank, row_count)`.
+    directory: Vec<(u64, u64, u32, u32, u32)>,
+    /// What each block in flight states about itself, in seal order, paired with its compressed
+    /// bytes as they come back from the pool ([`BlockPool`]).
+    in_flight: std::collections::VecDeque<(u32, u32, u32)>,
+    pool: Option<BlockPool>,
     hasrow: Bitmap,
     rank: u32,
     last_entity: Option<u32>,
@@ -103,6 +263,19 @@ impl RecordBlobWriter {
         directory_path: &Path,
         target: usize,
     ) -> io::Result<Self> {
+        Self::create_with(blocks_path, hasrow_path, directory_path, target, None)
+    }
+
+    /// The same, over a [`BlockPool`] the caller already started. A producer writing many small
+    /// blobs one after another passes the pool [`Self::finish`] handed back, which is what keeps
+    /// the compressor threads to one set per producer rather than one per blob.
+    pub fn create_with(
+        blocks_path: &Path,
+        hasrow_path: &Path,
+        directory_path: &Path,
+        target: usize,
+        pool: Option<BlockPool>,
+    ) -> io::Result<Self> {
         if target == 0 {
             return Err(invalid("a zero block target would seal a block per row"));
         }
@@ -114,12 +287,11 @@ impl RecordBlobWriter {
             blocks: BufWriter::new(file),
             written: 0,
             buf: Vec::new(),
-            current_offsets: Vec::new(),
             current_entities: Vec::new(),
             block_first_rank: 0,
             directory: Vec::new(),
-            row_offsets: Vec::new(),
-            list_offsets: vec![0],
+            in_flight: std::collections::VecDeque::new(),
+            pool,
             hasrow: Bitmap::new(),
             rank: 0,
             last_entity: None,
@@ -129,7 +301,30 @@ impl RecordBlobWriter {
     /// Append one entity's row. Entities must ascend strictly; the fields are one entity's whole
     /// blob-resident record, encoded by the format's owner (which refuses an empty field list, a
     /// duplicate tag, and — until epic 3 — a list value).
-    pub fn push_row(&mut self, entity: u32, fields: &[RecordField]) -> io::Result<()> {
+    pub fn push_row(&mut self, entity: u32, fields: &[RecordFieldRef<'_>]) -> io::Result<()> {
+        self.push_encoded(entity, &mut |buf| encode_row(entity, fields, buf))
+    }
+
+    /// Append one entity's row, its fields handed over one at a time in ascending tag order.
+    ///
+    /// What a merge has: one entity's fields are spread across streams that each own the bytes
+    /// they lend, so collecting them would be a vector of borrows of several streams at once and
+    /// could not be reused row to row. This encodes straight into the open block.
+    pub fn push_row_with(
+        &mut self,
+        entity: u32,
+        fields: &mut dyn FnMut(&mut RowFields<'_>) -> Result<(), tessera_filter::RecordError>,
+    ) -> io::Result<()> {
+        self.push_encoded(entity, &mut |buf| encode_row_with(entity, buf, fields))
+    }
+
+    /// The block cutting and the bookkeeping around one encoded row, whichever way its fields
+    /// arrived.
+    fn push_encoded(
+        &mut self,
+        entity: u32,
+        encode: &mut dyn FnMut(&mut Vec<u8>) -> Result<(), tessera_filter::RecordError>,
+    ) -> io::Result<()> {
         if self.last_entity.is_some_and(|last| last >= entity) {
             return Err(invalid(format!(
                 "entity {entity} arrived at or below its predecessor {}; rows are in entity \
@@ -138,8 +333,7 @@ impl RecordBlobWriter {
             )));
         }
         let row_start = self.buf.len();
-        encode_row(entity, fields, &mut self.buf)?;
-        let row_len = self.buf.len() - row_start;
+        encode(&mut self.buf)?;
 
         // The row was appended to the open block optimistically; if it belongs in the next block
         // — the open block is non-empty and now past the target — move it. A row past the target
@@ -149,14 +343,6 @@ impl RecordBlobWriter {
             self.seal_block()?;
             self.buf = row;
         }
-        let offset = self.buf.len() - row_len;
-        let offset = u32::try_from(offset).map_err(|_| {
-            invalid(format!(
-                "entity {entity}'s row starts past u32::MAX bytes into its block; the \
-                 within-block offsets are u32 (records §3)"
-            ))
-        })?;
-        self.current_offsets.push(offset);
         self.current_entities.push(entity);
         self.hasrow.add(entity);
         self.last_entity = Some(entity);
@@ -169,48 +355,76 @@ impl RecordBlobWriter {
     /// Compress and stream the open block, and record its directory row.
     ///
     /// The header goes on the front here rather than at [`Self::push_row`] because it cannot be
-    /// written until the block is closed: it states the row count, and it carries the digest of
-    /// the row offsets the directory is about to be given. That digest is the only place the two
-    /// files meet, so the reader can tell a directory that disagrees with these bytes from one
-    /// that addresses them (`tessera_filter::extent_digest`).
+    /// written until the block is closed: it states the row count and the entities of the rows,
+    /// as one first entity and a gap apiece.
     fn seal_block(&mut self) -> io::Result<()> {
         if self.buf.is_empty() {
             return Ok(());
         }
-        let rows_len = u32::try_from(self.buf.len())
-            .map_err(|_| invalid("a block exceeds u32::MAX uncompressed bytes"))?;
-        let digest = extent_digest(&self.current_offsets, rows_len);
         let mut block = Vec::with_capacity(self.buf.len() + 32 + self.current_entities.len());
-        encode_block_header(
-            self.block_first_rank,
-            &self.current_entities,
-            digest,
-            &mut block,
-        )?;
+        encode_block_header(self.block_first_rank, &self.current_entities, &mut block)?;
         block.extend_from_slice(&self.buf);
         let uncompressed = u32::try_from(block.len())
             .map_err(|_| invalid("a block exceeds u32::MAX uncompressed bytes"))?;
-        let compressed = zstd::bulk::compress(&block, ZSTD_LEVEL)?;
-        self.blocks.write_all(&compressed)?;
-        self.directory.push((
-            self.written,
-            compressed.len() as u64,
-            uncompressed,
-            self.block_first_rank,
-        ));
-        self.written += compressed.len() as u64;
-        self.row_offsets.append(&mut self.current_offsets);
-        self.list_offsets.push(self.row_offsets.len() as i64);
+        let rows = u32::try_from(self.current_entities.len())
+            .map_err(|_| invalid("more rows in one block than the u32 rank space holds"))?;
+        self.in_flight
+            .push_back((uncompressed, self.block_first_rank, rows));
+        self.pool
+            .get_or_insert_with(BlockPool::start)
+            .submit(block)?;
         self.current_entities.clear();
         self.block_first_rank = self.rank;
         self.buf.clear();
+        // Write whatever the pool has already finished, and do not wait for the rest: what bounds
+        // the blocks in flight is the pool's own queue, which is where this thread waits.
+        self.drain_blocks(false)?;
+        Ok(())
+    }
+
+    /// Write every block the pool has finished, in seal order, and record its directory row.
+    /// With `wait`, every block it has been given.
+    fn drain_blocks(&mut self, wait: bool) -> io::Result<()> {
+        let Some(pool) = self.pool.as_mut() else {
+            return Ok(());
+        };
+        while let Some(compressed) = pool.next(wait)? {
+            let (uncompressed, first_rank, rows) = self
+                .in_flight
+                .pop_front()
+                .ok_or_else(|| invalid("a compressed block arrived for no sealed block"))?;
+            self.blocks.write_all(&compressed)?;
+            self.directory.push((
+                self.written,
+                compressed.len() as u64,
+                uncompressed,
+                first_rank,
+                rows,
+            ));
+            self.written += compressed.len() as u64;
+        }
         Ok(())
     }
 
     /// Seal the open block and write the addressing files. `blocks.bin` is durable before the
     /// directory that addresses into it exists.
-    pub fn finish(mut self) -> io::Result<()> {
+    ///
+    /// Returns the compressor pool, drained and ready for another blob, for a producer that wants
+    /// to write the next one over the same threads ([`Self::create_with`]). A caller that drops it
+    /// stops those threads.
+    pub fn finish(mut self) -> io::Result<Option<BlockPool>> {
         self.seal_block()?;
+        self.drain_blocks(true)?;
+        let mut pool = self.pool.take();
+        if let Some(pool) = pool.as_mut() {
+            pool.reset();
+        }
+        if !self.in_flight.is_empty() {
+            return Err(invalid(format!(
+                "{} sealed block(s) were never compressed",
+                self.in_flight.len()
+            )));
+        }
         let file = self
             .blocks
             .into_inner()
@@ -223,18 +437,8 @@ impl RecordBlobWriter {
             Field::new("compressed_len", DataType::UInt64, false),
             Field::new("uncompressed_len", DataType::UInt32, false),
             Field::new("first_rank", DataType::UInt32, false),
-            Field::new(
-                "row_offsets",
-                DataType::LargeList(Arc::new(Field::new("item", DataType::UInt32, false))),
-                false,
-            ),
+            Field::new("row_count", DataType::UInt32, false),
         ]));
-        let lists = LargeListArray::new(
-            Arc::new(Field::new("item", DataType::UInt32, false)),
-            OffsetBuffer::new(ScalarBuffer::from(self.list_offsets)),
-            Arc::new(UInt32Array::from(self.row_offsets)),
-            None,
-        );
         let columns: Vec<ArrayRef> = vec![
             Arc::new(UInt64Array::from_iter_values(
                 self.directory.iter().map(|d| d.0),
@@ -248,7 +452,9 @@ impl RecordBlobWriter {
             Arc::new(UInt32Array::from_iter_values(
                 self.directory.iter().map(|d| d.3),
             )),
-            Arc::new(lists),
+            Arc::new(UInt32Array::from_iter_values(
+                self.directory.iter().map(|d| d.4),
+            )),
         ];
         let batch = RecordBatch::try_new(schema.clone(), columns)
             .map_err(|e| invalid(format!("assembling the block directory ({n} blocks): {e}")))?;
@@ -268,7 +474,7 @@ impl RecordBlobWriter {
         // how a bitmap happened to be built.
         self.hasrow.run_optimize();
         std::fs::write(&self.hasrow_path, self.hasrow.serialize::<Portable>())?;
-        Ok(())
+        Ok(pool)
     }
 }
 
@@ -384,9 +590,26 @@ fn write_merged_rows(
 ///
 /// A build's producer is not a blob: its rows come from the columns it has just joined and from
 /// the extents it spilled while joining them, so the merge takes a stream rather than a layer.
+///
+/// **A row is lent, not handed over.** A stream that owned each row would copy every string out
+/// of the bytes it read and free it a row later: over the 3.5×10⁹-row GBIF rung that was
+/// 6.4×10⁹ allocate-and-free pairs across this merge and the keyword pass reading the same
+/// extents, for characters that are copied again into the output block a moment afterwards. So
+/// the stream stays at a row while the merge reads its fields, and the fields borrow whatever
+/// buffer the stream holds: a decompressed block, a column's arena. A borrow is valid until the
+/// next [`RecordRows::advance`] on that stream.
 pub trait RecordRows {
-    /// The next row, ascending strictly in the entity. `None` ends the stream.
-    fn next_row(&mut self) -> io::Result<Option<(u32, Vec<RecordField>)>>;
+    /// Walk to the next row, ascending strictly in the entity. `false` ends the stream.
+    fn advance(&mut self) -> io::Result<bool>;
+
+    /// The entity of the row the stream is at.
+    fn entity(&self) -> u32;
+
+    /// How many fields that row carries.
+    fn field_count(&self) -> usize;
+
+    /// Field `i` of that row, borrowed from the stream's own buffer.
+    fn field(&self, i: usize) -> io::Result<RecordFieldRef<'_>>;
 }
 
 /// A [`RecordBlob`]'s own rows as such a stream.
@@ -411,8 +634,17 @@ impl<'a> BlobRows<'a> {
 }
 
 impl RecordRows for BlobRows<'_> {
-    fn next_row(&mut self) -> io::Result<Option<(u32, Vec<RecordField>)>> {
-        self.cursor.next_row().map_err(io::Error::from)
+    fn advance(&mut self) -> io::Result<bool> {
+        self.cursor.advance().map_err(io::Error::from)
+    }
+    fn entity(&self) -> u32 {
+        self.cursor.entity()
+    }
+    fn field_count(&self) -> usize {
+        self.cursor.field_count()
+    }
+    fn field(&self, i: usize) -> io::Result<RecordFieldRef<'_>> {
+        self.cursor.field(i).map_err(io::Error::from)
     }
 }
 
@@ -425,7 +657,10 @@ impl RecordRows for BlobRows<'_> {
 /// else. The fold and the coalesce pass streams their own guard has already proved disjoint, so
 /// for them the merge is a concatenation and the bytes are the ones a single stream wrote.
 ///
-/// Held at once: one open row per stream, and the writer's open block.
+/// Held at once: a heap of the streams that have a row, a list of which stream holds which of the
+/// row's tags, and the writer's open block. The fields themselves are never collected — they are lent
+/// by the streams and encoded straight into the block ([`RecordRows`]), so a row of any width
+/// costs no allocation.
 pub fn merge_record_rows(
     sources: &mut [&mut dyn RecordRows],
     tombstones: &Bitmap,
@@ -434,54 +669,77 @@ pub fn merge_record_rows(
     directory_path: &Path,
     target: usize,
 ) -> io::Result<()> {
-    let mut heads: Vec<Option<(u32, Vec<RecordField>)>> = Vec::with_capacity(sources.len());
+    // The heap is the whole of the merge's bookkeeping: a stream that has a row is in it under
+    // that row's entity, and a stream that is out of rows is not.
     let mut heap: BinaryHeap<Reverse<(u32, usize)>> = BinaryHeap::with_capacity(sources.len());
     for (i, source) in sources.iter_mut().enumerate() {
-        let head = source.next_row()?;
-        if let Some((entity, _)) = &head {
-            heap.push(Reverse((*entity, i)));
+        if source.advance()? {
+            heap.push(Reverse((source.entity(), i)));
         }
-        heads.push(head);
     }
     let mut writer = RecordBlobWriter::create(blocks_path, hasrow_path, directory_path, target)?;
-    let mut fields: Vec<RecordField> = Vec::new();
+    // Which stream holds which tag of the row being assembled, `(tag, stream, field)`. Reused row
+    // after row, so the merge allocates once however many rows it writes.
+    let mut picks: Vec<(u16, usize, usize)> = Vec::new();
+    // The streams that were at this entity, to be walked on once the row is written — they cannot
+    // move while the row's fields are borrowed out of them.
+    let mut at_entity: Vec<usize> = Vec::new();
     while let Some(Reverse((entity, _))) = heap.peek().copied() {
-        fields.clear();
+        picks.clear();
+        at_entity.clear();
         while let Some(&Reverse((head, source))) = heap.peek() {
             if head != entity {
                 break;
             }
             heap.pop();
-            let taken = heads[source].take().expect("a stream in the heap has a head");
-            for field in taken.1 {
-                match fields.iter_mut().find(|held| held.tag == field.tag) {
+            at_entity.push(source);
+            for field in 0..sources[source].field_count() {
+                let tag = sources[source].field(field)?.tag;
+                match picks.iter_mut().find(|held| held.0 == tag) {
                     // A later stream is the later write. The build's streams carry disjoint tags
                     // for one entity, so this arm is the refusal's absence rather than a route
                     // anything takes.
-                    Some(held) => held.value = field.value,
-                    None => fields.push(field),
+                    Some(held) => {
+                        held.1 = source;
+                        held.2 = field;
+                    }
+                    None => picks.push((tag, source, field)),
                 }
             }
-            let next = sources[source].next_row()?;
-            if let Some((next_entity, _)) = &next {
-                if *next_entity <= entity {
+        }
+        if !tombstones.contains(entity) {
+            // Rule F's remove-emit-no-bytes is the other arm: a tombstoned row leaves the artefact
+            // by never being written, not by being overwritten.
+            picks.sort_by_key(|pick| pick.0);
+            let lent = &*sources;
+            let mut at = 0usize;
+            writer.push_row_with(entity, &mut |row| {
+                while let Some(&(_, source, field)) = picks.get(at) {
+                    at += 1;
+                    row.field(
+                        lent[source]
+                            .field(field)
+                            .map_err(|e| tessera_filter::RecordError::Malformed(e.to_string()))?,
+                    )?;
+                }
+                Ok(())
+            })?;
+        }
+        for &source in &at_entity {
+            if sources[source].advance()? {
+                let next_entity = sources[source].entity();
+                if next_entity <= entity {
                     return Err(invalid(format!(
-                        "a row stream yielded entity {next_entity} at or below its predecessor                          {entity}; the merge reads streams that ascend"
+                        "a row stream yielded entity {next_entity} at or below its predecessor \
+                         {entity}; the merge reads streams that ascend"
                     )));
                 }
-                heap.push(Reverse((*next_entity, source)));
+                heap.push(Reverse((next_entity, source)));
             }
-            heads[source] = next;
         }
-        if tombstones.contains(entity) {
-            // Rule F's remove-emit-no-bytes: the row leaves the artefact by never being written,
-            // not by being overwritten.
-            continue;
-        }
-        fields.sort_by_key(|field| field.tag);
-        writer.push_row(entity, &fields)?;
     }
-    writer.finish()
+    writer.finish()?;
+    Ok(())
 }
 
 fn invalid(message: impl Into<String>) -> io::Error {
@@ -491,7 +749,7 @@ fn invalid(message: impl Into<String>) -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tessera_filter::{Access, RecordValue, RECORD_BLOCK_TARGET};
+    use tessera_filter::{Access, RecordField, RecordValue, RECORD_BLOCK_TARGET};
 
     /// One layer's three paths under `dir`, tagged so a test can hold several.
     fn paths_of(dir: &Path, tag: &str) -> (PathBuf, PathBuf, PathBuf) {
@@ -513,13 +771,13 @@ mod tests {
                 .push_row(
                     *entity,
                     &[
-                        RecordField {
+                        RecordFieldRef {
                             tag: 0,
-                            value: RecordValue::Utf8((*note).to_string()),
+                            value: tessera_filter::RecordValueRef::Utf8(note),
                         },
-                        RecordField {
+                        RecordFieldRef {
                             tag: 1,
-                            value: RecordValue::I64(i64::from(*entity) * 7),
+                            value: tessera_filter::RecordValueRef::I64(i64::from(*entity) * 7),
                         },
                     ],
                 )

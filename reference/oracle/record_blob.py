@@ -22,21 +22,22 @@ row — walkable with exactly these framing functions), and the coalesced-extent
 lifecycle; neither changes the licence above.
 
 Format, transcribed from `tessera-filter`'s `record` module (the byte format's single home): a
-block is `row_count u32 LE | first_rank u32 LE | first_entity u32 LE | extent_digest u64 LE`,
-then one LEB128 varint per row past the first holding that row's entity less its predecessor's
-less one, then the rows; a row is its fields and carries no header of its own, delimited by the
-directory's offsets relative to the rows section; a field is `tag u16 LE | kind u8 | value`.
-Rows concatenate in ascending entity order into zstd blocks cut against a 256 KiB uncompressed
-target measured over the rows, a row never splitting — an oversized row gets an oversized block
-of its own. The directory is one Arrow IPC file batch per blob: `(compressed_offset,
-compressed_len, uncompressed_len, first_rank, row_offsets)`, and `hasrow.roaring` is the
-portable-serialised has-row bitmap whose rank order is the row order.
+block is `row_count u32 LE | first_rank u32 LE | first_entity u32 LE`, then one LEB128 varint per
+row past the first holding that row's entity less its predecessor's less one, then the rows; a row
+is a LEB128 varint stating how many bytes of fields follow, then those fields; a field is
+`tag u16 LE | kind u8 | value`. Rows concatenate in ascending entity order into zstd blocks cut
+against a 256 KiB uncompressed target measured over the rows, a row never splitting — an oversized
+row gets an oversized block of its own. The directory is one Arrow IPC file batch per blob:
+`(compressed_offset, compressed_len, uncompressed_len, first_rank, row_count)`, and
+`hasrow.roaring` is the portable-serialised has-row bitmap whose rank order is the row order.
 
-The extent digest is FNV-1a over 64 bits, folded over each row offset's four little-endian bytes
-in order and then over the rows section's length. It is the only place the two files meet: the
-writer takes it over the offsets it hands the directory and a reader takes it over the offsets
-the directory holds, so a directory that disagrees with the bytes it addresses is refused rather
-than followed ([decision 0141](../../docs/decisions/0141-the-record-blob-states-identity-once-per-block.md)).
+**The delimiters are the block's own bytes**, which is what this walk turns on
+([decision 0142](../../docs/decisions/0142-the-record-blob-delimits-a-row-by-a-length-the-row-states.md)).
+The directory holds nothing per row, so there is no second file for it to address past; what
+replaces that cross-check is the tiling walk — stepping over exactly `row_count` rows by the
+lengths they state must land on the block's last byte, and every length must stay inside the
+block on the way. A rows section re-tiled so that both still hold is the class this cannot catch,
+and the manifest's digest over `blocks.bin` is what stands against it.
 """
 
 from __future__ import annotations
@@ -59,41 +60,32 @@ DIRECTORY_FILE = "directory.arrow"
 # shadow — a drift fails [`self_check`] loudly.
 BLOCK_TARGET = 256 * 1024
 
-# A block's fixed header: row count, first rank, first entity, extent digest.
-BLOCK_HEADER_FIXED = 20
-
-
-def _fnv1a64_extents(offsets: list[int], rows_len: int) -> int:
-    """The extent digest a block carries of the directory's row offsets for it."""
-    h = 0xCBF29CE484222325
-    for value in list(offsets) + [rows_len]:
-        for byte in struct.pack("<I", value):
-            h ^= byte
-            h = (h * 0x100000001B3) & 0xFFFFFFFFFFFFFFFF
-    return h
+# A block's fixed header: row count, first rank, first entity.
+BLOCK_HEADER_FIXED = 12
 
 
 def _take_varint(block: bytes, pos: int, limit: int) -> tuple[int, int]:
     """One LEB128 varint at `pos`, bounded by `limit`; returns `(value, new position)`. Raises
     `ValueError` on a truncated, over-wide or redundantly padded varint, which the Rust decoder
-    refuses in the same three places."""
+    refuses in the same three places. Both the entity gaps and the length that heads a row are
+    read through here."""
     value = 0
     shift = 0
     while True:
         if pos >= limit:
-            raise ValueError("a block's entity gaps end in the middle of a varint")
+            raise ValueError("a block ends in the middle of a varint")
         byte = block[pos]
         pos += 1
         value |= (byte & 0x7F) << shift
         if byte & 0x80 == 0:
             if shift > 0 and byte == 0:
-                raise ValueError("a block's entity gap is padded with a redundant byte")
+                raise ValueError("a block's varint is padded with a redundant byte")
             if value > 0xFFFFFFFF:
-                raise ValueError("a block's entity gap does not fit u32")
+                raise ValueError("a block's varint does not fit u32")
             return value, pos
         shift += 7
         if shift >= 32:
-            raise ValueError("a block's entity gap does not fit u32")
+            raise ValueError("a block's varint does not fit u32")
 
 # kind byte → fixed value width; the two variable-width kinds are handled by name.
 _FIXED_KIND_WIDTHS = {
@@ -276,6 +268,14 @@ def self_check(
                 f"{where}: first_rank {entry['first_rank']} != {rank} — blocks do not tile "
                 "the rank space"
             )
+        # **Both totals advance here, before anything about the block can abandon it.** A block
+        # the walk gives up on — a bad varint, rows that do not tile — still occupies the
+        # compressed extent the directory gives it and still claims its row count, so a walk that
+        # skipped the advance would report every later block against the wrong offset and rank and
+        # close with two summary lines about the first defect rather than the file.
+        block_rank = rank
+        rank += entry["row_count"]
+        cursor = entry["compressed_offset"] + entry["compressed_len"]
         compressed = blocks_bytes[
             entry["compressed_offset"] : entry["compressed_offset"] + entry["compressed_len"]
         ]
@@ -295,8 +295,8 @@ def self_check(
                 f"{entry['uncompressed_len']}"
             )
 
-        offsets = entry["row_offsets"]
-        if not offsets:
+        stated_rows = entry["row_count"]
+        if not stated_rows:
             failures.append(f"{where}: a block with no rows")
             continue
 
@@ -305,11 +305,9 @@ def self_check(
             failures.append(f"{where}: {len(block)} bytes cannot hold a block header")
             continue
         row_count, first_rank, first_entity = struct.unpack_from("<III", block, 0)
-        (extent_digest,) = struct.unpack_from("<Q", block, 12)
-        if row_count != len(offsets):
+        if row_count != stated_rows:
             failures.append(
-                f"{where}: states {row_count} rows where the directory addresses "
-                f"{len(offsets)}"
+                f"{where}: states {row_count} rows where the directory addresses {stated_rows}"
             )
             continue
         if first_rank != entry["first_rank"]:
@@ -329,31 +327,59 @@ def self_check(
             continue
         rows_at = pos
         rows_len = len(block) - rows_at
-        if _fnv1a64_extents(offsets, rows_len) != extent_digest:
+        # **The tiling walk**, which is what the directory's row offsets used to be and what the
+        # extent digest used to check. Each row states how many bytes of fields follow it; walking
+        # exactly `row_count` of them must land on the block's last byte, and no length may leave
+        # the block on the way.
+        extents: list[tuple[int, int]] = []
+        at = rows_at
+        tiled = True
+        try:
+            for _ in range(row_count):
+                length, after = _take_varint(block, at, len(block))
+                if length == 0:
+                    failures.append(
+                        f"{where}: a row states no fields — it should have no row at all"
+                    )
+                    tiled = False
+                    break
+                if after + length > len(block):
+                    failures.append(
+                        f"{where}: a row states {length} bytes of fields, which run past the "
+                        f"{len(block)}-byte block"
+                    )
+                    tiled = False
+                    break
+                extents.append((after - rows_at, after + length - rows_at))
+                at = after + length
+        except ValueError as e:
+            failures.append(f"{where}: {e}")
+            continue
+        if not tiled:
+            continue
+        if at != len(block):
             failures.append(
-                f"{where}: the extent digest does not match the directory's row offsets — the "
-                "block and the directory disagree about where this block's rows begin"
+                f"{where}: {rows_len} row bytes but its {row_count} rows end at {at - rows_at} — "
+                "a block carries nothing but whole rows"
             )
-        if rank < len(entities_in_rank_order) and first_entity != entities_in_rank_order[rank]:
+            continue
+        if (
+            block_rank < len(entities_in_rank_order)
+            and first_entity != entities_in_rank_order[block_rank]
+        ):
             failures.append(
-                f"{where}: states first entity {first_entity} but has-row's rank-{rank} member "
-                f"is {entities_in_rank_order[rank]} — the bitmap and the blocks disagree about "
-                "which entity a rank names"
+                f"{where}: states first entity {first_entity} but has-row's rank-{block_rank} "
+                f"member is {entities_in_rank_order[block_rank]} — the bitmap and the blocks "
+                "disagree about which entity a rank names"
             )
         if row_count > 1 and rows_len > block_target:
             failures.append(
                 f"{where}: {rows_len} row bytes exceed the {block_target} target across "
                 f"{row_count} rows — only a single oversized row may pass the target"
             )
-        if offsets[0] != 0:
-            failures.append(f"{where}: the first row starts at {offsets[0]}, not 0")
-
-        ends = list(offsets[1:]) + [rows_len]
-        for within, (start, end, entity) in enumerate(zip(offsets, ends, entities)):
-            row_where = f"{where} row {within} (rank {rank})"
-            if not 0 <= start < end <= rows_len:
-                failures.append(f"{row_where}: extent [{start}, {end}) is out of bounds")
-                break
+        for within, ((start, end), entity) in enumerate(zip(extents, entities)):
+            row_rank = block_rank + within
+            row_where = f"{where} row {within} (rank {row_rank})"
             if entity > 0xFFFFFFFF:
                 failures.append(f"{row_where}: entity {entity} is past the u32 ceiling")
                 break
@@ -363,14 +389,14 @@ def self_check(
                     "ascending entity order"
                 )
             previous_entity = entity
-            if rank >= len(entities_in_rank_order):
+            if row_rank >= len(entities_in_rank_order):
                 failures.append(f"{row_where}: more rows than has-row members")
                 break
-            if entity != entities_in_rank_order[rank]:
+            if entity != entities_in_rank_order[row_rank]:
                 failures.append(
-                    f"{row_where}: the block says entity {entity} but has-row's rank-{rank} "
-                    f"member is {entities_in_rank_order[rank]} — rank addressing would serve a "
-                    "neighbour's row"
+                    f"{row_where}: the block says entity {entity} but has-row's rank-{row_rank} "
+                    f"member is {entities_in_rank_order[row_rank]} — rank addressing would serve "
+                    "a neighbour's row"
                 )
             tags = _walk_payload(block[rows_at + start : rows_at + end], row_where, failures)
             if not tags:
@@ -380,8 +406,6 @@ def self_check(
                     f"{row_where}: tags {sorted(tags - allowed_tags)} are not blob-resident "
                     "columns — a hot-column or entity-space value has leaked into the blob"
                 )
-            rank += 1
-        cursor = entry["compressed_offset"] + entry["compressed_len"]
 
     if cursor != len(blocks_bytes):
         failures.append(
