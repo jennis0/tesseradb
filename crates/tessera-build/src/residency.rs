@@ -416,12 +416,12 @@ fn carries_characters(ty: ScalarType) -> bool {
 /// against a charge of 23.5, 2% low.
 const EXTENT_SHARE: u64 = 2;
 
-/// What one record-blob row costs beyond its characters: **8 bytes a row and 3 a field**, plus a
-/// `u32` length on each `utf8` one (`tessera_filter::record` — `entity u32 | payload_len u32`,
+/// What one record-blob row costs beyond its characters: **3 bytes a row and 3 a field**, plus a
+/// `u32` length on each `utf8` one (`tessera_filter::record` — an entity gap and a row length,
 /// then `tag u16 | kind u8 | value` a field).
 ///
 /// Charged over the blob-resident columns and their rows because for a short value it is more
-/// than the value: an 8-character key in one `utf8` field is 15 bytes of framing against 8 of
+/// than the value: an 8-character key in one `utf8` field is 10 bytes of framing against 8 of
 /// characters. It rides through the same zstd the blocks do, so it is charged at [`EXTENT_SHARE`]
 /// with them.
 fn record_framing_bytes(schema: &crate::config::Schema, rows: u64) -> u64 {
@@ -454,8 +454,8 @@ const RECORD_FIELD_BYTES: u64 = 3;
 
 /// What one **extent** row costs beyond its characters, for `rows` of one spilled column.
 ///
-/// An extent row carries that column alone (`crate::extents`), so it is one row header and one
-/// `utf8` field — 15 bytes around a value an unindexed `keyword` column can hold in 8. Charged for
+/// An extent row carries that column alone (`crate::extents`), so it is one row's framing and one
+/// `utf8` field — 10 bytes around a value an unindexed `keyword` column can hold in 8. Charged for
 /// every column the routing spills and not for the type: a `keyword` or `utf8` column the record
 /// blob alone reads spills the same extents a `text` column does.
 fn extent_framing_bytes(rows: u64) -> u64 {

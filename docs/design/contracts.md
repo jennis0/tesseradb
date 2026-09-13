@@ -1,5 +1,25 @@
 # Tessera — Contracts Specification
 
+**Status:** Draft r94 — **the record blob delimits a row by a length the row states**
+(r94, 2026-09-13, **owner ruling**;
+[decision 0142](../decisions/0142-the-record-blob-delimits-a-row-by-a-length-the-row-states.md),
+[`records-and-search.md`](records-and-search.md) §3). r93 moved a row's identity into the block and
+left its extent to a rank-indexed `u32` in `directory.arrow`. That array is 4 B for every row in
+the blob — 14.4 GB over the 3.5×10⁹-row GBIF rung against a 13.9 GB `blocks.bin`, and 14 GB of it
+anonymous in the writer for the whole of the build's blob stage — and it buys no read, a block's
+decompress being the cost of reaching any row in it. So §2.4's `attrs/record/` changes shape again:
+a row states how many bytes of fields follow it, as a LEB128 varint, and the directory's fifth
+column is one row count a block. The extent digest goes with the offsets it covered; what replaces
+the cross-check is the block's own tiling, walked once when the block is decompressed — exactly the
+row count the header states, each row inside the block, landing on the block's last byte. Rebuilt,
+this takes 38.0% off `gbif-64p`'s `attrs/record/`, 58.6% off `treeoflife-1m`'s and 4.7% off a prose
+corpus's (measured). **`bundle_format` moves from 9 to 10** — a 9 directory's fifth column is a
+list of row offsets where a 10 directory's is one row count a block. `api_version` stays at 1 and
+nothing reaches a client that did not before: the entity ids in a block are an index internal,
+**I10** as corrected by [decision 0065](../decisions/). Leak register: no new row, and the decision
+states why that is the owner's call to confirm — the class the format no longer catches is wider
+than r93's.
+
 **Status:** Draft r93 — **the record blob states a row's identity once per block**
 (r93, 2026-09-11, **owner ruling**;
 [decision 0141](../decisions/0141-the-record-blob-states-identity-once-per-block.md),

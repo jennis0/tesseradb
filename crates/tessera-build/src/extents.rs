@@ -62,6 +62,15 @@ pub(crate) struct ExtentColumn {
     /// How many cascade rounds have run, so a folded extent's name cannot collide with the one it
     /// was folded from.
     folds: usize,
+    /// The compressor threads every one of this column's extents is written over.
+    ///
+    /// **One set per column, not one per extent.** A column spills an extent per join chunk — 964
+    /// of them on the widest column of the 3.5×10⁹-row GBIF rung — and a pool started inside each
+    /// writer would start and stop its threads that many times. Held here and handed from one
+    /// extent's writer to the next, they are started once, by the first extent that seals a block.
+    /// The columns are written from one rayon lane each, so what the build holds is one pool a
+    /// spilled column ([`tessera_filter_write::BlockPool`]).
+    pool: Option<tessera_filter_write::BlockPool>,
 }
 
 impl ExtentColumn {
@@ -72,6 +81,7 @@ impl ExtentColumn {
             dir: dir.to_path_buf(),
             extents: Vec::new(),
             folds: 0,
+            pool: None,
         }
     }
 
@@ -94,11 +104,12 @@ impl ExtentColumn {
                 self.name, self.column
             ))
         })?;
-        let mut writer = RecordBlobWriter::create(
+        let mut writer = RecordBlobWriter::create_with(
             &paths.blocks,
             &paths.hasrow,
             &paths.directory,
             RECORD_BLOCK_TARGET,
+            self.pool.take(),
         )
         .map_err(|e| BuildError::io(&paths.blocks, e))?;
         for &(entity, value) in rows {
@@ -112,7 +123,7 @@ impl ExtentColumn {
                 )
                 .map_err(|e| BuildError::io(&paths.blocks, e))?;
         }
-        writer
+        self.pool = writer
             .finish()
             .map_err(|e| BuildError::io(&paths.blocks, e))?;
         self.extents.push(paths);
@@ -215,12 +226,22 @@ impl ExtentColumn {
 /// How many extents one merge may hold open under `budget`, above which
 /// [`ExtentColumn::cascade`] folds them into intermediates first.
 ///
-/// What an open extent costs the merge is one uncompressed block, [`RECORD_BLOCK_TARGET`], and
-/// the share allowed for them is a sixty-fourth of the budget: 32 MB of blocks, 128 extents, at
-/// the smallest budget a build is run under, and 336 MB at the 21.5 GB rung 6 was built under,
-/// which is past the 964 extents that build's widest column spilled. The extent count rises with
-/// the corpus and the budget does not, so the bound is what keeps the merge's memory off the
-/// corpus; the fold below it is the cost of that bound and is paid only where the bound bites.
+/// What an open extent costs the merge **per extent** is one uncompressed block,
+/// [`RECORD_BLOCK_TARGET`], and the share allowed for them is a sixty-fourth of the budget: 32 MB
+/// of blocks, 128 extents, at the smallest budget a build is run under, and 1,281 at the 21.5 GB
+/// rung 6 was built under, which is past the 964 extents that build's widest column spilled. The
+/// extent count rises with the corpus and the budget does not, so the bound is what keeps the
+/// merge's memory off the corpus; the fold below it is the cost of that bound and is paid only
+/// where the bound bites.
+///
+/// **The other two per-extent costs do not scale with the extent count and are not what this
+/// bounds.** Opening an extent also brings in its has-row bitmap and builds its live set
+/// ([`OpenExtents`]), and both are shares of one column's entity set: cutting the same rows into
+/// twice as many extents halves each one's, so the total is the column's however the chunks fell.
+/// The live-set loop in [`ExtentColumn::open`] is O(the column's total containers) for the same
+/// reason — a join chunk stages a contiguous run of entities, so each extent's bitmap touches its
+/// own containers and the running union grows through them once rather than being rewritten per
+/// extent.
 pub(crate) fn merge_fan_in(budget: u64) -> usize {
     let share = budget / 64;
     usize::try_from(share / RECORD_BLOCK_TARGET as u64)

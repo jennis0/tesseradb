@@ -71,9 +71,19 @@ const ZSTD_LEVEL: i32 = 3;
 ///
 /// Compressing a sealed block needs nothing but the block, so it does not have to happen on the
 /// thread that is cutting the next one. The bound is what keeps that from costing memory: three
-/// workers and a queue of two is at most five blocks in flight, 1.25 MB at the 256 KiB target,
-/// whatever the corpus. The pool is started at the first block a writer seals, so a writer that
-/// seals none — an extent of one short chunk — starts no thread.
+/// workers and a queue of two is at most five blocks in flight.
+///
+/// **The figure is per pool, and a pool is per producer, so it multiplies by however many run at
+/// once.** The build's attribute join writes its spilled columns from one rayon lane each
+/// (`tessera_build::pipeline`), so a schema with four spilled columns has four pools: twelve
+/// threads and 1.25 MB apiece at the 256 KiB target. A pool is therefore started once per column
+/// and handed from one extent's writer to the next ([`BlockPool`]), not started per writer; a
+/// producer that seals no block starts no thread at all.
+///
+/// **1.25 MB is the target, not a cap.** A row larger than the target gets an oversized block of
+/// its own (records §3), so a corpus with a 4 MB row has up to five of those in flight instead.
+/// The bound in bytes is five times the largest row, and the target is what it is for every
+/// corpus whose rows are ordinary.
 const COMPRESS_WORKERS: usize = 3;
 const COMPRESS_QUEUE: usize = 2;
 
@@ -84,7 +94,14 @@ const COMPRESS_QUEUE: usize = 2;
 /// about what it compresses to; writing them back in seal order then makes `blocks.bin` the file
 /// a single thread would have written, byte for byte. The directory is built here too, so its
 /// rows are in that order for the same reason.
-struct CompressPool {
+///
+/// **One pool serves any number of blobs, one after another.** A producer that writes many small
+/// artefacts — the join, spilling one extent per chunk per column — starts its pool once and
+/// hands it from writer to writer ([`RecordBlobWriter::finish`] returns it), so the threads are
+/// started once per column rather than once per extent. It cannot be shared between two writers
+/// at the same time: the sequence numbers are one blob's.
+#[derive(Debug)]
+pub struct BlockPool {
     jobs: SyncSender<(u64, Vec<u8>)>,
     results: Receiver<(u64, io::Result<Vec<u8>>)>,
     workers: Vec<std::thread::JoinHandle<()>>,
@@ -95,8 +112,9 @@ struct CompressPool {
     written: u64,
 }
 
-impl CompressPool {
-    fn start() -> Self {
+impl BlockPool {
+    /// Start the workers. Called once per producer, not once per blob.
+    pub fn start() -> Self {
         let (jobs, jobs_rx) = sync_channel::<(u64, Vec<u8>)>(COMPRESS_QUEUE);
         // Unbounded, so a worker never blocks handing a block back. What bounds the memory is the
         // job queue: a result can only exist for a block that was submitted, and at most
@@ -125,7 +143,7 @@ impl CompressPool {
                 }
             }));
         }
-        CompressPool {
+        BlockPool {
             jobs,
             results,
             workers,
@@ -142,6 +160,14 @@ impl CompressPool {
         self.jobs
             .send((seq, block))
             .map_err(|_| invalid("a block compressor stopped before the blob was written"))
+    }
+
+    /// Ready for the next blob: every block handed over has been written back, so the sequence
+    /// numbers start again. Called by [`RecordBlobWriter::finish`] before it hands the pool on.
+    fn reset(&mut self) {
+        self.ready.clear();
+        self.submitted = 0;
+        self.written = 0;
     }
 
     /// The next block in seal order, or `None` where there is not one to write.
@@ -174,7 +200,7 @@ impl CompressPool {
     }
 }
 
-impl Drop for CompressPool {
+impl Drop for BlockPool {
     fn drop(&mut self) {
         // Closing the queue is what ends the workers' loops; joining them keeps the threads from
         // outliving the writer that started them.
@@ -208,9 +234,9 @@ pub struct RecordBlobWriter {
     /// `(compressed_offset, compressed_len, uncompressed_len, first_rank, row_count)`.
     directory: Vec<(u64, u64, u32, u32, u32)>,
     /// What each block in flight states about itself, in seal order, paired with its compressed
-    /// bytes as they come back from the pool ([`CompressPool`]).
+    /// bytes as they come back from the pool ([`BlockPool`]).
     in_flight: std::collections::VecDeque<(u32, u32, u32)>,
-    pool: Option<CompressPool>,
+    pool: Option<BlockPool>,
     hasrow: Bitmap,
     rank: u32,
     last_entity: Option<u32>,
@@ -224,6 +250,19 @@ impl RecordBlobWriter {
         hasrow_path: &Path,
         directory_path: &Path,
         target: usize,
+    ) -> io::Result<Self> {
+        Self::create_with(blocks_path, hasrow_path, directory_path, target, None)
+    }
+
+    /// The same, over a [`BlockPool`] the caller already started. A producer writing many small
+    /// blobs one after another passes the pool [`Self::finish`] handed back, which is what keeps
+    /// the compressor threads to one set per producer rather than one per blob.
+    pub fn create_with(
+        blocks_path: &Path,
+        hasrow_path: &Path,
+        directory_path: &Path,
+        target: usize,
+        pool: Option<BlockPool>,
     ) -> io::Result<Self> {
         if target == 0 {
             return Err(invalid("a zero block target would seal a block per row"));
@@ -240,7 +279,7 @@ impl RecordBlobWriter {
             block_first_rank: 0,
             directory: Vec::new(),
             in_flight: std::collections::VecDeque::new(),
-            pool: None,
+            pool,
             hasrow: Bitmap::new(),
             rank: 0,
             last_entity: None,
@@ -320,7 +359,7 @@ impl RecordBlobWriter {
         self.in_flight
             .push_back((uncompressed, self.block_first_rank, rows));
         self.pool
-            .get_or_insert_with(CompressPool::start)
+            .get_or_insert_with(BlockPool::start)
             .submit(block)?;
         self.current_entities.clear();
         self.block_first_rank = self.rank;
@@ -357,10 +396,17 @@ impl RecordBlobWriter {
 
     /// Seal the open block and write the addressing files. `blocks.bin` is durable before the
     /// directory that addresses into it exists.
-    pub fn finish(mut self) -> io::Result<()> {
+    ///
+    /// Returns the compressor pool, drained and ready for another blob, for a producer that wants
+    /// to write the next one over the same threads ([`Self::create_with`]). A caller that drops it
+    /// stops those threads.
+    pub fn finish(mut self) -> io::Result<Option<BlockPool>> {
         self.seal_block()?;
         self.drain_blocks(true)?;
-        self.pool = None;
+        let mut pool = self.pool.take();
+        if let Some(pool) = pool.as_mut() {
+            pool.reset();
+        }
         if !self.in_flight.is_empty() {
             return Err(invalid(format!(
                 "{} sealed block(s) were never compressed",
@@ -416,7 +462,7 @@ impl RecordBlobWriter {
         // how a bitmap happened to be built.
         self.hasrow.run_optimize();
         std::fs::write(&self.hasrow_path, self.hasrow.serialize::<Portable>())?;
-        Ok(())
+        Ok(pool)
     }
 }
 
@@ -599,8 +645,8 @@ impl RecordRows for BlobRows<'_> {
 /// else. The fold and the coalesce pass streams their own guard has already proved disjoint, so
 /// for them the merge is a concatenation and the bytes are the ones a single stream wrote.
 ///
-/// Held at once: the entity each stream is at, a list of which stream holds which of the row's
-/// tags, and the writer's open block. The fields themselves are never collected — they are lent
+/// Held at once: a heap of the streams that have a row, a list of which stream holds which of the
+/// row's tags, and the writer's open block. The fields themselves are never collected — they are lent
 /// by the streams and encoded straight into the block ([`RecordRows`]), so a row of any width
 /// costs no allocation.
 pub fn merge_record_rows(
@@ -611,14 +657,13 @@ pub fn merge_record_rows(
     directory_path: &Path,
     target: usize,
 ) -> io::Result<()> {
-    let mut heads: Vec<Option<u32>> = Vec::with_capacity(sources.len());
+    // The heap is the whole of the merge's bookkeeping: a stream that has a row is in it under
+    // that row's entity, and a stream that is out of rows is not.
     let mut heap: BinaryHeap<Reverse<(u32, usize)>> = BinaryHeap::with_capacity(sources.len());
     for (i, source) in sources.iter_mut().enumerate() {
-        let head = source.advance()?.then(|| source.entity());
-        if let Some(entity) = head {
-            heap.push(Reverse((entity, i)));
+        if source.advance()? {
+            heap.push(Reverse((source.entity(), i)));
         }
-        heads.push(head);
     }
     let mut writer = RecordBlobWriter::create(blocks_path, hasrow_path, directory_path, target)?;
     // Which stream holds which tag of the row being assembled, `(tag, stream, field)`. Reused row
@@ -635,7 +680,6 @@ pub fn merge_record_rows(
                 break;
             }
             heap.pop();
-            heads[source] = None;
             at_entity.push(source);
             for field in 0..sources[source].field_count() {
                 let tag = sources[source].field(field)?.tag;
@@ -670,8 +714,8 @@ pub fn merge_record_rows(
             })?;
         }
         for &source in &at_entity {
-            let next = sources[source].advance()?.then(|| sources[source].entity());
-            if let Some(next_entity) = next {
+            if sources[source].advance()? {
+                let next_entity = sources[source].entity();
                 if next_entity <= entity {
                     return Err(invalid(format!(
                         "a row stream yielded entity {next_entity} at or below its predecessor \
@@ -680,10 +724,10 @@ pub fn merge_record_rows(
                 }
                 heap.push(Reverse((next_entity, source)));
             }
-            heads[source] = next;
         }
     }
-    writer.finish()
+    writer.finish()?;
+    Ok(())
 }
 
 fn invalid(message: impl Into<String>) -> io::Error {

@@ -462,6 +462,38 @@ fn a_block_holding_another_blocks_rows_refuses() {
     assert!(blob.self_check().is_err());
 }
 
+/// **A block that states the wrong row count.** The header's first word alone is doctored, the
+/// gaps and the rows left as they were, so nothing about the block's bytes has moved and only the
+/// count the block claims disagrees with the count the directory's first ranks imply. The block is
+/// refused before a row is framed: the count is what bounds the walk, so a block read against the
+/// wrong one would stop short of its own rows or run past them.
+///
+/// Mutation killed: dropping the `row_count` comparison in `header_of`.
+#[test]
+fn a_block_that_states_the_wrong_row_count_refuses() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let p = write_fixture(dir.path(), 3, 1024);
+    doctor_block(&p, 0, |block| {
+        assert_eq!(
+            u32::from_le_bytes(block[..4].try_into().expect("four bytes")),
+            3,
+            "the block holds three rows"
+        );
+        block[..4].copy_from_slice(&2u32.to_le_bytes());
+    });
+
+    let blob = open(&p).expect("opens; the directory and the bitmap are untouched");
+    let err = blob
+        .fields_of(entity_of_rank(0))
+        .expect_err("the block and the directory count different rows");
+    assert!(matches!(err, RecordError::Malformed(_)), "{err}");
+    assert!(
+        err.to_string().contains("rows where the directory"),
+        "{err}"
+    );
+    assert!(blob.self_check().is_err());
+}
+
 /// **A block that does not tile.** A byte appended to a block's rows section: every row is still
 /// as long as it says, but the section is a byte longer than the rows account for. The block's
 /// rows must end where the block does, so it refuses before a row is framed.

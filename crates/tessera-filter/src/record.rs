@@ -882,13 +882,13 @@ fn decode_value(
     })
 }
 
-/// Decode one row's fields out of the extent the directory places it at.
+/// Decode one row's fields out of the bytes its own length covers.
 ///
-/// The extent is the whole of the row: the field walk must consume it exactly. A walk that runs
-/// past the extent refuses on bounds, and one that ends short of it cannot — the loop runs until
-/// the cursor reaches the end — so a directory offset that lands mid-row refuses unless the bytes
-/// there happen to frame as a whole field sequence. `entity` names the row in the refusals; it is
-/// checked against the block's own statement of identity before this is called.
+/// That length is the whole of the row: the field walk must consume it exactly. A walk that runs
+/// past it refuses on bounds, and one that ends short of it cannot — the loop runs until the
+/// cursor reaches the end — so a length that does not frame a whole field sequence refuses.
+/// `entity` names the row in the refusals; it is checked against the block's own statement of
+/// identity before this is called.
 fn decode_row(payload: &[u8], entity: u32) -> Result<Vec<RecordField>, RecordError> {
     let mut fields = Vec::new();
     let mut cursor = 0usize;
@@ -919,8 +919,8 @@ fn decode_row(payload: &[u8], entity: u32) -> Result<Vec<RecordField>, RecordErr
 /// Everything the directory claims about itself is verified at open — blocks contiguous and
 /// exactly covering `blocks.bin`, first ranks agreeing with the per-block row counts, the total
 /// agreeing with the has-row cardinality — so a truncated or doctored artefact refuses before any
-/// request reads through it. What open cannot see (row offsets against uncompressed bytes, the
-/// discriminants) is checked per read, and exhaustively by [`Self::self_check`].
+/// request reads through it. What open cannot see (a block's rows tiling it, the discriminants) is
+/// checked when the block is decompressed and exhaustively by [`Self::self_check`].
 #[derive(Debug)]
 pub struct RecordBlob {
     hasrow: Bitmap,
@@ -1128,9 +1128,10 @@ impl RecordBlob {
     }
 
     /// A decompressed block's header, checked against everything the other two files say about
-    /// the block: the directory's row count and first rank, the has-row bitmap's member at that
-    /// rank, and the directory's own row-offset slice through the extent digest. Past this, the
-    /// block and the files that address it are known to be describing the same rows.
+    /// the block — the directory's row count and first rank, the has-row bitmap's member at that
+    /// rank — and against the block's own bytes through the tiling walk below. Past this, the
+    /// block and the files that address it are known to be describing the same rows, and every
+    /// row of the block is known to be reachable inside it.
     fn header_of(&self, block: usize, bytes: &[u8]) -> Result<BlockHeader, RecordError> {
         let header = decode_block_header(bytes, block)?;
         let rows = self.rows_in_block(block)?;

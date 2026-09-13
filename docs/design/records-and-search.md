@@ -268,21 +268,35 @@ mismatch refuses the request rather than answering. **Entity ids in a block are
 never serialised to any client** (I10 as corrected by 0065 — the blob is an index internal, not a
 gather artefact). §10's catalogue gains the block-boundary cases.
 
-What is **not** caught is corruption inside a row's bytes that still frames as a whole field
-sequence filling the row's extent: the self-description refuses an unknown kind, a length past the
-extent or a walk that ends short of it, and past that the file digest is the guard. `tessera verify
---deep` walks every block of every layer offline, so a fold or coalesce that corrupted the
-addressing is reported by a verifier rather than first seen by a viewer receiving another
-principal's record.
+What is **not** caught is a rows section rewritten so that it still tiles. The self-description
+refuses an unknown kind, a length past the block or a field walk that ends short of the row's own
+length, and the walk refuses a block whose rows do not account for it exactly — but bytes that
+satisfy all of those do not refuse. This is wider than the class the per-row payload length left
+uncaught, which was a wrong value for the right entity: someone who rewrites a block may re-cut
+the rows as well as their contents, and the entities come from the gaps, which are untouched, so a
+neighbour's bytes can be presented under an earlier entity's identity where the tags permit. **The
+manifest's SHA-256 over `blocks.bin` is what stands against forged block bytes** (§7: a blob file
+that is missing, short, or fails its digest refuses at open), and it was already the only guard
+against the narrower class. Whether the wider one takes a leak-register row is the owner's call
+([decision 0142](../decisions/0142-the-record-blob-delimits-a-row-by-a-length-the-row-states.md)).
+`tessera verify --deep` walks every block of every layer offline, so a fold or coalesce that
+corrupted the addressing is reported by a verifier rather than first seen by a viewer receiving
+another principal's record.
 
 Three honesty notes travel with the format. The mixed row's ratio was *assumed* to match the
 per-column 2.44× and is now **measured better than it**: 3.00× against a 2.54× title control
 through the same writer, the shared context between neighbouring rows buying more than
-interleaving costs, with addressing at **4.13 B per has-row entity** ([the epic-1 measurements](../evidence/memos/2026-08-12-records-and-search-epic-1-measurements.md)). The
+interleaving costs, with addressing measured at **4.13 B per has-row entity** ([the epic-1 measurements](../evidence/memos/2026-08-12-records-and-search-epic-1-measurements.md)).
+Four of those bytes were the directory's rank-indexed offset, which the format no longer carries:
+addressing is now the has-row bitmap and a handful of words a block, **about 0.13 B per has-row
+entity** (modelled — the epic-1 figure less its offset; that measurement has not been re-run under
+this format), and what delimits a row is a varint inside the compressed block instead, measured at
+0.34 compressed bytes a row on `gbif-64p`. The
 blob-versus-dictionary comparison is per column shape (review N7): on a near-sequential identifier
-(`id`) the blob's compressed content is ~0.6 B/entity and the whole blob row ~4.6 B under this
-addressing — *cheaper* than DICT+C's 6.1 — while on `doi`/`submitter` shapes the blob costs ~11.7
-and the dictionary wins decisively; "`index = true` is cheaper *and* searchable" holds for the
+(`id`) the blob's compressed content is ~0.6 B/entity and the whole blob row **~1.1 B** under this
+addressing (modelled, the same substitution) — *cheaper* than DICT+C's 6.1, where the old
+addressing already made it cheaper at ~4.6 — while on `doi`/`submitter` shapes the blob costs
+~8.0 and the dictionary wins decisively; "`index = true` is cheaper *and* searchable" holds for the
 latter shapes, not the sequential-identifier one. And flipping a field to `index = true` later is
 a derivation pass over the blob — attrs §2.2's existing "build pass, no row rewrite" class —
 where under the old surface it was free; that is the price of not storing every field twice.
@@ -298,8 +312,8 @@ fixture's own generation functions, so a build that wrote wrong bytes and then s
 by them *disagrees* with the oracle instead of being agreed with — strictly stronger than reading
 the artefact, and this design inherits that construction rather than the weaker one an earlier
 draft claimed. The one narrow artefact-level check the blob adds is its own **addressing
-self-consistency** — rank, offsets, identities — which the fixture cannot see and B6's
-refusals depend on. Within the system, the artefact-of-record rule stands as stated: derived
+self-consistency** — rank, the rows tiling their block, identities — which the fixture cannot see
+and B6's refusals depend on. Within the system, the artefact-of-record rule stands as stated: derived
 structures are rebuilt from the record, never trusted beside it.
 
 ---
@@ -527,10 +541,11 @@ writers at 21.75–22.97 across three scales — the model was conservative by u
 index is **22.58 B/entity on disk against the flat column's 83.6** — smaller than the column it
 replaces,
 stable across a 9.6× scale range, because a head token's posting densifies as a tail token's
-spreads and the two cancel. With the blob record and its addressing beside it, **~59 GB at 10⁹
-against 83.6 GB flat** — the compressed value bytes (~31 GB) plus the blob's own offsets, has-row
-bitmap and directory (~4.4 GB; review B5's correction of an earlier ~55 GB that omitted the
-addressing) plus the index; the ~1.4× win stands.
+spreads and the two cancel. With the blob record and its addressing beside it, **~55 GB at 10⁹
+against 83.6 GB flat** — the compressed value bytes (~31 GB) plus the row lengths inside them
+(~0.3 GB) plus the has-row bitmap and block directory (~0.2 GB) plus the index. Modelled: review
+B5's correction put the addressing at ~4.4 GB when the directory carried a `u32` an entity, and
+dropping that array is what moves the total from ~59 GB. The ~1.4× win stands and widens.
 
 ⊘ **Two limits on that sizing, and the second is not a scale caveat.** The 10⁹ figure is a linear
 extrapolation of a per-entity cost measured to 2.4M; §11 gates promotion on extending it, and no
@@ -1133,7 +1148,7 @@ The oracle keeps the fixture-input relation (§3, review B7): expected values an
 derive from the fixture's own generation functions, with text passed through the linked analyser
 by invoking the `tessera tokenise` verb. The blob is checked through the served surface, plus one
 narrow artefact-level check the fixture cannot see — the addressing self-consistency B6's refusals
-depend on: rank, offsets, block bounds, identities. The analyser is pinned by golden
+depend on: rank, the rows tiling their block, block bounds, identities. The analyser is pinned by golden
 known-answer vectors per script family, dictionary-segmented scripts included. Where scoring
 lands, the oracle recomputes the mask-local statistics independently — DF as
 `|posting ∩ candidate|` from its own relation — and asserts the served cap selection is the

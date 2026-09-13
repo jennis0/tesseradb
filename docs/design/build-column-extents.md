@@ -223,10 +223,16 @@ with the same schema it is 540 extents a column.
 
 The merge holds one uncompressed block per extent, 256 KiB, so 54 extents cost 14 MB and 540 cost
 138 MB. The cap on how many a merge holds open is a sixty-fourth of the memory budget, which is 128
-extents at the smallest budget a build is run under and 1,344 at 21.5 GB. Above the cap the extents
+extents at the smallest budget a build is run under and 1,281 at 21.5 GB. Above the cap the extents
 are merged in groups into intermediate extents until what is left fits one merge, the same cascade
 the text index's runs take. Its reason is buffers alone: an extent's files are mapped and their
 descriptors dropped at open, so there is no descriptor ceiling here.
+
+The block buffers are what the cap is about because they are the only per-extent cost that rises
+with the extent count. Opening an extent also brings in its has-row bitmap and builds its live set,
+and both are shares of one column's entity set: a join chunk stages a contiguous run of entities,
+so cutting the same rows into twice as many extents halves each extent's bitmap, and the live-set
+loop walks the column's containers once rather than once per extent.
 
 The cascade buys no read work, which is why the cap is set against the budget rather than at a
 constant low enough to fold often. Both readers of a column's extents are merges over all of them
