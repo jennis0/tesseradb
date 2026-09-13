@@ -4151,7 +4151,7 @@ impl KeywordValues<'_> {
             KeywordValues::Extents(extents) => extents
                 .blobs
                 .iter()
-                .map(|blob| blob.hasrow().cardinality() as usize)
+                .map(|blob| blob.rows() as usize)
                 .sum(),
         }
     }

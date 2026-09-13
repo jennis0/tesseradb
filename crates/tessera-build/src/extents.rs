@@ -31,9 +31,19 @@
 //!
 //! An attribute source may carry two rows for one entity, and the last one written is the value.
 //! Within a chunk that is the last row of the stable sort, collapsed before the extent is written.
-//! Across chunks the earlier row is in an earlier extent, so the **live set** of extent *i* is its
-//! has-row bitmap less the union of every later extent's ([`OpenExtents::live`]). Both readers skip
-//! a row outside it, so the index holds terms for exactly the values the blob holds.
+//! Across chunks the earlier row is in an earlier extent, so a row of extent *i* is **live** only
+//! where no later extent holds its entity. Both readers skip a row that is not, so the index holds
+//! terms for exactly the values the blob holds.
+//!
+//! That is one question per row — *does a later extent hold this entity?* — and [`DuplicateMap`]
+//! answers it for the whole column out of two bitmaps rather than one per extent. A per-extent live
+//! set is the obvious construction and it does not fit: `andnot` over a run-encoded has-row bitmap
+//! yields array containers at two bytes an entity, so the 988 extents each of the two string
+//! columns of the 3.5×10⁹-row GBIF rung spilled came to about 7 GB of live sets a column, held
+//! from the postings stage through the blob. The map is instead the entities that appear in more
+//! than one extent, and for each of those the last extent that holds it — near empty for a corpus
+//! with about one row an entity, and bounded above by two whole-column bitmaps whatever the extent
+//! count.
 
 use std::path::{Path, PathBuf};
 
@@ -192,23 +202,22 @@ impl ExtentColumn {
         Ok(())
     }
 
-    /// Open every extent, mapped, with each one's live set beside it.
+    /// Open every extent, mapped, with the column's duplicate map beside them.
+    ///
+    /// The blobs are opened for a sequential walk alone
+    /// ([`RecordBlob::open_rows_only`][tessera_filter::RecordBlob::open_rows_only]): both readers
+    /// take the rows of an extent front to back, and a blob opened that way holds no has-row bitmap
+    /// on the heap. The bitmaps are read here instead, one at a time and released, to build
+    /// [`DuplicateMap`] — and the one addressing check that open gives up, that an extent's
+    /// directory accounts for as many rows as its has-row bitmap holds, is made there against the
+    /// same bytes.
     pub(crate) fn open(&self) -> Result<OpenExtents> {
         let blobs = open_all(&self.extents)?;
-        // Later extents were written later, so a repeated entity's value is the last extent's.
-        // Walked backwards, `seen` is the union of every later extent's rows.
-        let mut live = vec![Bitmap::new(); blobs.len()];
-        let mut seen = Bitmap::new();
-        for (i, blob) in blobs.iter().enumerate().rev() {
-            let mut mine = blob.hasrow().clone();
-            mine.andnot_inplace(&seen);
-            seen.or_inplace(blob.hasrow());
-            live[i] = mine;
-        }
+        let duplicates = DuplicateMap::over(&self.extents, &blobs)?;
         Ok(OpenExtents {
             column: self.column,
             blobs,
-            live,
+            duplicates,
         })
     }
 
@@ -234,17 +243,13 @@ impl ExtentColumn {
 /// merge's memory off the corpus; the fold below it is the cost of that bound and is paid only
 /// where the bound bites.
 ///
-/// **The other two per-extent costs do not scale with the extent count and are not what this
-/// bounds.** Opening an extent also brings in its has-row bitmap and builds its live set
-/// ([`OpenExtents`]), and both are shares of one column's entity set: cutting the same rows into
-/// twice as many extents halves each one's, so the bytes are the column's however the chunks fell.
-///
-/// The live-set loop in [`ExtentColumn::open`] is not free of the extent count — it is O(E·C)
-/// container steps over E extents and C containers, the running union being walked once per
-/// extent — but each step is a container header compared, and an extent's own containers are the
-/// only ones it copies. A join chunk stages a contiguous run of entities, so those are a 1/E share
-/// of the column. Beside E block buffers of 256 KiB apiece, the loop is not what the bound is
-/// about.
+/// **A block buffer is the whole of what an open extent costs.** It used to bring in a has-row
+/// bitmap and a live set as well, and neither fell with the fan-in: a join chunk is a run of the
+/// attribute source's own order, scattered over entity space rather than a contiguous run of it,
+/// so every extent's bitmap spanned the column and folding two extents into one left the entity
+/// set the same size. That is why the term is gone rather than bounded —
+/// [`ExtentColumn::open`] reads the has-row files one at a time into [`DuplicateMap`], whose two
+/// whole-column bitmaps are a cost of the column and not of the extent count.
 pub(crate) fn merge_fan_in(budget: u64) -> usize {
     let share = budget / 64;
     usize::try_from(share / RECORD_BLOCK_TARGET as u64)
@@ -252,12 +257,92 @@ pub(crate) fn merge_fan_in(budget: u64) -> usize {
         .max(2)
 }
 
-/// One column's extents, open, with each one's live set.
+/// One column's extents, open, with the map that says which extent's row wins for a repeated
+/// entity.
 pub(crate) struct OpenExtents {
     /// The declaration position, which is the field tag the rows carry.
     pub(crate) column: usize,
     pub(crate) blobs: Vec<RecordBlob>,
-    pub(crate) live: Vec<Bitmap>,
+    pub(crate) duplicates: DuplicateMap,
+}
+
+/// Which extent's row survives, for every entity one column's extents hold more than once.
+///
+/// A row of extent *i* carrying entity *e* is live exactly where no later extent holds *e*. The
+/// map states that as two structures over the whole column rather than one set per extent:
+/// `repeat` is the entities more than one extent holds, and `last` is, for each of those in
+/// ascending order, the highest extent index that holds it. An entity outside `repeat` is in one
+/// extent only, and that extent's row is live by construction.
+///
+/// **Peak is two whole-column bitmaps and four bytes a repeated entity.** A bitmap over an entity
+/// space of *n* is at most *n*/8 bytes — 437 MB apiece at the 3.5×10⁹-row GBIF rung — whatever the
+/// extent count, and GBIF carries about one row an entity, so `repeat` there is close to empty.
+/// The cost is one extra sequential pass over the has-row files, which the first pass has just
+/// warmed: the map cannot be built in one, because which entities repeat is not known until every
+/// extent has been read.
+pub(crate) struct DuplicateMap {
+    repeat: Bitmap,
+    last: Vec<u32>,
+}
+
+impl DuplicateMap {
+    /// Stream the extents' has-row files in write order, twice.
+    ///
+    /// Each file is deserialised, used, and dropped before the next is read, so what stands through
+    /// the build is `repeat`, `seen` and `last` — never a per-extent set.
+    fn over(extents: &[ExtentPaths], blobs: &[RecordBlob]) -> Result<Self> {
+        let mut seen = Bitmap::new();
+        let mut repeat = Bitmap::new();
+        for (paths, blob) in extents.iter().zip(blobs) {
+            let hasrow = read_hasrow(paths)?;
+            // The check `RecordBlob::open_rows_only` gives up, made here instead: the extent's
+            // directory must account for exactly the rows its has-row bitmap holds.
+            if hasrow.cardinality() != blob.rows() {
+                return Err(BuildError::Invalid(format!(
+                    "the extent at {} addresses {} rows but its has-row bitmap holds {} entities",
+                    paths.blocks.display(),
+                    blob.rows(),
+                    hasrow.cardinality()
+                )));
+            }
+            repeat.or_inplace(&seen.and(&hasrow));
+            seen.or_inplace(&hasrow);
+        }
+        drop(seen);
+        let mut last = vec![0u32; repeat.cardinality() as usize];
+        if !last.is_empty() {
+            for (i, paths) in extents.iter().enumerate() {
+                let index = u32::try_from(i).expect("an extent index is a u32");
+                let here = read_hasrow(paths)?.and(&repeat);
+                // Ascending in the extent, so the last write for an entity is the highest extent
+                // that holds it.
+                for entity in here.iter() {
+                    last[(repeat.rank(entity) - 1) as usize] = index;
+                }
+            }
+        }
+        Ok(DuplicateMap { repeat, last })
+    }
+
+    /// Whether the row extent `extent` holds for `entity` is the one that survives.
+    fn is_live(&self, extent: usize, entity: u32) -> bool {
+        if !self.repeat.contains(entity) {
+            return true;
+        }
+        let rank = (self.repeat.rank(entity) - 1) as usize;
+        self.last[rank] as usize == extent
+    }
+}
+
+/// One extent's has-row bitmap, read and deserialised on its own.
+fn read_hasrow(paths: &ExtentPaths) -> Result<Bitmap> {
+    let bytes = std::fs::read(&paths.hasrow).map_err(|e| BuildError::io(&paths.hasrow, e))?;
+    Bitmap::try_deserialize::<croaring::Portable>(&bytes).ok_or_else(|| {
+        BuildError::Invalid(format!(
+            "the extent has-row bitmap at {} is not portable Roaring",
+            paths.hasrow.display()
+        ))
+    })
 }
 
 /// One window of one extent: a contiguous run of blocks, which is a contiguous run of entities.
@@ -301,11 +386,10 @@ impl OpenExtents {
         visit: &mut dyn FnMut(usize, &str) -> Result<()>,
     ) -> Result<()> {
         let blob = &self.blobs[window.extent];
-        let live = &self.live[window.extent];
         let mut cursor = blob.rows_cursor_over(window.lo, window.hi);
         while cursor.advance().map_err(record_error)? {
             let entity = cursor.entity();
-            if !live.contains(entity) {
+            if !self.duplicates.is_live(window.extent, entity) {
                 continue;
             }
             let value = field_value(&cursor, self.column)?;
@@ -316,11 +400,11 @@ impl OpenExtents {
 
     /// Every live `(entity, value)` across one column's extents, ascending in the entity.
     ///
-    /// The extents each ascend and their live sets are disjoint, so the lowest head is the next
-    /// row and no two streams ever offer the same entity. That is the stream the keyword
-    /// dictionary pass reads in place of an entity-indexed arena: it wants the column once, in
-    /// entity order, and this delivers it without the offset array that ordering used to cost
-    /// (`build-column-extents.md`).
+    /// The extents each ascend and exactly one of them is live for any entity, so the lowest head
+    /// is the next row and no two streams ever offer the same entity. That is the stream the
+    /// keyword dictionary pass reads in place of an entity-indexed arena: it wants the column
+    /// once, in entity order, and this delivers it without the offset array that ordering used to
+    /// cost (`build-column-extents.md`).
     pub(crate) fn for_each_live_record(
         &self,
         visit: &mut dyn FnMut(u32, &str) -> Result<()>,
@@ -330,13 +414,13 @@ impl OpenExtents {
         let mut heap: std::collections::BinaryHeap<std::cmp::Reverse<(u32, usize)>> =
             std::collections::BinaryHeap::with_capacity(cursors.len());
         for (i, cursor) in cursors.iter_mut().enumerate() {
-            if next_live(cursor, &self.live[i])? {
+            if next_live(cursor, &self.duplicates, i)? {
                 heap.push(std::cmp::Reverse((cursor.entity(), i)));
             }
         }
         while let Some(std::cmp::Reverse((entity, source))) = heap.pop() {
             visit(entity, field_value(&cursors[source], self.column)?)?;
-            if next_live(&mut cursors[source], &self.live[source])? {
+            if next_live(&mut cursors[source], &self.duplicates, source)? {
                 let next_entity = cursors[source].entity();
                 if next_entity <= entity {
                     return Err(BuildError::Invalid(format!(
@@ -351,14 +435,18 @@ impl OpenExtents {
     }
 }
 
-/// The next row of one extent that its live set holds — a row outside it is a value a later chunk
-/// overwrote, skipped here for the reason [`OpenExtents::for_each_record_in`] skips it.
-fn next_live(cursor: &mut tessera_filter::RecordRowCursor<'_>, live: &Bitmap) -> Result<bool> {
+/// The next live row of one extent — a row that is not is a value a later chunk overwrote,
+/// skipped here for the reason [`OpenExtents::for_each_record_in`] skips it.
+fn next_live(
+    cursor: &mut tessera_filter::RecordRowCursor<'_>,
+    duplicates: &DuplicateMap,
+    extent: usize,
+) -> Result<bool> {
     loop {
         if !cursor.advance().map_err(record_error)? {
             return Ok(false);
         }
-        if live.contains(cursor.entity()) {
+        if duplicates.is_live(extent, cursor.entity()) {
             return Ok(true);
         }
     }
@@ -391,7 +479,8 @@ fn record_error(e: tessera_filter::RecordError) -> BuildError {
 /// One extent's live rows as a stream the record blob's merge reads.
 pub(crate) struct ExtentRows<'a> {
     cursor: tessera_filter::RecordRowCursor<'a>,
-    live: &'a Bitmap,
+    duplicates: &'a DuplicateMap,
+    extent: usize,
 }
 
 impl<'a> ExtentRows<'a> {
@@ -399,10 +488,11 @@ impl<'a> ExtentRows<'a> {
     pub(crate) fn over(open: &'a OpenExtents) -> Vec<ExtentRows<'a>> {
         open.blobs
             .iter()
-            .zip(&open.live)
-            .map(|(blob, live)| ExtentRows {
+            .enumerate()
+            .map(|(extent, blob)| ExtentRows {
                 cursor: blob.rows_cursor(),
-                live,
+                duplicates: &open.duplicates,
+                extent,
             })
             .collect()
     }
@@ -414,7 +504,7 @@ impl tessera_filter_write::RecordRows for ExtentRows<'_> {
             if !self.cursor.advance().map_err(std::io::Error::from)? {
                 return Ok(false);
             }
-            if self.live.contains(self.cursor.entity()) {
+            if self.duplicates.is_live(self.extent, self.cursor.entity()) {
                 return Ok(true);
             }
         }
@@ -430,19 +520,143 @@ impl tessera_filter_write::RecordRows for ExtentRows<'_> {
     }
 }
 
-/// Open a run of extents, mapped.
+/// Open a run of extents, mapped, for a sequential walk alone.
+///
+/// Every reader of an extent — the fold's merge, the keyword dictionary pass, the text index's
+/// windows and the record blob's merge — takes its rows front to back, so none of them addresses a
+/// row by entity and none of them needs the has-row bitmap on the heap
+/// ([`RecordBlob::open_rows_only`][tessera_filter::RecordBlob::open_rows_only] states what that
+/// gives up and what stands instead).
 fn open_all(extents: &[ExtentPaths]) -> Result<Vec<RecordBlob>> {
     let mut blobs = Vec::with_capacity(extents.len());
     for paths in extents {
         blobs.push(
-            RecordBlob::open(
-                &paths.blocks,
-                &paths.hasrow,
-                &paths.directory,
-                Access::Mapped,
-            )
-            .map_err(|e| BuildError::io(&paths.blocks, std::io::Error::from(e)))?,
+            RecordBlob::open_rows_only(&paths.blocks, &paths.directory, Access::Mapped)
+                .map_err(|e| BuildError::io(&paths.blocks, std::io::Error::from(e)))?,
         );
     }
     Ok(blobs)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Three extents over one column, with two entities written in more than one of them and two
+    /// written in exactly one.
+    fn three_extents(dir: &Path) -> ExtentColumn {
+        let mut column = ExtentColumn::new(dir, 0, "note");
+        column
+            .push_extent(&[(1, "0:1"), (5, "0:5"), (9, "0:9")])
+            .expect("an extent");
+        column
+            .push_extent(&[(5, "1:5"), (7, "1:7")])
+            .expect("an extent");
+        column
+            .push_extent(&[(9, "2:9"), (11, "2:11")])
+            .expect("an extent");
+        column
+    }
+
+    /// **The last extent to hold an entity is the one whose row survives**, and an entity only one
+    /// extent holds survives from it — which is the whole of what the duplicate map answers. Entity
+    /// 5 is in extents 0 and 1, entity 9 in extents 0 and 2, and 1, 7 and 11 in one apiece.
+    #[test]
+    fn the_last_extent_to_hold_a_repeated_entity_is_the_live_one() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let column = three_extents(dir.path());
+        let open = column.open().expect("the extents open");
+        let map = &open.duplicates;
+
+        // The repeated entities: live in their highest extent and nowhere else.
+        assert!(!map.is_live(0, 5), "extent 0's entity 5 was overwritten");
+        assert!(map.is_live(1, 5), "extent 1 holds the surviving entity 5");
+        assert!(!map.is_live(0, 9), "extent 0's entity 9 was overwritten");
+        assert!(map.is_live(2, 9), "extent 2 holds the surviving entity 9");
+
+        // A single-extent entity is live wherever it is asked for, being outside `repeat`.
+        assert!(map.is_live(0, 1), "entity 1 is in extent 0 alone");
+        assert!(map.is_live(1, 7), "entity 7 is in extent 1 alone");
+        assert!(map.is_live(2, 11), "entity 11 is in extent 2 alone");
+    }
+
+    /// The stream the keyword dictionary pass reads: every live row once, ascending in the entity,
+    /// each carrying the value of the last extent that wrote it.
+    #[test]
+    fn the_live_stream_is_one_row_an_entity_carrying_the_last_value_written() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let column = three_extents(dir.path());
+        let open = column.open().expect("the extents open");
+
+        let mut seen: Vec<(u32, String)> = Vec::new();
+        open.for_each_live_record(&mut |entity, value| {
+            seen.push((entity, value.to_string()));
+            Ok(())
+        })
+        .expect("the stream reads");
+        assert_eq!(
+            seen,
+            vec![
+                (1, "0:1".to_string()),
+                (5, "1:5".to_string()),
+                (7, "1:7".to_string()),
+                (9, "2:9".to_string()),
+                (11, "2:11".to_string()),
+            ]
+        );
+    }
+
+    /// The same rows through the windowed reader the text index divides its work by. A window is
+    /// inside one extent, so the rows arrive extent by extent rather than in entity order, but the
+    /// set of them is the same.
+    #[test]
+    fn the_windowed_reader_yields_the_same_live_rows() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let column = three_extents(dir.path());
+        let open = column.open().expect("the extents open");
+
+        let mut seen: Vec<(usize, String)> = Vec::new();
+        for window in open.windows(16) {
+            open.for_each_record_in(window, &mut |entity, value| {
+                seen.push((entity, value.to_string()));
+                Ok(())
+            })
+            .expect("a window reads");
+        }
+        seen.sort();
+        assert_eq!(
+            seen,
+            vec![
+                (1, "0:1".to_string()),
+                (5, "1:5".to_string()),
+                (7, "1:7".to_string()),
+                (9, "2:9".to_string()),
+                (11, "2:11".to_string()),
+            ]
+        );
+    }
+
+    /// A column no entity of which is written twice carries an empty duplicate map, and every row
+    /// of every extent is live.
+    #[test]
+    fn a_column_that_repeats_no_entity_carries_an_empty_map() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let mut column = ExtentColumn::new(dir.path(), 0, "note");
+        column
+            .push_extent(&[(1, "a"), (2, "b")])
+            .expect("an extent");
+        column
+            .push_extent(&[(3, "c"), (4, "d")])
+            .expect("an extent");
+        let open = column.open().expect("the extents open");
+        assert!(open.duplicates.repeat.is_empty());
+        assert!(open.duplicates.last.is_empty());
+        let mut rows = 0usize;
+        open.for_each_live_record(&mut |_, _| {
+            rows += 1;
+            Ok(())
+        })
+        .expect("the stream reads");
+        assert_eq!(rows, 4, "every row of both extents is live");
+    }
 }
