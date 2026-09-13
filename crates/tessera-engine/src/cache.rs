@@ -172,6 +172,12 @@ impl CacheWeight for RowProjection {
     /// size. The caveat is stated here, at the site that computes the number, because the same claim
     /// is easy to reach for in `tessera-server::config` to justify a margin it does not explain.
     ///
+    /// **A projection is run-optimised at construction** (`crate::compose::RowProjection::from_rows`),
+    /// so a grant covering runs of row space is charged the run containers it holds rather than the
+    /// bitmap containers it would otherwise hold. That moves the charge down and never up — a
+    /// container is converted only where the run form is smaller — so the 125.12 MB above stays an
+    /// upper bound at that coverage, and an entry that runs well is charged what it costs.
+    ///
     /// The floor applied on top of this (`single_flight::PER_ENTRY_FLOOR_BYTES`) is what stops the
     /// *opposite* error — a bound that charges a near-empty projection its true handful of bytes
     /// bounds no number of entries.

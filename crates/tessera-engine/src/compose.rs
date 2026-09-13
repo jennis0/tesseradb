@@ -178,7 +178,18 @@ impl RowProjection {
     ///
     /// The result covers no extents, so [`Self::extends_to`] holds only over a row space with none.
     /// A projection meant to be extended must come from [`Self::new`].
-    pub fn from_rows(rows: Bitmap) -> Self {
+    pub fn from_rows(mut rows: Bitmap) -> Self {
+        // **Run containers, because a projection is held for a session and read for its life.**
+        // The rows a grant projects to are a contiguous range wherever the grant covers a run of
+        // entity space, and a bitmap container spends 8 KiB on a range a run container states in
+        // four bytes: a whole-corpus grant at 3.5×10⁹ rows is 53 342 bitmap containers, 437 MB
+        // resident a session, against a single run. `run_optimize` converts a container only where
+        // the run form is smaller, so a projection that runs badly keeps the representation it had.
+        //
+        // This is also what `cache_weight_bytes` charges the row-projection cache, so the cache's
+        // bound is over the bytes the projection actually holds rather than over the bytes it would
+        // have held unoptimised.
+        rows.run_optimize();
         let cardinality = rows.cardinality();
         RowProjection {
             rows,

@@ -24,7 +24,7 @@ use std::sync::Arc;
 use tempfile::TempDir;
 
 use tessera_engine::viewport::ViewportRequest;
-use tessera_engine::{Engine, EngineConfig};
+use tessera_engine::{Engine, EngineConfig, Session};
 use tessera_store::read::open_bundle;
 use tessera_store::Bundle;
 
@@ -108,24 +108,40 @@ fn publish_second_geometry(engine: &Engine, tmp: &TempDir, prefix: &str, n: u64)
     next_version
 }
 
-/// Squeeze the bound to what **one** entry occupies, so any second distinct key evicts the first.
+/// Squeeze the bound to what **one** entry occupies, so any second distinct key evicts the first,
+/// and leave the cache empty so the caller populates it in the order its own assertion needs.
 ///
 /// Derived from the cache's own accounting rather than hard-coded, which keeps it independent of
-/// the fixture's serialised size — but it must divide by the *entry count*, not use the resident
-/// total. Setting the bound to the total is the mistake this helper was written with, and it is
-/// silent: the bound is then already satisfied, nothing is ever evicted, and both tests that depend
-/// on it fail at their "the eviction must have happened" guard rather than at their real assertion.
-/// That guard is why they are not vacuous.
-fn tighten_to_one_entry(engine: &Engine) -> u64 {
-    let stats = engine.row_projection_cache_stats();
-    assert!(
-        stats.entries > 0,
-        "the caller must populate the cache first"
-    );
-    let per_entry = stats.bytes / stats.entries as u64;
-    assert!(per_entry > 0, "an entry must be charged something");
-    engine.set_cache_bounds(per_entry, u64::MAX);
-    per_entry
+/// the fixture's serialised size. Two things it has to get right, and both are silent when it does
+/// not: the bound is *one* entry's charge and not the resident total, and it is the **largest**
+/// charge among the principals the caller is about to round-robin. Coverage does not order the
+/// charges — a projection is run-optimised, so a broad grant covering a run of row space is charged
+/// less than a sparse grant scattered over the same space — so a bound taken from whichever
+/// principal happened to be resident can sit below another's entry, which is then served without
+/// being retained and evicts nothing. Either mistake ends at a "the eviction must have happened"
+/// guard rather than at the real assertion, which is why those guards are there.
+fn tighten_to_one_entry(engine: &Engine, sessions: &[&Session]) -> u64 {
+    let mut largest = 0u64;
+    for session in sessions {
+        for resident in sessions {
+            engine.prune_token(resident.token_id);
+        }
+        engine
+            .viewport(session, whole_extent())
+            .expect("a viewport populates this principal's entry");
+        let stats = engine.row_projection_cache_stats();
+        assert_eq!(
+            stats.entries, 1,
+            "one principal resident at a time, so `bytes` is that principal's own charge"
+        );
+        largest = largest.max(stats.bytes);
+    }
+    for resident in sessions {
+        engine.prune_token(resident.token_id);
+    }
+    assert!(largest > 0, "an entry must be charged something");
+    engine.set_cache_bounds(largest, u64::MAX);
+    largest
 }
 
 /// A revoke drops that session's projections and nobody else's.
@@ -242,13 +258,12 @@ fn an_evicted_then_rebuilt_projection_is_byte_identical() {
     );
     let engine = open_with(config(), &tmp, &bundle_root);
     let session = engine.authorise(&full_coverage_credential()).unwrap();
-
-    let first = engine.viewport(&session, whole_extent()).unwrap();
-
-    // Force this session's entry out by round-robinning another principal through a one-entry
-    // bound.
-    tighten_to_one_entry(&engine);
     let other = engine.authorise(&subset_credential()).unwrap();
+
+    // Force this session's entry out by round-robinning another principal through a bound that
+    // holds the larger of the two entries and not both.
+    tighten_to_one_entry(&engine, &[&session, &other]);
+    let first = engine.viewport(&session, whole_extent()).unwrap();
     engine.viewport(&other, whole_extent()).unwrap();
     let evictions = engine.row_projection_cache_stats().evictions;
     assert!(
@@ -285,15 +300,12 @@ fn eviction_never_widens_a_mask() {
     let sparse = engine.authorise(&subset_credential()).unwrap();
     let broad = engine.authorise(&full_coverage_credential()).unwrap();
 
-    // **Ordering here is load-bearing twice over.** The bound is enforced at publish, so tightening
-    // while both principals are already resident would leave both there and every read below would
-    // be a hit. And it must be sized from the *larger* of the two masks: sized from the sparse one,
-    // the broad projection exceeds the whole bound and takes the oversized-admission path — served
-    // but never retained — so the sparse entry is never evicted and the round-robin silently
-    // becomes a sequence of hits and unretained builds. Both mistakes were made writing this test
-    // and both were caught by the eviction guard at the end, which is why that guard is there.
+    // **Ordering here is load-bearing.** The bound is enforced at publish, so tightening while
+    // both principals are already resident would leave both there and every read below would be a
+    // hit. `tighten_to_one_entry` measures each principal alone and leaves the cache empty, which
+    // is what makes the two reads below a build each.
+    tighten_to_one_entry(&engine, &[&sparse, &broad]);
     let broad_out = engine.viewport(&broad, whole_extent()).unwrap();
-    tighten_to_one_entry(&engine);
     let sparse_before = engine.viewport(&sparse, whole_extent()).unwrap();
 
     // Non-vacuity: the two principals must genuinely see different sets, or "did not widen" is
@@ -349,7 +361,7 @@ fn an_undersized_bound_does_not_livelock() {
         .collect();
 
     let reference = engine.viewport(&sessions[0], whole_extent()).unwrap();
-    tighten_to_one_entry(&engine);
+    tighten_to_one_entry(&engine, &[&sessions[0]]);
 
     for round in 0..4 {
         for (index, session) in sessions.iter().enumerate() {
