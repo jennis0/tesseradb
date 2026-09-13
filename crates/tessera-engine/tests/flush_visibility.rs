@@ -54,6 +54,25 @@ fn engine_at(tmp: &std::path::Path, root: &std::path::Path, tick_secs: u64) -> E
     engine
 }
 
+/// The same engine **without a write executor**: one executor owns a bundle root (write-path
+/// §1.2), and a reopen that runs beside a live publisher is a reader. What it proves is unchanged —
+/// the artefacts on disc rather than the publishing process's own generation.
+fn reader_at(tmp: &std::path::Path, root: &std::path::Path) -> Engine {
+    Engine::open(
+        root,
+        &tmp.join("cache-reader"),
+        &tmp.join("wal-reader.log"),
+        tessera_plugin::Passthrough::new(),
+        EngineConfig {
+            flush_max_age_secs: 3600,
+            max_merged_segment_bytes: None,
+            compaction: tessera_engine::CompactionSchedule::off(),
+            ..config()
+        },
+    )
+    .expect("engine opens")
+}
+
 fn fixture(tmp: &std::path::Path) -> std::path::PathBuf {
     let root = tmp.join("bundle");
     build_fixture(
@@ -309,7 +328,7 @@ fn a_flushed_item_is_visible_in_a_viewport() {
 
     // A fresh engine on the same bundle: the restart path, and the only one that proves the
     // artefacts rather than the publishing process's own in-memory generation.
-    let reopened = engine_at(tmp.path(), &root, 3600);
+    let reopened = reader_at(tmp.path(), &root);
     let reopened_session = reopened
         .authorise(&full_coverage_credential())
         .expect("the credential authorises against the reopened bundle");

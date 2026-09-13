@@ -3158,8 +3158,18 @@ async fn backpressure_is_invisible_before_auth() {
     // Server B: the *queue* 429 and the *row cap* 422 — the two signals server A cannot produce.
     // Its admission bound refuses before `run_ingest` runs at all, which is itself the ordering
     // under test, so a row-cap leg on server A can only ever observe the 429.
+    //
+    // **Its own bundle**, because both servers run write executors and one executor owns a bundle
+    // root (write-path §1.2). Nothing here is about the two sharing a corpus: each server's
+    // subject is the order of its own refusals.
+    let bundle_root_b = tmp.path().join("bundle-b");
+    build_fixture(
+        &bundle_root_b,
+        &tmp.path().join("points-b.parquet"),
+        &tmp.path().join("pairs-b.parquet"),
+    );
     let mut engine_b = Engine::open(
-        &bundle_root,
+        &bundle_root_b,
         &tmp.path().join("cache-b"),
         &tmp.path().join("wal-b.log"),
         Passthrough::new(),

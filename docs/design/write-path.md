@@ -136,6 +136,18 @@ executor at each write and living **in the filename alone** — the manifest fie
 duplicated it is deleted (contracts §2.3). `n` advances faster than the geometry version, because
 overlay publications take an `n` and move no geometry.
 
+**One executor owns a bundle root.** Every name a publication allocates comes from state one
+executor holds — `n`, an entity id, a `seg_id` — so a second writer over the same root takes the
+same names from the same seed, and publishes complete current state over manifests the first is
+rebasing on. The executor takes an exclusive `flock` on the bundle root directory at start and
+holds it until its thread has ended; a second executor refuses to start, naming the holder's process
+where `/proc/locks` gives it. `flock` rather than a `fcntl` record lock, because a record lock is
+held per process and the two executors that provoked this were in one process: a restart whose
+predecessor was still serving. The directory rather than `CURRENT`, which a fold replaces by rename,
+or the WAL, which is per node and so shared by neither of two nodes over one bundle. Readers take no
+lock. **The guarantee is same-host**: `flock` over SMB and NFS is unreliable, and a bundle is never
+served from a share.
+
 Every writer of a side-manifest — flush, merge, coalesce, fold, overlay publication — takes its
 `n` from one counter on the executor thread, and the counter is raised over every
 `SEGMENTS-<n>.json` present under the bundle root at each allocation. A counter says what this

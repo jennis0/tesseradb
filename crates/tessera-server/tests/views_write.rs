@@ -276,10 +276,10 @@ async fn reauthorise(served: &mut Served) {
 }
 
 /// Reopen the same bundle and the same WAL — the restart every durability claim below is made
-/// against. The old server is dropped first so its executor releases the log.
+/// against. The old server is stopped and waited for first, so its executor has released the bundle root's write lock before the new one takes it.
 async fn restart(served: Served) -> Served {
     let Served { server, tmp, .. } = served;
-    drop(server);
+    server.shutdown().await;
     open(tmp).await
 }
 

@@ -215,7 +215,7 @@ async fn an_exclusion_serves_what_the_inclusion_spelling_serves_and_replays() {
     assert!(narrow[0].1 < broad[0].1, "{narrow:?} against {broad:?}");
 
     // The record carries the inclusion, so replay lands the same membership.
-    drop(server);
+    server.shutdown().await;
     let server = open(&tmp).await;
     assert_eq!(
         served(&server, LAYER, &["0"]).await,

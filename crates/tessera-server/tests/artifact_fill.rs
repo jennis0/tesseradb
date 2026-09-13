@@ -46,7 +46,7 @@ async fn serve(tmp: &TempDir) -> TestServer {
 }
 
 async fn restart(server: TestServer, tmp: &TempDir) -> TestServer {
-    drop(server);
+    server.shutdown().await;
     open(tmp).await
 }
 

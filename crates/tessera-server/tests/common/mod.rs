@@ -205,6 +205,15 @@ pub struct TestServer {
     /// of through a request has stopped being a server test; the point is to *observe* after
     /// driving the request normally.
     pub state: Arc<AppState>,
+    /// The three `axum::serve` tasks, so a test that reopens the bundle can stop them.
+    ///
+    /// **Each holds an `Arc<AppState>`, and so the engine and its write executor.** Dropping a
+    /// `TestServer` drops one `Arc` and leaves theirs, so a `restart` that only dropped the server
+    /// ran its new engine beside the old one — two executors over one bundle root, allocating the
+    /// same side-manifest numbers from the same seed. The engine now refuses to start over a
+    /// locked root (`write-path.md` §1.2), so a test that leaks its server fails at the reopen
+    /// rather than in a way only a counter records.
+    pub serve_tasks: Vec<tokio::task::JoinHandle<()>>,
 }
 
 impl TestServer {
@@ -216,6 +225,49 @@ impl TestServer {
     }
     pub fn control_url(&self, path: &str) -> String {
         format!("http://{}{}", self.control_addr, path)
+    }
+
+    /// **Stop serving and wait for the engine to be released** — what a restart puts between the
+    /// old server and the new one.
+    ///
+    /// Three things hold an `Arc<AppState>`: this value, the three accept loops, and one task per
+    /// live connection that `axum::serve` spawned. The client is dropped first so its keep-alive
+    /// connections close and those per-connection tasks end; then the accept loops are aborted and
+    /// awaited; then this waits for the last `Arc` to be this one before dropping it, which is what
+    /// runs `WritePath::drop` — the join of the executor thread and the release of the bundle lock.
+    pub async fn shutdown(mut self) {
+        // A fresh client in place of this one: dropping the old pool closes its keep-alive
+        // connections, and with them the per-connection tasks holding the state.
+        self.client = reqwest::Client::new();
+        let tasks = std::mem::take(&mut self.serve_tasks);
+        for task in &tasks {
+            task.abort();
+        }
+        for task in tasks {
+            let _ = task.await;
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while Arc::strong_count(&self.state) > 1 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "a connection task still holds the engine 30 s after the listeners stopped"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        // The engine is dropped here: the executor thread is joined and the bundle root's write
+        // lock released before this returns.
+        drop(self);
+    }
+}
+
+impl Drop for TestServer {
+    /// The backstop for a test that drops its server without reopening the bundle. A `Drop` cannot
+    /// wait, so this only stops the accept loops; a test that reopens must call
+    /// [`TestServer::shutdown`] and wait.
+    fn drop(&mut self) {
+        for task in &self.serve_tasks {
+            task.abort();
+        }
     }
 }
 
@@ -611,9 +663,17 @@ async fn mount_server_with_flush(
     let session_router = tessera_server::session::router(Arc::clone(&state));
     let control_router = tessera_server::control::router(Arc::clone(&state));
 
-    tokio::spawn(async move { axum::serve(viewer_listener, viewer_router).await });
-    tokio::spawn(async move { axum::serve(session_listener, session_router).await });
-    tokio::spawn(async move { axum::serve(control_listener, control_router).await });
+    let serve_tasks = vec![
+        tokio::spawn(async move {
+            let _ = axum::serve(viewer_listener, viewer_router).await;
+        }),
+        tokio::spawn(async move {
+            let _ = axum::serve(session_listener, session_router).await;
+        }),
+        tokio::spawn(async move {
+            let _ = axum::serve(control_listener, control_router).await;
+        }),
+    ];
 
     TestServer {
         viewer_addr,
@@ -621,6 +681,7 @@ async fn mount_server_with_flush(
         control_addr,
         client: reqwest::Client::new(),
         state,
+        serve_tasks,
     }
 }
 

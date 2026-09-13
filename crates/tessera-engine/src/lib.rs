@@ -10,6 +10,7 @@ pub mod artifact_content;
 pub mod artifacts;
 mod attributes;
 pub mod browse;
+pub mod bundle_lock;
 mod cache;
 pub mod cancel;
 mod categories;

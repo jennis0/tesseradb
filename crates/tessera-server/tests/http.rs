@@ -1577,8 +1577,11 @@ async fn viewport_response_body_is_byte_identical_at_compute_threads_1_and_8() {
         engine_8.set_serial_fallback_max_rows_for_test(0);
     }
 
-    let server_1 = spawn_server_from_engine(engine_1, config_1.max_k, generous_test_gate()).await;
-    let server_8 = spawn_server_from_engine(engine_8, config_8.max_k, generous_test_gate()).await;
+    // **Mounted without write executors**: one executor owns a bundle root (write-path §1.2), and
+    // these two servers share one. Neither writes — the comparison is between two reads of the same
+    // published bundle.
+    let server_1 = mount_server(engine_1, config_1.max_k, generous_test_gate()).await;
+    let server_8 = mount_server(engine_8, config_8.max_k, generous_test_gate()).await;
 
     let auth_1 = authorise(&server_1, &["0"]).await;
     let token_1 = auth_1["token"].as_str().unwrap();
@@ -1714,8 +1717,11 @@ async fn viewport_response_body_is_byte_identical_at_compute_threads_1_and_8_wit
         engine_8.set_serial_fallback_max_rows_for_test(0);
     }
 
-    let server_1 = spawn_server_from_engine(engine_1, config_1.max_k, generous_test_gate()).await;
-    let server_8 = spawn_server_from_engine(engine_8, config_8.max_k, generous_test_gate()).await;
+    // **Mounted without write executors**: one executor owns a bundle root (write-path §1.2), and
+    // these two servers share one. Neither writes — the comparison is between two reads of the same
+    // published bundle.
+    let server_1 = mount_server(engine_1, config_1.max_k, generous_test_gate()).await;
+    let server_8 = mount_server(engine_8, config_8.max_k, generous_test_gate()).await;
 
     let auth_1 = authorise(&server_1, &["0"]).await;
     let token_1 = auth_1["token"].as_str().unwrap();

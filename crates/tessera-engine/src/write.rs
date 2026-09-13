@@ -2365,6 +2365,10 @@ pub(crate) struct WritePath {
     /// join hang forever.
     handle: Option<LifecycleHandle>,
     join: Option<std::thread::JoinHandle<()>>,
+    /// The bundle root's write lock, held for as long as the executor is. Dropped after the join
+    /// in [`WritePath::drop`] — field drops follow the `drop` body — so the lock outlives every
+    /// write the executor makes.
+    bundle_lock: Option<crate::bundle_lock::BundleWriteLock>,
     health: Arc<ExecutorHealth>,
     #[cfg(feature = "fault-injection")]
     faults: Option<Arc<tessera_lifecycle::faults::FaultSwitchboard>>,
@@ -2384,6 +2388,13 @@ pub enum ExecutorStartError {
     /// permanently writer-less either way: the WAL moved into the closure that failed to spawn and
     /// was dropped with it, so a retry answers `AlreadyStarted`. Restart the process.
     Spawn(std::io::ErrorKind),
+    /// Another executor holds this bundle root's write lock (`crate::bundle_lock`).
+    ///
+    /// One executor owns a bundle root. Every name a publication allocates — the side-manifest
+    /// number, an entity id, a `seg_id` — comes from state one executor holds, and a second writer
+    /// takes the same names from the same seed. The refusal is what keeps the second one from
+    /// starting; the side-manifest floor keeps a node that met one anyway from livelocking.
+    BundleLocked(crate::bundle_lock::BundleLockError),
     /// The bundle root could not be listed for the side-manifest numbers already on disc
     /// (`tessera_store::highest_side_manifest_n`).
     ///
@@ -2403,6 +2414,11 @@ impl std::fmt::Display for ExecutorStartError {
                 f,
                 "the lifecycle thread could not be spawned ({kind:?}); this engine can no longer \
                  accept writes"
+            ),
+            ExecutorStartError::BundleLocked(e) => write!(
+                f,
+                "this bundle root is already being written: {e}. One executor owns a bundle root \
+                 (write-path §1.2); a second would allocate the same names from the same seed"
             ),
             ExecutorStartError::SideManifestScan(detail) => write!(
                 f,
@@ -3499,6 +3515,7 @@ impl WritePath {
             wal: Some(state.wal),
             handle: None,
             join: None,
+            bundle_lock: None,
             health: Arc::new(ExecutorHealth::new()),
             #[cfg(feature = "fault-injection")]
             faults: None,
@@ -3520,7 +3537,24 @@ impl WritePath {
             Arc<tessera_lifecycle::faults::FaultSwitchboard>,
         >,
     ) -> Result<(), ExecutorStartError> {
-        let wal = self.wal.take().ok_or(ExecutorStartError::AlreadyStarted)?;
+        if self.wal.is_none() {
+            return Err(ExecutorStartError::AlreadyStarted);
+        }
+        // **Before the WAL is taken**, so a refused start leaves this engine exactly as it was: the
+        // WAL moves into the executor's closure and cannot be handed back, and a caller that meets
+        // a locked bundle must be able to answer the same `AlreadyStarted`/`BundleLocked` question
+        // again rather than a stale one.
+        let bundle_lock =
+            crate::bundle_lock::BundleWriteLock::acquire(&flush.bundle_root).map_err(|e| {
+                tracing::error!(
+                    error = %e,
+                    "ALARM: refusing to start a write executor over a bundle root another writer \
+                     holds"
+                );
+                ExecutorStartError::BundleLocked(e)
+            })?;
+        tracing::debug!(root = %bundle_lock.path().display(), "bundle write lock taken");
+        let wal = self.wal.take().expect("checked immediately above");
         let wal_position_at_start = wal.position();
 
         // **Compaction §7's startup sweep, before anything else and before the thread** — see
@@ -3753,6 +3787,7 @@ impl WritePath {
             health: Arc::clone(&self.health),
         });
         self.join = Some(join);
+        self.bundle_lock = Some(bundle_lock);
         #[cfg(feature = "fault-injection")]
         {
             self.faults = faults;
@@ -4249,6 +4284,9 @@ impl Drop for WritePath {
         if let Some(join) = self.join.take() {
             let _ = join.join();
         }
+        // **After the join, never before.** The lock's promise is that no other executor writes
+        // while this one might, and this one might until its thread has ended.
+        drop(self.bundle_lock.take());
     }
 }
 

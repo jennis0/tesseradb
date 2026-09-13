@@ -102,6 +102,25 @@ fn engine_at(tmp: &Path, root: &Path, tick_secs: u64) -> Engine {
     engine
 }
 
+/// The same engine **without a write executor** — one executor owns a bundle root (write-path
+/// §1.2). What a restart reads is what these cases assert, and reading takes no lock.
+fn reader_at(tmp: &Path, root: &Path) -> Engine {
+    std::fs::create_dir_all(tmp).expect("the reader's own directory");
+    Engine::open(
+        root,
+        &tmp.join("cache"),
+        &tmp.join("wal.log"),
+        tessera_plugin::Passthrough::new(),
+        EngineConfig {
+            flush_max_age_secs: 3600,
+            max_merged_segment_bytes: None,
+            compaction: tessera_engine::CompactionSchedule::off(),
+            ..config()
+        },
+    )
+    .expect("engine opens")
+}
+
 fn fixture(tmp: &Path) -> PathBuf {
     let root = tmp.join("bundle");
     build_fixture(
@@ -210,7 +229,7 @@ fn a_novel_descriptor_becomes_a_durable_ordinal_and_the_item_becomes_visible() {
 
     // **Restart equality** (obligation 2). The reopened dictionary must give the descriptor the
     // same ordinal the publishing process assigned, or the tier's postings name something else.
-    let reopened = engine_at(&tmp.path().join("restart"), &root, 3600);
+    let reopened = reader_at(&tmp.path().join("restart"), &root);
     assert_eq!(
         reopened.generation().dict.lookup(NOVEL),
         engine.generation().dict.lookup(NOVEL),
@@ -279,7 +298,7 @@ fn a_second_flush_reuses_the_first_flushs_ordinal_and_writes_no_duplicate_record
     );
 
     // The artefact is what a restart reads, so prove the ordinals survive it.
-    let reopened = engine_at(&tmp.path().join("restart"), &root, 3600);
+    let reopened = reader_at(&tmp.path().join("restart"), &root);
     assert_eq!(reopened.generation().dict.lookup(NOVEL), Some(promoted));
     assert_eq!(
         reopened.generation().dict.lookup(OTHER),

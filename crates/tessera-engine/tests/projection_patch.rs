@@ -61,6 +61,25 @@ fn engine_at(tmp: &std::path::Path, root: &std::path::Path, wal: &str, tick_secs
     engine
 }
 
+/// The same engine **without a write executor** — one executor owns a bundle root (write-path
+/// §1.2), and an engine opened beside a live publisher is a reader. Nothing this reference does is
+/// a write.
+fn reader_at(tmp: &std::path::Path, root: &std::path::Path, wal: &str) -> Engine {
+    Engine::open(
+        root,
+        &tmp.join(format!("cache-{wal}")),
+        &tmp.join(format!("{wal}.log")),
+        tessera_plugin::Passthrough::new(),
+        EngineConfig {
+            flush_max_age_secs: 3600,
+            max_merged_segment_bytes: None,
+            compaction: tessera_engine::CompactionSchedule::off(),
+            ..config_uncapped()
+        },
+    )
+    .expect("engine opens")
+}
+
 fn ingest(engine: &Engine, external_id: &str, x: f64, y: f64) {
     let row = UnallocatedRow {
         external_id: Some(external_id.as_bytes().to_vec()),
@@ -136,7 +155,7 @@ fn a_flush_refreshes_a_sessions_geometry_and_the_refresh_equals_a_rebuild() {
 
     // The reference: a cold engine over the same published bundle, on its own WAL, with nothing
     // resident to refresh from.
-    let cold = engine_at(tmp.path(), &root, "wal-cold", 3600);
+    let cold = reader_at(tmp.path(), &root, "wal-cold");
     let cold_session = cold.authorise(&full_coverage_credential()).unwrap();
     let rebuilt = cold.viewport(&cold_session, whole_extent()).unwrap();
     assert_eq!(

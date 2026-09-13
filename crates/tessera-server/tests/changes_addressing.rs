@@ -336,6 +336,9 @@ async fn a_tessera_addressed_deny_replays_to_the_same_entity() {
         .await;
         assert_eq!(resp.status(), 200);
         assert_eq!(visible(&server, &token).await, before - 1);
+        // Stopped and waited for: the reopen below takes the bundle root's write lock, which this
+        // server's executor holds until its engine is dropped (write-path §1.2).
+        server.shutdown().await;
         before
     };
 
