@@ -1501,6 +1501,47 @@ fn build_bundle(
         drop(long_sig);
         timer.end(BuildStage::SignatureSort, recs.len() as u64);
 
+        // **The label is the entity's, not the row's** (`views.md` §7): every view holding an
+        // item must have given it the same term set. The item's signature is the deduplicated
+        // union over the views, and `distinct_of_ordinal` is the sum of each view's own distinct
+        // count — so the two agree exactly when every view contributed the whole union, and the
+        // identity is a refusal rather than a hash comparison.
+        //
+        // Checked only on the per-view route: a shared relation is entity space already and is
+        // scanned once, so there is nothing for two views to disagree about
+        // (`crate::AccessRoute`).
+        //
+        // Ahead of the assignment walk rather than inside it, and so in ordinal order rather than
+        // entity order. The walk visits records in entity order, which on a one-term-per-item
+        // corpus is (term, Morton); the check's two counter reads and its signature length were
+        // three gathers over the batch's slice of three arrays that ordinal order reads
+        // sequentially. The first offending item is reported in ordinal order. Measured over a
+        // 125,789,091-row prefix of the GBIF ladder corpus in three batches of 50,331,648 items:
+        // the assignment loop fell from 302 to 227 ns a record. ⊘ Prefetching the walk's one
+        // remaining gather, the ordinal-indexed write and `starts` read 24 records ahead, was
+        // measured on the same prefix and cost 35% rather than paying.
+        if per_view_labels {
+            let appearances = appearances.as_slice();
+            for local in 0..batch_len {
+                let ordinal = ordinal_lo as usize + local;
+                let sig_len = (starts[local + 1] - starts[local]) as u64;
+                if distinct_of_ordinal[ordinal] as u64 != sig_len * appearances[ordinal] as u64 {
+                    return Err(BuildError::Invalid(format!(
+                        "entity_id {} carries different access labels in different views. A label \
+                         is the entity's, not the row's (views §7): it is one set wherever the \
+                         entity appears, and a re-label is a delete plus a re-ingest (decision \
+                         0047). The views this build reads are {}",
+                        source_ids.ids().id_of(ordinal),
+                        args.views
+                            .iter()
+                            .map(|v| format!("'{}' ({})", v.view_id, v.points.display()))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )));
+                }
+            }
+        }
+
         // **The batch's slice of the entity map, filled here and written once.** A batch's
         // ordinals are the contiguous range `[ordinal_lo, ordinal_hi)`, and the walk visits them
         // in signature order — so writing each entity straight into the mapping scattered the
@@ -1522,32 +1563,6 @@ fn build_bundle(
             let local = (rec.ordinal as u64 - ordinal_lo) as usize;
             assigned[local] = entity;
             let sig = &packed[starts[local] as usize..starts[local + 1] as usize];
-            // **The label is the entity's, not the row's** (`views.md` §7): every view holding
-            // this item must have given it the same term set. `sig` is the deduplicated union
-            // over the views, and `distinct_of_ordinal` is the sum of each view's own distinct
-            // count — so the two agree exactly when every view contributed the whole union, and
-            // the identity is a refusal rather than a hash comparison.
-            //
-            // Checked only on the per-view route: a shared relation is entity space already and
-            // is scanned once, so there is nothing for two views to disagree about
-            // (`crate::AccessRoute`).
-            if per_view_labels
-                && distinct_of_ordinal[rec.ordinal as usize] as u64
-                    != sig.len() as u64 * appearances.as_slice()[rec.ordinal as usize] as u64
-            {
-                return Err(BuildError::Invalid(format!(
-                    "entity_id {} carries different access labels in different views. A label is \
-                     the entity's, not the row's (views §7): it is one set wherever the entity \
-                     appears, and a re-label is a delete plus a re-ingest (decision 0047). The \
-                     views this build reads are {}",
-                    source_ids.ids().id_of(rec.ordinal as usize),
-                    args.views
-                        .iter()
-                        .map(|v| format!("'{}' ({})", v.view_id, v.points.display()))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                )));
-            }
             sig_terms.clear();
             for &value in sig {
                 let term = term_of(value);
