@@ -255,10 +255,11 @@ impl MembershipPack {
         // SAFETY: the file is opened read-only and the mapping is never written through. A
         // concurrent truncation would be undefined, and nothing truncates a published extent: an
         // extent's name carries the publication counter that wrote it, which never repeats within
-        // a process and is reseeded above every candidate the bundle carries at open, so no writer
-        // ever creates a name a reader may hold. A prefix's files are removed only by reclamation,
-        // which runs when no generation names them, and unlinking a mapped file leaves the mapping
-        // valid.
+        // an executor and is seeded above every candidate the bundle carries when that executor is
+        // built. One executor owns a bundle root, so that is every writer there is, and none of
+        // them ever creates a name a reader may hold. A prefix's files are removed only by
+        // reclamation, which runs when no generation names them, and unlinking a mapped file
+        // leaves the mapping valid.
         let map = unsafe { Mmap::map(&file) }.map_err(|source| StoreError::Io {
             path: path.to_path_buf(),
             source,

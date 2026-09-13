@@ -1798,7 +1798,7 @@ fn a_fold_rehouses_every_membership_onto_the_prefix_it_published() {
     // Reopened, so the memberships are the seed's views over the prefix's extent rather than the
     // heap bitmaps the publication built.
     let engine = fx.open();
-    let superseded = fx.live_prefix(&engine).join("partitions/default/members");
+    let superseded = fx.live_prefix(&engine);
     let seeded = engine.level_memberships_for_test("clusters/a", 0);
     assert_eq!(seeded.len(), 1);
     assert!(
@@ -1826,16 +1826,33 @@ fn a_fold_rehouses_every_membership_onto_the_prefix_it_published() {
     assert_eq!(
         engine.owned_memberships_for_test(),
         0,
-        "and nothing anywhere in the store is left on the heap"
+        "and no membership anywhere in the store is left on the heap"
     );
 
-    let maps = std::fs::read_to_string("/proc/self/maps")
-        .expect("this process's own mappings are readable");
-    assert!(
-        !maps.contains(superseded.to_str().expect("a UTF-8 path")),
-        "a membership is still mapped from the prefix the fold superseded, so its blocks are held \
-         for the life of the process:\n{superseded:?}"
-    );
+    // **The whole prefix, not only its memberships.** The rehousing is what releases the packs,
+    // and reclamation is what removes the tree once no generation names it; a mapping into
+    // anything under the old root would hold that file's blocks with no name to see them under.
+    // Reclamation runs on the executor's own tick, so this waits for it rather than assuming it
+    // has already run.
+    let root = superseded.to_str().expect("a UTF-8 path");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    loop {
+        let maps = std::fs::read_to_string("/proc/self/maps")
+            .expect("this process's own mappings are readable");
+        if !maps.contains(root) {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "a file under the prefix the fold superseded is still mapped, so its blocks are held \
+             for the life of the process:\n{}",
+            maps.lines()
+                .filter(|line| line.contains(root))
+                .collect::<Vec<&str>>()
+                .join("\n")
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
 }
 
 /// Every log member, removed — the extent is the membership's durable home, so what comes back at

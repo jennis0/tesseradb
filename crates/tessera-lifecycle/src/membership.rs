@@ -581,10 +581,14 @@ pub struct Degradation {
 /// second format and no second write — the mapped bytes are the extent's, in the portable Roaring
 /// form [`serialise_members`] already wrote.
 ///
-/// A serving node reads the same extents at open and takes the same form. Decoding them onto the
-/// heap instead costs the whole corpus's memberships in anonymous memory for as long as the
-/// process runs: 31 GB over the 1.6×10⁶ artifacts and 3.4×10⁹ member entries of the GBIF corpus,
-/// measured at `Engine::open` on 2026-09-13, for bytes the process already has mapped.
+/// A serving node reads the same extents at open, at every publication it makes and at every fold,
+/// and takes the same form each time. Decoding them onto the heap instead costs the whole corpus's
+/// memberships in anonymous memory for as long as the process runs: 31 GB over the 1.6×10⁶
+/// artifacts and 3.4×10⁹ member entries of the GBIF corpus, measured at `Engine::open` on
+/// 2026-09-13, for bytes the process already has mapped.
+///
+/// ⊘ A content's generating set ([`ContentSet::generated_from`]) is a `Bitmap` and has no view
+/// form, so it is decoded onto the heap wherever a record is. The bytes are in the same blob.
 ///
 /// # What a view may and may not do
 ///
@@ -2775,9 +2779,10 @@ pub fn members_bytes(blob: &[u8]) -> Option<&[u8]> {
 /// One packed blob's membership as a view over the pack that carries the blob, rather than a copy
 /// on the heap.
 ///
-/// The one route to a mapped membership outside this module. A build takes it over the extent it
-/// has just written and a serving open takes it over the extents the manifest names, so a
-/// membership reaches its mapped form the same way on both paths.
+/// The one route to a mapped membership outside this module, and every writer of an extent takes
+/// it over what it has just written: a build over the level it published, a serving open over the
+/// extents the manifest names, a publication at a running node over the extent it wrote, and a
+/// fold over the extents it rewrote. A membership reaches its mapped form one way.
 ///
 /// `None` where the framing does not hold or the bytes are not a bitmap ([`Members::mapped`]). The
 /// caller then keeps the heap bitmap [`decode_record`] gave it, which answers identically.

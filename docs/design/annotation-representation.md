@@ -336,8 +336,11 @@ extent covers a contiguous ordinal range and disturbs no earlier one; a reader u
 extents. The rejected alternative was the record blob, whose compressed blocks would foreclose ever
 using a membership in place.
 
-✔ **The extent is read where it lies, at a build (2026-09-12) and at a serving open and every fold
-(2026-09-13, owner ruling).** A resident membership is a read-only view over the extent's bytes in
+✔ **The extent is read where it lies, wherever one is written: a build (2026-09-12), a serving
+open, a publication at a running node and a fold (2026-09-13, owner ruling).** A membership is
+therefore a view for the whole life of a store rather than only at open, and no view into a
+superseded prefix outlives the fold that replaced it. A resident membership is a read-only view
+over the extent's bytes in
 the portable Roaring form the file already carries, so the heap holds the container descriptors and
 the two-byte values stay page cache the kernel may evict. Decoding them instead costs the whole
 corpus's memberships in anonymous memory for as long as the process runs: **31 GB measured at
@@ -350,6 +353,12 @@ goes through the same accessor and no caller can tell the two forms apart; a wri
 membership it touches to the heap first. The fallback is the decoded bitmap: where the bytes will
 not map, or where the view disagrees with the decoded membership by cardinality, the record keeps
 what it decoded and the node alarms.
+
+⊘ **A content's generating set is not mapped**, and this is a gap rather than a decision: the
+extent carries each set's bytes beside the membership, but the field holding one is a bitmap with
+no view form, so every generating set a node holds is decoded onto the heap. What that costs is
+unmeasured, and it is a function of how many contents a corpus declares rather than of its
+membership size.
 
 **Supplied content itself is not here: it lives in the record blob — the store points use —
 addressed at the artifact's own entity**

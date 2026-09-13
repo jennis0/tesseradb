@@ -1954,9 +1954,17 @@ impl LiveState {
     /// is the post-retirement set; running it first would refuse every artifact this fold took a
     /// member from and leave those on the heap.
     ///
-    /// Returns how many memberships took and how many stayed as they were. A pack that will not
-    /// open, or a blob that will not map, costs nothing but the heap it was already paying: the
-    /// record keeps the membership it holds and every answer is unchanged.
+    /// Returns how many memberships took and how many did not. A pack that will not open leaves
+    /// its level on the heap and alarms; a blob the store cannot match is the caller's alarm to
+    /// raise, and what it means is in the call sites.
+    ///
+    /// **The cost is one file mapping per extent and one checked decode per record, under the
+    /// artifacts mutex.** The decode is [`Members::mapped`]'s own validation, which walks a
+    /// bitmap's header region rather than its values, and the whole pass is `O(artifacts in the
+    /// extents)` — every artifact the node holds, at a fold. Nothing reads the store while it runs.
+    /// ⊘ The stall is unmeasured above 2.5×10⁵ artifacts (25,846,007 GBIF occurrences, 2026-09-13,
+    /// where it was not separable from the fold around it); at 10⁶ and beyond it is a request-path
+    /// pause nobody has put a number on.
     fn rehouse_memberships(
         &self,
         prefix_dir: &std::path::Path,
@@ -1969,11 +1977,12 @@ impl LiveState {
             let pack = match tessera_store::membership::MembershipPack::open(&path) {
                 Ok(pack) => Arc::new(pack),
                 Err(error) => {
-                    tracing::warn!(
+                    tracing::error!(
                         path = %path.display(),
                         %error,
-                        "an extent this publication wrote would not open, so its memberships \
-                         stay on the heap; every answer is unchanged"
+                        "ALARM: an extent this node wrote and fsynced a moment ago would not \
+                         open; its memberships stay on the heap, where they answer exactly as \
+                         before, and the file a restart reads is the one that would not open"
                     );
                     continue;
                 }
@@ -3181,9 +3190,10 @@ impl WritePath {
                         // it holds the view. **No extent file is ever written twice**, which is
                         // what keeps a mapped file from being truncated under a reader: an extent
                         // is named `members-{n:06}-{index:03}` from the publication counter
-                        // (`Executor::allocate_manifest_n`), which only rises within a process and
-                        // is reseeded above every candidate any partition carries at open
-                        // (`Engine`'s executor seed), and the writer is
+                        // (`Executor::allocate_manifest_n`), which only rises within an executor
+                        // and is seeded above every candidate any partition carries when that
+                        // executor is built (`Engine`'s executor seed). One executor owns a bundle
+                        // root, so that is the whole set of writers. The writer itself is
                         // `tessera_store::write_and_fsync`, whose `File::create` would truncate a
                         // name it was handed twice.
                         let mapped = unsafe {
@@ -8746,11 +8756,18 @@ impl Executor {
         // blocks the mapping goes on holding.
         let (rehoused, kept) = self.live.rehouse_memberships(&to_prefix_dir, &repacked);
         if kept > 0 {
-            tracing::warn!(
+            // **Unreachable, on the seed's rule.** The extents were written from this store a
+            // moment ago and a hole is an empty blob the rehousing skips, so a record that does
+            // not take is one the store no longer holds at that ordinal, or one whose cardinality
+            // disagrees with the bytes this fold wrote for it. The first is a level the prefix and
+            // the store describe differently; the second is an artifact served from the bitmap it
+            // already holds, against an extent a restart will read instead.
+            tracing::error!(
                 rehoused,
                 kept,
-                "some memberships could not be read back through the extents this fold wrote \
-                 and stay on the heap; every answer is unchanged and the next fold tries again"
+                "ALARM: artifact memberships this fold wrote back do not match the records they \
+                 were written from; the level the prefix carries and the level being served \
+                 disagree for those ordinals"
             );
         }
         self.membership_extents = repacked;
@@ -14884,8 +14901,10 @@ impl Executor {
         let live = self.generation.load_full();
         // What this publication wrote, per partition, so the resident memberships can move onto it
         // once every manifest naming one is durable (`LiveState::rehouse_memberships`).
-        let mut written: Vec<(std::path::PathBuf, Vec<tessera_store::manifest::MembershipExtent>)> =
-            Vec::new();
+        let mut written: Vec<(
+            std::path::PathBuf,
+            Vec<tessera_store::manifest::MembershipExtent>,
+        )> = Vec::new();
         for (partition, partition_data) in &live.bundle.partitions {
             let mut manifest = partition_data.manifest.clone();
             write_deny_state(&mut manifest, &live.overlay);
@@ -15028,12 +15047,15 @@ impl Executor {
         for (prefix_dir, extents) in &written {
             let (rehoused, kept) = self.live.rehouse_memberships(prefix_dir, extents);
             if kept > 0 {
-                tracing::warn!(
+                // Unreachable for the fold's reason exactly: the extent was packed from these
+                // records, and an ordinal with no record is written as an empty blob the
+                // rehousing skips.
+                tracing::error!(
                     rehoused,
                     kept,
-                    "some memberships could not be read back through the extents this publication \
-                     wrote and stay on the heap; every answer is unchanged and the next fold \
-                     rehouses them"
+                    "ALARM: artifact memberships this publication wrote do not match the records \
+                     they were written from; the extent the manifest now names and the level being \
+                     served disagree for those ordinals"
                 );
             }
         }
