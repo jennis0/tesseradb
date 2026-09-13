@@ -17,7 +17,7 @@ use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use arrow::array::{Array, Float64Array, UInt32Array, UInt64Array};
+use arrow::array::{Array, BinaryArray, Float64Array, UInt32Array, UInt64Array};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
@@ -520,6 +520,59 @@ fn a_locator_slot_addressing_another_entitys_binding_is_refused() {
     refresh_digest(&root, rel);
 
     expect_refusal(&root, "the locator and the runs disagree");
+}
+
+/// A run whose external ids stop ascending. The sidecar binary-searches each run, so a key out
+/// of order makes a binding unreachable; the scan holds no key but the previous one, and the pair
+/// it compares is the whole check.
+#[test]
+fn a_run_whose_external_ids_stop_ascending_is_refused() {
+    let temp = tempfile::TempDir::new().unwrap();
+    flushed_bundle(temp.path());
+    let root = bundle_root(&temp);
+    let prefix_dir = root.join("v00000");
+    let segments: serde_json::Value = serde_json::from_slice(
+        &fs::read(prefix_dir.join("partitions/default/SEGMENTS-1.json")).unwrap(),
+    )
+    .unwrap();
+    let rel = segments["external_id_runs"][0]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let path = prefix_dir.join(&rel);
+
+    // The run's first two keys are swapped and written back. The entity column is untouched, so
+    // what breaks is the ascent and nothing else.
+    let reader = arrow::ipc::reader::FileReader::try_new(File::open(&path).unwrap(), None).unwrap();
+    let schema = reader.schema();
+    let batches: Vec<RecordBatch> = reader.map(|batch| batch.unwrap()).collect();
+    assert!(
+        batches[0].num_rows() >= 2,
+        "the run must hold two keys for there to be an order to break"
+    );
+    let keys = batches[0]
+        .column_by_name("external_id")
+        .and_then(|c| c.as_any().downcast_ref::<BinaryArray>())
+        .expect("the run carries a binary 'external_id' column");
+    let mut values: Vec<Vec<u8>> = (0..keys.len()).map(|i| keys.value(i).to_vec()).collect();
+    values.swap(0, 1);
+    let swapped: Vec<&[u8]> = values.iter().map(|v| v.as_slice()).collect();
+    let at = batches[0].schema().index_of("external_id").unwrap();
+    let mut columns = batches[0].columns().to_vec();
+    columns[at] = Arc::new(BinaryArray::from(swapped));
+    let first = RecordBatch::try_new(batches[0].schema(), columns).unwrap();
+
+    let mut writer =
+        arrow::ipc::writer::FileWriter::try_new(File::create(&path).unwrap(), &schema).unwrap();
+    writer.write(&first).unwrap();
+    for batch in &batches[1..] {
+        writer.write(batch).unwrap();
+    }
+    writer.finish().unwrap();
+    drop(writer);
+    refresh_digest(&root, &rel);
+
+    expect_refusal(&root, "external ids are not strictly ascending at row 1");
 }
 
 /// A sidecar file whose bytes stopped matching the manifest: the family is exempt from the
