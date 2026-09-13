@@ -581,6 +581,15 @@ pub struct Degradation {
 /// second format and no second write — the mapped bytes are the extent's, in the portable Roaring
 /// form [`serialise_members`] already wrote.
 ///
+/// A serving node reads the same extents at open, at every publication it makes and at every fold,
+/// and takes the same form each time. Decoding them onto the heap instead costs the whole corpus's
+/// memberships in anonymous memory for as long as the process runs: 31 GB over the 1.6×10⁶
+/// artifacts and 3.4×10⁹ member entries of the GBIF corpus, measured at `Engine::open` on
+/// 2026-09-13, for bytes the process already has mapped.
+///
+/// ⊘ A content's generating set ([`ContentSet::generated_from`]) is a `Bitmap` and has no view
+/// form, so it is decoded onto the heap wherever a record is. The bytes are in the same blob.
+///
 /// # What a view may and may not do
 ///
 /// Reads go through [`Deref`](std::ops::Deref), so every caller that asks a membership a question is unchanged and
@@ -589,8 +598,9 @@ pub struct Degradation {
 /// keeps write-path §5.4's two removal rules the only routes a bit leaves a membership.
 ///
 /// ⊘ **The mapping's lifetime is the owner's, and the owner is held here.** `bytes` points into an
-/// allocation `owner` keeps alive — at a build, the mapped extent file — so the view is valid for
-/// exactly as long as this value is. Nothing outside [`Members::mapped`] can construct one.
+/// allocation `owner` keeps alive — the mapped extent file, at a build and at a serving open alike
+/// — so the view is valid for exactly as long as this value is. Nothing outside
+/// [`Members::mapped`] can construct one.
 pub struct Members(MembersInner);
 
 enum MembersInner {
@@ -611,7 +621,8 @@ unsafe impl Send for Members {}
 unsafe impl Sync for Members {}
 
 impl Members {
-    /// The membership on the heap — what a publication, a WAL replay and every test produce.
+    /// The membership on the heap — what a publication, a WAL replay, a growth and every test
+    /// produce.
     pub fn owned(bitmap: Bitmap) -> Self {
         Members(MembersInner::Owned(bitmap))
     }
@@ -654,8 +665,9 @@ impl Members {
         }
     }
 
-    /// Whether this membership is read through a mapping rather than held on the heap — for the
-    /// build's own accounting and its tests, and for nothing on a serving path.
+    /// Whether this membership is read through a mapping rather than held on the heap. Read by
+    /// the build's accounting, by tests and by this type's own `Debug`; no answer a principal
+    /// gets depends on it.
     pub fn is_mapped(&self) -> bool {
         matches!(self.0, MembersInner::Mapped { .. })
     }
@@ -2557,6 +2569,21 @@ impl ArtifactStore {
             .sum()
     }
 
+    /// How many artifacts hold their membership on the heap rather than through the extent that
+    /// carries it.
+    ///
+    /// Zero on a node whose every membership has been published and read back. Above zero for a
+    /// membership a publication has not reached yet, one a growth has rewritten since, and one the
+    /// mapping refused — which is the fault the seed and the fold both alarm on. Counts only, and
+    /// no per-layer form, on [`Self::total`]'s rule.
+    pub fn owned_memberships(&self) -> usize {
+        self.levels
+            .values()
+            .flat_map(|slots| slots.iter().flatten())
+            .filter(|record| !record.members.is_mapped())
+            .count()
+    }
+
     pub fn is_empty(&self) -> bool {
         self.total() == 0
     }
@@ -2747,6 +2774,28 @@ pub fn members_bytes(blob: &[u8]) -> Option<&[u8]> {
     let at = at + 2;
     let members_len = u32::from_le_bytes(blob.get(at..at + 4)?.try_into().ok()?) as usize;
     blob.get(at + 4..at + 4 + members_len)
+}
+
+/// One packed blob's membership as a view over the pack that carries the blob, rather than a copy
+/// on the heap.
+///
+/// The one route to a mapped membership outside this module, and every writer of an extent takes
+/// it over what it has just written: a build over the level it published, a serving open over the
+/// extents the manifest names, a publication at a running node over the extent it wrote, and a
+/// fold over the extents it rewrote. A membership reaches its mapped form one way.
+///
+/// `None` where the framing does not hold or the bytes are not a bitmap ([`Members::mapped`]). The
+/// caller then keeps the heap bitmap [`decode_record`] gave it, which answers identically.
+///
+/// # Safety
+///
+/// `blob` must lie inside an allocation `owner` owns and must stay valid and unwritten for as long
+/// as `owner` is held. Both hold for a blob of a read-only file mapping `owner` itself keeps open.
+pub unsafe fn mapped_members(blob: &[u8], owner: Arc<dyn Any + Send + Sync>) -> Option<Members> {
+    let bytes = members_bytes(blob)?;
+    // SAFETY: `bytes` is a subslice of `blob`, which the caller's contract above pins to `owner`
+    // for as long as `owner` lives.
+    unsafe { Members::mapped(bytes, owner) }
 }
 
 /// The inverse, refusing anything it cannot read back exactly.
@@ -3309,6 +3358,38 @@ mod tests {
         // the whole point of the explicit length `encode_record` puts in front of it.
         let end = bytes.as_ptr() as usize - blob.as_ptr() as usize + bytes.len();
         assert!(members_bytes(&blob[..end - 1]).is_none());
+    }
+
+    /// **A blob's membership read where it lies answers what `decode_record` would have built**,
+    /// which is what lets a build and a serving open drop the heap copy.
+    ///
+    /// **Mutation:** hand the blob itself rather than its membership slice and this answers `None`
+    /// or another set, never the published one.
+    #[test]
+    fn mapped_members_reads_the_membership_a_blob_carries() {
+        let mut record = record(100, &[1, 2, 3, 70_000]);
+        record.key = Some("a-key".to_string());
+        record.contents = vec![ContentSet {
+            values: Some(vec!["topic".to_string()]),
+            digest: content_digest(&["topic".to_string()]),
+            generated_from: Bitmap::of(&[2, 3]),
+            cardinality: 2,
+        }];
+        let blob: Arc<Vec<u8>> = Arc::new(encode_record(&record, None));
+        let owner: Arc<dyn Any + Send + Sync> = blob.clone();
+        // SAFETY: `blob` is the allocation `owner` holds, and it is read-only for as long as both
+        // live.
+        let members = unsafe { mapped_members(&blob, owner) }.expect("the framing holds");
+        assert!(members.is_mapped());
+        assert_eq!(members, Bitmap::of(&[1, 2, 3, 70_000]));
+
+        // A blob cut inside the membership takes nothing rather than a shorter set, on
+        // `members_bytes`' rule.
+        let bytes = members_bytes(&blob).expect("the framing holds");
+        let end = bytes.as_ptr() as usize - blob.as_ptr() as usize + bytes.len();
+        let short: Arc<Vec<u8>> = Arc::new(blob[..end - 1].to_vec());
+        let owner: Arc<dyn Any + Send + Sync> = short.clone();
+        assert!(unsafe { mapped_members(&short, owner) }.is_none());
     }
 
     fn check_round_trip(members: &Bitmap) {

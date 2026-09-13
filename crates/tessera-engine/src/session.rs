@@ -4273,6 +4273,47 @@ impl Engine {
     pub fn published_artifacts(&self) -> usize {
         self.write.with_artifacts(|store| store.total())
     }
+
+    /// How many resident memberships are held on the heap rather than read through the extent
+    /// that carries them — see [`tessera_lifecycle::membership::ArtifactStore::owned_memberships`].
+    ///
+    /// A test hook on [`Self::level_memberships_for_test`]'s argument, and a count rather than a
+    /// membership: what it answers is whether a publication left anything behind.
+    #[cfg(feature = "fault-injection")]
+    #[doc(hidden)]
+    pub fn owned_memberships_for_test(&self) -> usize {
+        self.write.with_artifacts(|store| store.owned_memberships())
+    }
+
+    /// Every artifact of one level as `(ordinal, members, mapped)`, where `mapped` says the
+    /// membership is read through the extent that carries it rather than from the heap.
+    ///
+    /// **A test hook, gated so it cannot exist in a shipped build**, on
+    /// [`Self::set_background_refresh_for_test`]'s argument and on a second one of its own: this
+    /// answers memberships in entity space with no mask anywhere near it, which is the shape no
+    /// serving route may have. Where a membership lives is otherwise invisible — every reader goes
+    /// through `Deref` and cannot tell the two apart — so without it the seed and the fold could
+    /// stop mapping and only a memory measurement would ever say so.
+    #[cfg(feature = "fault-injection")]
+    #[doc(hidden)]
+    pub fn level_memberships_for_test(
+        &self,
+        layer: &str,
+        level: u32,
+    ) -> Vec<(u32, Vec<u32>, bool)> {
+        self.write.with_artifacts(|store| {
+            store
+                .level(layer, level)
+                .map(|(ordinal, record)| {
+                    (
+                        ordinal,
+                        record.members.iter().collect::<Vec<u32>>(),
+                        record.members.is_mapped(),
+                    )
+                })
+                .collect()
+        })
+    }
 }
 
 /// One join's answer from [`Engine::grow_memberships`].

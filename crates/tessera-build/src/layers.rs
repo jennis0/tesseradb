@@ -3022,8 +3022,7 @@ fn map_level_memberships(
         // the `Members` this produces holds `owner` for as long as it holds the view. The file is
         // written, fsynced and closed for writing before this runs, and nothing in the build
         // reopens it for writing.
-        let mapped = tessera_lifecycle::membership::members_bytes(blob)
-            .and_then(|bytes| unsafe { tessera_lifecycle::Members::mapped(bytes, owner.clone()) });
+        let mapped = unsafe { tessera_lifecycle::membership::mapped_members(blob, owner.clone()) };
         let took = match mapped {
             Some(members) => store.rehouse_members(layer, level, ordinal, members),
             None => false,

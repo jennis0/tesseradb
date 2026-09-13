@@ -1769,3 +1769,106 @@ fn deleting_a_cluster_deletes_its_labels_and_they_retire_at_the_same_fold() {
         "and the cluster's own slot is a hole, as it was before this rule existed"
     );
 }
+
+/// **A fold leaves no membership reading through the prefix it superseded.**
+///
+/// A membership seeded at open is a view over that prefix's extent, and the pack holding it alive
+/// is not something reclamation can see: `remove_dir_all` unlinks the directory, the mapping
+/// outlives the directory entry, and the file's blocks stay allocated under no name at all. So the
+/// fold reads its own extents back and the old packs go with the records that held them.
+///
+/// The deletion is here to reach the other half: retirement rewrites the surviving membership
+/// through `Members::to_mut`, which copies it to the heap, and only the rehousing puts it back on
+/// a mapping.
+///
+/// **Mutation:** remove the rehousing from the fold's publication and the memberships come back
+/// owned, with `/proc/self/maps` still naming the superseded prefix's `members/`.
+#[test]
+fn a_fold_rehouses_every_membership_onto_the_prefix_it_published() {
+    let fx = fixture();
+    {
+        let engine = fx.open();
+        publish(&fx, &engine, 0..300);
+    }
+    // **The log goes, so the seed is the extent's own doing.** A WAL record postdates any state a
+    // manifest carries and replay applies it over the seed, which puts that artifact's membership
+    // back on the heap — correct, and not what this case is about.
+    remove_the_whole_log(&fx);
+
+    // Reopened, so the memberships are the seed's views over the prefix's extent rather than the
+    // heap bitmaps the publication built.
+    let engine = fx.open();
+    let superseded = fx.live_prefix(&engine);
+    let seeded = engine.level_memberships_for_test("clusters/a", 0);
+    assert_eq!(seeded.len(), 1);
+    assert!(
+        seeded[0].2,
+        "the seed reads a published membership through the extent that carries it"
+    );
+
+    engine
+        .accept_change(fx.member(7), ChangeOp::Delete)
+        .expect("the delete is accepted");
+    fold(&engine);
+
+    let folded = engine.level_memberships_for_test("clusters/a", 0);
+    assert_eq!(folded.len(), 1);
+    assert_eq!(
+        folded[0].1.len(),
+        299,
+        "the retirement took the deleted member and nothing else"
+    );
+    assert!(
+        folded[0].2,
+        "and the membership the retirement rewrote is read through the extent the fold wrote"
+    );
+
+    assert_eq!(
+        engine.owned_memberships_for_test(),
+        0,
+        "and no membership anywhere in the store is left on the heap"
+    );
+
+    // **The whole prefix, not only its memberships.** The rehousing is what releases the packs,
+    // and reclamation is what removes the tree once no generation names it; a mapping into
+    // anything under the old root would hold that file's blocks with no name to see them under.
+    // Reclamation runs on the executor's own tick, so this waits for it rather than assuming it
+    // has already run.
+    let root = superseded.to_str().expect("a UTF-8 path");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    loop {
+        let maps = std::fs::read_to_string("/proc/self/maps")
+            .expect("this process's own mappings are readable");
+        if !maps.contains(root) {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "a file under the prefix the fold superseded is still mapped, so its blocks are held \
+             for the life of the process:\n{}",
+            maps.lines()
+                .filter(|line| line.contains(root))
+                .collect::<Vec<&str>>()
+                .join("\n")
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
+/// Every log member, removed — the extent is the membership's durable home, so what comes back at
+/// the next open came from the prefix (`artifact_publish.rs` asserts that on its own).
+fn remove_the_whole_log(fx: &Fixture) {
+    let dir = fx.wal.parent().expect("the log has a directory");
+    let stem = fx.wal.file_stem().expect("the log has a stem").to_owned();
+    for entry in std::fs::read_dir(dir)
+        .expect("the log's directory exists")
+        .flatten()
+    {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with(&format!("{}-", stem.to_string_lossy())) {
+            std::fs::remove_file(entry.path()).expect("a log member is removable");
+        }
+    }
+    let _ = std::fs::remove_file(&fx.wal);
+}
