@@ -660,8 +660,9 @@ fn a_fold_over_a_row_major_level_writes_its_column_and_changes_no_answer() {
         "the fold wrote the row-major column"
     );
     assert!(
-        fx.tile_index_files(&engine).is_empty(),
-        "and wrote no tile index for a level that has nothing to index"
+        !fx.tile_index_files(&engine).is_empty(),
+        "and the extents beside it, which bound the walk that reads one artifact's rows back \
+         out of the column"
     );
 
     let extents: Vec<_> = engine
@@ -706,6 +707,60 @@ fn a_fold_over_a_row_major_level_writes_its_column_and_changes_no_answer() {
         0,
         "a level that adopted its column has not fallen back"
     );
+    // **And it built no artifact-major form at all.** The fold wrote the extents beside the
+    // column, so the level is served from the two files: the column answers candidacy, the counts
+    // and the declared sizes, and the extents bound the walk that reads one artifact's rows back
+    // out of it. The sweep above compared the centroid and the bounding box of every served
+    // artifact, each of which is a function of `membership ∩ M_auth` alone, so that walk is what
+    // this assertion is claiming produced them.
+    assert!(
+        reopened.artifact_tile_indexes_adopted() > 0,
+        "the reopened engine claimed the fold's extents rather than deriving them"
+    );
+    let form = reopened
+        .held_artifact_form_for_test("s0", FLAT, 0)
+        .expect("the sweep left the level's form held");
+    assert!(
+        !form.membership().rows_held(),
+        "a level holding both its column and its extents transposes neither"
+    );
+    // **And the drill-down agrees with the viewport on such a level.** It is a different route to
+    // `membership ∩ M_auth` — `Engine::artifact` derives the geometry from the artifact alone —
+    // and on a column-only form both routes take the column walk rather than a held bitmap.
+    //
+    // **The drill-down is taken from a second session**, so its derived geometry is computed
+    // rather than read from the per-principal cache the viewport just filled: the two routes
+    // share that cache by design, and comparing them inside one session compares one answer with
+    // itself. A client following a saved link reaches this route cold.
+    let idset = reopened.generation().bundle.manifest.identity.idset;
+    for credential in [full_coverage_credential(), subset_credential()] {
+        let looking = reopened.authorise(&credential).unwrap();
+        let response = reopened
+            .viewport(
+                &looking,
+                ViewportRequest::new("s0", 0, WHOLE_MAP, N_ITEMS as usize),
+            )
+            .expect("a viewport");
+        assert!(!response.artifacts.is_empty());
+        assert!(
+            response.artifacts.iter().any(|a| a.derived.centroid.is_some()),
+            "the layer derives a centroid, or this comparison asserts nothing"
+        );
+        let cold = reopened.authorise(&credential).unwrap();
+        for artifact in &response.artifacts {
+            let alone = reopened
+                .artifact(&cold, artifact.tessera_id, Some(idset), "s0", None)
+                .expect("the identifier resolves")
+                .expect("and the artifact is served to the viewer the viewport served it to");
+            assert_eq!(alone.masked_count, artifact.masked_count);
+            assert_eq!(
+                alone.derived.centroid, artifact.derived.centroid,
+                "the drill-down and the viewport disagreed about {:?}",
+                artifact.key
+            );
+            assert_eq!(alone.derived.bbox, artifact.derived.bbox);
+        }
+    }
 }
 
 /// **The histogram cache's edges**: a deny moves the count on the next request, a growth moves it,

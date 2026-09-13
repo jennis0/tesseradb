@@ -188,14 +188,14 @@ fn the_fold_flips_a_scattered_level_and_the_answers_do_not_move() {
         "the list form represents an overlapping level, so nothing falls back"
     );
 
-    // **The old form's files are not named and the new form's are.** The fold rewrites every level
-    // into the prefix it publishes, so what it did not write is simply absent from the manifest —
-    // which is how a flip drops what nothing will read again.
+    // **Both forms' files are named.** The fold rewrites every level into the prefix it publishes:
+    // the column the flipped level is served from, and the extents that bound the walk reading one
+    // artifact back out of it (`crate::artifacts::ArtifactRows::visible_rows`).
     let columns = files(&root, &engine, "row-column");
     assert!(!columns.is_empty(), "the fold wrote the list column");
     assert!(
-        files(&root, &engine, "tile-index").is_empty(),
-        "and wrote no tile index for a level that has nothing to index"
+        !files(&root, &engine, "tile-index").is_empty(),
+        "and the extents beside it, which a row-major level needs as much as any other"
     );
     let extents: Vec<_> = engine
         .generation()
@@ -224,8 +224,9 @@ fn the_fold_flips_a_scattered_level_and_the_answers_do_not_move() {
         .map(|p| p.manifest.tile_index_extents.len())
         .sum();
     assert_eq!(
-        index_extents, 0,
-        "the flipped level's old-form entries are gone from the manifest"
+        index_extents,
+        files(&root, &engine, "tile-index").len(),
+        "the manifest and the extent files agree"
     );
 
     // **A restart adopts the new form at its coordinate** rather than recomposing it — which is the

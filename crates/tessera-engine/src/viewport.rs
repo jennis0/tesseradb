@@ -67,7 +67,7 @@ use tessera_types::{EntityId, GenerationStamp, RowId, TermId, TesseraId, API_VER
 
 use crate::cache::{CacheWaitEnded, Peek, RowProjectionKey, SessionGeometry};
 use crate::cancel::CancelToken;
-use crate::compose::{compose, visible_to, EffectiveMask, FilterRows, MaskedSet, RowProjection};
+use crate::compose::{compose, visible_to, EffectiveMask, FilterRows, RowProjection};
 use crate::filter::{Endpoint, Family, FilterOperand, Scalar};
 use crate::membership_column::{ServedLayer, ServedLevel};
 use crate::select::{SelectParams, Selection, SelectionPart, SelectionParts, Threshold};
@@ -5439,7 +5439,11 @@ impl Engine {
                         if gated.layer.declaration.drawn_shape()
                             != Some(tessera_types::layer::DrawnShape::Authored) =>
                     {
-                        gated.rows.get(gated.ordinal).cloned().unwrap_or_default()
+                        // `membership ∩ M_auth`, from whichever half of the form holds it — see
+                        // [`crate::artifacts::ArtifactRows::visible_rows`]. The operand is
+                        // composed with the mask wherever it is used, so narrowing it here is the
+                        // same set by another route.
+                        gated.rows.visible_rows(gated.ordinal, mask)
                     }
                     _ => croaring::Bitmap::new(),
                 };
@@ -5484,7 +5488,6 @@ impl Engine {
         denied: &croaring::Bitmap,
         mask_identity: crate::histogram::MaskIdentity,
     ) -> std::result::Result<croaring::Bitmap, crate::filter::FilterError> {
-        use crate::compose::WholeMask;
         use crate::filter::FilterError;
         let reachable = self.write.resolve_layers(
             |term| session.satisfied.contains(&term),
@@ -5511,40 +5514,20 @@ impl Engine {
         let Some(gated) = gated.filter(|g| g.name == leaf.layer) else {
             return Ok(croaring::Bitmap::new());
         };
-        // **The artifact-major membership first, whatever the level's serving layout** — this is
-        // the cheap case `highlight-and-hierarchy.md` §2.1 names, and it is cheap because
-        // `MembershipRows` is already a row-space bitmap: the operand is one intersection with
-        // `M_auth`, O(containers touched) and independent of what the artifact matched.
+        // **The artifact-major membership where the form holds it, and the column walk where it
+        // does not** — one call, and which route it takes is a property of the level
+        // (`crate::artifacts::ArtifactRows::visible_rows`). The first is one intersection with
+        // `M_auth`, O(containers touched) and independent of what the artifact matched; the second
+        // is a walk of the visible rows inside the artifact's extent, reading labels off the
+        // column. The two agree by construction: the column is a projection *of* that membership
+        // (`crate::row_column`), and the extent is `minimum` and `maximum` over it.
         //
-        // **A row-major level has one too**, and reading the column instead was measured at
-        // 2.85 s on rung 3's `mesh/descriptors` — a walk of every visible row of a 3.6 × 10⁷-row
-        // view asking each of its ~46 labels whether it is this ordinal, where the bitmap beside
-        // it answers the same question in microseconds. The two agree by construction: the column
-        // is a projection *of* this membership (`crate::row_column`), and the residency saving
-        // that would drop the artifact-major form is ⊘ **not taken**, so the form is there.
-        //
-        // The column walk stays as the fallback for the level that one day has no artifact-major
-        // form — an unreachable route today, and the honest answer rather than an empty operand
-        // if it ever is reached.
-        if let Some(rows) = gated.rows.get(gated.ordinal) {
-            return Ok(mask.visible_rows(rows));
+        // **The counter says which levels take the walk**, so a deployment can see that a level
+        // is answering `member_of` at the column's cost rather than the bitmap's.
+        if !gated.rows.membership().rows_held() {
+            self.member_of_column_walks.fetch_add(1, Ordering::Relaxed);
         }
-        Ok(match gated.rows.column() {
-            None => croaring::Bitmap::new(),
-            Some(column) => {
-                self.member_of_column_walks.fetch_add(1, Ordering::Relaxed);
-                let visible = mask.visible_all();
-                let mut out = croaring::Bitmap::new();
-                for row in visible.iter() {
-                    column.for_each_label(row, |ordinal| {
-                        if ordinal == gated.ordinal {
-                            out.add(row);
-                        }
-                    });
-                }
-                out
-            }
-        })
+        Ok(gated.rows.visible_rows(gated.ordinal, mask))
     }
 
     /// Drill down on one artifact by the identifier a response handed out.
@@ -5703,10 +5686,7 @@ impl Engine {
                     return crate::derived::DerivedContent::default();
                 };
                 let locator = crate::derived::RowLocator::new(segments);
-                let visible = rows
-                    .get(ordinal)
-                    .map(|members| mask.visible_rows(members))
-                    .unwrap_or_default();
+                let visible = rows.visible_rows(ordinal, &mask);
                 crate::derived::compute(&declared_derived, &visible, &locator)
             });
             (*content).clone()
@@ -6576,10 +6556,7 @@ impl Engine {
                             properties: crate::derived_cache::properties_bits(&declared_derived),
                         };
                         (*self.derived_geometry.get_or_derive(key, || {
-                            let visible = rows
-                                .get(ordinal)
-                                .map(|members| mask.visible_rows(members))
-                                .unwrap_or_default();
+                            let visible = rows.visible_rows(ordinal, mask);
                             crate::derived::compute(&declared_derived, &visible, &locator)
                         }))
                         .clone()

@@ -182,7 +182,7 @@ pub struct ArtifactRecords {
 /// range would admit whatever documents happen to sit between two members in Morton order — and one
 /// extra member can lift an artifact over its existence criterion. The write cycle forbids
 /// range-wise translation for that reason; the same rule reaches the build of this form.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct MembershipRows {
     /// Parallel to a level's ordinals; `None` is a hole, not an empty membership.
     ///
@@ -196,6 +196,23 @@ pub struct MembershipRows {
     /// Per ordinal, per rank: that content's **generating set** in row space. Pushed in lockstep
     /// with [`ArtifactRecords::declared`], which is the size the same set had in entity space.
     generating: Vec<Vec<Bitmap>>,
+    /// **Whether [`Self::rows`] holds anything at all.**
+    ///
+    /// `false` on a level served row-major whose row column *and* whose extent column the prefix
+    /// both hold: the column is the membership addressed by row, the extents bound the walk that
+    /// reads one artifact out of it, and neither has to be transposed back into an artifact-major
+    /// bitmap per ordinal. At the rung 6 corpus — 1,646,192 artifacts over ~3.4×10⁹ member entries
+    /// a level — transposing costs a measured ~28 GB retained and ~10 GB transient, which is the
+    /// residency `design/artifact-serving-at-scale.md` §5.1 records as *not taken* and this is.
+    ///
+    /// The slots are still there and still tell a hole from a live ordinal — every live one holds
+    /// the same empty bitmap — so a form in this state can be brought back to the ordinary one by
+    /// [`Self::absorb_transposed`] without walking the level's records again.
+    ///
+    /// **[`Self::get`] answers `None` for every ordinal while this is `false`**, so a reader that
+    /// wants one artifact's rows is told they are not held rather than handed an empty set. What
+    /// each such reader takes instead is named at [`ArtifactRows::visible_rows`].
+    rows_held: bool,
 }
 
 /// One level's row form and the records beside it, under one validity key.
@@ -399,6 +416,16 @@ impl ArtifactRecords {
     }
 }
 
+impl Default for MembershipRows {
+    fn default() -> Self {
+        MembershipRows {
+            rows: Vec::new(),
+            generating: Vec::new(),
+            rows_held: true,
+        }
+    }
+}
+
 impl MembershipRows {
     /// Project a level's memberships into `space`.
     ///
@@ -496,7 +523,21 @@ impl MembershipRows {
                 *slot = Some(Arc::new(std::mem::take(&mut transposed[idx])));
             }
         }
+        self.rows_held = true;
         true
+    }
+
+    /// Give up the per-artifact rows and serve them from the column instead — see
+    /// [`Self::rows_held`]. Every live ordinal keeps the one shared empty bitmap, so a hole is
+    /// still a hole and [`Self::absorb_transposed`] can bring the form back.
+    fn hold_no_rows(&mut self) {
+        let empty = Arc::new(Bitmap::new());
+        for slot in self.rows.iter_mut() {
+            if slot.is_some() {
+                *slot = Some(Arc::clone(&empty));
+            }
+        }
+        self.rows_held = false;
     }
 
     /// One artifact whose membership rows were resolved elsewhere — a shape's — with the
@@ -562,11 +603,21 @@ impl MembershipRows {
         }
     }
 
+    /// One artifact's rows, or `None` where this form does not hold them — a hole, an ordinal
+    /// past the level's end, or a form built column-only ([`Self::rows_held`]).
     pub fn get(&self, ordinal: u32) -> Option<&Bitmap> {
+        if !self.rows_held {
+            return None;
+        }
         self.rows
             .get(ordinal as usize)
             .and_then(Option::as_ref)
             .map(Arc::as_ref)
+    }
+
+    /// See [`Self::rows_held`].
+    pub fn rows_held(&self) -> bool {
+        self.rows_held
     }
 
     /// A row form given directly — the tests whose subject is the hierarchy over a row form rather
@@ -578,6 +629,7 @@ impl MembershipRows {
         MembershipRows {
             generating: vec![Vec::new(); rows.len()],
             rows: rows.into_iter().map(|set| set.map(Arc::new)).collect(),
+            rows_held: true,
         }
     }
 
@@ -757,6 +809,12 @@ impl ArtifactRows {
     /// **The generating sets still project**: they are not in the column, they are a different set
     /// from the membership, and they are small — see [`MembershipRows::put_generating`].
     ///
+    /// **Where the prefix holds this level's extent column too, nothing is transposed either.**
+    /// The form is then *column-only*: the row column is the membership, the extents bound the
+    /// walk that reads one artifact out of it, and the artifact-major bitmaps are not built at all
+    /// ([`MembershipRows::rows_held`]). At the rung 6 corpus that is a measured ~28 GB retained and
+    /// ~10 GB transient not paid at open, per level.
+    ///
     /// **`adopted` is taken only on success**, so a caller whose column turns out not to cover
     /// the level still has the fold-written index to hand to [`Self::build_over`].
     ///
@@ -793,17 +851,12 @@ impl ArtifactRows {
         if column.len() < membership.len() {
             return None;
         }
-        if !membership.absorb_transposed(column.transpose()?) {
-            return None;
-        }
-        for (idx, rows) in above {
-            membership.or_rows(idx, &rows);
-        }
         // [`Self::build_over`]'s rule for an offered index, and its reason: a shorter one leaves
         // every ordinal past its end out of every walk.
         // [`Self::build_over`]'s rule again: an index the fold wrote is over the base rows.
-        let index = match adopted.take().filter(|_| space.extent_count() == 0) {
-            Some(index) if index.len() == membership.len() => index,
+        let offered = adopted.take().filter(|_| space.extent_count() == 0);
+        let offered = match offered {
+            Some(index) if index.len() == membership.len() => Some(index),
             Some(index) => {
                 tracing::warn!(
                     adopted_ordinals = index.len(),
@@ -811,20 +864,54 @@ impl ArtifactRows {
                     "a fold-written tile index covers a different ordinal range from the level it \
                      was offered for; it is dropped and the level's index is derived"
                 );
-                TileIndex::build(&membership, total_rows(space))
+                None
             }
-            None => TileIndex::build(&membership, total_rows(space)),
+            None => None,
         };
-        Some(ArtifactRows {
-            records,
-            membership,
-            index,
-            partition: None,
-            layout: ServingLayout::ArtifactMajor,
-            column: None,
-            base_rows: space.base_rows(),
-            covered: covered_by(space),
-        })
+        // **The column and the extents together are the whole form**, so where the prefix holds
+        // both there is no artifact-major half to build (`crate::row_column`'s module doc, and the
+        // residency §5.1 records as not taken). The column answers candidacy, the masked counts and
+        // the declared sizes; the extents bound the walk that reads one artifact's rows out of the
+        // column ([`Self::visible_rows`]); and the generating sets containment is tested against
+        // were projected above, being nowhere in either file.
+        //
+        // **Only with no extents**, which is the same condition both adoptions already take: a
+        // flushed segment's rows lie above the base, and neither the column nor the extents reach
+        // them. A form that has to take a flush gives this up first ([`Self::hold_rows`]).
+        match offered {
+            Some(index) => {
+                membership.hold_no_rows();
+                Some(ArtifactRows {
+                    records,
+                    membership,
+                    index,
+                    partition: None,
+                    layout: ServingLayout::ArtifactMajor,
+                    column: None,
+                    base_rows: space.base_rows(),
+                    covered: covered_by(space),
+                })
+            }
+            None => {
+                if !membership.absorb_transposed(column.transpose()?) {
+                    return None;
+                }
+                for (idx, rows) in above {
+                    membership.or_rows(idx, &rows);
+                }
+                let index = TileIndex::build(&membership, total_rows(space));
+                Some(ArtifactRows {
+                    records,
+                    membership,
+                    index,
+                    partition: None,
+                    layout: ServingLayout::ArtifactMajor,
+                    column: None,
+                    base_rows: space.base_rows(),
+                    covered: covered_by(space),
+                })
+            }
+        }
     }
 
     /// The same family over a membership **resolved elsewhere** — a spatial level's, joined from
@@ -1329,6 +1416,7 @@ impl ArtifactRows {
                 .map(|s| s.map(|s| Arc::new(Bitmap::of(s))))
                 .collect(),
             generating: vec![Vec::new(); sets.len()],
+            rows_held: true,
         };
         let index = TileIndex::build(&membership, 0);
         ArtifactRows {
@@ -1350,6 +1438,71 @@ impl ArtifactRows {
 
     pub fn get(&self, ordinal: u32) -> Option<&Bitmap> {
         self.membership.get(ordinal)
+    }
+
+    /// **`membership ∩ M_auth` for one artifact** — the rows of its membership this viewer may
+    /// see, and the one question every per-artifact reader of the membership asks: the input
+    /// derived content is a function of (`annotations.md` §4.2), the operand a `member_of` leaf
+    /// resolves to, and the rows a region leaf by artifact stands for.
+    ///
+    /// **Two routes and one answer.** Where the form holds per-artifact rows, it is one
+    /// intersection with the mask, O(containers touched). Where it does not — a column-only form
+    /// ([`MembershipRows::rows_held`]) — it is a walk of the rows this viewer may see **inside the
+    /// artifact's extent**, reading each one's labels off the column. The extent is what makes the
+    /// second bounded: a walk of the whole visible set was measured at 2.85 s on rung 3's
+    /// `mesh/descriptors`, where the artifact's own span is the part of it that can hold a member.
+    ///
+    /// **Composed from inside the mask** (**I2**): the span is handed to
+    /// [`MaskedSet::visible_rows`], which is the only route to a visible row set, rather than
+    /// materialised and gated afterwards.
+    ///
+    /// Empty for a hole, for an artifact whose membership projects to nothing, and for a
+    /// column-only form with no column — which cannot arise, the column being what makes the form
+    /// column-only.
+    pub fn visible_rows(&self, ordinal: u32, mask: &impl MaskedSet) -> Bitmap {
+        if let Some(rows) = self.get(ordinal) {
+            return mask.visible_rows(rows);
+        }
+        let Some(column) = self.column() else {
+            return Bitmap::new();
+        };
+        let crate::tile_index::Extent::Span { lo, hi } = self.index.extent(ordinal) else {
+            return Bitmap::new();
+        };
+        let visible = mask.visible_rows(&Bitmap::from_range(lo..=hi));
+        let mut out = Bitmap::new();
+        for row in visible.iter() {
+            column.for_each_label(row, |labelled| {
+                if labelled == ordinal {
+                    out.add(row);
+                }
+            });
+        }
+        out
+    }
+
+    /// **Bring a column-only form back to holding per-artifact rows**, by transposing the column
+    /// it was built from — what an amendment needs, every one of them being expressed over the
+    /// artifact-major half ([`Self::extend_by`], [`Self::rebase_span`], [`Self::publish_at`]).
+    ///
+    /// `false` where the transpose refuses — a column with a live tail, or none at all. The caller
+    /// then drops the form and the next request naming the level projects it whole, which is what
+    /// every request did before the column-only form existed.
+    ///
+    /// **On the executor thread and once**, at the first flush, merge or publication after an
+    /// open: the form has taken an extent by the end of it and is never column-only again under
+    /// this prefix.
+    fn hold_rows(&mut self) -> bool {
+        if self.membership.rows_held() {
+            return true;
+        }
+        let Some(column) = self.column.as_deref() else {
+            return false;
+        };
+        let Some(transposed) = column.transpose() else {
+            return false;
+        };
+        self.membership.absorb_transposed(transposed)
     }
 
     /// How many ordinals this level covers, holes included.
@@ -2485,6 +2638,20 @@ impl ArtifactProjections {
         let started = std::time::Instant::now();
         let shared = Arc::strong_count(&rows) > 1;
         let amended = Arc::make_mut(&mut rows);
+        // **A column-only form takes its rows back before any delta reaches it** — every arm below
+        // is expressed over the artifact-major half. The entry is already out of the map, so a
+        // failure here drops the form and the next request projects the level whole.
+        if !amended.hold_rows() {
+            tracing::warn!(
+                layer = %layer,
+                level,
+                view = %view,
+                "a level served from its fold-written column alone could not transpose it back \
+                 into per-artifact rows, which this publication is expressed over; the form is \
+                 dropped and the next request naming this level projects it whole"
+            );
+            return;
+        }
         let cloned_ms = started.elapsed().as_millis() as u64;
         // **The rows these deltas gave each artifact**, gathered as the membership takes them, so
         // the column is amended at exactly those and the pack is never rewritten. Empty on an
@@ -2696,6 +2863,10 @@ impl ArtifactProjections {
             };
             let started = std::time::Instant::now();
             let amended = Arc::make_mut(&mut rows);
+            if !amended.hold_rows() {
+                self.drop_unheld(&address, view);
+                continue;
+            }
             let (added, rows_taken) = match source {
                 SegmentRows::Projected => {
                     amended.extend_by(store.level_in_view(layer, *level, view_key(view)), next)
@@ -2806,6 +2977,10 @@ impl ArtifactProjections {
             };
             let started = std::time::Instant::now();
             let amended = Arc::make_mut(&mut rows);
+            if !amended.hold_rows() {
+                self.drop_unheld(&address, view);
+                continue;
+            }
             let (lo, hi, added, rows_taken) = match source {
                 SegmentRows::Projected => amended.rebase_span(
                     store.level_in_view(layer, *level, view_key(view)),
@@ -2856,6 +3031,24 @@ impl ArtifactProjections {
             .filter(|(_, held)| held.key.prefix == prefix)
             .map(|(address, held)| (address.clone(), held.key.clone(), Arc::clone(&held.rows)))
             .collect()
+    }
+
+    /// Drop a column-only form that could not be brought back to holding per-artifact rows —
+    /// see [`ArtifactRows::hold_rows`], which is the only caller's only failure.
+    fn drop_unheld(&self, address: &LevelAddress, view: &str) {
+        let (_, layer, level) = address;
+        self.cached
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(address);
+        tracing::warn!(
+            layer = %layer,
+            level,
+            view = %view,
+            "a level served from its fold-written column alone could not transpose it back into \
+             per-artifact rows, which an amendment is expressed over; the form is dropped and the \
+             next request naming this level projects it whole"
+        );
     }
 
     /// Drop a form whose rows are not rows of the generation being published — see
@@ -3085,8 +3278,14 @@ impl ArtifactProjections {
                 &mut adopted,
             )
         });
-        let from_transpose = transposed.is_some();
-        if claimed.is_some() && !from_transpose {
+        let from_prefix_column = transposed.is_some();
+        // **True where the column's bytes were turned back into per-artifact bitmaps**, which is
+        // not every level built from one: a level whose extents the prefix also holds is built
+        // from the column without transposing anything (`rows_held` beside it says which).
+        let from_transpose = transposed
+            .as_ref()
+            .is_some_and(|rows| rows.membership().rows_held());
+        if claimed.is_some() && !from_prefix_column {
             tracing::warn!(
                 layer = %layer,
                 level,
@@ -3148,7 +3347,27 @@ impl ArtifactProjections {
             },
         };
         let from_column = column.is_some();
-        let rows = Arc::new(built.with_column(column));
+        let mut built = built.with_column(column);
+        // **A column-only form without its column is not a form at all.** The branch above takes
+        // the claimed column whenever the transpose was skipped — the two are decided by the same
+        // pair of terms — so this cannot fire; it is here because the alternative to firing is a
+        // level whose every membership reads as absent, and the transpose is the answer that costs
+        // rather than the answer that is wrong.
+        if !from_column && !built.membership().rows_held() {
+            tracing::error!(
+                layer = %layer,
+                level,
+                view = %view,
+                "ALARM: a level built from its column alone has no column to serve from; its rows \
+                 are transposed back"
+            );
+            built.membership = MembershipRows::build(
+                store.level_in_view(layer, level, view_key(view)),
+                space,
+            );
+            built.index = TileIndex::build(&built.membership, total_rows(space));
+        }
+        let rows = Arc::new(built);
         if layout.is_row_major() && !from_column {
             self.fallbacks
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -3179,6 +3398,7 @@ impl ArtifactProjections {
             everywhere = rows.index().everywhere(),
             adopted = from_prefix,
             transposed = from_transpose,
+            rows_held = rows.membership().rows_held(),
             layout = ?rows.layout(),
             blocks_per_artifact = rows.membership().blocks_per_artifact(),
             "a level's row form and tile index are built"
@@ -3617,10 +3837,10 @@ pub struct ArtifactView<'a, M: MaskedSet> {
     /// `|membership ∩ M_auth|` one artifact at a time, so a request's budget bounds the work and
     /// there is nothing for a per-session structure to buy.
     ///
-    /// ⊘ **`None` on a row-major level is answered from the row form**, which is correct here only
-    /// because this stage still builds it (`crate::row_column`'s module doc). When it stops being
-    /// built, this stops being optional — and the assertion that the two agree is what a change
-    /// making it mandatory would be checked against.
+    /// **`Some` wherever the level has a column**, which is every level served row-major:
+    /// [`crate::Engine::masked_counts`] builds one from the column and nothing else decides. A
+    /// column-only form has no per-artifact membership to fall back to, so that is the whole of
+    /// the row-major route to this number rather than the fast half of it.
     pub counts: Option<Arc<MaskedCounts>>,
 }
 
@@ -3810,6 +4030,7 @@ mod tests {
             MembershipRows {
                 rows: sets.iter().map(|s| Some(Arc::new(Bitmap::of(s)))).collect(),
                 generating: vec![Vec::new(); sets.len()],
+                rows_held: true,
             },
         )
     }
@@ -3856,6 +4077,7 @@ mod tests {
             MembershipRows {
                 rows: vec![Some(Arc::new(Bitmap::of(members)))],
                 generating: vec![contents.iter().map(|(set, _)| Bitmap::of(set)).collect()],
+                rows_held: true,
             },
         )
     }
@@ -4230,6 +4452,7 @@ mod tests {
             MembershipRows {
                 rows: vec![Some(Arc::new(Bitmap::of(members)))],
                 generating: vec![Vec::new()],
+                rows_held: true,
             },
         )
     }

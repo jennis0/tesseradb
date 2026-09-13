@@ -492,11 +492,21 @@ label column beside it is **400 MB**, 4 B per row, at 13.4 s and 3.6 s to build 
 **~8 GB at 10⁹ rows for the list form and ~4 GB for the label form** *(derived from the measured
 per-row constant)*, and a residency line quoted for a layer is a figure about its `k`.
 
-**And at open the derivation runs the other way.** A level recorded row-major arrives with the
-column the build or the fold wrote, and that column *is* its membership — addressed by row. The
-artifact-major form the residency half above has not yet removed is therefore **transposed out of
-the column** rather than projected a second time from the level's memberships: one sequential pass
-over bytes already on disk, against a decode and a permutation of every artifact's members. ⊘
+**And the residency half is taken where the prefix holds the extents too.** A level recorded
+row-major arrives with the column the build or the fold wrote, and that column *is* its membership —
+addressed by row; the extent column beside it is `minimum` and `maximum` over the same set. Where
+both are named, the level is served from the two files and no artifact-major form is built at all:
+the column answers candidacy, the masked counts and the per-artifact declared size, and the extents
+bound the walk that reads one artifact's rows back out of the column for the three readers that ask
+for them — derived content, a `member_of` leaf and a region leaf by artifact. At the rung 6 corpus
+(1,646,192 artifacts over ~3.4×10⁹ member entries a level) the form that walk replaces was a
+measured ~28 GB retained and ~10 GB transient per level. A level that has to take a flush, a merge
+or a publication transposes the column back first, every amendment being expressed over the
+artifact-major half.
+
+**Where only the column is named, the artifact-major form is transposed out of it** rather than
+projected a second time from the level's memberships: one sequential pass over bytes already on
+disk, against a decode and a permutation of every artifact's members. ⊘
 Measured at rung 3 only (`mesh/descriptors`, 30,217 artifacts over 1.66×10⁹ membership entries,
 warm cache, single-threaded, `probes/2026-09-02-cold-start/`): **23.6–25.1 s to project and
 13.8–15.4 s to transpose**, and `/readyz` 32.8–34.9 s against 24.6–25.1. The transposition hands

@@ -8226,16 +8226,15 @@ impl Executor {
         // is going.** The forms themselves go on the prefix move; the store holds what the deltas
         // said, and the new prefix's forms are built from it.
         self.pending_forms.clear();
-        // **The tile indexes, in the same pass and omitting the same levels** — and omitting the
-        // levels now recorded row-major, which have nothing to index. Their extents are rows, so
-        // they are per view and are projected against the base permutation this fold just wrote.
+        // **The tile indexes, in the same pass and omitting the same levels** — every level of
+        // every view, whichever layout it is recorded in. Their extents are rows, so they are per
+        // view and are projected against the base permutation this fold just wrote.
         let tile_indexes = self.write_tile_indexes(
             &to_prefix_dir,
             &plan.partition,
             manifest_n,
             &fold_incarnations,
             &spaces,
-            &layouts,
             &pending,
             &mut derived_index,
         );
@@ -15987,7 +15986,6 @@ impl Executor {
         n: u64,
         incarnations: &FxHashMap<String, tessera_types::view::ViewIncarnation>,
         spaces: &[(String, tessera_store::RowSpace)],
-        layouts: &[(String, u32, tessera_types::layer::ServingLayout)],
         pending: &PendingRetirement,
         index: &mut tessera_store::derived::DerivedIndex,
     ) -> Vec<tessera_store::manifest::TileIndexExtent> {
@@ -16003,24 +16001,23 @@ impl Executor {
                     .levels_and_extents()
                     .map(|(layer, level, _)| (layer.to_string(), level))
                     .filter(|(layer, level)| self.composes_row_structures(pending, layer, *level))
-                    // **A row-major level has nothing to index** (selection memo §1): its candidacy
-                    // is a scan of `viewport ∩ M_auth`, which the viewport already bounds. Writing
-                    // one would be writing a file no reader on that route opens — and a level that
-                    // falls back derives its index on first use, which is the same answer at the
-                    // cost this pass was trying to save.
-                    .filter(|(layer, level)| {
-                        !layouts
-                            .iter()
-                            .any(|(l, v, layout)| l == layer && v == level && layout.is_row_major())
-                    })
+                    // **A row-major level has one too** (owner ruling 2026-09-13). Its candidacy
+                    // is a scan of `viewport ∩ M_auth` and needs no index, but its per-artifact
+                    // extents bound the column walk that answers `membership ∩ M_auth` for one
+                    // artifact, and a level whose extents a reader has to derive has to build the
+                    // artifact-major row form to derive them from — the residency the row-major
+                    // layout exists to avoid (`crate::artifacts`'s column-only form).
+                    //
                     // **A spatial level's index is not projected from its records**, which carry
                     // no membership — an index of empties would be adopted at open and settle
                     // nothing. Its index is built at open over the held pieces, one pass per
-                    // level over row extents, which is cheap where the resolution is not.
+                    // level over row extents, which is cheap where the resolution is not. An
+                    // attribute level is excluded for the same reason: its members are the rows
+                    // carrying a value, which is nowhere in the record this projects from.
                     .filter(|(layer, _)| {
-                        !self.live.registered_layer(layer).is_some_and(|registered| {
+                        self.live.registered_layer(layer).is_some_and(|registered| {
                             registered.declaration.membership
-                                == tessera_types::layer::MembershipSource::Spatial
+                                == tessera_types::layer::MembershipSource::Enumerated
                         })
                     })
                     .collect();

@@ -351,13 +351,28 @@ pub fn run(
         }
     }
 
-    // ---- the tile indexes: every level that is not row-major -----------------------------------
+    // ---- the tile indexes: every level, whichever layout it is served in -----------------------
     //
-    // **A row-major level has nothing to index** (selection memo §1): its candidacy is a scan of
-    // `viewport ∩ M_auth`, which the viewport already bounds.
+    // **A row-major level has one too** (owner ruling 2026-09-13, and `crate::artifacts`'s
+    // column-only form). Its candidacy is a scan of `viewport ∩ M_auth` and needs no index, but its
+    // per-artifact extents are what bound the column walk that answers `membership ∩ M_auth` for
+    // one artifact — and a level whose extents a reader has to derive has to build the
+    // artifact-major row form to derive them from, which at 1.6×10⁶ artifacts over 3.4×10⁹ member
+    // entries is the 28 GB the row-major layout exists to avoid holding.
+    //
+    // ⊘ **An attribute level is the one exception**, and it is the exclusion the row-major columns
+    // below make for the same reason: its members are the rows carrying a value, which is not in
+    // the record this walks, so every extent would come back empty — and an empty extent is
+    // *narrow*, which is the one direction an adopted structure may never be.
     let mut tile_indexes: Vec<Filed> = Vec::new();
     for (layer, level, layout) in &chosen {
-        if layout.is_row_major() {
+        let projectable = by_layer.get(layer).is_some_and(|registered| {
+            matches!(
+                registered.declaration.membership,
+                MembershipSource::Enumerated | MembershipSource::Spatial
+            )
+        });
+        if !projectable {
             continue;
         }
         let ordinals = store.level(layer, *level).count() as u32;

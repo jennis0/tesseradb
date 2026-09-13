@@ -305,12 +305,15 @@ fn the_manifest_names_a_column_for_one_level_and_an_index_for_the_other() {
         .filter(|e| e.layer == CLUMPED)
         .collect();
     assert_eq!(indexes.len(), 1, "one index per (view, layer, level)");
-    assert!(
+    assert_eq!(
         manifest
             .tile_index_extents
             .iter()
-            .all(|e| e.layer != SPREAD),
-        "a row-major level has nothing to index — its candidacy is a scan of the viewport"
+            .filter(|e| e.layer == SPREAD)
+            .count(),
+        1,
+        "and one for the row-major level too: its extents bound the walk that reads one \
+         artifact's rows back out of its column"
     );
 
     // And every file the manifest names is on disk under the prefix and digested in

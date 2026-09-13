@@ -195,12 +195,11 @@ impl Fixture {
 /// `membership ∩ M_auth` — the same number the artifacts frame serves beside the artifact — for
 /// every principal, which is what makes the layout a cost decision (decision 0093/0094).
 ///
-/// **And the route is the membership, never the column.** Both answer the same number, so only a
-/// counter separates them: `Engine::member_of_column_walks` rises when the leaf falls back to
-/// walking every visible row of the view asking each of its labels whether it is this ordinal.
-/// That fallback is a correct answer at the wrong price — measured at 2.85 s against 22 ms on
-/// rung 3's 3.6 × 10⁷-row `mesh/descriptors` — and it is reachable only on a level with no
-/// artifact-major membership, which no level is today.
+/// **And the route here is the membership, never the column.** Both answer the same number, so
+/// only a counter separates them: `Engine::member_of_column_walks` rises when the leaf reads the
+/// column instead, which is what a level holding no artifact-major membership does — the case
+/// `the_leaf_answers_from_the_column_where_the_form_holds_no_rows` covers. Nothing here has
+/// folded, so no level has claimed a column and the counter stays at zero.
 ///
 /// Mutations this kills: reading the membership without the mask (the broad principal's answer
 /// would be right and the narrow one's wrong); scanning the row column over the request's tiles
@@ -481,5 +480,77 @@ fn a_withheld_artifacts_timing_is_not_separable_from_an_unknown_identifiers() {
         (0.1..10.0).contains(&ratio),
         "the withheld artifact's median ({withheld:?}) and the unknown identifier's ({missing:?}) \
          differ by {ratio:.2}×, which is a channel rather than the register's stated residual"
+    );
+}
+
+/// **The leaf answers the same set from the column alone**, on a level whose row column and whose
+/// extents a fold wrote and a restart claimed.
+///
+/// Such a level builds no artifact-major membership at all
+/// (`crate::artifacts::MembershipRows::rows_held`), so the route this exercises is the one the
+/// counter above exists to distinguish: the walk of the principal's visible rows **inside the
+/// artifact's extent**, reading each row's labels off the column. It must return the same
+/// `membership ∩ M_auth` the bitmap returns, for a broad principal and a narrow one, or the leaf
+/// answers a different question under a layout no client can see.
+#[test]
+fn the_leaf_answers_from_the_column_where_the_form_holds_no_rows() {
+    let fx = fixture(Some(ServingLayout::RowMajorLabel), BOTH_SERVED);
+    let want_broad = matched(&viewport(
+        &fx.engine,
+        &full_coverage_credential(),
+        Some(member_of(fx.id)),
+    ));
+    let want_narrow = matched(&viewport(
+        &fx.engine,
+        &subset_credential(),
+        Some(member_of(fx.id)),
+    ));
+    assert!(
+        want_narrow > 0 && want_narrow < want_broad,
+        "the two principals are a real split"
+    );
+
+    let before = fx.engine.write_executor_stats();
+    fx.engine.request_fold();
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let now = fx.engine.write_executor_stats();
+        assert_eq!(now.fold_failures, before.fold_failures);
+        if now.folds > before.folds {
+            break;
+        }
+        assert!(Instant::now() < deadline, "the fold never published");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let cache = fx._tmp.path().join("cache2");
+    let wal = fx._tmp.path().join("wal2");
+    drop(fx.engine);
+    let reopened = open_engine_publishing(&fx.root, &cache, &wal);
+    let id = fx.id;
+
+    assert_eq!(
+        matched(&viewport(
+            &reopened,
+            &full_coverage_credential(),
+            Some(member_of(id))
+        )),
+        want_broad,
+        "the broad principal's operand is the same set by the column route"
+    );
+    assert_eq!(
+        matched(&viewport(&reopened, &subset_credential(), Some(member_of(id)))),
+        want_narrow,
+        "and the narrow principal's"
+    );
+    let form = reopened
+        .held_artifact_form_for_test("s0", LAYER, 0)
+        .expect("the requests left the level's form held");
+    assert!(
+        !form.membership().rows_held(),
+        "the level was served from its column and its extents, so it holds no per-artifact rows"
+    );
+    assert!(
+        reopened.member_of_column_walks() >= 2,
+        "and both leaves took the column route"
     );
 }

@@ -27,22 +27,25 @@
 //! from: both are per-artifact row-space questions with no row-addressed form, and both go on being
 //! answered from [`crate::artifacts::MembershipRows`] exactly as they were.
 //!
-//! ⊘ **So the residency half of §5.1 is not taken here.** The artifact-major row form is still held
-//! for a row-major level, which is what the layout exists to avoid at 10⁹ rows (4 GB against 78.5).
-//! Not holding it needs containment's projection-loss test and the computed properties to reach the
-//! membership another way, and neither is designed; what this stage delivers is the mechanism, the
-//! record, the files and the route — with every answer asserted identical to the artifact-major
-//! one's, which is what a later change removing the row form would be checked against.
+//! **The residency half of §5.1 is taken where the prefix holds the extents too.** A level whose
+//! row column *and* whose tile-index extents the manifest names is served from the two files
+//! alone: the column answers candidacy, the masked counts and the declared sizes, the extents bound
+//! the walk that reads one artifact's rows back out of the column
+//! ([`crate::artifacts::ArtifactRows::visible_rows`]), and the artifact-major bitmaps are never
+//! built ([`crate::artifacts::MembershipRows::rows_held`]). At the rung 6 corpus — 1,646,192
+//! artifacts over ~3.4×10⁹ member entries a level — the transpose that stands in for them was a
+//! measured ~28 GB retained and ~10 GB transient per level.
 //!
-//! **What has moved is which of the two is derived from the other.** Where the prefix holds this
-//! level's column, the artifact-major form is now **transposed out of it** rather than projected a
-//! second time from the level's memberships ([`RowColumn::transpose`], and
+//! **Where only the column is held, the artifact-major form is transposed out of it** rather than
+//! projected a second time from the level's memberships ([`RowColumn::transpose`], and
 //! [`crate::artifacts::ArtifactRows::build_from_column`] is the caller): the column already holds
 //! the membership, addressed by row, so reaching the other address is one sequential pass instead
 //! of a decode and a permutation of every artifact's members. At rung 3's `mesh/descriptors` —
 //! 30,217 artifacts over 1.66×10⁹ membership entries — that is **14.5 s at open against 24 s**,
 //! the open as a whole 14.4 s against 23.9, and `/readyz` 24.8 s against 33.8
-//! (`probes/2026-09-02-cold-start/`).
+//! (`probes/2026-09-02-cold-start/`). That same transpose is what a column-only form takes back
+//! when a flush, a merge or a publication reaches it, every amendment being expressed over the
+//! artifact-major half.
 //!
 //! **Three things are not in the column and still project**: each content's **generating set**,
 //! which containment is tested against and which is a different set from the membership; a level
