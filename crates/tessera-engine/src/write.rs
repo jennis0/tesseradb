@@ -3050,10 +3050,19 @@ impl WritePath {
         // after it and does.
         let mut artifacts = ArtifactStore::new();
         let mut undecodable = 0usize;
+        // How many memberships the seed holds on the heap because the mapping would not take. See
+        // the record arm below.
+        let mut on_heap = 0usize;
         for extent in seed.membership_extents {
             let path = seed.prefix_dir.join(&extent.path);
-            let pack = tessera_store::membership::MembershipPack::open(&path)
-                .map_err(|e| EngineError::Malformed(e.to_string()))?;
+            // **The pack is held for as long as the memberships read through it.** One `Arc` per
+            // extent is cloned into each `Members`, which is what makes the view below valid for
+            // the store's whole life.
+            let pack = Arc::new(
+                tessera_store::membership::MembershipPack::open(&path)
+                    .map_err(|e| EngineError::Malformed(e.to_string()))?,
+            );
+            let owner: Arc<dyn std::any::Any + Send + Sync> = pack.clone();
             // The manifest and the file must agree about which artifacts this range names. A
             // disagreement would serve one cluster's members under another's identity, so it
             // refuses rather than trusting either.
@@ -3089,7 +3098,35 @@ impl WritePath {
                     continue;
                 };
                 match tessera_lifecycle::membership::decode_record(entity, blob) {
-                    Some((record, shape)) => {
+                    Some((mut record, shape)) => {
+                        // **The membership is read through the pack rather than copied out of
+                        // it**, which is the route the build's own publication takes over the
+                        // extent it has just written (`tessera_lifecycle::Members`). The bitmap
+                        // `decode_record` built is dropped here. Keeping it costs a serving node
+                        // one Roaring bitmap per artifact over the whole corpus for as long as it
+                        // runs: 31 GB of anonymous memory at open over the 1.6×10⁶ artifacts and
+                        // 3.4×10⁹ member entries of the GBIF corpus, for bytes already mapped.
+                        //
+                        // SAFETY: `blob` is a slice of `pack`'s read-only mapping, `owner` is that
+                        // same pack, and the `Members` this produces holds `owner` for as long as
+                        // it holds the view. A published extent is written, fsynced and never
+                        // reopened for writing; a fold writes a new file under a new name.
+                        let mapped = unsafe {
+                            tessera_lifecycle::membership::mapped_members(blob, owner.clone())
+                        };
+                        // **The same cardinality check `ArtifactStore::rehouse_members` makes**,
+                        // and for the same reason: a mis-sliced blob would be a membership with a
+                        // low masked count for every viewer, which the existence criterion renders
+                        // as absent with nothing to notice. Where it does not hold, the record
+                        // keeps the bitmap it decoded, which answers identically.
+                        match mapped {
+                            Some(members)
+                                if members.cardinality() == record.members.cardinality() =>
+                            {
+                                record.members = members;
+                            }
+                            _ => on_heap += 1,
+                        }
                         artifacts.seed(&extent.layer, extent.level, ordinal, record, shape)
                     }
                     None => undecodable += 1,
@@ -3116,6 +3153,13 @@ impl WritePath {
         }
         for (record, position) in records.iter().zip(wal.replayed_positions()) {
             undecodable += artifacts.apply(record, *position);
+        }
+        if on_heap > 0 {
+            tracing::info!(
+                count = on_heap,
+                "artifact memberships could not be read through the extent that carries them and \
+                 are held on the heap instead; every answer is unchanged"
+            );
         }
         if undecodable > 0 {
             tracing::error!(
