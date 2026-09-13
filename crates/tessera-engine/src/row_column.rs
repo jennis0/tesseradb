@@ -92,6 +92,56 @@ use crate::artifacts::MembershipRows;
 type LevelWalk<'a> = tessera_store::derived::LevelWalk<'a>;
 use crate::compose::WholeMask;
 
+/// How many rows one `next_many` read takes out of the mask: 1,024 × 4 B is a 4 KiB buffer, the
+/// same block [`tessera_store::derived::RowLocator::positions`] reads its runs out of.
+const ROW_BLOCK: usize = 1_024;
+
+/// Every row of `rows`, read a block at a time. Every scan over the composed mask below takes this
+/// walk, so it is written once here.
+///
+/// The bitmap's iterator crosses the library's boundary on every `next`, which the compiler cannot
+/// inline through, and the bodies below are an indexed load and a compare each. `next_many` fills
+/// the block inside the library and hands back a slice. The rows, and so the answers, are the same
+/// ones in the same order.
+///
+/// Measured on a whole-map viewport over `gbif-64p`'s 25,846,007 rows, served hot, 2026-09-14:
+/// **3.2 ns a visible row against 6.6** for the row-at-a-time form.
+/// `tessera_store::derived::RowLocator::positions` measured the same change at 168 ms → 44 ms over
+/// 12.8×10⁶ rows.
+fn for_each_row(rows: &Bitmap, mut visit: impl FnMut(u32)) {
+    let mut it = rows.iter();
+    let mut block = [0u32; ROW_BLOCK];
+    loop {
+        let n = it.next_many(&mut block);
+        if n == 0 {
+            return;
+        }
+        for &row in &block[..n] {
+            visit(row);
+        }
+    }
+}
+
+/// [`for_each_row`] over `rows` from `lo` up to but not including `end`: one chunk of a split walk,
+/// which is how the histogram and the accumulation divide the row space.
+fn for_each_row_in(rows: &Bitmap, lo: u32, end: u64, mut visit: impl FnMut(u32)) {
+    let mut it = rows.iter();
+    it.reset_at_or_after(lo);
+    let mut block = [0u32; ROW_BLOCK];
+    loop {
+        let n = it.next_many(&mut block);
+        if n == 0 {
+            return;
+        }
+        for &row in &block[..n] {
+            if (row as u64) >= end {
+                return;
+            }
+            visit(row);
+        }
+    }
+}
+
 /// One `(view, layer, level)`'s row-addressed membership — mapped where a fold wrote it, a buffer
 /// where a publication built it.
 ///
@@ -779,7 +829,7 @@ impl RowColumn {
         let base_rows = self.base_rows();
         match &*self.pack {
             Pack::Label(pack) => {
-                for row in here.iter() {
+                for_each_row(here, |row| {
                     // **The tail answers for the rows above the base**, which is what makes a
                     // point ingested since the last fold a candidate on the next request: its row
                     // is above the base, so the packed column does not label it and the live half
@@ -792,17 +842,17 @@ impl RowColumn {
                     if label != ROW_COLUMN_HOLE {
                         seen[label as usize] = true;
                     }
-                }
+                });
             }
             Pack::List(pack) => {
-                for row in here.iter() {
+                for_each_row(here, |row| {
                     if row >= base_rows {
-                        continue;
+                        return;
                     }
                     for ordinal in pack.list(row as usize) {
                         seen[ordinal as usize] = true;
                     }
-                }
+                });
             }
         }
         // **The amendment, as a second pass over the rows it names that are in view** — never per
@@ -817,12 +867,17 @@ impl RowColumn {
                 }
             }
         }
+        // Added in one call rather than one `add` per hit, for the same reason the scan above
+        // reads the mask a block at a time: each `add` crosses the bitmap library's boundary, and
+        // a level's ordinal count is in the millions.
+        let hits: Vec<u32> = seen
+            .iter()
+            .enumerate()
+            .filter(|(_, hit)| **hit)
+            .map(|(ordinal, _)| ordinal as u32)
+            .collect();
         let mut out = Bitmap::new();
-        for (ordinal, hit) in seen.iter().enumerate() {
-            if *hit {
-                out.add(ordinal as u32);
-            }
-        }
+        out.add_many(&hits);
         out.run_optimize();
         out
     }
@@ -1099,14 +1154,9 @@ impl RowColumn {
                 let lo = u32::try_from(c * chunk).unwrap_or(u32::MAX);
                 let end = (c + 1) * chunk;
                 let mut counts = vec![0u32; ordinals];
-                let mut rows = visible.iter();
-                rows.reset_at_or_after(lo);
-                for row in rows {
-                    if (row as u64) >= end {
-                        break;
-                    }
+                for_each_row_in(visible, lo, end, |row| {
                     self.for_each_label(row, |ordinal| counts[ordinal as usize] += 1);
-                }
+                });
                 counts
             })
             .reduce(
@@ -1174,14 +1224,9 @@ impl RowColumn {
                 let lo = u32::try_from(c * chunk).unwrap_or(u32::MAX);
                 let end = (c + 1) * chunk;
                 let mut acc = empty();
-                let mut rows = visible.iter();
-                rows.reset_at_or_after(lo);
-                for row in rows {
-                    if (row as u64) >= end {
-                        break;
-                    }
+                for_each_row_in(visible, lo, end, |row| {
                     let Some((x, y)) = position(row) else {
-                        continue;
+                        return;
                     };
                     self.for_each_label(row, |ordinal| {
                         let i = ordinal as usize;
@@ -1194,7 +1239,7 @@ impl RowColumn {
                         b[2] = b[2].max(x);
                         b[3] = b[3].max(y);
                     });
-                }
+                });
                 acc
             })
             .reduce(empty, |mut a, b| {
@@ -1928,5 +1973,109 @@ mod tests {
             every_pair(&list)[2..],
             [(2, 0), (2, 1), (4, 1), (5, 1), (9, 0), (9, 1)]
         );
+    }
+
+    /// A deterministic mask over `rows` rows, roughly `numerator/denominator` of them set, in runs
+    /// rather than isolated rows so both shapes the block reader meets are covered.
+    fn sampled_mask(seed: u64, rows: u32, numerator: u32, denominator: u32) -> Bitmap {
+        use rand::{Rng, SeedableRng};
+        let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
+        let mut out = Bitmap::new();
+        let mut row = 0u32;
+        while row < rows {
+            let run = rng.gen_range(1..=17u32).min(rows - row);
+            if rng.gen_ratio(numerator, denominator) {
+                out.add_range(row..row + run);
+            }
+            row += run;
+        }
+        out
+    }
+
+    /// **The block reader and the row-at-a-time reader are the same walk.** `next_many` fills a
+    /// fixed block inside the bitmap library, so the two places it could differ from `iter()` are
+    /// the block boundary and the chunk bound. An off-by-one at either drops rows from a scan,
+    /// which reads as an artifact with no visible member and is served as absence.
+    #[test]
+    fn the_block_reader_walks_exactly_the_rows_the_iterator_does() {
+        // Around the block size, so a mask ending mid-block, one ending exactly on a block, and one
+        // a row past it are all walked.
+        let block = ROW_BLOCK as u32;
+        for count in [0u32, 1, block - 1, block, block + 1, 9_973] {
+            for (seed, num, den) in [(1u64, 1u32, 1u32), (2, 1, 2), (3, 1, 37)] {
+                let mask = sampled_mask(seed, count, num, den);
+                let expected: Vec<u32> = mask.iter().collect();
+                let mut seen = Vec::new();
+                for_each_row(&mask, |row| seen.push(row));
+                assert_eq!(seen, expected, "count={count} seed={seed}");
+
+                // And the chunked form, whose bound is exclusive: every cut of the row space
+                // partitions the same walk into two.
+                for cut in [0u64, 1, (count / 3) as u64, (count / 2) as u64, count as u64] {
+                    let mut walked = Vec::new();
+                    for_each_row_in(&mask, 0, cut, |row| walked.push(row));
+                    for_each_row_in(&mask, cut as u32, u64::from(u32::MAX) + 1, |row| {
+                        walked.push(row)
+                    });
+                    assert_eq!(walked, expected, "count={count} seed={seed} cut={cut}");
+                }
+            }
+        }
+    }
+
+    /// **Candidacy is the histogram's non-zero ordinals, over whatever set the two are given.**
+    ///
+    /// This is what licenses the whole-map route in
+    /// [`crate::artifacts::ArtifactRows::candidacy`]: where the viewport covers the mask the two
+    /// walks are taken over the same set, so reading the cached histogram is the scan's answer
+    /// without the scan. Asserted over both forms, over a base, a tail and an amendment, and over
+    /// masks from full to sparse — the equality has to hold at every row the two walks reach by
+    /// different code, not only at the rows a hand-written case names.
+    #[test]
+    fn candidacy_is_the_histograms_non_zero_ordinals() {
+        let disjoint: Vec<Vec<u32>> = (0..24u32)
+            .map(|i| ((i * 41)..(i * 41 + 41)).collect())
+            .collect();
+        let overlapping: Vec<Vec<u32>> = (0..24u32)
+            .map(|i| ((i * 29)..(i * 29 + 71)).map(|r| r % 1_000).collect())
+            .collect();
+
+        for (layout, sets) in [
+            (ServingLayout::RowMajorLabel, &disjoint),
+            (ServingLayout::RowMajorList, &overlapping),
+        ] {
+            let slices: Vec<Option<&[u32]>> =
+                sets.iter().map(|s| Some(s.as_slice())).collect();
+            let membership = rows_of(&slices);
+            let base = composed(&membership, 1_000, layout).expect("builds");
+
+            // Three states of one column: the base alone, the base with a flush's rows labelled by
+            // a tail, and the base with an amendment over it. All three are reachable between
+            // folds, and candidacy and the histogram read the live halves by different code.
+            let mut columns = vec![base.clone()];
+            if layout == ServingLayout::RowMajorLabel {
+                let tail = TailLabels::new(1_000, (0..200u32).map(|i| i % 24).collect());
+                columns.push(base.with_tail(tail));
+            }
+            let mut amended = base.clone();
+            assert!(amended.amend(&[(1_200, 3), (1_201, 7), (1_202, 3)], 1_300));
+            columns.push(amended);
+
+            for column in &columns {
+                for (seed, num, den) in [(11u64, 1u32, 1u32), (12, 1, 2), (13, 1, 11), (14, 1, 97)]
+                {
+                    let mask = sampled_mask(seed, column.row_count(), num, den);
+                    let scanned: Vec<u32> = column.candidates(&mask).iter().collect();
+                    let counted: Vec<u32> = column
+                        .histogram_over(&mask)
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, &count)| count > 0)
+                        .map(|(ordinal, _)| ordinal as u32)
+                        .collect();
+                    assert_eq!(scanned, counted, "{layout:?} seed={seed} {num}/{den}");
+                }
+            }
+        }
     }
 }
