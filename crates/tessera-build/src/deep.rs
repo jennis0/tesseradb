@@ -538,11 +538,14 @@ fn check_record_blobs(
     }
 
     for (name, blocks, hasrow, directory) in layers {
+        // Mapped, not read: `Access::Read` pulls `blocks.bin` and `directory.arrow` into the
+        // heap whole, and a corpus's record blocks are the corpus. The open-time digest sweep
+        // has already vouched for both files, so nothing here needs a private copy of them.
         let blob = tessera_filter::RecordBlob::open(
             &blocks,
             &hasrow,
             &directory,
-            tessera_filter::Access::Read,
+            tessera_filter::Access::Mapped,
         )
         .map_err(|e| BuildError::Invalid(format!("{name}: {e}")))?;
         let mut rows = 0u64;
