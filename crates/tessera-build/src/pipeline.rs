@@ -1148,8 +1148,8 @@ fn build_bundle(
     // of the label-agreement identity the batch loop checks (`views.md` §7).
     //
     // **File-backed**, which is [`spill::MappedArray`]'s case exactly: written at a scattered
-    // index by the sweep in [`resolve_pairs_chunk`], read at a scattered index by the assignment
-    // walk's label-agreement check, never sorted. At 4 B/item it was the build's largest anonymous
+    // index by the sweep in [`resolve_pairs_chunk`], read in ordinal order by the
+    // label-agreement pass the batch loop runs ahead of its assignment walk, never sorted. At 4 B/item it was the build's largest anonymous
     // structure — 13.0 GiB at the GBIF rung's 3.50×10⁹ items (modelled, items × 4 B) — and mapped
     // it is page cache the kernel may evict rather than memory the machine must have.
     // `plan_build`'s `loop_fixed` charges the same 4 B/item still, on purpose and for I9's sake:
@@ -1493,6 +1493,47 @@ fn build_bundle(
                 "bucket {k} holds pairs outside its ordinal range [{ordinal_lo}, {ordinal_hi})"
             )));
         }
+
+        // **The label is the entity's, not the row's** (`views.md` §7): every view holding an
+        // item must have given it the same term set. The item's signature is the deduplicated
+        // union over the views, and `distinct_of_ordinal` is the sum of each view's own distinct
+        // count — so the two agree exactly when every view contributed the whole union, and the
+        // identity is a refusal rather than a hash comparison. The first offending item is
+        // reported in ordinal order.
+        //
+        // Checked only on the per-view route: a shared relation is entity space already and is
+        // scanned once, so there is nothing for two views to disagree about
+        // (`crate::AccessRoute`).
+        //
+        // Here, ahead of the sort and the assignment walk, because it wants only `starts` and the
+        // two counters: the three arrays are read in ordinal order rather than the entity order
+        // the walk visits records in. Over a 125,789,091-row prefix of the GBIF ladder corpus in
+        // three batches of 50,331,648 items, the signature sort and the assignment together
+        // measure 333 ns a record against 379 with the check inside the walk (median of five
+        // paired runs). ⊘ Prefetching the walk's remaining gather, the ordinal-indexed write and
+        // the `starts` read 24 records ahead, measured 35% slower on the same prefix's assignment
+        // loop.
+        if per_view_labels {
+            let appearances = appearances.as_slice();
+            for local in 0..batch_len {
+                let ordinal = ordinal_lo as usize + local;
+                let sig_len = (starts[local + 1] - starts[local]) as u64;
+                if distinct_of_ordinal[ordinal] as u64 != sig_len * appearances[ordinal] as u64 {
+                    return Err(BuildError::Invalid(format!(
+                        "entity_id {} carries different access labels in different views. A label \
+                         is the entity's, not the row's (views §7): it is one set wherever the \
+                         entity appears, and a re-label is a delete plus a re-ingest (decision \
+                         0047). The views this build reads are {}",
+                        source_ids.ids().id_of(ordinal),
+                        args.views
+                            .iter()
+                            .map(|v| format!("'{}' ({})", v.view_id, v.points.display()))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )));
+                }
+            }
+        }
         // The triple (key_hi, key_lo, ordinal) is unique per rec — a total order, so the
         // parallel unstable sort has exactly one output; refinement makes it the reference
         // `(signature, source_id)` order.
@@ -1522,32 +1563,6 @@ fn build_bundle(
             let local = (rec.ordinal as u64 - ordinal_lo) as usize;
             assigned[local] = entity;
             let sig = &packed[starts[local] as usize..starts[local + 1] as usize];
-            // **The label is the entity's, not the row's** (`views.md` §7): every view holding
-            // this item must have given it the same term set. `sig` is the deduplicated union
-            // over the views, and `distinct_of_ordinal` is the sum of each view's own distinct
-            // count — so the two agree exactly when every view contributed the whole union, and
-            // the identity is a refusal rather than a hash comparison.
-            //
-            // Checked only on the per-view route: a shared relation is entity space already and
-            // is scanned once, so there is nothing for two views to disagree about
-            // (`crate::AccessRoute`).
-            if per_view_labels
-                && distinct_of_ordinal[rec.ordinal as usize] as u64
-                    != sig.len() as u64 * appearances.as_slice()[rec.ordinal as usize] as u64
-            {
-                return Err(BuildError::Invalid(format!(
-                    "entity_id {} carries different access labels in different views. A label is \
-                     the entity's, not the row's (views §7): it is one set wherever the entity \
-                     appears, and a re-label is a delete plus a re-ingest (decision 0047). The \
-                     views this build reads are {}",
-                    source_ids.ids().id_of(rec.ordinal as usize),
-                    args.views
-                        .iter()
-                        .map(|v| format!("'{}' ({})", v.view_id, v.points.display()))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                )));
-            }
             sig_terms.clear();
             for &value in sig {
                 let term = term_of(value);
@@ -1580,8 +1595,8 @@ fn build_bundle(
     // passes below take it as the plain `&[u32]` they always did.
     let entity_of_ordinal = entity_map.as_slice();
     // The two ordinal-space counters of the label-agreement identity (`views.md` §7) have served
-    // their only reader, the check inside the walk above, and are released here rather than at the
-    // end of the build — across every stage from the postings write to the last segment. 4 B/item
+    // their only reader, the ordinal-order pass each batch runs ahead of its assignment walk, and
+    // are released here rather than at the end of the build — across every stage from the postings write to the last segment. 4 B/item
     // each, both mapped files, so what this returns at the GBIF rung is 13.0 GiB of disk apiece
     // (modelled, items × 4 B). Each file is unlinked by `MappedArray`'s own `Drop`.
     drop(distinct_map);
