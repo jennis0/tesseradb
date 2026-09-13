@@ -192,3 +192,90 @@ survives the split.
   seven to ten will say.
 - Every stage after the batch loop against the reference table above; none has a measurement
   above 125.8×10⁶ items.
+
+## What the second build showed (2026-09-13)
+
+Two whole-corpus builds over the same 3,495,729,729 placed rows and the same ten-batch plan: run 1
+on main `a4152e79` (this memo's own build), run 2 on main `d7d26c16` after the bounded-assembly
+design (`2026-09-12-bounded-assembly-design.md`) and its six branches merged. Full figures are
+[`../../ingest-campaign.md`](../../ingest-campaign.md) §4d. This section answers each item above
+against the design's fix, and closes with two findings the second build itself produced.
+
+**Item 1 (the assignment walk's writeback) — the hoist landed and the diagnosis needs a
+correction.** The label-agreement check moved into ordinal order, which removes the scattered
+entity-map writes: a late batch that wrote 200–380 MB/s and faulted 50,000–90,000 pages a second
+under run 1 wrote 25 MB/s and faulted a few hundred pages a second under run 2. That took about
+12% off the loop total, not the loop's whole climb. What remains is Finding B, below.
+
+**Item 4 (`attribute_tail`'s scattered value-column writes) — not fixed in this merge set.**
+`attribute_tail` fell from 1,646 s to 1,574 s, a 4% change consistent with noise rather than with
+the `(entity, value)` partition the design proposes (§4.3): none of the six branches that landed
+is that partition. The scattered write-and-refault cycle this item describes is still in the
+build.
+
+**Item 5 (`layers` leaves freed heap resident) — did not recur.** `layers`' anonymous peak under
+run 2 was **9.1 GB**, against the 46 GB anonymous plus 8 GB of swap this memo measured. The
+batched publication (design §4.5, at most a few million membership entries a batch) and
+`malloc_trim(0)` at stage boundaries between them removed both the peak and the retained heap.
+
+**Item 6 (the keyword dictionary's 16 TB scattered read) — gone.** `filter_postings` fell from
+3,677 s to 1,606 s, with reads of about 25 GB against the 16 TB this memo measured. The
+`(row, ordinal)` partition (design §4.2) replaced the scattered write into
+`keyword-ordinals.scratch`, so the merge's output no longer depends on how much page cache the
+rest of the build leaves it.
+
+**Item 7 (the tiler sort's unmodelled 42 GB) — ran within budget.** `tiler_sort` completed at
+**328 s**, up 86 s from run 1 with no code change on that stage (unattributed; assumed page
+cache) but nowhere near the 47 GB box this memo said could not complete it. The row partition
+(design §4.1) bounds the sort by bucket rather than holding one record a row on the heap.
+
+**Item 8 (measured after the fact) — the artifact pass now has its own stage record, as
+proposed.** `manifests`' interval no longer reports the artifact pass: the two are timed
+separately in run 2 (artifact pass 1,901 s, `manifests`' own digests 69 s), which is the split
+§4.6 of the design asked for. The per-batch dictionary read (56.8 s → 14.1 s at 300×10⁶ rows) is
+not part of this merge set — `dictionary` and `geometry_read` moved in the slower direction
+between the two runs (162 s → 189 s, 398 s → 476 s), unexplained and not attributed to that fix,
+which was never landed here.
+
+### Finding A — `filter_postings` still exceeds the budget, and the design's rule was not applied to it
+
+**Measured.** Anonymous RSS reached **31.6 GB, 7.6 GB over the 24 GB budget, for about twenty
+minutes** in `filter_postings` under run 2 — the one point at which the post-design build did not
+fit.
+
+**Cause.** `ExtentColumn::open` (`crates/tessera-build/src/extents.rs`) deserialises every
+extent's has-row bitmap onto the heap and builds a per-extent live set by subtracting later
+extents' rows (`andnot_inplace`). Each of the two string columns (`scientificname` and
+`specieskey`) spilled 988 extents; the has-row files are run-encoded on disk (2.2 GB for
+`scientificname`), but the subtraction yields array containers at 2 B an entity — about 7 GB of
+live sets a column, plus about 4.5 GB of has-row for the two columns, over a 6 GB base. Run 1's
+fold to 8 extents put 437 M entities in each extent, so every container was a fixed 8 KiB bitset:
+about 14 GB for both columns, half of run 2's figure. The fold under run 1 halved the term by
+changing the container's encoding, not by bounding it, and the string-column extent fold being
+bounded by the budget instead of a fan-in of 128 (one of the six merged branches) meant no fold
+ran at rung 6 at all, so the unbounded shape is what run 2 measured in full. `merge_fan_in`'s
+comment assumes a join chunk covers a contiguous entity run; a chunk is in the attribute source's
+order, scattered over entity space, so that assumption is false and the residency model has no
+term for the live-set structure this produces.
+
+**Proposed fix.** Open extents cursor-only with the has-row file mapped, so the sequential cursor
+takes each row's entity from the block; replace the per-extent live sets with one duplicate map a
+column — `seen` and `repeat` bitmaps plus the last extent index per repeated entity, built in one
+sequential pass over the has-row files, about 90 s here — and add the one-bitmap term to the
+residency model. Modelled cost after the fix: about 1 GB for both columns, no disk, and about no
+change to the pass's wall time. Not built.
+
+### Finding B — the assignment climb is not writeback, and needs a profile
+
+**Measured.** After item 1's hoist, an assignment batch still climbs from 65 s to 165 s with the
+batch index, on one core at 100% with no disk traffic. The climb is superlinear in batch size: the
+half-size tenth batch costs 0.25 µs an item against 0.45 µs an item for a full batch.
+
+**Correction to this memo's item 1.** The scattered writeback this memo diagnosed as the
+assignment walk's main cost is gone, and about 12% of the loop's wall time went with it — the
+remaining 88% was never writeback. What binds now is CPU work that grows with the batch index and
+worse than linearly with batch size, and this memo has no measurement of what that work is.
+
+**Next step.** A `perf` profile of a late batch on the prefix ladder, not another guess. Chunking
+the walk across cores by position (this memo's item 1, second step) stays open behind that
+profile: it addresses writeback, and writeback is no longer most of the cost.

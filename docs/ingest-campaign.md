@@ -26,7 +26,7 @@ is the owner's to settle.
 | **3** | **MedCPT / PubMed** | **35,920,666** | **Built, verified and served** 2026-09-02 — see §4.6. The ladder's largest embedding rung and its first `dag` layer: MeSH's 30,217 descriptors with members over 41,321 edges, membership closed upward to **1.66×10⁹ entries** (3.27× rung 2's spill), an 11.15 GB bundle in 12 m 10 s at 16.03 GB peak, `verify --deep` clean. ⊘ Three non-reproducing host faults over two runs, §4.6 |
 | **4** | **PaperSeek + OpenAlex** | **102,117,343** | **Staged and prepared whole; built, verified and served at a 10⁷ prefix; ⊘ stalled at 10⁸** 2026-09-03 — see §4a. The corpus exists: 254 GB staged in one 164.7-minute pass, laid out and joined to OpenAlex in 43.8 minutes at 18.4 GB, 52.2 GB of `points.parquet`, 394,325,928 topic member rows, and the ladder's first compartment that is a property of the row. **`tessera build` reached the abstract text index and stalled there** — not refused, not killed, 93% system time against a 128 GiB mapped arena on a 47 GB box. Both stalls that produced are fixed, and **the whole corpus now builds: 2 h 56 m to a 70.78 GB bundle, `verify --deep` clean, served under a 24 GiB cap with `oom_kill` 0** (2026-09-04, §4b), and **1 h 09 m for the same bundle byte for byte** once the prose stopped being held in entity order at all (§4c). The rung's finding is that negative and its resolution |
 | **5** | **TreeOfLife-200M** | **233,055,986** | **Built, verified and served** 2026-09-04 — see §4b. The ladder's largest rung and its first with **two geometries over one entity space**: `bioclip` over every row and `geo` over the 75.90% the GBIF join placed on the ground. A **seven-level tiered taxonomy over every row** — 1,001,193 artifacts, 1.63×10⁹ membership entries — drawn on both views. **39.97 GB bundle in 1 h 10 m at 35.3 GB peak**, `verify --deep` clean in 37.1 s, served under a 24 GiB cap with every masked count identical, and the *f* = 50% ingest cell run: 116,527,993 rows in at 11,060 items/s and a 1,313 s fold. The vectors are 346 GB and were **never staged**: the layout is fitted on 2.5M rows and every row placed in one 2 h 55 m pass off the share |
-| 6 | GBIF | **3.65×10⁹** | **Pipeline written and run at a fraction; the whole corpus not built** 2026-09-09 — [`../test_corpora/gbif/`](../test_corpora/gbif/README.md), and `probes/2026-09-09-gbif-census/` for what the rung is. The staged 2026-06-01 vintage is **3,654,488,638** rows over 8,369 parts, not the 3.50×10⁹ this row carried; **3,542,849,433** carry coordinates and are placeable, which is **82.5% of the `u32` entity space** and leaves 752×10⁶ ids for a taxonomy of a few million artifacts — **this rung does not need sharding**. A deliberately sparse schema, one column per attribute type: `kingdom` the rendered category, `specieskey` the indexed keyword, `year` the numeric, `scientificname` stored and not indexed, no `locality` and so no text index (owner ruling, 2026-09-09). The tiered layer starts at **family**: kingdom Animalia holds 2.81×10⁹ members and `merge_member_runs` keeps the largest artifact's resident while it sorts them, which is 22.5 GB against family's 1.4 GB. Run at 64 of 8,369 parts, spread not prefixed — **a prefix of these parts is not a sample**, reading 72.19% coordinate coverage against the spread's 96.95% and disagreeing about which country dominates. Modelled from that fraction: `points.parquet` 59.0 GB, members 25.7 GB, bundle ~219 GB, ~304 GB of derived data |
+| 6 | GBIF | **3,495,729,729** | **Built, verified and served under a 24 GiB cap** 2026-09-13 — see §4d. The whole corpus, built twice to measure [the bounded-assembly design](evidence/memos/2026-09-12-bounded-assembly-design.md): **196 GiB bundle (record-blob format 10) in 3 h 30 m 55 s**, against 207 GiB in 4 h 09 m 35 s (format 9) before six branches landed. `verify --deep` clean in 14 m 42 s at 0.61 GB anonymous, against 20 m 50 s at 47 GB anonymous on the earlier bundle. `tessera serve` opens to `/readyz` in 193 s at 6.5 GB anonymous under the cap, `oom_kill` 0 — before the merge set, the open was modelled at ~60 GB anonymous and could not be attempted on this box. One stage, `filter_postings`, still held 7.6 GB over the budget — a residency-model gap, diagnosed and not yet fixed (§4d). The taxonomy still starts at **family**, ruled 2026-09-09: kingdom Animalia's 2.81×10⁹ members would set `layers`' peak by itself |
 | 7 | Overture buildings | 2.53×10⁹ | Not started. Staged; needs a second local volume |
 
 **Disk, and a trap in clearing it.** `/` had **23 GB free** on 2026-08-28, not the 117 GB recorded
@@ -1113,6 +1113,145 @@ that one file would fix them.
 ⊘ **The share also dropped three transient reads** in the 2 h 55 m pass. The placement now retries
 four times and checkpoints per row group, so a multi-hour pass survives one; a first attempt lost 25
 minutes to a read that a retry would have covered.
+
+## 4d. Rung 6 — GBIF, whole corpus: the bounded-assembly design measured
+
+The rung is [`../test_corpora/gbif/`](../test_corpora/gbif/README.md); the fraction runs it
+describes are §"Modelled — the whole corpus" there, superseded below. Two whole-corpus builds are
+compared, one before the bounded-assembly changes and one after, over the same **3,495,729,729**
+placed rows and the same ten signature batches of 369,098,752 items, so the entity-id assignment is
+identical between them (I9). Both `tessera build --memory-budget 24g --no-oracle-pairs
+--stage-timings` on this box (WSL2, 12 cores, 47 GiB in the VM, local NVMe): **run 1** on main
+`a4152e79`, 2026-09-13 01:01; **run 2** on main `d7d26c16`, 2026-09-13 21:52, after six branches
+merged. The observations that drove the design are
+[`evidence/memos/2026-09-12-gbif-whole-corpus-build-observations.md`](evidence/memos/2026-09-12-gbif-whole-corpus-build-observations.md);
+the design itself is
+[`evidence/memos/2026-09-12-bounded-assembly-design.md`](evidence/memos/2026-09-12-bounded-assembly-design.md);
+the acceptance measurement is
+[`../probes/2026-09-12-bounded-assembly/`](../probes/2026-09-12-bounded-assembly/README.md).
+
+**The wall fell 19%, and one stage still exceeded the budget.** 4 h 09 m 35 s → **3 h 30 m 55 s**;
+the bundle 207 GiB → **196 GiB**. `filter_postings` held **31.6 GB anonymous for twenty minutes,
+7.6 GB over the 24 GB budget** — Finding A, below — and is the one respect in which run 2 did not
+fit its budget.
+
+### The build
+
+| stage | run 1 | run 2 |
+|---|---|---|
+| `source_ids` | 85 s | 93 s |
+| `dictionary` | 162 s | 189 s |
+| `geometry_read` | 398 s | 476 s |
+| batch loop (10 × `signature_sort` + `assignment`) | 1,672 s | **1,463 s** — sorts 262 s, assignments 1,203 s |
+| `postings_write` | 71 s | 63 s |
+| `attribute_tail` | 1,646 s | 1,574 s |
+| `layers` | 2,141 s | 2,258 s |
+| `filter_postings` | 3,677 s | **1,606 s** |
+| `record_blob` | 1,917 s | **1,350 s** |
+| `tiler_sort` | 242 s | 328 s |
+| `segment_write` | 562 s | 629 s |
+| the artifact pass (reported inside `manifests`' interval; the bounded-assembly design gives it its own record, §4.6) | 1,728 s | 1,901 s |
+| `manifests` (the digests) | 65 s | 69 s |
+| **wall** | **4 h 09 m 35 s** | **3 h 30 m 55 s** |
+| **bundle** | 207 GiB, record-blob format 9 | **196 GiB, format 10** |
+
+The bundle shrank on a format change, not the build's own doing:
+[decision 0142](decisions/0142-the-record-blob-delimits-a-row-by-a-length-the-row-states.md) has a
+row carry its own length rather than the reader consulting a per-row offset table, format 9 → 10,
+landing in the same merge set.
+
+**Per-batch assignment seconds**, run 1 → run 2, batches 1 to 10 (the tenth is the
+173,840,961-row remainder): 110, 65, 65, 152, 187, 204, 233, 219, ~200, 46 → 107, 67, 64, 135,
+153, 165, 164, 164, 140, 44. The hoist that removed the entity map's scattered writes (below) took
+the climb from a 65–233 s range down to 64–165 s, about 12% off the loop total — smaller than the
+whole-loop change first suggested, because most of what remains is not writeback: one core at
+100% with no disk traffic, rising superlinearly with batch size (the half-size remainder batch
+costs 0.25 µs an item against 0.45 for a full batch). What is left is unexplained past that and the
+next step is a `perf` profile of a late batch, not another guess.
+
+**`tiler_sort` (+86 s) and the artifact pass (+173 s) got slower with no code change between the
+two runs, and neither change is explained** — assumed to be the page cache the process inherited
+from the stage before it, not measured. ⊘ The `peak=` figure stage timings print is `VmHWM`, the
+process's lifetime high-water RSS including file pages, not the anonymous figure below, and a
+stage's number in that column can belong to an earlier stage that mapped the file — read from the
+code (`crates/tessera-build/src/observer.rs`), not from a profile of this run.
+
+**Six branches landed between the runs, all on main `d7d26c16`.**
+
+- The label-agreement check hoisted into ordinal order, removing the scattered entity-map writes
+  the assignment walk made under run 1.
+- Memberships mapped from their own extents at open, publication and fold.
+- The record blob's format 10 (decision 0142).
+- The string-column extent fold bounded by the memory budget instead of a fan-in of 128 — no fold
+  ran at this rung.
+- `verify` holds no row-sized structure.
+- One executor owns a bundle root under a file lock, and a side-manifest number is never planned
+  twice.
+
+### Memory and disk
+
+**Peak anonymous RSS**: run 1 **21.5 GB in `record_blob`**; run 2 **31.6 GB in
+`filter_postings`** (Finding A, below), otherwise under **22.4 GB** in the batch loop and
+**17.9 GB** in `record_blob`. Swap peaked at **0.9 GB** in both runs.
+
+**Disk never came close to the pre-flight's forecast.** 429 GB free at the start, a minimum of
+**221 GB free** at the end — the transient never exceeded the finished bundle. The printed
+forecast was **~539 GB**, a model that sums three ceilings (artifact-pass buckets at 80 GB,
+row-column lanes at 40 GB, and the ordinal geometry) and is known to overstate; it did here too.
+
+**Finding A: `filter_postings` held 7.6 GB over budget for twenty minutes, and the residency model
+has no term for it.** Diagnosed from the code and the on-disk file sizes, not from a heap profile.
+`ExtentColumn::open` (`crates/tessera-build/src/extents.rs`) deserialises every extent's has-row
+bitmap onto the heap and builds a per-extent live set by subtracting later extents' rows
+(`andnot_inplace`). Each of the two string columns spilled 988 extents; the has-row files are
+run-encoded on disk (2.2 GB for `scientificname`), but the subtraction produces array containers
+at 2 B an entity — about 7 GB of live sets a column, plus about 4.5 GB of has-row for the two
+columns, over a 6 GB base. Run 1's fold to 8 extents put 437 M entities in each so every container
+was a fixed 8 KiB bitset, about 14 GB for both columns: the fold halved the term by changing the
+container's encoding and never bounded it. `merge_fan_in`'s comment assumes a join chunk covers a
+contiguous entity run; a chunk is in the attribute source's order, scattered over entity space, so
+that assumption does not hold here.
+
+The designed fix opens extents cursor-only with the has-row file mapped, replaces the per-extent
+live sets with one duplicate map a column (`seen` and `repeat` bitmaps plus the last extent index
+per repeated entity, one sequential pass over the has-row files, about 90 s here) and adds the
+one-bitmap term to the residency model. Modelled cost after the fix: about 1 GB for both columns,
+no disk, and about no change to the pass's time. Not built.
+
+### Verify
+
+`tessera verify --deep` under `systemd-run --user --scope -p MemoryMax=24G -p
+MemorySwapMax=2G`. Run 2's format-10 bundle verified **clean in 14 m 42 s at 0.61 GB peak
+anonymous**: 254 terms, 254 dictionary records, 3,495,729,729 record-blob rows, 1 segment,
+`entity_id_high_water` 3,495,729,729. Run 1's format-9 bundle took **20 m 50 s at 47 GB
+anonymous** — verify holding no row-sized structure is the change between the two runs, and the
+anonymous figure is the direct measurement of it.
+
+### Served, under a 24 GiB cap
+
+`tessera serve` on run 2's bundle under `systemd-run --user --scope -p MemoryMax=24G -p
+MemorySwapMax=0`. Opened to `/readyz` in **193 s at 6.5 GB anonymous** — three taxonomy levels'
+row forms built at open cost 1.03 s of that. Before this merge set, the open was modelled at about
+60 GB anonymous and could not be attempted on this box. `memory.peak` sat at the cap (file pages),
+**6,844** reclaim-at-max events, **`oom_kill` 0**.
+
+Single-request latencies, hot, under the 253-term all-countries principal:
+
+| request | latency |
+|---|---|
+| zoom 0, whole extent, with layers | 51–59 s |
+| zoom 0, whole extent, `layers: []` | 20 s |
+| a 10°×10° box, zoom 0 | 20 s |
+| zoom 3 | 0.23 s |
+| zoom 6 | 0.24 s |
+| zoom 12 | 0.02 s |
+
+⊘ **The first battery run failed after exactly 3,600 s**, a 403 while ranking 500 candidate boxes
+at zoom 0 under the 100% principal: the deployment's `token_max_lifetime` is 3,600 s and
+`serve_battery.py` authorises once and never re-authorises — a harness defect at this scale, not a
+serving one. The second run raises the lifetime to 43,200 s and 40 candidates a zoom.
+
+<!-- BATTERY TABLE: to be filled by the orchestrator -->
 
 ## 5. The machinery this campaign built
 
