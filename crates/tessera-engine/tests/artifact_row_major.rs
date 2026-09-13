@@ -661,7 +661,8 @@ fn a_fold_over_a_row_major_level_writes_its_column_and_changes_no_answer() {
     );
     assert!(
         fx.tile_index_files(&engine).is_empty(),
-        "and wrote no tile index for a level that has nothing to index"
+        "and wrote no tile index for a level that has nothing to index: a level served from its \
+         column derives its extents from the column's own bytes"
     );
 
     let extents: Vec<_> = engine
@@ -706,6 +707,56 @@ fn a_fold_over_a_row_major_level_writes_its_column_and_changes_no_answer() {
         0,
         "a level that adopted its column has not fallen back"
     );
+    // **And it built no artifact-major form at all.** The column is the level's membership and its
+    // own bytes give every artifact's extent, so the level is served from the one file: the column
+    // answers candidacy, the counts and the declared sizes, and the extents place each artifact in
+    // the tile index. The sweep above compared the centroid and the bounding box of every served
+    // artifact, each of which is a function of `membership ∩ M_auth` alone, so this assertion is
+    // claiming the accumulated route produced them.
+    let form = reopened
+        .held_artifact_form_for_test("s0", FLAT, 0)
+        .expect("the sweep left the level's form held");
+    assert!(
+        !form.membership().rows_held(),
+        "a level served from its column builds no artifact-major form"
+    );
+    // **And the drill-down agrees with the viewport on such a level.** It is a different route to
+    // `membership ∩ M_auth` — `Engine::artifact` derives the geometry from the artifact alone —
+    // and on a column-only form both routes take the column walk rather than a held bitmap.
+    //
+    // **The drill-down is taken from a second session**, so its derived geometry is computed
+    // rather than read from the per-principal cache the viewport just filled: the two routes
+    // share that cache by design, and comparing them inside one session compares one answer with
+    // itself. A client following a saved link reaches this route cold.
+    let idset = reopened.generation().bundle.manifest.identity.idset;
+    for credential in [full_coverage_credential(), subset_credential()] {
+        let looking = reopened.authorise(&credential).unwrap();
+        let response = reopened
+            .viewport(
+                &looking,
+                ViewportRequest::new("s0", 0, WHOLE_MAP, N_ITEMS as usize),
+            )
+            .expect("a viewport");
+        assert!(!response.artifacts.is_empty());
+        assert!(
+            response.artifacts.iter().any(|a| a.derived.centroid.is_some()),
+            "the layer derives a centroid, or this comparison asserts nothing"
+        );
+        let cold = reopened.authorise(&credential).unwrap();
+        for artifact in &response.artifacts {
+            let alone = reopened
+                .artifact(&cold, artifact.tessera_id, Some(idset), "s0", None)
+                .expect("the identifier resolves")
+                .expect("and the artifact is served to the viewer the viewport served it to");
+            assert_eq!(alone.masked_count, artifact.masked_count);
+            assert_eq!(
+                alone.derived.centroid, artifact.derived.centroid,
+                "the drill-down and the viewport disagreed about {:?}",
+                artifact.key
+            );
+            assert_eq!(alone.derived.bbox, artifact.derived.bbox);
+        }
+    }
 }
 
 /// **The histogram cache's edges**: a deny moves the count on the next request, a growth moves it,
@@ -1050,4 +1101,350 @@ fn a_column_the_level_has_moved_past_is_recomposed_rather_than_adopted() {
         "so it is recomposed on first use, which is what every request did before the fold wrote \
          anything"
     );
+}
+
+/// **The differential over a level that holds no bitmaps at all**, which is what a row-major level
+/// is after a fold and a restart: the column is the membership, its own bytes give every artifact's
+/// extent, and nothing is transposed back — a publication, a growth and a deny each reach the
+/// column and the extents rather than a row form.
+///
+/// So the same corpus is served twice, once with both levels pinned artifact-major and once
+/// row-major, and every answer is compared after each of those writes. The row-major side is
+/// asserted to be holding no rows at each step, or the comparison is of the artifact-major route
+/// against itself.
+///
+/// **Both column forms**: the flat level takes a label column and the treed one a list column, so
+/// the list form's amendment is covered here as well as the label form's.
+///
+/// Mutations this kills: taking a publication's rows out of a form that holds none (every new
+/// artifact would serve a zero count); leaving the extents behind a growth (the artifact's rows
+/// past the old extent would read as absent, which is a short `member_of` operand and a short
+/// region leaf); and transposing the column back on the first write, which the residency saving
+/// exists to avoid.
+#[test]
+fn a_level_that_holds_no_rows_takes_every_write_through_its_column() {
+    let major_fx = fixture();
+    let minor_fx = fixture();
+    let major = published(
+        &major_fx,
+        Some(ServingLayout::ArtifactMajor),
+        Some(ServingLayout::ArtifactMajor),
+    );
+    let minor = published(
+        &minor_fx,
+        Some(ServingLayout::RowMajorLabel),
+        Some(ServingLayout::RowMajorList),
+    );
+    assert_same(&sweep(&major), &sweep(&minor), "at publication");
+
+    // The fold writes each level's column into the new prefix; the restart claims it and builds no
+    // artifact-major half.
+    fold(&major);
+    fold(&minor);
+    drop(major);
+    drop(minor);
+    let major = major_fx.open();
+    let minor = minor_fx.open();
+    let baseline = sweep(&major);
+    assert_same(&baseline, &sweep(&minor), "after a fold and a restart");
+
+    let holds_no_rows = |engine: &Engine, what: &str| {
+        for layer in [FLAT, TREED] {
+            let form = engine
+                .held_artifact_form_for_test("s0", layer, 0)
+                .unwrap_or_else(|| panic!("{what}: {layer}'s form is held"));
+            assert!(
+                !form.membership().rows_held(),
+                "{what}: {layer} holds per-artifact rows, so this compares the artifact-major \
+                 route against itself"
+            );
+            assert!(
+                form.column().is_some(),
+                "{what}: {layer} is served from its column"
+            );
+        }
+    };
+    holds_no_rows(&minor, "after a restart");
+
+    // **A region leaf by artifact**, which is one of the two readers that still takes one
+    // artifact's rows out of the column. Its operand is `membership ∩ M_auth`, so a short one shows
+    // up as a lower `matched` than the artifact-major twin's.
+    let region_matched = |engine: &Engine| -> Vec<(Option<String>, u64)> {
+        let session = engine.authorise(&full_coverage_credential()).unwrap();
+        let served = engine
+            .viewport(
+                &session,
+                ViewportRequest::new("s0", 0, WHOLE_MAP, N_ITEMS as usize),
+            )
+            .expect("a viewport")
+            .artifacts;
+        served
+            .iter()
+            .map(|artifact| {
+                let out = engine
+                    .viewport(
+                        &session,
+                        ViewportRequest::new("s0", 0, WHOLE_MAP, N_ITEMS as usize).filter(
+                            tessera_engine::filter::FilterExpr::Region(
+                                tessera_engine::filter::RegionLeaf::Artifact(artifact.tessera_id),
+                            ),
+                        ),
+                    )
+                    .expect("a region leaf by artifact");
+                let matched: u64 = out.tiles.iter().map(|t| t.matched).sum();
+                (artifact.key.clone(), matched)
+            })
+            .collect()
+    };
+    let mut by_key = region_matched(&major);
+    let mut minor_by_key = region_matched(&minor);
+    by_key.sort();
+    minor_by_key.sort();
+    assert!(
+        by_key.iter().any(|(_, matched)| *matched > 0),
+        "the region leaf matched nothing anywhere, so it asserts nothing"
+    );
+    assert_eq!(
+        by_key, minor_by_key,
+        "a region leaf by artifact read a different membership out of the column"
+    );
+
+    // **A publication into a level that holds no rows**, on the overlapping level: its memberships
+    // overlap by construction, so a list column takes the new artifact's rows without the double
+    // claim that would cost a label column its column. The rows go to the column and the extents to
+    // the index; nothing is transposed.
+    for (fx, engine) in [(&major_fx, &major), (&minor_fx, &minor)] {
+        engine
+            .publish_artifacts(
+                TREED.into(),
+                0,
+                vec![IncomingArtifact::from_entities(
+                    Some("published-after-fold".into()),
+                    fx.members(0..200),
+                )],
+            )
+            .unwrap();
+        tick(engine);
+    }
+    assert_same(&sweep(&major), &sweep(&minor), "after a publication");
+    holds_no_rows(&minor, "after a publication");
+
+    // **A growth**, which extends an artifact's rows past the extent the column's own bytes gave
+    // it: an artifact whose extent stopped short would have its rows beyond it read as absent.
+    for (fx, engine) in [(&major_fx, &major), (&minor_fx, &minor)] {
+        engine
+            .publish_artifacts(
+                TREED.into(),
+                0,
+                vec![IncomingArtifact::from_entities(
+                    Some("published-after-fold".into()),
+                    fx.members(0..N_ITEMS),
+                )],
+            )
+            .unwrap();
+        tick(engine);
+    }
+    assert_same(&sweep(&major), &sweep(&minor), "after a growth");
+    holds_no_rows(&minor, "after a growth");
+    assert_eq!(
+        by_key,
+        {
+            let mut after = region_matched(&minor);
+            after.sort();
+            after.retain(|(key, _)| by_key.iter().any(|(k, _)| k == key));
+            after
+        },
+        "the grown level's region leaves moved for artifacts the growth did not touch"
+    );
+
+    // **And a deny**, which the level takes through the overlay exactly as an artifact-major one
+    // does: nothing about the column or the extents moves.
+    for (fx, engine) in [(&major_fx, &major), (&minor_fx, &minor)] {
+        engine
+            .accept_change(fx.member(7), ChangeOp::Suppress)
+            .unwrap();
+        engine
+            .accept_change(fx.member(11), ChangeOp::Delete)
+            .unwrap();
+    }
+    assert_same(&sweep(&major), &sweep(&minor), "after a deny");
+    holds_no_rows(&minor, "after a deny");
+}
+
+/// **The write a label column cannot express, and what a level holding no rows does instead.** A
+/// label column refuses a row that would come to carry two artifacts, and such a level's column
+/// *is* its membership — so there is nothing to fall back to. It takes the **list** form instead,
+/// composed through the disk-backed partition route from the column it already holds plus the
+/// pairs the amendment added: the form the fold would choose for a level that has stopped
+/// partitioning (decision 0094), reached without ever materialising the artifact-major bitmaps.
+///
+/// Mutations this kills: dropping the form and projecting the level on the next request, which at
+/// corpus scale is the residency and the request-path cost the layout exists to avoid; and
+/// recomposing it without the amendment's own pairs, which would serve the publication's members
+/// as belonging to nobody.
+#[test]
+fn a_publication_that_costs_a_label_column_its_partition_recomposes_it_as_a_list() {
+    let major_fx = fixture();
+    let minor_fx = fixture();
+    let major = published(
+        &major_fx,
+        Some(ServingLayout::ArtifactMajor),
+        Some(ServingLayout::ArtifactMajor),
+    );
+    let minor = published(&minor_fx, Some(ServingLayout::RowMajorLabel), None);
+    fold(&major);
+    fold(&minor);
+    drop(major);
+    drop(minor);
+    let major = major_fx.open();
+    let minor = minor_fx.open();
+    assert_same(&sweep(&major), &sweep(&minor), "after a fold and a restart");
+    assert!(
+        !minor
+            .held_artifact_form_for_test("s0", FLAT, 0)
+            .expect("the sweep left the level's form held")
+            .membership()
+            .rows_held(),
+        "the level is served from its column alone"
+    );
+
+    // Over the whole corpus, so every row the partitioning already claimed is claimed twice.
+    for (fx, engine) in [(&major_fx, &major), (&minor_fx, &minor)] {
+        engine
+            .publish_artifacts(
+                FLAT.into(),
+                0,
+                vec![labelled(fx, "overlapping", (0..N_ITEMS).collect(), vec![0])],
+            )
+            .unwrap();
+        tick(engine);
+    }
+    assert_same(&sweep(&major), &sweep(&minor), "after the overlap");
+    let form = minor
+        .held_artifact_form_for_test("s0", FLAT, 0)
+        .expect("the level's form is still held");
+    assert!(
+        !form.membership().rows_held(),
+        "the level took the list form rather than materialising the bitmaps it never held"
+    );
+    assert!(
+        form.column().is_some(),
+        "and it is still served from a column"
+    );
+    assert_eq!(
+        form.layout(),
+        ServingLayout::RowMajorList,
+        "the served layout is the form a level that has stopped partitioning takes"
+    );
+    // ⊘ The *record* still says `column`: it is the registry's, and a fold is what moves it
+    // (decision 0094). What moved here is the form the level is served in.
+    assert_eq!(minor.recorded_layout(FLAT, 0), Some(ServingLayout::RowMajorLabel));
+
+    // **And it goes on taking writes**, which is the whole of what the list form buys: it refuses
+    // no membership, so there is no second fallback below this one.
+    for (fx, engine) in [(&major_fx, &major), (&minor_fx, &minor)] {
+        engine
+            .publish_artifacts(
+                FLAT.into(),
+                0,
+                vec![labelled(fx, "overlapping-again", (0..N_ITEMS).collect(), vec![0])],
+            )
+            .unwrap();
+        tick(engine);
+    }
+    assert_same(&sweep(&major), &sweep(&minor), "after a second overlap");
+    let form = minor
+        .held_artifact_form_for_test("s0", FLAT, 0)
+        .expect("the level's form is still held");
+    assert!(!form.membership().rows_held());
+    assert_eq!(form.layout(), ServingLayout::RowMajorList);
+}
+
+/// **A growth in the same tick as the overlap that recomposes the column.**
+///
+/// A growth on a form that holds no rows offers the artifact's **whole** membership as the pairs
+/// the column gains — it has no held set to subtract one from — and the recomposition's feed is the
+/// column's own pairs plus those. A feed that concatenated the two would give a list row naming one
+/// ordinal twice, which counts that artifact twice in the histogram, twice in the declared size the
+/// proportional criterion divides by, and twice in the accumulated centroid. Every one of those is
+/// a number a viewer sees, and none of them is an error anywhere.
+///
+/// So the same tick carries both, and every answer is compared against the twin that holds its
+/// bitmaps.
+#[test]
+fn a_growth_in_the_tick_that_recomposes_the_column_counts_each_row_once() {
+    let major_fx = fixture();
+    let minor_fx = fixture();
+    let major = published(
+        &major_fx,
+        Some(ServingLayout::ArtifactMajor),
+        Some(ServingLayout::ArtifactMajor),
+    );
+    let minor = published(&minor_fx, Some(ServingLayout::RowMajorLabel), None);
+    fold(&major);
+    fold(&minor);
+    drop(major);
+    drop(minor);
+    let major = major_fx.open();
+    let minor = minor_fx.open();
+    assert_same(&sweep(&major), &sweep(&minor), "after a fold and a restart");
+    assert!(
+        !minor
+            .held_artifact_form_for_test("s0", FLAT, 0)
+            .expect("the sweep left the level's form held")
+            .membership()
+            .rows_held(),
+        "the level is served from its column alone"
+    );
+
+    // **One tick, two writes**: a growth of an artifact the level already holds — whose pairs the
+    // column already carries, so every one of them is a repeat — and a publication that makes the
+    // memberships overlap, which is what sends the level through the recomposition.
+    for (fx, engine) in [(&major_fx, &major), (&minor_fx, &minor)] {
+        engine.set_background_refresh_for_test(false);
+        engine
+            .grow_memberships(
+                FLAT.into(),
+                0,
+                vec![tessera_lifecycle::IncomingGrowth::from_entities(
+                    "p0".into(),
+                    fx.members(0..500),
+                )],
+            )
+            .expect("the growth is accepted");
+        engine
+            .publish_artifacts(
+                FLAT.into(),
+                0,
+                vec![labelled(fx, "overlapping", (0..N_ITEMS).collect(), vec![0])],
+            )
+            .unwrap();
+        tick(engine);
+    }
+    assert_same(
+        &sweep(&major),
+        &sweep(&minor),
+        "after a growth and an overlap in one tick",
+    );
+    let form = minor
+        .held_artifact_form_for_test("s0", FLAT, 0)
+        .expect("the level's form is still held");
+    assert!(
+        !form.membership().rows_held(),
+        "the level took the list form rather than materialising the bitmaps it never held"
+    );
+    assert_eq!(form.layout(), ServingLayout::RowMajorList);
+    // **The declared size is the criterion's denominator**, and it is where a repeated pair shows
+    // up as a number rather than as a set: it must be what the twin's membership cardinality is.
+    let column = form.column().expect("served from a column");
+    let twin = major
+        .held_artifact_form_for_test("s0", FLAT, 0)
+        .expect("the twin's form is held");
+    for ordinal in 0..form.len() as u32 {
+        assert_eq!(
+            column.declared_size(ordinal),
+            twin.get(ordinal).map(croaring::Bitmap::cardinality).unwrap_or(0),
+            "ordinal {ordinal}: the recomposed column counts a row twice"
+        );
+    }
 }

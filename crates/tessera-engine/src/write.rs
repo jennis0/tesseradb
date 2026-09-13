@@ -16188,6 +16188,9 @@ impl Executor {
                             layout,
                             predicate.as_ref(),
                             generation.segments_version,
+                            self.live.registered_layer(layer).is_some_and(|r| {
+                                crate::artifacts::serves_column_only(&r.declaration)
+                            }),
                         )
                     });
                 }

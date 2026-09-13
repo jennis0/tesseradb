@@ -450,6 +450,17 @@ the request needs one or all. Holding that histogram per `(session, layer)` is ~
 on the session-geometry cadence (owner ruling, 2026-08-21, recorded in 0093). Nothing else per token
 is sized by the artifact population.
 
+**An entry that carries the accumulated geometry is 36 B an artifact rather than 4** — the count,
+two `u64` position sums and four `u32` box bounds — which is **59 MB a level per session** at the
+rung 6 corpus's 1.65×10⁶ artifacts, against a 256 MB default bound. It is built only for a level
+served from its column whose layer derives a centroid or a box, and only for the requests that serve
+one: a browse page over the same level asks for the counts alone and gets an entry without it, which
+is two entries for one level by design rather than a duplication. **The default bound does not move
+for it**: the bound is a residency policy and not a correctness one — an entry larger than the whole
+bound is served to its caller and not admitted — so a deployment holding fewer of them resident is
+slower and never wrong, and raising the default would spend memory on every deployment for the few
+that hold several such levels at once.
+
 **Measured over 10⁸ points on the `partition` arm**, 10⁵ artifacts, full mask, milliseconds per
 request *(medians of three runs; `r1e8-p1e5-partition-medians.csv`)*:
 
@@ -492,11 +503,56 @@ label column beside it is **400 MB**, 4 B per row, at 13.4 s and 3.6 s to build 
 **~8 GB at 10⁹ rows for the list form and ~4 GB for the label form** *(derived from the measured
 per-row constant)*, and a residency line quoted for a layer is a figure about its `k`.
 
-**And at open the derivation runs the other way.** A level recorded row-major arrives with the
-column the build or the fold wrote, and that column *is* its membership — addressed by row. The
-artifact-major form the residency half above has not yet removed is therefore **transposed out of
-the column** rather than projected a second time from the level's memberships: one sequential pass
-over bytes already on disk, against a decode and a permutation of every artifact's members. ⊘
+**And the residency half is taken.** A level recorded row-major arrives with the column the build
+or the fold wrote, and that column *is* its membership — addressed by row. Such a level is served
+from that one file and builds no artifact-major form at all: the column answers candidacy, the
+masked counts and the per-artifact declared size, and **each artifact's extent is folded out of the
+column's own bytes** in the pass that already walks it for the declared sizes. At the rung 6 corpus
+(1,646,192 artifacts over ~3.4×10⁹ member entries a level) the form this replaces was a measured
+~28 GB retained and ~10 GB transient per level.
+
+**The extents come off the column and never off a second file.** A fold-written extent column is a
+separate artefact whose agreement with the column nothing checks, and a hole in it would make an
+artifact's rows read as absent where the membership has them — a silently short membership. Derived
+from the bytes beside them, the two cannot part company.
+
+**The extent bounds a per-artifact walk only as far as the artifact is clustered.** Two readers
+still take one artifact's rows out of the column — a `member_of` leaf and a region leaf by artifact
+— by walking the rows the viewer may see inside that artifact's extent. For a *scattered* artifact
+that extent is the whole row space, so the walk is `|M_auth|`: **2.85 s** at rung 3's
+`mesh/descriptors` against 22 ms for the bitmap it replaces. Each of those leaves names one
+artifact, so a request pays it once.
+
+**Nothing that runs per served artifact may take that walk**, which is why the derived centroid and
+box do not. One pass over `M_auth` accumulates every artifact's count, position sum and bounding box
+together — the masked histogram's walk with two more accumulators on it — and is held per
+`(session, level)` under the same key and the same byte budget as the counts. A layer deriving a
+**hull** is the exception and is served artifact-major: a hull is a function of the member positions
+themselves rather than an accumulation over them, so it needs one artifact's rows materialised.
+
+**Every write reaches the column, and the form is never transposed back.** A flush, a growth, a
+publication and a merge's rebase each give the column the `(row, ordinal)` pairs they added and
+widen the extents by the rows those pairs name — exact where rows are only added, a superset where a
+merge renumbers a span, and never narrow. A deny moves nothing here: suppression and deletion are
+asked of the overlay at every verdict, as they are on any level.
+
+**An amendment a label column cannot express takes the list form, not the artifact-major one.** A
+label column refuses a row that would come to carry two artifacts, and a level served from its
+column has no other membership to fall back to — so it takes the form the fold would choose for a
+level that has stopped partitioning (decision 0094), composed through the same disk-backed partition
+route the build and the fold compose through, from the pairs the column already holds and the pairs
+the amendment added. **Nothing row-sized is held while it runs**: one partition bucket, as the
+fold's composition holds. The alternative — dropping the form for the next request to project —
+would put the artifact-major projection this whole layout avoids on a request thread, and on a
+taxonomy every published family or genus reaches it. A list column refuses no membership, so there
+is no second fallback below this one; what remains below it is an I/O failure, which drops the form
+as any composition failure does. The layout *record* is the registry's and moves at the next fold;
+what moves here is the form the level is served in.
+
+**Where only the column is named on a hull-deriving layer, the artifact-major form is transposed
+out of it** rather than
+projected a second time from the level's memberships: one sequential pass over bytes already on
+disk, against a decode and a permutation of every artifact's members. ⊘
 Measured at rung 3 only (`mesh/descriptors`, 30,217 artifacts over 1.66×10⁹ membership entries,
 warm cache, single-threaded, `probes/2026-09-02-cold-start/`): **23.6–25.1 s to project and
 13.8–15.4 s to transpose**, and `/readyz` 32.8–34.9 s against 24.6–25.1. The transposition hands
@@ -813,7 +869,7 @@ decides the layout there, and it does not depend on a serving figure.
 | containment partition, one expression per artifact | 10⁶ artifacts *(§4.2's census)* | ~306 MB |
 | label column *(row-major, partitioning layer)* | 10⁸ rows at `k = 1` | 400 MB |
 | list column *(row-major, overlapping layer)* | 10⁸ rows at `k = 1` | 800 MB |
-| **per session** | | **nothing artifact-major**; a row-major layer holds ~4 B per artifact (§5.1) |
+| **per session** | | **nothing artifact-major**; a row-major layer holds ~4 B per artifact, or 36 B where the layer derives a centroid or a box (§4, §5.1) |
 
 ⊘ The tile index at 10⁷ artifacts over 10⁹ points is not in this table: it is the cell the box could
 not build (§7.1). The earlier campaign measured 42.3 MB there, on a layer covering a tenth of the

@@ -400,6 +400,7 @@ fn no_partition_is_built_under_a_plugin_that_is_not_the_builtin() {
         tessera_types::layer::ServingLayout::ArtifactMajor,
         None,
         0,
+        false,
     );
     assert!(
         rows.partition().is_none(),
@@ -429,6 +430,7 @@ fn no_partition_is_built_under_a_plugin_that_is_not_the_builtin() {
         tessera_types::layer::ServingLayout::ArtifactMajor,
         None,
         0,
+        false,
     );
     assert!(rows.partition().is_some());
     assert_eq!(projections.partitions(), 1);
@@ -448,6 +450,7 @@ fn no_partition_is_built_under_a_plugin_that_is_not_the_builtin() {
         tessera_types::layer::ServingLayout::ArtifactMajor,
         None,
         0,
+        false,
     );
     assert!(second.partition().is_some());
     assert_eq!(projections.builds(), 2, "two views, two row forms");
@@ -527,6 +530,7 @@ fn a_partition_is_adopted_at_its_own_coordinate_and_at_no_other() {
         tessera_types::layer::ServingLayout::ArtifactMajor,
         None,
         0,
+        false,
     );
     assert!(rows.partition().is_some());
     assert_eq!(
@@ -555,6 +559,7 @@ fn a_partition_is_adopted_at_its_own_coordinate_and_at_no_other() {
             tessera_types::layer::ServingLayout::ArtifactMajor,
             None,
             0,
+            false,
         );
         assert!(rows.partition().is_some());
         assert_eq!(projections.partitions(), 1, "the level recomposed instead");
@@ -610,6 +615,7 @@ fn an_adopted_partition_does_not_answer_under_another_prefix() {
         tessera_types::layer::ServingLayout::ArtifactMajor,
         None,
         0,
+        false,
     );
     assert_eq!(
         projections.partitions(),

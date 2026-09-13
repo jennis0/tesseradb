@@ -51,9 +51,26 @@
 //! (`crate::cache`), and it is what makes a byte budget a residency policy rather than a
 //! correctness one.
 //!
-//! The budget is ~4 B per artifact per resident entry, which is 4 MB at 10⁶ artifacts and 40 MB at
-//! 10⁷ — the figures 0093 quotes — and it is answered to by eviction of the least recently used
-//! entry, exactly as the row-projection cache's is.
+//! The budget is ~4 B per artifact for an entry of counts alone, which is 4 MB at 10⁶ artifacts and
+//! 40 MB at 10⁷ — the figures 0093 quotes — and it is answered to by eviction of the least recently
+//! used entry, exactly as the row-projection cache's is.
+//!
+//! **An entry carrying the accumulated geometry is 36 B an artifact, nine times that**: a `u32`
+//! count, two `u64` sums and four `u32` box bounds beside the 4 B count
+//! ([`MaskedGeometry`]). At the rung 6 corpus's 1.65×10⁶ artifacts that is **59 MB a level per
+//! session** against the counts' 6.6, and against `tessera-server`'s 256 MB default bound. **The
+//! default does not move for it**: the bound is a residency policy and not a correctness one — an
+//! entry too large for the whole bound is handed to its caller and simply not admitted — so a
+//! deployment that holds fewer levels resident is slower and never wrong, and raising the default
+//! would spend memory on every deployment for the few that hold several such levels at once. An
+//! operator who wants them resident raises `selection.masked_count_cache_bytes`.
+//!
+//! **Two entries for one level is by design, not a duplication.** A viewport over a layer deriving
+//! a centroid or a box wants the geometry; a browse page over the same level wants the counts and
+//! nothing else, and building the geometry for it would read a position per visible row for a
+//! number no browse row carries. The `geometry` term of the key is what keeps the two apart, so a
+//! browse page cannot be handed an entry without the geometry a viewport then needs, nor made to
+//! pay for one it does not.
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -75,6 +92,11 @@ pub(crate) struct MaskedCountKey {
     pub level: u32,
     /// The level's artifact-write counter — what the column and the ordinals are valid for.
     pub level_version: u64,
+    /// Whether the entry carries the accumulated geometry beside the counts
+    /// ([`MaskedGeometry`]). A term of the key rather than something a caller checks for, so an
+    /// entry built for a caller that wanted counts alone can never be handed to one that wants
+    /// the geometry and find it absent.
+    pub geometry: bool,
     /// The geometry this row space belongs to.
     pub segments_version: u64,
     /// The overlay's own counter, bumped by every deny publication. See the module doc.
@@ -108,6 +130,7 @@ impl MaskIdentity {
         layer: &str,
         level: u32,
         level_version: u64,
+        geometry: bool,
     ) -> MaskedCountKey {
         MaskedCountKey {
             token_id: self.token_id,
@@ -115,6 +138,7 @@ impl MaskIdentity {
             layer: layer.to_string(),
             level,
             level_version,
+            geometry,
             segments_version: self.segments_version,
             overlay_version: self.overlay_version,
             fragment_identity: self.fragment_identity,
@@ -127,11 +151,88 @@ impl MaskIdentity {
 #[derive(Debug)]
 pub struct MaskedCounts {
     counts: Vec<u32>,
+    /// **The two accumulated derived properties, where the level is served from its column alone**
+    /// — see [`MaskedGeometry`]. `None` on every other level, whose derived content is computed
+    /// from the artifact's own row bitmap one artifact at a time.
+    geometry: Option<MaskedGeometry>,
+}
+
+/// Per ordinal, `membership ∩ M_auth`'s position sum and bounding box — the input a centroid and a
+/// box are functions of, accumulated in the same pass as the counts
+/// ([`crate::row_column::RowColumn::accumulate_over`]).
+///
+/// **Per `(session, level)` and not per artifact**, which is the whole reason it exists: a level
+/// served from its column alone has no per-artifact membership, and taking one artifact's rows out
+/// of the column costs the visible rows inside its extent — the whole visible set for a scattered
+/// artifact. One pass answers for every artifact of the level at once.
+///
+/// **A derived property is still a function of `membership ∩ M_auth` and of nothing else**
+/// (`annotations.md` §4.2): the pass reads only rows the composed mask admits, so an artifact's sum
+/// and box are over exactly the members this viewer may see.
+#[derive(Debug)]
+pub struct MaskedGeometry {
+    /// How many of the counted rows the row space could place — the divisor for the mean. Not the
+    /// masked count, which counts every visible row.
+    placed: Vec<u32>,
+    /// Exact: see [`crate::row_column::LevelAccumulation::sums`].
+    sums: Vec<[u64; 2]>,
+    boxes: Vec<[u32; 4]>,
+}
+
+impl MaskedGeometry {
+    pub(crate) fn new(placed: Vec<u32>, sums: Vec<[u64; 2]>, boxes: Vec<[u32; 4]>) -> Self {
+        MaskedGeometry {
+            placed,
+            sums,
+            boxes,
+        }
+    }
+
+    /// The mean position of the members this viewer may see, or `None` where they see none.
+    pub fn centroid(&self, ordinal: u32) -> Option<[f64; 2]> {
+        let i = ordinal as usize;
+        let n = *self.placed.get(i)? as f64;
+        if n == 0.0 {
+            return None;
+        }
+        let s = self.sums.get(i)?;
+        Some([s[0] as f64 / n, s[1] as f64 / n])
+    }
+
+    /// `[x_min, y_min, x_max, y_max]` over the members this viewer may see, or `None` where they
+    /// see none.
+    pub fn bbox(&self, ordinal: u32) -> Option<[u32; 4]> {
+        let i = ordinal as usize;
+        if *self.placed.get(i)? == 0 {
+            return None;
+        }
+        self.boxes.get(i).copied()
+    }
+
+    fn weight_bytes(&self) -> u64 {
+        (self.placed.len() * (std::mem::size_of::<u32>() + 16 + 16)) as u64
+    }
 }
 
 impl MaskedCounts {
     pub(crate) fn new(counts: Vec<u32>) -> Self {
-        MaskedCounts { counts }
+        MaskedCounts {
+            counts,
+            geometry: None,
+        }
+    }
+
+    /// The same counts with the accumulated geometry beside them — see [`MaskedGeometry`].
+    pub(crate) fn with_geometry(counts: Vec<u32>, geometry: MaskedGeometry) -> Self {
+        MaskedCounts {
+            counts,
+            geometry: Some(geometry),
+        }
+    }
+
+    /// See [`Self::geometry`].
+    pub fn geometry(&self) -> Option<&MaskedGeometry> {
+        self.geometry.as_ref()
     }
 
     /// `|membership ∩ M_auth|` for one artifact.
@@ -159,6 +260,7 @@ impl MaskedCounts {
 
     fn weight_bytes(&self) -> u64 {
         (self.counts.len() * std::mem::size_of::<u32>()) as u64
+            + self.geometry.as_ref().map_or(0, MaskedGeometry::weight_bytes)
     }
 }
 
@@ -360,6 +462,7 @@ mod tests {
 
     fn key(token: u64, layer: &str, overlay: u64) -> MaskedCountKey {
         MaskedCountKey {
+            geometry: false,
             token_id: token,
             view: "s0".into(),
             layer: layer.into(),

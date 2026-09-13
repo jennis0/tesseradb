@@ -893,15 +893,15 @@ pub struct Engine {
     /// still count the one crossing such a request makes for its entity-space sub-trees; a
     /// pure-row tree crosses nothing and moves this counter alone.
     pub(crate) filter_row_routed: AtomicU64,
-    /// `member_of` leaves that could not read an artifact-major membership and walked the level's
-    /// row column instead (`viewport::Engine::resolve_member_of`).
+    /// `member_of` leaves that read the level's row column rather than an artifact-major
+    /// membership (`viewport::Engine::resolve_member_of`).
     ///
-    /// **It should stay at zero**, and it is a counter rather than an assertion because the walk
-    /// is a correct answer at the wrong price: every level carries the artifact-major form today,
-    /// so the fallback is unreachable, and if the ⊘ residency saving of `crate::row_column` ever
-    /// drops that form this is the number that says the leaf started costing a pass over the whole
-    /// view rather than an intersection. Measured at 2.85 s against 22 ms on rung 3's
-    /// `mesh/descriptors` (2026-09-02).
+    /// **It rises on every level served column-only** — one whose row column and whose extents the
+    /// prefix both hold, which builds no artifact-major form
+    /// (`crate::artifacts::MembershipRows::rows_held`). The walk is bounded by the artifact's own
+    /// extent and by the visible set, where the bitmap answers in one intersection: the unbounded
+    /// form of it was measured at 2.85 s against 22 ms on rung 3's `mesh/descriptors`
+    /// (2026-09-02). This is the number that says which levels are paying that difference.
     pub(crate) member_of_column_walks: AtomicU64,
     /// Requests served from a one-generation-stale entry — the steady-state observable behind
     /// decision 0044's stale-serve. A deployment where this rises and
@@ -2128,8 +2128,18 @@ impl Engine {
         self.filter_row_routed.load(Ordering::Relaxed)
     }
 
+    /// **Whether this layer's levels may be served from their column alone** — the registry's
+    /// answer to [`crate::artifacts::serves_column_only`], asked here so every call site agrees.
+    /// A layer this engine does not carry keeps the artifact-major form, which is the conservative
+    /// reading of a name the registry cannot resolve.
+    pub(crate) fn serves_column_only(&self, layer: &str) -> bool {
+        self.write
+            .registered_layer(layer)
+            .is_some_and(|registered| crate::artifacts::serves_column_only(&registered.declaration))
+    }
+
     /// `member_of` leaves served by the row-column walk rather than by the artifact-major
-    /// membership — see [`Self::member_of_column_walks`]. Zero in every deployment today.
+    /// membership — see [`Self::member_of_column_walks`].
     pub fn member_of_column_walks(&self) -> u64 {
         self.member_of_column_walks.load(Ordering::Relaxed)
     }
