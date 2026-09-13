@@ -1928,9 +1928,11 @@ fn build_bundle(
     // attribute values exist.
     // The extents the join spilled, opened once for every reader: the record blob merges them,
     // and a `text` column's token index tokenises them in block windows first (`crate::extents`).
-    // Folded first where a column spilled more than one merge holds open.
+    // Folded first only where a column spilled more extents than the budget lets one merge hold
+    // open, which no corpus built so far reaches.
+    let fan_in = crate::extents::merge_fan_in(plan.budget);
     for column in spilled.iter_mut() {
-        column.cascade()?;
+        column.cascade(fan_in)?;
     }
     let open_extents: Vec<crate::extents::OpenExtents> = spilled
         .iter()
@@ -6702,7 +6704,8 @@ mod tests {
     #[test]
     fn folding_the_extents_leaves_the_same_rows() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let extents = crate::extents::ExtentColumn::MERGE_FAN_IN * 2 + 3;
+        let fan_in = 8usize;
+        let extents = fan_in * 2 + 3;
         let mut spilled = crate::extents::ExtentColumn::new(dir.path(), 0, "abstract");
         // One row per extent, walking entity space in a stride so the extents interleave, plus a
         // second value for one entity in a later extent than the one that first carried it.
@@ -6717,7 +6720,7 @@ mod tests {
             .push_extent(&[(3u32, "the later value")])
             .expect("an extent");
         let before = prose_rows(&spilled);
-        spilled.cascade().expect("the cascade");
+        spilled.cascade(fan_in).expect("the cascade");
         assert_eq!(before, prose_rows(&spilled), "the fold moved a value");
         assert_eq!(before.get(&3).map(String::as_str), Some("the later value"));
     }

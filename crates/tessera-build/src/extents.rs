@@ -119,23 +119,24 @@ impl ExtentColumn {
         Ok(())
     }
 
-    /// How many extents one merge holds open, and the number above which they are folded into
-    /// intermediates first: **128**.
-    ///
-    /// What an open extent costs the merge is one uncompressed block, 256 KiB, so 128 of them is
-    /// 32 MB. The cascade above that is a second write of the group's characters, which is why
-    /// the bound is not tighter: a join chunk is `JOIN_STAGE_BYTES` of staged rows, so a corpus
-    /// reaches 128 extents of one column only at ten times the 10⁸ rung's prose.
-    pub(crate) const MERGE_FAN_IN: usize = 128;
-
-    /// Fold the extents in groups until at most [`Self::MERGE_FAN_IN`] are left.
+    /// Fold the extents in groups until at most `max_open` are left ([`merge_fan_in`]).
     ///
     /// A group is a contiguous run in write order and is merged by the same row merge the blob
     /// itself is written by, so an entity written twice inside one group comes out carrying the
     /// later value and the ordering the live sets rest on survives.
-    pub(crate) fn cascade(&mut self) -> Result<()> {
-        while self.extents.len() > Self::MERGE_FAN_IN {
-            let groups = self.extents.len().div_ceil(Self::MERGE_FAN_IN);
+    ///
+    /// A fold buys nothing but the memory bound. Both of a column's readers are themselves
+    /// merges over every extent at once, so neither of them reads fewer bytes for having had the
+    /// extents folded first, and the fold is a second decompress, decode, re-encode and
+    /// recompress of the whole column. Measured on the 125,789,091-row GBIF prefix, the record
+    /// blob took 40.6 s over folded extents against 39.1 s over unfolded ones, with every output
+    /// byte identical; at rung 6 the fold was 1,951 s of the filter-postings stage's 3,677 s,
+    /// 44.8 GB written and 51.3 GB read. So `max_open` is set by the budget rather than by a
+    /// constant, and a corpus whose extents fit the budget never folds.
+    pub(crate) fn cascade(&mut self, max_open: usize) -> Result<()> {
+        let max_open = max_open.max(2);
+        while self.extents.len() > max_open {
+            let groups = self.extents.len().div_ceil(max_open);
             let per_group = self.extents.len().div_ceil(groups);
             let taken: Vec<ExtentPaths> = self.extents.drain(..).collect();
             let mut folded: Vec<ExtentPaths> = Vec::with_capacity(groups);
@@ -209,6 +210,22 @@ impl ExtentColumn {
             }
         }
     }
+}
+
+/// How many extents one merge may hold open under `budget`, above which
+/// [`ExtentColumn::cascade`] folds them into intermediates first.
+///
+/// What an open extent costs the merge is one uncompressed block, [`RECORD_BLOCK_TARGET`], and
+/// the share allowed for them is a sixty-fourth of the budget: 32 MB of blocks, 128 extents, at
+/// the smallest budget a build is run under, and 336 MB at the 21.5 GB rung 6 was built under,
+/// which is past the 964 extents that build's widest column spilled. The extent count rises with
+/// the corpus and the budget does not, so the bound is what keeps the merge's memory off the
+/// corpus; the fold below it is the cost of that bound and is paid only where the bound bites.
+pub(crate) fn merge_fan_in(budget: u64) -> usize {
+    let share = budget / 64;
+    usize::try_from(share / RECORD_BLOCK_TARGET as u64)
+        .unwrap_or(usize::MAX)
+        .max(2)
 }
 
 /// One column's extents, open, with each one's live set.

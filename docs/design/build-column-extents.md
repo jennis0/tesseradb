@@ -222,9 +222,19 @@ merge of both columns' extents into the base blob measured 777.4 s at 16 major f
 with the same schema it is 540 extents a column.
 
 The merge holds one uncompressed block per extent, 256 KiB, so 54 extents cost 14 MB and 540 cost
-138 MB. The fan-in cap is 128, above which the extents are merged in groups into intermediate
-extents until what is left fits one merge. That is the same cascade the text index's runs take and
-the same reason: file descriptors and buffers, not correctness.
+138 MB. The cap on how many a merge holds open is a sixty-fourth of the memory budget, which is 128
+extents at the smallest budget a build is run under and 1,344 at 21.5 GB. Above the cap the extents
+are merged in groups into intermediate extents until what is left fits one merge, the same cascade
+the text index's runs take. Its reason is buffers alone: an extent's files are mapped and their
+descriptors dropped at open, so there is no descriptor ceiling here.
+
+The cascade buys no read work, which is why the cap is set against the budget rather than at a
+constant low enough to fold often. Both readers of a column's extents are merges over all of them
+at once, so neither reads fewer bytes for a fold, and the fold is a second decompress, decode,
+re-encode and recompress of the column. Measured on the 125,789,091-row GBIF prefix, the record
+blob took 40.6 s over folded extents against 39.1 s over unfolded ones, every output byte
+identical; at rung 6, where each string column spilled about 964 extents against a cap of 128, the
+fold was 1,951 s of the filter-postings stage's 3,677 s, 44.8 GB written and 51.3 GB read.
 
 ## 5. The disk pre-flight
 
