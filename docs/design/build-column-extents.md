@@ -228,11 +228,14 @@ are merged in groups into intermediate extents until what is left fits one merge
 the text index's runs take. Its reason is buffers alone: an extent's files are mapped and their
 descriptors dropped at open, so there is no descriptor ceiling here.
 
-The block buffers are what the cap is about because they are the only per-extent cost that rises
-with the extent count. Opening an extent also brings in its has-row bitmap and builds its live set,
-and both are shares of one column's entity set: a join chunk stages a contiguous run of entities,
-so cutting the same rows into twice as many extents halves each extent's bitmap, and the live-set
-loop walks the column's containers once rather than once per extent.
+The block buffers are what the cap is about because they are the only per-extent cost whose
+*bytes* rise with the extent count. Opening an extent also brings in its has-row bitmap and builds
+its live set, and both are shares of one column's entity set: a join chunk stages a contiguous run
+of entities, so cutting the same rows into twice as many extents halves each extent's bitmap. The
+live-set loop is O(E·C) container steps over E extents and C containers — the running union is
+walked once per extent — but a step is a container header compared and the containers each extent
+copies are its own 1/E share, which beside E buffers of 256 KiB apiece is not what the cap is
+about.
 
 The cascade buys no read work, which is why the cap is set against the budget rather than at a
 constant low enough to fold often. Both readers of a column's extents are merges over all of them

@@ -237,11 +237,14 @@ impl ExtentColumn {
 /// **The other two per-extent costs do not scale with the extent count and are not what this
 /// bounds.** Opening an extent also brings in its has-row bitmap and builds its live set
 /// ([`OpenExtents`]), and both are shares of one column's entity set: cutting the same rows into
-/// twice as many extents halves each one's, so the total is the column's however the chunks fell.
-/// The live-set loop in [`ExtentColumn::open`] is O(the column's total containers) for the same
-/// reason — a join chunk stages a contiguous run of entities, so each extent's bitmap touches its
-/// own containers and the running union grows through them once rather than being rewritten per
-/// extent.
+/// twice as many extents halves each one's, so the bytes are the column's however the chunks fell.
+///
+/// The live-set loop in [`ExtentColumn::open`] is not free of the extent count — it is O(E·C)
+/// container steps over E extents and C containers, the running union being walked once per
+/// extent — but each step is a container header compared, and an extent's own containers are the
+/// only ones it copies. A join chunk stages a contiguous run of entities, so those are a 1/E share
+/// of the column. Beside E block buffers of 256 KiB apiece, the loop is not what the bound is
+/// about.
 pub(crate) fn merge_fan_in(budget: u64) -> usize {
     let share = budget / 64;
     usize::try_from(share / RECORD_BLOCK_TARGET as u64)

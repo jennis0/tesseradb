@@ -97,20 +97,23 @@ digest. The argument that it does is that 0141's own no-register claim rested on
 
 ## What it saved, measured
 
-`attrs/record/` built before and after from the same inputs, whole-directory size and the two files
-it is made of:
+Each corpus built twice from the same inputs, once by the binary at the commit before this change
+and once by the binary at it, with `--no-oracle-pairs` and again under `--memory-budget 2g`; the
+sizes are `stat` over the three files of `attrs/record/` in the resulting bundles, which differ in
+no other file. `medcpt-10m-abs` was built once each way instead, being the measurement corpus:
 
-| corpus | `attrs/record/` | `blocks.bin` | `directory.arrow` |
-|---|---|---|---|
-| `gbif-64p` (64M rows) | **−38.0%** | +18.3% | −99.9% |
-| `treeoflife-1m` | **−58.6%** | +5.3% | −99.9% |
-| `medcpt-1m` | **−4.7%** | +3.2% | −99.5% |
-| `medcpt-10m-abs` (10M rows, abstracts) | **−0.31%** | +0.83% | −97.2% |
+| corpus | rows | `attrs/record/` | `blocks.bin` | `directory.arrow` |
+|---|---|---|---|---|
+| `gbif-64p` | 25,846,007 | **−38.0%** | +18.3% | −99.9% |
+| `treeoflife-1m` | 1,000,000 | **−58.6%** | +5.3% | −99.9% |
+| `medcpt-1m` | 1,000,000 | **−4.7%** | +3.2% | −99.5% |
+| `medcpt-10m-abs` (abstracts) | 10,000,000 | **−0.31%** | +0.83% | −97.2% |
 
 The short-row corpora gain most, as under 0141 and for the same reason: the directory's four bytes
 were a constant on top of almost nothing. `blocks.bin` rises because a one-byte varint is inside
-the block's compression where the four-byte offset was outside it — 0.34 compressed bytes a row on
-`gbif-64p` against the 1.67 the directory was spending.
+the block's compression where the four-byte offset was outside it — **0.83 compressed bytes a row**
+on `gbif-64p` (18.3% of its 117,546,801-byte `blocks.bin` over 25,846,007 rows) against the
+measured 4.13 B per has-row entity the directory was spending.
 
 The transient the writer no longer holds is the whole of the point at scale: 4 B a row of anonymous
 memory, 14 GB at rung 6, against a 21.5 GB budget.

@@ -232,11 +232,13 @@ the first holding that row's entity as a distance from its predecessor, less the
 ascent already gives. A row is a length and the fields it covers. The four-byte entity id that
 used to head every row is gone, and the four-byte payload length beside it is now a varint:
 they were **42.6% of `blocks.bin` on `gbif-64p` and 54.7% on `treeoflife-1m`** compressed, where a
-page-oriented store spends a fraction of a percent. Rebuilding both corpora under the block form
-takes **38.1% off `gbif-64p`'s `blocks.bin` and 41.5% off `treeoflife-1m`'s**, and 9.6% off a prose
-corpus whose rows are four times longer (measured, decision 0141). The identity is checked as often
-as it was, once per row read; it is *stored* once per block, which is where every other storage
-engine puts it.
+page-oriented store spends a fraction of a percent. Moving the identity to the block took
+**38.1% off `gbif-64p`'s `blocks.bin` and 41.5% off `treeoflife-1m`'s**, and 9.6% off a prose
+corpus whose rows are four times longer (measured, decision 0141) — that is the r93 step alone,
+with the directory unchanged. Moving the delimiter into the row after it takes **38.0% and 58.6%
+off the whole of `attrs/record/`** on the same two corpora, `blocks.bin` rising 18.3% and 5.3% as
+the varint enters it (measured, decision 0142). The identity is checked as often as it was, once
+per row read; it is *stored* once per block, which is where every other storage engine puts it.
 
 **The drill-down carries the item's satisfied labels beside its record** *(2026-08-31,
 [decision 0114](../decisions/0114-the-drill-down-serves-the-satisfied-labels-only.md),
@@ -291,12 +293,12 @@ Four of those bytes were the directory's rank-indexed offset, which the format n
 addressing is now the has-row bitmap and a handful of words a block, **about 0.13 B per has-row
 entity** (modelled — the epic-1 figure less its offset; that measurement has not been re-run under
 this format), and what delimits a row is a varint inside the compressed block instead, measured at
-0.34 compressed bytes a row on `gbif-64p`. The
+**0.83 compressed bytes a row** on `gbif-64p`. The
 blob-versus-dictionary comparison is per column shape (review N7): on a near-sequential identifier
-(`id`) the blob's compressed content is ~0.6 B/entity and the whole blob row **~1.1 B** under this
+(`id`) the blob's compressed content is ~0.6 B/entity and the whole blob row **~1.6 B** under this
 addressing (modelled, the same substitution) — *cheaper* than DICT+C's 6.1, where the old
 addressing already made it cheaper at ~4.6 — while on `doi`/`submitter` shapes the blob costs
-~8.0 and the dictionary wins decisively; "`index = true` is cheaper *and* searchable" holds for the
+~8.5 and the dictionary wins decisively; "`index = true` is cheaper *and* searchable" holds for the
 latter shapes, not the sequential-identifier one. And flipping a field to `index = true` later is
 a derivation pass over the blob — attrs §2.2's existing "build pass, no row rewrite" class —
 where under the old surface it was free; that is the price of not storing every field twice.
@@ -541,9 +543,9 @@ writers at 21.75–22.97 across three scales — the model was conservative by u
 index is **22.58 B/entity on disk against the flat column's 83.6** — smaller than the column it
 replaces,
 stable across a 9.6× scale range, because a head token's posting densifies as a tail token's
-spreads and the two cancel. With the blob record and its addressing beside it, **~55 GB at 10⁹
+spreads and the two cancel. With the blob record and its addressing beside it, **~55.6 GB at 10⁹
 against 83.6 GB flat** — the compressed value bytes (~31 GB) plus the row lengths inside them
-(~0.3 GB) plus the has-row bitmap and block directory (~0.2 GB) plus the index. Modelled: review
+(~0.8 GB) plus the has-row bitmap and block directory (~0.2 GB) plus the index. Modelled: review
 B5's correction put the addressing at ~4.4 GB when the directory carried a `u32` an entity, and
 dropping that array is what moves the total from ~59 GB. The ~1.4× win stands and widens.
 

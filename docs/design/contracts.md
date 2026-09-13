@@ -16,9 +16,12 @@ this takes 38.0% off `gbif-64p`'s `attrs/record/`, 58.6% off `treeoflife-1m`'s a
 corpus's (measured). **`bundle_format` moves from 9 to 10** — a 9 directory's fifth column is a
 list of row offsets where a 10 directory's is one row count a block. `api_version` stays at 1 and
 nothing reaches a client that did not before: the entity ids in a block are an index internal,
-**I10** as corrected by [decision 0065](../decisions/). Leak register: no new row, and the decision
-states why that is the owner's call to confirm — the class the format no longer catches is wider
-than r93's.
+**I10** as corrected by decision 0065 (recorded in the [decisions](../decisions/README.md) set's
+history rather than as a file of its own; the standing I10 ruling is
+[decision 0014](../decisions/0014-i10-weakened-to-construction.md)). Leak register: unchanged
+pending the owner's ruling on the wider uncaught class, which
+[decision 0142](../decisions/0142-the-record-blob-delimits-a-row-by-a-length-the-row-states.md)
+leaves open.
 
 **Status:** Draft r93 — **the record blob states a row's identity once per block**
 (r93, 2026-09-11, **owner ruling**;

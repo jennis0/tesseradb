@@ -268,6 +268,14 @@ def self_check(
                 f"{where}: first_rank {entry['first_rank']} != {rank} — blocks do not tile "
                 "the rank space"
             )
+        # **Both totals advance here, before anything about the block can abandon it.** A block
+        # the walk gives up on — a bad varint, rows that do not tile — still occupies the
+        # compressed extent the directory gives it and still claims its row count, so a walk that
+        # skipped the advance would report every later block against the wrong offset and rank and
+        # close with two summary lines about the first defect rather than the file.
+        block_rank = rank
+        rank += entry["row_count"]
+        cursor = entry["compressed_offset"] + entry["compressed_len"]
         compressed = blocks_bytes[
             entry["compressed_offset"] : entry["compressed_offset"] + entry["compressed_len"]
         ]
@@ -355,11 +363,14 @@ def self_check(
                 "a block carries nothing but whole rows"
             )
             continue
-        if rank < len(entities_in_rank_order) and first_entity != entities_in_rank_order[rank]:
+        if (
+            block_rank < len(entities_in_rank_order)
+            and first_entity != entities_in_rank_order[block_rank]
+        ):
             failures.append(
-                f"{where}: states first entity {first_entity} but has-row's rank-{rank} member "
-                f"is {entities_in_rank_order[rank]} — the bitmap and the blocks disagree about "
-                "which entity a rank names"
+                f"{where}: states first entity {first_entity} but has-row's rank-{block_rank} "
+                f"member is {entities_in_rank_order[block_rank]} — the bitmap and the blocks "
+                "disagree about which entity a rank names"
             )
         if row_count > 1 and rows_len > block_target:
             failures.append(
@@ -367,7 +378,8 @@ def self_check(
                 f"{row_count} rows — only a single oversized row may pass the target"
             )
         for within, ((start, end), entity) in enumerate(zip(extents, entities)):
-            row_where = f"{where} row {within} (rank {rank})"
+            row_rank = block_rank + within
+            row_where = f"{where} row {within} (rank {row_rank})"
             if entity > 0xFFFFFFFF:
                 failures.append(f"{row_where}: entity {entity} is past the u32 ceiling")
                 break
@@ -377,14 +389,14 @@ def self_check(
                     "ascending entity order"
                 )
             previous_entity = entity
-            if rank >= len(entities_in_rank_order):
+            if row_rank >= len(entities_in_rank_order):
                 failures.append(f"{row_where}: more rows than has-row members")
                 break
-            if entity != entities_in_rank_order[rank]:
+            if entity != entities_in_rank_order[row_rank]:
                 failures.append(
-                    f"{row_where}: the block says entity {entity} but has-row's rank-{rank} "
-                    f"member is {entities_in_rank_order[rank]} — rank addressing would serve a "
-                    "neighbour's row"
+                    f"{row_where}: the block says entity {entity} but has-row's rank-{row_rank} "
+                    f"member is {entities_in_rank_order[row_rank]} — rank addressing would serve "
+                    "a neighbour's row"
                 )
             tags = _walk_payload(block[rows_at + start : rows_at + end], row_where, failures)
             if not tags:
@@ -394,8 +406,6 @@ def self_check(
                     f"{row_where}: tags {sorted(tags - allowed_tags)} are not blob-resident "
                     "columns — a hot-column or entity-space value has leaked into the blob"
                 )
-            rank += 1
-        cursor = entry["compressed_offset"] + entry["compressed_len"]
 
     if cursor != len(blocks_bytes):
         failures.append(

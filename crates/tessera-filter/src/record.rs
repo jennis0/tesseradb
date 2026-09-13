@@ -50,9 +50,10 @@
 //! would pass the target, so a row larger than the target gets an oversized block of its own — the
 //! target is a target, not a cap (records §3). Whole-row blocks are what make drill-down one block
 //! read and one decompress; the 256 KiB point is the string-storage probe's measured operating
-//! point on *title-shaped* bytes (2.44× at 169 µs/read), and the mixed-field row ratio is
-//! **assumed, not measured** — records §3 says so and §11 item 6 owes the measurement, so this
-//! module quotes neither figure as this format's.
+//! point on *title-shaped* bytes (2.44× at 169 µs/read), and the mixed-field row ratio records §3
+//! once marked assumed is measured there at 3.00× against a 2.54× title control through this
+//! writer. Neither figure is quoted here as this format's: both were taken before the row form
+//! moved twice.
 //!
 //! # Addressing is has-row rank (records §3, review B5)
 //!
@@ -103,12 +104,17 @@
 //! Entity ids in the block are an index internal and are never serialised to any client (**I10**
 //! as corrected by decision 0065: the blob is an index internal, not a gather artefact).
 //!
-//! **What this does not catch**: a block whose *bytes* are corrupt inside a row, in a way that
-//! still frames as a field sequence consuming the row's extent exactly. The field walk is what
-//! stands there — a kind byte naming no kind, a length running past the extent, a walk that ends
-//! short of it all refuse — and the manifest's digest is what stands behind that (records §7: a
-//! blob file that fails its digest refuses at open). [`RecordBlob::self_check`] walks the whole
-//! artefact — ranks, offsets, block bounds, identities — for the conformance suite and for
+//! **What this does not catch**: a block's rows section rewritten so that it still tiles. The
+//! field walk is what stands inside a row — a kind byte naming no kind, a length running past the
+//! block, a walk that ends short of the row's own length all refuse — and the tiling walk stands
+//! around it, but bytes that satisfy both do not refuse. Someone who rewrites a block may re-cut
+//! its rows as well as their contents: as long as the walk visits the row count the header states
+//! and lands on the block's last byte, the entities still come from the gaps, which are untouched,
+//! so a neighbour's bytes can be presented under an earlier entity's identity where the tags
+//! permit. **The manifest's SHA-256 over `blocks.bin` is what stands there** (records §7: a blob
+//! file that fails its digest refuses at open), and decision 0142 leaves open whether that takes a
+//! leak-register row. [`RecordBlob::self_check`] walks the whole artefact — ranks, the rows tiling
+//! their block, block bounds, identities — for the conformance suite and for
 //! `tessera verify --deep`, neither of which can see addressing from the served surface
 //! (records §10).
 //!
@@ -500,14 +506,16 @@ impl BlockScan {
             .filter(|end| *end <= bytes.len())
             .ok_or_else(|| {
                 malformed(format!(
-                    "block {block} row {} states {len} bytes of fields, which run past the                      {}-byte block",
+                    "block {block} row {} states {len} bytes of fields, which run past the \
+                     {}-byte block",
                     self.local,
                     bytes.len()
                 ))
             })?;
         if len == 0 {
             return Err(malformed(format!(
-                "block {block} row {} states no fields; an entity with no blob-resident value                  has no row at all",
+                "block {block} row {} states no fields; an entity with no blob-resident value \
+                 has no row at all",
                 self.local
             )));
         }
@@ -1242,8 +1250,8 @@ impl RecordBlob {
     /// The whole row `entity` carries, decoded — or `None` where it has none.
     ///
     /// One block read and one decompress (records §3's cost shape). Every failure of the
-    /// addressing — an offset outside the block, a row that does not tile against its neighbour,
-    /// a discriminant naming another entity — refuses rather than answers.
+    /// addressing — a length running past the block, rows that do not account for the block, a
+    /// discriminant naming another entity — refuses rather than answers.
     ///
     /// **One entity per call, one decompress per call**, with nothing held between calls: a
     /// caller that wants many rows must not loop this, and [`Self::for_each_row_in`] is the read

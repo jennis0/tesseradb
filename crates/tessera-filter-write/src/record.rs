@@ -84,6 +84,12 @@ const ZSTD_LEVEL: i32 = 3;
 /// its own (records §3), so a corpus with a 4 MB row has up to five of those in flight instead.
 /// The bound in bytes is five times the largest row, and the target is what it is for every
 /// corpus whose rows are ordinary.
+///
+/// **The per-column pool covers the spill path only.** The fold a column takes when it spills more
+/// extents than one merge may hold open runs through [`merge_record_rows`], which makes its own
+/// writer and so its own pool, per merge group. That path is bounded by the fold's own group count
+/// and runs where the extent cap bites, which no corpus built so far reaches
+/// (`build-column-extents.md` §4).
 const COMPRESS_WORKERS: usize = 3;
 const COMPRESS_QUEUE: usize = 2;
 
@@ -163,8 +169,14 @@ impl BlockPool {
     }
 
     /// Ready for the next blob: every block handed over has been written back, so the sequence
-    /// numbers start again. Called by [`RecordBlobWriter::finish`] before it hands the pool on.
+    /// numbers start again. Called by [`RecordBlobWriter::finish`] before it hands the pool on,
+    /// which is after it has drained, so nothing is held.
     fn reset(&mut self) {
+        debug_assert!(
+            self.ready.is_empty(),
+            "a pool being reset still holds a compressed block; the writer drains before it \
+             hands the pool on"
+        );
         self.ready.clear();
         self.submitted = 0;
         self.written = 0;
