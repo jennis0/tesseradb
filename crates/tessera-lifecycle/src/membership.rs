@@ -661,8 +661,9 @@ impl Members {
         }
     }
 
-    /// Whether this membership is read through a mapping rather than held on the heap. For the
-    /// build's own accounting and for tests; no answer a caller gets depends on it.
+    /// Whether this membership is read through a mapping rather than held on the heap. Read by
+    /// the build's accounting, by tests and by this type's own `Debug`; no answer a principal
+    /// gets depends on it.
     pub fn is_mapped(&self) -> bool {
         matches!(self.0, MembersInner::Mapped { .. })
     }

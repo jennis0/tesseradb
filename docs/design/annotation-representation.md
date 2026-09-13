@@ -328,16 +328,28 @@ what Stage 5 puts there.
 `members/<ordinal>.roaring` line above is a shape, not a layout** (review 2026-08-15, verified
 against the code). Every bundle file is a manifest entry, digested at write and parsed at open; at
 10⁷ artifacts that is 10⁷ entries. The membership bytes are affordable — 794 MB *measured* (§2) —
-and the packaging is not. ✔ **Ruled 2026-08-16 (owner): a packed extent per level per publication,
-read normally into memory.** One file, addressed by dense ordinal, behind one manifest entry —
+and the packaging is not. ✔ **Ruled 2026-08-16 (owner): a packed extent per level per publication.**
+One file, addressed by dense ordinal, behind one manifest entry —
 `tessera-store`'s `membership` module owns the addressing and holds each membership as an opaque
 blob, so the bitmap library stays on one side of the boundary. Publication is append-only, so an
 extent covers a contiguous ordinal range and disturbs no earlier one; a reader unions a level's
-extents. The two alternatives were the record blob, whose compressed blocks would foreclose ever
-using a membership in place, and a mapped form read where it lies — declined **for now** rather than
-on the merits: it is the same file read differently, and the measured ~6× it saves is worth having
-only at a cluster count three orders of magnitude beyond anything running
-([the residency probe](../../probes/2026-08-16-membership-residency/README.md), §11.3).
+extents. The rejected alternative was the record blob, whose compressed blocks would foreclose ever
+using a membership in place.
+
+✔ **The extent is read where it lies, at a build (2026-09-12) and at a serving open and every fold
+(2026-09-13, owner ruling).** A resident membership is a read-only view over the extent's bytes in
+the portable Roaring form the file already carries, so the heap holds the container descriptors and
+the two-byte values stay page cache the kernel may evict. Decoding them instead costs the whole
+corpus's memberships in anonymous memory for as long as the process runs: **31 GB measured at
+`Engine::open`** over the GBIF corpus's 1,646,192 artifacts and 3.43×10⁹ member entries a level.
+The residency probe's earlier ~6× measured serialised bytes against the same bytes mapped, not
+against the decoded bitmaps the store was holding, which is why it read as a saving for a cluster
+count nothing was running
+([the residency probe](../../probes/2026-08-16-membership-residency/README.md), §11.3). Every read
+goes through the same accessor and no caller can tell the two forms apart; a write copies the one
+membership it touches to the heap first. The fallback is the decoded bitmap: where the bytes will
+not map, or where the view disagrees with the decoded membership by cardinality, the record keeps
+what it decoded and the node alarms.
 
 **Supplied content itself is not here: it lives in the record blob — the store points use —
 addressed at the artifact's own entity**

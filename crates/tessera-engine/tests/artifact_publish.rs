@@ -454,3 +454,53 @@ fn an_artifacts_entity_takes_a_suppression_like_any_other() {
     engine.accept_change(entity, ChangeOp::Unsuppress).unwrap();
     assert!(!engine.generation().overlay.is_suppressed(entity));
 }
+
+/// **A membership that came back from an extent is read through that extent**, and it is the set
+/// that was published.
+///
+/// The equality is what matters: a view over the wrong bytes is a membership whose masked count is
+/// low for every viewer, which the existence criterion renders as absent with nothing anywhere to
+/// notice. The `is_mapped` half is the other one — where a membership lives is invisible to every
+/// reader, so without this the seed could stop mapping and only a memory measurement would say so.
+/// The build asserts the same pair over its own publication (`tessera-build`'s `layers.rs`).
+#[test]
+fn a_membership_seeded_from_an_extent_is_read_through_it() {
+    let fx = fixture();
+    let members: Vec<u32> = {
+        let engine = fx.open();
+        engine.register_layer(declaration("clusters/a")).unwrap();
+        engine
+            .publish_artifacts(
+                "clusters/a".into(),
+                0,
+                vec![artifact("c0", fx.members(0..40))],
+            )
+            .unwrap();
+        assert_eq!(published_extents(&fx).len(), 1);
+        let mut members: Vec<u32> = fx
+            .members(0..40)
+            .into_iter()
+            .map(|e| e.raw() as u32)
+            .collect();
+        members.sort_unstable();
+        members
+    };
+
+    // The log goes, so nothing replays over the seed: a WAL record postdates the manifest and
+    // `apply` puts that artifact's membership back on the heap, which is correct and is not what
+    // this case is about.
+    remove_the_whole_log(&fx);
+
+    let engine = fx.open();
+    let seeded = engine.level_memberships_for_test("clusters/a", 0);
+    assert_eq!(seeded.len(), 1, "the one artifact came back from the extent");
+    assert_eq!(seeded[0].0, 0);
+    assert_eq!(
+        seeded[0].1, members,
+        "the view is the set the caller published"
+    );
+    assert!(
+        seeded[0].2,
+        "and it is read through the extent rather than copied onto the heap"
+    );
+}
