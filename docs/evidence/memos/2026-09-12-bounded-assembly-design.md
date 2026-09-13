@@ -5,7 +5,7 @@
 [`../../ingest-campaign.md`](../../ingest-campaign.md) §4d. It answers the findings of
 [`2026-09-12-gbif-whole-corpus-build-observations.md`](2026-09-12-gbif-whole-corpus-build-observations.md)
 with one rule and one primitive, and names the work packages that apply them. §9 lists the
-decisions taken.
+decisions it asked for.
 
 ## 1. What the whole-corpus run showed
 

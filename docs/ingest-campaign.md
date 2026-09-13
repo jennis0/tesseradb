@@ -1130,7 +1130,7 @@ the design itself is
 the acceptance measurement is
 [`../probes/2026-09-12-bounded-assembly/`](../probes/2026-09-12-bounded-assembly/README.md).
 
-**The wall fell 19%, and one stage still exceeded the budget.** 4 h 09 m 35 s → **3 h 30 m 55 s**;
+**The wall fell 15%, and one stage still exceeded the budget.** 4 h 09 m 35 s → **3 h 30 m 55 s**;
 the bundle 207 GiB → **196 GiB**. `filter_postings` held **31.6 GB anonymous for twenty minutes,
 7.6 GB over the 24 GB budget** — Finding A, below — and is the one respect in which run 2 did not
 fit its budget.
@@ -1150,7 +1150,7 @@ fit its budget.
 | `record_blob` | 1,917 s | **1,350 s** |
 | `tiler_sort` | 242 s | 328 s |
 | `segment_write` | 562 s | 629 s |
-| the artifact pass (reported inside `manifests`' interval; the bounded-assembly design gives it its own record, §4.6) | 1,728 s | 1,901 s |
+| `artifact_pass` | 1,728 s | 1,901 s |
 | `manifests` (the digests) | 65 s | 69 s |
 | **wall** | **4 h 09 m 35 s** | **3 h 30 m 55 s** |
 | **bundle** | 207 GiB, record-blob format 9 | **196 GiB, format 10** |
@@ -1192,7 +1192,7 @@ code (`crates/tessera-build/src/observer.rs`), not from a profile of this run.
 
 **Peak anonymous RSS**: run 1 **21.5 GB in `record_blob`**; run 2 **31.6 GB in
 `filter_postings`** (Finding A, below), otherwise under **22.4 GB** in the batch loop and
-**17.9 GB** in `record_blob`. Swap peaked at **0.9 GB** in both runs.
+**17.9 GB** in `record_blob`. Swap peaked at **0.4 GB** in run 1 and **0.9 GB** in run 2.
 
 **Disk never came close to the pre-flight's forecast.** 429 GB free at the start, a minimum of
 **221 GB free** at the end — the transient never exceeded the finished bundle. The printed

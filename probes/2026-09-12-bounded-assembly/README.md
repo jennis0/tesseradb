@@ -89,11 +89,12 @@ to this pass, and the residency model still has no term for it. Diagnosed, with 
 (open extents cursor-only, one duplicate map a column built in one sequential pass); not built.
 
 **The disk transient never exceeded the finished bundle.** 429 GB free at the start of the
-post-design run, 221 GB free at the end — the bundle itself is 196 GB, so nothing intermediate
-grew past it. The pre-flight's own forecast, ~539 GB, is a model that sums three ceilings
-(artifact-pass buckets, row-column lanes, ordinal geometry) known to overstate, and it overstated
-here by close to 3×; the design's phase table in §7 already expected the assembly phase to be the
-binding one and it was not.
+post-design run, 221 GB free at the end — the bundle itself is 196 GiB (210 GB), so nothing
+intermediate grew past it. The disk minimum fell at 21:49, during `artifact_pass` at the end of
+the build, which is the assembly phase the design's phase table in §7 named as the binding one —
+right about the phase, and wrong only about the magnitude: the pre-flight's own forecast, ~539 GB,
+is a model that sums three ceilings (artifact-pass buckets, row-column lanes, ordinal geometry)
+known to overstate, and it overstated here by close to 3×.
 
 **What the design's own mechanisms bought, measured**: the assignment-walk hoist that removed the
 scattered entity-map writes (§4.4) took about 12% off the batch loop, smaller than expected
