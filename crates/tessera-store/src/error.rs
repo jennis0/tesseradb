@@ -163,6 +163,16 @@ pub enum StoreError {
     /// name; a file carrying one arrived from outside the writer, and the operator response is to
     /// rename it to its canonical spelling or remove it.
     NonCanonicalManifestName { partition: String, name: String },
+    /// A `SEGMENTS-<n>.json` already exists at the `n` a publication was writing at
+    /// (`hard_link`'s `AlreadyExists`, [`crate::write_segments_manifest`]).
+    ///
+    /// **Its own variant, naming the file, because the raw `Io` form reads as a filesystem
+    /// fault.** A side-manifest is complete current state rather than a diff, so `n` is allocated
+    /// once and never reused (contracts §2.3); a file already at this one means a second writer is
+    /// publishing into this bundle, or an allocator started below a number already on disc. The
+    /// caller discards its publication and re-plans, and the operator reading this needs the path
+    /// to find out which.
+    SideManifestExists { path: PathBuf },
 }
 
 impl fmt::Display for StoreError {
@@ -256,6 +266,15 @@ impl fmt::Display for StoreError {
                  refused rather than parsed: parsing it and reading the canonical name back \
                  would step silently past a manifest that may carry a deny. Rename it to its \
                  canonical spelling or remove it"
+            ),
+            StoreError::SideManifestExists { path } => write!(
+                f,
+                "refusing to write {}: a side-manifest already exists at this n. A side-manifest \
+                 is complete current state for its partition, so writing through one would drop \
+                 the rows the manifest it replaced named. n is allocated once and never reused \
+                 (contracts §2.3): a file already here means a second writer is publishing into \
+                 this bundle",
+                path.display()
             ),
             StoreError::UnsafePath { what, value } => {
                 write!(f, "unsafe path in manifest ({what}): '{value}'")

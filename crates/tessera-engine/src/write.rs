@@ -2371,7 +2371,7 @@ pub(crate) struct WritePath {
 }
 
 /// Why an executor could not be started.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExecutorStartError {
     /// This engine already has one. The WAL can be owned once.
     AlreadyStarted,
@@ -2384,6 +2384,13 @@ pub enum ExecutorStartError {
     /// permanently writer-less either way: the WAL moved into the closure that failed to spawn and
     /// was dropped with it, so a retry answers `AlreadyStarted`. Restart the process.
     Spawn(std::io::ErrorKind),
+    /// The bundle root could not be listed for the side-manifest numbers already on disc
+    /// (`tessera_store::highest_side_manifest_n`).
+    ///
+    /// A node that cannot see which `n` are taken cannot allocate one, and every publication it
+    /// made would be a guess at a free name. Refusing to start is recoverable — the bundle is
+    /// untouched — where starting is not.
+    SideManifestScan(String),
 }
 
 impl std::fmt::Display for ExecutorStartError {
@@ -2396,6 +2403,11 @@ impl std::fmt::Display for ExecutorStartError {
                 f,
                 "the lifecycle thread could not be spawned ({kind:?}); this engine can no longer \
                  accept writes"
+            ),
+            ExecutorStartError::SideManifestScan(detail) => write!(
+                f,
+                "the side-manifest numbers already on disc could not be read ({detail}); a writer \
+                 that cannot see them cannot allocate one"
             ),
         }
     }
@@ -3516,6 +3528,13 @@ impl WritePath {
         // first, so a second `start_executor` on the same path cannot sweep a second time.
         sweep_orphan_prefixes(&flush.bundle_root, &generation.load().prefix);
 
+        // **Above every `SEGMENTS-<n>.json` on disc, not above what a manifest names** — see
+        // [`Executor::next_manifest_n`]. The sweep above has already removed the unpublished
+        // prefixes, so what is left is what a reader could resolve.
+        let next_manifest_n = tessera_store::highest_side_manifest_n(&flush.bundle_root)
+            .map_err(|e| ExecutorStartError::SideManifestScan(e.to_string()))?
+            .map_or(1, |highest| highest + 1);
+
         let (work_tx, work_rx) = std::sync::mpsc::sync_channel(queue_bound);
         let (deny_tx, deny_rx) = std::sync::mpsc::channel();
         // Capacity one, and `try_send` that discards `Full`: a token means "something may be
@@ -3639,8 +3658,7 @@ impl WritePath {
                     flush_max_age_secs: flush.max_age_secs,
                     flush_max_items: flush.max_items,
                     flush_attempt: 0,
-                    // Above every candidate present at open, per partition — see the field's doc.
-                    next_manifest_n: flush.next_manifest_n,
+                    next_manifest_n,
                     deny_dirty: false,
                     windows_since_publication: 0,
                     bundle_root: flush.bundle_root,
@@ -4857,9 +4875,6 @@ pub(crate) struct MaintenanceDeps {
     /// one path by which a *caller* grows the dictionary, and so the one declared bound that is
     /// enforced rather than trusted. See `flush::promote`.
     pub(crate) max_distinct_terms: u64,
-    /// One past the highest `SEGMENTS-<n>.json` this bundle carries — the executor's manifest
-    /// counter seed. See [`Executor::next_manifest_n`].
-    pub(crate) next_manifest_n: u64,
     /// `EngineConfig::max_merged_segment_bytes` **as configured**, `None` where the deployment set
     /// nothing — not the resolved policy value, which always has one.
     ///
@@ -6208,17 +6223,26 @@ struct Executor {
     /// feeds.
     flush_attempt: u64,
     /// The next `SEGMENTS-<n>.json` number to write, for the single partition this executor
-    /// publishes. Seeded at open from `highest_candidate_n + 1`.
+    /// publishes.
     ///
-    /// **One allocator, on the one thread that writes manifests.** `n` is per-partition, monotone
-    /// and never reused (contracts §2.3), and it must be allocated by whoever writes at it: a
-    /// number taken when a flush is *planned* is stale by the time that flush lands, because a
-    /// deny publication may have taken one during its flight — and a flush committed beneath the
-    /// newest manifest is a segment a restore never reads.
+    /// **One allocator, on the one thread that writes manifests, and every writer of a
+    /// side-manifest takes its number from it** — flush, merge, coalesce, fold and overlay
+    /// publication alike. `n` is per-partition, monotone and never reused (contracts §2.3), and it
+    /// must be allocated by whoever writes at it: a number taken when a flush is *planned* is stale
+    /// by the time that flush lands, because a deny publication may have taken one during its
+    /// flight, and a flush committed beneath the newest manifest is a segment a restore never
+    /// reads.
     ///
-    /// Seeded from the highest *candidate*, not the served `n`, so a manifest stepped past for
-    /// failing verification is never overwritten. `write_segments_manifest` refuses to replace in
-    /// any case; seeding above means the refusal cannot arise.
+    /// **The counter alone is not a floor**, which is why [`Executor::allocate_manifest_n`] raises
+    /// it over the files on disc at every allocation rather than only at the seed. A counter is
+    /// above what *this* executor has written; the numbers taken are the filenames present, and the
+    /// two differ wherever a second writer holds the same bundle root — the state a restart passes
+    /// through, whose two executors would otherwise advance in lockstep from one seed and collide
+    /// at every publication either made.
+    ///
+    /// Seeding from a manifest is the same gap standing still: a manifest names the files of its
+    /// own publication, and a side-manifest another writer left, or one an in-flight compaction's
+    /// unpublished prefix holds, is named by nothing.
     next_manifest_n: u64,
     /// Whether the overlay holds deny state no side-manifest carries yet.
     ///
@@ -7219,7 +7243,19 @@ impl Executor {
             &live.bundle.manifest.vocabularies,
         );
 
-        let manifest_n = self.allocate_manifest_n();
+        let manifest_n = match self.allocate_manifest_n() {
+            Ok(n) => n,
+            Err(e) => {
+                self.health.merge_failures.fetch_add(1, Ordering::Relaxed);
+                tracing::error!(
+                    error = %e,
+                    "ALARM: a completed merge's side-manifest number could not be allocated; its \
+                     files are orphans, every consumed segment still stands, and the next tick \
+                     re-plans"
+                );
+                return;
+            }
+        };
         // The publication seam: the merged segment's files are on disc and nothing durable names
         // them until this write returns (correctness-suite §12.3).
         self.pause_point(PauseSiteArg::BeforeManifestPublish);
@@ -8095,7 +8131,17 @@ impl Executor {
         let retired_count = executed.cardinality();
         // Allocated here rather than beside the manifest write, so the artifact pass below can name
         // its files after the publication that introduces them — one sequence, not two.
-        let manifest_n = self.allocate_manifest_n();
+        let manifest_n = match self.allocate_manifest_n() {
+            Ok(n) => n,
+            Err(e) => {
+                tracing::error!(
+                    error = %e,
+                    "ALARM: a completed fold's side-manifest number could not be allocated; its \
+                     prefix is unpublished and the next tick re-plans"
+                );
+                return;
+            }
+        };
 
         // ---- step 3: the merge-size relation, against the fold's own output --------------------
         //
@@ -9421,7 +9467,21 @@ impl Executor {
             &live.bundle.manifest.vocabularies,
         );
 
-        let manifest_n = self.allocate_manifest_n();
+        let manifest_n = match self.allocate_manifest_n() {
+            Ok(n) => n,
+            Err(e) => {
+                self.health
+                    .coalesce_failures
+                    .fetch_add(1, Ordering::Relaxed);
+                tracing::error!(
+                    error = %e,
+                    "ALARM: a completed coalesce's side-manifest number could not be allocated; \
+                     its files are orphans, every consumed entry still stands, and the next tick \
+                     re-plans"
+                );
+                return;
+            }
+        };
         // The publication seam: the coalesced extents are on disc and nothing durable names them
         // until this write returns (correctness-suite §12.3).
         self.pause_point(PauseSiteArg::BeforeManifestPublish);
@@ -10663,11 +10723,24 @@ impl Executor {
         self.bundle_root.join(&generation.prefix)
     }
 
-    /// Take the next side-manifest number. See [`Executor::next_manifest_n`].
-    fn allocate_manifest_n(&mut self) -> u64 {
-        let n = self.next_manifest_n;
-        self.next_manifest_n += 1;
-        n
+    /// Take the next side-manifest number: this executor's counter, raised over every
+    /// `SEGMENTS-<n>.json` present under the bundle root. See [`Executor::next_manifest_n`] for why
+    /// the counter alone is not enough, and `tessera_store::highest_side_manifest_n` for what the
+    /// scan covers.
+    ///
+    /// The scan is a `readdir` per prefix and per partition directory, paid once per publication —
+    /// publications are seconds apart, and the alternative is a number that may already be a file.
+    ///
+    /// A bundle root that cannot be listed fails the allocation, and so the publication: an
+    /// allocator that cannot see which files are present cannot say a number is free. The caller
+    /// discards, its files are orphans, and the next tick re-plans.
+    fn allocate_manifest_n(&mut self) -> tessera_store::Result<u64> {
+        let on_disk = tessera_store::highest_side_manifest_n(&self.bundle_root)?;
+        let n = self
+            .next_manifest_n
+            .max(on_disk.map_or(0, |highest| highest + 1));
+        self.next_manifest_n = n + 1;
+        Ok(n)
     }
 
     /// Commit one partition's side-manifest — **the only route to
@@ -14951,7 +15024,19 @@ impl Executor {
             // records holding the only other copy.
             // Allocated first so the extents can be named after the publication that carries them:
             // one sequence, not two, and a file whose name says which manifest introduced it.
-            let n = self.allocate_manifest_n();
+            let n = match self.allocate_manifest_n() {
+                Ok(n) => n,
+                Err(e) => {
+                    tracing::error!(
+                        error = %e,
+                        partition = %partition,
+                        "ALARM: a side-manifest number could not be allocated; the memberships \
+                         stay WAL-durable and the log stays pinned, and the write is retried at \
+                         the next tick"
+                    );
+                    return;
+                }
+            };
             let prefix_dir = self.prefix_dir(&live);
             let published = match self.write_membership_extents(&prefix_dir, partition, n) {
                 Ok(published) => published,
@@ -16474,7 +16559,18 @@ impl Executor {
             .flush_lap(crate::flush::FlushStage::Compose, *mark);
 
         let mut manifest = partition_data.manifest.clone();
-        let manifest_n = self.allocate_manifest_n();
+        let manifest_n = match self.allocate_manifest_n() {
+            Ok(n) => n,
+            Err(e) => {
+                self.health.flush_failures.fetch_add(1, Ordering::Relaxed);
+                tracing::error!(
+                    error = %e,
+                    "ALARM: a completed flush's side-manifest number could not be allocated; its \
+                     files are orphans, the buffer is retained, and the next tick re-plans"
+                );
+                return false;
+            }
+        };
         // **The watermark advances at every flush publication, and never regresses** — a
         // publication coordinate, which is the only reading left of it.
         //

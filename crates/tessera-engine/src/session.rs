@@ -3247,17 +3247,6 @@ impl Engine {
                 identity_key: self.identity_key,
                 pool: Arc::clone(&self.pool),
                 max_distinct_terms: self.plugin.declared_bounds().max_distinct_terms,
-                // Above every candidate any partition carries, so a manifest stepped past for
-                // failing verification is never overwritten.
-                next_manifest_n: self
-                    .generation
-                    .load()
-                    .bundle
-                    .partitions
-                    .values()
-                    .map(|p| p.highest_candidate_n + 1)
-                    .max()
-                    .unwrap_or(1),
             },
             #[cfg(feature = "fault-injection")]
             None,
@@ -3309,17 +3298,6 @@ impl Engine {
                 identity_key: self.identity_key,
                 pool: Arc::clone(&self.pool),
                 max_distinct_terms: self.plugin.declared_bounds().max_distinct_terms,
-                // Above every candidate any partition carries, so a manifest stepped past for
-                // failing verification is never overwritten.
-                next_manifest_n: self
-                    .generation
-                    .load()
-                    .bundle
-                    .partitions
-                    .values()
-                    .map(|p| p.highest_candidate_n + 1)
-                    .max()
-                    .unwrap_or(1),
             },
             Some(faults),
         )

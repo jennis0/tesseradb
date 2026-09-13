@@ -136,6 +136,16 @@ executor at each write and living **in the filename alone** — the manifest fie
 duplicated it is deleted (contracts §2.3). `n` advances faster than the geometry version, because
 overlay publications take an `n` and move no geometry.
 
+Every writer of a side-manifest — flush, merge, coalesce, fold, overlay publication — takes its
+`n` from one counter on the executor thread, and the counter is raised over every
+`SEGMENTS-<n>.json` present under the bundle root at each allocation. A counter says what this
+executor has written; the filenames say which numbers are taken, and the two differ while a second
+writer holds the same bundle root. Two executors seeded from one disc state advance in lockstep and
+collide at every publication either makes, and each collision discards a publication whose files
+are already written. Seeding from a manifest leaves the same gap: a manifest names the files of its
+own publication, so a side-manifest another writer left, or one an unpublished compaction prefix
+holds, is named by nothing. A collision that does happen is refused by name (§4.2), not merged.
+
 ### 1.3 The WAL
 
 Per partition; a sequence of member files, single appender (the executor), append-only records —
@@ -442,7 +452,10 @@ rotates nothing until restarted, alarmed throughout — publishing from that ove
 **One plan per dispatch.** Every plan in a dispatch would take the same side-manifest name, so
 one view publishes per tick, chosen by oldest unflushed row; the side-manifest write **refuses
 to replace** an existing `SEGMENTS-<n>.json` (`hard_link`, atomic, `AlreadyExists` on collision)
-as the guard at the format boundary.
+as the guard at the format boundary. The refusal names the file and is its own error rather than a
+filesystem fault: a side-manifest is complete current state, so a write through one drops the rows
+the manifest it replaced named. The publication is discarded, its files are orphans, and the next
+tick re-plans — at a number above what is on disc, never at the one that was refused (§1.2).
 
 ### 4.3 Execution on the pool: the files, and descriptor promotion
 

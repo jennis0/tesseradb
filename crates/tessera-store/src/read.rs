@@ -1098,6 +1098,77 @@ fn list_segments_manifests(partition_dir: &Path, partition_label: &str) -> Resul
     Ok(found)
 }
 
+/// The highest `n` any `SEGMENTS-<n>.json` under `bundle_root` is named with — over every prefix
+/// directory and every partition directory beneath them — or `None` where the tree holds none.
+///
+/// **The floor a writer's next `n` must clear** (write-path §1.2). `n` is allocated once and never
+/// reused, and the only complete record of which numbers are taken is the set of filenames present:
+/// a manifest names the files of its own publication, not the side-manifests of any other, and a
+/// prefix an in-flight compaction is building is named by nothing at all until it flips `CURRENT`.
+/// An allocator seeded from what a manifest names is therefore seeded below files that exist, and
+/// the first publication at such an `n` is refused by
+/// [`StoreError::SideManifestExists`](crate::StoreError::SideManifestExists).
+///
+/// **A non-canonical name raises the floor rather than refusing here.** The reader refuses one
+/// ([`list_segments_manifests`], contracts §2.1) because it must not read a manifest under a name
+/// it cannot reconstruct; this asks only which numbers may be taken, and a padded `SEGMENTS-01.json`
+/// says `1` may be. Refusing would stop a node writing over a file it can already read past.
+///
+/// A directory that cannot be listed is an error rather than an omission: an allocator that cannot
+/// see the files present cannot say a number is free.
+pub fn highest_side_manifest_n(bundle_root: &Path) -> Result<Option<u64>> {
+    let mut highest: Option<u64> = None;
+    for prefix in sub_directories(bundle_root)? {
+        for partition in sub_directories(&prefix.join("partitions"))? {
+            for entry in read_dir_if_present(&partition)? {
+                let entry = entry.map_err(|source| StoreError::Io {
+                    path: partition.clone(),
+                    source,
+                })?;
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                let Some(rest) = name
+                    .strip_prefix("SEGMENTS-")
+                    .and_then(|r| r.strip_suffix(".json"))
+                else {
+                    continue;
+                };
+                if let Ok(n) = rest.parse::<u64>() {
+                    highest = Some(highest.map_or(n, |h: u64| h.max(n)));
+                }
+            }
+        }
+    }
+    Ok(highest)
+}
+
+/// The directories directly under `dir`, empty where `dir` does not exist.
+fn sub_directories(dir: &Path) -> Result<Vec<PathBuf>> {
+    let mut found = Vec::new();
+    for entry in read_dir_if_present(dir)? {
+        let entry = entry.map_err(|source| StoreError::Io {
+            path: dir.to_path_buf(),
+            source,
+        })?;
+        if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            found.push(entry.path());
+        }
+    }
+    Ok(found)
+}
+
+/// `read_dir`, with an absent directory reading as empty and every other failure an error.
+fn read_dir_if_present(dir: &Path) -> Result<Vec<std::io::Result<std::fs::DirEntry>>> {
+    match std::fs::read_dir(dir) {
+        Ok(entries) => Ok(entries.collect()),
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(source) => Err(StoreError::Io {
+            path: dir.to_path_buf(),
+            source,
+        }),
+    }
+}
+
 /// **The one path-escape rule in this crate**, shared with [`crate::reclaim`] rather than copied:
 /// a second implementation of what counts as a safe manifest path is a second thing to get right,
 /// on the boundary where getting it wrong walks outside the bundle root.

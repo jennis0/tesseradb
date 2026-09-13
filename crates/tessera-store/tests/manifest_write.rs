@@ -390,8 +390,12 @@ fn a_side_manifest_is_never_replaced() {
     let refused = write_segments_manifest(prefix_dir, "default", 4, &second)
         .expect_err("the second write at the same n must be refused");
     assert!(
-        refused.to_string().contains("never replaced"),
-        "the refusal must say what it is: {refused}"
+        matches!(refused, tessera_store::StoreError::SideManifestExists { .. }),
+        "a collision is its own error, not a filesystem fault: {refused}"
+    );
+    assert!(
+        refused.to_string().contains("SEGMENTS-4.json"),
+        "the refusal must name the file an operator has to look at: {refused}"
     );
 
     let committed: SegmentsManifest = serde_json::from_slice(
@@ -415,5 +419,58 @@ fn a_side_manifest_is_never_replaced() {
             .join("SEGMENTS-4.json.tmp")
             .exists(),
         "and the refused write left no temporary behind"
+    );
+}
+
+/// **The floor an allocator clears: every `SEGMENTS-<n>.json` present, wherever it sits.**
+///
+/// The refusal above is the guard at the artefact; this is the number that keeps it from firing.
+/// What a writer must not reuse is a *filename*, and a manifest names the files of its own
+/// publication and no side-manifest at all — so the set of numbers taken is read off the tree,
+/// across every prefix (an unpublished compaction prefix holds its own) and every partition
+/// directory (`MANIFEST.json` need not name them all).
+#[test]
+fn the_side_manifest_floor_is_every_file_present() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path();
+    assert_eq!(
+        tessera_store::highest_side_manifest_n(root).unwrap(),
+        None,
+        "an empty tree takes nothing"
+    );
+
+    let live = root.join("v00000").join("partitions");
+    std::fs::create_dir_all(live.join("default")).unwrap();
+    std::fs::write(live.join("default").join("SEGMENTS-3.json"), b"{}").unwrap();
+    // Not a candidate at any n: the name does not end in `.json`, and a crashed write leaves one.
+    std::fs::write(live.join("default").join("SEGMENTS-40.json.tmp"), b"{}").unwrap();
+    assert_eq!(
+        tessera_store::highest_side_manifest_n(root).unwrap(),
+        Some(3)
+    );
+
+    // A partition directory no manifest need name.
+    std::fs::create_dir_all(live.join("other")).unwrap();
+    std::fs::write(live.join("other").join("SEGMENTS-7.json"), b"{}").unwrap();
+    assert_eq!(
+        tessera_store::highest_side_manifest_n(root).unwrap(),
+        Some(7)
+    );
+
+    // The prefix an in-flight compaction is building, which `CURRENT` does not name.
+    let pending = root.join("v00001").join("partitions").join("default");
+    std::fs::create_dir_all(&pending).unwrap();
+    std::fs::write(pending.join("SEGMENTS-11.json"), b"{}").unwrap();
+    assert_eq!(
+        tessera_store::highest_side_manifest_n(root).unwrap(),
+        Some(11)
+    );
+
+    // A padded name raises the floor rather than refusing: the reader refuses it, and a writer
+    // asking which numbers may be taken is told that 12 may be.
+    std::fs::write(pending.join("SEGMENTS-012.json"), b"{}").unwrap();
+    assert_eq!(
+        tessera_store::highest_side_manifest_n(root).unwrap(),
+        Some(12)
     );
 }
