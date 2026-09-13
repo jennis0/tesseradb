@@ -131,10 +131,11 @@ version** — process-local, carried on the generation, bumped only by a geometr
 (flush; merge when it publishes), and the row-projection cache key component. `overlay_version`
 moves on every accepted change. An accepted deny never moves `segments_version`, so **no deny
 ever rotates a session's row-projection key** (spec §5.8). On disc there is a third counter of a
-different kind: `n`, the side-manifest sequence number, per partition, monotone, allocated by the
-executor at each write and living **in the filename alone** — the manifest field that once
-duplicated it is deleted (contracts §2.3). `n` advances faster than the geometry version, because
-overlay publications take an `n` and move no geometry.
+different kind: `n`, the side-manifest sequence number, allocated by the executor at each write and
+living **in the filename alone** — the manifest field that once duplicated it is deleted (contracts
+§2.3). One counter serves the whole bundle, so a number is unique bundle-wide, and monotone per
+partition as a consequence of that. `n` advances faster than the geometry version, because overlay
+publications take an `n` and move no geometry.
 
 **One executor owns a bundle root.** Every name a publication allocates comes from state one
 executor holds — `n`, an entity id, a `seg_id` — so a second writer over the same root takes the
@@ -148,15 +149,33 @@ or the WAL, which is per node and so shared by neither of two nodes over one bun
 lock. **The guarantee is same-host**: `flock` over SMB and NFS is unreliable, and a bundle is never
 served from a share.
 
-Every writer of a side-manifest — flush, merge, coalesce, fold, overlay publication — takes its
-`n` from one counter on the executor thread, and the counter is raised over every
-`SEGMENTS-<n>.json` present under the bundle root at each allocation. A counter says what this
-executor has written; the filenames say which numbers are taken, and the two differ while a second
-writer holds the same bundle root. Two executors seeded from one disc state advance in lockstep and
-collide at every publication either makes, and each collision discards a publication whose files
-are already written. Seeding from a manifest leaves the same gap: a manifest names the files of its
-own publication, so a side-manifest another writer left, or one an unpublished compaction prefix
-holds, is named by nothing. A collision that does happen is refused by name (§4.2), not merged.
+Every writer of a side-manifest — flush, merge, coalesce, fold, overlay publication — takes its `n`
+from one counter on the executor thread, and the counter is raised over every `SEGMENTS-<n>.json`
+present under the bundle root at each allocation: one scan per publication, whatever it allocates.
+A counter says what this executor has written; the filenames say which numbers are taken, and the
+two differ only where something else has written. Two executors seeded from one disc state advance
+in lockstep and collide at every publication either makes, and each collision discards a publication
+whose files are already written.
+
+**The floor makes that state survivable, not safe.** It is what keeps the node publishing; it does
+not reconcile what the other writer published with what this one holds, and both are still writing
+complete current state over each other's manifests. The writer is refused at the lock above, so a
+floor that rises is positive evidence of one that got past it: in single-writer operation the
+highest number on disc is the last one this executor took. It is alarmed and counted
+(`foreign_side_manifests` on `/control/status`).
+
+Seeding from a manifest would leave the gap the counter has: a manifest names the files of its own
+publication, so a side-manifest another writer left is named by nothing. A collision that does
+happen is refused by name (§4.2), not merged. A scan that cannot read a directory fails the
+allocation, and so the publication: an allocator that cannot see which files are present cannot say
+a number is free. The publication's files become orphans and the tick re-plans, which is the posture
+every other publication failure on this path takes.
+
+**"Never reused" is a statement about the side-manifests present.** A number an unpublished
+compaction prefix held becomes allocatable once the startup sweep has removed that prefix. That is
+safe for the reason the sweep is: `CURRENT` never named the swept prefix, so nothing a reader can
+resolve is in it, and any file at that number a reader *can* resolve is named by a live manifest at
+`n` or above — which is on disc, and therefore under the floor.
 
 ### 1.3 The WAL
 

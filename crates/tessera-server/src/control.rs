@@ -5598,6 +5598,10 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::V
                 "flushes": executor.flushes,
                 "flush_skips": executor.flush_skips,
                 "flush_failures": executor.flush_failures,
+                // Positive evidence of a second writer over this bundle root (write-path §1.2):
+                // a side-manifest allocation that had to rise over a file this node did not
+                // write. Zero on a node whose bundle is its own.
+                "foreign_side_manifests": executor.foreign_side_manifests,
                 "flushable_items": executor.flushable_items,
                 "flush_requested": executor.flush_requested,
                 // Whether a flush unit is on the pool now. `flushes` counts publications and

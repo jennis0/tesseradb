@@ -1109,6 +1109,8 @@ fn list_segments_manifests(partition_dir: &Path, partition_label: &str) -> Resul
 /// the first publication at such an `n` is refused by
 /// [`StoreError::SideManifestExists`](crate::StoreError::SideManifestExists).
 ///
+/// Symlinked prefix and partition directories are followed; a broken link is skipped.
+///
 /// **A non-canonical name raises the floor rather than refusing here.** The reader refuses one
 /// ([`list_segments_manifests`], contracts §2.1) because it must not read a manifest under a name
 /// it cannot reconstruct; this asks only which numbers may be taken, and a padded `SEGMENTS-01.json`
@@ -1143,6 +1145,11 @@ pub fn highest_side_manifest_n(bundle_root: &Path) -> Result<Option<u64>> {
 }
 
 /// The directories directly under `dir`, empty where `dir` does not exist.
+///
+/// `metadata` rather than the entry's own `file_type`, so a symlinked prefix or partition directory
+/// is walked: the entry's type says "symlink" where the target is the directory the numbers live
+/// in, and an allocator that skipped it would allocate over files that are there. An entry whose
+/// target cannot be stat'd — a broken link — is not a directory and is skipped.
 fn sub_directories(dir: &Path) -> Result<Vec<PathBuf>> {
     let mut found = Vec::new();
     for entry in read_dir_if_present(dir)? {
@@ -1150,8 +1157,9 @@ fn sub_directories(dir: &Path) -> Result<Vec<PathBuf>> {
             path: dir.to_path_buf(),
             source,
         })?;
-        if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-            found.push(entry.path());
+        let path = entry.path();
+        if std::fs::metadata(&path).map(|m| m.is_dir()).unwrap_or(false) {
+            found.push(path);
         }
     }
     Ok(found)

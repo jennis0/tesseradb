@@ -294,6 +294,14 @@ pub struct ExecutorHealth {
     pub(crate) flush_skips: AtomicU64,
     /// Flushes that failed and left the buffer intact for the next tick (§10).
     pub(crate) flush_failures: AtomicU64,
+    /// Allocations that found a `SEGMENTS-<n>.json` this executor did not write
+    /// ([`Executor::raise_manifest_floor`]).
+    ///
+    /// **Alarmed, because it is positive evidence of a second writer.** In single-writer operation
+    /// the highest number on disc is the last one this executor took, so the floor never rises
+    /// above the counter. A node that raises it has met a writer the bundle lock should have
+    /// refused, or a file placed by hand.
+    pub(crate) foreign_side_manifests: AtomicU64,
     /// Entity-space coalesce publications since the executor started (decision 0044's D2). A
     /// separate counter from `flushes` because the two publish different things: a flush moves
     /// geometry, a coalesce bounds the tier, run and dictionary-extent counts and moves none.
@@ -795,6 +803,9 @@ pub struct ExecutorStats {
     pub flush_skips: u64,
     /// Flushes that failed and left the buffer intact for the next tick (§10).
     pub flush_failures: u64,
+    /// Side-manifest allocations that had to rise over a file this executor did not write — a
+    /// second writer over this bundle root, which the write lock exists to refuse (§1.2).
+    pub foreign_side_manifests: u64,
     /// Entity-space coalesce publications, and the ones that produced nothing — the observable
     /// behind "the tier, run and dictionary-extent counts are bounded".
     pub coalesces: u64,
@@ -995,6 +1006,7 @@ impl ExecutorHealth {
             flush_period_nanos: AtomicU64::new(0),
             flush_skips: AtomicU64::new(0),
             flush_failures: AtomicU64::new(0),
+            foreign_side_manifests: AtomicU64::new(0),
             coalesces: AtomicU64::new(0),
             coalesce_failures: AtomicU64::new(0),
             coalesce_completed_pending: AtomicBool::new(false),
@@ -1150,6 +1162,7 @@ impl ExecutorHealth {
             overlay_publications: self.overlay_publications.load(Ordering::Relaxed),
             flush_skips: self.flush_skips.load(Ordering::Relaxed),
             flush_failures: self.flush_failures.load(Ordering::Relaxed),
+            foreign_side_manifests: self.foreign_side_manifests.load(Ordering::Relaxed),
             coalesces: self.coalesces.load(Ordering::Relaxed),
             coalesce_failures: self.coalesce_failures.load(Ordering::Relaxed),
             merges: self.merges.load(Ordering::Relaxed),
@@ -10766,19 +10779,56 @@ impl Executor {
     /// the counter alone is not enough, and `tessera_store::highest_side_manifest_n` for what the
     /// scan covers.
     ///
+    /// One publication, one scan. A caller allocating several numbers at once — the overlay
+    /// publication, which takes one per partition — raises the floor itself and then takes each
+    /// number from [`Executor::take_manifest_n`], so the scan does not run once per partition.
+    fn allocate_manifest_n(&mut self) -> tessera_store::Result<u64> {
+        self.raise_manifest_floor()?;
+        Ok(self.take_manifest_n())
+    }
+
+    /// Raise the counter over every `SEGMENTS-<n>.json` on disc, and alarm if it moved.
+    ///
     /// The scan is a `readdir` per prefix and per partition directory, paid once per publication —
     /// publications are seconds apart, and the alternative is a number that may already be a file.
     ///
+    /// **A floor above the counter is positive evidence of a second writer.** In single-writer
+    /// operation the highest number on disc is the last one this executor took, so the two are
+    /// equal at every allocation. Raising the floor keeps this node publishing rather than
+    /// colliding at every number it re-plans at, which makes the state survivable and not safe:
+    /// the other writer is publishing complete current state over the manifests this one rebases
+    /// on. The bundle lock refuses that writer at its start (§1.2), so what is left to reach here
+    /// is a file placed by hand.
+    ///
     /// A bundle root that cannot be listed fails the allocation, and so the publication: an
     /// allocator that cannot see which files are present cannot say a number is free. The caller
-    /// discards, its files are orphans, and the next tick re-plans.
-    fn allocate_manifest_n(&mut self) -> tessera_store::Result<u64> {
+    /// discards, its files are orphans, and the next tick re-plans — the posture every other
+    /// publication failure on this path takes.
+    fn raise_manifest_floor(&mut self) -> tessera_store::Result<()> {
         let on_disk = tessera_store::highest_side_manifest_n(&self.bundle_root)?;
-        let n = self
-            .next_manifest_n
-            .max(on_disk.map_or(0, |highest| highest + 1));
-        self.next_manifest_n = n + 1;
-        Ok(n)
+        let floor = on_disk.map_or(0, |highest| highest + 1);
+        if floor > self.next_manifest_n {
+            self.health
+                .foreign_side_manifests
+                .fetch_add(1, Ordering::Relaxed);
+            tracing::error!(
+                floor,
+                counter = self.next_manifest_n,
+                root = %self.bundle_root.display(),
+                "ALARM: a side-manifest this executor did not write is on disc. One executor owns \
+                 a bundle root (write-path §1.2); publications continue above it, and what the \
+                 other writer has published is not reconciled with what this node holds"
+            );
+            self.next_manifest_n = floor;
+        }
+        Ok(())
+    }
+
+    /// The counter alone, for a caller that has just raised the floor.
+    fn take_manifest_n(&mut self) -> u64 {
+        let n = self.next_manifest_n;
+        self.next_manifest_n += 1;
+        n
     }
 
     /// Commit one partition's side-manifest — **the only route to
@@ -15010,6 +15060,18 @@ impl Executor {
         }
 
         let live = self.generation.load_full();
+        // **One scan for the publication, not one per partition.** Each partition takes its own
+        // `n`, and the floor under all of them is the same disc state
+        // ([`Executor::raise_manifest_floor`]); scanning inside the loop costs a `readdir` per
+        // partition per partition.
+        if let Err(e) = self.raise_manifest_floor() {
+            tracing::error!(
+                error = %e,
+                "ALARM: the side-manifest numbers on disc could not be read; the memberships stay \
+                 WAL-durable and the log stays pinned, and the write is retried at the next tick"
+            );
+            return;
+        }
         // What this publication wrote, per partition, so the resident memberships can move onto it
         // once every manifest naming one is durable (`LiveState::rehouse_memberships`).
         let mut written: Vec<(
@@ -15062,19 +15124,7 @@ impl Executor {
             // records holding the only other copy.
             // Allocated first so the extents can be named after the publication that carries them:
             // one sequence, not two, and a file whose name says which manifest introduced it.
-            let n = match self.allocate_manifest_n() {
-                Ok(n) => n,
-                Err(e) => {
-                    tracing::error!(
-                        error = %e,
-                        partition = %partition,
-                        "ALARM: a side-manifest number could not be allocated; the memberships \
-                         stay WAL-durable and the log stays pinned, and the write is retried at \
-                         the next tick"
-                    );
-                    return;
-                }
-            };
+            let n = self.take_manifest_n();
             let prefix_dir = self.prefix_dir(&live);
             let published = match self.write_membership_extents(&prefix_dir, partition, n) {
                 Ok(published) => published,
