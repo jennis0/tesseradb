@@ -70,6 +70,29 @@ use tessera_types::{EntityId, RowId, ROW_ABSENT};
 
 use crate::error::{Result, StoreError};
 
+/// A row-indexed "already claimed" set, one bit a row.
+///
+/// The two bijectivity checks in this module sweep a row space that reaches 10⁹. A byte a row
+/// is 1 GB of transient memory there, paid by every view at bundle open and twice again by
+/// `tessera verify`; a bit a row is 125 MB. The check is unchanged: a row whose bit is already
+/// set is claimed by a second entity.
+struct RowsSeen(Vec<u64>);
+
+impl RowsSeen {
+    fn new(rows: usize) -> RowsSeen {
+        RowsSeen(vec![0u64; rows.div_ceil(64)])
+    }
+
+    /// Claim `row`, returning whether it was already claimed.
+    fn claim(&mut self, row: usize) -> bool {
+        let bit = 1u64 << (row & 63);
+        let word = &mut self.0[row >> 6];
+        let already = *word & bit != 0;
+        *word |= bit;
+        already
+    }
+}
+
 const PERMUTATION_MAGIC: &[u8; 4] = b"TSPM";
 const PERMUTATION_VERSION: u16 = 2;
 
@@ -492,7 +515,7 @@ impl Permutation {
     /// `project` later hand out a `RowId` that indexes `columns.arrow` out of bounds (I4/I11).
     pub fn validate_rows(&self, row_count: u32) -> Result<()> {
         let row_count_usize = row_count as usize;
-        let mut seen = vec![false; row_count_usize];
+        let mut seen = RowsSeen::new(row_count_usize);
         for page in 0..self.page_count {
             let Some(slots) = self.page_of(page) else {
                 continue;
@@ -511,8 +534,7 @@ impl Permutation {
                         ),
                     });
                 }
-                let idx = slot as usize;
-                if seen[idx] {
+                if seen.claim(slot as usize) {
                     return Err(StoreError::InvalidPermutation {
                         path: self.path.clone(),
                         detail: format!(
@@ -520,7 +542,6 @@ impl Permutation {
                         ),
                     });
                 }
-                seen[idx] = true;
             }
         }
         Ok(())
@@ -894,15 +915,14 @@ impl SegmentExtent {
             return false;
         }
         let count = self.row_count();
-        let mut seen = vec![false; count as usize];
+        let mut seen = RowsSeen::new(count as usize);
         for &row in &self.rows {
             if row == ROW_ABSENT {
                 continue;
             }
-            if row >= count || seen[row as usize] {
+            if row >= count || seen.claim(row as usize) {
                 return false;
             }
-            seen[row as usize] = true;
         }
         true
     }
