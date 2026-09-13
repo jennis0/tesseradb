@@ -523,10 +523,20 @@ themselves rather than an accumulation over them, so it needs one artifact's row
 publication and a merge's rebase each give the column the `(row, ordinal)` pairs they added and
 widen the extents by the rows those pairs name — exact where rows are only added, a superset where a
 merge renumbers a span, and never narrow. A deny moves nothing here: suppression and deletion are
-asked of the overlay at every verdict, as they are on any level. The one write such a level cannot
-take is an amendment that makes a **label** column's memberships overlap: its column is its
-membership, so it has nothing left to serve from, and the form is dropped for the next request to
-project whole — which is what a level with no column has always done.
+asked of the overlay at every verdict, as they are on any level.
+
+**An amendment a label column cannot express takes the list form, not the artifact-major one.** A
+label column refuses a row that would come to carry two artifacts, and a level served from its
+column has no other membership to fall back to — so it takes the form the fold would choose for a
+level that has stopped partitioning (decision 0094), composed through the same disk-backed partition
+route the build and the fold compose through, from the pairs the column already holds and the pairs
+the amendment added. **Nothing row-sized is held while it runs**: one partition bucket, as the
+fold's composition holds. The alternative — dropping the form for the next request to project —
+would put the artifact-major projection this whole layout avoids on a request thread, and on a
+taxonomy every published family or genus reaches it. A list column refuses no membership, so there
+is no second fallback below this one; what remains below it is an I/O failure, which drops the form
+as any composition failure does. The layout *record* is the registry's and moves at the next fold;
+what moves here is the form the level is served in.
 
 **Where only the column is named on a hull-deriving layer, the artifact-major form is transposed
 out of it** rather than

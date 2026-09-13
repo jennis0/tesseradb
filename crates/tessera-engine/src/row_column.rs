@@ -18,6 +18,9 @@
 //! ([`RowColumn::compose`] and [`RowColumn::project`] both return `None` on a double claim). Keeping
 //! the last writer would give each contested row to whichever artifact happened to be walked last,
 //! which is a masked count short for one artifact and long for another with nothing reporting it.
+//! **A level served from its column has no artifact-major form to be composed into**, so a label
+//! column that stops partitioning under an amendment takes the list form instead
+//! ([`RowColumn::recompose_as_list`]).
 //!
 //! # What this replaces, and what it does not
 //!
@@ -353,6 +356,114 @@ impl RowColumn {
         }
         // A label column composed over the base already partitions, and the rows above it are the
         // same memberships' rows, so the amendment cannot be refused here.
+        if !column.amend(&above, row_count) {
+            return None;
+        }
+        Some(column)
+    }
+
+    /// **Every `(row, ordinal)` this column carries**, in row order over the pack and then the two
+    /// live halves — one sequential pass, nothing held.
+    ///
+    /// `below` bounds it to the base rows, which is what a recomposition's pack takes
+    /// ([`Self::compose_over_base`]'s split).
+    fn for_each_pair(&self, below: Option<u32>, visit: &mut dyn FnMut(u32, u32)) {
+        let ceiling = below.unwrap_or(u32::MAX);
+        match &*self.pack {
+            Pack::Label(pack) => {
+                let end = (pack.rows() as usize).min(ceiling as usize);
+                for row in 0..end {
+                    let label = pack.label(row);
+                    if label != ROW_COLUMN_HOLE {
+                        visit(row as u32, label);
+                    }
+                }
+            }
+            Pack::List(pack) => {
+                let end = (pack.rows() as usize).min(ceiling as usize);
+                for row in 0..end {
+                    for ordinal in pack.list(row) {
+                        visit(row as u32, ordinal);
+                    }
+                }
+            }
+        }
+        if let Some(tail) = &self.tail {
+            for row in tail.row_base..tail.row_end().min(ceiling) {
+                let label = tail.label(row);
+                if label != ROW_COLUMN_HOLE {
+                    visit(row, label);
+                }
+            }
+        }
+        if let Some(added) = &self.added {
+            for row in added.rows.iter() {
+                if row >= ceiling {
+                    continue;
+                }
+                for (_, ordinal) in added.at(row) {
+                    visit(row, *ordinal);
+                }
+            }
+        }
+    }
+
+    /// **Take the list form, from this column's own bytes plus the pairs that would not fit the
+    /// label form** — what a level served from its column does when an amendment makes its
+    /// memberships overlap.
+    ///
+    /// A label column refuses a row that would come to carry two artifacts, and a level served from
+    /// its column has no other membership to fall back to. The bounded answer is the one the fold
+    /// already takes for such a level (decision 0094): the list form, composed through the
+    /// disk-backed partition route ([`tessera_store::derived::project_row_column_pairs`]) from the
+    /// pairs this column already holds and the pairs the amendment added. **Nothing row-sized is
+    /// held while it runs** — one partition bucket, exactly as the fold's composition and the
+    /// build's — so the level never materialises the artifact-major form the layout exists to
+    /// avoid.
+    ///
+    /// The pack covers `[0, base_rows)` and everything above enters as the amendment, which is
+    /// [`Self::compose_over_base`]'s split and is what a later merge's rebase rests on.
+    ///
+    /// `None` where the composition could not be written or read back — an I/O failure rather than
+    /// a shape this cannot express: a list column takes any membership, so there is no second
+    /// refusal below this one.
+    pub fn recompose_as_list(
+        &self,
+        extra: &[(u32, u32)],
+        base_rows: u32,
+        row_count: u32,
+        scratch: &std::path::Path,
+    ) -> Option<Self> {
+        let ordinals = self
+            .len()
+            .max(extra.iter().map(|(_, o)| *o as usize + 1).max().unwrap_or(0))
+            as u32;
+        let pairs = |visit: &mut dyn FnMut(u32, u32)| {
+            self.for_each_pair(Some(base_rows), visit);
+            for (row, ordinal) in extra {
+                if *row < base_rows {
+                    visit(*row, *ordinal);
+                }
+            }
+        };
+        let mut column = Self::assemble_pairs(
+            ordinals,
+            base_rows,
+            ServingLayout::RowMajorList,
+            scratch,
+            &pairs,
+        )?;
+        if row_count <= base_rows {
+            return Some(column);
+        }
+        let mut above: Vec<(u32, u32)> = Vec::new();
+        self.for_each_pair(None, &mut |row, ordinal| {
+            if row >= base_rows {
+                above.push((row, ordinal));
+            }
+        });
+        above.extend(extra.iter().copied().filter(|(row, _)| *row >= base_rows));
+        // A list column refuses nothing, so this cannot fail for a reason the form can express.
         if !column.amend(&above, row_count) {
             return None;
         }
@@ -1183,6 +1294,47 @@ impl RowColumn {
             }
         }
         out
+    }
+
+    /// [`Self::assemble`] fed by `(row, ordinal)` pairs — see
+    /// [`tessera_store::derived::project_row_column_pairs`]. The two share the composition; what
+    /// differs is only how the caller has the membership to hand.
+    fn assemble_pairs(
+        ordinals: u32,
+        row_count: u32,
+        layout: ServingLayout,
+        scratch: &std::path::Path,
+        each: tessera_store::derived::PairWalk<'_>,
+    ) -> Option<Self> {
+        let path = match tessera_store::derived::project_row_column_pairs(
+            ordinals, row_count, layout, scratch, each,
+        ) {
+            Ok(Some(path)) => path,
+            Ok(None) => return None,
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    "a row-major column would not be composed from the column it replaces"
+                );
+                return None;
+            }
+        };
+        let pack = match layout {
+            ServingLayout::RowMajorLabel => LabelColumnPack::open(&path).map(Pack::Label),
+            _ => ListColumnPack::open(&path).map(Pack::List),
+        };
+        let _ = std::fs::remove_file(&path);
+        match pack {
+            Ok(pack) => Some(Self::over(pack)),
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    path = %path.display(),
+                    "a row-major column this process just composed would not be read back"
+                );
+                None
+            }
+        }
     }
 
     /// The two builders, sharing one walk protocol: `each` calls `visit` once per live artifact with

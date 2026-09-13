@@ -208,9 +208,10 @@ pub struct MembershipRows {
     /// **Every write reaches the column, and the form is never transposed back.** A flush, a
     /// growth, a publication and a merge's rebase hand the column the `(row, ordinal)` pairs they
     /// added and widen the extents by the rows those pairs name ([`TileIndex::amend`]); a deny
-    /// moves nothing here, being asked of the overlay at every verdict. The one write such a form
-    /// cannot take is one that makes a **label** column's memberships overlap: its column is its
-    /// membership, so the form is dropped and the next request projects the level whole.
+    /// moves nothing here, being asked of the overlay at every verdict. An amendment a **label**
+    /// column cannot express — a row that would come to carry two artifacts — takes the **list**
+    /// form instead ([`RowColumn::recompose_as_list`]), composed from the column it already holds
+    /// through the disk-backed partition route, so nothing row-sized is held there either.
     ///
     /// The slots are still there and still tell a hole from a live ordinal — every live one holds
     /// the same empty bitmap — which is what [`RowColumn::extents`] needs and what a publication
@@ -1308,12 +1309,10 @@ impl ArtifactRows {
             return false;
         };
         if Arc::make_mut(column).amend(added, row_count) {
-            false
-        } else {
-            self.layout = ServingLayout::ArtifactMajor;
-            self.column = None;
-            true
+            return false;
         }
+        self.lose_column();
+        true
     }
 
     /// **Every artifact's membership rebased over the extent at `start`** — what a row-space merge
@@ -1370,12 +1369,53 @@ impl ArtifactRows {
             return false;
         };
         if Arc::make_mut(column).rebase(lo, hi, added, row_count) {
-            false
-        } else {
+            return false;
+        }
+        self.lose_column();
+        true
+    }
+
+    /// **The refused amendment's posture, on a form that holds its own bitmaps**: the level goes
+    /// back to the artifact-major route, which answers identically.
+    ///
+    /// A form that holds no bitmaps keeps its column here — there is nothing to fall back to — and
+    /// the caller recomposes it in the list form ([`Self::recompose_as_list`]) before anything
+    /// reads it. That is why this is not simply `self.column = None`.
+    fn lose_column(&mut self) {
+        if self.membership.rows_held() {
             self.layout = ServingLayout::ArtifactMajor;
             self.column = None;
-            true
         }
+    }
+
+    /// **Take the list form from the column this level already holds**, after an amendment the
+    /// label form could not express — see [`RowColumn::recompose_as_list`], which is where the
+    /// bound is argued.
+    ///
+    /// The extents are re-derived from the new column's own bytes, exactly as they were at the
+    /// build: the form's one membership is the column, and the two may not be allowed to
+    /// disagree.
+    ///
+    /// `false` where the composition failed, which is an I/O failure and not a shape: the caller
+    /// drops the form and the next request projects the level whole.
+    fn recompose_as_list(&mut self, added: &[(u32, u32)], scratch: &std::path::Path) -> bool {
+        let Some(column) = self.column.as_deref() else {
+            return false;
+        };
+        let row_count = self.index.row_count().max(column.row_count());
+        let Some(listed) =
+            column.recompose_as_list(added, self.base_rows, row_count, scratch)
+        else {
+            return false;
+        };
+        let live = self.membership.live_slots();
+        self.index = TileIndex::of_bytes(tessera_store::membership::pack_tile_index(
+            row_count,
+            &listed.extents(&live),
+        ));
+        self.layout = listed.layout();
+        self.column = Some(Arc::new(listed));
+        true
     }
 
     /// This level's row-addressed column, where it has one.
@@ -2830,18 +2870,36 @@ impl ArtifactProjections {
         if lost {
             self.fallbacks
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            // The entry is already out of the map, so dropping it here is not putting it back.
+            // [`Self::extend_flushed`]'s arm: a form that holds no bitmaps takes the list form
+            // rather than falling back to a membership it does not have. The entry is already out
+            // of the map, so a failure here drops it rather than putting it back.
             if !amended.membership().rows_held() {
-                self.drop_lost_column(&map_key, view);
-                return;
+                let recomposed = std::time::Instant::now();
+                let scratch = self.scratch().to_path_buf();
+                if !amended.recompose_as_list(&added, &scratch) {
+                    self.drop_lost_column(&map_key, view);
+                    return;
+                }
+                self.columns_composed
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                tracing::warn!(
+                    layer = %layer,
+                    level,
+                    view = %view,
+                    elapsed_ms = recomposed.elapsed().as_millis() as u64,
+                    "this level's amended memberships no longer partition and it is served from \
+                     its column alone, so the column is recomposed in the list form. Every answer \
+                     is unchanged; the layout is not"
+                );
+            } else {
+                tracing::warn!(
+                    layer = %layer,
+                    level,
+                    view = %view,
+                    "this level's amended memberships no longer partition, so it is served \
+                     artifact-major. Every answer is unchanged; the layout is not"
+                );
             }
-            tracing::warn!(
-                layer = %layer,
-                level,
-                view = %view,
-                "this level's amended memberships no longer partition, so it is served \
-                 artifact-major. Every answer is unchanged; the layout is not"
-            );
         }
         // **A publication carries the containment partition over; a page of a generating set takes
         // it away.** The partition is composed from the level's records at a version and answers
@@ -2961,19 +3019,38 @@ impl ArtifactProjections {
             if lost {
                 self.fallbacks
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                // A form that was served from its column alone has no membership left once the
-                // column goes; every other form falls back to its own bitmaps.
+                // **A form that holds no bitmaps takes the list form instead of falling back**:
+                // its column is its membership, so there is nothing to fall back *to*, and the
+                // list form is what a fold would choose for a level that has stopped partitioning
+                // (decision 0094). Composed through the disk-backed partition route from the
+                // column it already holds — nothing row-sized is held.
                 if !rows.membership().rows_held() {
-                    self.drop_lost_column(&address, view);
-                    continue;
+                    let started = std::time::Instant::now();
+                    let scratch = self.scratch().to_path_buf();
+                    if !Arc::make_mut(&mut rows).recompose_as_list(&added, &scratch) {
+                        self.drop_lost_column(&address, view);
+                        continue;
+                    }
+                    self.columns_composed
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    tracing::warn!(
+                        layer = %layer,
+                        level,
+                        view = %view,
+                        elapsed_ms = started.elapsed().as_millis() as u64,
+                        "this level's extended memberships no longer partition and it is served from \
+                         its column alone, so the column is recomposed in the list form. Every \
+                         answer is unchanged; the layout is not"
+                    );
+                } else {
+                    tracing::warn!(
+                        layer = %layer,
+                        level,
+                        view = %view,
+                        "this level's extended memberships no longer partition, so it is served \
+                         artifact-major. Every answer is unchanged; the layout is not"
+                    );
                 }
-                tracing::warn!(
-                    layer = %layer,
-                    level,
-                    view = %view,
-                    "this level's extended memberships no longer partition, so it is served \
-                     artifact-major. Every answer is unchanged; the layout is not"
-                );
             }
             self.insert_newest(address, Held { key, at, rows });
         }
@@ -3065,19 +3142,38 @@ impl ArtifactProjections {
             if lost {
                 self.fallbacks
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                // A form that was served from its column alone has no membership left once the
-                // column goes; every other form falls back to its own bitmaps.
+                // **A form that holds no bitmaps takes the list form instead of falling back**:
+                // its column is its membership, so there is nothing to fall back *to*, and the
+                // list form is what a fold would choose for a level that has stopped partitioning
+                // (decision 0094). Composed through the disk-backed partition route from the
+                // column it already holds — nothing row-sized is held.
                 if !rows.membership().rows_held() {
-                    self.drop_lost_column(&address, view);
-                    continue;
+                    let started = std::time::Instant::now();
+                    let scratch = self.scratch().to_path_buf();
+                    if !Arc::make_mut(&mut rows).recompose_as_list(&added, &scratch) {
+                        self.drop_lost_column(&address, view);
+                        continue;
+                    }
+                    self.columns_composed
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    tracing::warn!(
+                        layer = %layer,
+                        level,
+                        view = %view,
+                        elapsed_ms = started.elapsed().as_millis() as u64,
+                        "this level's rebased memberships no longer partition and it is served from \
+                         its column alone, so the column is recomposed in the list form. Every \
+                         answer is unchanged; the layout is not"
+                    );
+                } else {
+                    tracing::warn!(
+                        layer = %layer,
+                        level,
+                        view = %view,
+                        "this level's rebased memberships no longer partition, so it is served \
+                         artifact-major. Every answer is unchanged; the layout is not"
+                    );
                 }
-                tracing::warn!(
-                    layer = %layer,
-                    level,
-                    view = %view,
-                    "this level's rebased memberships no longer partition, so it is served \
-                     artifact-major. Every answer is unchanged; the layout is not"
-                );
             }
             self.insert_newest(address, Held { key, at, rows });
         }
@@ -3099,14 +3195,13 @@ impl ArtifactProjections {
             .collect()
     }
 
-    /// Drop a column-only form whose amendment cost it its column.
+    /// Drop a column-only form whose column could not be recomposed in the list form.
     ///
-    /// **The one amendment a column-only form cannot survive**: a label column refuses a row that
-    /// would come to carry two artifacts, so an amendment that makes the memberships overlap
-    /// leaves the level with no column — and a column-only form's column *is* its membership, so
-    /// there is nothing to fall back to. Every other form falls back to its own bitmaps and is
-    /// merely slower. The level is projected whole by the next request that names it, which is what
-    /// every request did before this form existed.
+    /// **An I/O failure and not a shape.** A list column expresses any membership, so the
+    /// recomposition ([`ArtifactRows::recompose_as_list`]) has no case it cannot represent; what
+    /// reaches this is a scratch directory that would not take the composition or a file that
+    /// would not read back. The level is projected whole by the next request that names it, which
+    /// is what every request did before this form existed.
     fn drop_lost_column(&self, address: &LevelAddress, view: &str) {
         let (_, layer, level) = address;
         self.cached
@@ -3117,9 +3212,9 @@ impl ArtifactProjections {
             layer = %layer,
             level,
             view = %view,
-            "this level's amended memberships no longer partition and it was served from its \
-             column alone, so it has no membership left to serve; the form is dropped and the \
-             next request naming this level projects it whole"
+            "ALARM: this level's column could not be recomposed in the list form, so the level \
+             has no membership left to serve; the form is dropped and the next request naming \
+             this level projects it whole"
         );
     }
 

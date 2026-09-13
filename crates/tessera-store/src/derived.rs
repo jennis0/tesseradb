@@ -75,6 +75,12 @@ use crate::membership::{
 /// apart everywhere below.
 pub type LevelWalk<'a> = &'a dyn Fn(&mut dyn FnMut(u32, &Bitmap));
 
+/// One level's membership as **`(row, ordinal)` pairs**, in any order — the form
+/// [`project_row_column`] immediately flattens its bitmaps into, exposed so a caller that already
+/// holds the membership row-addressed can feed it without materialising a bitmap per artifact
+/// first. May be called more than once, on [`LevelWalk`]'s terms.
+pub type PairWalk<'a> = &'a dyn Fn(&mut dyn FnMut(u32, u32));
+
 /// One term's postings, handed to a visitor — the shape [`SignatureIndex::build`] walks the
 /// postings through. See [`PostingSlice`] for why it is a callback and not a return.
 pub type PostingWalk<'a> = &'a dyn Fn(u32, &mut dyn FnMut(PostingSlice<'_>)) -> std::io::Result<()>;
@@ -398,6 +404,29 @@ pub fn project_row_column(
     scratch: &Path,
     each: LevelWalk<'_>,
 ) -> crate::Result<Option<std::path::PathBuf>> {
+    // **One composition, two feeds.** The pairs are what the partition route takes; a walk that
+    // hands whole bitmaps is flattened into them here rather than composed a second way (decision
+    // 0139: one implementation across a type family).
+    let pairs = |visit: &mut dyn FnMut(u32, u32)| {
+        each(&mut |ordinal, rows| {
+            for row in rows.iter() {
+                visit(row, ordinal);
+            }
+        });
+    };
+    project_row_column_pairs(ordinals, row_count, layout, scratch, &pairs)
+}
+
+/// [`project_row_column`] fed by `(row, ordinal)` pairs rather than by a bitmap an artifact — see
+/// [`PairWalk`]. Its one caller outside this crate is the engine recomposing a level's column from
+/// the column it already holds, which is row-addressed and has no per-artifact bitmap to offer.
+pub fn project_row_column_pairs(
+    ordinals: u32,
+    row_count: u32,
+    layout: ServingLayout,
+    scratch: &Path,
+    each: PairWalk<'_>,
+) -> crate::Result<Option<std::path::PathBuf>> {
     if matches!(layout, ServingLayout::ArtifactMajor) {
         return Ok(None);
     }
@@ -419,26 +448,24 @@ pub fn project_row_column(
     )?;
     let mut entries: u64 = 0;
     let mut pushed: crate::Result<()> = Ok(());
-    each(&mut |ordinal, rows| {
+    each(&mut |row, ordinal| {
         if pushed.is_err() {
             return;
         }
-        for row in rows.iter() {
-            // A row past the column is a member the projection placed above this view's base row
-            // space, which `project_base` does not produce. Guarded rather than trusted: the
-            // alternative is a panic on a shape nothing here controls.
-            if row >= row_count {
-                continue;
-            }
-            let mut record = [0u8; ROW_ORDINAL_RECORD];
-            record[..4].copy_from_slice(&row.to_le_bytes());
-            record[4..].copy_from_slice(&ordinal.to_le_bytes());
-            if let Err(error) = partition.push(&record) {
-                pushed = Err(error);
-                return;
-            }
-            entries += 1;
+        // A row past the column is a member the projection placed above this view's base row
+        // space, which `project_base` does not produce. Guarded rather than trusted: the
+        // alternative is a panic on a shape nothing here controls.
+        if row >= row_count {
+            return;
         }
+        let mut record = [0u8; ROW_ORDINAL_RECORD];
+        record[..4].copy_from_slice(&row.to_le_bytes());
+        record[4..].copy_from_slice(&ordinal.to_le_bytes());
+        if let Err(error) = partition.push(&record) {
+            pushed = Err(error);
+            return;
+        }
+        entries += 1;
     });
     pushed?;
     let mut store = partition.finish()?;

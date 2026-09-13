@@ -1271,13 +1271,19 @@ fn a_level_that_holds_no_rows_takes_every_write_through_its_column() {
     holds_no_rows(&minor, "after a deny");
 }
 
-/// **The one write a level holding no rows cannot take, and what it does instead.** A label column
-/// refuses a row that would come to carry two artifacts, and such a level's column *is* its
-/// membership — so an amendment that makes the memberships overlap leaves it with nothing to serve
-/// from, and the form is dropped rather than served short. The next request projects the level
-/// whole, and every answer is what the artifact-major twin's is.
+/// **The write a label column cannot express, and what a level holding no rows does instead.** A
+/// label column refuses a row that would come to carry two artifacts, and such a level's column
+/// *is* its membership — so there is nothing to fall back to. It takes the **list** form instead,
+/// composed through the disk-backed partition route from the column it already holds plus the
+/// pairs the amendment added: the form the fold would choose for a level that has stopped
+/// partitioning (decision 0094), reached without ever materialising the artifact-major bitmaps.
+///
+/// Mutations this kills: dropping the form and projecting the level on the next request, which at
+/// corpus scale is the residency and the request-path cost the layout exists to avoid; and
+/// recomposing it without the amendment's own pairs, which would serve the publication's members
+/// as belonging to nobody.
 #[test]
-fn a_publication_that_costs_a_label_column_its_partition_drops_the_form() {
+fn a_publication_that_costs_a_label_column_its_partition_recomposes_it_as_a_list() {
     let major_fx = fixture();
     let minor_fx = fixture();
     let major = published(
@@ -1316,9 +1322,40 @@ fn a_publication_that_costs_a_label_column_its_partition_drops_the_form() {
     assert_same(&sweep(&major), &sweep(&minor), "after the overlap");
     let form = minor
         .held_artifact_form_for_test("s0", FLAT, 0)
-        .expect("the next request projected the level");
+        .expect("the level's form is still held");
     assert!(
-        form.membership().rows_held(),
-        "the level lost its column, so the request that followed projected it whole"
+        !form.membership().rows_held(),
+        "the level took the list form rather than materialising the bitmaps it never held"
     );
+    assert!(
+        form.column().is_some(),
+        "and it is still served from a column"
+    );
+    assert_eq!(
+        form.layout(),
+        ServingLayout::RowMajorList,
+        "the served layout is the form a level that has stopped partitioning takes"
+    );
+    // ⊘ The *record* still says `column`: it is the registry's, and a fold is what moves it
+    // (decision 0094). What moved here is the form the level is served in.
+    assert_eq!(minor.recorded_layout(FLAT, 0), Some(ServingLayout::RowMajorLabel));
+
+    // **And it goes on taking writes**, which is the whole of what the list form buys: it refuses
+    // no membership, so there is no second fallback below this one.
+    for (fx, engine) in [(&major_fx, &major), (&minor_fx, &minor)] {
+        engine
+            .publish_artifacts(
+                FLAT.into(),
+                0,
+                vec![labelled(fx, "overlapping-again", (0..N_ITEMS).collect(), vec![0])],
+            )
+            .unwrap();
+        tick(engine);
+    }
+    assert_same(&sweep(&major), &sweep(&minor), "after a second overlap");
+    let form = minor
+        .held_artifact_form_for_test("s0", FLAT, 0)
+        .expect("the level's form is still held");
+    assert!(!form.membership().rows_held());
+    assert_eq!(form.layout(), ServingLayout::RowMajorList);
 }
