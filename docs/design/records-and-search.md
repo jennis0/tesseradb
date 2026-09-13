@@ -208,20 +208,22 @@ block of its own — the target is a target, not a cap.
 draft were wrong** (review B5). A **has-row Roaring bitmap** marks the entities that have a blob
 row; a block directory of `(compressed offset, first rank, row count)` locates the block holding a
 rank by binary search; the row is that rank less the block's first rank rows into the block, found
-by walking the block's rows, each of which states its own length. An entity with
-no blob-resident field is absent from the bitmap and occupies nothing.
+by walking the block's rows, each of which states its own length. An entity with no blob-resident
+field is absent from the bitmap and occupies nothing. A blob **field** needs no per-field presence
+structure — a field's absence is its absence from the row — but the blob as a whole carries the one
+has-row bitmap; the two statements are about different things and both hold. One block read returns
+an entity's whole residual record; drill-down assembles the rest from the other two homes by array
+index.
 
-**The directory holds nothing per row** *(2026-09-13, owner ruling)*. A rank-indexed array of
-within-block offsets is 4 B for every row in the blob: 14 GB over the 3.5×10⁹-row GBIF rung,
-against a 13.9 GB `blocks.bin`, held anonymous for the whole of the build's blob stage and
-resident for every read after it. It buys no read. Reaching any row of a block costs that block's
-decompress either way, and walking past `k` rows of the decompressed bytes costs a varint and an
-addition each over bytes already in cache. So the delimiter is a LEB128 length the row itself
-carries — one byte on a row under 128 bytes, inside the block's own compression. A blob **field** needs no
-per-field presence structure — a field's absence is its absence from the row — but the blob as a
-whole carries the one has-row bitmap; the two statements are about different things and both hold.
-One block read returns an entity's whole residual record; drill-down assembles the rest from the
-other two homes by array index.
+**The directory holds nothing per row** *(2026-09-13, owner ruling;
+[decision 0142](../decisions/0142-the-record-blob-delimits-a-row-by-a-length-the-row-states.md))*.
+A rank-indexed array of within-block offsets is 4 B for every row in the blob: 14.4 GB over the
+3.5×10⁹-row GBIF rung against a 13.9 GB `blocks.bin`, and 14 GB of it anonymous in the writer for
+the whole of the build's blob stage. It buys no read. Reaching any row of a block costs that
+block's decompress either way, and walking past `k` rows of the decompressed bytes costs a varint
+and an addition each over bytes already in cache. So the delimiter is a LEB128 length the row
+itself carries — one byte on a row under 128 bytes, inside the block's own compression — and the
+directory's fifth column is one row count a block.
 
 **A block states whose rows it holds** *(2026-09-11, owner ruling;
 [decision 0141](../decisions/0141-the-record-blob-states-identity-once-per-block.md))*. Its header

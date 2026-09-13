@@ -62,7 +62,7 @@ DEFAULT_VIEW = "s0"
 # fixture is shared across checkouts at a fixed path, so one built by an engine at another number
 # has to be rebuilt rather than reused — `tessera serve` refuses it, and this suite reads `attrs/`
 # by hand and would decode the older bytes under the newer format's rules.
-BUNDLE_FORMAT = 9
+BUNDLE_FORMAT = 10
 
 
 def bundle_format_matches(prefix_dir: Path) -> bool:

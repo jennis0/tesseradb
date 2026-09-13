@@ -95,6 +95,9 @@ block := row_count u32 LE | first_rank u32 LE | first_entity u32 LE | extent_dig
          | gap × (row_count - 1) | row × row_count
 ```
 
+(The extent digest and the directory's offsets left the format two days later; see the section at
+the end.)
+
 A row is its fields and nothing else, delimited by the directory's rank-indexed offsets, and its
 field walk must consume that extent exactly.
 
@@ -167,7 +170,7 @@ All four corpora agree entity for entity, 25,846,007 rows on `gbif-64p` and 1,02
 30 on the others. `tessera verify --deep` walks all four clean, and a rebuilt bundle served over
 the three planes answers `POST /v1/items/{tessera_id}` with values the blob's own bytes hold.
 
-## Not taken
+## Not taken here, taken two days later
 
 **The directory's row offsets could move into the block too**, as varint row lengths, and
 `directory.arrow` would lose its `LargeList<u32>`. That file is a measured **4.13 B per entity with
@@ -175,3 +178,11 @@ a row**, larger than the whole saving above, against a measured 0.71 B/row for t
 the block. It is the larger prize and it is a different change: it would leave the block bytes the
 sole authority on where a row starts, with no second file to disagree with them, and the
 cross-check this decision rests on would have nothing to compare.
+
+That is what [decision 0142](0142-the-record-blob-delimits-a-row-by-a-length-the-row-states.md)
+rules, on the rung 6 figure this section did not have: `directory.arrow` is 14.4 GB against a
+13.9 GB `blocks.bin` there, and the same array is 14 GB of anonymous memory in the writer. What
+replaces the cross-check is a tiling walk made once per block load — the rows a block states must
+account for the block exactly — and the extent digest below goes with the offsets it covered. The
+block form this decision rules is otherwise unchanged; a row now states its own length ahead of
+its fields.
