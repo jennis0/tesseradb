@@ -14882,6 +14882,10 @@ impl Executor {
         }
 
         let live = self.generation.load_full();
+        // What this publication wrote, per partition, so the resident memberships can move onto it
+        // once every manifest naming one is durable (`LiveState::rehouse_memberships`).
+        let mut written: Vec<(std::path::PathBuf, Vec<tessera_store::manifest::MembershipExtent>)> =
+            Vec::new();
         for (partition, partition_data) in &live.bundle.partitions {
             let mut manifest = partition_data.manifest.clone();
             write_deny_state(&mut manifest, &live.overlay);
@@ -14943,8 +14947,11 @@ impl Executor {
                     return;
                 }
             };
-            self.membership_extents.extend(published);
+            self.membership_extents.extend(published.clone());
             manifest.membership_extents = self.membership_extents.clone();
+            if !published.is_empty() {
+                written.push((prefix_dir.clone(), published));
+            }
             // **Supplied content goes into the record blob**, the store points already use
             // ([decision 0077](../../../docs/decisions/0077-supplied-content-lives-in-the-record-blob.md)),
             // in extents of its own but on the same list and behind the same reader. Artifact and
@@ -15013,6 +15020,23 @@ impl Executor {
         // the same argument.
         self.live.mark_memberships_published();
         self.live.mark_content_published();
+        // **And the memberships move onto the extents this publication wrote**, on the fold's
+        // rule (`LiveState::rehouse_memberships`): a membership left on the heap is one the node
+        // carries in anonymous memory for as long as it runs, for bytes it has just written and
+        // holds open. After the manifests, because a publication that failed above leaves files no
+        // manifest names, and this is the point where every one of them is named.
+        for (prefix_dir, extents) in &written {
+            let (rehoused, kept) = self.live.rehouse_memberships(prefix_dir, extents);
+            if kept > 0 {
+                tracing::warn!(
+                    rehoused,
+                    kept,
+                    "some memberships could not be read back through the extents this publication \
+                     wrote and stay on the heap; every answer is unchanged and the next fold \
+                     rehouses them"
+                );
+            }
+        }
 
         self.deny_dirty = false;
         self.windows_since_publication = 0;

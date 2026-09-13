@@ -1823,6 +1823,12 @@ fn a_fold_rehouses_every_membership_onto_the_prefix_it_published() {
         "and the membership the retirement rewrote is read through the extent the fold wrote"
     );
 
+    assert_eq!(
+        engine.owned_memberships_for_test(),
+        0,
+        "and nothing anywhere in the store is left on the heap"
+    );
+
     let maps = std::fs::read_to_string("/proc/self/maps")
         .expect("this process's own mappings are readable");
     assert!(

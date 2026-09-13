@@ -504,3 +504,51 @@ fn a_membership_seeded_from_an_extent_is_read_through_it() {
         "and it is read through the extent rather than copied onto the heap"
     );
 }
+
+/// **A membership published into a running node is read through the extent that publication
+/// wrote**, without waiting for a restart or a fold.
+///
+/// The publication builds the bitmap in memory and writes the bytes a moment later. Leaving the
+/// bitmap where it was is a copy of a file this process holds open, carried in anonymous memory
+/// for as long as the node runs — and a node that never restarts never gets it back.
+///
+/// **Mutation:** remove the rehousing from the overlay publication and `owned_memberships_for_test`
+/// stays at the number of artifacts published.
+#[test]
+fn a_membership_published_at_a_running_node_is_read_through_its_extent() {
+    let fx = fixture();
+    let engine = fx.open();
+    engine.register_layer(declaration("clusters/a")).unwrap();
+    engine
+        .publish_artifacts(
+            "clusters/a".into(),
+            0,
+            vec![
+                artifact("c0", fx.members(0..40)),
+                artifact("c1", fx.members(40..90)),
+            ],
+        )
+        .unwrap();
+    assert_eq!(published_extents(&fx).len(), 1);
+
+    // The publication is the executor's, so the rehousing lands with it rather than with the call
+    // that returned above.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while engine.owned_memberships_for_test() > 0 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "a membership stayed on the heap after the extent naming it was published"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+
+    let published = engine.level_memberships_for_test("clusters/a", 0);
+    assert_eq!(published.len(), 2);
+    assert!(
+        published.iter().all(|(_, _, mapped)| *mapped),
+        "both memberships are views over the extent this node just wrote"
+    );
+    let mut first: Vec<u32> = fx.members(0..40).iter().map(|e| e.raw() as u32).collect();
+    first.sort_unstable();
+    assert_eq!(published[0].1, first, "and the sets are what was published");
+}

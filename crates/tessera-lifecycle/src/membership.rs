@@ -2565,6 +2565,21 @@ impl ArtifactStore {
             .sum()
     }
 
+    /// How many artifacts hold their membership on the heap rather than through the extent that
+    /// carries it.
+    ///
+    /// Zero on a node whose every membership has been published and read back. Above zero for a
+    /// membership a publication has not reached yet, one a growth has rewritten since, and one the
+    /// mapping refused — which is the fault the seed and the fold both alarm on. Counts only, and
+    /// no per-layer form, on [`Self::total`]'s rule.
+    pub fn owned_memberships(&self) -> usize {
+        self.levels
+            .values()
+            .flat_map(|slots| slots.iter().flatten())
+            .filter(|record| !record.members.is_mapped())
+            .count()
+    }
+
     pub fn is_empty(&self) -> bool {
         self.total() == 0
     }

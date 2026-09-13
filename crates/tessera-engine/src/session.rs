@@ -4283,6 +4283,17 @@ impl Engine {
     /// serving route may have. Where a membership lives is otherwise invisible — every reader goes
     /// through `Deref` and cannot tell the two apart — so without it the seed and the fold could
     /// stop mapping and only a memory measurement would ever say so.
+    /// How many resident memberships are held on the heap rather than read through the extent
+    /// that carries them — see [`tessera_lifecycle::membership::ArtifactStore::owned_memberships`].
+    ///
+    /// A test hook on [`Self::level_memberships_for_test`]'s argument, and a count rather than a
+    /// membership: what it answers is whether a publication left anything behind.
+    #[cfg(feature = "fault-injection")]
+    #[doc(hidden)]
+    pub fn owned_memberships_for_test(&self) -> usize {
+        self.write.with_artifacts(|store| store.owned_memberships())
+    }
+
     #[cfg(feature = "fault-injection")]
     #[doc(hidden)]
     pub fn level_memberships_for_test(
