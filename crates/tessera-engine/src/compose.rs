@@ -181,14 +181,25 @@ impl RowProjection {
     pub fn from_rows(mut rows: Bitmap) -> Self {
         // **Run containers, because a projection is held for a session and read for its life.**
         // The rows a grant projects to are a contiguous range wherever the grant covers a run of
-        // entity space, and a bitmap container spends 8 KiB on a range a run container states in
-        // four bytes: a whole-corpus grant at 3.5×10⁹ rows is 53 342 bitmap containers, 437 MB
-        // resident a session, against a single run. `run_optimize` converts a container only where
-        // the run form is smaller, so a projection that runs badly keeps the representation it had.
+        // row space, and a bitmap container spends 8 KiB stating what a run container states in
+        // four bytes plus a count. A whole-corpus grant at 3.5×10⁹ rows is 53 342 containers: 437 MB
+        // of bitmap containers, or 53 342 run containers of one run each, on the order of a
+        // megabyte. Run form is per container and never global — the count does not fall, only what
+        // each container costs — and `run_optimize` converts one only where the run form is
+        // smaller, so a projection that runs badly keeps the representation it had.
         //
         // This is also what `cache_weight_bytes` charges the row-projection cache, so the cache's
         // bound is over the bytes the projection actually holds rather than over the bytes it would
         // have held unoptimised.
+        //
+        // **Paid again at every publication, for every resident session.** The background refresh
+        // (`crate::refresh`) rebuilds or patches each resident projection at each geometry
+        // publication and every route lands here, so a flush pays this per session rather than
+        // once. The cost is `O(containers)`: croaring walks each container to decide whether its
+        // run form would be smaller, and for a scattered mask the answer is no everywhere and it
+        // converts nothing. That is the shape of this cache's own sizing — containers, not
+        // cardinality — and it is what a session with a scattered grant pays for the sessions with
+        // contiguous ones.
         rows.run_optimize();
         let cardinality = rows.cardinality();
         RowProjection {
