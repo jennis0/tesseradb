@@ -55,11 +55,26 @@ def main(path):
         + f". View `{d['view']}`."
     )
     print()
-    verdict = d["disagreeing_tiles"]
     print(
-        f"**Equality: {'every tile agreed' if verdict == 0 else f'{verdict} tile(s) disagreed'}** "
-        "between the band route and the shipped selection."
+        "Run: arms " + ",".join(d["arms"])
+        + (f", cases {','.join(d['cases_filter'])}" if d.get("cases_filter") else "")
+        + f", fp16 count {'on' if d['fp16_measured'] else 'off'}"
+        + f", cell-code check {'on' if d['code_check'] else 'off'}"
+        + f", MADV_RANDOM {'applied' if d['madv_random']['applied'] else 'not applied'}"
+        + "."
     )
+    print()
+    verdict = d["disagreeing_tiles"]
+    if "R" in [a.upper() for a in d["arms"]]:
+        print(
+            f"**Equality: {'every tile agreed' if verdict == 0 else f'{verdict} tile(s) disagreed'}** "
+            "between the band route and the shipped selection."
+        )
+    else:
+        print(
+            "**No equality comparison**: the reference arm did not run, so the band route's "
+            "answers were not checked against it in this run."
+        )
     print()
 
     print("## The builder's files, measured against their models")
@@ -132,21 +147,25 @@ def main(path):
             for cond in conditions:
                 r = c["arms"].get(f"R.{cond}")
                 b = c["arms"].get(f"B.{cond}")
-                if not r or not b:
+                if not r and not b:
                     continue
                 rows.append(
                     [
                         f"`{c['case']}`" if cond == conditions[0] else "",
                         c["zoom"] if cond == conditions[0] else "",
                         cond,
-                        ms(r["wall_s"]),
-                        ms(r["cpu_s"]),
-                        r["majflt"],
-                        mb(r["read_bytes"]),
-                        ms(b["wall_s"]),
-                        ms(b["cpu_s"]),
-                        b["majflt"],
-                        mb(b["read_bytes"]),
+                        ms(r["wall_s"]) if r else "—",
+                        ms(r["cpu_s"]) if r else "—",
+                        r["majflt"] if r else "—",
+                        mb(r["read_bytes"]) if r else "—",
+                        ms(b["wall_s"]) if b else "—",
+                        ms(b["cpu_s"]) if b else "—",
+                        ms(b["search_wall_s"]) if b else "—",
+                        ms(b["search_cpu_s"]) if b else "—",
+                        ms(b["position_wall_s"]) if b else "—",
+                        ms(b["position_cpu_s"]) if b else "—",
+                        b["majflt"] if b else "—",
+                        mb(b["read_bytes"]) if b else "—",
                     ]
                 )
         table(
@@ -160,6 +179,10 @@ def main(path):
                 "R read MB",
                 "B wall ms",
                 "B cpu ms",
+                "B search ms",
+                "B search cpu",
+                "B posn ms",
+                "B posn cpu",
                 "B majflt",
                 "B read MB",
             ],
@@ -167,7 +190,8 @@ def main(path):
         )
         print(
             "R runs on the engine's pool and includes the gather; B is one thread and answers the "
-            "selection alone. CPU is the comparable column."
+            "selection alone. CPU is the comparable column. B's arm total also carries the "
+            "comparison against R, which the search and position sub-timers exclude."
         )
         print()
 
@@ -191,12 +215,18 @@ def main(path):
                     f"{b['column_reads']:,}",
                     mb(b["list_bytes"]),
                     mb(b["lz_bytes"]),
-                    f"{b['cut_lookups']:,}",
+                    f"{b['codes_from_list']:,}",
+                    f"{b['codes_from_cut_index']:,}",
                     f"{b['floor_widened_tiles']:,}",
+                    f"{b['floor_settled_by_band']:,}/{b['floor_settled_by_list']:,}/"
+                    f"{b['floor_settled_by_column']:,}",
+                    f"{b['floor_column_rows_read']:,}",
                     f"{b['fallback_scan_tiles']:,}",
                     f"{r['points']:,}" if r else "—",
                     f"{b['served_total']:,}",
-                    "agree" if b["disagreeing_tiles"] == 0 else f"{b['disagreeing_tiles']} DIFFER",
+                    "no reference"
+                    if not b["compared"]
+                    else ("agree" if b["disagreeing_tiles"] == 0 else f"{b['disagreeing_tiles']} DIFFER"),
                 ]
             )
         table(
@@ -209,8 +239,11 @@ def main(path):
                 "column reads",
                 "list MB",
                 "lz MB",
-                "cut lookups",
+                "codes from list",
+                "codes from cut index",
                 "floor widened",
+                "floor band/list/col",
+                "floor col rows",
                 "fallback scan",
                 "R served",
                 "B served",
@@ -222,39 +255,39 @@ def main(path):
         print("### The quantised counts against the exact one, over the banded tiles")
         print()
         rows = []
+        fp16 = d["fp16_measured"]
         for c in cases:
             b = c["arms"].get(f"B.{last}")
             if not b or not b["band_tiles"]:
                 continue
             exact = b["exact_banded"]
-            rows.append(
-                [
-                    f"`{c['case']}`",
-                    f"{exact:,}",
-                    f"{b['s_total']:,}",
-                    ratio(b["s_total"], exact),
-                    f"{b['band_above_total']:,}",
-                    ratio(b["band_above_total"], exact),
+            row = [
+                f"`{c['case']}`",
+                f"{exact:,}",
+                f"{b['s_total']:,}",
+                ratio(b["s_total"], exact),
+                f"{b['band_above_total']:,}",
+                ratio(b["band_above_total"], exact),
+            ]
+            if fp16:
+                row += [
                     f"{b['fp16_total']:,}",
                     ratio(b["fp16_total"], exact),
                     f"{b['fp16_tie_reads']:,}",
                 ]
-            )
+            rows.append(row)
         if rows:
-            table(
-                [
-                    "case",
-                    "exact ΣC",
-                    "band j Σ\\|S\\|",
-                    "÷ exact",
-                    "band j+1",
-                    "÷ exact",
-                    "fp16",
-                    "÷ exact",
-                    "fp16 tie reads",
-                ],
-                rows,
-            )
+            head = [
+                "case",
+                "exact ΣC",
+                "band j Σ\\|S\\|",
+                "÷ exact",
+                "band j+1",
+                "÷ exact",
+            ]
+            if fp16:
+                head += ["fp16", "÷ exact", "fp16 tie reads"]
+            table(head, rows)
         else:
             print("No case was settled by a band; every tile fell back to the scan.")
             print()
@@ -262,6 +295,10 @@ def main(path):
         print("### The render: the two columns against the cut index")
         print()
         rows = []
+        if not any(f"G.{cond}" in c["arms"] for c in cases for cond in conditions):
+            print("The render arm did not run.")
+            print()
+            continue
         for c in cases:
             for cond in conditions:
                 g = c["arms"].get(f"G.{cond}")

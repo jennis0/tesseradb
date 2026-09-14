@@ -39,17 +39,33 @@ expectation, so its ratio is `1 ± O(2^{J/2}/√n)`.
 - **B**, the band route, evaluated in the probe against **the engine's own composed mask, cut,
   tile ranges and `SelectParams`** — one accessor, `Engine::composed_mask`, hands over the mask
   the request would be answered from, so the two arms are two evaluations of one input and not
-  two transcriptions of the composition rule. Per tile: the band `j = P_d.leading_zeros()`, the
-  candidate rows the band offers inside the mask, the exact count, the served identities, and the
-  cell of each served row from `cuts.u32` and `cell-codes.u32`. **B asserts its served identity
-  set against R's on every tile**; a disagreement is recorded with the tile, both sets' sizes and
-  the first differing identity, and the run continues.
+  two transcriptions of the composition rule. **B asserts its served identity set against R's on
+  every tile**; a disagreement is recorded with the tile, both sets' sizes and the first differing
+  identity, and the run continues.
 - **G**, the render: for the rows the case served, `morton.u32[row]` and `residual[row]` read
   scattered, against one `cuts.u32` binary search and one `cell-codes.u32` read for the same rows.
 
-Beside the exact count, B records three quantised counts over the tiles a band settled: `|S|` (the
-band's own population inside the mask), the next band up, and the `fp16` count — which compares
-quantised prefixes and reads the identity column only where two prefixes are equal.
+**B is timed in two parts, because it answers two questions.** `search` is steps 1 to 4 — the
+band `j = P_d.leading_zeros()`, the candidate rows it offers inside the mask, the exact count and
+the served set. `position` is step 5, each served row's cell. The comparison against R is the
+probe's own check and is timed as part of neither.
+
+- **The band's own list supplies the position.** A `top-J.bin` entry carries `(row, id, code)`,
+  so a served row a list offered needs no lookup at all; only the rest cost a `cuts.u32` binary
+  search and a `cell-codes.u32` read. The report counts the two separately.
+- **The floor widens through the lists, not through `lz.u8`.** When `C_θ < m`, the route first
+  takes the band already in hand — which held fewer than `m` rows *below the cut*, not fewer than
+  `m` rows — then steps down the wider lists (`J` below `j`, narrowest first), each a slice of the
+  tile's row range located by binary search. A settled step costs no identity read: the entries
+  carry the identities. Only where even `J = 4` (one row in sixteen) holds fewer than `m` of the
+  tile's visible rows does the route read the tile's visible identities from the column, and such
+  a tile has few visible rows. `lz.u8` is read by step 2b alone, the sparse-principal route where
+  no list is narrow enough to be the band.
+- **The quantised counts.** Beside the exact count, B records the band's own population `|S|` and
+  the next band up, both free because every candidate's identity is already in hand. The `fp16`
+  count is behind `--fp16` and is **an experiment on top of the route rather than part of it**:
+  where a list supplies the candidate its identity comes with it, so the exact count needs no
+  quantised prefix and the two-byte column would be read for the comparison alone.
 
 **Cases**, per principal: `whole_k30` (whole extent, zoom 0, k = 30 — the battery's request);
 `whole_budget` (whole extent at `d*`, the depth in `0..=9` whose `16 · N_occ(d)` is nearest the
@@ -59,6 +75,17 @@ client's mark budget, k = 5000); and, for z in 2, 4, 6, 8, the densest depth-`z`
 **Conditions.** `hot` is the second of two runs. `cold` is `posix_fadvise(POSIX_FADV_DONTNEED)`
 over every file under the bundle and the bands directory, then one run — the eviction available
 without root on this box, and the one `serve_battery.py` uses.
+
+**Flags that change what is measured**, all off by default except the cell-code check:
+
+| flag | what it does |
+|---|---|
+| `--arms R,B,G` | which arms run. `B` alone skips the reference and the equality comparison, for a re-run where equality is already established; `G` reads `B`'s served rows and needs it |
+| `--cases <names>` | run only these cases |
+| `--no-code-check` | skip step 5's assertion that a served row's cell code is its own `morton.u32` entry. The assertion checks the cut index's contract and is not part of the route: it reads the scattered geometry column the route exists to avoid, once a served row |
+| `--fp16` | also compute the `fp16` count |
+| `--madv-random` | `madvise(MADV_RANDOM)` over the identity column and `lz.u8` before the arms run, so a scattered read stops pulling a read-ahead window |
+| `--per-tile <dir>` | write the reference arm's whole per-tile table as NDJSON |
 
 Every figure is measured except these, which are modelled and marked as such in the report: the
 4 KiB page counts and the byte figures derived from them in arm G, the `px/cell` bound on the
@@ -77,7 +104,15 @@ cell-resolution render's position error, and the size models above.
   layers; B answers selection alone. B is an upper bound on what the structure costs rather than a
   lower one: it is the route written out, not a tuned version of it.
 - **`read_bytes` and `majflt` are the whole process's.** Nothing separates the engine's pool
-  threads from the probe's own reads.
+  threads from the probe's own reads. They are also not the bytes a route *asked* for: a scattered
+  read pulls a read-ahead window, so an arm touching a few million rows can move tens of gigabytes
+  through the block layer. `--madv-random` is the knob that turns that off for the identity column
+  and `lz.u8`; it applies to the *mapping*, so it reaches the reference arm's reads of the same
+  column as well as the band arm's, and a served path would decide it per mapping rather than per
+  process.
+- **The share of positions a list supplies is a property of `j`.** Where the cut lands in a band a
+  list covers, nearly every served row's code arrives with its entry; where it does not, every one
+  costs a cut-index search. The two counts are reported separately rather than summed.
 - **The zoom-`z` locations are the widest principal's densest tiles**, so that every principal is
   measured at the same places. A sparse principal sees nothing in some of them and its case is
   then empty — six of `p1`'s ten cases are empty on the small corpus. Those rows are real
@@ -133,6 +168,16 @@ systemd-run --user --scope --collect -p MemoryMax=24G -p MemorySwapMax=2G -- \
     --budget 2000000 --k-small 30 --conditions cold,hot \
     --out <work>/results.json
 
+# the band arm alone, on a corpus where equality is already established: no reference, no
+# comparison, no render, no cell-code assertion, and the two scattered columns advised random
+systemd-run --user --scope --collect -p MemoryMax=24G -p MemorySwapMax=2G -- \
+  nice -n 19 target/release/identity_bands_probe \
+    --bundle <bundle> --bands <work>/bands \
+    --principal p1=<terms> ... --principal p100=<terms> \
+    --arms B --no-code-check --madv-random \
+    --budget 2000000 --k-small 30 --conditions cold,hot \
+    --out <work>/results-b.json
+
 python3 probes/2026-09-14-identity-bands/report.py <work>/results.json
 ```
 
@@ -144,16 +189,35 @@ every tile in memory whether or not it is written out.
 ## Results
 
 **Small corpus, 2026-09-14, `data/ladder/gbif-64p` rebuilt at 25,846,007 rows in one segment over
-3,508,005 occupied leaf cells, six principals from 1% to 100%, both conditions.**
+3,508,005 occupied leaf cells, six principals from 1% to 100%, ten cases each, both conditions,
+every arm, the cell-code check on. The box was shared with another session's measurement
+throughout, so the wall figures carry that and the run-to-run spread is a few per cent.**
 
 Every tile of every case agreed between the band route and the shipped selection: 0 disagreements
 over the sixty principal-and-case pairs. The builder's file sizes matched their models to within
 0.5% (`top-10.bin`, the smallest list, at 0.9895) except `lz.u8`, whose 8/3 ratio is the packed
-model against a byte-a-row file as described above. The `fp16` count equalled the exact count in
-every case, at 2 B a candidate row plus a handful of identity reads for equal prefixes: 379 ties
-over 588,510 counted rows in `p100`'s `whole_budget`, 1,188 over 1,320,729 in its `zoom_2`. The
-band's own population `|S|` ran 1.01× to 2.07× the exact count and the next band up 0.40× to
-0.99×, bracketing it as the powers-of-two spacing predicts.
+model against a byte-a-row file as described above. The band's own population `|S|` ran 1.01× to
+2.07× the exact count and the next band up 0.40× to 0.99×, bracketing it as the powers-of-two
+spacing predicts. With `--fp16`, the quantised count equalled the exact count in every case at 2 B
+a candidate row plus a handful of identity reads for equal prefixes (379 ties over 588,510 counted
+rows in `p100`'s `whole_budget`).
+
+**Where the positions come from decides what step 5 costs.** At `p100`'s `whole_budget` — the
+whole extent at the depth a 2,000,000-mark budget chooses — 501,828 of 536,448 served rows took
+their cell code from the `top-4.bin` entry that offered them and 34,620 needed a cut-index search,
+so the position phase was 6.8 ms cold and 5.6 ms hot against a 110.1 / 89.0 ms arm. Where no list
+is narrow enough to be the band the share inverts: `p100`'s `zoom_2` (cut in band 2) took every
+one of its 1,134,142 positions from the cut index, at 33.7 / 32.5 ms. Across every case of the run
+the split is 793,560 from lists against 6,889,988 from the cut index, because the deep-zoom cases
+saturate the threshold and have no band at all.
+
+**The floor's widening reaches the column more often than the lists.** Of 67,908 floor-widened
+tiles across the run, 7,232 were settled by the band already in hand, 5,703 by a wider list and
+54,973 by reading the tile's visible identities from the column. Those are the tiles with too few
+visible rows for one row in sixteen to reach the floor, and at `p100`'s `whole_budget` they cost
+140,771 identity reads — which is the whole of that case's column traffic, since the list route
+supplies every other identity. The alternative that was measured first, widening through `lz.u8`,
+cost 1.5 MB of that column at the same case and still left the identities to read.
 
 What the small corpus does not answer is whether the structure saves anything, for the reason in
 "what it cannot attribute": at this row count a 2,000,000-mark budget is 8% of the corpus, so the

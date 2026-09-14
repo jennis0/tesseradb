@@ -72,9 +72,16 @@ const K_MIN: usize = 2;
 const MAX_TILES_PER_REQUEST: usize = 262_144;
 /// The deepest whole-extent depth [`MAX_TILES_PER_REQUEST`] admits.
 const MAX_WHOLE_EXTENT_DEPTH: u8 = 9;
-/// How deep the occupancy ladder is reported to. Depth 12 is the background fill's own reach
-/// (`stage::BACKGROUND_DEPTH`), so the rungs beyond the one a request uses cost nothing extra.
-const LADDER_DEPTH: u8 = 12;
+/// How deep the occupancy ladder is walked, once per principal.
+///
+/// **One walk answers every case.** A rung is the count of distinct depth-`d` ancestors of the
+/// walked tiles, and the depth-`d` ancestors of the occupied depth-16 tiles are exactly the
+/// occupied depth-`d` tiles — so `ladder(16).at(d)` equals `ladder(d).at(d)`, which is what
+/// `Engine::occupied_tiles` computes for `N_occ(d)`. The tail the two share
+/// (`occupancy::finish_ladder`) clamps each rung at `4^d` and takes a running maximum across
+/// rungs, both of which are per-rung and depth-independent. The probe therefore walks once at 16
+/// and reads the rung each case needs, instead of walking the Morton column once a case.
+const LADDER_DEPTH: u8 = 16;
 /// The grid is 2^16 × 2^16 (§5.2), so a leaf cell is 2⁻¹⁶ of the extent on each axis.
 const GRID: f64 = 65_536.0;
 /// The viewport width the pixel figures are quoted at.
@@ -103,6 +110,36 @@ struct Args {
     /// Which conditions to run, in this order.
     #[arg(long, value_delimiter = ',', default_value = "cold,hot")]
     conditions: Vec<String>,
+    /// Which arms to run: `R` the reference, `B` the band route, `G` the render. `B` alone skips
+    /// the reference and the equality comparison, for a re-run on a corpus where equality is
+    /// already established; `G` needs `B`, whose served rows it reads.
+    #[arg(long, value_delimiter = ',', default_value = "R,B,G")]
+    arms: Vec<String>,
+    /// Only these cases, by name. Every case by default.
+    #[arg(long, value_delimiter = ',')]
+    cases: Vec<String>,
+    /// Skip step 5's assertion that a served row's cell code is its own `morton.u32` entry.
+    ///
+    /// The assertion checks the cut index's contract and is **not part of the route**: it reads
+    /// the scattered geometry column the route exists to avoid, at one read a served row. A run
+    /// measuring the position lookup's cost passes this; a run establishing correctness does not.
+    #[arg(long = "no-code-check")]
+    no_code_check: bool,
+    /// Also compute the `fp16` count beside the exact one.
+    ///
+    /// Off by default, because it is an experiment on top of the route rather than part of it:
+    /// where a list supplies the candidate its identity comes with it, so the exact count needs no
+    /// quantised prefix and the two-byte column is read for the comparison alone.
+    #[arg(long = "fp16")]
+    fp16: bool,
+    /// `madvise(MADV_RANDOM)` over the identity column and `lz.u8` before the arms run.
+    ///
+    /// Both are read scattered, and the kernel's default read-ahead answers a scattered read by
+    /// pulling a window around it — which is how an arm touching a few million rows comes to move
+    /// tens of gigabytes. **It applies to the mapping**, so it reaches the reference arm's reads
+    /// of the same column as well as the band arm's.
+    #[arg(long = "madv-random")]
+    madv_random: bool,
     /// Where the results go.
     #[arg(long)]
     out: PathBuf,
@@ -248,6 +285,35 @@ fn evict(roots: &[&Path]) -> usize {
         walk(root, &mut advised);
     }
     advised
+}
+
+/// `madvise(MADV_RANDOM)` over one mapped byte range, clamped to whole pages, returning the bytes
+/// advised.
+///
+/// The address a caller hands over sits inside a mapping and need not be page-aligned — an Arrow
+/// column starts at whatever offset its IPC header leaves — so the start rounds up and the length
+/// rounds down. A refusal leaves a correct mapping that is merely no gentler than before, so it
+/// returns zero rather than failing.
+fn madvise_random(ptr: *const u8, bytes: usize) -> usize {
+    const PAGE: usize = 4096;
+    let start = ptr as usize;
+    let aligned = start.div_ceil(PAGE) * PAGE;
+    let end = start + bytes;
+    if end <= aligned {
+        return 0;
+    }
+    let len = (end - aligned) / PAGE * PAGE;
+    if len == 0 {
+        return 0;
+    }
+    // SAFETY: the range lies inside a mapping this process holds for the whole run, and
+    // `MADV_RANDOM` changes read-ahead and nothing else.
+    let rc = unsafe { libc::madvise(aligned as *mut libc::c_void, len, libc::MADV_RANDOM) };
+    if rc == 0 {
+        len
+    } else {
+        0
+    }
 }
 
 // ------------------------------------------------------------------------------------------
@@ -417,11 +483,15 @@ struct BandOutcome {
     j_max: u32,
     /// `Σ|S|`, the candidate rows the band offered, after masking.
     s_total: u64,
-    /// `Σ|{row ∈ S : lz ≥ j + 1}|` — the next band up, as a quantised count.
+    /// `Σ|{row ∈ S : lz ≥ j + 1}|` — the next band up, as a quantised count. Free: every
+    /// candidate's identity is already in hand, so its leading-zero count is a register operation
+    /// and reads nothing.
     band_above_total: u64,
-    /// The `fp16` count, and the identity reads its ties forced.
+    /// The `fp16` count and the identity reads its ties forced, or zero where `--fp16` was not
+    /// asked for. [`Self::fp16_measured`] says which.
     fp16_total: u64,
     fp16_tie_reads: u64,
+    fp16_measured: bool,
     /// `Σ C_θ`, the exact count, over every tile.
     exact_total: u64,
     /// `Σ C_θ` over the band-settled tiles alone.
@@ -432,15 +502,37 @@ struct BandOutcome {
     list_entries_walked: u64,
     lz_bytes: u64,
     fp16_bytes: u64,
-    cut_lookups: u64,
+    /// Served rows whose cell code arrived with the `top-J.bin` entry that offered them, so the
+    /// position cost nothing beyond the list read the search had already paid for.
+    codes_from_list: u64,
+    /// Served rows whose cell code needed one `cuts.u32` binary search and one `cell-codes.u32`
+    /// read, because no list supplied them.
+    codes_from_cut_index: u64,
     floor_widened_tiles: u64,
+    /// How the floor was settled, where it bound: by the band already in hand, by a wider list, or
+    /// by reading the tile's visible identities from the column.
+    floor_settled_by_band: u64,
+    floor_settled_by_list: u64,
+    floor_settled_by_column: u64,
+    /// Shares of [`Self::list_bytes`] and [`Self::column_reads`] the floor's widening accounts
+    /// for, so the floor's cost is separable from the search's.
+    floor_list_bytes: u64,
+    floor_column_rows_read: u64,
     fallback_scan_tiles: u64,
     /// Tiles whose threshold was saturated, so no cut existed to band against.
     saturated_tiles: u64,
     /// Tiles whose cut lay in the top band (`j == 0`), which excludes no identity.
     top_band_tiles: u64,
+    /// Steps 1 to 4 — candidates, counts and the served set — over every tile.
+    search_wall_s: f64,
+    search_cpu_s: f64,
+    /// Step 5 — each served row's position at cell resolution — over every served row.
+    position_wall_s: f64,
+    position_cpu_s: f64,
     /// Served rows, every tile concatenated — the render arm's input.
     served_rows: Vec<u32>,
+    /// Whether a reference arm's served identities were available to compare against at all.
+    compared: bool,
     disagreements: Vec<Value>,
 }
 
@@ -461,6 +553,7 @@ impl BandOutcome {
             "j_mean": if self.tiles == 0 { 0.0 } else { self.j_sum as f64 / self.tiles as f64 },
             "s_total": self.s_total,
             "band_above_total": self.band_above_total,
+            "fp16_measured": self.fp16_measured,
             "fp16_total": self.fp16_total,
             "fp16_tie_reads": self.fp16_tie_reads,
             "exact_total": self.exact_total,
@@ -471,11 +564,22 @@ impl BandOutcome {
             "list_entries_walked": self.list_entries_walked,
             "lz_bytes": self.lz_bytes,
             "fp16_bytes": self.fp16_bytes,
-            "cut_lookups": self.cut_lookups,
+            "codes_from_list": self.codes_from_list,
+            "codes_from_cut_index": self.codes_from_cut_index,
             "floor_widened_tiles": self.floor_widened_tiles,
+            "floor_settled_by_band": self.floor_settled_by_band,
+            "floor_settled_by_list": self.floor_settled_by_list,
+            "floor_settled_by_column": self.floor_settled_by_column,
+            "floor_list_bytes": self.floor_list_bytes,
+            "floor_column_rows_read": self.floor_column_rows_read,
             "fallback_scan_tiles": self.fallback_scan_tiles,
             "saturated_tiles": self.saturated_tiles,
             "top_band_tiles": self.top_band_tiles,
+            "search_wall_s": self.search_wall_s,
+            "search_cpu_s": self.search_cpu_s,
+            "position_wall_s": self.position_wall_s,
+            "position_cpu_s": self.position_cpu_s,
+            "compared": self.compared,
             "disagreeing_tiles": self.disagreements.len(),
             "disagreements": self.disagreements,
         })
@@ -492,10 +596,73 @@ struct Inputs<'a> {
     ranges: &'a [Range<u32>],
 }
 
-/// Evaluate §7.2's definition over every tile of one request by the band route, asserting each
-/// tile's served identities against the reference arm's.
-fn band_route(inputs: &Inputs<'_>, reference: &HashMap<u64, (u64, Vec<u64>)>) -> BandOutcome {
+/// What the band arm does beyond answering the definition.
+#[derive(Clone, Copy)]
+struct BandOptions {
+    /// Compute the `fp16` count beside the exact one. **An experiment on top of the route, not
+    /// part of it**: where a list supplied the candidate its identity came with it, so the exact
+    /// count needs no quantised prefix and the two-byte column is read for the comparison alone.
+    fp16: bool,
+    /// Assert each served row's cell code against its own `morton.u32` entry. A check on the cut
+    /// index's contract, not part of the route, and it reads the scattered geometry column the
+    /// route exists to avoid.
+    check_codes: bool,
+}
+
+/// One tile's served rows inside the flat served list, with what the search concluded about it.
+struct TileGroup {
+    tile: u64,
+    depth: u8,
+    visible: u64,
+    j: u32,
+    exact: u64,
+    start: usize,
+    len: usize,
+}
+
+/// The entries of one `top-J.bin` inside `range` that the mask admits, as `(row, id, code)`.
+///
+/// Every entry of the list carries `lz >= J` by construction, so a caller wanting a narrower band
+/// than the list's own filters on the identity afterwards.
+fn list_candidates(
+    list: &Mmap,
+    range: &Range<u32>,
+    mask: &EffectiveMask,
+    entries_walked: &mut u64,
+    out: &mut Vec<(u32, u64, Option<u32>)>,
+) {
+    out.clear();
+    let mut i = seek_row(list, range.start);
+    let n = list.len() / ENTRY;
+    while i < n {
+        let (row, id, code) = entry_at(list, i);
+        if row >= range.end {
+            break;
+        }
+        *entries_walked += 1;
+        if mask.contains_row(row) {
+            out.push((row, id, Some(code)));
+        }
+        i += 1;
+    }
+}
+
+/// Evaluate §7.2's definition over every tile of one request by the band route.
+///
+/// **Three phases, and only the first two are the route.** The search (steps 1 to 4) and the
+/// position lookup (step 5) are separately timed because they answer different questions and cost
+/// differently: the search is what a band replaces the identity column with, the position is what
+/// the cut index replaces the geometry columns with. The comparison against `reference` is the
+/// probe's own check and is timed as part of neither. `reference` is `None` when the reference arm
+/// was not run, and then no comparison is made and [`BandOutcome::compared`] records that.
+fn band_route(
+    inputs: &Inputs<'_>,
+    reference: Option<&HashMap<u64, (u64, Vec<u64>)>>,
+    options: BandOptions,
+) -> BandOutcome {
     let mut out = BandOutcome::new();
+    out.compared = reference.is_some();
+    out.fp16_measured = options.fp16;
     let ids = inputs.segment.columns.tessera_id();
     let starts = inputs.segment.cuts.starts();
     let cut = match inputs.params.threshold {
@@ -504,6 +671,17 @@ fn band_route(inputs: &Inputs<'_>, reference: &HashMap<u64, (u64, Vec<u64>)>) ->
     };
     let cut_fp16 = cut.map(fp16_of);
 
+    // Every served row of the request, in tile order, with the cell code where a list supplied
+    // one. `groups` indexes into it per tile, so the position phase is one flat pass and the
+    // comparison needs no second walk of the tiles.
+    let mut served: Vec<(u64, u32, Option<u32>)> = Vec::new();
+    let mut groups: Vec<TileGroup> = Vec::new();
+    let mut candidates: Vec<(u32, u64, Option<u32>)> = Vec::new();
+    let mut wider: Vec<(u32, u64, Option<u32>)> = Vec::new();
+
+    // ---- Phase 1: the search, steps 1 to 4.
+    let search_started = Instant::now();
+    let search_cpu = process_cpu_s();
     for (tile, range) in inputs.tiles.iter().zip(inputs.ranges) {
         if range.start >= range.end {
             continue;
@@ -522,7 +700,9 @@ fn band_route(inputs: &Inputs<'_>, reference: &HashMap<u64, (u64, Vec<u64>)>) ->
         out.j_min = out.j_min.min(j);
         out.j_max = out.j_max.max(j);
 
-        let mut candidates: Vec<(u32, u64)> = Vec::new();
+        // `(row, id, code)`: the code is present exactly when a list offered the row, and it is
+        // the row's cell code, so step 5 has nothing left to look up for it.
+        candidates.clear();
         let mut from_scan = false;
         if cut.is_none() || j == 0 {
             // The whole tile is the band, so it excludes nothing and every visible identity is
@@ -534,40 +714,40 @@ fn band_route(inputs: &Inputs<'_>, reference: &HashMap<u64, (u64, Vec<u64>)>) ->
             }
             out.fallback_scan_tiles += 1;
             from_scan = true;
-        } else if let Some((_list_j, list)) = inputs.bands.list_for(j) {
-            // Step 2a: the band's own list, located by binary search and then walked.
-            let mut i = seek_row(list, range.start);
-            let n = list.len() / ENTRY;
-            while i < n {
-                let (row, id, _code) = entry_at(list, i);
-                if row >= range.end {
-                    break;
-                }
-                out.list_entries_walked += 1;
-                out.list_bytes += ENTRY as u64;
-                if id.leading_zeros() >= j && inputs.mask.contains_row(row) {
-                    candidates.push((row, id));
-                }
-                i += 1;
+        } else if let Some((list_j, list)) = inputs.bands.list_for(j) {
+            // Step 2a: the band's own list, located by binary search and then walked. The list's
+            // `J` is at or below `j`, so its entries are filtered down to band `j` here.
+            let before = out.list_entries_walked;
+            list_candidates(
+                list,
+                range,
+                inputs.mask,
+                &mut out.list_entries_walked,
+                &mut candidates,
+            );
+            out.list_bytes += (out.list_entries_walked - before) * ENTRY as u64;
+            if list_j < j {
+                candidates.retain(|&(_, id, _)| id.leading_zeros() >= j);
             }
         } else {
             // Step 2b: no list is narrow enough, so the `lz` column decides membership and the
-            // identity column answers each member.
+            // identity column answers each member. This is the sparse-principal route, and it is
+            // the only reader of `lz.u8`.
             inputs.mask.for_each_visible_run(range.clone(), |run| {
                 for row in run {
                     out.lz_bytes += 1;
                     if inputs.bands.lz(row) >= j {
-                        candidates.push((row, ids[row as usize]));
+                        candidates.push((row, ids[row as usize], None));
                         out.column_reads += 1;
                     }
                 }
             });
         }
 
-        // Step 3: the exact count, and the two quantised counts beside it.
+        // Step 3: the exact count, and the quantised counts beside it.
         let mut exact: u64 = 0;
-        // Assigned exactly once, by whichever of the three routes below settles the tile.
-        let served_source: Vec<(u64, u32)>;
+        // Assigned exactly once, by whichever route below settles the tile.
+        let served_source: Vec<(u64, u32, Option<u32>)>;
         if from_scan {
             let mut smallest = Smallest::new(inputs.params.cap);
             inputs.mask.for_each_visible_run(range.clone(), |run| {
@@ -582,79 +762,132 @@ fn band_route(inputs: &Inputs<'_>, reference: &HashMap<u64, (u64, Vec<u64>)>) ->
             });
             // No band settled this tile, so no quantised count is accumulated for it.
             let m = served_count(exact, inputs.params, visible);
-            served_source = smallest.take(m);
+            served_source = smallest
+                .take(m)
+                .into_iter()
+                .map(|(id, row)| (id, row, None))
+                .collect();
         } else {
             out.band_tiles += 1;
             out.s_total += candidates.len() as u64;
-            let mut below: Vec<(u64, u32)> = Vec::with_capacity(candidates.len());
-            for &(row, id) in &candidates {
-                // Band `j + 1`, the next one up, as the second quantised count.
-                if inputs.bands.lz(row) > j {
+            let mut below: Vec<(u64, u32, Option<u32>)> = Vec::with_capacity(candidates.len());
+            for &(row, id, code) in &candidates {
+                // Band `j + 1`, the next one up. The identity is in hand, so this is a register
+                // operation and reads nothing.
+                if id.leading_zeros() > j {
                     out.band_above_total += 1;
                 }
-                out.lz_bytes += 1;
-                // The `fp16` count: the quantised prefixes settle all but a tie, and a tie is one
-                // identity read.
-                let row_fp16 = inputs.bands.fp16(row);
-                out.fp16_bytes += 2;
-                match fp16_cmp(
-                    row_fp16,
-                    cut_fp16.expect("a cut, since `from_scan` is false"),
-                ) {
-                    Ordering::Less => out.fp16_total += 1,
-                    Ordering::Greater => {}
-                    Ordering::Equal => {
-                        out.fp16_tie_reads += 1;
-                        out.column_reads += 1;
-                        if ids[row as usize] < cut.expect("a cut") {
-                            out.fp16_total += 1;
+                if options.fp16 {
+                    // The quantised prefixes settle all but a tie, and a tie is one identity read.
+                    let row_fp16 = inputs.bands.fp16(row);
+                    out.fp16_bytes += 2;
+                    match fp16_cmp(
+                        row_fp16,
+                        cut_fp16.expect("a cut, since `from_scan` is false"),
+                    ) {
+                        Ordering::Less => out.fp16_total += 1,
+                        Ordering::Greater => {}
+                        Ordering::Equal => {
+                            out.fp16_tie_reads += 1;
+                            out.column_reads += 1;
+                            if ids[row as usize] < cut.expect("a cut") {
+                                out.fp16_total += 1;
+                            }
                         }
                     }
                 }
                 if inputs.params.threshold.admits(id) {
                     exact += 1;
-                    below.push((id, row));
+                    below.push((id, row, code));
                 }
             }
             let m = served_count(exact, inputs.params, visible);
             if exact >= m as u64 {
+                // Identities are unique within a tile, so the third element never decides the
+                // order and the sort is by `(id, row)` as it was.
                 below.sort_unstable();
                 below.truncate(m);
                 served_source = below;
             } else {
-                // Step 4: the floor binds. Widen the band until it holds `m` visible rows of the
-                // tile; `j' = 0` is the whole tile, which is the scan, and `m ≤ visible` always,
-                // so the walk terminates.
+                // Step 4: the floor binds, so the served set is not a prefix of `{id < P_d}` and
+                // the route must widen until some band holds `m` visible rows of the tile. A band
+                // is an identity-space prefix, so the `m` smallest visible identities lie inside
+                // the first band that holds `m` of them, and taking the `m` smallest of that band
+                // is exactly taking the `m` smallest of the tile.
+                //
+                // **Through the lists, not through `lz.u8`.** Every widening step is one slice of
+                // a `top-J.bin` located by binary search, and its entries carry the identities and
+                // the codes — so a settled step costs no identity-column read at all. The `lz`
+                // column would cost a byte a visible row of the tile and would still leave every
+                // identity to be read.
                 out.floor_widened_tiles += 1;
-                let mut per_lz = [0u64; 66];
-                inputs.mask.for_each_visible_run(range.clone(), |run| {
-                    for row in run {
-                        out.lz_bytes += 1;
-                        per_lz[inputs.bands.lz(row) as usize] += 1;
-                    }
-                });
-                let mut settled = 0u32;
-                for level in (0..=j).rev() {
-                    let held: u64 = per_lz[level as usize..].iter().sum();
-                    settled = level;
-                    if held >= m as u64 {
-                        break;
-                    }
+                let mut settled: Option<Vec<(u64, u32, Option<u32>)>> = None;
+                // The band already in hand comes first: it held fewer than `m` rows *below the
+                // cut*, which does not mean it holds fewer than `m` rows at all.
+                if candidates.len() >= m {
+                    out.floor_settled_by_band += 1;
+                    let mut kept: Vec<(u64, u32, Option<u32>)> = candidates
+                        .iter()
+                        .map(|&(row, id, code)| (id, row, code))
+                        .collect();
+                    kept.sort_unstable();
+                    kept.truncate(m);
+                    settled = Some(kept);
                 }
-                if settled == 0 {
-                    out.fallback_scan_tiles += 1;
-                }
-                let mut smallest = Smallest::new(inputs.params.cap);
-                inputs.mask.for_each_visible_run(range.clone(), |run| {
-                    for row in run {
-                        out.lz_bytes += 1;
-                        if inputs.bands.lz(row) >= settled {
-                            out.column_reads += 1;
-                            smallest.offer(ids[row as usize], row);
+                // Then the wider lists, narrowest first. A list whose `J` is at or above `j`
+                // addresses a subset of the band just rejected and cannot hold more than it did.
+                if settled.is_none() {
+                    for (list_j, list) in inputs.bands.lists.iter().rev() {
+                        if *list_j >= j {
+                            continue;
+                        }
+                        let before = out.list_entries_walked;
+                        list_candidates(
+                            list,
+                            range,
+                            inputs.mask,
+                            &mut out.list_entries_walked,
+                            &mut wider,
+                        );
+                        let bytes = (out.list_entries_walked - before) * ENTRY as u64;
+                        out.list_bytes += bytes;
+                        out.floor_list_bytes += bytes;
+                        if wider.len() >= m {
+                            out.floor_settled_by_list += 1;
+                            let mut kept: Vec<(u64, u32, Option<u32>)> = wider
+                                .iter()
+                                .map(|&(row, id, code)| (id, row, code))
+                                .collect();
+                            kept.sort_unstable();
+                            kept.truncate(m);
+                            settled = Some(kept);
+                            break;
                         }
                     }
-                });
-                served_source = smallest.take(m);
+                }
+                served_source = match settled {
+                    Some(kept) => kept,
+                    None => {
+                        // Even the widest list holds fewer than `m` of this tile's visible rows,
+                        // so the tile has few visible rows — in expectation under `16 · m` of
+                        // them, since the widest list holds one row in sixteen — and reading their
+                        // identities directly is a page or two.
+                        out.floor_settled_by_column += 1;
+                        let mut smallest = Smallest::new(inputs.params.cap);
+                        inputs.mask.for_each_visible_run(range.clone(), |run| {
+                            for row in run {
+                                out.column_reads += 1;
+                                out.floor_column_rows_read += 1;
+                                smallest.offer(ids[row as usize], row);
+                            }
+                        });
+                        smallest
+                            .take(m)
+                            .into_iter()
+                            .map(|(id, row)| (id, row, None))
+                            .collect()
+                    }
+                };
             }
         }
 
@@ -662,43 +895,87 @@ fn band_route(inputs: &Inputs<'_>, reference: &HashMap<u64, (u64, Vec<u64>)>) ->
         if !from_scan {
             out.exact_banded += exact;
         }
-        out.served_total += served_source.len() as u64;
+        let start = served.len();
+        served.extend(served_source);
+        groups.push(TileGroup {
+            tile: tile.prefix,
+            depth: tile.depth,
+            visible,
+            j,
+            exact,
+            start,
+            len: served.len() - start,
+        });
+    }
+    out.search_wall_s = search_started.elapsed().as_secs_f64();
+    out.search_cpu_s = process_cpu_s() - search_cpu;
+    out.served_total = served.len() as u64;
 
-        // Step 5: each served row's position at cell resolution, from the cut index and the
-        // cell codes. A cell's code is every one of its rows' code, so this must equal the
-        // row's own entry in `morton.u32`.
-        let codes = inputs.segment.morton.u32();
-        for &(_, row) in &served_source {
-            let cell = starts.partition_point(|&s| s <= row) - 1;
-            out.cut_lookups += 1;
+    // ---- Phase 2: step 5, each served row's position at cell resolution.
+    //
+    // A row a list offered brought its cell code with it and needs no lookup at all; every other
+    // row costs one binary search over `cuts.u32` and one `cell-codes.u32` read. `check_codes`
+    // additionally asserts the answer against `morton.u32`, which is the column the route exists
+    // to stop reading — so it is off in a run that is measuring rather than checking.
+    let position_started = Instant::now();
+    let position_cpu = process_cpu_s();
+    let codes = if options.check_codes {
+        Some(inputs.segment.morton.u32())
+    } else {
+        None
+    };
+    for &(_, row, code) in &served {
+        let cell_code = match code {
+            Some(code) => {
+                out.codes_from_list += 1;
+                code
+            }
+            None => {
+                out.codes_from_cut_index += 1;
+                let cell = starts.partition_point(|&s| s <= row) - 1;
+                inputs.bands.cell_code(cell)
+            }
+        };
+        if let Some(codes) = codes {
             assert_eq!(
-                inputs.bands.cell_code(cell),
-                codes[row as usize],
-                "cell {cell}'s code is not row {row}'s, which the cut index's own contract forbids"
+                cell_code, codes[row as usize],
+                "row {row}'s cell code is not its own Morton code, which the cut index's contract \
+                 forbids"
             );
-            out.served_rows.push(row);
         }
+    }
+    out.position_wall_s = position_started.elapsed().as_secs_f64();
+    out.position_cpu_s = process_cpu_s() - position_cpu;
 
-        // Step 6: the same served identities as the reference arm, or a recorded disagreement.
-        let mine: Vec<u64> = served_source.iter().map(|&(id, _)| id).collect();
+    out.served_rows = served.iter().map(|&(_, row, _)| row).collect();
+
+    // ---- Phase 3, timed as part of neither: the same served identities as the reference arm, or
+    // a recorded disagreement. Skipped where no reference arm ran.
+    if let Some(reference) = reference {
         let empty = (0u64, Vec::new());
-        let (ref_served, ref_ids) = reference.get(&tile.prefix).unwrap_or(&empty);
-        if mine.len() as u64 != *ref_served || mine != *ref_ids {
-            let first_diff = mine
+        for group in &groups {
+            let mine: Vec<u64> = served[group.start..group.start + group.len]
                 .iter()
-                .zip(ref_ids.iter())
-                .find(|(a, b)| a != b)
-                .map(|(a, b)| json!({"band": a, "reference": b}));
-            out.disagreements.push(json!({
-                "tile": tile.prefix,
-                "zoom": tile.depth,
-                "visible": visible,
-                "band_served": mine.len(),
-                "reference_served": ref_served,
-                "j": j,
-                "exact_count": exact,
-                "first_differing": first_diff,
-            }));
+                .map(|&(id, _, _)| id)
+                .collect();
+            let (ref_served, ref_ids) = reference.get(&group.tile).unwrap_or(&empty);
+            if mine.len() as u64 != *ref_served || mine != *ref_ids {
+                let first_diff = mine
+                    .iter()
+                    .zip(ref_ids.iter())
+                    .find(|(a, b)| a != b)
+                    .map(|(a, b)| json!({"band": a, "reference": b}));
+                out.disagreements.push(json!({
+                    "tile": group.tile,
+                    "zoom": group.depth,
+                    "visible": group.visible,
+                    "band_served": mine.len(),
+                    "reference_served": ref_served,
+                    "j": group.j,
+                    "exact_count": group.exact,
+                    "first_differing": first_diff,
+                }));
+            }
         }
     }
     out
@@ -800,6 +1077,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if args.principals.is_empty() {
         return Err("at least one --principal NAME=TERM,TERM is required".into());
     }
+    for arm in &args.arms {
+        if !["R", "B", "G"].iter().any(|k| arm.eq_ignore_ascii_case(k)) {
+            return Err(format!("--arms takes R, B and G; got '{arm}'").into());
+        }
+    }
+    let named = |name: &str| args.arms.iter().any(|a| a.eq_ignore_ascii_case(name));
+    let (run_r, run_b, run_g) = (named("R"), named("B"), named("G"));
+    if !(run_r || run_b || run_g) {
+        return Err("--arms names no arm".into());
+    }
+    if run_g && !run_b {
+        return Err("the render arm reads the band arm's served rows, so --arms G needs B".into());
+    }
+    let band_options = BandOptions {
+        fp16: args.fp16,
+        check_codes: !args.no_code_check,
+    };
 
     // ---- The view, its frame, and the single-segment refusal.
     let (view_id, quantisation, segment_count) = {
@@ -942,6 +1236,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
+    // The two columns every arm reads scattered. `MADV_RANDOM` applies to the mapping, so this
+    // reaches the reference arm's reads of the identity column as well as the band arm's.
+    let madv = if args.madv_random {
+        let ids = segment.columns.tessera_id();
+        let identity = madvise_random(ids.as_ptr() as *const u8, std::mem::size_of_val(ids));
+        let lz = madvise_random(bands.lz.as_ptr(), bands.lz.len());
+        json!({"applied": true, "identity_bytes": identity, "lz_bytes": lz})
+    } else {
+        json!({"applied": false})
+    };
+
     // ---- The zoom-`z` locations, chosen once under the widest principal so that every principal
     // is measured at the same places.
     let widest = principals
@@ -1002,6 +1307,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 k: args.k_small,
             });
         }
+        if !args.cases.is_empty() {
+            cases.retain(|case| args.cases.iter().any(|name| name == &case.name));
+            if cases.is_empty() {
+                return Err(format!("--cases {:?} names no case", args.cases).into());
+            }
+        }
 
         let mut case_values: Vec<Value> = Vec::new();
         for case in &cases {
@@ -1015,7 +1326,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 continue;
             }
             let ranges = tile_ranges_all(segment, &tiles);
-            let n_occ = occupied_tiles_ladder(&principal.mask, &segments, case.zoom).at(case.zoom);
+            // The rung this principal's one walk already produced — see [`LADDER_DEPTH`] for why
+            // it is the same number the request path computes for `N_occ(case.zoom)`.
+            let n_occ = principal.ladder[case.zoom as usize];
             let threshold = Threshold::at_depth(principal.visible_total, THETA_TARGET, n_occ);
             let params = SelectParams {
                 k_min: K_MIN,
@@ -1032,7 +1345,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             };
 
             let mut arms = serde_json::Map::new();
-            let mut reference: HashMap<u64, (u64, Vec<u64>)> = HashMap::new();
+            // `None` where the reference arm did not run: the band arm then makes no comparison
+            // and records that it made none.
+            let mut reference: Option<HashMap<u64, (u64, Vec<u64>)>> = run_r.then(HashMap::new);
             let mut served_rows: Vec<u32> = Vec::new();
             let mut case_meta = json!({
                 "case": case.name,
@@ -1054,135 +1369,141 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 // ---- R, the shipped path. Cold is one run after an eviction pass; hot is the
                 // second of two, so the first has already faulted the pages in.
-                if cold {
-                    evict(&roots);
-                } else {
-                    drop(engine.viewport(
+                if run_r {
+                    if cold {
+                        evict(&roots);
+                    } else {
+                        drop(engine.viewport(
+                            &principal.session,
+                            ViewportRequest::new(&view_id, case.zoom, case.bbox, case.k),
+                        )?);
+                    }
+                    let before = Counters::now();
+                    let out = engine.viewport(
                         &principal.session,
                         ViewportRequest::new(&view_id, case.zoom, case.bbox, case.k),
-                    )?);
-                }
-                let before = Counters::now();
-                let out = engine.viewport(
-                    &principal.session,
-                    ViewportRequest::new(&view_id, case.zoom, case.bbox, case.k),
-                )?;
-                arms.insert(
-                    format!("R.{condition}"),
-                    merge(before.since(ticks), r_detail(&out)),
-                );
-                // The served identities per tile, split out of the flat points stream by each
-                // tile's own `served` — the only grouping the response carries
-                // (`TileCount::served`). Taken from the first condition's run; the request is the
-                // same one, so the second condition's answer is the same set.
-                if reference.is_empty() {
-                    let mut at = 0usize;
-                    let mut per_tile = String::new();
-                    for tile in &out.tiles {
-                        let take = tile.served as usize;
-                        let ids = out.points.tessera_ids[at..at + take].to_vec();
-                        at += take;
-                        if args.per_tile.is_some() {
-                            per_tile.push_str(
-                                &json!({
-                                    "tile": tile.tile,
-                                    "visible": tile.visible,
-                                    "served": tile.served,
-                                    "ids": ids,
-                                })
-                                .to_string(),
-                            );
-                            per_tile.push('\n');
+                    )?;
+                    arms.insert(
+                        format!("R.{condition}"),
+                        merge(before.since(ticks), r_detail(&out)),
+                    );
+                    // The served identities per tile, split out of the flat points stream by each
+                    // tile's own `served` — the only grouping the response carries
+                    // (`TileCount::served`). Taken from the first condition's run; the request is
+                    // the same one, so the second condition's answer is the same set.
+                    let reference = reference.as_mut().expect("a map, since the arm ran");
+                    if reference.is_empty() {
+                        let mut at = 0usize;
+                        let mut per_tile = String::new();
+                        for tile in &out.tiles {
+                            let take = tile.served as usize;
+                            let ids = out.points.tessera_ids[at..at + take].to_vec();
+                            at += take;
+                            if args.per_tile.is_some() {
+                                per_tile.push_str(
+                                    &json!({
+                                        "tile": tile.tile,
+                                        "visible": tile.visible,
+                                        "served": tile.served,
+                                        "ids": ids,
+                                    })
+                                    .to_string(),
+                                );
+                                per_tile.push('\n');
+                            }
+                            reference.insert(tile.tile, (tile.served, ids));
                         }
-                        reference.insert(tile.tile, (tile.served, ids));
-                    }
-                    if let Some(dir) = &args.per_tile {
-                        std::fs::create_dir_all(dir)?;
-                        std::fs::write(
-                            dir.join(format!("{}.{}.ndjson", principal.name, case.name)),
-                            per_tile,
-                        )?;
+                        if let Some(dir) = &args.per_tile {
+                            std::fs::create_dir_all(dir)?;
+                            std::fs::write(
+                                dir.join(format!("{}.{}.ndjson", principal.name, case.name)),
+                                per_tile,
+                            )?;
+                        }
                     }
                 }
-                drop(out);
 
                 // ---- B, the band route over the same mask, cut, ranges and parameters.
-                if cold {
-                    evict(&roots);
-                } else {
-                    drop(band_route(&inputs, &reference));
-                }
-                let before = Counters::now();
-                let outcome = band_route(&inputs, &reference);
-                arms.insert(
-                    format!("B.{condition}"),
-                    merge(before.since(ticks), outcome.to_json()),
-                );
-                disagreeing_tiles += outcome.disagreements.len();
-                if served_rows.is_empty() {
-                    served_rows.clone_from(&outcome.served_rows);
+                if run_b {
+                    if cold {
+                        evict(&roots);
+                    } else {
+                        drop(band_route(&inputs, reference.as_ref(), band_options));
+                    }
+                    let before = Counters::now();
+                    let outcome = band_route(&inputs, reference.as_ref(), band_options);
+                    arms.insert(
+                        format!("B.{condition}"),
+                        merge(before.since(ticks), outcome.to_json()),
+                    );
+                    disagreeing_tiles += outcome.disagreements.len();
+                    if served_rows.is_empty() {
+                        served_rows.clone_from(&outcome.served_rows);
+                    }
                 }
 
-                // ---- G, the render, over the rows B served and R agreed with.
-                let codes = segment.morton.u32();
-                let residual = segment.columns.residual();
-                let starts = segment.cuts.starts();
-                let rows = &served_rows;
-                let run_columns = || {
-                    let mut acc = 0u64;
-                    for &row in rows {
-                        acc ^= (u64::from(codes[row as usize]) << 32)
-                            | u64::from(residual[row as usize]);
+                // ---- G, the render, over the rows B served.
+                if run_g {
+                    let codes = segment.morton.u32();
+                    let residual = segment.columns.residual();
+                    let starts = segment.cuts.starts();
+                    let rows = &served_rows;
+                    let run_columns = || {
+                        let mut acc = 0u64;
+                        for &row in rows {
+                            acc ^= (u64::from(codes[row as usize]) << 32)
+                                | u64::from(residual[row as usize]);
+                        }
+                        black_box(acc);
+                    };
+                    let run_cells = || {
+                        let mut acc = 0u64;
+                        for &row in rows {
+                            let cell = starts.partition_point(|&s| s <= row) - 1;
+                            acc ^= u64::from(bands.cell_code(cell));
+                        }
+                        black_box(acc);
+                    };
+                    if cold {
+                        evict(&roots);
+                    } else {
+                        run_columns();
                     }
-                    black_box(acc);
-                };
-                let run_cells = || {
-                    let mut acc = 0u64;
-                    for &row in rows {
-                        let cell = starts.partition_point(|&s| s <= row) - 1;
-                        acc ^= u64::from(bands.cell_code(cell));
-                    }
-                    black_box(acc);
-                };
-                if cold {
-                    evict(&roots);
-                } else {
+                    let before = Counters::now();
                     run_columns();
-                }
-                let before = Counters::now();
-                run_columns();
-                let columns_metrics = before.since(ticks);
-                if !cold {
+                    let columns_metrics = before.since(ticks);
+                    if !cold {
+                        run_cells();
+                    }
+                    let before = Counters::now();
                     run_cells();
-                }
-                let before = Counters::now();
-                run_cells();
-                let cells_metrics = before.since(ticks);
+                    let cells_metrics = before.since(ticks);
 
-                let cell_indices: Vec<u32> = rows
-                    .iter()
-                    .map(|&row| (starts.partition_point(|&s| s <= row) - 1) as u32)
-                    .collect();
-                let morton_pages = pages_of(rows, 4);
-                let residual_pages = pages_of(rows, 4);
-                let cell_code_pages = pages_of(&cell_indices, 4);
-                let cut_pages = cut_index_pages(starts, rows);
-                arms.insert(
-                    format!("G.{condition}"),
-                    json!({
-                        "rows": rows.len(),
-                        "columns": merge(columns_metrics, json!({
-                            "morton_pages": morton_pages,
-                            "residual_pages": residual_pages,
-                            "modelled_bytes": (morton_pages + residual_pages) as u64 * 4096,
-                        })),
-                        "cells": merge(cells_metrics, json!({
-                            "cell_code_pages": cell_code_pages,
-                            "cut_index_pages": cut_pages,
-                            "modelled_bytes": (cell_code_pages + cut_pages) as u64 * 4096,
-                        })),
-                    }),
-                );
+                    let cell_indices: Vec<u32> = rows
+                        .iter()
+                        .map(|&row| (starts.partition_point(|&s| s <= row) - 1) as u32)
+                        .collect();
+                    let morton_pages = pages_of(rows, 4);
+                    let residual_pages = pages_of(rows, 4);
+                    let cell_code_pages = pages_of(&cell_indices, 4);
+                    let cut_pages = cut_index_pages(starts, rows);
+                    arms.insert(
+                        format!("G.{condition}"),
+                        json!({
+                            "rows": rows.len(),
+                            "columns": merge(columns_metrics, json!({
+                                "morton_pages": morton_pages,
+                                "residual_pages": residual_pages,
+                                "modelled_bytes": (morton_pages + residual_pages) as u64 * 4096,
+                            })),
+                            "cells": merge(cells_metrics, json!({
+                                "cell_code_pages": cell_code_pages,
+                                "cut_index_pages": cut_pages,
+                                "modelled_bytes": (cell_code_pages + cut_pages) as u64 * 4096,
+                            })),
+                        }),
+                    );
+                }
             }
             case_meta["arms"] = Value::Object(arms);
             case_values.push(case_meta);
@@ -1207,6 +1528,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "budget": args.budget,
         "k_small": args.k_small,
         "conditions": args.conditions,
+        "arms": args.arms,
+        "cases_filter": args.cases,
+        "fp16_measured": args.fp16,
+        "code_check": !args.no_code_check,
+        "madv_random": madv,
         "engine_config": {
             "max_k": MAX_K,
             "k_min": K_MIN,
@@ -1232,11 +1558,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &args.out,
         format!("{}\n", serde_json::to_string_pretty(&report)?),
     )?;
-    eprintln!(
-        "wrote {} — {} tile(s) disagreed between the band route and the reference",
-        args.out.display(),
-        disagreeing_tiles
-    );
+    if run_r && run_b {
+        eprintln!(
+            "wrote {} — {} tile(s) disagreed between the band route and the reference",
+            args.out.display(),
+            disagreeing_tiles
+        );
+    } else {
+        eprintln!(
+            "wrote {} — arms {}, so no equality comparison was made",
+            args.out.display(),
+            args.arms.join(",")
+        );
+    }
     let _ = std::fs::remove_dir_all(&tmp);
     Ok(())
 }
