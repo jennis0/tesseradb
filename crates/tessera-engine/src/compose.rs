@@ -273,9 +273,13 @@ impl FilterRows {
 }
 
 /// The composed, effective visibility mask for one request: `base` plus a small diff (`minus`,
-/// `plus`) capturing every overlay/buffer effect since `base` was cached. Never materialises the
-/// full mask — every operation below costs O(containers touched) in the diffs, which are
-/// expected to be tiny relative to `base`.
+/// `plus`) capturing every overlay/buffer effect since `base` was cached. Every question an
+/// artifact's membership asks costs O(containers touched) in the diffs, which are expected to be
+/// tiny relative to `base`, and materialises nothing.
+///
+/// [`WholeMask::visible_all`] is the one answer that needs the whole set. It borrows `base` where
+/// the diffs are empty, and otherwise materialises once into [`Self::whole`], so a request that
+/// asks for it twice pays for it once.
 pub struct EffectiveMask {
     base: Arc<RowProjection>,
     minus: Bitmap,
@@ -303,6 +307,14 @@ pub struct EffectiveMask {
     /// [`FilterRows::Viewport`] is the ordinary shape here and every question asked of it is
     /// inside the domain by construction.
     highlight: Option<FilterRows>,
+    /// `(base − minus) ∪ plus` materialised, filled by the first [`WholeMask::visible_all`] that
+    /// needs it and left empty on a mask that denies nothing.
+    ///
+    /// Nothing narrows or widens it after composition. [`Self::with_filter`] and
+    /// [`Self::with_highlight`] set fields this is not derived from, so a filtered mask and the
+    /// unfiltered one it was built from hold the same set here. I12 requires that of every quantity
+    /// an artifact's existence is decided by.
+    whole: std::sync::OnceLock<Bitmap>,
 }
 
 /// The two questions an artifact's membership asks of a viewer's mask.
@@ -376,12 +388,16 @@ pub trait MaskedSet {
 /// The **whole** composed mask, materialised — every row this viewer may see, in this view's row
 /// space.
 ///
-/// **One caller, and it is the row-major count** ([`crate::row_column::RowColumn::histogram`]). A
-/// row-major level has no per-artifact membership to intersect, so its only route to
+/// **Two callers, and the first is the row-major count** ([`crate::row_column::RowColumn::histogram`]).
+/// A row-major level has no per-artifact membership to intersect, so its only route to
 /// `|membership ∩ M_auth|` is a walk of the mask reading off which artifact each visible row belongs
 /// to — the one place [decision 0093](../../../docs/decisions/0093-nothing-is-materialised-per-token-over-the-artifact-population.md)
 /// admits a structure sized by the artifact population per session, and it is admitted because there
 /// is no other route.
+///
+/// **The second is [`crate::tile_index::Viewport::compose`]**, which borrows this set where the
+/// viewport holds every row the viewer may see, rather than intersecting to a copy of it. It reads
+/// the same set the histogram walks, which is what makes the two agree at that viewport.
 ///
 /// **Its own trait rather than a third method on [`MaskedSet`]**, for a reason that is about the
 /// question rather than about tidiness: `MaskedSet` is *the questions an artifact's membership asks
@@ -403,10 +419,21 @@ pub trait WholeMask {
     /// `count_intersection(set)` are therefore the same number by construction, which the test
     /// beside the implementation asserts rather than assumes.
     ///
-    /// O(containers in the projection) and a full copy of it — hundreds of megabytes at the
-    /// campaign's target, which is why the histogram it feeds is built once per session per
-    /// generation and cached, never per request.
-    fn visible_all(&self) -> Bitmap;
+    /// Borrowed, and materialised at most once for the life of the mask. The set is the
+    /// projection's own size, 437 MB at the rung 6 corpus, so a caller that copies it per request
+    /// pays that copy per request. Where the mask denies nothing the borrow is of the projection
+    /// itself and nothing is materialised. Where it denies something the difference is materialised
+    /// on the first ask and every later ask in the request borrows it.
+    fn visible_all(&self) -> &Bitmap;
+
+    /// `|M_auth|`, without materialising the set.
+    ///
+    /// The composition is three terms whose cardinalities add, so a caller that needs only the size
+    /// never pays the copy. The default is the general answer; [`EffectiveMask`] overrides it with
+    /// the arithmetic [`EffectiveMask::visible_total`] takes, which is the one θ anchors on.
+    fn visible_count(&self) -> u64 {
+        self.visible_all().cardinality()
+    }
 }
 
 impl WholeMask for EffectiveMask {
@@ -414,19 +441,36 @@ impl WholeMask for EffectiveMask {
     /// `set` to narrow by. `minus ⊆ base` and `plus ∩ base = ∅` hold structurally ([`compose`]
     /// asserts them), so every row appears once and the cardinality of what comes back is
     /// [`EffectiveMask::visible_total`] exactly.
-    fn visible_all(&self) -> Bitmap {
-        let mut visible = self.base.bitmap().clone();
-        visible.andnot_inplace(&self.minus);
-        visible.or_inplace(&self.plus);
-        visible
+    ///
+    /// A mask that denies nothing is its projection: `(base − ∅) ∪ ∅ = base`, so that arm copies
+    /// nothing. The other arm copies, because `base` is shared with every other session holding the
+    /// same projection and the difference is this mask's alone. It copies once, into
+    /// [`Self::whole`], and that copy is what the request's viewport and its histogram walk both
+    /// read.
+    fn visible_all(&self) -> &Bitmap {
+        if self.minus.is_empty() && self.plus.is_empty() {
+            return self.base.bitmap();
+        }
+        self.whole.get_or_init(|| {
+            let mut visible = self.base.bitmap().clone();
+            visible.andnot_inplace(&self.minus);
+            visible.or_inplace(&self.plus);
+            visible
+        })
+    }
+
+    /// [`EffectiveMask::visible_total`] under the trait — one implementation, so the anchor and
+    /// this cannot disagree about what composition means.
+    fn visible_count(&self) -> u64 {
+        EffectiveMask::visible_total(self)
     }
 }
 
 /// A mask with no denials — **test-only**, for [`MaskedSet`]'s reason.
 #[cfg(test)]
 impl WholeMask for Bitmap {
-    fn visible_all(&self) -> Bitmap {
-        self.clone()
+    fn visible_all(&self) -> &Bitmap {
+        self
     }
 }
 
@@ -1036,6 +1080,7 @@ pub fn compose(
         // unfiltered total θ anchors on — properties of composition alone.
         filter: None,
         highlight: None,
+        whole: std::sync::OnceLock::new(),
     }
 }
 

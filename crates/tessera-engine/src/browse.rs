@@ -368,21 +368,21 @@ impl crate::Engine {
                     store,
                     walked,
                 );
-                (
-                    self.artifact_projections.get_or_build(
-                        &generation.prefix,
-                        view,
-                        req.layer,
-                        walked,
-                        store,
-                        &view_data.row_space,
-                        Some(&source),
-                        recorded,
-                        predicate.as_ref(),
-                        generation.segments_version,
-                        self.serves_column_only(req.layer),
-                    ),
-                    store.level_version(req.layer, walked),
+                // The version the form is of, not the store's — see
+                // `ArtifactProjections::get_or_build`. The histogram below is filed under it and
+                // is the same entry a viewport reads.
+                self.artifact_projections.get_or_build(
+                    &generation.prefix,
+                    view,
+                    req.layer,
+                    walked,
+                    store,
+                    &view_data.row_space,
+                    Some(&source),
+                    recorded,
+                    predicate.as_ref(),
+                    generation.segments_version,
+                    self.serves_column_only(req.layer),
                 )
             });
             let counts = self.masked_counts(
@@ -414,8 +414,11 @@ impl crate::Engine {
             // per-artifact membership to intersect, so this is the only route to the number.
             let filtered_histogram = match (rows.column(), filter_rows.as_ref()) {
                 (Some(column), Some(rows_of_filter)) => {
-                    let mut visible = mask.visible_all();
-                    visible.and_inplace(rows_of_filter);
+                    // Narrowed into a copy, because the composed set is the mask's and is borrowed.
+                    // The count beside an artifact is filter-blind (I12) and the whole-map
+                    // candidacy route reads the same set, so narrowing it in place would make both
+                    // a function of this request's filter.
+                    let visible = mask.visible_all().and(rows_of_filter);
                     // The engine's pool, for `Engine::masked_counts`' reason: the walk splits.
                     Some(self.pool.install(|| column.histogram_over(&visible)))
                 }

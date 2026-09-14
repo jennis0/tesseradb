@@ -705,3 +705,60 @@ fn the_materialised_visible_rows_agree_with_the_composed_count() {
         assert!(mask.contains_row(row), "row {row} is not in the mask");
     }
 }
+
+/// **A filter moves neither `viewport ∩ M_auth` nor whether that set is the whole mask.**
+///
+/// A row-major level reads candidacy off its masked-count histogram where the viewport covers the
+/// mask, and takes it off a count a filter narrows nowhere. That is sound only while both inputs
+/// are functions of the composed mask alone. If a filter narrowed `here`, a whole-map request under
+/// a filter would look like a whole-map request without one and the histogram would admit artifacts
+/// the filter had removed from view; narrowing the histogram instead would withhold artifacts a
+/// viewer is entitled to. I3 and I12: a filter may hide, never reveal, and may move the frontier
+/// up, never down.
+///
+/// Driven with a suppression and a buffered arrival, the two terms that make the composed mask
+/// differ from the projection at all.
+#[test]
+fn a_filter_moves_neither_the_composed_set_nor_the_whole_map_test() {
+    use tessera_engine::compose::{FilterRows, WholeMask};
+    use tessera_engine::tile_index::Viewport;
+
+    let fx = build_fixture();
+    let mut overlay = Overlay::new();
+    overlay.apply(e(SUPPRESS_IN), ChangeOp::Suppress);
+    let mut buffer = IngestBuffer::new();
+    insert_buffered(
+        &mut buffer,
+        BUFFERED_PASS,
+        vec![TermId::new(SATISFIED_TERM_A)],
+    );
+    let unfiltered = compose_with(&fx, &overlay, &buffer);
+    // One row in ten, which removes most of what the viewer may see without emptying anything.
+    let admitted: croaring::Bitmap = (0..BOUND as u32).filter(|r| r % 10 == 0).collect();
+    let filtered =
+        compose_with(&fx, &overlay, &buffer).with_filter(FilterRows::Complete(admitted.clone()));
+
+    assert_eq!(unfiltered.visible_all(), filtered.visible_all());
+    assert_eq!(unfiltered.visible_count(), filtered.visible_count());
+    assert!(
+        unfiltered.visible_count() > unfiltered.visible_all().and_cardinality(&admitted),
+        "the filter must actually narrow something, or this test asserts nothing"
+    );
+
+    let whole = croaring::Bitmap::from_range(0..(BOUND as u32));
+    let narrow = croaring::Bitmap::from_range(0..100);
+    for rows in [&whole, &narrow] {
+        let without = Viewport::compose(rows, &unfiltered);
+        let with = Viewport::compose(rows, &filtered);
+        assert_eq!(without.here(), with.here());
+        assert_eq!(without.covers_mask(), with.covers_mask());
+    }
+    // And the two viewports are genuinely the two cases, not one case twice.
+    assert!(Viewport::compose(&whole, &unfiltered).covers_mask());
+    assert!(!Viewport::compose(&narrow, &unfiltered).covers_mask());
+    assert_eq!(
+        Viewport::compose(&whole, &unfiltered).here(),
+        unfiltered.visible_all(),
+        "a viewport over the whole row space composes to the mask itself"
+    );
+}

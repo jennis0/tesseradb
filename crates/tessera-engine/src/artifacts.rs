@@ -1432,12 +1432,53 @@ impl ArtifactRows {
     /// inside the viewport* — and the layout decides only which structure is walked to reach it.
     /// `tests/artifact_row_major.rs` asserts the two agree ordinal for ordinal over a generated
     /// corpus, which is this stage's spine.
-    pub fn candidacy(&self, viewport: &crate::tile_index::Viewport<'_>) -> Candidacy {
+    ///
+    /// # The whole-map case is read off the histogram rather than scanned
+    ///
+    /// `counts` is this level's masked-count histogram where the request already built one
+    /// ([`crate::Engine::masked_counts`]). It says, per ordinal, how many rows inside `M_auth`
+    /// carry that ordinal's label. Where the viewport covers the whole mask
+    /// ([`crate::tile_index::Viewport::covers_mask`]) that is the question candidacy asks: `here`
+    /// is then `M_auth` itself, so an ordinal has a visible member in view exactly when its count
+    /// is non-zero, and the scan finds nothing the histogram has not already counted.
+    ///
+    /// The two are taken over the same set, and that is what makes the substitution exact. The
+    /// histogram walks [`crate::compose::WholeMask::visible_all`] and `here` is composed from the
+    /// same three terms, both blind to the request's filter, so the whole-map answer here is the
+    /// authorised one whether or not the request carries a filter (I3, I12). The filtered question
+    /// is [`Self::matched`]'s, asked of a narrower set, and it keeps the scan.
+    ///
+    /// What this removes is the scan: 3.5×10⁹ labels read at the rung 6 corpus to learn what the
+    /// histogram beside it had already counted.
+    pub fn candidacy(
+        &self,
+        viewport: &crate::tile_index::Viewport<'_>,
+        counts: Option<&crate::histogram::MaskedCounts>,
+    ) -> Candidacy {
         // **Two routes and one question.** The column arm answers against `viewport ∩ M_auth` and
         // is therefore exact for the masked question as well; the indexed arm is a candidate
         // generator and every ordinal it returns still pays a probe.
         match &self.column {
-            Some(column) => Candidacy::Scanned(column.candidates(viewport.here())),
+            Some(column) => {
+                if viewport.covers_mask() {
+                    // The lengths must agree, or the histogram is not this column's. Both are the
+                    // level's ordinal count, and the key the histogram is filed under carries the
+                    // version of the form this column came from
+                    // (`ArtifactProjections::get_or_build`), so they agree on every route that
+                    // reaches here.
+                    //
+                    // **This is a sanity check on the pairing, not the disclosure defence.** What
+                    // keeps an ordinal with no visible row out of the answer is that the counts
+                    // were taken over `M_auth` and over nothing else; a length mismatch would only
+                    // make the entry short, and a short entry loses artifacts rather than
+                    // admitting them. The version term of the key is what stops a histogram of
+                    // another version being read here at all.
+                    if let Some(counts) = counts.filter(|c| c.len() == column.len()) {
+                        return Candidacy::Scanned(counts.populated());
+                    }
+                }
+                Candidacy::Scanned(column.candidates(viewport.here()))
+            }
             None => Candidacy::Indexed(self.index.candidates(viewport.rows())),
         }
     }
@@ -3274,6 +3315,14 @@ impl ArtifactProjections {
     /// built from records that have since moved. That is the whole of the freshness argument, and
     /// a stale form here is a wrong masked count with nothing reporting a fault.
     ///
+    /// **The returned version is the form's own, which is not always the store's.** The level
+    /// version is a floor here ([`ProjectionKey::stale_form_of`]), so between an accepted write and
+    /// the tick that publishes its delta the form handed back is the level as last published and
+    /// stands at the *earlier* version. A caller keying anything on the store's version instead
+    /// would file a derivation of this form under a version it is not of — and the masked-count
+    /// histogram, which decides a row-major level's candidacy, would then be read by every later
+    /// request in the session as though it had counted the grown column.
+    ///
     /// **The build runs outside this cache's lock**, so a slow projection does not block every
     /// other layer's requests behind it. Two threads racing the same key both build and the last
     /// one wins; they build from the same level version over the same row space, so the two
@@ -3297,7 +3346,7 @@ impl ArtifactProjections {
         predicate: Option<&PredicateSource<'_>>,
         segments_version: u64,
         column_only: bool,
-    ) -> Arc<ArtifactRows> {
+    ) -> (Arc<ArtifactRows>, u64) {
         let key = ProjectionKey {
             prefix: prefix.to_string(),
             view: view.to_string(),
@@ -3334,7 +3383,10 @@ impl ArtifactProjections {
             // equality: a form under another prefix, or of another view, or of an attribute
             // predicate whose value column the geometry has moved, describes something else.
             if held.key.stale_form_of(&key) && held.rows.covers(space) {
-                return Arc::clone(&held.rows);
+                // **Its own version and not `key`'s**: see the doc above. A form still waiting for
+                // a tick's delta is the level at the earlier version, and that is what anything
+                // derived from it must be filed under.
+                return (Arc::clone(&held.rows), held.key.level_version);
             }
         }
 
@@ -3437,6 +3489,7 @@ impl ArtifactProjections {
             );
             self.builds
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let version = key.level_version;
             self.insert_newest(
                 map_key,
                 Held {
@@ -3445,7 +3498,7 @@ impl ArtifactProjections {
                     rows: Arc::clone(&rows),
                 },
             );
-            return rows;
+            return (rows, version);
         }
         let mut adopted = self.claim_index(prefix, view, layer, level, key.level_version);
         let from_prefix = adopted.is_some();
@@ -3610,6 +3663,7 @@ impl ArtifactProjections {
         );
         self.builds
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let version = key.level_version;
         self.insert_newest(
             map_key,
             Held {
@@ -3618,7 +3672,7 @@ impl ArtifactProjections {
                 rows: Arc::clone(&rows),
             },
         );
-        rows
+        (rows, version)
     }
 
     /// Take the fold-written index for this `(view, layer, level)` if one was adopted and its
@@ -4927,6 +4981,107 @@ mod tests {
             rows.satisfied_rank_via(1, &answers, &Bitmap::new(), true),
             None,
             "the second ordinal is past the partition, so it has no answer to give"
+        );
+    }
+
+    // ---- candidacy on a row-major level ---------------------------------------------------
+
+    /// A row-major level over twelve artifacts of fifty contiguous rows each, with the column the
+    /// scan and the histogram are both read from.
+    fn row_major_level() -> (ArtifactRows, Arc<RowColumn>) {
+        static DIR: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+        let scratch = DIR
+            .get_or_init(|| tempfile::tempdir().expect("a scratch directory"))
+            .path();
+        let sets: Vec<Vec<u32>> = (0..12u32)
+            .map(|i| ((i * 50)..(i * 50 + 50)).collect())
+            .collect();
+        let slices: Vec<Option<&[u32]>> = sets.iter().map(|s| Some(s.as_slice())).collect();
+        let membership = MembershipRows::of_rows(
+            sets.iter()
+                .map(|s| Some(s.iter().copied().collect::<Bitmap>()))
+                .collect(),
+        );
+        let column = Arc::new(
+            RowColumn::compose(&membership, 600, ServingLayout::RowMajorLabel, scratch)
+                .expect("the memberships partition"),
+        );
+        (
+            ArtifactRows::synthetic(&slices, Some(Arc::clone(&column))),
+            column,
+        )
+    }
+
+    /// The histogram and the scan return the same candidates, whatever the viewport covers.
+    ///
+    /// The whole-map viewport is the case the histogram answers: `here` is then `M_auth` itself, so
+    /// the counts taken over `M_auth` already say which ordinals have a visible member. A narrower
+    /// viewport is the case it must not answer, the histogram being over the whole mask and knowing
+    /// nothing about the box, and the level falls back to the scan even with counts in hand.
+    #[test]
+    fn the_whole_map_reads_candidacy_off_the_histogram_and_a_narrower_viewport_scans() {
+        let (rows, column) = row_major_level();
+        // A mask that keeps three quarters of the row space, emptying ordinal 4 entirely so that
+        // an ordinal present in the level and absent from the mask is in the comparison.
+        let mut mask: Bitmap = (0..600u32).filter(|r| r % 4 != 3).collect();
+        mask.remove_range(200..250);
+        let counts = crate::histogram::MaskedCounts::new(column.histogram_over(&mask));
+        assert_eq!(counts.get(4), 0, "ordinal 4 has no visible row");
+
+        // The whole map: every visible row is in view, so the two routes must agree.
+        let whole = Bitmap::from_range(0..600);
+        let viewport = crate::tile_index::Viewport::compose(&whole, &mask);
+        assert!(viewport.covers_mask());
+        let from_histogram: Vec<u32> = rows.candidacy(&viewport, Some(&counts)).iter().collect();
+        let from_scan: Vec<u32> = rows.candidacy(&viewport, None).iter().collect();
+        assert_eq!(from_histogram, from_scan);
+        assert_eq!(from_scan, vec![0, 1, 2, 3, 5, 6, 7, 8, 9, 10, 11]);
+
+        // A viewport holding two artifacts' rows: narrower than the mask, so the histogram is not
+        // an answer and must not be taken for one.
+        let box_rows = Bitmap::from_range(320..440);
+        let narrow = crate::tile_index::Viewport::compose(&box_rows, &mask);
+        assert!(!narrow.covers_mask());
+        let narrowed: Vec<u32> = rows.candidacy(&narrow, Some(&counts)).iter().collect();
+        assert_eq!(
+            narrowed,
+            rows.candidacy(&narrow, None).iter().collect::<Vec<_>>()
+        );
+        assert_eq!(narrowed, vec![6, 7, 8]);
+    }
+
+    /// A viewport that covers most of the row space but not all of the mask is not the whole-map
+    /// case. The test is `|viewport ∩ M_auth| = |M_auth|`, so a mask holding one row outside the
+    /// viewport takes the scan. That is the direction that matters: reading the histogram there
+    /// would serve an artifact whose only visible member is off screen.
+    #[test]
+    fn a_viewport_missing_one_visible_row_does_not_cover_the_mask() {
+        let (rows, column) = row_major_level();
+        let mask: Bitmap = (0..600u32).collect();
+        let counts = crate::histogram::MaskedCounts::new(column.histogram_over(&mask));
+
+        // Every row but one, and the one left out is the only visible row of ordinal 11 in view.
+        let mut almost = Bitmap::from_range(0..600);
+        almost.remove_range(551..600);
+        let viewport = crate::tile_index::Viewport::compose(&almost, &mask);
+        assert!(!viewport.covers_mask());
+        let served: Vec<u32> = rows.candidacy(&viewport, Some(&counts)).iter().collect();
+        assert_eq!(
+            served,
+            (0..12u32).collect::<Vec<_>>(),
+            "row 550 is in view and ordinal 11 labels it"
+        );
+
+        let mut off_screen = Bitmap::from_range(0..600);
+        off_screen.remove_range(550..600);
+        let viewport = crate::tile_index::Viewport::compose(&off_screen, &mask);
+        assert!(!viewport.covers_mask());
+        assert_eq!(
+            rows.candidacy(&viewport, Some(&counts))
+                .iter()
+                .collect::<Vec<_>>(),
+            (0..11u32).collect::<Vec<_>>(),
+            "ordinal 11 is wholly off screen, and the histogram must not serve it"
         );
     }
 }
