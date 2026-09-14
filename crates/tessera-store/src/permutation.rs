@@ -358,10 +358,16 @@ pub struct Permutation {
     present_count: usize,
     payload_start: usize,
     path: PathBuf,
-    /// The row count this file's slots were found to claim exactly — recorded by
-    /// [`Self::validate_rows`] when the slots it claimed numbered the whole of `[0, row_count)`,
-    /// and left unset otherwise. [`Self::project_with`] reads it for the whole-domain case; the
-    /// argument is there.
+    /// The row count this file's slots claim exactly, where that is established.
+    ///
+    /// **What it is for:** a mask holding every entity in `[0, bound)` projects to every row this
+    /// mapping has, and this value is what says those rows are the contiguous range
+    /// `[0, dense_rows)` rather than some subset of it. With it, [`Self::project_with`] answers a
+    /// whole-domain mask as that range and reads no page; without it, it walks. Two routes set it,
+    /// and both are the same claim from a different source: [`Self::validate_rows`] counts the
+    /// slots and finds they number `row_count`, and [`Self::declare_dense_rows`] takes the writer's
+    /// word for the same count where the caller's premise is that this process wrote the file.
+    /// Unset means neither has spoken, and the walk answers everything.
     dense_rows: std::sync::OnceLock<u32>,
 }
 
@@ -655,6 +661,23 @@ impl Permutation {
             let _ = self.dense_rows.set(row_count);
         }
         Ok(())
+    }
+
+    /// Record that this mapping's slots are a bijection onto `[0, row_count)` on the **writer's**
+    /// word rather than on a scan of the file.
+    ///
+    /// [`Self::validate_rows`] establishes the same fact by reading every present page, which is
+    /// `O(bound)` and is the check a bundle arriving from storage must pay. A caller that wrote
+    /// these bytes itself, in this process, has the fact already: the writer emits one slot per row
+    /// of the segment it is writing, so the mapping is onto its own row count by construction. That
+    /// caller is `read::open_written_prefix`, whose doc carries the premise and the obligation it
+    /// puts on the one call site allowed to hold it.
+    ///
+    /// The first value recorded wins, so this cannot contradict a validation that already ran. It
+    /// records nothing else: a caller with no such premise omits the call and the projection walks,
+    /// which is correct at any cost.
+    pub fn declare_dense_rows(&self, row_count: u32) {
+        let _ = self.dense_rows.set(row_count);
     }
 
     /// Every entity that holds a row here, ascending, with the row it holds.

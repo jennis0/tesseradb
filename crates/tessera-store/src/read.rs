@@ -421,6 +421,17 @@ enum Verification {
 /// parses are the ones it computed from the bytes it had in hand. Re-reading them proves nothing
 /// that the write did not already prove, and costs the whole bundle in IO.
 ///
+/// **What `validate_rows` also produces is taken from the writer instead of dropped.** Besides
+/// checking the file, that scan records that the mapping is onto `[0, row_count)`, which is what
+/// lets a whole-domain grant's projection be the row range rather than a walk of every page
+/// (`Permutation::project`). Skipping the scan and recording nothing would leave every session on
+/// this prefix walking until the next restart — a cost a compaction imposes on the deployment for
+/// as long as the process lives. So this open calls `Permutation::declare_dense_rows` with the
+/// segment's own `row_count`. That is not a check on bytes from storage and is not one being
+/// skipped: it is the writer stating what it wrote, under the same premise as everything else in
+/// this section, and the manifest's `row_count` is already cross-checked against `morton.u32` and
+/// `columns.arrow` two paragraphs below.
+///
 /// Kept, all of it: the `bundle_format` check, `identity.validate()`, every path-component
 /// sanitisation, the `ensure_verified` membership check (a file the loader reads must appear in a
 /// `files` map — cheap, and it catches a manifest that names a file it does not digest), the
@@ -696,11 +707,22 @@ fn open_prefix(
             // row bound against that segment's `row_count` the first time we see it (I11/I4 —
             // a corrupt permutation must never hand out a `RowId` that indexes `columns.arrow`
             // out of range). Only meaningful once, against the one segment a Phase-1 view has.
-            if is_base_segment && verification == Verification::Digests {
-                view_entry
-                    .row_space
-                    .base()
-                    .validate_rows(seg_desc.row_count)?;
+            if is_base_segment {
+                match verification {
+                    Verification::Digests => view_entry
+                        .row_space
+                        .base()
+                        .validate_rows(seg_desc.row_count)?,
+                    // The scan is skipped here and its *result* is taken from the writer — see
+                    // this function's "what is skipped" section for why that is the same premise
+                    // and not a weaker one. Without it a compaction's in-process open would leave
+                    // every session on the new prefix walking `permutation.bin` for a whole-domain
+                    // grant until the process restarted.
+                    Verification::JustWritten => view_entry
+                        .row_space
+                        .base()
+                        .declare_dense_rows(seg_desc.row_count),
+                }
             }
 
             // Every segment after the first is one a flush appended or a merge collapsed, and it
