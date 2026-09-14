@@ -565,8 +565,8 @@ fn write_merged_rows(
     let present: Vec<(usize, Bitmap)> = layers
         .iter()
         .enumerate()
-        .map(|(i, layer)| (i, layer.hasrow().clone()))
-        .collect();
+        .map(|(i, layer)| layer.hasrow().map(|hasrow| (i, hasrow.clone())))
+        .collect::<Result<_, _>>()?;
     let (order, _) = crate::ordered_disjoint(present, pass)?;
     let mut cursors: Vec<BlobRows> = order
         .iter()
@@ -1046,7 +1046,12 @@ mod tests {
             assert!(holds(kept), "a survivor's bytes are gone");
         }
         let folded = RecordBlob::open(&blocks, &hasrow, &directory, Access::Read).expect("open");
-        assert!(!folded.has_row(1), "the blanked entity is out of has-row");
+        assert!(
+            !folded
+                .has_row(1)
+                .expect("a blob opened whole holds its has-row bitmap"),
+            "the blanked entity is out of has-row"
+        );
         assert!(folded.fields_of(1).expect("read").is_none());
         assert!(folded.fields_of(0).expect("read").is_some());
     }

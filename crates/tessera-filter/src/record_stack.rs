@@ -140,7 +140,7 @@ impl RecordStack {
     pub fn fields_of(&self, entity: u32) -> Result<Option<Vec<RecordField>>, RecordError> {
         let mut merged: Option<Vec<RecordField>> = None;
         for layer in &self.layers {
-            if !layer.has_row(entity) {
+            if !layer.has_row(entity)? {
                 continue;
             }
             self.reads
@@ -206,7 +206,7 @@ impl RecordStack {
             // `wanted` first, so the intersection is the size of the caller's set and the layer's
             // own bitmap is only read.
             let mut here = wanted.clone();
-            here.and_inplace(layer.hasrow());
+            here.and_inplace(layer.hasrow()?);
             let mut again = here.clone();
             again.and_inplace(&seen);
             shared.or_inplace(&again);
@@ -227,8 +227,13 @@ impl RecordStack {
     }
 
     /// Whether any layer holds a row for `entity`.
-    pub fn has_row(&self, entity: u32) -> bool {
-        self.layers.iter().any(|layer| layer.has_row(entity))
+    pub fn has_row(&self, entity: u32) -> Result<bool, RecordError> {
+        for layer in &self.layers {
+            if layer.has_row(entity)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     /// Every layer's own addressing self-check, for the conformance surface.

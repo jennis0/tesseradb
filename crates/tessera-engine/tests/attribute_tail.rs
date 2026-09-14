@@ -1592,7 +1592,9 @@ fn a_suppression_touches_no_blob_byte_and_only_the_fold_removes_a_deletion() {
         "the suppressed row folds through intact — a later unsuppress reveals exactly this"
     );
     assert!(
-        !stack.has_row(deleted),
+        !stack
+            .has_row(deleted)
+            .expect("a served blob holds its has-row bitmap"),
         "the deleted entity is out of has-row"
     );
     assert_eq!(stack.fields_of(deleted).expect("a clean read"), None);

@@ -852,6 +852,42 @@ pub(crate) fn entity_order_residency(
                 constant: false,
             });
         }
+        // **A spilled column's duplicate map** (`crate::extents::DuplicateMap`): the two
+        // whole-column Roaring bitmaps that stand while the map says which of a repeated entity's
+        // rows survives. It is built when the extents are opened and held until the column's last
+        // reader is done with them, and it is the one anonymous term a spilled column has — the
+        // rest of what an open extent costs is a block buffer, which the merge fan-in bounds.
+        //
+        // **It stands for exactly the phases the column's own storage does, less the join**, which
+        // is what `column.phases` says: a spilled column with no blob row meets its last reader at
+        // the end of the index phase and `crate::pipeline` drops its `OpenExtents` there, so
+        // charging it through the blob would refuse a build over bytes nothing holds. The map does
+        // not exist in the join at all — the extents are still being written then.
+        //
+        // **A rate over the corpus, not a constant**, which is what separates it from the
+        // partitions below: a Roaring bitmap over an entity space of n is at most n/8 bytes, and a
+        // spilled column's extents between them cover the entities that have a value. Charging the
+        // ceiling over-charges a column whose extents are sparse or run-encoded, and the ceiling is
+        // the figure the budget has to stand: 437 MB apiece at the 3.5×10⁹-row GBIF rung. The eight
+        // bytes a *repeated* entity that the built table costs are not charged — a corpus with one
+        // row an entity repeats none, and one that repeated every entity would pay 8n against these
+        // 2n/8, which is a shape the model does not have a figure for.
+        if spilled {
+            terms.push(Term {
+                what: format!(
+                    "declared column {index} ({ty}): the duplicate map over its extents, two \
+                     whole-column Roaring bitmaps at {} MiB apiece",
+                    n.div_ceil(8) >> 20
+                ),
+                bytes: 2u64.saturating_mul(n.div_ceil(8)),
+                mapped: false,
+                phases: match column.phases.holds(Phase::Blob) {
+                    true => Phases::INDEX.and(Phases::BLOB),
+                    false => Phases::INDEX,
+                },
+                constant: false,
+            });
+        }
         // The text index's sorted runs, **charged at the column they are tokenised from** rather
         // than at a constant of their own. The runs spill while the column is resident, so the two
         // stand on the disk together; and a run spends one varint on a `(term, entity)` pair where
@@ -878,6 +914,26 @@ pub(crate) fn entity_order_residency(
                 constant: false,
             });
         }
+    }
+    // **And the duplicate maps' transient, charged once rather than per column.** Building one
+    // column's map holds four whole-column bitmaps at its worst moment — the running union, the
+    // repeats so far, the extent's own bitmap and the intersection of the first with the third —
+    // against the two the built map leaves standing (`crate::extents::DuplicateMap`). The columns
+    // are opened one after another, so only one column is ever mid-build: the extra two bitmaps are
+    // a term of the build and not of the column count, and charging them per column would
+    // over-charge the second spilled column by n/4 for bytes that are never simultaneously live.
+    if columns.iter().any(|column| column.extents) {
+        terms.push(Term {
+            what: format!(
+                "the two further whole-column Roaring bitmaps held while one spilled column's \
+                 duplicate map is built, at {} MiB apiece",
+                n.div_ceil(8) >> 20
+            ),
+            bytes: 2u64.saturating_mul(n.div_ceil(8)),
+            mapped: false,
+            phases: Phases::INDEX,
+            constant: false,
+        });
     }
     if member_entries > 0 {
         terms.push(Term {
@@ -919,8 +975,8 @@ pub(crate) fn entity_order_residency(
     // so what a partition costs is a constant: its writer buffers while it is open, and one loaded
     // bucket and one window at the replay. Charging the ceiling over-charges a small corpus by up
     // to the bucket count, which is the price of a model whose terms do not move with `n` — the
-    // whole of what `the_anonymous_total_does_not_grow_with_the_row_count` asserts, and the reason
-    // the design names 2 GiB as the budget floor (§3).
+    // whole of what `the_anonymous_total_grows_only_by_the_three_terms_this_names` asserts, and
+    // the reason the design names 2 GiB as the budget floor (§3).
     //
     // **How many are open at the worst phase.** The attribute join opens one per column it fills
     // in entity order and holds them all while it sweeps; the assembly opens the row partition,
@@ -951,8 +1007,8 @@ pub(crate) fn entity_order_residency(
     // bucket holds at most `n / 128` records and never more than 2³²/128 whatever `n` is, so the
     // term rises with the corpus until the key type binds and is flat above it — which is the
     // sense in which a partition's memory is a constant, and what
-    // `the_anonymous_total_does_not_grow_with_the_row_count` asserts by evaluating the model on
-    // both sides of that bound.
+    // `the_anonymous_total_grows_only_by_the_three_terms_this_names` asserts by evaluating the
+    // model on both sides of that bound.
     let records =
         (n / crate::spill::PARTITION_BUCKETS as u64).clamp(1, crate::spill::PARTITION_BUCKET_RECORDS);
     let bucket = |width: u64| records.saturating_mul(width);
@@ -3513,22 +3569,26 @@ require_member_visibility = "none"
     }
 
     /// **The headline of the entity-order model: what anonymous memory grows with the corpus is
-    /// named, and it is two terms.**
+    /// named, and it is three terms.**
     ///
     /// Every term the model charges against the machine is a constant or one publication batch — a
-    /// share of the budget — with two exceptions, and this test subtracts them rather than
+    /// share of the budget — with three exceptions, and this test subtracts them rather than
     /// pretending they are not there:
     ///
     /// - arrow's all-ones validity bitmaps during the `columns.arrow` layout pass, `n / 8` bytes a
     ///   column alive together;
+    /// - a spilled string column's duplicate map, `n / 4` bytes a column, held from the postings
+    ///   stage to the end of the record blob's merge;
     /// - the artifact pass's partition bucket, which holds one record per **member entry** in its
     ///   row range and so is bounded by the largest layer's entries over 128 rather than by the
     ///   `u32` row key. Every other partition pushes one record per key and is flat above the key
     ///   type's bound; this one is not, and a layer of many ordinals a row is where it shows.
     ///
+    /// Naming them is the point: the assertions are equalities against exactly these three, so a
+    /// term that starts rising with the corpus fails here whether or not anyone remembered to look.
     /// What grows properly is the disk the same model reports beside it.
     #[test]
-    fn the_anonymous_total_does_not_grow_with_the_row_count() {
+    fn the_anonymous_total_grows_only_by_the_three_terms_this_names() {
         // The floor a partition's own constant needs, and the budget both row counts here carry
         // more member entries than one publication batch of.
         const BUDGET: u64 = 2 << 30;
@@ -3556,14 +3616,22 @@ require_member_visibility = "none"
         // columns, at one bit a row each. The two that carry characters are not render columns and
         // are not in `columns.arrow`.
         let bitmaps = |n: u64| 4 * n.div_ceil(8);
+        // **And the one spilled column's duplicate map**: two whole-column Roaring bitmaps at n/8
+        // bytes apiece for the column, and two more for the build, held while that column's map is
+        // being built. It is the second term that is a rate in the row count rather than one
+        // publication batch, and it is charged for a spilled string column alone — a build with no
+        // such column has no such term, which is why the assertions below name it separately
+        // rather than folding it into the rate.
+        let duplicates = |n: u64| 4 * n.div_ceil(8);
         let small = residency(10_000_000);
         let large = residency(100_000_000);
         // **The rate terms are equal net of the bitmaps**: one publication batch, whatever the
         // level behind it.
         assert_eq!(
-            scaling_total(&small) - bitmaps(10_000_000),
-            scaling_total(&large) - bitmaps(100_000_000),
-            "the anonymous rate is one publication batch and arrow's validity bitmaps:\nat 10⁷{}\nat 10⁸{}",
+            scaling_total(&small) - bitmaps(10_000_000) - duplicates(10_000_000),
+            scaling_total(&large) - bitmaps(100_000_000) - duplicates(100_000_000),
+            "the anonymous rate is one publication batch, arrow's validity bitmaps and the \
+             spilled column's duplicate map:\nat 10⁷{}\nat 10⁸{}",
             small.describe(),
             large.describe()
         );
@@ -3579,9 +3647,11 @@ require_member_visibility = "none"
         assert_eq!(
             beyond.total() - at_bound.total(),
             (bitmaps(1u64 << 34) - bitmaps(1u64 << 32))
+                + (duplicates(1u64 << 34) - duplicates(1u64 << 32))
                 + (pass_bucket(1u64 << 34) - pass_bucket(1u64 << 32)),
-            "above the key type's bound the anonymous total moves by the validity bitmaps and the \
-             artifact pass's bucket and nothing else:\nat 2³²{}\nat 2³⁴{}",
+            "above the key type's bound the anonymous total moves by the validity bitmaps, the \
+             spilled column's duplicate map and the artifact pass's bucket, and nothing \
+             else:\nat 2³²{}\nat 2³⁴{}",
             at_bound.describe(),
             beyond.describe()
         );
