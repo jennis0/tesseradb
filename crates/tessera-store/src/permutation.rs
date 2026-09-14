@@ -820,8 +820,8 @@ impl Permutation {
     /// entity-space width rather than anything a grant selects. So the residual sits inside C19's
     /// accepted shape — work correlating with the principal's own coverage — and adds no quantity
     /// to C4's open row, the same reading `tessera_engine`'s `DecodeSource` records for the
-    /// decode-source choice. No register row is added for it; whether Appendix C should name this
-    /// branch explicitly is the owner's call.
+    /// decode-source choice. Appendix C's **C19** names this branch as one of its accepted
+    /// widenings rather than giving it a row of its own (owner ruling, 2026-09-14).
     ///
     /// The invariant this file carries is I4 — it is the only EntityId→RowId path — and both
     /// routes keep it, neither handing an entity id or a `tessera_id` to a caller, so I10 stands
