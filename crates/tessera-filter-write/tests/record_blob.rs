@@ -92,6 +92,53 @@ fn write_fixture(dir: &Path, rows: u32, target: usize) -> Paths {
 
 /// Mixed-type rows round-trip through real blocks, and the block boundaries hold: with 30-byte
 /// rows and a 90-byte target the writer must cut 3 rows per block, and the first and last row of
+/// **A blob opened for a sequential walk alone reads its rows and refuses everything the bitmap
+/// answers.** The build's extent readers open this way and walk the rows; the five members that
+/// take their answer from the has-row bitmap — including `self_check`, whose whole contract is
+/// that it checks everything — must say so rather than answer a narrower question.
+#[test]
+fn a_rows_only_blob_walks_its_rows_and_refuses_the_bitmap() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let p = write_fixture(dir.path(), 10, 3 * ROW_BYTES);
+    let blob = RecordBlob::open_rows_only(&p.blocks, &p.directory, Access::Read)
+        .expect("the blob opens without its has-row file");
+
+    // The directory's own arithmetic still stands, and the walk still yields every row with the
+    // entity the block header and the gaps give it.
+    assert_eq!(blob.block_count(), 4, "10 rows at 3 per block");
+    assert_eq!(blob.rows(), 10, "the row count comes from the directory");
+    let mut walked = Vec::new();
+    blob.for_each_row(&mut |entity, fields| {
+        assert_eq!(fields, fields_for(entity));
+        walked.push(entity);
+        Ok(())
+    })
+    .expect("the rows walk");
+    assert_eq!(
+        walked,
+        (0..10).map(entity_of_rank).collect::<Vec<_>>(),
+        "every row, in entity order, from the blocks alone"
+    );
+
+    // And the five that need the bitmap refuse rather than answer.
+    let refuses = |what: &str, e: Option<RecordError>| {
+        let message = format!("{}", e.expect(what));
+        assert!(
+            message.contains("opened for a sequential walk alone"),
+            "{what} should name the open that has no bitmap, got: {message}"
+        );
+    };
+    refuses("hasrow refuses", blob.hasrow().err());
+    refuses("has_row refuses", blob.has_row(0).err());
+    refuses("fields_of refuses", blob.fields_of(0).err());
+    refuses(
+        "for_each_row_in refuses",
+        blob.for_each_row_in(&Bitmap::new(), &mut |_, _| Ok(()))
+            .err(),
+    );
+    refuses("self_check refuses", blob.self_check().err());
+}
+
 /// every block — the B6 catalogue's boundary cases — read back as their own entities.
 #[test]
 fn rows_round_trip_across_block_boundaries() {

@@ -1007,9 +1007,11 @@ impl RecordBlob {
     /// has-row files it streams once to decide which extent's row for a repeated entity wins
     /// (`tessera-build`'s `extents::DuplicateMap`).
     ///
-    /// [`Self::hasrow`], [`Self::has_row`], [`Self::fields_of`] and [`Self::for_each_row_in`] all
-    /// refuse on a blob opened this way. It is not a mode for a served blob: the request path
-    /// addresses rows by entity, and every one of those refusals is how it does it.
+    /// [`Self::hasrow`], [`Self::has_row`], [`Self::fields_of`], [`Self::for_each_row_in`] and
+    /// [`Self::self_check`] all refuse on a blob opened this way — the four that address a row by
+    /// entity, and the one whose contract is that it checks *everything*. It is not a mode for a
+    /// served blob: the request path addresses rows by entity, and every one of those refusals is
+    /// how it does it.
     pub fn open_rows_only(
         blocks_path: &Path,
         directory_path: &Path,
@@ -1436,7 +1438,13 @@ impl RecordBlob {
     /// each block exactly, and the discriminants agree rank-for-rank with the has-row bitmap.
     /// The fixture-input relation cannot see any of this — it is the one artefact-level check the
     /// blob adds (review B7).
+    ///
+    /// **Refuses on a blob opened by [`Self::open_rows_only`]**, which cannot make the
+    /// rank-for-rank comparison at all. A walk that checked everything *except* the half the
+    /// caller came here for would answer `Ok` to a question it had not asked, which is the one
+    /// thing a check named `self_check` must not do.
     pub fn self_check(&self) -> Result<(), RecordError> {
+        self.hasrow()?;
         self.for_each_row(&mut |_, _| Ok(()))
     }
 }
