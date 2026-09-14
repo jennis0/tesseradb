@@ -97,6 +97,16 @@ def ms(n) -> str:
     return "—" if n is None else (f"{n:.2f} ms" if n < 1000 else f"{n / 1000:.2f} s")
 
 
+def mb(n) -> str:
+    """Decimal MB. A budget-sized response is tens of these, which GB would round away."""
+    return "—" if n is None else f"{n / 1e6:.1f} MB"
+
+
+def marks(n) -> str:
+    """A point count. A percentile over samples is a float; a mark is not."""
+    return "—" if n is None else f"{n:,.0f}"
+
+
 def build_row(name: str, data: dict) -> str:
     build = data.get("build") or {}
     stages = build.get("stages") or []
@@ -110,9 +120,16 @@ def build_row(name: str, data: dict) -> str:
 
 
 def serve_row(name: str, data: dict) -> list[str]:
+    """One row per (cap, principal), with the shape the run's requests carried.
+
+    A run with no `request` block did not record its shape, and every column that only means
+    something under a stated shape renders `—` rather than a number a reader would compare
+    against one taken at a different `k` and depth.
+    """
     rows = []
     for run in data.get("serve", []):
         cap = "uncapped" if run.get("cap") is None else gb(run["cap"])
+        request = run.get("request") or {}
         for rung in run.get("ladder", []):
             battery = rung.get("battery", {})
 
@@ -122,11 +139,18 @@ def serve_row(name: str, data: dict) -> list[str]:
 
             rows.append(
                 f"| {name} | {cap} | {rung['target']:.0%} | {rung['measured']:.2%} | "
-                f"{rung['terms_n']} | {ms(rung.get('authorise_s', 0) * 1000)} | "
+                f"{rung['terms_n']} | {si(request.get('k'))} | "
+                f"{si(request.get('budget_depth'))} | "
+                f"{ms(rung.get('authorise_s', 0) * 1000)} | "
                 f"{ms(rung.get('first_viewport_s', 0) * 1000)} | "
+                f"{marks(rung.get('first_viewport_served'))} | "
+                f"{mb(rung.get('first_viewport_bytes'))} | "
+                f"{marks(cell('hot', 'served', 'of_cell_p50'))} | "
+                f"{mb(cell('hot', 'response_bytes', 'of_cell_p50'))} | "
                 f"{ms(cell('cold', 'wall_ms', 'of_cell_p50'))} | "
                 f"{ms(cell('cold_pages_warm_engine', 'wall_ms', 'of_cell_p50'))} | "
                 f"{ms(cell('hot', 'wall_ms', 'of_cell_p50'))} | "
+                f"{ms(cell('hot', 'stream_ms', 'of_cell_p50'))} | "
                 f"{ms(cell('hot', 'server_ms', 'of_cell_p99'))} |"
             )
     return rows
@@ -192,13 +216,19 @@ def render() -> str:
     lines += [build_row(name, data) for name, data in rungs]
     lines += [
         "",
-        "**Serve.** One row per (cap, principal). `measured` is a zoom-0 whole-extent viewport",
-        "under that principal over the same under the 100% principal — the *target* is what the",
-        "greedy term composition aimed at. The three latency columns are the median **cell**'s",
-        "median under each condition, end to end; the last is the median cell's server-side p99.",
+        "**Serve.** One row per (cap, principal). Every request is one a client draws a whole view",
+        "with: `k` is the deployment's ceiling and `depth` is how much deeper than its own zoom a",
+        "request was made, so the whole extent is asked for at `depth` and a sample at zoom *z* at",
+        "*z* + `depth`. `measured` is a whole-extent viewport under that principal over the same",
+        "under the 100% principal — the *target* is what the greedy term composition aimed at.",
+        "`first viewport` is a fresh session's first request, which carries the fragment build;",
+        "`points` and `wire` beside it are what that one request served and moved, and the second",
+        "pair are the median **cell**'s medians. The three latency columns are the median cell's",
+        "median under each condition, end to end; `hot stream` is the same cell's whole-stream",
+        "figure and the last is its server-side p99, which stops at the sweep.",
         "",
-        "| rung | cap | target | measured | terms | authorise | first viewport | cold | cold pages | hot | hot server p99 |",
-        "|---|---|---|---|---|---|---|---|---|---|---|",
+        "| rung | cap | target | measured | terms | k | depth | authorise | first viewport | first points | first wire | points | wire | cold | cold pages | hot | hot stream | hot server p99 |",
+        "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for name, data in rungs:
         lines += serve_row(name, data)
