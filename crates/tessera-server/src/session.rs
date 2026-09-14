@@ -106,12 +106,20 @@ async fn authorise(
         .sessions
         .lock()
         .insert(session, crate::state::now_secs());
-    // The sweep's engine half, and the same call a revocation makes. The registry removal is what
-    // makes a swept session unusable; this releases what the engine still holds under its token id.
-    // Outside the lock above — the temporary guard is dropped at the end of that statement —
-    // because a prune cancels a stage and walks five caches.
-    for token_id in expired {
-        state.engine.prune_token(token_id);
+    // The sweep's engine half, and the same removal a revocation makes. The registry removal is
+    // what makes a swept session unusable; this releases what the engine still holds under its
+    // token ids.
+    //
+    // **One batched call, on a blocking thread.** It walks five caches under five global mutexes,
+    // which is the reactor's least welcome work and the request path's most contended lock — the
+    // same reason the authorisation above runs on `spawn_blocking`. `Engine::prune_tokens` makes
+    // the batch one pass per cache rather than one per session. The response does not wait for it:
+    // the session is already inserted and the answer is already built, and a prune is memory
+    // hygiene whose timing nothing observes.
+    if !expired.is_empty() {
+        let doomed: rustc_hash::FxHashSet<u64> = expired.into_iter().collect();
+        let pruner = Arc::clone(&state);
+        tokio::task::spawn_blocking(move || pruner.engine.prune_tokens(&doomed));
     }
     Ok(Json(resp))
 }

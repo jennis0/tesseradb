@@ -158,6 +158,26 @@ fn next_sweep_threshold(live: usize) -> usize {
     live.saturating_mul(2).max(SWEEP_FLOOR_ENTRIES)
 }
 
+/// Drop from the token-id index every entry whose token `live` rejects, and return the ids
+/// dropped.
+///
+/// A free function over the index alone, rather than three lines inside
+/// [`SessionRegistry::sweep_expired`], because the ids it returns are what the engine is told to
+/// prune and they are the one part of the sweep a test can reach: a [`Session`] owns an
+/// `Arc<FrozenFragment>`, which only the engine's cache can produce, so no unit test can build the
+/// map the rest of the sweep walks.
+fn prune_index(index: &mut FxHashMap<u64, String>, live: impl Fn(&str) -> bool) -> Vec<u64> {
+    let mut dropped = Vec::new();
+    index.retain(|token_id, token| {
+        let keep = live(token);
+        if !keep {
+            dropped.push(*token_id);
+        }
+        keep
+    });
+    dropped
+}
+
 /// What the registry has retained and reclaimed — `/control/status`'s `sessions` block.
 pub struct SessionRegistryStats {
     /// Sessions currently retained: **live and expired-but-not-yet-swept alike**. This is the `n`
@@ -229,13 +249,8 @@ impl SessionRegistry {
         // `by_token` only through this index, and an index entry outliving its session would make
         // a revocation a silent no-op. The ids dropped here are the ones the engine is told about.
         let by_token = &self.by_token;
-        let mut swept = Vec::new();
-        self.token_id_to_token.retain(|token_id, token| {
-            let live = by_token.contains_key(token);
-            if !live {
-                swept.push(*token_id);
-            }
-            live
+        let swept = prune_index(&mut self.token_id_to_token, |token| {
+            by_token.contains_key(token)
         });
         self.sweeps += 1;
         self.swept_total += (before - self.by_token.len()) as u64;
@@ -787,6 +802,36 @@ mod session_registry_tests {
         // An absurd live set must not wrap to a *small* threshold, which would sweep constantly
         // rather than never — benign in direction, silently not the documented policy.
         assert_eq!(next_sweep_threshold(usize::MAX), usize::MAX);
+    }
+
+    /// The ids the sweep hands to `Engine::prune_tokens` are exactly the ones whose sessions went,
+    /// and the index keeps the rest. Both halves are asserted: an over-broad return would prune a
+    /// live session's caches, costing it a rebuild on its next request, and a short one would
+    /// leave a dead session's entries resident under an id nothing can present again.
+    #[test]
+    fn the_sweep_returns_the_ids_it_dropped_and_keeps_the_rest() {
+        let mut index: FxHashMap<u64, String> = (1..=4)
+            .map(|id| (id, format!("token-{id}")))
+            .collect();
+        let live = ["token-2", "token-4"];
+
+        let mut dropped = prune_index(&mut index, |token| live.contains(&token));
+        dropped.sort_unstable();
+
+        assert_eq!(dropped, vec![1, 3]);
+        let mut kept: Vec<u64> = index.keys().copied().collect();
+        kept.sort_unstable();
+        assert_eq!(kept, vec![2, 4]);
+    }
+
+    /// A sweep that removed nothing returns nothing, so the caller starts no prune and takes no
+    /// blocking thread for an empty batch.
+    #[test]
+    fn a_sweep_that_removes_nothing_returns_nothing() {
+        let mut index: FxHashMap<u64, String> =
+            (1..=3).map(|id| (id, format!("token-{id}"))).collect();
+        assert!(prune_index(&mut index, |_| true).is_empty());
+        assert_eq!(index.len(), 3);
     }
 }
 

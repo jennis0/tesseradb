@@ -2468,6 +2468,34 @@ impl Engine {
         self.row_projection_cache.prune_token(token_id)
     }
 
+    /// Drop every entry belonging to any of `token_ids` — the expiry sweep's form of
+    /// [`Self::prune_token`], and the same removal with the same argument.
+    ///
+    /// **One pass per cache, not one prune per session.** A sweep drops a batch, and five
+    /// `retain_keys` passes per session would take each of the five mutexes once per victim and
+    /// re-walk every surviving key each time. Here each cache is walked once with a set membership
+    /// test, so the cost is O(entries) in the batch rather than O(entries × victims). The stage
+    /// cancellations stay per token: each is a map removal under its own lock, and there is no
+    /// walk to share.
+    ///
+    /// Returns how many row projections were removed, as [`Self::prune_token`] does. Call it off
+    /// the request path — `tessera_server`'s `/session/authorise` hands it to `spawn_blocking`,
+    /// beside the authorisation it already runs there.
+    pub fn prune_tokens(&self, token_ids: &FxHashSet<u64>) -> usize {
+        if token_ids.is_empty() {
+            return 0;
+        }
+        for token_id in token_ids {
+            self.stage.cancel(*token_id);
+        }
+        self.masked_counts.prune_tokens(token_ids);
+        self.occupancy
+            .retain_keys(|key| !token_ids.contains(&key.token_id));
+        self.derived_geometry.prune_tokens(token_ids);
+        self.suggest_sets.prune_tokens(token_ids);
+        self.row_projection_cache.prune_tokens(token_ids)
+    }
+
     /// The masked-count cache's gauges — see [`crate::histogram::MaskedCountStats`]. Operator plane
     /// only; a count of structures, naming no artifact and no principal.
     pub fn masked_count_cache_stats(&self) -> crate::histogram::MaskedCountStats {

@@ -22,6 +22,7 @@
 use std::sync::Arc;
 
 use croaring::Portable;
+use rustc_hash::FxHashSet;
 
 use tessera_authz::FrozenFragment;
 use tessera_types::TermId;
@@ -391,10 +392,12 @@ impl RowProjectionCache {
     /// else, and the byte bound reclaims it. The disclosure control for a revoked session is
     /// `AppState::authenticated_session` returning `BadCredential`, not this.
     ///
-    /// **Revoke is also not the common retention path** — an *expired* session is 403'd but never
-    /// removed from the registry, and nothing prunes it, so at the 3600 s default lifetime the
-    /// overwhelming majority of dead sessions' entries are reclaimed by the byte bound rather than
-    /// by this. Pruning on revoke makes reclamation timely; it does not make it the mechanism.
+    /// **Revoke is not the common retention path; expiry is.** Most sessions are never revoked —
+    /// they reach the 3600 s default lifetime and are refused. The registry sweeps those out on the
+    /// next authorisation and hands their token ids to [`Engine::prune_tokens`], which is this
+    /// removal in its batched form, so an expired session's entries go the same way a revoked
+    /// one's do (`tessera_server::state::SessionRegistry`). What the byte bound is left to reclaim
+    /// is the residue between sweeps, bounded at `2 × live` sessions.
     ///
     /// # Cost, stated rather than argued
     ///
@@ -405,13 +408,31 @@ impl RowProjectionCache {
     /// where a pass is tens of milliseconds while every admitted request blocks on the same mutex.
     /// **Reaching it requires the session credential**: `authorise` is behind `check_bearer`, so it
     /// is not a viewer-plane exposure, and a holder of that shared secret can already call revoke
-    /// in a loop. `CacheStats::prune_scanned` makes the real n observable rather than assumed. A
+    /// in a loop. `CacheStats::prune_scanned` makes the real n observable rather than assumed.
+    ///
+    /// **The sweep's batch pays the pass once, and not on the reactor.** [`Self::prune_tokens`]
+    /// walks n for the whole batch rather than n per victim, and `/session/authorise` hands it to
+    /// `spawn_blocking`, so a batch of expired sessions costs one pass on a blocking thread rather
+    /// than `victims` passes on the thread answering requests. A
     /// secondary `token_id → keys` index would make the pass O(victims); it is declined here
     /// because a second index is a second bijection to keep in step — the failure
     /// `crate::single_flight`'s rule 1 exists to prevent — and the exposure above does not justify
     /// it. Recorded so the trade is visible rather than rediscovered.
     pub(crate) fn prune_token(&self, token_id: u64) -> usize {
         self.inner.retain_keys(|key| key.token_id != token_id)
+    }
+
+    /// The same removal for a set of sessions, in **one** pass.
+    ///
+    /// The expiry sweep drops a batch — up to `2 × live` sessions at once
+    /// (`tessera_server::state::SessionRegistry`) — and a loop over [`Self::prune_token`] would
+    /// take this cache's mutex once per session and walk every surviving key each time. One pass
+    /// with a set membership test is the same work for one session and O(n) rather than
+    /// O(n × victims) for a batch, which is what keeps the sweep's cost off the request path's
+    /// lock. Cost otherwise as [`Self::prune_token`] states it.
+    pub(crate) fn prune_tokens(&self, token_ids: &FxHashSet<u64>) -> usize {
+        self.inner
+            .retain_keys(|key| !token_ids.contains(&key.token_id))
     }
 
     /// Drop every projection built against a generation older than `floor`, keeping `floor` and
