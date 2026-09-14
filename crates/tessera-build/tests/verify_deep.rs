@@ -1054,3 +1054,34 @@ fn a_missing_scoped_render_lane_is_refused_and_an_intact_one_is_counted() {
 
     expect_refusal(&out, "does not hold it");
 }
+
+/// **A cut index that names one boundary too few is refused.** The boundaries of `cuts.u32` are
+/// what makes the cells cover the segment without overlapping, and selection reads a cell's
+/// identities as ascending on the strength of them (contracts §2.6): a missing boundary joins two
+/// cells, and the join is where the ascending property fails. The file stays strictly ascending
+/// and still starts at row 0, so the open's own validation passes it and only the pass that holds
+/// both columns can tell.
+///
+/// The other direction — a boundary where the Morton code does not change — is refused by the
+/// same loop; this fixture places every point in a cell of its own, so there is no row to put one
+/// at.
+#[test]
+fn a_cut_index_missing_a_cell_boundary_is_refused() {
+    let temp = tempfile::TempDir::new().unwrap();
+    flushed_bundle(temp.path());
+    let root = bundle_root(&temp);
+    let rel = "partitions/default/views/s0/segments/seg-0/cuts.u32";
+    let path = root.join("v00000").join(rel);
+
+    let bytes = fs::read(&path).unwrap();
+    assert!(
+        bytes.len() >= 12,
+        "the base segment must hold at least three cells for a boundary to be droppable"
+    );
+    let mut damaged = bytes.clone();
+    damaged.drain(4..8);
+    fs::write(&path, &damaged).unwrap();
+    refresh_digest(&root, rel);
+
+    expect_refusal(&root, "where the Morton code changes at row");
+}

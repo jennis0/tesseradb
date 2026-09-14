@@ -568,15 +568,20 @@ fn load_build_segment(
         .join("segments")
         .join(crate::BUILD_SEG_ID);
     let morton = MortonSlice::load(&dir.join("morton.u32"));
+    let cuts = tessera_store::read::CutIndex::load(
+        &dir.join(tessera_store::read::CutIndex::FILE),
+        row_count,
+    );
     let columns = ColumnsRef::load(&dir.join("columns.arrow"));
-    match (morton, columns) {
-        (Ok(morton), Ok(columns)) => Some(SegmentData {
+    match (morton, cuts, columns) {
+        (Ok(morton), Ok(cuts), Ok(columns)) => Some(SegmentData {
             seg_id: crate::BUILD_SEG_ID.to_string(),
             row_count,
             morton,
+            cuts,
             columns,
         }),
-        (Err(error), _) | (_, Err(error)) => {
+        (Err(error), _, _) | (_, Err(error), _) | (_, _, Err(error)) => {
             eprintln!(
                 "artifact pass: the segment this build just wrote would not reopen ({error}); \
                  every shape layer is recorded in its pinned or default layout and resolved at \

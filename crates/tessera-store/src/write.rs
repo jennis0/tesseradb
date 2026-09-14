@@ -109,6 +109,54 @@ pub fn write_segment(
     Ok(())
 }
 
+/// Writes one segment's `cuts.u32` from the Morton codes of its rows, arriving in row order.
+///
+/// A cell's start is written the first time a code is seen, so the file is the run-length index of
+/// `morton.u32`: `crate::read::CutIndex` describes what it is for and what it costs. Nothing is
+/// held but the previous code and a `BufWriter`.
+///
+/// **One writer for both producers.** The build's bounded assembly emits `morton.u32` positionally
+/// and [`SegmentWriter`] emits it row by row, so the two paths have no code in common — but a
+/// second transcription of this layout is a second thing that can disagree with the column it
+/// indexes, and a build that indexed its segment differently from a flush would serve two
+/// different selections from one bundle (decisions 0091, 0139).
+/// **It counts nothing.** The cell count this could return is the one the build already keeps —
+/// `OccupancyRun` derives it from the same codes in the same order — and two counters of one
+/// quantity are two things that can disagree about it. A caller wanting the number reads the
+/// file's length, or asks the build's own occupancy.
+pub struct CutWriter {
+    out: BufWriter<File>,
+    last: Option<u32>,
+    row: u32,
+}
+
+impl CutWriter {
+    /// Create `cuts.u32` in `dir`, which must exist.
+    pub fn create(dir: &Path) -> io::Result<Self> {
+        Ok(CutWriter {
+            out: BufWriter::new(File::create(dir.join(crate::read::CutIndex::FILE))?),
+            last: None,
+            row: 0,
+        })
+    }
+
+    /// Take the next row's Morton code. Codes must arrive in the row order the segment is written
+    /// in, which is ascending; a repeated code continues the cell it started.
+    pub fn push(&mut self, morton: u32) -> io::Result<()> {
+        if self.last != Some(morton) {
+            self.out.write_all(&self.row.to_le_bytes())?;
+            self.last = Some(morton);
+        }
+        self.row += 1;
+        Ok(())
+    }
+
+    /// Flush the file.
+    pub fn finish(mut self) -> io::Result<()> {
+        self.out.flush()
+    }
+}
+
 /// One row of a segment: what [`SegmentWriter::append`] takes, in row order.
 ///
 /// **The code and its residual are carried, never a coordinate.** Both producers already hold the
@@ -143,6 +191,7 @@ pub struct SegmentRow<'a> {
 /// byte formats fixed little-endian by contracts §2.6 and stay so.
 pub struct SegmentWriter {
     morton: BufWriter<File>,
+    cuts: CutWriter,
     columns_path: PathBuf,
     schema: Arc<Schema>,
     /// One spool per schema column, in schema order: `tessera_id`, `residual`, then the declared
@@ -178,6 +227,7 @@ impl SegmentWriter {
 
         Ok(SegmentWriter {
             morton: BufWriter::new(File::create(dir.join("morton.u32"))?),
+            cuts: CutWriter::create(dir)?,
             columns_path: dir.join("columns.arrow"),
             schema,
             columns,
@@ -204,6 +254,7 @@ impl SegmentWriter {
         self.last_key = Some(key);
 
         self.morton.write_all(&row.morton.to_le_bytes())?;
+        self.cuts.push(row.morton)?;
         self.columns[0].append_u64(row.tessera_id.raw())?;
         self.columns[1].append_u32(row.residual)?;
         for (idx, spool) in self.columns.iter_mut().enumerate().skip(FIXED_COLUMN_COUNT) {
@@ -233,6 +284,7 @@ impl SegmentWriter {
     pub fn finish(self) -> io::Result<usize> {
         let SegmentWriter {
             mut morton,
+            cuts,
             columns_path,
             schema,
             columns,
@@ -242,6 +294,7 @@ impl SegmentWriter {
         } = self;
         morton.flush()?;
         drop(morton);
+        cuts.finish()?;
 
         let mut arrays: Vec<ArrayRef> = Vec::with_capacity(columns.len());
         for (spool, field) in columns.into_iter().zip(schema.fields()) {

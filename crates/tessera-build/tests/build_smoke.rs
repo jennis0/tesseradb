@@ -218,7 +218,7 @@ fn build_produces_a_verifiable_signature_sorted_bundle() {
 
     // ---- (a) manifests present, digests verify (open_bundle is the read protocol) ----------
     let bundle = open_bundle(&out).expect("open_bundle must verify the freshly built bundle");
-    assert_eq!(bundle.manifest.bundle_format, 10);
+    assert_eq!(bundle.manifest.bundle_format, tessera_types::BUNDLE_FORMAT);
     assert_eq!(bundle.manifest.entity_id_high_water, N_ITEMS);
     assert_eq!(bundle.manifest.small_term_threshold, 32);
     assert_eq!(bundle.manifest.partitions.len(), 1);
@@ -277,6 +277,9 @@ fn build_produces_a_verifiable_signature_sorted_bundle() {
         "partitions/default/views/s0/row-entity.u32",
         "partitions/default/views/s0/segments/seg-0/columns.arrow",
         "partitions/default/views/s0/segments/seg-0/morton.u32",
+        // The Morton column's run-length index, which selection walks per cell
+        // (`tessera_store::read::CutIndex`).
+        "partitions/default/views/s0/segments/seg-0/cuts.u32",
     ] {
         assert!(
             bundle.manifest.files.contains_key(rel),
@@ -286,7 +289,7 @@ fn build_produces_a_verifiable_signature_sorted_bundle() {
     }
     assert_eq!(
         bundle.manifest.files.len(),
-        12,
+        13,
         "MANIFEST.json must list every build-written file and nothing else"
     );
 

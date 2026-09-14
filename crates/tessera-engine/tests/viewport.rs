@@ -23,6 +23,7 @@ use tempfile::TempDir;
 
 use sha2::Digest;
 use tessera_build::{build, BuildArgs};
+use tessera_engine::select::{decode_tier, DecodeTier};
 use tessera_engine::viewport::{ViewportRequest, SERIAL_FALLBACK_MAX_ROWS};
 use tessera_engine::{
     default_compute_threads, CancelToken, Engine, EngineConfig, EngineError, Session,
@@ -2365,13 +2366,19 @@ fn warm_row_projection_cache_serves_output_identical_to_cold() {
 /// identical counts and one of the two directions this test claims to guard is undetectable in
 /// principle. The precondition below states that requirement rather than relying on it.
 ///
-/// **What this does and does not own.** It pins the *implemented route*: direct evaluation reads
-/// every visible row in a tile. It does **not** own I7 — that the served set is §7.2's and not a
-/// row-order prefix is established by output-level tests in `tests/selection.rs` and by the Python
-/// oracle, in default builds, at every zoom. This test runs only under `--features bench-timing`.
-/// Design §7.2 admits exact routes visiting fewer than Σvisible rows (within a leaf Morton cell the
-/// `tessera_id` column is sorted, so `C_θ` there is a binary search plus a range cardinality); if
-/// one lands, revise this test alongside the differential oracle rather than deleting it.
+/// **What this does and does not own.** It pins the *implemented route* on the tier this fixture
+/// reaches: a mask too scattered to decode as ranges is scanned, and the scan reads every visible
+/// row in the tile. It does **not** own I7 — that the served set is §7.2's and not a row-order
+/// prefix is established by output-level tests in `tests/selection.rs` and by the Python oracle, in
+/// default builds, at every zoom. This test runs only under `--features bench-timing`.
+///
+/// **The sub-Σvisible route the original comment reserved has landed, and this is the half of the
+/// tiering it still owns.** Within a leaf Morton cell the identity column is sorted, so a dense
+/// tile is evaluated per cell and reads fewer rows than it can see
+/// (`f1_selection_reads_fewer_than_the_visible_set_on_a_dense_tile` is that half). Equality is the
+/// right assertion *here* because this fixture's every-third-item grant puts the tile on the value
+/// tier, and the test asserts that tier before asserting the equality — so a fixture that later
+/// grew denser fails by naming the tier rather than by looking like an early exit.
 #[cfg(feature = "bench-timing")]
 #[test]
 fn f1_selection_visits_exactly_the_visible_set() {
@@ -2417,14 +2424,97 @@ fn f1_selection_visits_exactly_the_visible_set() {
         "the cap governs what is returned"
     );
 
+    // The tier first, because it is what makes the equality below the right assertion. Both
+    // operands are the tile's own — one tile at zoom 0 — and the gate is the engine's, imported
+    // rather than transcribed.
+    assert_eq!(
+        decode_tier(t.sigma_visible, t.rows_in_ranges),
+        DecodeTier::Values,
+        "this fixture must stay on the value tier: {} visible of {} spanned. A denser one is \
+         evaluated per Morton cell and reads fewer rows than it sees, which is correct and would \
+         fail the equality below — assert it there instead \
+         (f1_selection_reads_fewer_than_the_visible_set_on_a_dense_tile).",
+        t.sigma_visible,
+        t.rows_in_ranges
+    );
     assert_eq!(
         t.select_rows_visited, t.sigma_visible,
-        "selection visited {} rows against {} visible. Fewer means an early exit or a prefix \
-         sample, which would evaluate §7.2's threshold clause over part of the tile. More means \
-         iterating the raw row range rather than the mask. If an exact fast path lands (candidate \
-         lists, a cached threshold bitmap), sub-Σvisible visits become legitimate — revise this \
-         with the differential oracle rather than deleting it.",
+        "selection visited {} rows against {} visible on the value tier, which scans. Fewer means \
+         an early exit or a prefix sample, which would evaluate §7.2's threshold clause over part \
+         of the tile. More means iterating the raw row range rather than the mask.",
         t.select_rows_visited, t.sigma_visible
+    );
+}
+
+/// **The per-cell route reads fewer rows than the tile holds, and still serves the same set.**
+///
+/// The canary above owns the scan; this owns the route that replaced it on dense tiles, and the
+/// two together are what the original comment asked for when it said to revise rather than delete.
+/// Asserting only the equality would have left the new route covered by nothing: this fixture's
+/// every-third-item grant keeps that test on the value tier, so it would have gone on passing with
+/// the cell walk entirely unexercised.
+///
+/// **Full coverage, which the canary above cannot use.** At full coverage `sigma_visible ==
+/// rows_in_ranges`, so the "walked the raw row range rather than the mask" direction is undetectable
+/// — that is why the other test is deliberately partial. What full coverage buys here is the other
+/// direction: the whole-range tier, ten rows to each of the fixture's thousand occupied cells, and
+/// a `cap` far below either. A route reading every visible row would visit 10,000; the cell walk
+/// settles almost every cell on its first identity.
+///
+/// **What the inequality catches is the route reverting to the scan, and that is all it claims.**
+/// Mutating the tier gate so a dense part takes the value arm fails it at 10,000 of 10,000
+/// (measured). It does *not* catch a cell walk that is wrong about where cells begin — dropping the
+/// boundaries entirely still reads far fewer than 10,000 — because that is a correctness question
+/// and `tests/selection.rs` owns it against the scan itself, over random masks, tiers, caps and
+/// thresholds. A canary that claimed both would be claiming the second falsely.
+#[cfg(feature = "bench-timing")]
+#[test]
+fn f1_selection_reads_fewer_than_the_visible_set_on_a_dense_tile() {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+
+    let engine = open_engine(
+        &bundle_root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+    );
+    let session = engine.authorise(&full_coverage_credential()).unwrap();
+
+    const K: usize = 5;
+    let out = engine
+        .viewport(
+            &session,
+            ViewportRequest::new("s0", 0, [0.0, 0.0, 1000.0, 1000.0], K),
+        )
+        .unwrap();
+    let t = out.timings;
+
+    assert!(t.enabled, "built with bench-timing, so timings must be real");
+    assert_eq!(t.tiles_nonempty, 1, "zoom 0 is one tile");
+    assert_eq!(
+        decode_tier(t.sigma_visible, t.rows_in_ranges),
+        DecodeTier::FullRange,
+        "full coverage must reach the whole-range tier, or this test is not exercising the cell \
+         walk at all: {} visible of {} spanned",
+        t.sigma_visible,
+        t.rows_in_ranges
+    );
+    assert_eq!(
+        t.points_gathered, K as u64,
+        "the cap governs what is returned"
+    );
+    assert!(
+        t.select_rows_visited < t.sigma_visible,
+        "selection read {} rows of {} visible. The cell route must read fewer: the fixture's \
+         10,000 rows occupy 1,000 cells and a cell is settled from its head wherever neither the \
+         threshold nor the heap can take another of its rows.",
+        t.select_rows_visited,
+        t.sigma_visible
     );
 }
 

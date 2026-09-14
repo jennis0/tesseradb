@@ -359,8 +359,13 @@ fn view_space_mask(map: &Treemap, scratch: &Path) -> EffectiveMask {
     )
 }
 
-/// A segment whose identity column is `rows` random `u64`s. Selection never reads the Morton
-/// column, so it is one code; the loader wants a non-empty ascending file, and that is one.
+/// A segment whose identity column is `rows` random `u64`s, each row in a leaf cell of its own.
+///
+/// **One row a cell, because the identities are random.** Row order is `(morton, tessera_id)`, so
+/// identities ascend within a cell and selection reads them expecting that; a segment claiming one
+/// cell over unsorted identities would be a segment no producer can write. One row a cell is the
+/// shape that asks nothing of the identities, and it is the shape that makes selection read every
+/// visible row — which is the cost this bench is measuring.
 fn synthetic_segment(rows: usize, seed: u64, scratch: &Path) -> SegmentData {
     let mut rng = SplitMix(seed);
     let ids: Vec<u64> = (0..rows).map(|_| rng.next()).collect();
@@ -373,12 +378,21 @@ fn synthetic_segment(rows: usize, seed: u64, scratch: &Path) -> SegmentData {
         rows,
     )
     .expect("write synthetic columns");
+    let mut codes: Vec<u8> = Vec::with_capacity(rows * 4);
+    let mut starts: Vec<u8> = Vec::with_capacity(rows * 4);
+    for row in 0..rows as u32 {
+        codes.extend_from_slice(&row.to_le_bytes());
+        starts.extend_from_slice(&row.to_le_bytes());
+    }
     let morton = scratch.join("morton.u32");
-    std::fs::write(&morton, 0u32.to_le_bytes()).expect("write morton stub");
+    std::fs::write(&morton, &codes).expect("write morton codes");
+    let cuts = scratch.join(tessera_store::read::CutIndex::FILE);
+    std::fs::write(&cuts, &starts).expect("write cell starts");
     SegmentData {
         seg_id: "epoch-shard-synthetic".into(),
         row_count: rows as u32,
-        morton: MortonSlice::load(&morton).expect("load morton stub"),
+        morton: MortonSlice::load(&morton).expect("load morton codes"),
+        cuts: tessera_store::read::CutIndex::load(&cuts, rows as u32).expect("load cell starts"),
         columns: ColumnsRef::load(&columns).expect("load synthetic columns"),
     }
 }

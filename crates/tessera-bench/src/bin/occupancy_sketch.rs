@@ -264,6 +264,11 @@ fn build_layout(codes: &[u32], parts: usize, split: Split) -> SegmentLayout {
             seg_id: format!("bench-{g}"),
             row_count: items.len() as u32,
             morton: MortonSlice::load(&temp.path().join("morton.u32")).expect("morton"),
+            cuts: tessera_store::read::CutIndex::load(
+                &temp.path().join(tessera_store::read::CutIndex::FILE),
+                items.len() as u32,
+            )
+            .expect("cuts"),
             columns: ColumnsRef::load(&temp.path().join("columns.arrow")).expect("columns"),
         };
         bases.push(base);

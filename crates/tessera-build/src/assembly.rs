@@ -50,7 +50,7 @@ use rayon::slice::ParallelSliceMut;
 use tessera_spatial::split32;
 use tessera_spatial::tiler::ScalarType;
 use tessera_store::columns::{ColumnsFile, ColumnsPlan};
-use tessera_store::write::{PagePlan, PermutationWriter};
+use tessera_store::write::{CutWriter, PagePlan, PermutationWriter};
 use tessera_types::{EntityId, IdentityKey};
 
 use crate::column::EntityColumn;
@@ -405,6 +405,8 @@ pub(crate) struct Assembled {
     pub(crate) rows_in_view: u32,
     pub(crate) occupancy: Occupancy,
     pub(crate) morton_path: PathBuf,
+    /// The Morton column's run-length index — `tessera_store::read::CutIndex`.
+    pub(crate) cuts_path: PathBuf,
     pub(crate) row_entity_path: PathBuf,
     pub(crate) columns_path: PathBuf,
     pub(crate) permutation_path: PathBuf,
@@ -590,6 +592,11 @@ pub(crate) fn write_segment(
     let mut morton_out = std::io::BufWriter::new(
         std::fs::File::create(&morton_path).map_err(|e| BuildError::io(&morton_path, e))?,
     );
+    // The run-length index of the column being written beside it, from the writer the flush and
+    // the merge use — see `tessera_store::write::CutWriter`.
+    let cuts_path = job.segment_dir.join(tessera_store::read::CutIndex::FILE);
+    let mut cuts_out =
+        CutWriter::create(job.segment_dir).map_err(|e| BuildError::io(&cuts_path, e))?;
     let mut row_entity_out = std::io::BufWriter::new(
         std::fs::File::create(&row_entity_path)
             .map_err(|e| BuildError::io(&row_entity_path, e))?,
@@ -646,6 +653,9 @@ pub(crate) fn write_segment(
             let mut residuals: Vec<u8> = Vec::with_capacity(chunk.len() * 4);
             for record in chunk {
                 occupancy.push(record.morton);
+                cuts_out
+                    .push(record.morton)
+                    .map_err(|e| BuildError::io(&cuts_path, e))?;
                 codes.extend_from_slice(&record.morton.to_le_bytes());
                 entities.extend_from_slice(&record.entity.to_le_bytes());
                 identities.extend_from_slice(&record.identity.to_le_bytes());
@@ -680,6 +690,9 @@ pub(crate) fn write_segment(
         .map_err(|e| BuildError::io(&row_entity_path, e))?;
     drop(morton_out);
     drop(row_entity_out);
+    cuts_out
+        .finish()
+        .map_err(|e| BuildError::io(&cuts_path, e))?;
     debug_assert_eq!(row, rows_in_view as u64);
     let mut pairs = pairs.finish()?;
 
@@ -781,6 +794,7 @@ pub(crate) fn write_segment(
         rows_in_view,
         occupancy: occupancy.finish(),
         morton_path,
+        cuts_path,
         row_entity_path,
         columns_path,
         permutation_path,

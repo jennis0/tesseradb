@@ -94,6 +94,13 @@ pub fn build_bundle(root: &Path, n: u64) {
             format!("partitions/{PARTITION}/views/{VIEW}/segments/seg0/morton.u32"),
             seg_dir.join("morton.u32"),
         ),
+        (
+            format!(
+                "partitions/{PARTITION}/views/{VIEW}/segments/seg0/{}",
+                tessera_store::read::CutIndex::FILE
+            ),
+            seg_dir.join(tessera_store::read::CutIndex::FILE),
+        ),
     ] {
         files.insert(rel, file_digest(&path));
     }
@@ -259,6 +266,11 @@ pub fn flush_segment(
         seg_id,
         row_count: out.segment.row_count,
         morton: MortonSlice::load(&seg_dir.join("morton.u32")).expect("morton"),
+        cuts: tessera_store::read::CutIndex::load(
+            &seg_dir.join(tessera_store::read::CutIndex::FILE),
+            out.segment.row_count,
+        )
+        .expect("cuts"),
         columns: ColumnsRef::load(&seg_dir.join("columns.arrow")).expect("columns"),
     };
     (segment, out.extent)

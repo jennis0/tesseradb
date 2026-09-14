@@ -33,6 +33,8 @@ import pytest
 from oracle import mask as mask_mod
 from oracle import morton
 from oracle import viewport as vp
+import numpy as np
+
 from oracle.bundle import Bundle
 
 from .wire import decode_viewport
@@ -100,6 +102,33 @@ def _random_bbox(rng: random.Random) -> tuple[float, float, float, float]:
     y0 = rng.uniform(0, GRID_MAX)
     y1 = rng.uniform(0, GRID_MAX)
     return (min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1))
+
+
+def test_stored_cut_index_matches_the_morton_column_byte_for_byte(oracle_bundle: Bundle):
+    """(a2) `cuts.u32` against the oracle's own run-length encoding of `morton.u32`.
+
+    The index is a pure function of the column beside it — cell *i* begins at the row where the
+    code last changed — so a second reader derives it rather than reading it back, the way it
+    derives position codes rather than trusting `stored_code`. What that catches is a producer
+    that wrote the index from something other than the column it indexes: the engine maps both
+    and selection walks the index, so the two disagreeing puts a cell boundary where no cell
+    begins and ends a `C_theta` prefix early.
+
+    Exact and whole-column, not sampled: the file is 4 bytes an occupied cell, so the comparison
+    costs what the column costs to walk once.
+    """
+    seg = oracle_bundle.segment(VIEW)
+    assert seg.cuts is not None, "a bundle at this format carries cuts.u32"
+    expected = seg.cut_starts()
+    assert len(seg.cuts) == len(expected), (
+        f"cuts.u32 names {len(seg.cuts)} cells; the Morton column changes "
+        f"{len(expected)} times"
+    )
+    disagree = np.flatnonzero(np.asarray(seg.cuts) != expected)
+    assert disagree.size == 0, (
+        f"cell {int(disagree[0])}: cuts.u32 opens it at row {int(seg.cuts[disagree[0]])}, the "
+        f"Morton column at row {int(expected[disagree[0]])}"
+    )
 
 
 def test_stored_position_matches_the_source_byte_for_byte(oracle_bundle: Bundle):

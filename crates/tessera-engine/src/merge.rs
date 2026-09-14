@@ -248,6 +248,11 @@ pub(crate) fn execute(plan: MergePlan, ctx: MergeContext) -> Result<CompletedMer
         row_count: output.segment.row_count,
         morton: tessera_store::read::MortonSlice::load(&seg_dir.join("morton.u32"))
             .map_err(|e| MergeFailed(format!("morton: {e}")))?,
+        cuts: tessera_store::read::CutIndex::load(
+            &seg_dir.join(tessera_store::read::CutIndex::FILE),
+            output.segment.row_count,
+        )
+        .map_err(|e| MergeFailed(format!("cuts: {e}")))?,
         columns: tessera_store::read::ColumnsRef::load(&seg_dir.join("columns.arrow"))
             .map_err(|e| MergeFailed(format!("columns: {e}")))?,
     };
@@ -341,6 +346,7 @@ pub(crate) fn rebase_into(
         );
         for name in [
             "morton.u32",
+            tessera_store::read::CutIndex::FILE,
             "columns.arrow",
             "external-ids.arrow",
             "ext-locator.u32",

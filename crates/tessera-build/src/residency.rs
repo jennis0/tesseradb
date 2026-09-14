@@ -1859,9 +1859,15 @@ pub(crate) fn disk(
             Phases::BLOB.onwards(),
         );
     }
-    // Per view: `morton.u32`, `permutation.bin`, `row-entity.u32` and the segment's `columns.arrow`
-    // — the residual, the `tessera_id` and one slot per render column, each with the Arrow validity
-    // bitmap the column carries beside it at a bit a row.
+    // Per view: `morton.u32`, `cuts.u32`, `permutation.bin`, `row-entity.u32` and the segment's
+    // `columns.arrow` — the residual, the `tessera_id` and one slot per render column, each with
+    // the Arrow validity bitmap the column carries beside it at a bit a row.
+    //
+    // **`cuts.u32` is charged at its ceiling of 4 B a row**, which is one occupied leaf cell per
+    // row. A corpus with several rows to a cell pays a fraction of that — 0.54 B a row over the
+    // 25.8M-row GBIF corpus — and the pre-flight has no way to know the cell count before the
+    // geometry is read, so the model takes the bound rather than an estimate it would have to
+    // apologise for.
     let render: u64 = args
         .schema
         .attributes
@@ -1872,7 +1878,7 @@ pub(crate) fn disk(
     let arrow_columns = 2 + args.schema.attributes.iter().filter(|a| a.render).count() as u64;
     push(
         format!("each view's segment, permutation and row→entity files, over {views} view(s)"),
-        ((4 + 4 + 4 + 4 + 8 + render) * n + arrow_columns * n.div_ceil(8)) * views,
+        ((4 + 4 + 4 + 4 + 4 + 8 + render) * n + arrow_columns * n.div_ceil(8)) * views,
         Phases::ASSEMBLE,
     );
     push(

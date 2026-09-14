@@ -420,6 +420,7 @@ pub fn execute_merge(
     let mut files = BTreeMap::new();
     for name in [
         "morton.u32",
+        crate::read::CutIndex::FILE,
         "columns.arrow",
         "external-ids.arrow",
         "ext-locator.u32",

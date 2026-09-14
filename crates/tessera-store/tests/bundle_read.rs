@@ -109,6 +109,13 @@ fn build_bundle(root: &Path, n: u64) -> (Vec<TilerItem>, Vec<u32>) {
         "partitions/default/views/main/segments/seg0/morton.u32".to_string(),
         file_digest(&seg_dir.join("morton.u32")),
     );
+    segments_files.insert(
+        format!(
+            "partitions/default/views/main/segments/seg0/{}",
+            tessera_store::read::CutIndex::FILE
+        ),
+        file_digest(&seg_dir.join(tessera_store::read::CutIndex::FILE)),
+    );
 
     let segments_manifest = SegmentsManifest {
         watermark: n,
@@ -157,7 +164,7 @@ fn build_bundle(root: &Path, n: u64) -> (Vec<TilerItem>, Vec<u32>) {
     fs::write(partition_dir.join("SEGMENTS-0.json"), &segments_bytes).expect("write SEGMENTS-0");
 
     let manifest = Manifest {
-        bundle_format: 10,
+        bundle_format: tessera_types::BUNDLE_FORMAT,
         created_at: "2026-07-28T00:00:00Z".to_string(),
         data_plugin_hash: tessera_plugin::Passthrough::new().data_plugin_hash(),
         declared_bounds: serde_json::json!({}),
@@ -217,7 +224,7 @@ fn open_bundle_loads_segments_and_columns_round_trip() {
     let (items, codes) = build_bundle(dir.path(), 200);
 
     let bundle = open_bundle(dir.path()).expect("open_bundle");
-    assert_eq!(bundle.manifest.bundle_format, 10);
+    assert_eq!(bundle.manifest.bundle_format, tessera_types::BUNDLE_FORMAT);
 
     let partition = bundle.partitions.get("default").expect("default partition");
     assert_eq!(partition.segments_n, 0);
@@ -687,16 +694,14 @@ fn a_manifest_with_no_unhonourable_state_opens_at_the_highest_n() {
     );
 }
 
-/// **A bundle at the previous number refuses at open on the number alone** (`bundle_format` 10,
-/// `records-and-search.md` §3).
+/// **A bundle at the previous number refuses at open on the number alone** (`bundle_format` 11,
+/// contracts §2.6).
 ///
-/// Format 9's record blob delimited a row by a rank-indexed offset in the block directory, where
-/// 10 delimits it by a length the row carries and gives the directory a row count a block in that
-/// column's place. A bundle at 9 whose `MANIFEST.json` parsed cleanly would therefore have a
-/// block's row offsets read as row counts and the first two bytes of every row's first field tag
-/// read as its length — the misread the number exists to stop. The manifest here is exactly the
-/// one the writer at 10 produced with the number turned back, so nothing but the number can be
-/// what refuses.
+/// A segment at 11 holds `cuts.u32` beside `morton.u32`, and a segment written at 10 does not.
+/// The open names every segment file it maps, so such a bundle would refuse there in any case —
+/// but it would refuse as a missing file, which is what a damaged bundle looks like. The number is
+/// what says it is a stale one instead. The manifest here is exactly the one the writer at 11
+/// produced with the number turned back, so nothing but the number can be what refuses.
 #[test]
 fn a_bundle_at_the_previous_number_is_refused_on_the_number_alone() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -706,7 +711,7 @@ fn a_bundle_at_the_previous_number_is_refused_on_the_number_alone() {
     let mut value: serde_json::Value =
         serde_json::from_slice(&fs::read(&manifest_path).expect("read MANIFEST.json"))
             .expect("parse MANIFEST.json");
-    value["bundle_format"] = serde_json::json!(9);
+    value["bundle_format"] = serde_json::json!(tessera_types::BUNDLE_FORMAT - 1);
     let bytes = serde_json::to_vec_pretty(&value).expect("serialise");
     fs::write(&manifest_path, &bytes).expect("rewrite MANIFEST.json");
     let current = CurrentPointer {
@@ -722,7 +727,10 @@ fn a_bundle_at_the_previous_number_is_refused_on_the_number_alone() {
     let err = open_bundle(dir.path()).expect_err("a bundle at another format must not open");
     match err {
         StoreError::UnsupportedBundleFormat { found, supported } => {
-            assert_eq!((found, supported), (9, 10));
+            assert_eq!(
+                (found, supported),
+                (tessera_types::BUNDLE_FORMAT - 1, tessera_types::BUNDLE_FORMAT)
+            );
         }
         other => panic!("refused for the wrong reason: {other}"),
     }

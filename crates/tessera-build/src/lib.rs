@@ -1661,6 +1661,7 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
         .map_err(|e| BuildError::io(&segment_dir, e))?;
     fsync_file(&segment_dir.join("columns.arrow"))?;
     fsync_file(&segment_dir.join("morton.u32"))?;
+    fsync_file(&segment_dir.join(tessera_store::read::CutIndex::FILE))?;
 
     let permutation_path = view_dir.join("permutation.bin");
     let row_order: Vec<EntityId> = entity_ids;
@@ -1804,6 +1805,7 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
         row_entity_path,
         segment_dir.join("columns.arrow"),
         segment_dir.join("morton.u32"),
+        segment_dir.join(tessera_store::read::CutIndex::FILE),
     ]);
     other_paths.extend(presence_paths);
     other_paths.extend(filter_paths);

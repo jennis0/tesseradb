@@ -27,7 +27,7 @@ use tessera_engine::select::{
 };
 use tessera_lifecycle::{ChangeOp, IngestBuffer, Overlay};
 use tessera_spatial::{fixed32, morton_of, tiler::sort_batch, Bounds, Tile, TilerItem};
-use tessera_store::read::{ColumnsRef, MortonSlice, SegmentData};
+use tessera_store::read::{ColumnsRef, CutIndex, MortonSlice, SegmentData};
 use tessera_store::write::{write_permutation, write_segment};
 use tessera_store::{tile_ranges, Permutation, RowSpace};
 use tessera_types::{EntityId, TermId, TesseraId};
@@ -81,6 +81,11 @@ fn segment_of(points: &[(f32, f32, u64)]) -> Segment {
         seg_id: "seg0".to_string(),
         row_count: items.len() as u32,
         morton: MortonSlice::load(&temp.path().join("morton.u32")).unwrap(),
+        cuts: CutIndex::load(
+            &temp.path().join(CutIndex::FILE),
+            items.len() as u32,
+        )
+        .unwrap(),
         columns: ColumnsRef::load(&temp.path().join("columns.arrow")).unwrap(),
     };
     Segment {
@@ -1046,13 +1051,28 @@ fn tiered_decode_matches_the_per_value_path_on_all_tiers_routes_and_branches() {
                                  {diffs_present} k_min={k_min} cap={cap} threshold={threshold:?} \
                                  range={range:?} visible={vis}"
                             );
-                            // R3: the counter, un-gated. Every tier counts the clamped rows it
-                            // actually reads, so both sides must equal the visible cardinality.
-                            assert_eq!(
-                                got.rows_visited, want_visited,
-                                "rows_visited diverged at diffs_present={diffs_present} \
-                                 cap={cap} threshold={threshold:?} range={range:?}"
-                            );
+                            // R3: the counter, un-gated. The value tier reads every visible row,
+                            // so it must equal the visible cardinality; the two dense tiers
+                            // evaluate per Morton cell and stop reading a cell once neither the
+                            // count nor the heap can take another of its rows, so they read at
+                            // most as many. Never more — reading past the mask is what the
+                            // counter's upper direction watches for.
+                            let this_tier = decode_tier(vis, u64::from(range.end - range.start));
+                            if this_tier == DecodeTier::Values {
+                                assert_eq!(
+                                    got.rows_visited, want_visited,
+                                    "rows_visited diverged at diffs_present={diffs_present} \
+                                     cap={cap} threshold={threshold:?} range={range:?}"
+                                );
+                            } else {
+                                assert!(
+                                    got.rows_visited <= want_visited,
+                                    "rows_visited {} exceeds the visible cardinality \
+                                     {want_visited} at diffs_present={diffs_present} \
+                                     cap={cap} threshold={threshold:?} range={range:?}",
+                                    got.rows_visited
+                                );
+                            }
                             assert_eq!(
                                 want_visited, vis,
                                 "the per-value oracle itself must read exactly the visible \
@@ -1441,4 +1461,409 @@ fn a_clustered_fixture_grows_well_short_of_four_per_level() {
     );
     // Depth 0 is one tile whatever the data does, which is where the two anchors coincide.
     assert_eq!(counts[0], 1);
+}
+
+// ---------------------------------------------------------------------------------------------
+// The per-cell route: equivalence with the scan
+// ---------------------------------------------------------------------------------------------
+
+/// Points on a coarse lattice, so that many rows share a leaf Morton cell.
+///
+/// The random fixtures above put 4,096 points over a 2¹⁶ × 2¹⁶ grid, where almost every point has
+/// a cell to itself and the per-cell route degenerates to the scan it is being compared against.
+/// A lattice of `positions` places `n / positions` rows in each occupied cell, which is what makes
+/// the prefix arguments — a cell's identities ascending, the count and the heap each ending inside
+/// it — reachable at all.
+fn lattice_points(n: usize, positions: usize, seed: u64) -> Vec<(f32, f32, u64)> {
+    let mut rng = StdRng::seed_from_u64(seed);
+    let side = (positions as f32).sqrt().ceil() as usize;
+    (0..n)
+        .map(|i| {
+            let cell = i % positions;
+            (
+                (cell % side) as f32 * 13.0,
+                (cell / side) as f32 * 13.0,
+                rng.gen(),
+            )
+        })
+        .collect()
+}
+
+/// **The per-cell route returns exactly what the scan returns**, over cells holding many rows,
+/// every decode tier, every internal branch, four caps and seven thresholds.
+///
+/// The reference is [`per_value_selection`] — the row-by-row scan, kept as a transcription so that
+/// the thing being compared against is the mechanism the definition was first implemented as, not
+/// a second derivation of the definition. What the route changes is which rows it *reads*
+/// (`rows_visited`, asserted never to exceed the scan's and asserted below to be genuinely fewer
+/// somewhere); what it must not change is a single served row.
+///
+/// The thresholds include three taken from the fixture's own identity distribution, because the
+/// interesting case for the count is a cut that falls *inside* a cell: a cut below every identity
+/// and a cut above every identity both settle a cell on its first row.
+#[test]
+fn per_cell_selection_returns_what_the_scan_returns() {
+    let mut rng = StdRng::seed_from_u64(0xCE11_0001);
+    let points = lattice_points(3_000, 150, 0xCE11_0002);
+    let seg = segment_of(&points);
+    let n = seg.row_count();
+
+    // Cuts inside the identity distribution: the count ends part-way through a cell there.
+    let mut all_ids: Vec<u64> = (0..n).map(|row| seg.id_at(row)).collect();
+    all_ids.sort_unstable();
+    let thresholds = [
+        Threshold::Saturated,
+        Threshold::Cut(1),
+        Threshold::Cut(u64::MAX),
+        Threshold::Cut(1u64 << 62),
+        Threshold::Cut(all_ids[all_ids.len() / 10]),
+        Threshold::Cut(all_ids[all_ids.len() / 2]),
+        Threshold::Cut(all_ids[all_ids.len() * 9 / 10]),
+    ];
+
+    // Four visibility densities, so the tier gate sends the same corpus down all three tiers, and
+    // an overlay arm so the composed-bitmap decode route is exercised beside the in-place one.
+    let mut fired = [0u32; 3];
+    let mut read_fewer = 0u32;
+    for (density_pct, diffs_present) in [
+        (100u32, false),
+        (97, false),
+        (97, true),
+        (60, false),
+        (8, false),
+        (8, true),
+    ] {
+        let visible_rows: Vec<u32> = (0..n)
+            .filter(|_| rng.gen_range(0..100u32) < density_pct)
+            .collect();
+        if visible_rows.is_empty() {
+            continue;
+        }
+        let (overlay, buffer) = (Overlay::default(), IngestBuffer::default());
+        let (_t, mask) = if diffs_present {
+            // A suppression of one row is enough to move the mask onto the composed-bitmap route.
+            let mut overlay = Overlay::default();
+            overlay.apply(
+                EntityId::new(u64::from(visible_rows[0])),
+                ChangeOp::Suppress,
+            );
+            mask_over_with(&visible_rows, n, &overlay, &buffer)
+        } else {
+            mask_over_with(&visible_rows, n, &overlay, &buffer)
+        };
+
+        for &threshold in &thresholds {
+            for cap in [0usize, 1, 30, 5_000] {
+                for k_min in [1usize, 2] {
+                    let p = params(k_min, cap, threshold);
+                    for i in 0..24 {
+                        // Whole segment, then cell-aligned tiles, then arbitrary ranges: the
+                        // aligned ones are what a viewport asks for, the arbitrary ones are what
+                        // proves the walk does not depend on the alignment.
+                        let range = match i % 3 {
+                            0 => 0..n,
+                            1 => {
+                                let depth = 6 + (i % 4) as u8;
+                                let row = rng.gen_range(0..n);
+                                tile_ranges(&seg.data, &tile_of_row(&seg, row, depth))
+                            }
+                            _ => {
+                                let a = rng.gen_range(0..n);
+                                let b = rng.gen_range(0..n);
+                                a.min(b)..a.max(b) + 1
+                            }
+                        };
+                        if range.start >= range.end {
+                            continue;
+                        }
+                        let vis = mask.count_range(range.clone());
+                        if vis == 0 {
+                            continue;
+                        }
+                        let got = Selection::of(
+                            &mask,
+                            &SelectionParts::new(&[SelectionPart::base(
+                                &seg.data,
+                                range.clone(),
+                                vis,
+                            )]),
+                            &p,
+                            vis,
+                        );
+                        let (want_rows, want_visited) =
+                            per_value_selection(&seg, &mask, range.clone(), &p, vis);
+                        assert_eq!(
+                            got.rows, want_rows,
+                            "the per-cell route diverged from the scan: diffs={diffs_present} \
+                             density={density_pct} k_min={k_min} cap={cap} \
+                             threshold={threshold:?} range={range:?} visible={vis}"
+                        );
+                        assert!(
+                            got.rows_visited <= want_visited,
+                            "the per-cell route read {} rows where the scan read {want_visited}",
+                            got.rows_visited
+                        );
+                        if got.rows_visited < want_visited {
+                            read_fewer += 1;
+                        }
+                        let tier = match decode_tier(vis, u64::from(range.end - range.start)) {
+                            DecodeTier::FullRange => 0,
+                            DecodeTier::Runs => 1,
+                            DecodeTier::Values => 2,
+                        };
+                        fired[tier] += 1;
+                    }
+                }
+            }
+        }
+    }
+    for (tier, &count) in fired.iter().enumerate() {
+        assert!(count > 0, "tier {tier} was never reached, so it was not tested");
+    }
+    assert!(
+        read_fewer > 0,
+        "the per-cell route never read fewer rows than the scan, so the fixture tested nothing \
+         the scan does not already do"
+    );
+}
+
+/// [`per_value_selection`] over a tile that draws rows from more than one segment: the same
+/// retired per-value path, with the part decomposition the union requires.
+///
+/// Kept separate from the single-part form rather than generalising it, because the single-part
+/// form is the transcription the older tests are pinned against and a shared helper would let a
+/// change to this one move them. The two share the definition and nothing else.
+///
+/// `parts` is `(segment, segment-local range, row_base)`, ascending in `row_base`. The visible
+/// rows of the union are each part's own, concatenated in part order, which is ascending row
+/// order; identities are read through the part that owns the row.
+fn per_value_selection_parts(
+    parts: &[(&Segment, std::ops::Range<u32>, u32)],
+    mask: &EffectiveMask,
+    p: &SelectParams,
+    visible: u64,
+) -> (Vec<u32>, u64) {
+    use std::collections::BinaryHeap;
+
+    if p.cap == 0 {
+        return (Vec::new(), 0);
+    }
+    let id_at = |view_row: u32| -> u64 {
+        for (seg, range, base) in parts {
+            if view_row >= base + range.start && view_row < base + range.end {
+                return seg.id_at(view_row - base);
+            }
+        }
+        panic!("view row {view_row} lies in no part");
+    };
+    let mut visible_rows: Vec<u32> = Vec::new();
+    for (_, range, base) in parts {
+        if range.start >= range.end {
+            continue;
+        }
+        visible_rows.extend(mask.rows_in_range(base + range.start..base + range.end).iter());
+    }
+
+    let floor = p.k_min.min(p.cap);
+    let serves_all =
+        visible <= floor as u64 || (p.threshold.is_saturated() && visible <= p.cap as u64);
+
+    let mut rows_visited: u64 = 0;
+    let rows: Vec<u32> = if serves_all {
+        let mut rows = visible_rows;
+        rows_visited = rows.len() as u64;
+        rows.sort_unstable_by_key(|&row| id_at(row));
+        rows
+    } else {
+        let mut c_theta: u64 = 0;
+        let mut heap: BinaryHeap<(u64, u32)> = BinaryHeap::new();
+        for row in visible_rows {
+            rows_visited += 1;
+            let id = id_at(row);
+            if p.threshold.admits(id) {
+                c_theta += 1;
+            }
+            if heap.len() == p.cap {
+                if id >= heap.peek().expect("non-empty at len == cap").0 {
+                    continue;
+                }
+                heap.pop();
+            }
+            heap.push((id, row));
+        }
+        let m = p
+            .cap
+            .min(floor.max(usize::try_from(c_theta).unwrap_or(usize::MAX)))
+            .min(usize::try_from(visible).unwrap_or(usize::MAX));
+        let mut kept: Vec<(u64, u32)> = heap.into_vec();
+        kept.sort_unstable();
+        kept.truncate(m);
+        kept.into_iter().map(|(_, row)| row).collect()
+    };
+    (rows, rows_visited)
+}
+
+/// **The cell walk resolves `row_base` correctly, over a tile spanning two segments.**
+///
+/// Everything the single-segment sweep covers is covered there with `row_base = 0`, where the
+/// walk's view-space and segment-local arithmetic coincide and a confusion between them is
+/// invisible. A second part at `row_base = n_a` separates them: the boundaries come out of the
+/// second segment's own index and are read segment-locally, the mask and the runs are view-space,
+/// and the identity slice is indexed by the difference. Getting that wrong reads another segment's
+/// identities under this one's rows.
+///
+/// **Three shapes in one tile**, because the union is where `cap`, the floor and `C_θ` are single
+/// quantities: a part whose range starts and ends inside a cell, a second part at a `row_base`
+/// above it, and an empty part, which the walk must skip rather than treat as a cell. The two
+/// live parts are given different densities so the tier is chosen per part — one may scan while
+/// the other walks cells, which is the arrangement `Selection::of` documents and the single-part
+/// sweep cannot produce.
+#[test]
+fn per_cell_selection_spans_segments_at_a_row_base() {
+    let mut rng = StdRng::seed_from_u64(0xCE11_0101);
+    let seg_a = segment_of(&lattice_points(1_200, 60, 0xCE11_0102));
+    let seg_b = segment_of(&lattice_points(900, 45, 0xCE11_0103));
+    let (n_a, n_b) = (seg_a.row_count(), seg_b.row_count());
+    let total = n_a + n_b;
+
+    let mut all_ids: Vec<u64> = (0..n_a)
+        .map(|row| seg_a.id_at(row))
+        .chain((0..n_b).map(|row| seg_b.id_at(row)))
+        .collect();
+    all_ids.sort_unstable();
+    let thresholds = [
+        Threshold::Saturated,
+        Threshold::Cut(1),
+        Threshold::Cut(u64::MAX),
+        Threshold::Cut(all_ids[all_ids.len() / 10]),
+        Threshold::Cut(all_ids[all_ids.len() / 2]),
+    ];
+
+    // The cell starts of each segment, so the fixture can prove it actually put a range boundary
+    // inside a cell rather than assuming a random one did.
+    let starts_a: Vec<u32> = seg_a.data.cuts.starts().to_vec();
+    let starts_b: Vec<u32> = seg_b.data.cuts.starts().to_vec();
+    let mut mid_cell_edges = 0u32;
+    let mut differing_tiers = 0u32;
+    let mut read_fewer = 0u32;
+
+    for (density_a, density_b, diffs_present) in [
+        (100u32, 100u32, false),
+        (100, 8, false),
+        (97, 40, false),
+        (97, 97, true),
+        (8, 100, false),
+        (55, 8, true),
+    ] {
+        let visible_rows: Vec<u32> = (0..total)
+            .filter(|&row| {
+                let d = if row < n_a { density_a } else { density_b };
+                rng.gen_range(0..100u32) < d
+            })
+            .collect();
+        if visible_rows.is_empty() {
+            continue;
+        }
+        let buffer = IngestBuffer::default();
+        let mut overlay = Overlay::default();
+        if diffs_present {
+            overlay.apply(
+                EntityId::new(u64::from(visible_rows[0])),
+                ChangeOp::Suppress,
+            );
+        }
+        let (_t, mask) = mask_over_with(&visible_rows, total, &overlay, &buffer);
+
+        for &threshold in &thresholds {
+            for cap in [0usize, 1, 30, 5_000] {
+                for k_min in [1usize, 2] {
+                    let p = params(k_min, cap, threshold);
+                    for _ in 0..12 {
+                        let a0 = rng.gen_range(0..n_a);
+                        let a1 = rng.gen_range(0..n_a);
+                        let b0 = rng.gen_range(0..n_b);
+                        let b1 = rng.gen_range(0..n_b);
+                        let range_a = a0.min(a1)..a0.max(a1) + 1;
+                        let range_b = b0.min(b1)..b0.max(b1) + 1;
+                        // The empty one: a well-formed range holding nothing, which every loop
+                        // must skip rather than open a cell for.
+                        let empty = n_a.min(7)..n_a.min(7);
+
+                        if !starts_a.contains(&range_a.start) || !starts_b.contains(&range_b.start)
+                        {
+                            mid_cell_edges += 1;
+                        }
+
+                        let vis_a = mask.count_range(range_a.clone());
+                        let vis_b =
+                            mask.count_range(n_a + range_b.start..n_a + range_b.end);
+                        let visible = vis_a + vis_b;
+                        if visible == 0 {
+                            continue;
+                        }
+                        let parts = [
+                            SelectionPart::base(&seg_a.data, range_a.clone(), vis_a),
+                            SelectionPart {
+                                segment: &seg_a.data,
+                                range: empty.clone(),
+                                row_base: 0,
+                                visible: 0,
+                            },
+                            SelectionPart {
+                                segment: &seg_b.data,
+                                range: range_b.clone(),
+                                row_base: n_a,
+                                visible: vis_b,
+                            },
+                        ];
+                        let got = Selection::of(&mask, &SelectionParts::new(&parts), &p, visible);
+                        let (want_rows, want_visited) = per_value_selection_parts(
+                            &[
+                                (&seg_a, range_a.clone(), 0),
+                                (&seg_b, range_b.clone(), n_a),
+                            ],
+                            &mask,
+                            &p,
+                            visible,
+                        );
+                        assert_eq!(
+                            got.rows, want_rows,
+                            "the per-cell route diverged from the scan across segments: \
+                             diffs={diffs_present} k_min={k_min} cap={cap} \
+                             threshold={threshold:?} a={range_a:?} b={range_b:?} \
+                             visible={visible}"
+                        );
+                        assert!(
+                            got.rows_visited <= want_visited,
+                            "the per-cell route read {} rows where the scan read {want_visited}",
+                            got.rows_visited
+                        );
+                        if got.rows_visited < want_visited {
+                            read_fewer += 1;
+                        }
+                        let tier_a =
+                            decode_tier(vis_a, u64::from(range_a.end - range_a.start));
+                        let tier_b =
+                            decode_tier(vis_b, u64::from(range_b.end - range_b.start));
+                        if tier_a != tier_b {
+                            differing_tiers += 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    assert!(
+        mid_cell_edges > 0,
+        "no range began inside a cell, so the walk's unaligned arm was never taken"
+    );
+    assert!(
+        differing_tiers > 0,
+        "both parts always took the same tier, so the per-part tier choice was not exercised \
+         across a row_base"
+    );
+    assert!(
+        read_fewer > 0,
+        "the per-cell route never read fewer rows than the scan across segments"
+    );
 }

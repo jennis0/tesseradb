@@ -101,6 +101,7 @@ fn build_bundle(root: &Path) {
         "partitions/default/views/main/permutation.bin",
         "partitions/default/views/main/segments/seg0/columns.arrow",
         "partitions/default/views/main/segments/seg0/morton.u32",
+        "partitions/default/views/main/segments/seg0/cuts.u32",
     ] {
         segments_files.insert(rel.to_string(), file_digest(&prefix_dir.join(rel)));
     }
@@ -152,7 +153,7 @@ fn build_bundle(root: &Path) {
     fs::write(partition_dir.join("SEGMENTS-0.json"), &segments_bytes).expect("write SEGMENTS-0");
 
     let manifest = Manifest {
-        bundle_format: 10,
+        bundle_format: tessera_types::BUNDLE_FORMAT,
         created_at: "2026-07-31T00:00:00Z".to_string(),
         data_plugin_hash: tessera_plugin::Passthrough::new().data_plugin_hash(),
         declared_bounds: serde_json::json!({}),

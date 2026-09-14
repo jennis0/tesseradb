@@ -150,7 +150,7 @@ fn validate_merge_size_relation(config: &Config, engine: &Engine) -> Result<(), 
         .values()
         .flat_map(|p| p.views.values())
         .flat_map(|s| s.segments.iter())
-        .map(|s| s.columns.byte_len() + s.morton.byte_len())
+        .map(|s| s.columns.byte_len() + s.morton.byte_len() + s.cuts.byte_len())
         .max()
         .unwrap_or(0);
     // Only an **explicitly set** value is checked. An unset one is derived from this same figure

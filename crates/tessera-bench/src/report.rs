@@ -74,6 +74,11 @@ pub struct Work {
     /// Sum of `range.len()` over tiles — rows spanned, visible or not.
     /// `rows_in_ranges - sigma_visible` is C4's numerator.
     pub rows_in_ranges: u64,
+    /// Rows selection read (`Selection::rows_visited`). **Figures from before the per-cell
+    /// selection route are not comparable with figures after it**: on a tile dense enough to
+    /// decode as ranges the route reads a bounded number of identities per Morton cell rather than
+    /// every visible row, and this counts the binary search's probes plus the rows the heap feed
+    /// walked. It equals the visible count only on the scattered tiles that still scan.
     pub rows_materialised: u64,
     pub points_gathered: u64,
     /// Sub-cells §7.3's underlay evaluated — `tiles_nonempty x 4^offset`, not the number emitted.
@@ -229,6 +234,9 @@ pub struct Normalised {
     pub ns_per_point_gathered: f64,
     pub ns_per_tile: f64,
     pub ns_per_container: f64,
+    /// **Not comparable across the per-cell selection route.** Its denominator is
+    /// [`Work::rows_materialised`], whose meaning that route changed; a run from either side of it
+    /// gates against a different quantity, so a gate wants a baseline recorded after it.
     pub ns_per_row_materialised: f64,
     /// Cost per sub-cell *evaluated* (not emitted) by §7.3's underlay. Zero when unrequested.
     ///

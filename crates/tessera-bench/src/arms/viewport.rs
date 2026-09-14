@@ -281,6 +281,10 @@ pub fn run(
                             // F1, reported per cell rather than only in the canary test: when
                             // selection materialises far more rows than it returns, the selection
                             // path is O(Sigma-visible) and design §10.4's prescription is unapplied.
+                            // **The ratio fell when the per-cell route landed and figures across
+                            // that change are not comparable**: a dense tile now reads a bounded
+                            // number of identities per Morton cell rather than every visible row,
+                            // so the same request flags a smaller multiple, or none.
                             if t.select_rows_visited > t.points_gathered.saturating_mul(4)
                                 && t.points_gathered > 0
                             {

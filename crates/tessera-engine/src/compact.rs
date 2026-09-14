@@ -1109,8 +1109,11 @@ pub(crate) struct CompletedFold {
     /// The new run 0's prefix-relative path — `None` when the deployment holds no external ids at
     /// all, in which case pass 3 wrote nothing and the new manifest lists no runs.
     pub(crate) external_id_run: Option<String>,
-    /// The largest new base segment's `columns.arrow + morton.u32` bytes — compaction §4 step 3's
-    /// operand, computed here because these are the files that were just written.
+    /// The largest new base segment's `columns.arrow + morton.u32 + cuts.u32` bytes — compaction
+    /// §4 step 3's operand, computed here because these are the files that were just written.
+    /// The same three files the server sums at startup for the merge-size relation
+    /// (`tessera_server::validate_merge_size_relation`); they are mapped together, so a segment's
+    /// size is all of them and the two computations of one quantity have to name one set.
     pub(crate) base_segment_bytes: u64,
     /// One [`PassCost`] per pass, in execution order — the fold thread's account of what it
     /// spent. Publication resumes the staircase with its own phases, logs the whole and reduces it
@@ -1237,7 +1240,11 @@ pub(crate) fn execute(plan: FoldPlan, ctx: FoldContext) -> Result<CompletedFold,
         .map_err(|e| failed("pass 1 (row space)", &e))?;
 
         let mut view_bytes = 0u64;
-        for name in ["morton.u32", "columns.arrow"] {
+        for name in [
+            "morton.u32",
+            tessera_store::read::CutIndex::FILE,
+            "columns.arrow",
+        ] {
             let path = segment_dir.join(name);
             view_bytes += std::fs::metadata(&path)
                 .map_err(|e| failed("sizing the new base segment", &e))?
@@ -1247,7 +1254,7 @@ pub(crate) fn execute(plan: FoldPlan, ctx: FoldContext) -> Result<CompletedFold,
         base_segment_bytes = base_segment_bytes.max(view_bytes);
         // The render columns' presence bitmaps beside the new segment (decision 0064), named by
         // the pass that decided which columns still have an absence after the drops. Not counted
-        // into `view_bytes`, which is the two mapped files step 3's headroom check is about.
+        // into `view_bytes`, which is the three mapped files step 3's headroom check is about.
         for column in &out.presence_columns {
             written.push((
                 format!("{segment_rel}/{RENDER_PRESENCE_DIR}/{column}.roaring"),
