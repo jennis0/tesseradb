@@ -853,19 +853,25 @@ pub(crate) fn entity_order_residency(
             });
         }
         // **A spilled column's duplicate map** (`crate::extents::DuplicateMap`): the two
-        // whole-column Roaring bitmaps that say which of a repeated entity's rows survives. It is
-        // built when the extents are opened and held until the record blob has merged them, and it
-        // is the one anonymous term a spilled column has — the rest of what an open extent costs is
-        // a block buffer, which the merge fan-in bounds.
+        // whole-column Roaring bitmaps that stand while the map says which of a repeated entity's
+        // rows survives. It is built when the extents are opened and held until the column's last
+        // reader is done with them, and it is the one anonymous term a spilled column has — the
+        // rest of what an open extent costs is a block buffer, which the merge fan-in bounds.
+        //
+        // **It stands for exactly the phases the column's own storage does, less the join**, which
+        // is what `column.phases` says: a spilled column with no blob row meets its last reader at
+        // the end of the index phase and `crate::pipeline` drops its `OpenExtents` there, so
+        // charging it through the blob would refuse a build over bytes nothing holds. The map does
+        // not exist in the join at all — the extents are still being written then.
         //
         // **A rate over the corpus, not a constant**, which is what separates it from the
         // partitions below: a Roaring bitmap over an entity space of n is at most n/8 bytes, and a
         // spilled column's extents between them cover the entities that have a value. Charging the
         // ceiling over-charges a column whose extents are sparse or run-encoded, and the ceiling is
-        // the figure the budget has to stand: 437 MB apiece at the 3.5×10⁹-row GBIF rung. The four
-        // bytes a *repeated* entity that the map's `last` vector adds are not charged — a corpus
-        // with one row an entity repeats none, and one that repeated every entity would pay 4n
-        // against these 2n/8, which is a shape the model does not have a figure for.
+        // the figure the budget has to stand: 437 MB apiece at the 3.5×10⁹-row GBIF rung. The eight
+        // bytes a *repeated* entity that the built table costs are not charged — a corpus with one
+        // row an entity repeats none, and one that repeated every entity would pay 8n against these
+        // 2n/8, which is a shape the model does not have a figure for.
         if spilled {
             terms.push(Term {
                 what: format!(
@@ -875,8 +881,10 @@ pub(crate) fn entity_order_residency(
                 ),
                 bytes: 2u64.saturating_mul(n.div_ceil(8)),
                 mapped: false,
-                // Opened for the postings and released once the blob has merged the extents.
-                phases: Phases::INDEX.and(Phases::BLOB),
+                phases: match column.phases.holds(Phase::Blob) {
+                    true => Phases::INDEX.and(Phases::BLOB),
+                    false => Phases::INDEX,
+                },
                 constant: false,
             });
         }
@@ -906,6 +914,26 @@ pub(crate) fn entity_order_residency(
                 constant: false,
             });
         }
+    }
+    // **And the duplicate maps' transient, charged once rather than per column.** Building one
+    // column's map holds four whole-column bitmaps at its worst moment — the running union, the
+    // repeats so far, the extent's own bitmap and the intersection of the first with the third —
+    // against the two the built map leaves standing (`crate::extents::DuplicateMap`). The columns
+    // are opened one after another, so only one column is ever mid-build: the extra two bitmaps are
+    // a term of the build and not of the column count, and charging them per column would
+    // over-charge the second spilled column by n/4 for bytes that are never simultaneously live.
+    if columns.iter().any(|column| column.extents) {
+        terms.push(Term {
+            what: format!(
+                "the two further whole-column Roaring bitmaps held while one spilled column's \
+                 duplicate map is built, at {} MiB apiece",
+                n.div_ceil(8) >> 20
+            ),
+            bytes: 2u64.saturating_mul(n.div_ceil(8)),
+            mapped: false,
+            phases: Phases::INDEX,
+            constant: false,
+        });
     }
     if member_entries > 0 {
         terms.push(Term {
@@ -3588,12 +3616,13 @@ require_member_visibility = "none"
         // columns, at one bit a row each. The two that carry characters are not render columns and
         // are not in `columns.arrow`.
         let bitmaps = |n: u64| 4 * n.div_ceil(8);
-        // **And the one spilled column's duplicate map**, two whole-column Roaring bitmaps at n/8
-        // bytes apiece. It is the second term that is a rate in the row count rather than one
+        // **And the one spilled column's duplicate map**: two whole-column Roaring bitmaps at n/8
+        // bytes apiece for the column, and two more for the build, held while that column's map is
+        // being built. It is the second term that is a rate in the row count rather than one
         // publication batch, and it is charged for a spilled string column alone — a build with no
         // such column has no such term, which is why the assertions below name it separately
         // rather than folding it into the rate.
-        let duplicates = |n: u64| 2 * n.div_ceil(8);
+        let duplicates = |n: u64| 4 * n.div_ceil(8);
         let small = residency(10_000_000);
         let large = residency(100_000_000);
         // **The rate terms are equal net of the bitmaps**: one publication batch, whatever the
