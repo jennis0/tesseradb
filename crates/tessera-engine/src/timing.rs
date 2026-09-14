@@ -199,11 +199,12 @@ pub struct StageTimings {
     /// and only where the fixture makes `sigma_visible < rows_in_ranges`, or the second direction is
     /// structurally invisible.
     ///
-    /// It pins the **implemented route**, not the definition. Design §7.2 admits exact routes that
-    /// visit fewer than Σvisible rows — within a leaf Morton cell the `tessera_id` column is sorted,
-    /// so `C_θ` there is a binary search plus a range cardinality — and none of them is built, the
-    /// obviously-correct scan being preferred. If one ever lands, revise this alongside the
-    /// differential oracle rather than deleting it.
+    /// It pins the **implemented route**, not the definition, and the route reads fewer than
+    /// Σvisible rows where a tile's mask decodes as ranges: the `tessera_id` column is sorted
+    /// within a leaf Morton cell, so `C_θ` there is a binary search and the heap feed leaves the
+    /// cell at the first identity it rejects (`crate::select`). Against `sigma_visible` this
+    /// counter is therefore at or below it on those tiles and equal to it on the scattered ones;
+    /// above it would mean a walk of the raw row range rather than of the mask.
     pub select_rows_visited: u64,
     /// Points actually returned.
     pub points_gathered: u64,

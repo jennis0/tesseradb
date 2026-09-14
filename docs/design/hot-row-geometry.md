@@ -44,9 +44,9 @@ row index: no new mapping on the gather path, no manifest entry, no digest, and 
 with `tessera_id` comes free from the record batch.
 
 **Row order is unchanged** — `(morton, tessera_id)`, so the residual varies arbitrarily within a
-cell and is not a sort key. §7.2's `served(T)` is the *m* smallest by `tessera_id`, and the
-selection route reserves an exact sub-Σvisible evaluation that rests on the identity column being
-sorted within a cell (⊘ specified, not built). Both depend on that order; neither is affected here.
+cell and is not a sort key. §7.2's `served(T)` is the *m* smallest by `tessera_id`, and selection's
+exact sub-Σvisible evaluation rests on the identity column being sorted within a cell. Both depend
+on that order; neither is affected here.
 
 ### 2.1 Why not one packed column
 

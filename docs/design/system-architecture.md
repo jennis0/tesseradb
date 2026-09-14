@@ -238,6 +238,8 @@ bundle/
         segments/<seg_id>/
           columns.arrow            tessera_id, residual, priority, declared scalars
           morton.u32               the Morton column; tile ranges derive from it
+          cuts.u32                 where each occupied leaf cell's rows begin; selection
+                                   evaluates a dense tile per cell rather than per row
           permutation.bin          streamed segments only; absent on a build segment
 ```
 
