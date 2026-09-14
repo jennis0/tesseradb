@@ -8645,7 +8645,11 @@ impl Executor {
                 tessera_store::view_rel(&descriptor.view),
                 descriptor.seg_id
             );
-            for name in ["morton.u32", "columns.arrow"] {
+            for name in [
+                "morton.u32",
+                tessera_store::read::CutIndex::FILE,
+                "columns.arrow",
+            ] {
                 carried_rels.insert(format!("{segment_prefix}/{name}"));
             }
             // **And every render column's presence bitmap the live manifest names for it**
@@ -17884,18 +17888,23 @@ fn fold_segments(
             .join("segments")
             .join(&descriptor.seg_id);
         let morton = tessera_store::read::MortonSlice::load(&dir.join("morton.u32"));
+        let cuts = tessera_store::read::CutIndex::load(
+            &dir.join(tessera_store::read::CutIndex::FILE),
+            descriptor.row_count,
+        );
         let columns = tessera_store::read::ColumnsRef::load(&dir.join("columns.arrow"));
-        match (morton, columns) {
-            (Ok(morton), Ok(columns)) => out.push((
+        match (morton, cuts, columns) {
+            (Ok(morton), Ok(cuts), Ok(columns)) => out.push((
                 descriptor.view.clone(),
                 tessera_store::read::SegmentData {
                     seg_id: descriptor.seg_id.clone(),
                     row_count: descriptor.row_count,
                     morton,
+                    cuts,
                     columns,
                 },
             )),
-            (Err(error), _) | (_, Err(error)) => tracing::warn!(
+            (Err(error), _, _) | (_, Err(error), _) | (_, _, Err(error)) => tracing::warn!(
                 view = %descriptor.view,
                 seg_id = %descriptor.seg_id,
                 %error,

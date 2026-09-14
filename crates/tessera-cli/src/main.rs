@@ -1901,14 +1901,15 @@ fn main() -> ExitCode {
                         println!(
                             "deep: {} term(s), {} delta tier(s), {} pairs row(s), {} dict \
                              record(s), {} external-id binding(s), {} record blob row(s), {} \
-                             scoped render lane(s)",
+                             scoped render lane(s), {} Morton cell(s)",
                             report.terms,
                             report.delta_tiers,
                             report.pairs_rows,
                             report.dict_records,
                             report.external_id_bindings,
                             report.record_rows,
-                            report.scoped_render_lanes
+                            report.scoped_render_lanes,
+                            report.cells
                         );
                         ExitCode::SUCCESS
                     }

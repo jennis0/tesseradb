@@ -71,6 +71,9 @@ pub struct SegmentData {
     pub seg_id: String,
     pub row_count: u32,
     pub morton: MortonSlice,
+    /// Where each occupied leaf Morton cell's rows begin — [`CutIndex`], the run-length index of
+    /// `morton`, which selection evaluates per cell instead of per row.
+    pub cuts: CutIndex,
     pub columns: ColumnsRef,
 }
 
@@ -631,12 +634,20 @@ fn open_prefix(
 
             let seg_dir = view_dir.join("segments").join(&seg_desc.seg_id);
             let morton_path = seg_dir.join("morton.u32");
+            let cuts_path = seg_dir.join(CutIndex::FILE);
             let columns_path = seg_dir.join("columns.arrow");
             let morton_rel = format!(
                 "partitions/{}/{}/segments/{}/morton.u32",
                 partition_desc.phash,
                 crate::view_rel(&seg_desc.view),
                 seg_desc.seg_id
+            );
+            let cuts_rel = format!(
+                "partitions/{}/{}/segments/{}/{}",
+                partition_desc.phash,
+                crate::view_rel(&seg_desc.view),
+                seg_desc.seg_id,
+                CutIndex::FILE
             );
             let columns_rel = format!(
                 "partitions/{}/{}/segments/{}/columns.arrow",
@@ -650,6 +661,7 @@ fn open_prefix(
                 &manifest.files,
                 &morton_path,
             )?;
+            ensure_verified(&cuts_rel, &segments_manifest, &manifest.files, &cuts_path)?;
             ensure_verified(
                 &columns_rel,
                 &segments_manifest,
@@ -685,6 +697,7 @@ fn open_prefix(
             }
 
             let morton = MortonSlice::load(&morton_path)?;
+            let cuts = CutIndex::load(&cuts_path, seg_desc.row_count)?;
             let columns = ColumnsRef::load(&columns_path)?;
 
             if morton.len() as u32 != seg_desc.row_count
@@ -768,6 +781,7 @@ fn open_prefix(
                 seg_id: seg_desc.seg_id.clone(),
                 row_count: seg_desc.row_count,
                 morton,
+                cuts,
                 columns,
             }));
         }
@@ -1487,6 +1501,133 @@ impl MortonSlice {
         // per-open re-check needed the way `permutation.bin`'s offset-16 slice needed one,
         // since here the slice starts at offset 0.
         unsafe { std::slice::from_raw_parts(self.mmap.as_ptr() as *const u32, self.len()) }
+    }
+}
+
+/// A memory-mapped, zero-copy view of `cuts.u32`: where each occupied leaf Morton cell's rows
+/// begin, ascending, raw little-endian `u32`, no header (contracts §2.6).
+///
+/// # What it is for
+///
+/// Row order is `(morton, tessera_id)`, so the rows of one leaf cell are contiguous **and their
+/// identities ascend within it**. That second half is what selection needs and what nothing on
+/// disk previously said: given a cell's row range, the identities below a threshold are a prefix
+/// of it, and the smallest identities of a tile are a merge of its cells' prefixes. Selection
+/// reads a bounded number of rows per cell instead of every visible row of the tile
+/// ([`crate::read`] has no opinion on that; see `tessera_engine::select`).
+///
+/// Cell *i* covers rows `starts[i] .. starts[i + 1]`, the last ending at the segment's
+/// `row_count`. `starts[0]` is 0 in a segment with rows. The array is therefore the run-length
+/// index of `morton.u32` and holds no code: the code is `morton[starts[i]]`, and storing it again
+/// would be a second copy that could disagree with the column it describes.
+///
+/// # Size
+///
+/// One `u32` per **occupied cell**, not per row — 4 B × 3,508,005 = 14.0 MB for the 25,846,007-row
+/// GBIF corpus at `data/ladder/gbif-64p` (measured, 2026-09-14), where `morton.u32` is 103 MB and
+/// the identity column 207 MB. A corpus whose cells are large pays less per row, not more; the
+/// ceiling is 4 B/row, reached only where every row has a cell to itself.
+#[derive(Debug)]
+pub struct CutIndex {
+    mmap: Mmap,
+}
+
+impl CutIndex {
+    /// The file a segment's cut index lives in, beside `morton.u32`.
+    pub const FILE: &'static str = "cuts.u32";
+
+    /// Map and validate `cuts.u32` against the segment's row count.
+    ///
+    /// **Validated here rather than trusted**, for the reason [`MortonSlice::load`] gives: the
+    /// selection binary-searches this array, so a non-ascending or out-of-range entry produces a
+    /// wrong row range rather than an error. What the check cannot see from here is whether the
+    /// boundaries fall where the Morton code actually changes — that needs both columns, and
+    /// `tessera verify --deep` is where it is made.
+    pub fn load(path: &Path, row_count: u32) -> Result<Self> {
+        let file = File::open(path).map_err(|source| StoreError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        // SAFETY: read-only for this struct's lifetime; see `Permutation::load`'s note on the
+        // shared operational hazard of a concurrently-truncated backing file.
+        let mmap = unsafe { Mmap::map(&file) }.map_err(|source| StoreError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        if mmap.len() % 4 != 0 {
+            return Err(StoreError::MalformedBundle {
+                detail: format!(
+                    "{}: length {} is not a multiple of 4",
+                    path.display(),
+                    mmap.len()
+                ),
+            });
+        }
+        let view = CutIndex { mmap };
+        let starts = view.starts();
+        let malformed = |detail: String| StoreError::MalformedBundle {
+            detail: format!("{}: {detail}", path.display()),
+        };
+        match starts.first() {
+            None => {
+                if row_count != 0 {
+                    return Err(malformed(format!(
+                        "no cells for a segment of {row_count} rows"
+                    )));
+                }
+            }
+            Some(&first) => {
+                if first != 0 {
+                    return Err(malformed(format!("the first cell begins at row {first}")));
+                }
+                if row_count == 0 {
+                    return Err(malformed("cells in a segment with no rows".to_string()));
+                }
+            }
+        }
+        if !starts.windows(2).all(|w| w[0] < w[1]) {
+            return Err(malformed("cell starts are not strictly ascending".to_string()));
+        }
+        if starts.last().is_some_and(|&last| last >= row_count) {
+            return Err(malformed(format!(
+                "the last cell begins at row {} in a segment of {row_count} rows",
+                starts.last().copied().unwrap_or_default()
+            )));
+        }
+        Ok(view)
+    }
+
+    /// The number of occupied cells.
+    pub fn len(&self) -> usize {
+        self.mmap.len() / 4
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.mmap.is_empty()
+    }
+
+    /// This mapping's size in bytes — what a residency report charges the index.
+    pub fn byte_len(&self) -> u64 {
+        self.mmap.len() as u64
+    }
+
+    /// The row at which each occupied cell begins, ascending.
+    pub fn starts(&self) -> &[u32] {
+        // SAFETY: as [`MortonSlice::u32`] — a checked multiple of 4 from a page-aligned base.
+        unsafe { std::slice::from_raw_parts(self.mmap.as_ptr() as *const u32, self.len()) }
+    }
+
+    /// The cell starts at or after `from` and before `until`.
+    ///
+    /// A tile's row range is cell-aligned — a tile is a code prefix, so it holds whole leaf
+    /// cells — which makes the first returned start equal to `from` for any range this crate
+    /// hands out. Callers clamp anyway rather than rely on it, so that a sub-range of a tile is
+    /// still answered correctly.
+    pub fn starts_within(&self, from: u32, until: u32) -> &[u32] {
+        let starts = self.starts();
+        let lo = starts.partition_point(|&s| s < from);
+        let hi = starts.partition_point(|&s| s < until);
+        &starts[lo..hi.max(lo)]
     }
 }
 

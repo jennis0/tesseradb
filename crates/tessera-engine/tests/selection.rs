@@ -27,7 +27,7 @@ use tessera_engine::select::{
 };
 use tessera_lifecycle::{ChangeOp, IngestBuffer, Overlay};
 use tessera_spatial::{fixed32, morton_of, tiler::sort_batch, Bounds, Tile, TilerItem};
-use tessera_store::read::{ColumnsRef, MortonSlice, SegmentData};
+use tessera_store::read::{ColumnsRef, CutIndex, MortonSlice, SegmentData};
 use tessera_store::write::{write_permutation, write_segment};
 use tessera_store::{tile_ranges, Permutation, RowSpace};
 use tessera_types::{EntityId, TermId, TesseraId};
@@ -81,6 +81,11 @@ fn segment_of(points: &[(f32, f32, u64)]) -> Segment {
         seg_id: "seg0".to_string(),
         row_count: items.len() as u32,
         morton: MortonSlice::load(&temp.path().join("morton.u32")).unwrap(),
+        cuts: CutIndex::load(
+            &temp.path().join(CutIndex::FILE),
+            items.len() as u32,
+        )
+        .unwrap(),
         columns: ColumnsRef::load(&temp.path().join("columns.arrow")).unwrap(),
     };
     Segment {

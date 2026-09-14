@@ -437,7 +437,7 @@ fn the_k_way_merge_emits_exactly_what_a_concatenate_and_sort_would() {
 
     merge(dir.path(), &inputs);
     let merged = seg_dir(dir.path(), "merged-1");
-    for name in ["morton.u32", "columns.arrow"] {
+    for name in ["morton.u32", "cuts.u32", "columns.arrow"] {
         assert_eq!(
             std::fs::read(merged.join(name)).unwrap(),
             std::fs::read(expected_dir.join(name)).unwrap(),
@@ -456,7 +456,7 @@ fn the_k_way_merge_emits_exactly_what_a_concatenate_and_sort_would() {
 ///
 /// **Mutation:** replace `SpoolGuard`'s `Drop` with a `remove_file` at the end of `finish` and this
 /// still passes; delete either and it fails. What it pins is that a published segment directory
-/// holds exactly the four files the manifest names.
+/// holds exactly the files the manifest names.
 #[test]
 fn a_merged_segment_directory_holds_no_spool_files() {
     let dir = tempfile::TempDir::new().unwrap();
@@ -474,6 +474,7 @@ fn a_merged_segment_directory_holds_no_spool_files() {
         names,
         vec![
             "columns.arrow",
+            "cuts.u32",
             "ext-locator.u32",
             "external-ids.arrow",
             "morton.u32"

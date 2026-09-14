@@ -220,6 +220,11 @@ fn fixture(v_per_tile: usize) -> (TempDir, SegmentData, EffectiveMask) {
         seg_id: "seg0".into(),
         row_count: items.len() as u32,
         morton: MortonSlice::load(&temp.path().join("morton.u32")).unwrap(),
+        cuts: tessera_store::read::CutIndex::load(
+            &temp.path().join(tessera_store::read::CutIndex::FILE),
+            items.len() as u32,
+        )
+        .unwrap(),
         columns: ColumnsRef::load(&temp.path().join("columns.arrow")).unwrap(),
     };
 

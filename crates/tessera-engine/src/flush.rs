@@ -1191,6 +1191,11 @@ fn execute_flush_stages(
                 row_count: out.segment.row_count,
                 morton: MortonSlice::load(&seg_dir.join("morton.u32"))
                     .map_err(|e| FlushFailed(format!("morton: {e}")))?,
+                cuts: tessera_store::read::CutIndex::load(
+                    &seg_dir.join(tessera_store::read::CutIndex::FILE),
+                    out.segment.row_count,
+                )
+                .map_err(|e| FlushFailed(format!("cuts: {e}")))?,
                 columns: ColumnsRef::load(&seg_dir.join("columns.arrow"))
                     .map_err(|e| FlushFailed(format!("columns: {e}")))?,
             })

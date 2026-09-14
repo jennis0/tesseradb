@@ -1237,7 +1237,11 @@ pub(crate) fn execute(plan: FoldPlan, ctx: FoldContext) -> Result<CompletedFold,
         .map_err(|e| failed("pass 1 (row space)", &e))?;
 
         let mut view_bytes = 0u64;
-        for name in ["morton.u32", "columns.arrow"] {
+        for name in [
+            "morton.u32",
+            tessera_store::read::CutIndex::FILE,
+            "columns.arrow",
+        ] {
             let path = segment_dir.join(name);
             view_bytes += std::fs::metadata(&path)
                 .map_err(|e| failed("sizing the new base segment", &e))?

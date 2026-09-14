@@ -143,9 +143,13 @@ pub struct GenerationStamp {
 // mis-reads every block boundary. A 9 block's rows carry no length, so a 10 reader would take the
 // first two bytes of a row's first field tag as a length and frame the rest against it. The number
 // is what stops either opening.
+// 11: a segment holds `cuts.u32` beside `morton.u32` — where each occupied leaf Morton cell's rows
+// begin, which is what selection evaluates per cell instead of per row. A 10 bundle does not have
+// the file, and the open names every segment file it maps, so a reader at 11 refuses it there. The
+// number is what says the absence is a stale bundle rather than a damaged one.
 // Each bump makes a stale local bundle a loud refusal rather than a silent misread — a fail-closed
 // guard, not compatibility (decision 0048).
-pub const BUNDLE_FORMAT: u32 = 10;
+pub const BUNDLE_FORMAT: u32 = 11;
 pub const API_VERSION: u32 = 1;
 pub const ABI_VERSION: u32 = 1;
 pub const ROW_ABSENT: u32 = 0xFFFF_FFFF;
@@ -169,7 +173,7 @@ mod tests {
     }
     #[test]
     fn constants() {
-        assert_eq!(BUNDLE_FORMAT, 10);
+        assert_eq!(BUNDLE_FORMAT, 11);
         assert_eq!(ROW_ABSENT, 0xFFFF_FFFF);
     }
 }

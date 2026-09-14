@@ -123,6 +123,9 @@ pub struct VerifyDeepReport {
     /// ([`check_scoped_render_lanes`]); 0 where no family declares `render`, which is every
     /// bundle whose attributes are entity-scoped.
     pub scoped_render_lanes: u64,
+    /// Leaf Morton cells confirmed to begin where `cuts.u32` says and to hold ascending
+    /// identities ([`check_cut_index`]), across every segment of every view.
+    pub cells: u64,
 }
 
 /// Deep-verify the bundle at `root`: the shallow [`crate::verify`] pass, then §11's structural
@@ -151,6 +154,7 @@ pub fn verify_deep(root: &Path, opts: &VerifyOpts) -> Result<VerifyDeepReport> {
         external_id_bindings: 0,
         record_rows: 0,
         scoped_render_lanes: 0,
+        cells: 0,
     };
 
     // Sorted so two runs over the same defective bundle refuse with the same message.
@@ -180,9 +184,97 @@ pub fn verify_deep(root: &Path, opts: &VerifyOpts) -> Result<VerifyDeepReport> {
             &mut report,
         )?;
         check_scoped_render_lanes(&bundle.manifest, phash, partition, &mut report)?;
+        check_cut_index(phash, partition, &mut report)?;
     }
 
     Ok(report)
+}
+
+/// **`cuts.u32` names exactly the rows at which a leaf Morton cell begins, and each cell's
+/// identities ascend** (contracts §2.6).
+///
+/// The index is what selection walks instead of reading every visible row of a tile, and both
+/// halves of that walk rest on a property no other check establishes. The boundaries being where
+/// the code changes is what makes the cells cover the segment without overlapping — a boundary too
+/// few merges two cells and the ascending-identity property fails across the join; one too many
+/// splits a cell, which loses no row but ends a prefix early and would serve a smaller `C_θ`.
+/// Identities ascending within a cell is the row order itself (`(morton, tessera_id)`), stated
+/// where selection depends on it rather than assumed from the producer.
+///
+/// The open has already refused a `cuts.u32` that is not strictly ascending, that starts anywhere
+/// but row 0, or whose last cell begins past the segment
+/// ([`tessera_store::read::CutIndex::load`]); what needs both columns is checked here.
+///
+/// One forward pass over `morton.u32` and the identity column, holding a row index and the
+/// previous row's two values.
+fn check_cut_index(
+    phash: &str,
+    partition: &tessera_store::read::PartitionData,
+    report: &mut VerifyDeepReport,
+) -> Result<()> {
+    let mut views: Vec<_> = partition.views.iter().collect();
+    views.sort_by(|a, b| a.0.cmp(b.0));
+    for (view, data) in views {
+        for segment in &data.segments {
+            let codes = segment.morton.u32();
+            let starts = segment.cuts.starts();
+            let ids = segment.columns.tessera_id();
+            let where_at = |row: usize| {
+                format!("partition {phash}, view '{view}', segment '{}', row {row}", segment.seg_id)
+            };
+            let mut cell = 0usize;
+            for row in 0..codes.len() {
+                let opens = row == 0 || codes[row] != codes[row - 1];
+                if opens {
+                    match starts.get(cell) {
+                        Some(&start) if start as usize == row => cell += 1,
+                        Some(&start) => {
+                            return Err(BuildError::Invalid(format!(
+                                "cuts.u32 names row {start} where the Morton code changes at \
+                                 row {row} ({})",
+                                where_at(row)
+                            )))
+                        }
+                        None => {
+                            return Err(BuildError::Invalid(format!(
+                                "cuts.u32 names {} cells and the Morton code changes again at \
+                                 row {row} ({})",
+                                starts.len(),
+                                where_at(row)
+                            )))
+                        }
+                    }
+                } else {
+                    if starts.get(cell).is_some_and(|&start| start as usize == row) {
+                        return Err(BuildError::Invalid(format!(
+                            "cuts.u32 opens a cell at row {row}, where the Morton code is \
+                             unchanged ({})",
+                            where_at(row)
+                        )));
+                    }
+                    if ids[row] <= ids[row - 1] {
+                        return Err(BuildError::Invalid(format!(
+                            "identity {} does not follow {} inside one Morton cell — selection \
+                             reads a cell's identities as ascending ({})",
+                            ids[row],
+                            ids[row - 1],
+                            where_at(row)
+                        )));
+                    }
+                }
+            }
+            if cell != starts.len() {
+                return Err(BuildError::Invalid(format!(
+                    "cuts.u32 names {} cells and the Morton column holds {cell} (partition \
+                     {phash}, view '{view}', segment '{}')",
+                    starts.len(),
+                    segment.seg_id
+                )));
+            }
+            report.cells += cell as u64;
+        }
+    }
+    Ok(())
 }
 
 /// **A rendered group-scoped family's lane is present in every build segment of every view that

@@ -2146,6 +2146,7 @@ fn build_bundle(
         occupancies.push(assembled.occupancy);
         let presence_paths = assembled.presence_paths;
         let morton_path = assembled.morton_path;
+        let cuts_path = assembled.cuts_path;
         let row_entity_path = assembled.row_entity_path;
         let columns_path = assembled.columns_path;
         let permutation_path = assembled.permutation_path;
@@ -2153,6 +2154,7 @@ fn build_bundle(
         fsync_file(&row_entity_path)?;
         fsync_file(&columns_path)?;
         fsync_file(&morton_path)?;
+        fsync_file(&cuts_path)?;
         timer.end(BuildStage::SegmentWrite, rows_in_view as u64);
 
         // ---- 10b. the post-bundle artifact pass, per view (decision 0094's first half) ----
@@ -2202,6 +2204,7 @@ fn build_bundle(
         view_files.push(row_entity_path);
         view_files.push(columns_path);
         view_files.push(morton_path);
+        view_files.push(cuts_path);
         view_files.extend(presence_paths);
         segments.push(tessera_store::manifest::SegmentDescriptor {
             view: view.view_id.clone(),
