@@ -1521,6 +1521,25 @@ impl MortonSlice {
 /// index of `morton.u32` and holds no code: the code is `morton[starts[i]]`, and storing it again
 /// would be a second copy that could disagree with the column it describes.
 ///
+/// # What holds the premise, and what a broken one would cost
+///
+/// **Identities ascending within a cell is by construction, and it is not checked at open.** It is
+/// the row order itself, so every producer gets it from the sort it already does:
+/// [`crate::write::SegmentWriter::append`] debug-asserts the arriving key against the last, and
+/// the build's bounded assembly sorts each bucket by the same comparator. `tessera verify --deep`
+/// checks it in full, over both columns, along with the boundaries falling where the code changes.
+/// What this type checks at `load` is only what one column can answer: strictly ascending, opening
+/// at row 0, ending inside the segment. A whole-column identity pass at every open would cost the
+/// identity column on the startup path, which is the thing the route exists to stop reading.
+///
+/// **A violated premise gives a wrong subset of the visible rows, never a row outside the mask.**
+/// Every row selection returns is one the composed mask admitted, because membership is only ever
+/// asked of the mask; what the ordering decides is where the walk stops. So the failure is an
+/// under-counted `C_θ` and a served set that may not be the *m* smallest — items missing from a
+/// map, of the principal's own items. It is not a disclosure. That is why the check is a verifier's
+/// and not an open's: the cost of being wrong is a wrong map, which an operator can be told about,
+/// rather than a leak, which they could not be.
+///
 /// # Size
 ///
 /// One `u32` per **occupied cell**, not per row. Both GBIF corpora, counted from their Morton
@@ -1607,7 +1626,9 @@ impl CutIndex {
         self.mmap.is_empty()
     }
 
-    /// This mapping's size in bytes — what a residency report charges the index.
+    /// This mapping's size in bytes — see [`MortonSlice::byte_len`], which this joins in the
+    /// merge-size relation's operand: the three files are mapped together and a segment's size is
+    /// all of them.
     pub fn byte_len(&self) -> u64 {
         self.mmap.len() as u64
     }

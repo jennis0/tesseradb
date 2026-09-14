@@ -512,6 +512,13 @@ correctness checks that can run where the data came from somewhere real.
   check; what the suite adds is a deliberate-damage test per property, so a loader relaxed in a
   later change fails here instead of quietly widening what opens. The cost is diagnostic — a
   damaged bundle refuses at the open and names the loader's reason rather than the check's.
+- **`cuts.u32` opens a cell exactly where the Morton code changes, and each cell's identities
+  ascend.** The index is what selection walks instead of reading every visible row of a tile
+  (design §7.2), and both halves of that walk rest on properties no other check establishes: the
+  boundaries are what make the cells cover the segment without overlapping, and a boundary too few
+  joins two cells at a join where the ascending order fails. The open refuses an index that is not
+  strictly ascending, does not start at row 0, or names a row past the segment; what needs both
+  columns is checked here, in one forward pass holding a row index.
 - **Postings are sorted, duplicate-free, and bounded by `entity_id_high_water`.**
 - **The external-id locator and its sidecar agree in both directions, newest binding first.** Not a
   bijection: a delete-plus-re-ingest rebinds a key and the superseded binding is retained (decision

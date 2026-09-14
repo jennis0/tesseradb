@@ -120,11 +120,14 @@ pub fn write_segment(
 /// second transcription of this layout is a second thing that can disagree with the column it
 /// indexes, and a build that indexed its segment differently from a flush would serve two
 /// different selections from one bundle (decisions 0091, 0139).
+/// **It counts nothing.** The cell count this could return is the one the build already keeps —
+/// `OccupancyRun` derives it from the same codes in the same order — and two counters of one
+/// quantity are two things that can disagree about it. A caller wanting the number reads the
+/// file's length, or asks the build's own occupancy.
 pub struct CutWriter {
     out: BufWriter<File>,
     last: Option<u32>,
     row: u32,
-    cells: u64,
 }
 
 impl CutWriter {
@@ -134,7 +137,6 @@ impl CutWriter {
             out: BufWriter::new(File::create(dir.join(crate::read::CutIndex::FILE))?),
             last: None,
             row: 0,
-            cells: 0,
         })
     }
 
@@ -144,16 +146,14 @@ impl CutWriter {
         if self.last != Some(morton) {
             self.out.write_all(&self.row.to_le_bytes())?;
             self.last = Some(morton);
-            self.cells += 1;
         }
         self.row += 1;
         Ok(())
     }
 
-    /// Flush the file and return how many occupied cells it names.
-    pub fn finish(mut self) -> io::Result<u64> {
-        self.out.flush()?;
-        Ok(self.cells)
+    /// Flush the file.
+    pub fn finish(mut self) -> io::Result<()> {
+        self.out.flush()
     }
 }
 

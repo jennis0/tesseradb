@@ -628,6 +628,7 @@ bundle/
         segments/<seg_id>/      # the build's one segment, plus flush and merge segments
           columns.arrow
           morton.u32
+          cuts.u32               # where each occupied leaf Morton cell's rows begin (2.6)
           delta.arrow            # flush segments only: that flush's postings tier (2.4;
                                  # r15 — supersedes the terms/deltas-<n>.arrow name, which
                                  # nothing ever wrote). A merge writes none: the consumed
