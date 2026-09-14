@@ -427,10 +427,10 @@ enum Verification {
 /// (`Permutation::project`). Skipping the scan and recording nothing would leave every session on
 /// this prefix walking until the next restart — a cost a compaction imposes on the deployment for
 /// as long as the process lives. So this open calls `Permutation::declare_dense_rows` with the
-/// segment's own `row_count`. That is not a check on bytes from storage and is not one being
-/// skipped: it is the writer stating what it wrote, under the same premise as everything else in
-/// this section, and the manifest's `row_count` is already cross-checked against `morton.u32` and
-/// `columns.arrow` two paragraphs below.
+/// segment's own `row_count`. That is the writer stating what it wrote, which rests on the same
+/// premise as everything else in this section rather than on a new one, and the `row_count` it
+/// states is cross-checked against `morton.u32` and `columns.arrow` by the check the next paragraph
+/// lists among what is kept.
 ///
 /// Kept, all of it: the `bundle_format` check, `identity.validate()`, every path-component
 /// sanitisation, the `ensure_verified` membership check (a file the loader reads must appear in a
@@ -714,10 +714,10 @@ fn open_prefix(
                         .base()
                         .validate_rows(seg_desc.row_count)?,
                     // The scan is skipped here and its *result* is taken from the writer — see
-                    // this function's "what is skipped" section for why that is the same premise
-                    // and not a weaker one. Without it a compaction's in-process open would leave
-                    // every session on the new prefix walking `permutation.bin` for a whole-domain
-                    // grant until the process restarted.
+                    // [`open_written_prefix`]'s "what is skipped" section for why that rests on
+                    // the same premise rather than a weaker one. Without it a compaction's
+                    // in-process open would leave every session on the new prefix walking
+                    // `permutation.bin` for a whole-domain grant until the process restarted.
                     Verification::JustWritten => view_entry
                         .row_space
                         .base()

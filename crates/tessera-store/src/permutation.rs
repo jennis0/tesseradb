@@ -817,12 +817,15 @@ impl Permutation {
     /// the principal holds already, which is exactly C14's accepted reasoning ("the principal
     /// already knows their own clearances, so this reveals nothing about data"). Nothing about the
     /// corpus enters the branch: the mapping is not read on this path, and `bound` is the view's
-    /// entity-space width rather than anything a grant selects. The residual is C4's — service
-    /// time varies — and is recorded there, in the same terms as the decode-source choice
-    /// (`tessera_engine`'s `DecodeSource`).
+    /// entity-space width rather than anything a grant selects. So the residual sits inside C19's
+    /// accepted shape — work correlating with the principal's own coverage — and adds no quantity
+    /// to C4's open row, the same reading `tessera_engine`'s `DecodeSource` records for the
+    /// decode-source choice. No register row is added for it; whether Appendix C should name this
+    /// branch explicitly is the owner's call.
     ///
-    /// I10 is not what is at stake here and is untouched: this file is I4's structure, the only
-    /// EntityId→RowId path, and no entity id or `tessera_id` reaches a caller from either route.
+    /// The invariant this file carries is I4 — it is the only EntityId→RowId path — and both
+    /// routes keep it, neither handing an entity id or a `tessera_id` to a caller, so I10 stands
+    /// where it stood.
     pub fn project(&self, mask: &croaring::Bitmap) -> croaring::Bitmap {
         self.project_with(mask, &mut ProjectScratch::default())
     }
