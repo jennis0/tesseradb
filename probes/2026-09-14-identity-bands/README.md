@@ -246,13 +246,22 @@ the split is 793,560 from lists against 6,889,988 from the cut index, because th
 saturate the threshold and have no band at all.
 
 **Inside the search, the floor is the expensive third.** At `p100`'s `whole_budget` the split is
-29.9 ms gathering the band's candidates, 16.0 ms counting and 27.6 ms in the floor, hot. The floor
+14.9 ms gathering the band's candidates, 13.2 ms counting and 9.4 ms in the floor, hot, over a
+42.4 ms search — down from 29.9 / 16.0 / 27.6 over 80.8 ms before the wholly-visible tiles stopped
+going through a cursor. The mask walk itself is 2.33 ms over 48,749 calls, all of them full-range,
+where it was 38.1 ms. The floor
 widened 24,697 of 36,833 tiles, settling 1,214 on the band already in hand, 3,000 on a wider list
 and 20,483 by reading the tile's visible identities from the column — 140,771 reads, which is that
 case's whole column traffic, since the list route supplies every other identity. It walked 23,483
 lists for 23,483 tiles: one each, because at `j = 5` only `J = 4` is eligible and the entry point
 has nothing to choose between. The alternative that was measured first, widening through `lz.u8`,
 cost 1.5 MB of that column at the same case and still left the identities to read.
+
+**The wholly-visible gate answers nearly every walk.** 48,749 of `p100`'s 48,749 walks at
+`whole_budget` are full-range, 11,574 of `p50`'s 11,917 and 1,668 of `p1`'s 1,956, and the mask's
+own cost per call falls from 0.781 µs to 0.048 µs at `p100` accordingly. The runs handed to the
+caller are unchanged — 48,749 at `p100`, 2,367 at `p1` — which is what says the gate is a
+shortcut and not a different answer.
 
 **Every principal's mask takes the fast decode route, and its `base` is nearly all run
 containers.** `diffs_are_empty` is true for all six, `minus` and `plus` are empty and no filter is
@@ -262,6 +271,34 @@ against 50 containers for the 1% principal. The mask's own cost per `for_each_vi
 with the caller's work removed, runs from 0.166 µs at 36 containers (`p5`) to 0.781 µs at 395
 (`p100`), and at `p100` every call yields exactly one run, so that figure is cursor construction
 and the seek rather than run iteration.
+
+### What a run walk costs on a bitmap of long runs
+
+**The engine's run decode pays, per call, the containers between the tile's start and the end of
+the run the tile sits in.** `EffectiveMask::for_each_visible_run` walks its source through
+`for_each_run_in`, which asks the croaring cursor for ranges before it looks at the caller's range
+end. The native reader,
+[`roaring_uint32_iterator_read_ranges`](https://github.com/RoaringBitmap/CRoaring) — croaring-sys
+4.7.1, `CRoaring/roaring.c` line 16868 — merges a run across container boundaries: when a run
+reaches a container's end it steps to the next container and keeps merging while that container
+begins at `max + 1`. On a bitmap that is one long run, the first range returned from any tile
+start is therefore the run to the end of the bitmap, and producing it steps every container in
+between. The read buffer's size does not change this: a buffer of four and a buffer of sixty-four
+both read that same first range.
+
+Measured at rung 6 (3,495,729,729 rows, whole-grant session, `base` 53,341 run containers of one
+full run each, diffs empty, no filter): **84 µs a call** at `whole_budget`, about 27,000 container
+steps on the average tile, and **157 µs** at `zoom_2`, whose tile sits earlier in the row space
+with more containers ahead of it. The 50% principal, whose runs are short, pays **1.1 µs** a call.
+Those three figures are from the rung-6 band-only runs, not from this README's own corpus.
+
+**The shipped path hides this for a whole-grant session and not for every session.**
+`select::decode_tier`'s `FullRange` arm answers a wholly visible tile without a cursor, and every
+tile of a whole-grant session is of that shape. A session whose mask holds a long contiguous run
+that is **not** the whole view — a large country's rows, say — takes the runs tier instead, and
+every tile inside that run pays the containers from the tile's start to the run's end. The band
+arm applies the same `FullRange` gate (`full_range_walks` counts it) so that the two arms gate a
+whole tile the same way. Nothing in the engine was changed; this records what was measured.
 
 **The merge does not show its value here.** The masks on this corpus are country-shaped and hold
 under one run a tile at every depth measured (28,266 runs over 36,833 tiles at `p100`'s

@@ -516,6 +516,9 @@ struct BandOutcome {
     mask_walk_s: f64,
     mask_walk_inside_s: f64,
     mask_walk_calls: u64,
+    /// Walks the wholly-visible shortcut answered without a cursor — `select::decode_tier`'s
+    /// `FullRange` arm, applied here so the two arms gate a whole tile the same way.
+    full_range_walks: u64,
     /// `seek_row`'s binary searches over the lists.
     seek_s: f64,
     seeks: u64,
@@ -594,6 +597,7 @@ impl BandOutcome {
             "mask_walk_s": self.mask_walk_s,
             "mask_walk_inside_s": self.mask_walk_inside_s,
             "mask_walk_calls": self.mask_walk_calls,
+            "full_range_walks": self.full_range_walks,
             "seek_s": self.seek_s,
             "seeks": self.seeks,
             "lz_bytes": self.lz_bytes,
@@ -705,30 +709,53 @@ struct WalkTimers {
     inside_s: f64,
     mask_walk_calls: u64,
     runs_walked: u64,
+    /// Walks the wholly-visible shortcut answered without a cursor. A tile can make several
+    /// walks, so this is not a tile count; the rest of [`Self::mask_walk_calls`] went to the
+    /// engine's route.
+    full_range_walks: u64,
     /// `seek_row`'s binary searches over the lists.
     seek_s: f64,
     seeks: u64,
 }
 
-/// `EffectiveMask::for_each_visible_run`, with the mask's own time separated from the caller's.
+/// The visible runs of `range`, with the mask's own time separated from the caller's.
 ///
-/// Two clock reads a call and two a run. At one run a tile that is four reads a tile, which is
-/// what a monotonic clock costs and not what a syscall counter would.
+/// **Two routes, and the first is the shipped sweep's own first question.** `visible ==
+/// range.len()` is `select::decode_tier`'s `FullRange` arm: the range is wholly visible, so it is
+/// one run the caller already holds, and asking a cursor for it is asking for something in hand.
+/// Everything else goes to the engine's `for_each_visible_run`, which is the route the shipped
+/// runs tier decodes through, so the two arms decode a partial tile the same way.
+///
+/// The shortcut is worth a gate of its own because the cursor's answer is not free on a bitmap of
+/// long runs — see this probe's README for what it costs and why — and because a whole-grant
+/// session's tiles are all of this shape.
+///
+/// `visible` is the caller's own `mask.count_range(range)`, which every call site has already
+/// taken to decide whether the tile is empty at all.
 fn walk_runs(
     mask: &EffectiveMask,
     range: Range<u32>,
+    visible: u64,
     timers: &mut WalkTimers,
     mut f: impl FnMut(Range<u32>),
 ) {
     let started = Instant::now();
     let mut inside = 0.0f64;
     let mut runs = 0u64;
-    mask.for_each_visible_run(range, |run| {
-        runs += 1;
+    if visible == u64::from(range.end - range.start) {
+        timers.full_range_walks += 1;
+        runs = 1;
         let entered = Instant::now();
-        f(run);
+        f(range.clone());
         inside += entered.elapsed().as_secs_f64();
-    });
+    } else {
+        mask.for_each_visible_run(range.clone(), |run| {
+            runs += 1;
+            let entered = Instant::now();
+            f(run);
+            inside += entered.elapsed().as_secs_f64();
+        });
+    }
     timers.mask_walk_calls += 1;
     timers.runs_walked += runs;
     timers.inside_s += inside;
@@ -752,6 +779,7 @@ fn list_candidates(
     list: &Mmap,
     range: &Range<u32>,
     mask: &EffectiveMask,
+    visible: u64,
     entries_read: &mut u64,
     timers: &mut WalkTimers,
     out: &mut Vec<(u32, u64, Option<u32>)>,
@@ -771,7 +799,7 @@ fn list_candidates(
     if current.is_none_or(|(row, _, _)| row >= range.end) {
         return;
     }
-    walk_runs(mask, range.clone(), timers, |run| {
+    walk_runs(mask, range.clone(), visible, timers, |run| {
         while let Some((row, id, code)) = current {
             // Past this run: the entry stays for the next one, and the cursor never goes back.
             if row >= run.end {
@@ -871,6 +899,7 @@ fn band_route(
                 list,
                 range,
                 inputs.mask,
+                visible,
                 &mut out.list_entries_walked,
                 &mut timers,
                 &mut candidates,
@@ -883,7 +912,7 @@ fn band_route(
             // Step 2b: no list is narrow enough, so the `lz` column decides membership and the
             // identity column answers each member. This is the sparse-principal route, and it is
             // the only reader of `lz.u8`.
-            walk_runs(inputs.mask, range.clone(), &mut timers, |run| {
+            walk_runs(inputs.mask, range.clone(), visible, &mut timers, |run| {
                 for row in run {
                     out.lz_bytes += 1;
                     if inputs.bands.lz(row) >= j {
@@ -902,7 +931,7 @@ fn band_route(
         let served_source: Vec<(u64, u32, Option<u32>)>;
         if from_scan {
             let mut smallest = Smallest::new(inputs.params.cap);
-            walk_runs(inputs.mask, range.clone(), &mut timers, |run| {
+            walk_runs(inputs.mask, range.clone(), visible, &mut timers, |run| {
                 for row in run {
                     let id = ids[row as usize];
                     out.column_reads += 1;
@@ -1016,6 +1045,7 @@ fn band_route(
                             list,
                             range,
                             inputs.mask,
+                            visible,
                             &mut out.list_entries_walked,
                             &mut timers,
                             &mut wider,
@@ -1045,7 +1075,7 @@ fn band_route(
                         // identities directly is a page or two.
                         out.floor_settled_by_column += 1;
                         let mut smallest = Smallest::new(inputs.params.cap);
-                        walk_runs(inputs.mask, range.clone(), &mut timers, |run| {
+                        walk_runs(inputs.mask, range.clone(), visible, &mut timers, |run| {
                             for row in run {
                                 out.column_reads += 1;
                                 out.floor_column_rows_read += 1;
@@ -1085,6 +1115,7 @@ fn band_route(
     out.mask_walk_s = timers.mask_walk_s;
     out.mask_walk_inside_s = timers.inside_s;
     out.mask_walk_calls = timers.mask_walk_calls;
+    out.full_range_walks = timers.full_range_walks;
     out.runs_walked = timers.runs_walked;
     out.seek_s = timers.seek_s;
     out.seeks = timers.seeks;
