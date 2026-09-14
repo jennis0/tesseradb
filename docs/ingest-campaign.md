@@ -69,6 +69,7 @@ block; re-run the script.
 
 | rung | rows | build wall | peak RSS | bundle | slowest stage |
 |---|---|---|---|---|---|
+| gbif | 3,495,729,729 | 161:10 | 46.87 GB | 209.85 GB | layers 31:21 |
 | medcpt | 35,920,666 | 15:13 | 11.85 GB | 11.15 GB | layers 6:52 |
 | paperseek | 102,117,343 | 67:46 | 20.54 GB | 70.78 GB | text_index 28:08 |
 | treeoflife | 233,055,986 | 70:33 | 37.86 GB | 40.01 GB | filter_postings 35:25 |
@@ -80,6 +81,12 @@ median under each condition, end to end; the last is the median cell's server-si
 
 | rung | cap | target | measured | terms | authorise | first viewport | cold | cold pages | hot | hot server p99 |
 |---|---|---|---|---|---|---|---|---|---|---|
+| gbif | 25.77 GB | 1% | 1.00% | 5 | 29.80 ms | 8.76 s | 5.64 s | 194.51 ms | 6.16 ms | 78.00 ms |
+| gbif | 25.77 GB | 5% | 5.00% | 6 | 10.80 ms | 11.86 s | 9.04 s | 210.01 ms | 6.10 ms | 103.80 ms |
+| gbif | 25.77 GB | 10% | 10.00% | 7 | 31.60 ms | 18.16 s | 14.33 s | 325.56 ms | 6.32 ms | 136.80 ms |
+| gbif | 25.77 GB | 25% | 25.00% | 7 | 40.50 ms | 32.38 s | 22.83 s | 324.60 ms | 29.53 ms | 141.16 ms |
+| gbif | 25.77 GB | 50% | 50.00% | 8 | 86.90 ms | 47.61 s | 36.96 s | 322.24 ms | 57.07 ms | 153.88 ms |
+| gbif | 25.77 GB | 100% | 100.00% | 253 | 1.50 ms | 41.36 s | 28.64 s | 324.70 ms | 58.12 ms | 187.92 ms |
 | medcpt | uncapped | 1% | 2.86% | 2 | 5.50 ms | 256.20 ms | 1.04 s | 23.47 ms | 3.09 ms | 2.32 ms |
 | medcpt | uncapped | 5% | 2.86% | 2 | 0.80 ms | 1.26 s | 1.06 s | 26.03 ms | 6.80 ms | 1.81 ms |
 | medcpt | uncapped | 10% | 9.66% | 2 | 7.80 ms | 1.73 s | 1.11 s | 31.00 ms | 9.08 ms | 2.24 ms |
