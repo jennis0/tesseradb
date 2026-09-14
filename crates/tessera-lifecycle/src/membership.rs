@@ -340,12 +340,32 @@ pub struct IncomingContent {
 ///
 /// The order a set is built in is not observable in the set, so this changes no result.
 fn bitmap_of_entities(entities: impl IntoIterator<Item = EntityId>) -> Bitmap {
-    // Entity space is `u32` by I9, so the narrowing is total.
-    let mut values: Vec<u32> = entities.into_iter().map(|e| e.raw() as u32).collect();
+    // **Checked, through the crate's one narrowing** ([`crate::overlay::as_u32`]). Entity space is
+    // `u32` by I9 and the allocator will not issue an id outside it, so this never fires; an `as`
+    // here would turn an id that somehow was outside into another entity's, which is a document
+    // nobody named put into the artifact. The build refuses the same id where it decodes a member
+    // table, and refusing rather than truncating is what makes the two entry points agree.
+    let mut values: Vec<u32> = entities
+        .into_iter()
+        .map(crate::overlay::as_u32)
+        .collect();
     values.sort_unstable();
-    values.dedup();
+    bitmap_of_sorted(&values)
+}
+
+/// The same membership, from entities a caller already holds **ascending**.
+///
+/// **One implementation of the append and two ways in**, differing only in who sorts. A build
+/// reads each artifact's members out of a table the member merge wrote in entity order, so the
+/// sort above would re-sort a sorted slice and the collect would hold a second copy of the
+/// largest artifact in the corpus.
+///
+/// **Duplicates are values here, not a fault.** The same document named twice for one artifact is
+/// two member entries and one member; `add_many` takes the second as the value the bitmap already
+/// holds. The count that reports entries reads the member table, not the set.
+fn bitmap_of_sorted(entities: &[u32]) -> Bitmap {
     let mut bitmap = Bitmap::new();
-    bitmap.add_many(&values);
+    bitmap.add_many(entities);
     bitmap
 }
 
@@ -426,6 +446,25 @@ impl IncomingArtifact {
         let mut artifact = IncomingArtifact::from_entities(key, members);
         artifact.contents = contents;
         artifact
+    }
+
+    /// The same, from members the caller already holds **ascending** — the build's route, where
+    /// the member table is written in entity order ([`bitmap_of_sorted`]).
+    pub fn with_content_sorted(
+        key: Option<String>,
+        members: &[u32],
+        contents: Vec<IncomingContent>,
+    ) -> Self {
+        IncomingArtifact {
+            key,
+            view: None,
+            members: bitmap_of_sorted(members),
+            excluding: None,
+            contents,
+            attached_to: None,
+            parent_keys: Vec::new(),
+            shape: None,
+        }
     }
 }
 
@@ -1010,7 +1049,12 @@ pub struct ArtifactStore {
     /// **Only a build reaches this**, between the encode and the mapping of the file it encoded
     /// into. An entry left here at the end of that window is an artifact holding the empty set,
     /// so the build refuses on it rather than writing a bundle whose level serves as absent.
-    vacated: BTreeMap<(String, u32, u32), u64>,
+    ///
+    /// **Keyed per `(layer, level)` and then per ordinal**, so the layer's name is held once a
+    /// level rather than once an artifact. A level of 1.6×10⁶ artifacts is vacated one batch at a
+    /// time, and an address built per artifact was a heap `String` per artifact for the map and
+    /// two more for the lookups around it.
+    vacated: BTreeMap<(String, u32), BTreeMap<u32, u64>>,
 }
 
 impl ArtifactStore {
@@ -1782,14 +1826,19 @@ impl ArtifactStore {
         ordinal: u32,
         members: Members,
     ) -> bool {
-        let address = (layer.to_string(), level, ordinal);
+        // The layer's name once, for all three lookups: this runs once per artifact of a level.
+        let address = (layer.to_string(), level);
         // **A vacated artifact is checked against the cardinality it had before the vacate**, not
         // against the placeholder standing in for it: the placeholder is empty, so the check that
         // is the whole of this method's value would otherwise pass for any short membership.
-        let vacated = self.vacated.get(&address).copied();
+        let vacated = self
+            .vacated
+            .get(&address)
+            .and_then(|level| level.get(&ordinal))
+            .copied();
         let Some(record) = self
             .levels
-            .get_mut(&(address.0, level))
+            .get_mut(&address)
             .and_then(|slots| slots.get_mut(ordinal as usize))
             .and_then(Option::as_mut)
         else {
@@ -1800,7 +1849,12 @@ impl ArtifactStore {
         }
         record.members = members;
         if vacated.is_some() {
-            self.vacated.remove(&(layer.to_string(), level, ordinal));
+            if let Some(level) = self.vacated.get_mut(&address) {
+                level.remove(&ordinal);
+                if level.is_empty() {
+                    self.vacated.remove(&address);
+                }
+            }
         }
         true
     }
@@ -1825,31 +1879,44 @@ impl ArtifactStore {
     /// calls it, and the build's own order — publish, pack, rehouse, then the artifact pass —
     /// is what keeps that true.
     ///
-    /// `false` where the address names no record.
-    pub fn vacate_members(&mut self, layer: &str, level: u32, ordinal: u32) -> bool {
-        debug_assert!(
-            !self.vacated.contains_key(&(layer.to_string(), level, ordinal)),
-            "an artifact vacated twice loses the cardinality the rehousing answers with"
-        );
-        let Some(record) = self
-            .levels
-            .get_mut(&(layer.to_string(), level))
-            .and_then(|slots| slots.get_mut(ordinal as usize))
-            .and_then(Option::as_mut)
-        else {
-            return false;
+    /// **A range of ordinals rather than one**, because a batch is what is vacated: the level is
+    /// found once and the layer's name is built once, where an address per artifact was three
+    /// heap `String`s per artifact over a level of 1.6×10⁶ of them.
+    ///
+    /// Answers how many records were vacated, which is the range's length where every ordinal in
+    /// it names one.
+    pub fn vacate_members(&mut self, layer: &str, level: u32, lo: u32, count: u32) -> u32 {
+        let address = (layer.to_string(), level);
+        let Some(slots) = self.levels.get_mut(&address) else {
+            return 0;
         };
-        let cardinality = record.members.cardinality();
-        record.members = Members::owned(Bitmap::new());
-        self.vacated
-            .insert((layer.to_string(), level, ordinal), cardinality);
-        true
+        let vacated = self.vacated.entry(address.clone()).or_default();
+        let mut done = 0;
+        for ordinal in lo..lo + count {
+            let Some(record) = slots.get_mut(ordinal as usize).and_then(Option::as_mut) else {
+                continue;
+            };
+            debug_assert!(
+                !vacated.contains_key(&ordinal),
+                "an artifact vacated twice loses the cardinality the rehousing answers with"
+            );
+            vacated.insert(ordinal, record.members.cardinality());
+            record.members = Members::owned(Bitmap::new());
+            done += 1;
+        }
+        // A range naming no record leaves no entry, on [`Self::rehouse_members`]'s rule: an empty
+        // level is not a level with nothing vacated in it, and the two must not be told apart by
+        // whether a range was once passed over.
+        if vacated.is_empty() {
+            self.vacated.remove(&address);
+        }
+        done
     }
 
     /// How many artifacts hold a placeholder rather than their membership — zero everywhere but
     /// inside a build's publication window. See [`Self::vacate_members`].
     pub fn vacated_count(&self) -> usize {
-        self.vacated.len()
+        self.vacated.values().map(BTreeMap::len).sum()
     }
 
     pub fn get(&self, layer: &str, level: u32, ordinal: u32) -> Option<&ArtifactRecord> {
@@ -4341,5 +4408,43 @@ mod tests {
 
         store.mark_growth_packed();
         assert_eq!(store.wal_pin(), None);
+    }
+
+    /// **A membership built from an ascending slice is the one built from the same entities in
+    /// any order**, duplicates included. The build reads each artifact's members out of the member
+    /// table, which the merge wrote in entity order, so it hands the slice straight to the Roaring
+    /// append; every other caller sorts first. A set that differed between the two routes would be
+    /// a masked count that depended on which constructor a caller reached for.
+    #[test]
+    fn a_membership_from_a_sorted_slice_is_the_one_a_scattered_iterator_builds() {
+        // Scattered across a wide space so the containers are arrays, dense in one block so one
+        // is a bitset, and carrying duplicates at both ends of a container.
+        let mut members: Vec<u32> = (0..5_000u32).map(|i| i * 977).collect();
+        members.extend(70_000u32..78_000);
+        members.push(0);
+        members.push(77_999);
+        members.sort_unstable();
+
+        let sorted = IncomingArtifact::with_content_sorted(None, &members, Vec::new());
+        let mut scattered: Vec<u32> = members.clone();
+        scattered.reverse();
+        let any_order = IncomingArtifact::from_entities(
+            None,
+            scattered.iter().map(|e| EntityId::new(*e as u64)),
+        );
+        assert_eq!(sorted.members, any_order.members);
+
+        let mut distinct = members.clone();
+        distinct.dedup();
+        assert_eq!(
+            sorted.members.cardinality(),
+            distinct.len() as u64,
+            "a duplicate member entry is one member"
+        );
+        assert_eq!(
+            sorted.members.iter().collect::<Vec<u32>>(),
+            distinct,
+            "the set is the distinct members, ascending"
+        );
     }
 }

@@ -29,7 +29,7 @@
 // unused. Remove this allow when `pipeline.rs` takes the module up.
 
 use std::fs::{self, File, OpenOptions};
-use std::io::{BufReader, BufWriter, Read, Write};
+use std::io::{BufRead, BufReader, BufWriter, Read, Write};
 use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
 
@@ -1034,17 +1034,67 @@ impl BandReader {
     }
 }
 
-/// One byte from `reader`, or `None` at EOF. Retries `Interrupted` (a bare `read` may see it).
-fn next_byte(reader: &mut impl Read) -> std::io::Result<Option<u8>> {
-    let mut byte = [0u8; 1];
+/// One byte from `reader`, or `None` at EOF. Retries `Interrupted` (a refill may see it).
+///
+/// **Out of the buffer the reader already holds.** `read` of a single byte is a call and a copy
+/// per byte through `BufReader`'s own bookkeeping; `fill_buf` hands over what is buffered and
+/// `consume` takes one byte of it.
+fn next_byte(reader: &mut BufReader<File>) -> std::io::Result<Option<u8>> {
     loop {
-        match reader.read(&mut byte) {
-            Ok(0) => return Ok(None),
-            Ok(_) => return Ok(Some(byte[0])),
+        let byte = match reader.fill_buf() {
+            Ok([]) => return Ok(None),
+            Ok(buffered) => buffered[0],
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
             Err(e) => return Err(e),
-        }
+        };
+        reader.consume(1);
+        return Ok(Some(byte));
     }
+}
+
+/// Decode one LEB128 `u32` from the head of `buffered`, with how many bytes it took.
+///
+/// `None` where the varint is not whole inside the slice, and where it is whole and malformed:
+/// both send the caller to the byte-at-a-time path, which refills across the boundary and names
+/// the malformation.
+fn varint32_at(buffered: &[u8]) -> Option<(u32, usize)> {
+    let mut value = 0u32;
+    let mut shift = 0u32;
+    for (at, &byte) in buffered.iter().enumerate() {
+        if shift == 28 {
+            // Fifth byte: four payload bits remain in a u32, and there is no sixth.
+            if byte & 0xF0 != 0 {
+                return None;
+            }
+            return Some((value | ((byte as u32) << 28), at + 1));
+        }
+        value |= ((byte & 0x7F) as u32) << shift;
+        if byte & 0x80 == 0 {
+            return Some((value, at + 1));
+        }
+        shift += 7;
+    }
+    None
+}
+
+/// [`varint32_at`] at the `u64` width.
+fn varint64_at(buffered: &[u8]) -> Option<(u64, usize)> {
+    let mut value = 0u64;
+    let mut shift = 0u32;
+    for (at, &byte) in buffered.iter().enumerate() {
+        if shift == 63 {
+            if byte & 0xFE != 0 {
+                return None;
+            }
+            return Some((value | ((byte as u64) << 63), at + 1));
+        }
+        value |= ((byte & 0x7F) as u64) << shift;
+        if byte & 0x80 == 0 {
+            return Some((value, at + 1));
+        }
+        shift += 7;
+    }
+    None
 }
 
 // --------------------------------------------------------------------------------------------
@@ -1719,14 +1769,11 @@ impl MemberRunReader {
         while self.pending > 0 {
             self.next_source()?;
         }
-        let first = match next_byte(&mut self.reader).map_err(|e| BuildError::io(&self.path, e))? {
-            None => {
-                self.verify_end()?;
-                return Ok(false);
-            }
-            Some(byte) => byte,
-        };
-        let gap = self.decode_varint(first)?;
+        if self.at_end()? {
+            self.verify_end()?;
+            return Ok(false);
+        }
+        let gap = self.next_u32()?;
         self.index = if self.started {
             self.index
                 .checked_add(gap)
@@ -1735,10 +1782,7 @@ impl MemberRunReader {
         } else {
             gap
         };
-        let count = {
-            let byte = self.require_byte()?;
-            self.decode_varint(byte)?
-        };
+        let count = self.next_u32()?;
         if count == 0 {
             return Err(self.malformed("an artifact with no sources"));
         }
@@ -1770,9 +1814,58 @@ impl MemberRunReader {
         Ok(())
     }
 
+    /// Whether the stream is at end of file — a record boundary, which is the only place it may
+    /// legitimately be.
+    fn at_end(&mut self) -> Result<bool> {
+        let MemberRunReader { reader, path, .. } = self;
+        loop {
+            match reader.fill_buf() {
+                Ok(buffered) => return Ok(buffered.is_empty()),
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(e) => return Err(BuildError::io(path, e)),
+            }
+        }
+    }
+
+    /// One LEB128 `u32` **out of the buffer the reader already holds**, falling back to the
+    /// byte-at-a-time path where the varint straddles the buffer's end or is malformed.
+    ///
+    /// **Why the two paths.** A member run is one varint a pair, so a corpus of 10¹⁰ pairs is
+    /// 10¹⁰ of them and a byte at a time is a call and a copy through `BufReader`'s bookkeeping
+    /// per byte. `fill_buf` hands over the bytes already read and `consume` takes what the varint
+    /// used; only a varint crossing the buffer's end takes the other path, which is at most one
+    /// per [`SPILL_BUF_BYTES`].
+    fn next_u32(&mut self) -> Result<u32> {
+        let taken = {
+            let MemberRunReader { reader, path, .. } = self;
+            let buffered = reader.fill_buf().map_err(|e| BuildError::io(path, e))?;
+            varint32_at(buffered)
+        };
+        if let Some((value, len)) = taken {
+            self.reader.consume(len);
+            return Ok(value);
+        }
+        let first = self.require_byte()?;
+        self.decode_varint(first)
+    }
+
+    /// [`Self::next_u32`] at the `u64` width — the source deltas, which is every pair.
+    fn next_u64(&mut self) -> Result<u64> {
+        let taken = {
+            let MemberRunReader { reader, path, .. } = self;
+            let buffered = reader.fill_buf().map_err(|e| BuildError::io(path, e))?;
+            varint64_at(buffered)
+        };
+        if let Some((value, len)) = taken {
+            self.reader.consume(len);
+            return Ok(value);
+        }
+        let first = self.require_byte()?;
+        self.decode_varint64(first)
+    }
+
     fn next_source(&mut self) -> Result<u64> {
-        let byte = self.require_byte()?;
-        let delta = self.decode_varint64(byte)?;
+        let delta = self.next_u64()?;
         let source = if self.taken == 0 {
             delta
         } else {
@@ -2075,11 +2168,17 @@ impl MemberTable {
     /// `scratch` is the caller's byte buffer, reused across artifacts: an artifact's extent is
     /// read whole because it is contiguous and small beside the file, and allocating that buffer
     /// per artifact would be one allocation per artifact per pass.
+    ///
+    /// **The members come out `u32`, which is the entity space I9 states.** The deltas on disk
+    /// are `u64` varints — a member table is written from source ids before they are resolved in
+    /// any other pass — and an entity outside the space refuses rather than being truncated. What
+    /// the narrower buffer buys is the buffer: every reader of this holds one per thread, grown to
+    /// the largest artifact it met, and the largest artifact at the GBIF rung is 2.81×10⁹ members.
     pub(crate) fn read_into(
         &self,
         index: usize,
         scratch: &mut Vec<u8>,
-        out: &mut Vec<u64>,
+        out: &mut Vec<u32>,
     ) -> Result<()> {
         use std::os::unix::fs::FileExt;
         out.clear();
@@ -2112,7 +2211,12 @@ impl MemberTable {
             };
             last = entity;
             anchor = anchor.wrapping_add(mix64(mark ^ entity));
-            out.push(entity);
+            out.push(u32::try_from(entity).map_err(|_| {
+                self.malformed(
+                    index,
+                    &format!("member {entity} is outside the u32 entity space (I9)"),
+                )
+            })?);
         }
         if cursor != scratch.len() {
             return Err(self.malformed(
@@ -2738,6 +2842,91 @@ mod tests {
         Ok(out)
     }
 
+    /// **A varint is decoded out of the buffer only where the whole of it is in the buffer.** The
+    /// slice decoders are the fast path a member run's pairs take; a prefix read as a value would
+    /// be a source id short of what was written, and every id after it in the record wrong by the
+    /// same amount. Everything they decline — a prefix, an overlong encoding, an empty slice —
+    /// goes to the byte-at-a-time path, which refills across the boundary and names a
+    /// malformation.
+    #[test]
+    fn the_slice_varint_decoders_take_only_a_whole_legal_varint() {
+        // The widest legal values: five bytes at the u32 width, ten at the u64.
+        let widest32 = [0xFF, 0xFF, 0xFF, 0xFF, 0x0F];
+        let widest64 = [0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x01];
+        assert_eq!(varint32_at(&widest32), Some((u32::MAX, 5)));
+        assert_eq!(varint64_at(&widest64), Some((u64::MAX, 10)));
+        // And a value after them is not read: the length is what `consume` takes.
+        assert_eq!(varint32_at(&[0x7F, 0x01]), Some((0x7F, 1)));
+        assert_eq!(varint64_at(&[0x7F, 0x01]), Some((0x7F, 1)));
+
+        // Every proper prefix declines, the empty slice included.
+        for len in 0..widest32.len() {
+            assert_eq!(varint32_at(&widest32[..len]), None, "u32 prefix of {len}");
+        }
+        for len in 0..widest64.len() {
+            assert_eq!(varint64_at(&widest64[..len]), None, "u64 prefix of {len}");
+        }
+
+        // Both overflow shapes: payload bits above the width, and a continuation where there is
+        // no further byte to continue into.
+        assert_eq!(varint32_at(&[0xFF, 0xFF, 0xFF, 0xFF, 0x1F]), None);
+        assert_eq!(varint32_at(&[0xFF, 0xFF, 0xFF, 0xFF, 0x8F]), None);
+        assert_eq!(
+            varint64_at(&[0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x03]),
+            None
+        );
+        assert_eq!(
+            varint64_at(&[0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x81]),
+            None
+        );
+    }
+
+    /// One source delta per five bytes over a record larger than the reader's buffer, so varints
+    /// straddle the buffer's end and the slice decoder declines at each boundary. **The record
+    /// that comes back is the record that went in**, which is what says the two decode paths
+    /// agree: a boundary read by the wrong one would be a membership whose ids are wrong from the
+    /// boundary onward, and the anchor over them is what would catch it.
+    #[test]
+    fn a_member_run_spanning_several_read_buffers_round_trips() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let path = temp.path().join("wide-member-run.spill");
+        // 2^30 needs five bytes, so every delta does — 11.0 MB over three 4 MiB buffers.
+        let step = 1u64 << 30;
+        let sources: Vec<u64> = (1..=2_200_000u64).map(|i| i * step).collect();
+        assert_eq!(
+            sources.len() * 5,
+            11_000_000,
+            "the fixture must be five bytes a source"
+        );
+        assert!(
+            sources.len() * 5 > 2 * SPILL_BUF_BYTES,
+            "the fixture must span more than two buffers"
+        );
+        let receipt = write_member_run(&path, &[(7, sources.clone())]);
+        assert_eq!(
+            fs::metadata(&path).unwrap().len() as usize / SPILL_BUF_BYTES,
+            2,
+            "three buffers, the third partial"
+        );
+        assert_eq!(read_member_run(&receipt).unwrap(), vec![(7, sources)]);
+    }
+
+    /// **A file cut inside a five-byte delta refuses.** The slice decoder declines a prefix and
+    /// the byte-at-a-time path behind it meets the end of the file, which is the one place a
+    /// truncation can be told from a record boundary.
+    #[test]
+    fn a_member_run_cut_inside_a_delta_is_truncated() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let path = temp.path().join("cut-member-run.spill");
+        let step = 1u64 << 30;
+        let sources: Vec<u64> = (1..=8u64).map(|i| i * step).collect();
+        let receipt = write_member_run(&path, &[(3, sources)]);
+        // Two of the last delta's five bytes, so the file ends inside it.
+        truncate_by(&path, 2);
+        let message = err_string(read_member_run(&receipt));
+        assert!(message.contains("truncated"), "{message}");
+    }
+
     #[test]
     fn member_run_round_trips() {
         let temp = tempfile::TempDir::new().unwrap();
@@ -2886,7 +3075,7 @@ mod tests {
         writer.finish().unwrap()
     }
 
-    fn read_member_table(table: &MemberTable, artifacts: usize) -> Result<Vec<Vec<u64>>> {
+    fn read_member_table(table: &MemberTable, artifacts: usize) -> Result<Vec<Vec<u32>>> {
         let mut scratch = Vec::new();
         let mut out = Vec::new();
         for index in 0..artifacts {
@@ -2904,18 +3093,19 @@ mod tests {
         // Artifact 1 is named by no member row and keeps the empty extent, which is a legal
         // membership and not a missing one; artifact 3 holds the same entity twice.
         let rows = vec![
-            (0usize, vec![0u64, 1, 2, u64::MAX]),
+            (0usize, vec![0u64, 1, 2, u32::MAX as u64]),
             (2, (0..4_000u64).map(|e| e * 7).collect()),
             (3, vec![9, 9, 10]),
         ];
         let table = write_member_table(&path, 5, &rows);
+        let narrowed = |row: &Vec<u64>| -> Vec<u32> { row.iter().map(|e| *e as u32).collect() };
         assert_eq!(
             read_member_table(&table, 5).unwrap(),
             vec![
-                rows[0].1.clone(),
+                narrowed(&rows[0].1),
                 Vec::new(),
-                rows[1].1.clone(),
-                rows[2].1.clone(),
+                narrowed(&rows[1].1),
+                narrowed(&rows[2].1),
                 Vec::new(),
             ]
         );
@@ -2924,9 +3114,21 @@ mod tests {
         let mut scratch = Vec::new();
         let mut buf = Vec::new();
         table.read_into(3, &mut scratch, &mut buf).unwrap();
-        assert_eq!(buf, vec![9, 9, 10]);
+        assert_eq!(buf, vec![9u32, 9, 10]);
         table.read_into(0, &mut scratch, &mut buf).unwrap();
-        assert_eq!(buf, vec![0, 1, 2, u64::MAX]);
+        assert_eq!(buf, vec![0u32, 1, 2, u32::MAX]);
+    }
+
+    /// **A member outside the `u32` entity space refuses rather than being truncated.** Entity
+    /// space is `u32` by I9 and the table's deltas are `u64`, so the narrowing is where a source
+    /// id that reached the table unresolved would otherwise become another entity's member.
+    #[test]
+    fn member_table_refuses_a_member_outside_the_entity_space() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let path = temp.path().join("member-table.spill");
+        let table = write_member_table(&path, 1, &[(0, vec![1, u32::MAX as u64 + 1])]);
+        let message = err_string(read_member_table(&table, 1));
+        assert!(message.contains("outside the u32 entity space"), "{message}");
     }
 
     #[test]
@@ -2959,7 +3161,7 @@ mod tests {
     #[test]
     fn an_empty_member_table_answers_every_artifact() {
         let table = MemberTable::empty(3);
-        assert_eq!(read_member_table(&table, 3).unwrap(), vec![Vec::<u64>::new(); 3]);
+        assert_eq!(read_member_table(&table, 3).unwrap(), vec![Vec::<u32>::new(); 3]);
     }
 
     proptest! {
@@ -2993,10 +3195,10 @@ mod tests {
         #[test]
         fn any_member_table_round_trips(
             raw in prop::collection::vec(
-                prop::collection::vec(prop::num::u64::ANY, 0..8),
+                prop::collection::vec(prop::num::u32::ANY, 0..8),
                 1..20),
         ) {
-            let memberships: Vec<Vec<u64>> = raw
+            let memberships: Vec<Vec<u32>> = raw
                 .into_iter()
                 .map(|mut entities| {
                     entities.sort_unstable();
@@ -3005,9 +3207,9 @@ mod tests {
                 .collect();
             let rows: Vec<(usize, Vec<u64>)> = memberships
                 .iter()
-                .cloned()
+                .map(|entities| entities.iter().map(|e| *e as u64).collect())
                 .enumerate()
-                .filter(|(_, entities)| !entities.is_empty())
+                .filter(|(_, entities): &(usize, Vec<u64>)| !entities.is_empty())
                 .collect();
 
             let temp = tempfile::TempDir::new().unwrap();

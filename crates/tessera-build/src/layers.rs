@@ -174,15 +174,15 @@ struct ResolvedArtifact {
 /// spelled on the artifact's *own row* is one list per artifact in a file an author wrote, so it
 /// is held where it was read.
 ///
-/// The members are raw entity ids rather than [`EntityId`] because a source id and the entity it
-/// resolves to are both `u64`, so the inline case is rewritten in place rather than copied. The
-/// newtype goes back on at [`incoming_artifact`], the one place these leave this module.
+/// The members are raw `u32` entities rather than [`EntityId`] because that is the entity space I9
+/// states and it is what the store's bitmap takes: the newtype would be put on at
+/// [`incoming_artifact`] and taken straight off again.
 #[derive(Debug)]
 enum ResolvedMembers {
     /// At this artifact's extent of the merged member table.
     Table,
     /// Materialised here: the artifact row's `members`, or the complement of its `excluding`.
-    Inline(Vec<u64>),
+    Inline(Vec<u32>),
 }
 
 /// What the build reads: declarations, and the artifacts to publish into them.
@@ -238,15 +238,68 @@ const MEMBER_ARTIFACT_BYTES: usize = 80;
 ///
 /// ⊘ Deliberately **not** added to `residency.rs`'s model, for that pass's reason: it is a
 /// sixteenth of the same budget the model is checked against, inside the factor of two that module
-/// states as its own error bar, and adding it would turn builds that fit today into refusals.
+/// states as its own error bar, and adding it would turn builds that fit today into refusals. The
+/// merge's open runs ([`member_merge_fan_in`]) are left out on the same argument and a second one:
+/// they are sized *from* this share and stand only while the accumulator is empty, so the two are
+/// one term and not two.
 const MEMBER_BUDGET_SHARE: u64 = 16;
 const MEMBER_BUDGET_MIN: u64 = 64 << 20;
 const MEMBER_BUDGET_MAX: u64 = 1 << 30;
 
-/// The most runs one merge opens at once. A run is a file descriptor and a 4 MiB read buffer, so
-/// this is what the merge's own residency is a function of. The text index's number, for the same
-/// reason it has one.
-const MEMBER_MERGE_FAN_IN: usize = 128;
+/// What the member accumulator may hold at `memory_budget` — the share, floored and capped.
+fn member_budget(memory_budget: u64) -> u64 {
+    (memory_budget / MEMBER_BUDGET_SHARE).clamp(MEMBER_BUDGET_MIN, MEMBER_BUDGET_MAX)
+}
+
+/// What one open run costs the merge: its read buffer, which is [`spill::SPILL_BUF_BYTES`]. The
+/// file descriptor, the reader's own fields and its place in the heap come to under a kibibyte
+/// beside it.
+const MEMBER_MERGE_BYTES_PER_RUN: u64 = spill::SPILL_BUF_BYTES as u64;
+
+/// The most runs one merge may hold **open**, whatever the budget pays for.
+///
+/// **A merge holds a file descriptor per run, and memory is not what bounds that.** The budget
+/// share buys 256 runs at the accumulator's present ceiling, so the cap does not bind today; it
+/// binds the moment [`MEMBER_BUDGET_MAX`] is raised, where a 8 GiB share would otherwise ask for
+/// 2,048 descriptors and fail with `EMFILE` at hour two on exactly the corpus this shape exists to
+/// make buildable. The text index's merge has the same cap for the same reason
+/// ([`crate::pipeline`]'s `RUN_MERGE_FAN_IN`), at a lower number because it runs one merge per
+/// thread and this one runs a merge at a time.
+///
+/// Five hundred and twelve: half the 1,024 soft limit a Linux process ordinarily starts with. The
+/// other half is what the build holds open beside this merge — the source Parquet readers, the
+/// mapped arenas, the member table it is writing and the membership packs that follow it — none of
+/// which scales with the run count, so half is headroom rather than an estimate.
+const MEMBER_MERGE_DESCRIPTOR_CAP: usize = 512;
+
+/// The most runs one merge opens at once: **what the accumulator's own budget share pays for**,
+/// rather than a fixed number.
+///
+/// **The run count is the corpus's, and the fan-in is the budget's.** The accumulator spills a run
+/// each time it reaches [`member_budget`] at [`MEMBER_ENTRY_BYTES`] a pair, so a corpus of *E*
+/// pairs writes about `E × 16 / member_budget` runs — at a 24 GiB budget the share is capped at
+/// 1 GiB, which is 67.1×10⁶ pairs a run, and the whole GBIF corpus's 10.3×10⁹ pairs is 154 of
+/// them. A fixed 128 put that corpus one pass of the cascade below the merge it was already able
+/// to run: a full extra read and write of every pair, and the runs of both levels on the disk at
+/// once. The same share buys `1 GiB / 4 MiB = 256` open runs, so it does not fire.
+///
+/// **The cascade stays** for the budget that really cannot hold the runs. At the floor — 64 MiB,
+/// which is a `--memory-budget` under 1 GiB — a run is 4.19×10⁶ pairs and the merge opens 16 of
+/// them, so a corpus of more than 67×10⁶ pairs reduces before it merges. That is the trade the
+/// flag asks for, and the floor is also what makes a pass always reduce: sixteen runs into one is
+/// a reduction where one run into one would be a copy.
+///
+/// [`MEMBER_MERGE_DESCRIPTOR_CAP`] bounds it above, memory not being what limits how many files a
+/// process may hold open.
+fn member_merge_fan_in(memory_budget: u64) -> usize {
+    open_runs_for(member_budget(memory_budget))
+}
+
+/// How many runs a budget share of `bytes` pays for, held under the descriptor cap. Split out so
+/// the cap can be read at a share the accumulator's present ceiling does not reach.
+fn open_runs_for(bytes: u64) -> usize {
+    ((bytes / MEMBER_MERGE_BYTES_PER_RUN) as usize).min(MEMBER_MERGE_DESCRIPTOR_CAP)
+}
 
 /// Every layer's member rows, accumulated as `(artifact, source)` pairs and spilled as **sorted
 /// runs** once the accumulator reaches its budget.
@@ -295,10 +348,9 @@ struct MemberSpill {
 
 impl MemberSpill {
     fn new(dir: &Path, budget: u64) -> MemberSpill {
-        let budget = budget / MEMBER_BUDGET_SHARE;
         MemberSpill {
             dir: dir.to_path_buf(),
-            budget: budget.clamp(MEMBER_BUDGET_MIN, MEMBER_BUDGET_MAX) as usize,
+            budget: member_budget(budget) as usize,
             bytes: 0,
             open: Vec::new(),
             receipts: Vec::new(),
@@ -1710,7 +1762,7 @@ pub fn publish(
                 // bitmaps plus the largest single artifact per thread, rather than a batch of
                 // entity vectors beside them.
                 .map_init(
-                    || (Vec::<u8>::new(), Vec::<u64>::new()),
+                    || (Vec::<u8>::new(), Vec::<u32>::new()),
                     |(scratch, buf), ((key, index), body)| {
                         incoming_artifact(
                             key,
@@ -1777,9 +1829,7 @@ pub fn publish(
             }
             // The bytes are in the writer, so the store's own bitmaps have one reader left — the
             // rehousing that replaces them with a view over the finished pack.
-            for ordinal in batch_lo..batch_lo + batch_len {
-                store.vacate_members(layer, level, ordinal);
-            }
+            store.vacate_members(layer, level, batch_lo, batch_len);
             // **No trim here.** A batch's bitmaps are freed above and the next batch allocates
             // the same shapes straight back, so returning the pages to the kernel between two
             // batches of one level buys a heap the level is about to ask for again — and
@@ -1883,7 +1933,8 @@ fn merge_member_runs(
     if receipts.is_empty() {
         return Ok(spill::MemberTable::empty(plan.bodies.len()));
     }
-    let receipts = cascade_member_runs(receipts, &plan.members.dir)?;
+    let receipts =
+        cascade_member_runs(receipts, &plan.members.dir, member_merge_fan_in(plan.memory_budget))?;
     let path = plan.members.dir.join("member-table.spill");
     let mut writer = spill::MemberTableWriter::create(&path, plan.bodies.len())?;
     let mut merge = MemberRunMerge::open(&receipts)?;
@@ -1930,22 +1981,23 @@ fn merge_member_runs(
     writer.finish()
 }
 
-/// Reduce `receipts` to at most [`MEMBER_MERGE_FAN_IN`] runs, deleting each pass's inputs as it
-/// goes — so a build's transient disk is the runs at one level of the cascade and not all of them.
+/// Reduce `receipts` to at most `fan_in` runs, deleting each pass's inputs as it goes — so a
+/// build's transient disk is the runs at one level of the cascade and not all of them.
 ///
-/// ⊘ **Unreached by anything measured.** At the accumulator's ceiling a run holds 67×10⁶ pairs, and
-/// GeoNames' 68.4×10⁶ spilled **two**. It exists because a small `--memory-budget` over a large
-/// corpus is the caller's to choose: the budget is a sixteenth of that flag, so it is the flag and
-/// not the corpus that decides whether a cascade happens at all.
+/// ⊘ **Reached only where the budget cannot hold the runs** ([`member_merge_fan_in`]). A pass is a
+/// full extra read and write of every pair the corpus declares, and both levels' runs stand on the
+/// disk while it runs, so what decides whether it happens is the `--memory-budget` the caller
+/// chose and never the corpus's size on its own.
 fn cascade_member_runs(
     receipts: &[spill::SpillReceipt],
     dir: &Path,
+    fan_in: usize,
 ) -> Result<Vec<spill::SpillReceipt>> {
     let mut receipts = receipts.to_vec();
     let mut pass = 0usize;
-    while receipts.len() > MEMBER_MERGE_FAN_IN {
-        let mut merged = Vec::with_capacity(receipts.len().div_ceil(MEMBER_MERGE_FAN_IN));
-        for (group, runs) in receipts.chunks(MEMBER_MERGE_FAN_IN).enumerate() {
+    while receipts.len() > fan_in {
+        let mut merged = Vec::with_capacity(receipts.len().div_ceil(fan_in));
+        for (group, runs) in receipts.chunks(fan_in).enumerate() {
             let path = dir.join(format!("member-cascade-{pass}-{group:04}.spill"));
             let mut writer = spill::MemberRunWriter::create(&path)?;
             let mut merge = MemberRunMerge::open(runs)?;
@@ -2191,9 +2243,9 @@ type Address = (String, u32, String);
 #[derive(Default)]
 struct HierarchyBuffers {
     parent_bytes: Vec<u8>,
-    parent_buf: Vec<u64>,
+    parent_buf: Vec<u32>,
     child_bytes: Vec<u8>,
-    child_buf: Vec<u64>,
+    child_buf: Vec<u32>,
 }
 
 fn verify_hierarchies(
@@ -2382,7 +2434,7 @@ fn verify_hierarchies(
             // because the buffer is this task's own: nothing else is reading it, and the largest
             // membership at the Overture rung is 73.6×10⁶ entries, which a copy would be 589 MB of.
             scratch.parent_buf.dedup();
-            let held: &[u64] = &scratch.parent_buf;
+            let held: &[u32] = &scratch.parent_buf;
             // One bit per distinct member, so `covered.len()` becomes a popcount: 2.5 MB where the
             // second `HashSet` was 300 MB, and the counts it feeds are identical by construction.
             let mut covered = vec![0u64; held.len().div_ceil(64)];
@@ -2608,9 +2660,10 @@ fn resolve_artifact(
              divides by"
         ))
     };
-    // **Rewritten where they sit.** A source id and the entity it resolves to are both `u64`, so
-    // the plan's vector is the resolved one and no second allocation of the corpus's whole
-    // membership exists to hold beside it.
+    // **A generating set is rewritten where it sits.** A source id and the entity it resolves to
+    // are both `u64`, so the plan's vector is the resolved one. It stays `u64` because it leaves
+    // here as [`EntityId`]s for a content's own bitmap, which is one list per ranked content per
+    // artifact and not a term any corpus makes large.
     let in_place = |ids: &mut Vec<u64>, what: &str| -> Result<()> {
         for id in ids.iter_mut() {
             let source = *id;
@@ -2618,18 +2671,47 @@ fn resolve_artifact(
         }
         Ok(())
     };
+    // A **membership** narrows as it resolves: the store's bitmap is over the `u32` entity space
+    // I9 states, so carrying one twice as wide from here to the publication is a second copy of
+    // the artifact's members with nothing reading the top half. An id outside the space refuses,
+    // on the same rule an unassigned one does.
+    let narrow = |entity: u64, what: &str| -> Result<u32> {
+        u32::try_from(entity).map_err(|_| {
+            BuildError::Invalid(format!(
+                "{layer} level {level} artifact {key}: {what} names entity {entity}, which is \
+                 outside the u32 entity space (I9's ceiling)"
+            ))
+        })
+    };
+    // **A membership is not rewritten in place, and holds both widths while it resolves**: the
+    // `Vec<u64>` the plan read and the `Vec<u32>` this builds, 12 bytes an entry against the
+    // 8 an in-place rewrite would hold. That is the trade for a membership half as wide
+    // everywhere downstream, and it is bounded: the two spellings that reach here are an
+    // artifact row's own `members` and its `excluding`, one list per artifact in a file somebody
+    // wrote. A member source's rows never come this way — they are in the merged member table,
+    // which resolves in the merge's own buffer.
+    let resolve_members = |ids: &[u64], what: &str| -> Result<Vec<u32>> {
+        let mut out = Vec::with_capacity(ids.len());
+        for &source in ids {
+            out.push(narrow(
+                resolve(source).ok_or_else(|| refuse(source, what))?,
+                what,
+            )?);
+        }
+        Ok(out)
+    };
 
     let members = match std::mem::take(&mut artifact.membership) {
         // The member sources' rows are in the merged table by now, resolved and sorted by the
         // merge — there is nothing here to do for them and nothing here to hold.
         PlannedMembership::Rows => ResolvedMembers::Table,
-        PlannedMembership::Included(mut ids) => {
-            in_place(&mut ids, "membership")?;
-            // **Sorted here, once, and not deduped.** Two readers want it in order — the
+        PlannedMembership::Included(ids) => {
+            let mut ids = resolve_members(&ids, "membership")?;
+            // **Sorted here, once, and not deduped.** Every reader wants it in order — the
             // containment pass, which walks parent and child together instead of hashing a set per
-            // parent, and `bitmap_of_entities`, which sorts before its bulk add. Deduping would be
-            // wrong: a containment violation counts member *entries* that escape, duplicates
-            // included, and that is the number an operator is given.
+            // parent, and the Roaring append, whose fast path is a value above the container's
+            // last. Deduping would be wrong: a containment violation counts member *entries* that
+            // escape, duplicates included, and that is the number an operator is given.
             ids.sort_unstable();
             ResolvedMembers::Inline(ids)
         }
@@ -2642,11 +2724,21 @@ fn resolve_artifact(
         // be held whichever side of the disk they sat — an `excluding` spelling is an authored one,
         // one row per artifact in a file somebody wrote, and the corpora that reach the spill do
         // not use it.
-        PlannedMembership::Excluded(mut ids) => {
-            in_place(&mut ids, "exclusion")?;
-            let excluded: std::collections::HashSet<u64> = ids.into_iter().collect();
+        PlannedMembership::Excluded(ids) => {
+            let excluded: std::collections::HashSet<u32> =
+                resolve_members(&ids, "exclusion")?.into_iter().collect();
+            // **`high_water` is one past the last entity**, so a build that assigned the whole
+            // `u32` space has `high_water == 2³²` and every entity in it still fits. Narrowing the
+            // mark itself would refuse that complement, which is a legal one.
+            if high_water > u32::MAX as u64 + 1 {
+                return Err(BuildError::Invalid(format!(
+                    "{layer} level {level} artifact {key}: this build assigned entities up to \
+                     {high_water}, which is outside the u32 entity space (I9's ceiling)"
+                )));
+            }
             ResolvedMembers::Inline(
                 (0..high_water)
+                    .map(|entity| entity as u32)
                     .filter(|entity| !excluded.contains(entity))
                     .collect(),
             )
@@ -2712,8 +2804,7 @@ impl ResolvedArtifact {
 ///
 /// **The members are read into `buf` and turned into a bitmap here**, which is what keeps a level's
 /// publication holding a level of *bitmaps* and never a level of entity vectors: the vector is one
-/// artifact's, reused, and the `EntityId` newtype goes back on the raw ids at the one boundary that
-/// leaves this module.
+/// artifact's, reused, and it is the ascending `u32` slice the Roaring append takes.
 fn incoming_artifact(
     key: &str,
     body: PublishableBody,
@@ -2721,16 +2812,12 @@ fn incoming_artifact(
     index: usize,
     table: &spill::MemberTable,
     scratch: &mut Vec<u8>,
-    buf: &mut Vec<u64>,
+    buf: &mut Vec<u32>,
 ) -> Result<IncomingArtifact> {
     load_members(members, index, table, scratch, buf)?;
-    let entities = buf.iter().copied().map(EntityId::new);
-    let mut result = match body.attached_to {
-        None => IncomingArtifact::with_content(Some(key.to_string()), entities, body.contents),
-        Some(attached_to) => {
-            IncomingArtifact::attached(Some(key.to_string()), entities, body.contents, attached_to)
-        }
-    };
+    let mut result =
+        IncomingArtifact::with_content_sorted(Some(key.to_string()), buf, body.contents);
+    result.attached_to = body.attached_to;
     result.parent_keys = body.parent_keys;
     result.shape = body.shape;
     result.view = body.view;
@@ -2747,7 +2834,7 @@ fn load_members(
     index: usize,
     table: &spill::MemberTable,
     scratch: &mut Vec<u8>,
-    buf: &mut Vec<u64>,
+    buf: &mut Vec<u32>,
 ) -> Result<()> {
     match members {
         ResolvedMembers::Table => table.read_into(index, scratch, buf),
@@ -4401,15 +4488,17 @@ mod tests {
         assert_eq!(drain(&forward), drain(&reversed));
     }
 
-    /// **The cascade is the same merge, and it holds every pair across a reduction.** Nothing
-    /// measured reaches it — GeoNames spills two runs against a fan-in of 128 — so the only
-    /// exercise it gets is this one, and it feeds the memberships every masked count divides by.
+    /// **The cascade is the same merge, and it holds every pair across a reduction.** Nothing a
+    /// measured corpus does reaches it — the fan-in is sized from the budget the runs were spilled
+    /// under — so the only exercise it gets is this one, and it feeds the memberships every masked
+    /// count divides by.
     #[test]
     fn a_cascade_reduces_the_runs_and_loses_no_pair() {
         let temp = tempfile::TempDir::new().unwrap();
+        let fan_in = 8usize;
         // Two full passes' worth: each run names three artifacts drawn from a space small enough
         // that every artifact is in most runs, which is the case a cascade has to gather.
-        let runs = MEMBER_MERGE_FAN_IN * 2 + 3;
+        let runs = fan_in * 2 + 3;
         let receipts: Vec<spill::SpillReceipt> = (0..runs)
             .map(|seq| {
                 let records: Vec<(u32, Vec<u64>)> = (0..3)
@@ -4421,8 +4510,8 @@ mod tests {
             })
             .collect();
         let direct = drain(&receipts);
-        let cascaded = cascade_member_runs(&receipts, temp.path()).unwrap();
-        assert!(cascaded.len() <= MEMBER_MERGE_FAN_IN, "the cascade reduces");
+        let cascaded = cascade_member_runs(&receipts, temp.path(), fan_in).unwrap();
+        assert!(cascaded.len() <= fan_in, "the cascade reduces");
         assert_eq!(drain(&cascaded), direct);
         assert_eq!(
             direct.iter().map(|(_, s)| s.len() as u64).sum::<u64>(),
@@ -4512,7 +4601,7 @@ mod tests {
         let parents = 240usize;
         let mut index_of: BTreeMap<Address, usize> = BTreeMap::new();
         let mut resolved: Vec<ResolvedArtifact> = Vec::new();
-        let body = |members: Vec<u64>, parent_keys: Vec<String>| ResolvedArtifact {
+        let body = |members: Vec<u32>, parent_keys: Vec<String>| ResolvedArtifact {
             view: None,
             members: ResolvedMembers::Inline(members),
             contents: Vec::new(),
@@ -4521,7 +4610,7 @@ mod tests {
             shape: None,
         };
         for parent in 0..parents {
-            let member = parent as u64 * 10;
+            let member = parent as u32 * 10;
             index_of.insert(
                 ("clusters/a".to_string(), 0, format!("p{parent:03}")),
                 resolved.len(),
@@ -4534,7 +4623,7 @@ mod tests {
             // One member the parent holds and one it does not, so every parent has exactly one
             // violation to report and exactly one covered member.
             resolved.push(body(
-                vec![member, 1_000_000 + parent as u64],
+                vec![member, 1_000_000 + parent as u32],
                 vec![format!("p{parent:03}")],
             ));
         }
@@ -4640,6 +4729,47 @@ mod tests {
             publication_batches(&artifacts, &resolved, &table, 1, false),
             vec![1, 2, 3, 4, 5],
             "a batch always takes an artifact, whatever it costs"
+        );
+    }
+
+    /// **The merge opens as many runs as the accumulator's own share of the budget pays for**, so
+    /// a corpus the budget could spill is a corpus the budget can merge. A fixed fan-in is a
+    /// cascade that fires on a corpus's size rather than on the memory it was given: at 24 GiB the
+    /// whole GBIF corpus spills about 154 runs, and 128 of them would have cost a full extra read
+    /// and write of 10.3×10⁹ pairs.
+    #[test]
+    fn the_merge_opens_the_runs_the_budget_pays_for() {
+        let runs_of = |memory_budget: u64, entries: u64| -> u64 {
+            entries.div_ceil(member_budget(memory_budget) / MEMBER_ENTRY_BYTES as u64)
+        };
+        // The ceiling: a 1 GiB share is 67.1×10⁶ pairs a run and 256 open runs.
+        assert_eq!(member_budget(24 << 30), MEMBER_BUDGET_MAX);
+        assert_eq!(
+            member_merge_fan_in(24 << 30),
+            (MEMBER_BUDGET_MAX / MEMBER_MERGE_BYTES_PER_RUN) as usize
+        );
+        assert_eq!(member_merge_fan_in(24 << 30), 256);
+        assert!(
+            runs_of(24 << 30, 10_300_000_000) <= member_merge_fan_in(24 << 30) as u64,
+            "the whole GBIF corpus spills {} run(s) against a fan-in of {}",
+            runs_of(24 << 30, 10_300_000_000),
+            member_merge_fan_in(24 << 30)
+        );
+        // The floor: 64 MiB is 4.19×10⁶ pairs a run and 16 open runs, so a corpus above about
+        // 67×10⁶ pairs cascades — which is what a budget under a gibibyte asks for.
+        assert_eq!(member_budget(1 << 20), MEMBER_BUDGET_MIN);
+        assert_eq!(member_merge_fan_in(1 << 20), 16);
+        assert!(runs_of(1 << 20, 100_000_000) > member_merge_fan_in(1 << 20) as u64);
+        // The floor is what makes a pass reduce rather than copy, at every budget.
+        assert_eq!(member_merge_fan_in(0), 16);
+        // **The descriptors bound it above**, and do not bind at the present ceiling. A share
+        // eight times that ceiling pays for 2,048 open files, which is twice the soft limit a
+        // Linux process starts with: it gets the cap instead.
+        assert_eq!(open_runs_for(MEMBER_BUDGET_MAX), 256);
+        assert_eq!(MEMBER_BUDGET_MAX * 8 / MEMBER_MERGE_BYTES_PER_RUN, 2_048);
+        assert_eq!(
+            open_runs_for(MEMBER_BUDGET_MAX * 8),
+            MEMBER_MERGE_DESCRIPTOR_CAP
         );
     }
 
