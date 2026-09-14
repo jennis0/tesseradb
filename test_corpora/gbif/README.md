@@ -293,16 +293,20 @@ are [`../../docs/ingest-campaign.md`](../../docs/ingest-campaign.md) §4d.
 **3,495,729,729 placed rows** built under `--memory-budget 24g` to a **196 GiB bundle in 2 h 52 m
 33 s** (third build, 2026-09-14, record-blob format 11 with a per-segment cut index), against
 3 h 30 m 55 s (format 10) after the bounded-assembly design and 4 h 09 m 35 s (format 9) before
-it. `verify --deep` clean in **15 m 08 s at 0.61 GB peak anonymous**. `tessera serve` opens to
-`/readyz` in **197 s at 6.7 GB anonymous** under a 24 GiB cap, `oom_kill` 0. The stage that missed
-the memory budget under the second build, `filter_postings`, now fits it: its own stage peak fell
-to 8.9 GB anonymous, against 31.5 GB before the fix.
+it. `verify --deep` clean in **15 m 08 s at 0.61 GB peak anonymous**. Served a fourth time,
+2026-09-14, after a fix returning freed memory to the allocator on a cadence: `tessera serve`
+opens to `/readyz` in **202 s at 6.7 GB anonymous** under a 24 GiB cap, peak **10.7 GB anonymous**
+(third serve: 197 s, peak 16.0 GB), `oom_kill` 0. The stage that missed the memory budget under
+the second build, `filter_postings`, now fits it: its own stage peak fell to 8.9 GB anonymous,
+against 31.5 GB before the fix.
 
 Hot zoom 0, whole-map, fell 4 to 6× for the sparse principals under the third build (1% 268 → 57
-ms, 5% 1,269 → 231 ms, 10% 2,653 → 453 ms) and stays linear in visible rows; the dense principals
-(50%, 100%) are still 10 to 17 s, barely better than before, because the identity column the
-per-cell route probes cannot stay resident under the cap and the route becomes disk-bound — open
-at the time of writing, §4d.
+ms, 5% 1,269 → 231 ms, 10% 2,653 → 453 ms) and stays linear in visible rows. Under the fourth
+serve the 50% principal falls further, 13.2 s → 2.2 s: its grant is contiguous in Morton space, so
+it takes the per-cell route, and the route's half of the identity column now fits the page cache
+the freed memory no longer holds. The 100% principal moves only 16.9 s → 14.6 s: its per-cell
+route touches the whole 28 GB identity column, which still does not fit under the cap. Open at the
+time of writing; see the whole-map-selection memo cited in §4d.
 
 Disk stayed well inside the fraction's projection: 429 GB free at the start, a minimum of 221 GB
 free at the end, against a pre-flight forecast of ~539 GB that is known to overstate. The taxonomy
