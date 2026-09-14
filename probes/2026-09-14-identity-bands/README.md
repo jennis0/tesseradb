@@ -312,3 +312,16 @@ whole-map cut lands in band 5 or below and the route reads a large fraction of t
 way. `p100`'s `zoom_4` and `zoom_6` cases saturate the threshold outright, and every tile there
 falls back to the scan — which is the route's floor behaving as specified, not a defect. The
 rung-6 run is the one that answers the design's question.
+
+### Rung 6
+
+The whole GBIF corpus (3,495,729,729 rows, format 11) under the 24 GiB serve cap, 2026-09-14:
+every tile of every case agreed, and the band route answers the whole map at a two-million-mark
+budget in 0.06 to 0.19 s hot for every principal on the ladder against 0.4 to 81 s for the
+shipped path. The tables and the reading of them are in
+[`docs/evidence/memos/2026-09-14-identity-bands-measured.md`](../../docs/evidence/memos/2026-09-14-identity-bands-measured.md).
+The raw results are in [`rung6/`](rung6/): `results-all-arms.json` (the run with the reference
+and render arms, commit `6b0c41e8`), `results-band-only.json` (the final band-only run, commit
+`76ff0c18`, readahead off on the identity column), `results-diagnostic.json` (the mask-walk
+attribution), the builder's `bands.json`, and `tables.py`, which renders the memo's tables from
+them into `tables.md`.
