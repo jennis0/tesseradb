@@ -23,20 +23,31 @@
 //! cells a scattered mask touches. [`scan_cell_piece`] carries the equality argument. Both routes
 //! evaluate the same definition over the same composed mask and return the same rows.
 //!
-//! **What the cell route costs, and where it starts paying** (measured 2026-09-14, zoom 0 over the
-//! whole extent, every row visible, hot, one core). A cell step costs about 5 ns and a scanned row
-//! about 0.8 ns, so the break-even is near six rows to a cell and the margin then grows with the
-//! cell. The two corpora measured sit either side of that:
+//! **What the cell route costs, and where it starts paying.** The trade is one cell step against
+//! the rows a cell holds, so the corpus decides it. `examples/cell_route.rs` sweeps rows a cell at
+//! a fixed row count with both mechanisms over identical inputs — re-run it rather than trusting
+//! these numbers second-hand — and measures a scanned row at **0.63–0.87 ns** and a cell step at
+//! **2.9 ns** where cells are short, rising to 5.2 (`cap` 30) or 20.5 (`cap` 500) by 128 rows a
+//! cell as the count's search lengthens. The break-even is therefore near **four to eight rows a
+//! cell**, and the margin grows with the cell: 0.10× the scan at 64 rows a cell, `cap` 30.
+//!
+//! **Below that the route is the slower one**, by up to 4.2× at one row a cell, where every cell
+//! step buys a single row. No gate excludes such a corpus: the tier is chosen from the mask's
+//! density and not from the segment's cell occupancy, so a corpus of distinct positions pays the
+//! loss. The two GBIF corpora are both past the break-even, which is why the gate does not exist
+//! yet rather than why it should not.
 //!
 //! | corpus | rows | occupied cells | rows a cell | scan | cell route |
 //! |---|---|---|---|---|---|
 //! | GBIF at `data/ladder/gbif-64p` | 25,846,007 | 3,508,005 | 7.4 | 21.5 ms | 17.4–18.9 ms |
 //! | GBIF whole (rung 6) | 3,495,729,729 | 41,899,178 | 83.4 | ~2.8 s | ~0.2 s |
 //!
-//! The rung-6 row counts its cells from that bundle's Morton column (measured); its two times are
-//! the same two rates applied to them, so they are **modelled from measured inputs** rather than
-//! served. What the route removes there is the 28 GB of identity column the scan reads, which is
-//! also what made the whole-extent request cost 20 s from disc under a 24 GiB cap.
+//! Those are whole-extent zoom-0 requests, `cap` 30, hot, one core. The first row is **measured**
+//! against a served bundle, the two binaries answering identically. The second counts its cells
+//! from that bundle's Morton column (measured) and applies the example's two rates to them, so its
+//! times are **modelled from measured inputs** rather than served. What the route removes there is
+//! the 28 GB of identity column the scan reads, which is also what made that request cost 20 s
+//! from disc under a 24 GiB cap.
 //!
 //! **Two things a reader needs that are not obvious from the code:**
 //!
@@ -474,8 +485,8 @@ impl CellWalk<'_> {
 /// How many of `slice`'s ascending identities are below `cut`, and how many of them were read.
 ///
 /// **The two ends are answered before the search runs**, and that is a measured shape rather than
-/// a tidiness: the cells of a real corpus hold tens of rows at most (the module doc's table), so a
-/// binary search over one is three unpredictable branches where the answer is usually at an end.
+/// a tidiness: the cells of a real corpus hold tens of rows at most (`examples/cell_route.rs`), so
+/// a binary search over one is three unpredictable branches where the answer is usually at an end.
 /// At a whole-map zoom `P_d` is a millionth of the identity space and the first identity settles
 /// almost every cell; under a saturating threshold the last one does.
 ///
@@ -541,7 +552,7 @@ fn scan_cell_piece(
     // rejects is followed only by larger ones. At a whole-map zoom both hold almost everywhere:
     // `P_d` is a millionth of the identity space and the `cap` smallest identities of a corpus are
     // smaller still. Without this a cell is walked in full, which on a corpus of short cells costs
-    // more than the rows the cell holds — the module doc's table has what that measured.
+    // more than the rows the cell holds — `examples/cell_route.rs` sweeps what that costs.
     let head = slice[0];
     let head_counts = !walk.count_done && params.threshold.admits(head);
     let head_enters = !walk.heap_done
