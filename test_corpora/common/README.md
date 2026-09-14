@@ -94,6 +94,13 @@ the deployment's `max_k`, which the engine clamps per tile to `k_max_marks` (arc
 not record its request shape, and `campaign_report.py` marks that run's columns rather than
 reading them under a shape they may not have been taken at.
 
+**A stream the server cut mid-body is a sample, not a failed run.** The whole emit phase runs
+under `serve.stream_deadline_ms` from the first flush (`streamed-serving.md` §5), and a
+budget-sized response on a large corpus can outrun it. The counts frame is first on the wire, so
+such a sample still carries exact counts; it carries no latency, because its wall time is the
+deadline rather than the request. Every block below counts them under `shed` and takes its
+percentiles over the rest.
+
 | field | unit | how it was measured |
 |---|---|---|
 | `cap` | bytes or `null` | the scope's `MemoryMax`. `null` is uncapped — still inside a scope, so the battery can reclaim |
@@ -101,9 +108,10 @@ reading them under a shape they may not have been taken at.
 | `total_rows` | count | the 100% principal's whole-extent `visible`. **The denominator of every coverage figure** |
 | `request.budget_depth` | depths | how much deeper than its own zoom a request was made. 9: the whole extent at depth 9 covers 4⁹ = 262,144 tiles, `serve.max_tiles_per_request`'s default |
 | `request.grid_depth` | depth | the Morton grid's sixteen levels, which no request goes below |
-| `request.k` | count | `k` on every request: `--k`, else the deployment's `selection.max_k` from `/v1/meta` |
+| `request.k` | count | `k` on every measured request: `--k`, else the deployment's `selection.max_k` from `/v1/meta` |
+| `request.rank_k` | count | `k` on a density-ranking request. 0 is the counts-only request (contracts §3.2 r38): the tiles frame exact as at any `k`, and no points frame at all. A decile ranks on `visible`, which no `k` changes |
 | `request.max_k`, `.k_max_marks`, `.theta_target_marks`, `.max_tiles_per_request` | — | the deployment's own selection constants, read from `/v1/meta`. The served count per tile is `min(k, max_k, k_max_marks)` under θ, so `k` alone does not say what a request drew |
-| `request.whole_extent_zoom`, `.whole_extent_served`, `.whole_extent_occupied_tiles`, `.whole_extent_bytes` | — | the run's anchor request: the whole extent at the budget's depth under the 100% principal. `served ÷ occupied_tiles` is the marks per occupied tile that θ aimed `theta_target_marks` at |
+| `request.whole_extent_zoom`, `.whole_extent_served`, `.whole_extent_occupied_tiles`, `.whole_extent_bytes`, `.whole_extent_shed` | — | the run's anchor request: the whole extent at the budget's depth under the 100% principal. `served ÷ occupied_tiles` is the marks per occupied tile that θ aimed `theta_target_marks` at. The counts hold whether or not the stream was shed |
 | `candidates_per_zoom`, `samples_per_cell`, `zooms`, `deciles`, `cells_per_decile`, `conditions` | — | the run's own parameters, recorded because a reduced run must not look like a full one |
 | `oom_kill_seen` | bool | `memory.events`' `oom_kill` moved at any point during the run |
 | `ladder[]` | — | one entry per target fraction |
@@ -116,7 +124,8 @@ reading them under a shape they may not have been taken at.
 | `ladder[].first_viewport_served`, `_occupied_tiles` | count | the tiles frame's `served` summed, and its row count — a tile holding nothing for this principal is not in the frame, so the row count is the occupied tiles |
 | `ladder[].first_viewport_bytes` | bytes | the response body, frames and all |
 | `ladder[].first_viewport_server_ms` | ms | `x-tessera-server-us`: post-admission to the sweep's end, which under streaming is the time to the first flush (`streamed-serving.md` §5) |
-| `ladder[].first_viewport_stream_ms` | ms | the trailer's `stream_us`: post-admission to the trailer, so it includes the client-paced emit (`streamed-serving.md` §6) |
+| `ladder[].first_viewport_stream_ms` | ms | the trailer's `stream_us`: post-admission to the trailer, so it includes the client-paced emit (`streamed-serving.md` §6). `null` on a shed stream, which emits no trailer |
+| `ladder[].first_viewport_shed` | bool | that request's stream was cut mid-body, so `first_viewport_s` is the time to the cut |
 | `ladder[].cells[]` | — | one per (zoom, decile, which) |
 | `cells[].request_zoom` | depth | the depth the cell's box was requested at |
 | `cells[].density_visible_100pc` | count | the cell's box's `visible` **under the 100% principal**, at the same depth its samples request, which is what makes the decile a property of the corpus rather than of the principal |
@@ -126,11 +135,12 @@ reading them under a shape they may not have been taken at.
 | `conditions.*.response_bytes` | bytes | the same percentiles over each sample's whole body |
 | `conditions.*.request_zoom`, `.k` | — | the depth and `k` the cell's samples carried |
 | `conditions.*.all` | — | the same blocks over **every** sample, proven or not |
-| `conditions.*.proven_cold` | count | samples whose `majflt` delta over the request was non-zero |
+| `conditions.*.proven_cold` | count | complete samples whose `majflt` delta over the request was non-zero |
 | `conditions.*.eviction_failed` | count | cold samples with a zero delta. ⊘ Under `cold_pages_warm_engine` a zero delta may mean the request needed no file page at all — see `condition_figures` |
-| `conditions.*.incomplete` | count | samples whose response carried no trailer. The server aborts a mid-stream failure without one, so the body is a prefix and not the answer (`streamed-serving.md` §6); the prefix is still sound and the sample is counted here rather than dropped |
+| `conditions.*.shed` | count | samples whose stream was cut: the read aborted, or the body carried no trailer, which is the completeness signal either way (`streamed-serving.md` §6). They are out of every percentile above and counted here, so a cell every sample of which was shed has `null` percentiles and this count |
+| `conditions.*.failed` | count | samples whose request did not answer at all: a refusal, a timeout, or a server that went away |
 | `conditions.*.occupied_tiles` | count | the first sample's tiles-frame row count |
-| `ladder[].battery` | — | battery-level figures **over cells, not over pooled samples**: each cell contributes its own p50 and p99, and these are percentiles over those, for each of the five per-sample figures |
+| `ladder[].battery` | — | battery-level figures **over cells, not over pooled samples**: each cell contributes its own p50 and p99, and these are percentiles over those, for each of the five per-sample figures. `battery.<condition>.shed` is that condition's shed samples summed over the cells |
 | `text_and_drilldown` | — | a `match` on the rung's text column with a common and a rare token, hot and cold, and a drill-down |
 
 ### §3 `ingest[]` — one cell

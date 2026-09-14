@@ -62,6 +62,7 @@ class Deployment:
         cap_bytes: int | None = None,
         env: dict[str, str] | None = None,
         ingest: dict | None = None,
+        serve: dict | None = None,
     ):
         self.source_dir = Path(source_dir)
         self.bundle = Path(bundle)
@@ -72,6 +73,11 @@ class Deployment:
         #: `[ingest]` keys written into the copy. Empty means the server's own defaults, which is
         #: what every cell that is not sweeping a write-path knob wants.
         self.ingest = dict(ingest or {})
+        #: Extra `[serve]` keys written into the copy, beside the ports and the credentials.
+        #: Empty means the server's own defaults. A measurement that drives a knob to its edge
+        #: sets it here — `stream_deadline_ms = 1` cuts every streamed response, which is how the
+        #: shed path is exercised without waiting for a corpus large enough to reach the default.
+        self.serve = dict(serve or {})
         self.env = dict(os.environ)
         self.env.update(read_env_file(self.source_dir / ".env"))
         if env:
@@ -111,7 +117,7 @@ class Deployment:
 
     def _write_toml(self) -> None:
         source = tomllib.loads((self.source_dir / "tessera.toml").read_text())
-        serve = source["serve"]
+        source_serve = source["serve"]
         body = f"""# Written by test_corpora/common/deployment.py for a measurement run. Not committed with a
 # rung: the ports and the scratch paths are this run's, the bundle is the rung's, and the
 # credential *values* are in the environment as `configuration.md` requires.
@@ -137,10 +143,13 @@ token_max_lifetime = {source.get('disclosure', {}).get('token_max_lifetime', 360
 viewer  = "127.0.0.1:{self.ports[0]}"
 session = "127.0.0.1:{self.ports[1]}"
 control = "127.0.0.1:{self.ports[2]}"
-max_k   = {serve.get('max_k', 5000)}
-session_credential_env  = "{serve['session_credential_env']}"
-operator_credential_env = "{serve['operator_credential_env']}"
+max_k   = {source_serve.get('max_k', 5000)}
+session_credential_env  = "{source_serve['session_credential_env']}"
+operator_credential_env = "{source_serve['operator_credential_env']}"
 """
+        body += "".join(
+            f"{key} = {value!r}\n".replace("'", '"') for key, value in self.serve.items()
+        )
         if self.ingest:
             body += "\n[ingest]\n" + "".join(
                 f"{key} = {value!r}\n".replace("'", '"') for key, value in self.ingest.items()

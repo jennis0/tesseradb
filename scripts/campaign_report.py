@@ -137,6 +137,15 @@ def serve_row(name: str, data: dict) -> list[str]:
                 block = battery.get(condition, {}).get(side, {})
                 return block.get(which, {}).get("p50")
 
+            # Streams the server cut mid-body, over every condition, plus the first viewport's
+            # own. `None` where no condition recorded the count, so a run measured before the
+            # field existed reads as unknown rather than as none.
+            shed = None
+            if any("shed" in (battery.get(c) or {}) for c in battery):
+                shed = sum((battery.get(c) or {}).get("shed", 0) for c in battery) + int(
+                    bool(rung.get("first_viewport_shed"))
+                )
+
             rows.append(
                 f"| {name} | {cap} | {rung['target']:.0%} | {rung['measured']:.2%} | "
                 f"{rung['terms_n']} | {si(request.get('k'))} | "
@@ -151,7 +160,7 @@ def serve_row(name: str, data: dict) -> list[str]:
                 f"{ms(cell('cold_pages_warm_engine', 'wall_ms', 'of_cell_p50'))} | "
                 f"{ms(cell('hot', 'wall_ms', 'of_cell_p50'))} | "
                 f"{ms(cell('hot', 'stream_ms', 'of_cell_p50'))} | "
-                f"{ms(cell('hot', 'server_ms', 'of_cell_p99'))} |"
+                f"{ms(cell('hot', 'server_ms', 'of_cell_p99'))} | {si(shed)} |"
             )
     return rows
 
@@ -225,10 +234,12 @@ def render() -> str:
         "`points` and `wire` beside it are what that one request served and moved, and the second",
         "pair are the median **cell**'s medians. The three latency columns are the median cell's",
         "median under each condition, end to end; `hot stream` is the same cell's whole-stream",
-        "figure and the last is its server-side p99, which stops at the sweep.",
+        "figure and `hot server p99` is its server-side p99, which stops at the sweep. `shed` is",
+        "how many of that principal's requests the server cut mid-body: they carry exact counts,",
+        "no latency, and are out of every figure to their left.",
         "",
-        "| rung | cap | target | measured | terms | k | depth | authorise | first viewport | first points | first wire | points | wire | cold | cold pages | hot | hot stream | hot server p99 |",
-        "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
+        "| rung | cap | target | measured | terms | k | depth | authorise | first viewport | first points | first wire | points | wire | cold | cold pages | hot | hot stream | hot server p99 | shed |",
+        "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for name, data in rungs:
         lines += serve_row(name, data)

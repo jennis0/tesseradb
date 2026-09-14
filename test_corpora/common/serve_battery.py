@@ -93,6 +93,7 @@ from pathlib import Path
 from typing import Callable, Iterable, Sequence
 
 import requests
+import urllib3
 from pyarrow import ipc
 
 #: The percentiles every cell reports. p25 and p75 are here because the interesting shape at a
@@ -115,10 +116,25 @@ DEFAULT_K = 5000
 #: `max_tiles_per_request` where `/v1/meta` publishes none: the server's own default.
 DEFAULT_MAX_TILES = 262_144
 
+#: `k` on a ranking request. `k = 0` is the counts-only request (contracts §3.2 r38): the tiles
+#: frame is served exact as at any `k` and no points frame is emitted at all, so the engine's
+#: `cap == 0` arm returns the counts without a selection or a gather. A decile is a ranking over
+#: `visible`, which no `k` changes, and at the budget's depth a ranked candidate asked for points
+#: would move tens of megabytes per candidate before the ladder had started.
+RANK_K = 0
+
 #: The frame kinds this module reads (contracts §3.2 r26; `clients/ts/core/src/frame.ts` carries
 #: the whole grammar).
 FRAME_TILES = 1
 FRAME_TRAILER = 4
+
+#: What a connection aborted part-way through a body raises. Caught around the read alone, never
+#: around the request, so a server that is not there is still a failure rather than a shed stream.
+SHED_ERRORS = (
+    requests.exceptions.ChunkedEncodingError,
+    requests.exceptions.ConnectionError,
+    urllib3.exceptions.ProtocolError,
+)
 
 
 # ---------------------------------------------------------------------------------------------
@@ -182,7 +198,8 @@ def response_figures(content: bytes) -> dict:
     """
     counts = None
     trailer: dict | None = None
-    for kind, payload in frames(content):
+    received = frames(content)
+    for kind, payload in received:
         if kind == FRAME_TILES:
             table = ipc.open_stream(io.BytesIO(payload)).read_all()
             names = table.column_names
@@ -202,6 +219,7 @@ def response_figures(content: bytes) -> dict:
         "stream_ms": None if stream_us is None else stream_us / 1000.0,
         "points_delivered": trailer.get("points"),
         "flushes": trailer.get("flushes"),
+        "frames_received": len(received),
         "complete": bool(trailer),
     }
 
@@ -222,6 +240,14 @@ def viewport(
     Neither has a default here. The depth is [`budget_zoom`]'s and `k` is the deployment's
     ceiling, and a default on either would be a second answer to a question this module answers
     once.
+
+    **A stream the server cut is a result, not an exception.** The whole emit phase runs under
+    `serve.stream_deadline_ms` from the first flush (`streamed-serving.md` §5), and a
+    budget-sized response on a large corpus can outrun it: the connection aborts mid-body and no
+    trailer is emitted. The body is therefore read chunk by chunk and what arrived is returned
+    with `shed` set — the counts frame is first on the wire, so a shed sample still carries exact
+    counts, and its delivered points are a sound prefix (§6). A response with no trailer is shed
+    whether or not the read raised, because the trailer's presence is the completeness signal.
     """
     body: dict = {"view": view_id, "zoom": zoom, "bbox": list(bbox), "k": k}
     if layers is not None:
@@ -234,21 +260,35 @@ def viewport(
         headers={"Authorization": f"Bearer {token}"},
         json=body,
         timeout=timeout,
+        stream=True,
     )
+    shed_error = None
+    content = bytearray()
+    try:
+        r.raise_for_status()
+        try:
+            for chunk in r.iter_content(chunk_size=1 << 20):
+                content.extend(chunk)
+        except SHED_ERRORS as e:  # noqa: BLE001 — the cut is the measurement
+            shed_error = f"{type(e).__name__}: {e}"[:300]
+    finally:
+        r.close()
     wall = time.perf_counter() - t0
-    r.raise_for_status()
     out = {
+        # To the cut where there was one, which is what a client waited before it knew.
         "wall_ms": wall * 1000.0,
         # Post-admission to the sweep's end, which under streaming is the time to the first flush
         # and the earliest byte a client can draw (`streamed-serving.md` §5). The whole stream is
         # the trailer's `stream_us`, and the two are named apart so neither stands in for the
         # other.
         "server_ms": int(r.headers.get("x-tessera-server-us", "0")) / 1000.0,
-        "bytes": len(r.content),
+        "bytes": len(content),
         "request_zoom": zoom,
         "k": k,
+        "shed_error": shed_error,
     }
-    out.update(response_figures(r.content))
+    out.update(response_figures(bytes(content)))
+    out["shed"] = shed_error is not None or not out["complete"]
     return out
 
 
@@ -506,7 +546,6 @@ def rank_by_density(
     quantisation: dict,
     budget_depth: int,
     max_tiles: int,
-    k: int,
     log: Callable[[str], None],
 ) -> list[tuple[list[float], int]]:
     """`(box, visible)` sorted ascending by `visible`, under the **100% principal**.
@@ -517,13 +556,18 @@ def rank_by_density(
 
     At the depth the cell's samples will ask at, because `visible` is summed over the tiles a
     request covers and a coarser cover of the same box reaches past it: a decile ranked at the
-    zoom's own depth would rank boxes on ground the samples do not read. The artifact channel is
-    off, which no count here depends on.
+    zoom's own depth would rank boxes on ground the samples do not read.
+
+    **At `RANK_K` and with the artifact channel off**, which is the counts frame and nothing else.
+    A ranking pass is ``--candidates`` requests a zoom before any cell is measured; asked for
+    points at the budget's depth each one is a whole view's body, and on a corpus large enough for
+    that body to outrun `serve.stream_deadline_ms` the pass cannot complete at all. No count here
+    depends on either.
     """
     ranked = []
     for i, box in enumerate(boxes):
         depth = budget_zoom(quantisation, box, zoom, budget_depth, max_tiles)
-        s = viewport(viewer_base, token, view_id, depth, box, k=k, layers=None)
+        s = viewport(viewer_base, token, view_id, depth, box, k=RANK_K, layers=None)
         ranked.append((list(box), int((s["counts"] or {}).get("visible") or 0)))
         if i and i % 200 == 0:
             log(f"    ranked {i}/{len(boxes)} at zoom {zoom}")
@@ -574,8 +618,12 @@ def cell_figures(samples: Sequence[dict]) -> dict:
     against 0.12 ms server-side (`probes/2026-09-02-serve-under-memory-cap`), so one pooled figure
     is two measurements averaged into neither; and under streaming the server-side figure stops at
     the sweep, so what a viewer waits through is the stream figure beside it.
+
+    **Over the complete samples.** A shed stream's wall time is the time to the cut, which is a
+    property of `serve.stream_deadline_ms` rather than of the request, so averaging it in would
+    report the deadline as a latency. The shed are counted instead.
     """
-    ok = [s for s in samples if not s.get("failed")]
+    ok = [s for s in samples if not s.get("failed") and not s.get("shed")]
     out = {
         "server_ms": percentiles([s["server_ms"] for s in ok if s.get("server_ms") is not None]),
         "stream_ms": percentiles([s["stream_ms"] for s in ok if s.get("stream_ms") is not None]),
@@ -589,7 +637,8 @@ def cell_figures(samples: Sequence[dict]) -> dict:
         ),
         "response_bytes": percentiles([s["bytes"] for s in ok if s.get("bytes") is not None]),
     }
-    out["failed"] = len(samples) - len(ok)
+    out["failed"] = sum(1 for s in samples if s.get("failed"))
+    out["shed"] = sum(1 for s in samples if s.get("shed") and not s.get("failed"))
     return out
 
 
@@ -611,10 +660,9 @@ def condition_figures(samples: Sequence[dict], cold: bool) -> dict:
     cold" — never a fast cold read.
     """
     samples = [s for s in samples]
+    complete = [s for s in samples if not s.get("failed") and not s.get("shed")]
     proven = (
-        [s for s in samples if s.get("majflt_delta") not in (None, 0) and not s.get("failed")]
-        if cold
-        else [s for s in samples if not s.get("failed")]
+        [s for s in complete if s.get("majflt_delta") not in (None, 0)] if cold else complete
     )
     out = cell_figures(proven)
     out["all"] = cell_figures(samples)
@@ -624,11 +672,13 @@ def condition_figures(samples: Sequence[dict], cold: bool) -> dict:
         sum(1 for s in samples if s.get("eviction_failed")) if cold else 0
     )
     # A response whose trailer never arrived is a stream the server cut mid-body
-    # (`streamed-serving.md` §6). It is counted rather than dropped: under a cap that is the
-    # result, and its delivered prefix is still a sound partial band.
-    out["incomplete"] = sum(
-        1 for s in samples if not s.get("failed") and s.get("complete") is False
-    )
+    # (`streamed-serving.md` §6). It is counted rather than dropped: on a corpus whose budget
+    # response outruns `serve.stream_deadline_ms` that is the result, and the delivered prefix is
+    # still a sound partial band. A cell every sample of which was shed has no percentiles and
+    # this count, which is the honest shape for it.
+    out["shed"] = sum(1 for s in samples if s.get("shed") and not s.get("failed"))
+    # The counts frame is first on the wire, so a shed sample carries them exactly and is as good
+    # a source for them as a complete one.
     first = next((s for s in samples if s.get("counts")), None)
     out["visible"] = first["counts"]["visible"] if first else None
     out["matched"] = first["counts"]["matched"] if first else None
@@ -699,11 +749,11 @@ class Battery:
     def _sample(self, token, view_id, zoom, box, cold: bool, **kw) -> dict:
         """One request, with the cold proof around it when the condition asks for one.
 
-        **A request that fails is a sample with a `failed` field, not the end of the run.** Under a
-        cap the server sheds a stream mid-body and the client sees a truncated response; that is a
-        result about the cap, and a battery that died on it would throw away every cell it had
-        already measured. The failure is recorded with its wall time and excluded from the
-        percentiles.
+        **A request that fails is a sample with a `failed` field, not the end of the run.** A
+        battery that died on one would throw away every cell it had already measured. The failure
+        is recorded with its wall time and excluded from the percentiles. A stream the server cut
+        mid-body does not reach here at all: [`viewport`] returns it marked `shed`, which is a
+        sample with exact counts and no latency figure.
         """
         depth = budget_zoom(self.quant, box, zoom, self.args.budget_depth, self.max_tiles)
         before = self.evictor.majflt() if cold else None
@@ -721,6 +771,10 @@ class Battery:
                 "counts": None,
                 "request_zoom": depth,
                 "k": self.k,
+                "shed": False,
+                "shed_error": None,
+                "complete": False,
+                "frames_received": 0,
                 "majflt_delta": None,
                 "eviction_failed": False,
             }
@@ -806,6 +860,7 @@ class Battery:
             f"({whole_served / max(whole_occupied, 1):.1f} a tile) in "
             f"{(whole['bytes'] or 0) / 1e6:.1f} MB, first flush {whole['server_ms']:.0f} ms, "
             f"stream {(whole['stream_ms'] or 0):.0f} ms"
+            + (f" — SHED after {whole['wall_ms']:.0f} ms" if whole["shed"] else "")
         )
 
         # Density deciles, ranked once under the 100% principal and reused by every rung.
@@ -821,7 +876,6 @@ class Battery:
                 quant,
                 args.budget_depth,
                 self.max_tiles,
-                self.k,
                 self.log,
             )
             pools[zoom] = decile_pools(ranked)
@@ -863,6 +917,7 @@ class Battery:
                 f"{(first.get('server_ms') or 0):.0f} ms, stream "
                 f"{(first.get('stream_ms') or 0):.0f} ms, measured coverage "
                 f"{measured/max(total_rows,1):.4%}"
+                + (" — SHED" if first.get("shed") else "")
             )
 
             cells = []
@@ -924,6 +979,9 @@ class Battery:
                         served_figures = cell["conditions"][args.conditions.split(",")[0]][
                             "all"
                         ]["served"]
+                        shed = sum(
+                            cell["conditions"][c].get("shed", 0) for c in cell["conditions"]
+                        )
                         self.log(
                             f"    zoom {zoom} decile {decile}.{which} "
                             f"depth={cell['request_zoom']} density={density:,} "
@@ -932,6 +990,7 @@ class Battery:
                                 f"{c}:p50={cell['conditions'][c]['wall_ms']['p50']}"
                                 for c in cell["conditions"]
                             )
+                            + (f" shed={shed}" if shed else "")
                         )
 
             # Appended even when the server died mid-rung: the cells measured before it are
@@ -953,6 +1012,7 @@ class Battery:
                 "first_viewport_bytes": first.get("bytes"),
                 "first_viewport_server_ms": first.get("server_ms"),
                 "first_viewport_stream_ms": first.get("stream_ms"),
+                "first_viewport_shed": bool(first.get("shed")),
                 "cells": cells,
             }
             rung_out["battery"] = battery_figures(cells)
@@ -973,6 +1033,7 @@ class Battery:
                 "budget_depth": args.budget_depth,
                 "grid_depth": GRID_DEPTH,
                 "k": self.k,
+                "rank_k": RANK_K,
                 "max_k": selection.get("max_k"),
                 "k_max_marks": selection.get("k_max_marks"),
                 "theta_target_marks": selection.get("theta_target_marks"),
@@ -981,6 +1042,7 @@ class Battery:
                 "whole_extent_served": whole_served,
                 "whole_extent_occupied_tiles": whole_occupied,
                 "whole_extent_bytes": whole["bytes"],
+                "whole_extent_shed": bool(whole["shed"]),
             },
             "all_terms_authorise_s": round(broad_authorise_s, 4),
             "candidates_per_zoom": args.candidates,
@@ -1090,6 +1152,7 @@ def battery_figures(cells: Sequence[dict]) -> dict:
         block["eviction_failed"] = sum(
             cell["conditions"][condition].get("eviction_failed", 0) for cell in cells
         )
+        block["shed"] = sum(cell["conditions"][condition].get("shed", 0) for cell in cells)
         out[condition] = block
     return out
 
@@ -1147,6 +1210,13 @@ def add_arguments(ap: argparse.ArgumentParser) -> None:
     ap.add_argument("--boot-scratch", help="where the scratch deployment, cache and WAL go")
     ap.add_argument("--boot-binary", help="the tessera binary")
     ap.add_argument("--boot-port0", type=int, default=8151)
+    ap.add_argument(
+        "--boot-serve-config",
+        default=None,
+        help='extra [serve] keys for the booted deployment, as JSON: '
+        '\'{"stream_deadline_ms": 1}\' cuts every streamed response, which is how the shed path '
+        "is exercised on a corpus whose responses would otherwise finish inside the budget",
+    )
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -1168,6 +1238,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             (args.boot_port0, args.boot_port0 + 1, args.boot_port0 + 2),
             Path(args.boot_binary),
             cap_bytes=args.cap_bytes,
+            serve=json.loads(args.boot_serve_config) if args.boot_serve_config else None,
         )
         served.clear_scratch()
         open_at = time.time()
