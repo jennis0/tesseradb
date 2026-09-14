@@ -810,7 +810,28 @@ pub(crate) struct OccupancyKey {
 /// over one view before the LRU begins removing the coldest — and the coldest are exactly the
 /// superseded ones, because a live rung is re-read on every request that composes θ. A bound below
 /// the live set would cost walks, not correctness ([`crate::single_flight`]'s rule 3).
+///
+/// **What a deployment should set it to** (`serve.occupancy_cache_bytes`): the live set is
+/// [`OCCUPANCY_LIVE_BYTES_PER_SESSION`] per concurrently-querying session per view, and the
+/// headroom above it is how many publications of superseded ladders the memo carries before the
+/// LRU takes them. This default is the live set of eight sessions over one view — the
+/// `serve.expected_concurrent_sessions` default — with about 480 publications of headroom. A
+/// deployment that raises `expected_concurrent_sessions` to 1,000 needs 8.7 MB for the live set
+/// alone and should raise this in proportion if it wants the same headroom; leaving it here costs
+/// walks rather than correctness, and `/control/status`' `occupancy.evictions` beside `walks` is
+/// where that shows.
 pub const DEFAULT_OCCUPANCY_CACHE_BYTES: u64 = 32 * 1024 * 1024;
+
+/// What one session's live ladder charges the memo, over one view: one rung per depth at the
+/// cache's per-entry floor.
+///
+/// The 17 depths are `0..=16`, the whole quantisation grid — a session touches a handful, and the
+/// background fill ([`crate::stage`]) takes it to [`crate::stage::BACKGROUND_DEPTH`], so this is
+/// the ceiling rather than the typical charge. It is `pub` because
+/// `tessera_server::validate_cache_bounds` weighs the configured bound against it and the
+/// arithmetic must have one home.
+pub const OCCUPANCY_LIVE_BYTES_PER_SESSION: u64 =
+    17 * crate::single_flight::PER_ENTRY_FLOOR_BYTES;
 
 /// One memoised `N_occ(d)`.
 #[derive(Debug, Clone, Copy)]

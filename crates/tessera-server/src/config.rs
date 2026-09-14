@@ -915,6 +915,8 @@ struct RawServe {
     #[serde(default)]
     masked_count_cache_bytes: Option<u64>,
     #[serde(default)]
+    occupancy_cache_bytes: Option<u64>,
+    #[serde(default)]
     fragment_cache_bytes: Option<u64>,
     #[serde(default)]
     expected_concurrent_sessions: Option<usize>,
@@ -1203,6 +1205,11 @@ pub struct Config {
     /// Byte bound on the masked-count cache — the per-`(session, layer, level)` histograms a
     /// **row-major** layer's counts come from. See [`DEFAULT_MASKED_COUNT_CACHE_BYTES`].
     pub masked_count_cache_bytes: u64,
+    /// Byte bound on the occupancy memo — θ's `N_occ` ladder, one rung per
+    /// `(session, view, depth, generation)`. See
+    /// [`tessera_engine::occupancy::DEFAULT_OCCUPANCY_CACHE_BYTES`], which argues the figure and
+    /// says what a deployment with many concurrent sessions should raise it to.
+    pub occupancy_cache_bytes: u64,
     /// Byte bound on the *in-memory* fragment tier. See [`DEFAULT_FRAGMENT_CACHE_BYTES`]. The
     /// `.frag` sidecar tier is untouched by it.
     pub fragment_cache_bytes: u64,
@@ -2645,6 +2652,15 @@ fn parse(text: &str) -> Result<Config> {
         "a cache that admits nothing rebuilds a whole level's masked counts on every request that \
          reaches a row-major layer, which is a walk of the session's entire mask per request",
     )?;
+    let occupancy_cache_bytes = non_zero_u64(
+        "serve.occupancy_cache_bytes",
+        raw.serve
+            .occupancy_cache_bytes
+            .unwrap_or(tessera_engine::occupancy::DEFAULT_OCCUPANCY_CACHE_BYTES),
+        "a memo that admits nothing makes every request at a new depth walk the session's mask \
+         and the Morton column again, which is the walk the memo exists to pay once per session \
+         and generation",
+    )?;
     let fragment_cache_bytes = non_zero_u64(
         "serve.fragment_cache_bytes",
         raw.serve
@@ -2821,6 +2837,7 @@ fn parse(text: &str) -> Result<Config> {
         flush_max_items,
         row_projection_cache_bytes,
         masked_count_cache_bytes,
+        occupancy_cache_bytes,
         fragment_cache_bytes,
         expected_concurrent_sessions,
     })
@@ -3832,13 +3849,14 @@ compaction_after_deletions = 9000
         let serve_keys = [
             "row_projection_cache_bytes",
             "masked_count_cache_bytes",
+            "occupancy_cache_bytes",
             "fragment_cache_bytes",
             "expected_concurrent_sessions",
         ];
         assert_eq!(
             ingest_keys.len() + serve_keys.len(),
-            16,
-            "there are sixteen write-path, artifact-plane and admission knobs; this table must \
+            17,
+            "there are seventeen write-path, artifact-plane and admission knobs; this table must \
              cover all of them"
         );
 
