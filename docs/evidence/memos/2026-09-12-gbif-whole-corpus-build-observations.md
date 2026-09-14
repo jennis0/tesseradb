@@ -279,3 +279,73 @@ worse than linearly with batch size, and this memo has no measurement of what th
 **Next step.** A `perf` profile of a late batch on the prefix ladder, not another guess. Chunking
 the walk across cores by position (this memo's item 1, second step) stays open behind that
 profile: it addresses writeback, and writeback is no longer most of the cost.
+
+## Third build (2026-09-14)
+
+A third whole-corpus build, main `488e43e5`, after the merge of Finding A's fix (extents opened
+cursor-only with the has-row file mapped, one duplicate map a column) alongside three serve-path
+changes: candidacy off the cached histogram with block-wise mask scans, a windowed session
+projection with a whole-grant short-circuit, and a per-segment cut index (`cuts.u32`, bundle
+format 11) with selection evaluated per cell on dense tiles. Full figures are
+[`../../ingest-campaign.md`](../../ingest-campaign.md) §4d.
+
+| stage | second build | third build |
+|---|---|---|
+| `source_ids` | 93 s | 81 s |
+| `dictionary` | 189 s | 156 s |
+| `geometry_read` | 476 s | 354 s |
+| batch loop | 1,463 s | 1,255 s |
+| `postings_write` | 63 s | 59 s |
+| `attribute_tail` | 1,574 s | 1,331 s |
+| `layers` | 2,258 s | 1,881 s |
+| `filter_postings` | 1,606 s | **1,076 s** |
+| `record_blob` | 1,350 s | **806 s** |
+| `tiler_sort` | 328 s | 208 s |
+| `segment_write` | 629 s | 577 s |
+| `artifact_pass` | 1,901 s | 1,815 s |
+| `manifests` | 69 s | 69 s |
+| **wall** | 3 h 30 m 55 s | **2 h 52 m 33 s** |
+
+Finding A's fix holds at scale: `filter_postings`'s own stage peak fell to **8.9 GB anonymous**,
+against 31.5 GB under the second build, inside the 24 GB budget. Part of every stage's gain is the
+idle box (the second build shared it with other work); the `filter_postings` and `record_blob`
+gains are the fix's, `record_blob` now having the page cache the live sets had held.
+
+### Finding C — hot zoom 0 falls 4 to 6× on a scattered mask, and stays disk-bound on a dense one
+
+**Measured.** Under the battery (`serve_battery.py --view geo --zooms 0,6,12 --deciles 9
+--candidates 40 --samples 10 --cold-samples 3 --text-samples 0`), hot zoom 0 for the sparse
+principals fell 4 to 6×: 268 → 57 ms at 1%, 1,269 → 231 ms at 5%, 2,653 → 453 ms at 10%, about
+1,060 ms at 25%. It stays linear in visible rows, at about 1.2 ns a row. For the dense principals
+(50%, 100%) hot zoom 0 is 10 to 17 s, barely better than the roughly 20 s the second build's
+single request measured.
+
+**Cause.** A scattered mask takes the sparse `Values` decode tier, which keeps the per-row
+identity scan: the per-cell route applies to dense tiers only. For the dense principals, the
+sampler shows the server reading 2 to 3.3 GB/s from disk during the request, with 8.7 GB of file
+pages resident beside 15.7 GB anonymous under the 24 GiB cap. The per-cell route probes the
+identity column inside every occupied cell, and a leaf cell's 83 ids span 664 B, so every 4 KiB
+page of the 28 GB identity column holds several cells and every page is touched. Under the cap the
+column cannot stay resident, so the route is disk-bound whether it probes per cell or per row.
+Modelled resident cost is 0.2 s for the per-cell route against 2.8 s for the per-row route; the
+cap turns both into a 28 GB read.
+
+**Directions, open at the time of writing.** A narrower identity column; a resident per-cell
+summary that answers the cut without touching the column; a larger cap on a larger box; a change
+to what §7.2 requires at whole-map zoom.
+
+### Finding D — the server's resident memory grows over a battery run, and the growth is not yet explained
+
+**Measured.** The server's anonymous memory rose from 6.7 GB at open to 15.7 GB after the six
+principals' battery sessions: 10.1 GB anonymous mappings and 5.5 GB heap. Not yet attributed.
+
+### ⊘ Two things noted, not investigated
+
+The battery harness authorises once and never re-authorises; the deployment's token lifetime was
+raised to 43,200 s for this run, as it was for the second build's second attempt. Two other cargo
+builds ran on the box during the battery.
+
+W1 of the layers investigation (item 6, above: reading the member key column as its own parquet
+dictionary) measured a 31% row-loop gain in the investigation and a 4% loss in the
+implementation, on the same prefix (both measured, `gbif-64p`, 2026-09-14). Held as a patch for an
+A/B at rung 6, not built here.

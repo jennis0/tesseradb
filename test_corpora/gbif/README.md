@@ -285,17 +285,24 @@ a measurement.** It is sound for sizing and it is not a substitute for the run's
 
 ## Measured — whole corpus
 
-Built twice, 2026-09-13, to measure the bounded-assembly design that the fraction's projections
-above named as open (`layers` at scale, disk against the ~304 GB modelled here). Full figures,
-both runs, are [`../../docs/ingest-campaign.md`](../../docs/ingest-campaign.md) §4d.
+Built three times, 2026-09-13 and 2026-09-14, to measure first the bounded-assembly design and
+then a set of serve-path fixes, against the fraction's projections above (`layers` at scale, disk
+against the ~304 GB modelled here, and zoom-0 whole-map latency). Full figures, all three builds,
+are [`../../docs/ingest-campaign.md`](../../docs/ingest-campaign.md) §4d.
 
-**3,495,729,729 placed rows** built under `--memory-budget 24g` to a **196 GiB bundle in 3 h 30 m
-55 s** (record-blob format 10, after six branches that bound the build's memory landed on main),
-against 207 GiB in 4 h 09 m 35 s before them. `verify --deep` clean in **14 m 42 s at 0.61 GB
-peak anonymous**. `tessera serve` opens to `/readyz` in **193 s at 6.5 GB anonymous** under a
-24 GiB cap, `oom_kill` 0 — before the merge set, the open was modelled at ~60 GB anonymous and
-could not be attempted on this box. One stage, `filter_postings`, still held 7.6 GB over the
-budget; the campaign section has the diagnosis and the fix, not yet built.
+**3,495,729,729 placed rows** built under `--memory-budget 24g` to a **196 GiB bundle in 2 h 52 m
+33 s** (third build, 2026-09-14, record-blob format 11 with a per-segment cut index), against
+3 h 30 m 55 s (format 10) after the bounded-assembly design and 4 h 09 m 35 s (format 9) before
+it. `verify --deep` clean in **15 m 08 s at 0.61 GB peak anonymous**. `tessera serve` opens to
+`/readyz` in **197 s at 6.7 GB anonymous** under a 24 GiB cap, `oom_kill` 0. The stage that missed
+the memory budget under the second build, `filter_postings`, now fits it: its own stage peak fell
+to 8.9 GB anonymous, against 31.5 GB before the fix.
+
+Hot zoom 0, whole-map, fell 4 to 6× for the sparse principals under the third build (1% 268 → 57
+ms, 5% 1,269 → 231 ms, 10% 2,653 → 453 ms) and stays linear in visible rows; the dense principals
+(50%, 100%) are still 10 to 17 s, barely better than before, because the identity column the
+per-cell route probes cannot stay resident under the cap and the route becomes disk-bound — open
+at the time of writing, §4d.
 
 Disk stayed well inside the fraction's projection: 429 GB free at the start, a minimum of 221 GB
 free at the end, against a pre-flight forecast of ~539 GB that is known to overstate. The taxonomy
