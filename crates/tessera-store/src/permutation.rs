@@ -333,9 +333,9 @@ const DECODE_WINDOW: usize = 8192;
 /// Row ids buffered in [`Permutation::project_with`]'s buckets before they are emitted and unioned
 /// into the result — the bound on that pass's transient memory.
 ///
-/// The buckets used to hold the whole result at once, four bytes a projected row: 14 GB at 3.5×10⁹
-/// rows over a whole-corpus grant, a transient no configured budget bounds. Emitting a window at a
-/// time makes the bucket transient a constant — 64 MB of row ids, plus the quarter of slack
+/// Bucketing the whole result before emitting any of it costs four bytes a projected row: 14 GB at
+/// 3.5×10⁹ rows over a whole-corpus grant, a transient no configured budget bounds. Emitting a
+/// window at a time makes the bucket transient a constant — 64 MB of row ids, plus the quarter of slack
 /// [`Permutation::project_with`] reserves on top — and leaves the result itself as the only term
 /// that grows with the grant.
 ///
@@ -822,9 +822,9 @@ impl Permutation {
         // and a bucket at 10⁹ is megabytes, so that is a realloc and a memcpy of the whole thing on
         // half of them. Not separately measured — it was not separable from run-to-run variance at
         // this size — so it is here on the argument, not on a number.
-        // Sized from the window rather than from the mask, because the window is what a bucket
-        // ever holds. A mask smaller than one window reserves for the mask, which is what this
-        // reserved before there were windows at all.
+        // Sized from the window rather than from the mask, because a window is all a bucket ever
+        // holds. A mask below one window reserves for the mask instead, so a small projection
+        // reserves what it needs and no more.
         let planned = (mask.cardinality() as usize).min(window_rows);
         let expected = (planned / nbuckets)
             .saturating_mul(5)
