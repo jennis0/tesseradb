@@ -198,10 +198,19 @@ lists' identities, and none of the routes above is one.
 
 ## 8. What it does not fix, and the decisions
 
-Not fixed here: session start, which at rung 6 is a 6 to 38 s projection build per principal and
-is now the largest cost of a first viewport; the handover for it is
-`2026-09-14-session-start-handover.md`. Nor the wire: 1.7 million points is 27 MB, longer at a
-hundred megabits than any figure in §1. The floor's column pages under the cap remain.
+Not fixed here: session start, which at rung 6 is a 6 to 38 s projection build per principal;
+the handover for it is `2026-09-14-session-start-handover.md`. Nor the emit. The serve battery
+at the client's request shape (`battery/budget-request`: the whole extent at depth 9, `k` at the
+ceiling, layers on; `rung6/battery-budget.json` beside the probe's results) measured the
+end-to-end whole map hot at 0.6 s for the 1% principal, 23 s at 10%, 35 s at 25%, 80 s at 50%
+and 95 s at 100%, of which the time to first flush, which is what the search above replaces, was
+0.1, 6.8, 5.5, 11.5 and 13.6 s. The remainder is the emit: the scattered gather of the served
+rows' positions and scalars, which the cell codes address for the position, and the artifact
+channel, which at depth 9 with every level of the taxonomy layer in view is 16 s and 51 MB for
+the 10% principal and about 200 MB of the 100% principal's 238 MB body. A default deployment
+sheds that body: its 60 s whole-stream deadline cut the 100% principal's whole map mid-stream
+until the deadline was raised for the measurement. The artifact channel at whole-map depth is
+the next read-path problem after this one. The floor's column pages under the cap remain.
 
 For the owner:
 
