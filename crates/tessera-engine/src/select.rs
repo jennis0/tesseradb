@@ -442,6 +442,7 @@ impl CellWalk<'_> {
     ///
     /// Rows arrive ascending, so this only ever moves forward; the last cell of a part ends at
     /// the part's range end, which is where the boundary list runs out.
+    #[inline]
     fn at(&mut self, row: u32, base: u32, part_end: u32) {
         while row >= self.end {
             self.end = match self.starts.get(self.next) {
@@ -455,23 +456,27 @@ impl CellWalk<'_> {
     }
 }
 
-/// `slice.partition_point(|&id| id < cut)`, reporting how many identities it read.
+/// How many of `slice`'s ascending identities are below `cut`, and how many of them were read.
 ///
-/// Written out rather than called on the slice because the probe count is the route's cost and
-/// [`Selection::rows_visited`] is an observation of that cost, not a restatement of the tile's
-/// visible count.
-fn identities_below(slice: &[u64], cut: u64, probes: &mut usize) -> usize {
-    let (mut lo, mut hi) = (0usize, slice.len());
-    while lo < hi {
-        let mid = lo + (hi - lo) / 2;
-        *probes += 1;
-        if slice[mid] < cut {
-            lo = mid + 1;
-        } else {
-            hi = mid;
-        }
+/// **The two ends are answered before the search runs**, and that is a measured shape rather than
+/// a tidiness: the cells of a real corpus are short — 7.4 rows a cell over the 25.8M-row GBIF
+/// corpus — so a binary search over one is three unpredictable branches where the answer is
+/// usually at an end. At a whole-map zoom `P_d` is a millionth of the identity space and the first
+/// identity settles almost every cell; under a saturating threshold the last one does.
+///
+/// The probe count is the route's cost, and [`Selection::rows_visited`] is an observation of that
+/// cost rather than a restatement of the tile's visible count — hence returning it. A binary
+/// search over `n` reads `⌈log2(n + 1)⌉`, which is what the arithmetic below computes.
+#[inline]
+fn identities_below(slice: &[u64], cut: u64) -> (usize, usize) {
+    if slice[0] >= cut {
+        return (0, 1);
     }
-    lo
+    if slice[slice.len() - 1] < cut {
+        return (slice.len(), 2);
+    }
+    let below = slice.partition_point(|&id| id < cut);
+    (below, (usize::BITS - slice.len().leading_zeros()) as usize)
 }
 
 /// One contiguous piece of visible rows inside one leaf cell: its contribution to `C_θ` and to the
@@ -502,6 +507,7 @@ fn identities_below(slice: &[u64], cut: u64, probes: &mut usize) -> usize {
 /// candidate list has below coverage `1/c` has nothing to arise from: a sparse principal's tile is
 /// still walked to its end, and still serves `k_min` (I7).
 #[allow(clippy::too_many_arguments)]
+#[inline]
 fn scan_cell_piece(
     start_row: u32,
     slice: &[u64],
@@ -514,13 +520,31 @@ fn scan_cell_piece(
     if slice.is_empty() {
         return;
     }
+    // **The head settles most cells, and settling them on one read is what makes the route pay.**
+    // The piece's identities ascend, so its first is the smallest that can enter either answer: a
+    // head at or above `P_d` puts the whole rest of the cell above it, and a head the heap already
+    // rejects is followed only by larger ones. At a whole-map zoom both hold almost everywhere —
+    // `P_d` is a millionth of the identity space and the `cap` smallest identities of a corpus are
+    // smaller still — and the cells of a real corpus are short, 7.4 rows over the 25.8M-row GBIF
+    // corpus, so a cell walked in full would cost more than the rows it holds.
+    let head = slice[0];
+    let head_counts = !walk.count_done && params.threshold.admits(head);
+    let head_enters = !walk.heap_done
+        && (heap.len() < params.cap || head < heap.peek().expect("non-empty at len == cap").0);
+    if !head_counts && !head_enters {
+        walk.count_done = true;
+        walk.heap_done = true;
+        *rows_visited += 1;
+        return;
+    }
     let mut probes = 0usize;
     if !walk.count_done {
         match params.threshold {
             // θ_d ≥ 1 admits every identity, so the count needs no identity read at all.
             Threshold::Saturated => *c_theta += slice.len() as u64,
             Threshold::Cut(cut) => {
-                let below = identities_below(slice, cut, &mut probes);
+                let (below, read) = identities_below(slice, cut);
+                probes = read;
                 *c_theta += below as u64;
                 if below < slice.len() {
                     walk.count_done = true;
