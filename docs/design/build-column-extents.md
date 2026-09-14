@@ -77,7 +77,9 @@ The record blob is a k-way merge over the extents and the entity-ordered columns
 through one `RecordBlobWriter` at 256 KiB. Nothing about the blob's format or addressing changes,
 and the output is byte-identical to the arena build's.
 
-Working set: one join chunk, plus one uncompressed block per extent at the merge.
+Working set: one join chunk, plus one uncompressed block per extent at the merge, plus the
+duplicate map held while a column's extents are open (below, "An entity written twice") — two
+whole-column bitmaps' worth, n/4 bytes, doubled while the map is itself being built.
 
 ### Which columns can take extents
 
@@ -176,11 +178,13 @@ An attribute source may carry two rows for one entity. The arena build resolves 
 wins, and its arena walk checks each record's offset back against the column so that the
 superseded record is not indexed.
 
-Here the superseded row is in an earlier extent. Extents are ordered by the chunk that wrote them,
-so the live set of extent *i* is its has-row bitmap minus the union of every later extent's. That
-is bitmap arithmetic over the extents' has-row files, computed once before either consumer runs,
-and both consumers skip a row outside it. The text index therefore indexes exactly the values the
-blob holds, which is the property the arena walk's offset check gives today.
+Here the superseded row is in an earlier extent, and there is no set per extent for it. Once before
+either consumer runs, a duplicate map is built for the whole column: the entities more than one
+extent holds, each paired with the last extent that holds it, as an ascending vector. It is built by
+streaming the has-row files twice, one bitmap on the heap at a time. A row is live unless its entity
+is in the map and the map names a different extent, and both consumers skip a row that is not live.
+The text index therefore indexes exactly the values the blob holds, which is the property the arena
+walk's offset check gives today.
 
 ### Stage order
 
@@ -203,8 +207,13 @@ keep: for them an entity in two layers is an allocator defect and must refuse ra
 With disjoint ordered inputs the merge is a concatenation, so their bytes do not change.
 
 The pull cursor the merge reads a layer through is `tessera_filter::RecordRowCursor`, and
-`RecordBlob::for_each_row` is that cursor drained. There is one walk over a blob, so the addressing
-self-check a producer runs its inputs through is the same one either way.
+`RecordBlob::for_each_row` is that cursor drained. The flush and the fold read a served blob this
+way, with its has-row bitmap on the heap, so every check that walk makes — including the three that
+compare a row's identity against the bitmap — stands. The build's extent readers open a blob
+rows-only instead (`RecordBlob::open_rows_only`), which skips those three. The one of them the build
+still needs, the bitmap's cardinality against the directory's row count, it makes itself against the
+same has-row files: once when a column's duplicate map is built, and again when a fold takes in an
+extent.
 
 The flush is untouched: it sorts a window in memory and writes one extent, which is the same shape
 at a smaller scale.
@@ -228,14 +237,14 @@ are merged in groups into intermediate extents until what is left fits one merge
 the text index's runs take. Its reason is buffers alone: an extent's files are mapped and their
 descriptors dropped at open, so there is no descriptor ceiling here.
 
-The block buffers are what the cap is about because they are the only per-extent cost whose
-*bytes* rise with the extent count. Opening an extent also brings in its has-row bitmap and builds
-its live set, and both are shares of one column's entity set: a join chunk stages a contiguous run
-of entities, so cutting the same rows into twice as many extents halves each extent's bitmap. The
-live-set loop is O(E·C) container steps over E extents and C containers — the running union is
-walked once per extent — but a step is a container header compared and the containers each extent
-copies are its own 1/E share, which beside E buffers of 256 KiB apiece is not what the cap is
-about.
+The block buffers are what `merge_fan_in` bounds, and nothing else per extent scales with the
+column: one uncompressed block, 256 KiB, per open extent, which at the cap is a sixty-fourth of the
+memory budget. Opening an extent no longer brings in its has-row bitmap or builds a live set. A join
+chunk is a run of the attribute source's own order, scattered over entity space rather than a
+contiguous run of it, so cutting the same rows into more extents did not shrink each extent's
+bitmap — the defect measured at rung 6 on 2026-09-13: 31.5 GB anonymous for the two 988-extent
+string columns. The has-row files are instead read once each, into the column's duplicate map (§2),
+and the loop that used to build a live set an extent is gone.
 
 The cascade buys no read work, which is why the cap is set against the budget rather than at a
 constant low enough to fold often. Both readers of a column's extents are merges over all of them
@@ -268,6 +277,11 @@ still
 and half is charged rather than a 2.9th because the figure is one corpus's. Modelled, not measured
 for this shape, and an estimate rather than a ceiling: a compression ratio has no lower bound at one
 half, and a blob-resident column of high-entropy short values measures 0.567 to 0.750.
+
+The model also carries the duplicate map (§2) as anonymous memory, which is not disk and not this
+term: 2 × n/8 bytes for a spilled column, standing for the phases its extents stay open, plus a
+further 2 × n/8 while whichever column is having its map built. The build opens one column's
+extents at a time, so at most one map is ever under construction.
 
 Which columns the term applies to is the route the build chose, carried into the model rather than
 restated in it: a pre-flight that decided the route for itself would charge an arena the build does
@@ -305,13 +319,21 @@ tag winning; the merge orders entities ascending and fields by tag. None of that
 boundary. The text index's dictionary is the sorted distinct term set and a posting is the entity
 set carrying that term, neither of which reads one either.
 
-Three tests hold it. `chunking_the_text_index_does_not_change_its_bytes` runs the same eleven
-plans over both producers and over one, three and eleven interleaved extents, and asserts one
-dictionary and one postings file across all of them.
-`the_prose_extents_do_not_change_the_blobs_bytes` writes the same corpus at seven chunk budgets,
-over values that are absent, empty and written twice, and asserts the three blob files are
-identical across all of them. `folding_the_extents_leaves_the_same_rows` asserts the cascade
-leaves the same entities carrying the same values.
+Three tests in `pipeline.rs` hold it. `chunking_the_text_index_does_not_change_its_bytes` runs the
+same eleven plans over both producers and over one, three and eleven interleaved extents, and
+asserts one dictionary and one postings file across all of them.
+`the_extents_do_not_change_the_blobs_bytes` writes the same corpus at seven chunk budgets, over
+values that are absent, empty and written twice, and asserts the three blob files are identical
+across all of them. `folding_the_extents_leaves_the_same_rows` asserts the cascade leaves the same
+entities carrying the same values.
+
+`extents.rs` holds three more, at the duplicate map's own grain.
+`a_folded_column_answers_the_same_live_rows` compares a column's live rows before folding against
+the same column folded with `max_open = 2`.
+`a_folded_groups_input_whose_hasrow_disagrees_with_its_directory_refuses` corrupts one extent's
+has-row bitmap and asserts the fold refuses it rather than reading past it.
+`a_fold_changes_no_byte_of_the_blob_its_extents_merge_into` writes the record blob a column's
+extents merge into, from a folded column and an unfolded one, and compares the files byte for byte.
 
 The join chunk sort is stable, which is what makes last-write-wins an answer rather than a race.
 
