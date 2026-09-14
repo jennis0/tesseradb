@@ -54,16 +54,18 @@ pub fn trim_heap() {
 /// A no-op off glibc, where it returns `false`.
 pub fn set_arena_max(arenas: usize) -> bool {
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
-    {
+    fn apply(arenas: usize) -> bool {
         let value = arenas.min(libc::c_int::MAX as usize) as libc::c_int;
         // SAFETY: `mallopt` takes two integers and returns one; no pointer is involved.
-        return unsafe { libc::mallopt(libc::M_ARENA_MAX, value) } == 1;
+        unsafe { libc::mallopt(libc::M_ARENA_MAX, value) == 1 }
     }
+    // Two definitions of one function rather than two branches in one body: the glibc arm names
+    // `M_ARENA_MAX`, which does not exist elsewhere, so the arms cannot share a body.
     #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
-    {
-        let _ = arenas;
+    fn apply(_arenas: usize) -> bool {
         false
     }
+    apply(arenas)
 }
 
 /// The process's resident set in bytes, as `/proc/self/status` reports it.
