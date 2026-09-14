@@ -2842,6 +2842,91 @@ mod tests {
         Ok(out)
     }
 
+    /// **A varint is decoded out of the buffer only where the whole of it is in the buffer.** The
+    /// slice decoders are the fast path a member run's pairs take; a prefix read as a value would
+    /// be a source id short of what was written, and every id after it in the record wrong by the
+    /// same amount. Everything they decline — a prefix, an overlong encoding, an empty slice —
+    /// goes to the byte-at-a-time path, which refills across the boundary and names a
+    /// malformation.
+    #[test]
+    fn the_slice_varint_decoders_take_only_a_whole_legal_varint() {
+        // The widest legal values: five bytes at the u32 width, ten at the u64.
+        let widest32 = [0xFF, 0xFF, 0xFF, 0xFF, 0x0F];
+        let widest64 = [0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x01];
+        assert_eq!(varint32_at(&widest32), Some((u32::MAX, 5)));
+        assert_eq!(varint64_at(&widest64), Some((u64::MAX, 10)));
+        // And a value after them is not read: the length is what `consume` takes.
+        assert_eq!(varint32_at(&[0x7F, 0x01]), Some((0x7F, 1)));
+        assert_eq!(varint64_at(&[0x7F, 0x01]), Some((0x7F, 1)));
+
+        // Every proper prefix declines, the empty slice included.
+        for len in 0..widest32.len() {
+            assert_eq!(varint32_at(&widest32[..len]), None, "u32 prefix of {len}");
+        }
+        for len in 0..widest64.len() {
+            assert_eq!(varint64_at(&widest64[..len]), None, "u64 prefix of {len}");
+        }
+
+        // Both overflow shapes: payload bits above the width, and a continuation where there is
+        // no further byte to continue into.
+        assert_eq!(varint32_at(&[0xFF, 0xFF, 0xFF, 0xFF, 0x1F]), None);
+        assert_eq!(varint32_at(&[0xFF, 0xFF, 0xFF, 0xFF, 0x8F]), None);
+        assert_eq!(
+            varint64_at(&[0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x03]),
+            None
+        );
+        assert_eq!(
+            varint64_at(&[0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x81]),
+            None
+        );
+    }
+
+    /// One source delta per five bytes over a record larger than the reader's buffer, so varints
+    /// straddle the buffer's end and the slice decoder declines at each boundary. **The record
+    /// that comes back is the record that went in**, which is what says the two decode paths
+    /// agree: a boundary read by the wrong one would be a membership whose ids are wrong from the
+    /// boundary onward, and the anchor over them is what would catch it.
+    #[test]
+    fn a_member_run_spanning_several_read_buffers_round_trips() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let path = temp.path().join("wide-member-run.spill");
+        // 2^30 needs five bytes, so every delta does — 11.0 MB over three 4 MiB buffers.
+        let step = 1u64 << 30;
+        let sources: Vec<u64> = (1..=2_200_000u64).map(|i| i * step).collect();
+        assert_eq!(
+            sources.len() * 5,
+            11_000_000,
+            "the fixture must be five bytes a source"
+        );
+        assert!(
+            sources.len() * 5 > 2 * SPILL_BUF_BYTES,
+            "the fixture must span more than two buffers"
+        );
+        let receipt = write_member_run(&path, &[(7, sources.clone())]);
+        assert_eq!(
+            fs::metadata(&path).unwrap().len() as usize / SPILL_BUF_BYTES,
+            2,
+            "three buffers, the third partial"
+        );
+        assert_eq!(read_member_run(&receipt).unwrap(), vec![(7, sources)]);
+    }
+
+    /// **A file cut inside a five-byte delta refuses.** The slice decoder declines a prefix and
+    /// the byte-at-a-time path behind it meets the end of the file, which is the one place a
+    /// truncation can be told from a record boundary.
+    #[test]
+    fn a_member_run_cut_inside_a_delta_is_truncated() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let path = temp.path().join("cut-member-run.spill");
+        let step = 1u64 << 30;
+        let sources: Vec<u64> = (1..=8u64).map(|i| i * step).collect();
+        let receipt = write_member_run(&path, &[(3, sources)]);
+        // Two of the last delta's five bytes, so the file ends inside it.
+        truncate_by(&path, 2);
+        let message = err_string(read_member_run(&receipt));
+        assert!(message.contains("truncated"), "{message}");
+    }
+
     #[test]
     fn member_run_round_trips() {
         let temp = tempfile::TempDir::new().unwrap();
