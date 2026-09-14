@@ -1,7 +1,8 @@
 """Read a Tessera bundle directly off disk (Reference Sheet R4, contracts §2.1-§2.3).
 
 Independent of `tessera-store`: this module re-parses `CURRENT`/`MANIFEST.json`/
-`SEGMENTS-<n>.json`, `permutation.bin`, `morton.u32`, `postings.arrow` and `columns.arrow` from
+`SEGMENTS-<n>.json`, `permutation.bin`, `morton.u32`, `cuts.u32`, `postings.arrow` and
+`columns.arrow` from
 their byte-level definitions, verifying every file digest the manifests name along the way. Tag-1
 postings records are read via `pyroaring.BitMap.deserialize`, which reads the portable Roaring
 format directly — this doubles as the cross-implementation portable-format check the brief calls
@@ -78,6 +79,21 @@ class Segment:
     morton: np.ndarray  # uint32, row order (raw sorted codes from morton.u32)
     row_count: int
     tessera_id: np.ndarray | None = None  # uint64, row order (stored post-r6; absent pre-r6)
+    cuts: np.ndarray | None = None  # uint32, ascending (raw row starts from cuts.u32)
+
+    def cut_starts(self) -> np.ndarray:
+        """Where each occupied leaf Morton cell's rows begin, **recomputed from `morton`**.
+
+        Not a read of `cuts.u32`: that file is a pure function of the Morton column, so the second
+        reader's job is to derive it and compare, exactly as it derives the position codes rather
+        than reading them back (`Bundle.row_position_codes`). A build that wrote the index from
+        something other than the column it indexes is what this catches, and reading the index
+        would catch nothing.
+        """
+        if self.row_count == 0:
+            return np.empty(0, dtype=np.uint32)
+        changes = np.flatnonzero(self.morton[1:] != self.morton[:-1]) + 1
+        return np.concatenate(([0], changes)).astype(np.uint32)
 
     def stored_code(self, row: int) -> int:
         """Row `row`'s position as the bundle stores it: the two words concatenated.
@@ -1007,6 +1023,11 @@ def _read_segment(seg_dir: Path, perm_path: Path | None = None) -> Segment:
             f"{seg_dir}: columns.arrow has {row_count} rows but morton.u32 has {len(morton)}"
         )
 
+    # `cuts.u32` (contracts §2.6) — the Morton column's run-length index, mapped by the engine and
+    # walked by selection. Read raw here; `Segment.cut_starts` derives what it should hold.
+    cuts_path = seg_dir / "cuts.u32"
+    cuts = np.frombuffer(cuts_path.read_bytes(), dtype="<u4")
+
     column_names = set(table.schema.names)
     if "tessera_id" in column_names:
         # Post-r6: columns.arrow stores tessera_id; entity_id is DERIVED via the
@@ -1043,6 +1064,7 @@ def _read_segment(seg_dir: Path, perm_path: Path | None = None) -> Segment:
         morton=morton,
         row_count=row_count,
         tessera_id=tessera_id,
+        cuts=cuts,
     )
 
 
