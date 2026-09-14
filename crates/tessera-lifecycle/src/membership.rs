@@ -1042,7 +1042,12 @@ pub struct ArtifactStore {
     /// **Only a build reaches this**, between the encode and the mapping of the file it encoded
     /// into. An entry left here at the end of that window is an artifact holding the empty set,
     /// so the build refuses on it rather than writing a bundle whose level serves as absent.
-    vacated: BTreeMap<(String, u32, u32), u64>,
+    ///
+    /// **Keyed per `(layer, level)` and then per ordinal**, so the layer's name is held once a
+    /// level rather than once an artifact. A level of 1.6×10⁶ artifacts is vacated one batch at a
+    /// time, and an address built per artifact was a heap `String` per artifact for the map and
+    /// two more for the lookups around it.
+    vacated: BTreeMap<(String, u32), BTreeMap<u32, u64>>,
 }
 
 impl ArtifactStore {
@@ -1814,14 +1819,19 @@ impl ArtifactStore {
         ordinal: u32,
         members: Members,
     ) -> bool {
-        let address = (layer.to_string(), level, ordinal);
+        // The layer's name once, for all three lookups: this runs once per artifact of a level.
+        let address = (layer.to_string(), level);
         // **A vacated artifact is checked against the cardinality it had before the vacate**, not
         // against the placeholder standing in for it: the placeholder is empty, so the check that
         // is the whole of this method's value would otherwise pass for any short membership.
-        let vacated = self.vacated.get(&address).copied();
+        let vacated = self
+            .vacated
+            .get(&address)
+            .and_then(|level| level.get(&ordinal))
+            .copied();
         let Some(record) = self
             .levels
-            .get_mut(&(address.0, level))
+            .get_mut(&address)
             .and_then(|slots| slots.get_mut(ordinal as usize))
             .and_then(Option::as_mut)
         else {
@@ -1832,7 +1842,12 @@ impl ArtifactStore {
         }
         record.members = members;
         if vacated.is_some() {
-            self.vacated.remove(&(layer.to_string(), level, ordinal));
+            if let Some(level) = self.vacated.get_mut(&address) {
+                level.remove(&ordinal);
+                if level.is_empty() {
+                    self.vacated.remove(&address);
+                }
+            }
         }
         true
     }
@@ -1857,31 +1872,38 @@ impl ArtifactStore {
     /// calls it, and the build's own order — publish, pack, rehouse, then the artifact pass —
     /// is what keeps that true.
     ///
-    /// `false` where the address names no record.
-    pub fn vacate_members(&mut self, layer: &str, level: u32, ordinal: u32) -> bool {
-        debug_assert!(
-            !self.vacated.contains_key(&(layer.to_string(), level, ordinal)),
-            "an artifact vacated twice loses the cardinality the rehousing answers with"
-        );
-        let Some(record) = self
-            .levels
-            .get_mut(&(layer.to_string(), level))
-            .and_then(|slots| slots.get_mut(ordinal as usize))
-            .and_then(Option::as_mut)
-        else {
-            return false;
+    /// **A range of ordinals rather than one**, because a batch is what is vacated: the level is
+    /// found once and the layer's name is built once, where an address per artifact was three
+    /// heap `String`s per artifact over a level of 1.6×10⁶ of them.
+    ///
+    /// Answers how many records were vacated, which is the range's length where every ordinal in
+    /// it names one.
+    pub fn vacate_members(&mut self, layer: &str, level: u32, lo: u32, count: u32) -> u32 {
+        let address = (layer.to_string(), level);
+        let Some(slots) = self.levels.get_mut(&address) else {
+            return 0;
         };
-        let cardinality = record.members.cardinality();
-        record.members = Members::owned(Bitmap::new());
-        self.vacated
-            .insert((layer.to_string(), level, ordinal), cardinality);
-        true
+        let vacated = self.vacated.entry(address).or_default();
+        let mut done = 0;
+        for ordinal in lo..lo + count {
+            let Some(record) = slots.get_mut(ordinal as usize).and_then(Option::as_mut) else {
+                continue;
+            };
+            debug_assert!(
+                !vacated.contains_key(&ordinal),
+                "an artifact vacated twice loses the cardinality the rehousing answers with"
+            );
+            vacated.insert(ordinal, record.members.cardinality());
+            record.members = Members::owned(Bitmap::new());
+            done += 1;
+        }
+        done
     }
 
     /// How many artifacts hold a placeholder rather than their membership — zero everywhere but
     /// inside a build's publication window. See [`Self::vacate_members`].
     pub fn vacated_count(&self) -> usize {
-        self.vacated.len()
+        self.vacated.values().map(BTreeMap::len).sum()
     }
 
     pub fn get(&self, layer: &str, level: u32, ordinal: u32) -> Option<&ArtifactRecord> {

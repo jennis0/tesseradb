@@ -1805,9 +1805,7 @@ pub fn publish(
             }
             // The bytes are in the writer, so the store's own bitmaps have one reader left — the
             // rehousing that replaces them with a view over the finished pack.
-            for ordinal in batch_lo..batch_lo + batch_len {
-                store.vacate_members(layer, level, ordinal);
-            }
+            store.vacate_members(layer, level, batch_lo, batch_len);
             // **No trim here.** A batch's bitmaps are freed above and the next batch allocates
             // the same shapes straight back, so returning the pages to the kernel between two
             // batches of one level buys a heap the level is about to ask for again — and
