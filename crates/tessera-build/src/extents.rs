@@ -42,8 +42,8 @@
 //! columns of the 3.5×10⁹-row GBIF rung spilled came to about 7 GB of live sets a column, held
 //! from the postings stage through the blob. The map is instead the entities that appear in more
 //! than one extent, and for each of those the last extent that holds it — near empty for a corpus
-//! with about one row an entity, and bounded above by two whole-column bitmaps whatever the extent
-//! count.
+//! with about one row an entity, and bounded, whatever the extent count, by four whole-column
+//! bitmaps while a column's map is built and eight bytes a repeated entity once it is.
 
 use std::path::{Path, PathBuf};
 
@@ -144,7 +144,12 @@ impl ExtentColumn {
     ///
     /// A group is a contiguous run in write order and is merged by the same row merge the blob
     /// itself is written by, so an entity written twice inside one group comes out carrying the
-    /// later value and the ordering the live sets rest on survives.
+    /// later value and the write order [`DuplicateMap`] rests on survives.
+    ///
+    /// **A folded group's inputs are checked before they are read**, which is the check
+    /// [`RecordBlob::open_rows_only`][tessera_filter::RecordBlob::open_rows_only] gives up: the
+    /// extents a fold consumes are unlinked at the end of the group and never reach
+    /// [`DuplicateMap::over`], which is where the check is made for a column that does not fold.
     ///
     /// A fold buys nothing but the memory bound. Both of a column's readers are themselves
     /// merges over every extent at once, so neither of them reads fewer bytes for having had the
@@ -169,6 +174,7 @@ impl ExtentColumn {
                     directory: self.dir.join(format!("{stem}.directory.arrow")),
                 };
                 let blobs = open_all(extents)?;
+                check_hasrow_totals(extents, &blobs)?;
                 let mut cursors: Vec<tessera_filter_write::BlobRows<'_>> = blobs
                     .iter()
                     .map(tessera_filter_write::BlobRows::over)
@@ -210,7 +216,8 @@ impl ExtentColumn {
     /// on the heap. The bitmaps are read here instead, one at a time and released, to build
     /// [`DuplicateMap`] — and the one addressing check that open gives up, that an extent's
     /// directory accounts for as many rows as its has-row bitmap holds, is made there against the
-    /// same bytes.
+    /// same bytes ([`read_checked_hasrow`], which [`ExtentColumn::cascade`] also calls for the
+    /// extents a fold consumes and unlinks before this runs).
     pub(crate) fn open(&self) -> Result<OpenExtents> {
         let blobs = open_all(&self.extents)?;
         let duplicates = DuplicateMap::over(&self.extents, &blobs)?;
@@ -269,69 +276,114 @@ pub(crate) struct OpenExtents {
 /// Which extent's row survives, for every entity one column's extents hold more than once.
 ///
 /// A row of extent *i* carrying entity *e* is live exactly where no later extent holds *e*. The
-/// map states that as two structures over the whole column rather than one set per extent:
-/// `repeat` is the entities more than one extent holds, and `last` is, for each of those in
-/// ascending order, the highest extent index that holds it. An entity outside `repeat` is in one
-/// extent only, and that extent's row is live by construction.
+/// map states that as one ascending table over the whole column rather than a set per extent:
+/// `repeats` carries every entity more than one extent holds, paired with the highest extent index
+/// that holds it. An entity absent from it is in one extent only, and that extent's row is live by
+/// construction.
 ///
-/// **Peak is two whole-column bitmaps and four bytes a repeated entity.** A bitmap over an entity
-/// space of *n* is at most *n*/8 bytes — 437 MB apiece at the 3.5×10⁹-row GBIF rung — whatever the
-/// extent count, and GBIF carries about one row an entity, so `repeat` there is close to empty.
-/// The cost is one extra sequential pass over the has-row files, which the first pass has just
-/// warmed: the map cannot be built in one, because which entities repeat is not known until every
-/// extent has been read.
+/// **A row costs a binary search over `repeats`, which is empty for almost every corpus.** The
+/// table is a `Vec` rather than the Roaring bitmap it is built from deliberately: a Roaring `rank`
+/// walks the container index, and this is asked once of every row of every extent, where the
+/// per-extent set it replaced cost one `contains`.
+///
+/// **What survives the build is eight bytes a repeated entity; the transient, while one column's
+/// map is built, is four whole-column bitmaps.** A bitmap over an entity space of *n* is at most
+/// *n*/8 bytes — 437 MB apiece at the 3.5×10⁹-row GBIF rung — whatever the extent count. The first
+/// pass holds four at its worst moment: the running union, the repeats so far, the extent's own
+/// bitmap, and the intersection of the first with the third. The second pass holds three of them
+/// and the table. GBIF carries about one row an entity, so the table there is close to empty.
+///
+/// The cost in time is one extra sequential pass over the has-row files, which the first pass has
+/// just warmed: the map cannot be built in one, because which entities repeat is not known until
+/// every extent has been read.
 pub(crate) struct DuplicateMap {
-    repeat: Bitmap,
-    last: Vec<u32>,
+    /// `(entity, the highest extent index holding it)`, ascending in the entity.
+    repeats: Vec<(u32, u32)>,
 }
 
 impl DuplicateMap {
     /// Stream the extents' has-row files in write order, twice.
     ///
     /// Each file is deserialised, used, and dropped before the next is read, so what stands through
-    /// the build is `repeat`, `seen` and `last` — never a per-extent set.
+    /// the passes is the running union, the repeats and one extent's bitmap — never a set an
+    /// extent.
     fn over(extents: &[ExtentPaths], blobs: &[RecordBlob]) -> Result<Self> {
+        assert_eq!(
+            extents.len(),
+            blobs.len(),
+            "open_all returns one blob an extent, and the two are walked in step here"
+        );
         let mut seen = Bitmap::new();
         let mut repeat = Bitmap::new();
         for (paths, blob) in extents.iter().zip(blobs) {
-            let hasrow = read_hasrow(paths)?;
-            // The check `RecordBlob::open_rows_only` gives up, made here instead: the extent's
-            // directory must account for exactly the rows its has-row bitmap holds.
-            if hasrow.cardinality() != blob.rows() {
-                return Err(BuildError::Invalid(format!(
-                    "the extent at {} addresses {} rows but its has-row bitmap holds {} entities",
-                    paths.blocks.display(),
-                    blob.rows(),
-                    hasrow.cardinality()
-                )));
-            }
+            let hasrow = read_checked_hasrow(paths, blob)?;
             repeat.or_inplace(&seen.and(&hasrow));
             seen.or_inplace(&hasrow);
         }
         drop(seen);
-        let mut last = vec![0u32; repeat.cardinality() as usize];
-        if !last.is_empty() {
+        let mut repeats: Vec<(u32, u32)> = repeat.iter().map(|entity| (entity, 0u32)).collect();
+        if !repeats.is_empty() {
             for (i, paths) in extents.iter().enumerate() {
                 let index = u32::try_from(i).expect("an extent index is a u32");
                 let here = read_hasrow(paths)?.and(&repeat);
-                // Ascending in the extent, so the last write for an entity is the highest extent
-                // that holds it.
+                // `here` is a subset of `repeat` and both ascend, so one walk in step reaches every
+                // slot this extent holds without a rank. Extents are visited in write order, so the
+                // last index written to a slot is the highest extent holding that entity.
+                let mut at = 0usize;
                 for entity in here.iter() {
-                    last[(repeat.rank(entity) - 1) as usize] = index;
+                    while at < repeats.len() && repeats[at].0 < entity {
+                        at += 1;
+                    }
+                    match repeats.get_mut(at) {
+                        Some(slot) if slot.0 == entity => slot.1 = index,
+                        _ => break,
+                    }
                 }
             }
         }
-        Ok(DuplicateMap { repeat, last })
+        drop(repeat);
+        Ok(DuplicateMap { repeats })
     }
 
     /// Whether the row extent `extent` holds for `entity` is the one that survives.
     fn is_live(&self, extent: usize, entity: u32) -> bool {
-        if !self.repeat.contains(entity) {
-            return true;
+        match self.repeats.binary_search_by_key(&entity, |&(e, _)| e) {
+            Err(_) => true,
+            Ok(i) => self.repeats[i].1 as usize == extent,
         }
-        let rank = (self.repeat.rank(entity) - 1) as usize;
-        self.last[rank] as usize == extent
     }
+}
+
+/// Every extent's has-row bitmap against what its directory addresses, read and dropped one at a
+/// time. [`ExtentColumn::cascade`] says why the fold makes this check of its own.
+fn check_hasrow_totals(extents: &[ExtentPaths], blobs: &[RecordBlob]) -> Result<()> {
+    assert_eq!(
+        extents.len(),
+        blobs.len(),
+        "open_all returns one blob an extent, and the two are walked in step here"
+    );
+    for (paths, blob) in extents.iter().zip(blobs) {
+        drop(read_checked_hasrow(paths, blob)?);
+    }
+    Ok(())
+}
+
+/// One extent's has-row bitmap, checked against the rows its directory addresses.
+///
+/// **This is the check [`RecordBlob::open_rows_only`][tessera_filter::RecordBlob::open_rows_only]
+/// gives up**, made wherever this build reads a has-row file: an extent whose directory and bitmap
+/// disagree about how many rows it holds refuses here rather than being walked.
+fn read_checked_hasrow(paths: &ExtentPaths, blob: &RecordBlob) -> Result<Bitmap> {
+    let hasrow = read_hasrow(paths)?;
+    if hasrow.cardinality() != blob.rows() {
+        return Err(BuildError::Invalid(format!(
+            "the extent at {} addresses {} rows but its has-row bitmap holds {} entities",
+            paths.blocks.display(),
+            blob.rows(),
+            hasrow.cardinality()
+        )));
+    }
+    Ok(hasrow)
 }
 
 /// One extent's has-row bitmap, read and deserialised on its own.
@@ -378,8 +430,8 @@ impl OpenExtents {
 
     /// Every live `(entity, value)` in one window, ascending in the entity.
     ///
-    /// A row outside the extent's live set is a value a later chunk overwrote, and it is skipped
-    /// here for the same reason the record blob does not write it.
+    /// A row whose entity a later extent holds is a value a later chunk overwrote, and it is
+    /// skipped here for the same reason the record blob does not write it ([`DuplicateMap`]).
     pub(crate) fn for_each_record_in(
         &self,
         window: ExtentWindow,
@@ -636,6 +688,65 @@ mod tests {
         );
     }
 
+    /// **The fold is a rewrite of the extents, and the live answer has to survive it.** Folding
+    /// with `max_open = 2` puts extents 0 and 1 into one intermediate — where the merge itself
+    /// resolves entity 5 to the later value — and leaves extent 2 beside it, so the map afterwards
+    /// answers over two extents where it answered over three, and the stream is the same either
+    /// way.
+    #[test]
+    fn a_folded_column_answers_the_same_live_rows() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let plain = three_extents(dir.path());
+        let expected = live_rows(&plain.open().expect("the extents open"));
+
+        let folded_dir = tempfile::tempdir().expect("a temp dir");
+        let mut folded = three_extents(folded_dir.path());
+        folded.cascade(2).expect("the fold runs");
+        assert!(
+            folded.extents.len() <= 2,
+            "the cascade folds until the fan-in holds, got {}",
+            folded.extents.len()
+        );
+        assert_eq!(
+            live_rows(&folded.open().expect("the extents open")),
+            expected
+        );
+    }
+
+    /// The check `RecordBlob::open_rows_only` gives up, made where a fold consumes its inputs: the
+    /// extents a group takes in are unlinked before `open` ever sees them, so a has-row file that
+    /// disagrees with its directory has to refuse here or never.
+    #[test]
+    fn a_folded_groups_input_whose_hasrow_disagrees_with_its_directory_refuses() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let mut column = three_extents(dir.path());
+        // Well-formed portable Roaring, and the wrong cardinality for the three rows extent 0's
+        // directory addresses.
+        let wrong: Bitmap = [1u32, 5, 9, 11].into_iter().collect();
+        std::fs::write(
+            &column.extents[0].hasrow,
+            wrong.serialize::<croaring::Portable>(),
+        )
+        .expect("the has-row file rewrites");
+        let err = column.cascade(2).expect_err("the fold refuses its input");
+        let message = format!("{err}");
+        assert!(
+            message.contains("addresses 3 rows but its has-row bitmap holds 4 entities"),
+            "the refusal names both counts, got: {message}"
+        );
+    }
+
+    /// Every live `(entity, value)` of a column, in entity order.
+    fn live_rows(open: &OpenExtents) -> Vec<(u32, String)> {
+        let mut seen = Vec::new();
+        open.for_each_live_record(&mut |entity, value| {
+            seen.push((entity, value.to_string()));
+            Ok(())
+        })
+        .expect("the stream reads");
+        seen
+    }
+
     /// A column no entity of which is written twice carries an empty duplicate map, and every row
     /// of every extent is live.
     #[test]
@@ -649,8 +760,7 @@ mod tests {
             .push_extent(&[(3, "c"), (4, "d")])
             .expect("an extent");
         let open = column.open().expect("the extents open");
-        assert!(open.duplicates.repeat.is_empty());
-        assert!(open.duplicates.last.is_empty());
+        assert!(open.duplicates.repeats.is_empty());
         let mut rows = 0usize;
         open.for_each_live_record(&mut |_, _| {
             rows += 1;
