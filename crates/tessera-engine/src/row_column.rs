@@ -93,7 +93,7 @@ type LevelWalk<'a> = tessera_store::derived::LevelWalk<'a>;
 use crate::compose::WholeMask;
 
 /// How many rows one `next_many` read takes out of the mask: 1,024 × 4 B is a 4 KiB buffer, the
-/// same block [`tessera_store::derived::RowLocator::positions`] reads its runs out of.
+/// same block [`crate::derived::RowLocator::positions`] reads its runs out of.
 const ROW_BLOCK: usize = 1_024;
 
 /// Every row of `rows`, read a block at a time. Every scan over the composed mask below takes this
@@ -106,7 +106,7 @@ const ROW_BLOCK: usize = 1_024;
 ///
 /// Measured on a whole-map viewport over `gbif-64p`'s 25,846,007 rows, served hot, 2026-09-14:
 /// **3.2 ns a visible row against 6.6** for the row-at-a-time form.
-/// `tessera_store::derived::RowLocator::positions` measured the same change at 168 ms → 44 ms over
+/// [`crate::derived::RowLocator::positions`] measured the same change at 168 ms → 44 ms over
 /// 12.8×10⁶ rows.
 fn for_each_row(rows: &Bitmap, mut visit: impl FnMut(u32)) {
     let mut it = rows.iter();
@@ -1160,7 +1160,16 @@ impl RowColumn {
                 let end = (c + 1) * chunk;
                 let mut counts = vec![0u32; ordinals];
                 for_each_row_in(visible, lo, end, |row| {
-                    self.for_each_label(row, |ordinal| counts[ordinal as usize] += 1);
+                    // **Guarded exactly as [`Self::candidates`] guards an amendment's ordinal.**
+                    // Both routes read the same labels through [`Self::for_each_label`], so an
+                    // ordinal past the level's count has to mean the same thing to both: candidacy
+                    // would drop it and this would panic, which is the two routes disagreeing
+                    // about the level rather than about the mask.
+                    self.for_each_label(row, |ordinal| {
+                        if let Some(count) = counts.get_mut(ordinal as usize) {
+                            *count += 1;
+                        }
+                    });
                 });
                 counts
             })
@@ -1233,8 +1242,12 @@ impl RowColumn {
                     let Some((x, y)) = position(row) else {
                         return;
                     };
+                    // Guarded as [`Self::histogram_over`]'s is, and for its reason.
                     self.for_each_label(row, |ordinal| {
                         let i = ordinal as usize;
+                        if i >= acc.counts.len() {
+                            return;
+                        }
                         acc.counts[i] += 1;
                         acc.sums[i][0] += u64::from(x);
                         acc.sums[i][1] += u64::from(y);

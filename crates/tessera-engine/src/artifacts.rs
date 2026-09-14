@@ -1462,10 +1462,17 @@ impl ArtifactRows {
             Some(column) => {
                 if viewport.covers_mask() {
                     // The lengths must agree, or the histogram is not this column's. Both are the
-                    // level's ordinal count and the cache key carries the level version, so they
-                    // agree on every route that reaches here. An entry that did not would be short
-                    // for the ordinals past its end, and withholding an artifact is the one outcome
-                    // this route may not have.
+                    // level's ordinal count, and the key the histogram is filed under carries the
+                    // version of the form this column came from
+                    // (`ArtifactProjections::get_or_build`), so they agree on every route that
+                    // reaches here.
+                    //
+                    // **This is a sanity check on the pairing, not the disclosure defence.** What
+                    // keeps an ordinal with no visible row out of the answer is that the counts
+                    // were taken over `M_auth` and over nothing else; a length mismatch would only
+                    // make the entry short, and a short entry loses artifacts rather than
+                    // admitting them. The version term of the key is what stops a histogram of
+                    // another version being read here at all.
                     if let Some(counts) = counts.filter(|c| c.len() == column.len()) {
                         return Candidacy::Scanned(counts.populated());
                     }

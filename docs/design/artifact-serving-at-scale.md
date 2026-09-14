@@ -462,7 +462,9 @@ slower and never wrong, and raising the default would spend memory on every depl
 that hold several such levels at once.
 
 **Measured over 10⁸ points on the `partition` arm**, 10⁵ artifacts, full mask, milliseconds per
-request *(medians of three runs; `r1e8-p1e5-partition-medians.csv`)*:
+request *(medians of three runs; `r1e8-p1e5-partition-medians.csv`)*. The two column figures are the
+**scan** route's, which is what every viewport took when these were measured; the whole-map row is
+no longer a cost the server pays, for the reason below the table:
 
 | viewport | artifact-major *(hoisted)* | **label column** | **list column** |
 |---|---:|---:|---:|
@@ -476,12 +478,13 @@ request *(medians of three runs; `r1e8-p1e5-partition-medians.csv`)*:
 forced. A row-major scan costs `O(k × visible rows)`, so it is dearest where the viewport is widest
 and cheapest at the narrow zooms where the artifact-major route is paying its per-candidate floor.
 **At whole-map zoom it is not paid at all.** Where the viewport holds every row the viewer may see,
-`viewport ∩ M_auth` is `M_auth`, and the masked-count histogram this layout already builds once per
-`(session, level)` says which artifacts have a visible row. The scan runs at the viewports narrower
-than the mask, at a measured **3.2 ns a visible row** (`gbif-64p`, 25,846,007 rows,
-`taxonomy/tree` levels 0 and 1, hot, 2026-09-14; 6.6 ns before the mask was read a block of rows at
-a time instead of one call into the bitmap library per row). A whole-map zoom-0 request over that
-corpus is **210 ms of server CPU against 40 ms**. **Flat in the artifact
+`viewport ∩ M_auth` is `M_auth`, and the masked-count histogram this layout already builds says
+which artifacts have a visible row — one entry per session, view, layer, level and level version,
+under the whole key `crate::histogram` states. The scan runs at the viewports narrower than the
+mask, and reading the mask a block of rows at a time rather than one call into the bitmap library
+per row took it from **6.6 ns a visible row to 3.2**. A whole-map zoom-0 request over the same
+corpus went from **210 ms of server CPU to 40**. Both measured on `gbif-64p`, 25,846,007 rows,
+`taxonomy/tree` levels 0 and 1, served hot, 2026-09-14. **Flat in the artifact
 count** is the other half and it holds: the list column measures **710 ms at 10⁴ scattered artifacts
 and 744 ms at 10⁵** at whole-map zoom, ten times the population for a 5% difference
 *(`r1e8-s1e4-scattered-medians.csv`, `r1e8-s1e5-scattered-medians.csv`)*. So the rule is **take the

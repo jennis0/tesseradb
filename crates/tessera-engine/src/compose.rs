@@ -388,12 +388,16 @@ pub trait MaskedSet {
 /// The **whole** composed mask, materialised — every row this viewer may see, in this view's row
 /// space.
 ///
-/// **One caller, and it is the row-major count** ([`crate::row_column::RowColumn::histogram`]). A
-/// row-major level has no per-artifact membership to intersect, so its only route to
+/// **Two callers, and the first is the row-major count** ([`crate::row_column::RowColumn::histogram`]).
+/// A row-major level has no per-artifact membership to intersect, so its only route to
 /// `|membership ∩ M_auth|` is a walk of the mask reading off which artifact each visible row belongs
 /// to — the one place [decision 0093](../../../docs/decisions/0093-nothing-is-materialised-per-token-over-the-artifact-population.md)
 /// admits a structure sized by the artifact population per session, and it is admitted because there
 /// is no other route.
+///
+/// **The second is [`crate::tile_index::Viewport::compose`]**, which borrows this set where the
+/// viewport holds every row the viewer may see, rather than intersecting to a copy of it. It reads
+/// the same set the histogram walks, which is what makes the two agree at that viewport.
 ///
 /// **Its own trait rather than a third method on [`MaskedSet`]**, for a reason that is about the
 /// question rather than about tidiness: `MaskedSet` is *the questions an artifact's membership asks
