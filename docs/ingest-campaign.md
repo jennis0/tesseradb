@@ -26,7 +26,7 @@ is the owner's to settle.
 | **3** | **MedCPT / PubMed** | **35,920,666** | **Built, verified and served** 2026-09-02 — see §4.6. The ladder's largest embedding rung and its first `dag` layer: MeSH's 30,217 descriptors with members over 41,321 edges, membership closed upward to **1.66×10⁹ entries** (3.27× rung 2's spill), an 11.15 GB bundle in 12 m 10 s at 16.03 GB peak, `verify --deep` clean. ⊘ Three non-reproducing host faults over two runs, §4.6 |
 | **4** | **PaperSeek + OpenAlex** | **102,117,343** | **Staged and prepared whole; built, verified and served at a 10⁷ prefix; ⊘ stalled at 10⁸** 2026-09-03 — see §4a. The corpus exists: 254 GB staged in one 164.7-minute pass, laid out and joined to OpenAlex in 43.8 minutes at 18.4 GB, 52.2 GB of `points.parquet`, 394,325,928 topic member rows, and the ladder's first compartment that is a property of the row. **`tessera build` reached the abstract text index and stalled there** — not refused, not killed, 93% system time against a 128 GiB mapped arena on a 47 GB box. Both stalls that produced are fixed, and **the whole corpus now builds: 2 h 56 m to a 70.78 GB bundle, `verify --deep` clean, served under a 24 GiB cap with `oom_kill` 0** (2026-09-04, §4b), and **1 h 09 m for the same bundle byte for byte** once the prose stopped being held in entity order at all (§4c). The rung's finding is that negative and its resolution |
 | **5** | **TreeOfLife-200M** | **233,055,986** | **Built, verified and served** 2026-09-04 — see §4b. The ladder's largest rung and its first with **two geometries over one entity space**: `bioclip` over every row and `geo` over the 75.90% the GBIF join placed on the ground. A **seven-level tiered taxonomy over every row** — 1,001,193 artifacts, 1.63×10⁹ membership entries — drawn on both views. **39.97 GB bundle in 1 h 10 m at 35.3 GB peak**, `verify --deep` clean in 37.1 s, served under a 24 GiB cap with every masked count identical, and the *f* = 50% ingest cell run: 116,527,993 rows in at 11,060 items/s and a 1,313 s fold. The vectors are 346 GB and were **never staged**: the layout is fitted on 2.5M rows and every row placed in one 2 h 55 m pass off the share |
-| 6 | GBIF | **3,495,729,729** | **Built, verified and served under a 24 GiB cap** 2026-09-14 — see §4d. The whole corpus, built three times: 4 h 09 m 35 s (207 GiB, format 9); after [the bounded-assembly design](evidence/memos/2026-09-12-bounded-assembly-design.md), 3 h 30 m 55 s (196 GiB, format 10), with `filter_postings` 7.6 GB over the 24 GB budget; after the serve fixes (candidacy off the cached histogram, extents opened rows-only, a windowed session projection, a per-segment cut index), **2 h 52 m 33 s** (**196 GiB, format 11**), with `filter_postings`'s own stage peak inside the budget at 8.9 GB. `verify --deep` clean in **15 m 08 s at 0.61 GB anonymous**. `tessera serve` opens to `/readyz` in **197 s at 6.7 GB anonymous** under the cap, `oom_kill` 0. Hot zoom 0 fell 4 to 6× for the sparse principals on the per-cell route; the dense principals stay disk-bound on the identity column under the cap, open at the time of writing (§4d). The taxonomy still starts at **family**, ruled 2026-09-09: kingdom Animalia's 2.81×10⁹ members would set `layers`' peak by itself |
+| 6 | GBIF | **3,495,729,729** | **Built, verified and served under a 24 GiB cap** 2026-09-14 — see §4d. The whole corpus, built three times: 4 h 09 m 35 s (207 GiB, format 9); after [the bounded-assembly design](evidence/memos/2026-09-12-bounded-assembly-design.md), 3 h 30 m 55 s (196 GiB, format 10), with `filter_postings` 7.6 GB over the 24 GB budget; after the serve fixes (candidacy off the cached histogram, extents opened rows-only, a windowed session projection, a per-segment cut index), **2 h 52 m 33 s** (**196 GiB, format 11**), with `filter_postings`'s own stage peak inside the budget at 8.9 GB. `verify --deep` clean in **15 m 08 s at 0.61 GB anonymous**. Served a fourth time after a fix returning freed memory to the allocator on a cadence: `tessera serve` opens to `/readyz` in **202 s at 6.7 GB anonymous** under the cap, peak **10.7 GB** (third serve: 197 s, peak 16.0 GB), `oom_kill` 0. Hot zoom 0 for the sparse principals still falls 4 to 6× on the per-cell route; the 50% principal now falls onto that route's resident cost too, 13.2 s → 2.2 s, while the 100% principal stays disk-bound on the 28 GB identity column, 16.9 s → 14.6 s, open at the time of writing (§4d). The taxonomy still starts at **family**, ruled 2026-09-09: kingdom Animalia's 2.81×10⁹ members would set `layers`' peak by itself |
 | 7 | Overture buildings | 2.53×10⁹ | Not started. Staged; needs a second local volume |
 
 **Disk, and a trap in clearing it.** `/` had **23 GB free** on 2026-08-28, not the 117 GB recorded
@@ -81,12 +81,12 @@ median under each condition, end to end; the last is the median cell's server-si
 
 | rung | cap | target | measured | terms | authorise | first viewport | cold | cold pages | hot | hot server p99 |
 |---|---|---|---|---|---|---|---|---|---|---|
-| gbif | 25.77 GB | 1% | 1.00% | 5 | 29.80 ms | 8.76 s | 5.64 s | 194.51 ms | 6.16 ms | 78.00 ms |
-| gbif | 25.77 GB | 5% | 5.00% | 6 | 10.80 ms | 11.86 s | 9.04 s | 210.01 ms | 6.10 ms | 103.80 ms |
-| gbif | 25.77 GB | 10% | 10.00% | 7 | 31.60 ms | 18.16 s | 14.33 s | 325.56 ms | 6.32 ms | 136.80 ms |
-| gbif | 25.77 GB | 25% | 25.00% | 7 | 40.50 ms | 32.38 s | 22.83 s | 324.60 ms | 29.53 ms | 141.16 ms |
-| gbif | 25.77 GB | 50% | 50.00% | 8 | 86.90 ms | 47.61 s | 36.96 s | 322.24 ms | 57.07 ms | 153.88 ms |
-| gbif | 25.77 GB | 100% | 100.00% | 253 | 1.50 ms | 41.36 s | 28.64 s | 324.70 ms | 58.12 ms | 187.92 ms |
+| gbif | 25.77 GB | 1% | 1.00% | 5 | 8.70 ms | 6.41 s | 4.97 s | 170.91 ms | 6.20 ms | 75.56 ms |
+| gbif | 25.77 GB | 5% | 5.00% | 6 | 10.60 ms | 13.01 s | 8.08 s | 167.50 ms | 4.39 ms | 115.90 ms |
+| gbif | 25.77 GB | 10% | 10.00% | 7 | 26.20 ms | 17.70 s | 12.95 s | 290.85 ms | 6.48 ms | 136.73 ms |
+| gbif | 25.77 GB | 25% | 25.00% | 7 | 56.70 ms | 28.94 s | 19.28 s | 312.68 ms | 29.43 ms | 140.47 ms |
+| gbif | 25.77 GB | 50% | 50.00% | 8 | 119.10 ms | 44.32 s | 32.97 s | 330.63 ms | 54.81 ms | 341.14 ms |
+| gbif | 25.77 GB | 100% | 100.00% | 253 | 4.20 ms | 38.18 s | 23.19 s | 306.37 ms | 53.52 ms | 311.01 ms |
 | medcpt | uncapped | 1% | 2.86% | 2 | 5.50 ms | 256.20 ms | 1.04 s | 23.47 ms | 3.09 ms | 2.32 ms |
 | medcpt | uncapped | 5% | 2.86% | 2 | 0.80 ms | 1.26 s | 1.06 s | 26.03 ms | 6.80 ms | 1.81 ms |
 | medcpt | uncapped | 10% | 9.66% | 2 | 7.80 ms | 1.73 s | 1.11 s | 31.00 ms | 9.08 ms | 2.24 ms |
@@ -1393,6 +1393,68 @@ larger box, or a change to what §7.2 requires at whole-map zoom.
 **Finding D (measured, not yet explained): the server's anonymous memory rose from 6.7 GB at open
 to 15.7 GB after the six principals' battery sessions**, 10.1 GB of it anonymous mappings and
 5.5 GB heap.
+
+### Fourth serve, 2026-09-14: the allocator returned
+
+Same bundle as the third build, server binary main `219526e8`, format 11, unchanged and verified.
+The merge between the third and fourth serves adds to the serve path: `malloc_trim(0)` on a
+cadence, run on a blocking thread after a response once `RssAnon` has grown 256 MiB since the last
+trim; `mallopt(M_ARENA_MAX)` at startup, sized from the thread count; the session registry's expiry
+sweep pruning the engine's per-session state in one batched pass; the occupancy memo bounded
+(`serve.occupancy_cache_bytes`, default 32 MiB); and `/control/status` reporting every per-session
+cache plus a `heap` block (`RssAnon`, `RssFile`, the last trim's cost and bytes returned). Same
+deployment as the third serve: `systemd-run -p MemoryMax=24G -p MemorySwapMax=0`, token lifetime
+43,200 s, the same battery parameters (`--view geo --zooms 0,6,12 --deciles 9 --candidates 40
+--samples 10 --cold-samples 3 --text-samples 0`), the box otherwise idle.
+
+#### Finding D, resolved
+
+The third serve's 9 GB of anonymous growth was glibc's free pool: 14.15 GiB of freed memory held in
+373 arenas plus a 5.28 GiB main arena, because nothing on the serve path called `malloc_trim`; the
+server's own cache accounting held 127 MB (measured on the live third-serve server, from
+`/proc/<pid>/smaps` and `/control/status`). That retention evicted the bundle's page cache:
+`memory.events max` 19,915,452, `workingset_refault_file` 1.2×10⁹, 8 TB read in 104 minutes. The
+probe record is
+[`../probes/2026-09-14-serve-allocator-retention/`](../probes/2026-09-14-serve-allocator-retention/README.md).
+
+#### Served, under a 24 GiB cap
+
+Open to `/readyz` in **202 s** (third serve 197 s), `RssAnon` **6.7 GB** after open, peak
+**10.7 GB** (third serve 16.0 GB), **8.7 GB** at the end of the battery with 11.3 GB of file pages
+resident. During the 100% principal the server held 8.8 GB anonymous beside 17.5 GB of file pages
+(third serve: 15.7 GB beside 8.7 GB). `memory.events max` **13,182,991** (third serve 19,915,452),
+`workingset_refault_file` **1.13×10⁹** (third serve 1.2×10⁹; the harness evicts pages deliberately
+for its cold samples, so most refaults are the harness's, not the allocator's). The last trim
+returned 696 MB in 0.44 s. The battery ran to completion in **4,763 s** (third serve 5,264 s),
+`oom_kill` 0.
+
+p50 ms, hot zoom 0, decile-9 cell *a*, third serve → fourth serve:
+
+| principal | hot zoom 0 | first viewport | cold zoom 0 | pages-cold, engine-warm zoom 0 |
+|---|---|---|---|---|
+| 1% | 56 → 55 | 8.76 → 6.41 s | 9,039 → 7,872 | — |
+| 5% | 219 → 225 | 11.86 → 13.01 s | — | — |
+| 10% | 475 → 447 | 18.16 → 17.70 s | 20,136 → 18,142 | — |
+| 25% | 1,043 → 1,189 | 32.38 → 28.94 s | — | — |
+| 50% | 13,170 → 2,174 | 47.61 → 44.32 s | 51,229 → 42,162 | 12,149 → 11,838 |
+| 100% | 16,930 → 14,561 | 41.36 → 38.18 s | 37,239 → 35,593 | 17,180 → 15,167 |
+
+Hot zoom 6 and zoom 12 are unchanged, 2 to 65 ms at every principal. The full ladder is in
+[`../test_corpora/gbif/measurements.json`](../test_corpora/gbif/measurements.json).
+
+**The sparse principals are unchanged (measured): their cost is the per-row identity scan of the
+sparse decode tier, which reads only the visible rows and was never page-bound at these
+densities.** The 50% principal fell from 13.2 s to 2.2 s: a country grant is contiguous in Morton
+space, so its mask decodes as runs and takes the per-cell route, whose pages are half the identity
+column, 14 GB, which fits in the 17.5 GB of file pages the cap now leaves. The 100% principal moved
+from 16.9 s to 14.6 s only: its per-cell route touches every page of the 28 GB identity column,
+which does not fit in 17.5 GB, so the request stays disk-bound. This is the mechanism
+[`evidence/memos/2026-09-14-whole-map-selection-under-a-cap.md`](evidence/memos/2026-09-14-whole-map-selection-under-a-cap.md)
+§1 states; that memo's §4 is a proposal, not accepted and not built, for removing the dependence on
+the column's residency, and its §6 is the experiment to run first.
+
+The battery's `k = 30` understates a client's request, which carries a 1 to 2 million point budget
+(owner, 2026-09-14): the figures above bound the search cost at `k = 30`, not the render.
 
 ## 5. The machinery this campaign built
 

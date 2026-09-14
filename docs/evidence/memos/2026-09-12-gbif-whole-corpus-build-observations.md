@@ -349,3 +349,25 @@ W1 of the layers investigation (item 6, above: reading the member key column as 
 dictionary) measured a 31% row-loop gain in the investigation and a 4% loss in the
 implementation, on the same prefix (both measured, `gbif-64p`, 2026-09-14). Held as a patch for an
 A/B at rung 6, not built here.
+
+## Fourth serve (2026-09-14)
+
+**Finding D, resolved.** The 9 GB rise was glibc's free pool: 14.15 GiB of freed memory held in
+373 arenas plus a 5.28 GiB main arena, because nothing on the serve path called `malloc_trim`; the
+server's own cache accounting held 127 MB. A merge adds `malloc_trim(0)` on a cadence, an
+`M_ARENA_MAX` cap sized from the thread count, and the figures on `/control/status` that this
+diagnosis needed. Served a fourth time on the same bundle: peak anonymous memory fell to 10.7 GB,
+against 16.0 GB under the third serve.
+
+The dense-principal result changes with it. Under the third serve both the 50% and 100% principals
+were disk-bound on the 28 GB identity column and hot zoom 0 was 10 to 17 s at both. Under the
+fourth serve the 50% principal, whose grant is contiguous in Morton space and so decodes as runs
+onto the per-cell route, falls to 2.2 s: its half of the identity column, 14 GB, now fits in the
+page cache the freed memory no longer holds. The 100% principal touches the whole 28 GB column and
+stays disk-bound, 16.9 s → 14.6 s. Full figures are
+[`../../ingest-campaign.md`](../../ingest-campaign.md) §4d.
+
+This is the mechanism, not a fix for it: the identity column's residency under the cap is still the
+constraint the 100% principal hits. A proposal for removing that dependence, and the experiment to
+run before any design is written, is
+[`2026-09-14-whole-map-selection-under-a-cap.md`](2026-09-14-whole-map-selection-under-a-cap.md).
