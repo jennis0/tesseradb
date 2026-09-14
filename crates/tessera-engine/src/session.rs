@@ -1807,7 +1807,13 @@ impl Engine {
         let fold_paused = Arc::new(AtomicBool::new(false));
         let fold_publication_paused = Arc::new(AtomicBool::new(false));
         let merge_publication_paused = Arc::new(AtomicBool::new(false));
-        let occupancy = Arc::new(crate::single_flight::SingleFlightCache::new(u64::MAX));
+        // **Bounded from construction**, unlike the caches `tessera_server::prepare` bounds after
+        // `open`: the memo's entries are 512 B and its live set is one ladder per (session, view),
+        // so there is no figure a deployment would set. What the bound answers is the superseded
+        // part — see `occupancy::DEFAULT_OCCUPANCY_CACHE_BYTES`.
+        let occupancy = Arc::new(crate::single_flight::SingleFlightCache::new(
+            crate::occupancy::DEFAULT_OCCUPANCY_CACHE_BYTES,
+        ));
         let occupancy_walks = Arc::new(AtomicU64::new(0));
         let stage = crate::stage::StageDeps {
             walks: Arc::clone(&occupancy_walks),
@@ -2568,6 +2574,23 @@ impl Engine {
     /// The region cache's gauges, beside the row-projection cache's.
     pub fn region_cache_stats(&self) -> crate::single_flight::CacheStats {
         self.region_cache.stats()
+    }
+
+    /// The occupancy memo's gauges — one entry per `(session, view, depth, generation)` rung of
+    /// θ's `N_occ` ladder. Operator plane only; a count of structures, naming no principal.
+    ///
+    /// `evictions` rising is the memo doing what its bound is for: the entries it removes are
+    /// rungs taken against a superseded generation, which no request can ask for again.
+    pub fn occupancy_cache_stats(&self) -> crate::single_flight::CacheStats {
+        self.occupancy.stats()
+    }
+
+    /// Bound the occupancy memo. An embedder that never calls this gets
+    /// [`crate::occupancy::DEFAULT_OCCUPANCY_CACHE_BYTES`], which is where the figure is argued.
+    /// A setter rather than an `EngineConfig` field, for [`Self::set_masked_count_cache_bytes`]'s
+    /// reason.
+    pub fn set_occupancy_cache_bytes(&self, bytes: u64) {
+        self.occupancy.set_bound_bytes(bytes);
     }
 
     /// How long a request parks on another request's in-flight row-projection build before it is
