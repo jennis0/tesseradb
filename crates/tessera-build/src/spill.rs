@@ -29,7 +29,7 @@
 // unused. Remove this allow when `pipeline.rs` takes the module up.
 
 use std::fs::{self, File, OpenOptions};
-use std::io::{BufReader, BufWriter, Read, Write};
+use std::io::{BufRead, BufReader, BufWriter, Read, Write};
 use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
 
@@ -1034,17 +1034,67 @@ impl BandReader {
     }
 }
 
-/// One byte from `reader`, or `None` at EOF. Retries `Interrupted` (a bare `read` may see it).
-fn next_byte(reader: &mut impl Read) -> std::io::Result<Option<u8>> {
-    let mut byte = [0u8; 1];
+/// One byte from `reader`, or `None` at EOF. Retries `Interrupted` (a refill may see it).
+///
+/// **Out of the buffer the reader already holds.** `read` of a single byte is a call and a copy
+/// per byte through `BufReader`'s own bookkeeping; `fill_buf` hands over what is buffered and
+/// `consume` takes one byte of it.
+fn next_byte(reader: &mut BufReader<File>) -> std::io::Result<Option<u8>> {
     loop {
-        match reader.read(&mut byte) {
-            Ok(0) => return Ok(None),
-            Ok(_) => return Ok(Some(byte[0])),
+        let byte = match reader.fill_buf() {
+            Ok([]) => return Ok(None),
+            Ok(buffered) => buffered[0],
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
             Err(e) => return Err(e),
-        }
+        };
+        reader.consume(1);
+        return Ok(Some(byte));
     }
+}
+
+/// Decode one LEB128 `u32` from the head of `buffered`, with how many bytes it took.
+///
+/// `None` where the varint is not whole inside the slice, and where it is whole and malformed:
+/// both send the caller to the byte-at-a-time path, which refills across the boundary and names
+/// the malformation.
+fn varint32_at(buffered: &[u8]) -> Option<(u32, usize)> {
+    let mut value = 0u32;
+    let mut shift = 0u32;
+    for (at, &byte) in buffered.iter().enumerate() {
+        if shift == 28 {
+            // Fifth byte: four payload bits remain in a u32, and there is no sixth.
+            if byte & 0xF0 != 0 {
+                return None;
+            }
+            return Some((value | ((byte as u32) << 28), at + 1));
+        }
+        value |= ((byte & 0x7F) as u32) << shift;
+        if byte & 0x80 == 0 {
+            return Some((value, at + 1));
+        }
+        shift += 7;
+    }
+    None
+}
+
+/// [`varint32_at`] at the `u64` width.
+fn varint64_at(buffered: &[u8]) -> Option<(u64, usize)> {
+    let mut value = 0u64;
+    let mut shift = 0u32;
+    for (at, &byte) in buffered.iter().enumerate() {
+        if shift == 63 {
+            if byte & 0xFE != 0 {
+                return None;
+            }
+            return Some((value | ((byte as u64) << 63), at + 1));
+        }
+        value |= ((byte & 0x7F) as u64) << shift;
+        if byte & 0x80 == 0 {
+            return Some((value, at + 1));
+        }
+        shift += 7;
+    }
+    None
 }
 
 // --------------------------------------------------------------------------------------------
@@ -1719,14 +1769,11 @@ impl MemberRunReader {
         while self.pending > 0 {
             self.next_source()?;
         }
-        let first = match next_byte(&mut self.reader).map_err(|e| BuildError::io(&self.path, e))? {
-            None => {
-                self.verify_end()?;
-                return Ok(false);
-            }
-            Some(byte) => byte,
-        };
-        let gap = self.decode_varint(first)?;
+        if self.at_end()? {
+            self.verify_end()?;
+            return Ok(false);
+        }
+        let gap = self.next_u32()?;
         self.index = if self.started {
             self.index
                 .checked_add(gap)
@@ -1735,10 +1782,7 @@ impl MemberRunReader {
         } else {
             gap
         };
-        let count = {
-            let byte = self.require_byte()?;
-            self.decode_varint(byte)?
-        };
+        let count = self.next_u32()?;
         if count == 0 {
             return Err(self.malformed("an artifact with no sources"));
         }
@@ -1770,9 +1814,58 @@ impl MemberRunReader {
         Ok(())
     }
 
+    /// Whether the stream is at end of file — a record boundary, which is the only place it may
+    /// legitimately be.
+    fn at_end(&mut self) -> Result<bool> {
+        let MemberRunReader { reader, path, .. } = self;
+        loop {
+            match reader.fill_buf() {
+                Ok(buffered) => return Ok(buffered.is_empty()),
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(e) => return Err(BuildError::io(path, e)),
+            }
+        }
+    }
+
+    /// One LEB128 `u32` **out of the buffer the reader already holds**, falling back to the
+    /// byte-at-a-time path where the varint straddles the buffer's end or is malformed.
+    ///
+    /// **Why the two paths.** A member run is one varint a pair, so a corpus of 10¹⁰ pairs is
+    /// 10¹⁰ of them and a byte at a time is a call and a copy through `BufReader`'s bookkeeping
+    /// per byte. `fill_buf` hands over the bytes already read and `consume` takes what the varint
+    /// used; only a varint crossing the buffer's end takes the other path, which is at most one
+    /// per [`SPILL_BUF_BYTES`].
+    fn next_u32(&mut self) -> Result<u32> {
+        let taken = {
+            let MemberRunReader { reader, path, .. } = self;
+            let buffered = reader.fill_buf().map_err(|e| BuildError::io(path, e))?;
+            varint32_at(buffered)
+        };
+        if let Some((value, len)) = taken {
+            self.reader.consume(len);
+            return Ok(value);
+        }
+        let first = self.require_byte()?;
+        self.decode_varint(first)
+    }
+
+    /// [`Self::next_u32`] at the `u64` width — the source deltas, which is every pair.
+    fn next_u64(&mut self) -> Result<u64> {
+        let taken = {
+            let MemberRunReader { reader, path, .. } = self;
+            let buffered = reader.fill_buf().map_err(|e| BuildError::io(path, e))?;
+            varint64_at(buffered)
+        };
+        if let Some((value, len)) = taken {
+            self.reader.consume(len);
+            return Ok(value);
+        }
+        let first = self.require_byte()?;
+        self.decode_varint64(first)
+    }
+
     fn next_source(&mut self) -> Result<u64> {
-        let byte = self.require_byte()?;
-        let delta = self.decode_varint64(byte)?;
+        let delta = self.next_u64()?;
         let source = if self.taken == 0 {
             delta
         } else {
