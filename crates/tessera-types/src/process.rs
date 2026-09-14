@@ -1,6 +1,8 @@
 //! The process's own memory: what the C allocator holds, and what the kernel says is resident.
 //!
-//! Three calls, shared by the build and the serve path (decision 0139). The build trims at every
+//! Three calls, shared by the build and the serve path, which are one database
+//! ([decision 0091](../../../docs/decisions/0091-build-is-ingest-into-an-empty-database.md)) and
+//! therefore one implementation of anything they both do. The build trims at every
 //! stage boundary; the server caps the arena count at startup and trims on a growth cadence. Both
 //! want the same three primitives, and a second copy of [`resident_bytes`]' parser would be a
 //! second answer to "how much of this process is anonymous memory".
@@ -77,6 +79,12 @@ pub fn set_arena_max(arenas: usize) -> bool {
 /// heap, and only the pair says which happened.
 ///
 /// Zeros where the file cannot be read or a field is absent.
+///
+/// **`VmHWM` is not here**, so the two peak-RSS readers in `tessera-bench` and the build's
+/// `observer::peak_rss_kib` still parse the file themselves. Adding it would let those consolidate
+/// onto this type; they are left alone because a high-water mark is a different question from a
+/// current reading — it is reset by `clear_refs` and is meaningless to a cadence — and folding it
+/// in would put a field on this struct that every caller here ignores.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Resident {
     /// `VmRSS` — every resident page, anonymous and file-backed together.

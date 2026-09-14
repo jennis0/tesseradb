@@ -5990,8 +5990,14 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::V
         // anonymous memory is climbing is either holding caches or holding allocator slack, and
         // until every bounded cache is published an operator cannot tell which.
         //
-        // `bytes` against `bound_bytes` is the residency; the hit and miss pair is whether the
-        // bytes are earning anything. The masked-count cache is the large one — ~4 B per artifact,
+        // `bytes` is the residency and the hit and miss pair is whether those bytes are earning
+        // anything. Three of these blocks carry the bound beside it — `region_cache` and
+        // `occupancy` from the single-flight cache's own gauges, and `row_projection_cache` and
+        // `fragment_cache` above — while `masked_count_cache`, `derived_cache` and `suggest_sets`
+        // publish `bytes` alone, because their types report residency without the bound. An alarm
+        // on those three needs the configured figure from the deployment file.
+        //
+        // The masked-count cache is the large one — ~4 B per artifact,
         // 40 MB at 10⁷ — and the occupancy memo is the small one whose key space is the largest:
         // a rung per (session, view, depth) per publication, which is why its evictions are the
         // expected reading rather than an alarm.

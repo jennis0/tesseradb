@@ -4,7 +4,9 @@
 //! # What this is for
 //!
 //! A serving node's caches are bounded and accounted. The memory the allocator keeps after those
-//! caches have released is neither. A rung 6 node (196 GiB bundle, `MemoryMax=24G`) reached
+//! caches have released is neither. Every figure below, the observation and the battery alike, is
+//! in `probes/2026-09-14-serve-allocator-retention`, with the commands and what was not measured.
+//! A rung 6 node (196 GiB bundle, `MemoryMax=24G`) reached
 //! 14.96 GiB of `RssAnon` after a six-principal battery, of which 14.15 GiB was inside glibc —
 //! 373 non-main arena heaps holding 8.87 GiB resident of 23.31 GiB of address space, plus a
 //! 5.28 GiB main arena — while the server's own cache accounting totalled 127 MB. The growth was a
@@ -34,6 +36,13 @@
 //! thread, never on the reactor and never on a compute worker, because `malloc_trim` walks every
 //! arena's free lists and takes each arena's lock as it goes.
 //!
+//! **What keying on growth does not answer.** Free chunks the allocator accumulates *below* the
+//! baseline — a process that frees and re-allocates at a flat `RssAnon` — are never returned,
+//! because nothing here ever asks. The mechanism is sized against what rung 6 showed, which was
+//! growth: a ratchet that climbed with each new principal and then stopped. A workload that
+//! fragments its arenas without growing would need a different trigger, and no measurement on this
+//! system has produced one.
+//!
 //! # The arena cap
 //!
 //! glibc creates an arena per contending thread up to `8 × cores` — 96 on a 12-core box — and
@@ -58,7 +67,8 @@ use crate::state::AppState;
 /// The figure sets the amortised cost: one `malloc_trim` per this much net anonymous growth.
 ///
 /// **What a trim costs, measured** on a warmed 64p node (25,846,007 rows, six principals, three
-/// batteries in one process, 2026-09-14): the two trims this threshold produced took 7.4 ms
+/// batteries in one process, 2026-09-14, `probes/2026-09-14-serve-allocator-retention`): the two
+/// trims this threshold produced took 7.4 ms
 /// returning 67.7 MB and 11.1 ms returning 100.1 MB. The cost tracks what is returned rather than
 /// how often the walk runs — the same battery at a 16 MiB threshold took 102 trims of about 2.1 ms
 /// each, returning 7.6 to 18.4 MB apiece. So a smaller threshold does not cost more in total; it
@@ -257,6 +267,12 @@ pub async fn trim_after_response(
 /// repeats of one binary — three batteries in one capped process gave 14.53, 14.69 and 15.46 ms at
 /// the first zoom 12 cell — so at this concurrency the cap costs nothing measurable and takes 1.9
 /// GiB off the address space. It is not a claim about a box with far more cores than this one.
+///
+/// **The measurement did not saturate the allocating threads**, which is where a shared arena's
+/// lock would show. The battery drives one request at a time; the threads that can allocate at
+/// once are the blocking pool's `4 × compute_threads`, `ingest_admission`'s share and the compute
+/// pool's own 32, and none of that was in flight together. What the table bounds is the cap's cost
+/// on a node serving sequentially. `probes/2026-09-14-serve-allocator-retention` records the gap.
 ///
 /// The floor of 4 is for a single-core box, where `8 × cores` would still be 8: a cap that made an
 /// unusual deployment allocate through one arena would be a contention change nobody measured.

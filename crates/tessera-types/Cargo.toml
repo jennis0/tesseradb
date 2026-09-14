@@ -7,8 +7,10 @@ edition = "2021"
 serde = { workspace = true, optional = true }
 
 # `src/process.rs`' two allocator calls, and nothing else in this crate. Declared per-target rather
-# than plainly so a musl or macOS build of the workspace does not acquire the edge at all: the
-# module compiles to no-ops there.
+# than plainly so that off glibc *this* crate takes no edge at all and its module compiles to
+# no-ops. It says nothing about the workspace: tessera-build and tessera-engine depend on libc
+# unconditionally for `posix_fallocate`, `madvise`, `flock` and `statvfs`, so a musl or macOS build
+# still links it.
 [target.'cfg(all(target_os = "linux", target_env = "gnu"))'.dependencies]
 libc = "0.2"
 
