@@ -37,6 +37,10 @@
 //!     --bundle <bundle> --bands <builder out> --principal p100=US,AU,... --out results.json
 //! ```
 
+// `serde_json::json!` expands one nesting level per key, and the band arm's outcome has more keys
+// than the default 128 allows.
+#![recursion_limit = "256"]
+
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::fs::File;
@@ -47,6 +51,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use clap::Parser;
+use croaring::Bitmap;
 use memmap2::Mmap;
 use serde_json::{json, Value};
 
@@ -166,6 +171,7 @@ struct Counters {
     started: Instant,
     cpu_s: f64,
     cpu_ticks: u64,
+    minflt: u64,
     majflt: u64,
     read_bytes: u64,
 }
@@ -197,13 +203,14 @@ fn clock_ticks() -> f64 {
     }
 }
 
-fn proc_stat() -> (u64, u64) {
+/// `(minflt, majflt, utime + stime)` from `/proc/self/stat`.
+fn proc_stat() -> (u64, u64, u64) {
     let Ok(text) = std::fs::read_to_string("/proc/self/stat") else {
-        return (0, 0);
+        return (0, 0, 0);
     };
     // `comm` may hold spaces and parentheses; everything after the LAST ')' is field 3 onward.
     let Some(tail) = text.rfind(')').map(|i| &text[i + 1..]) else {
-        return (0, 0);
+        return (0, 0, 0);
     };
     let fields: Vec<&str> = tail.split_whitespace().collect();
     let at = |i: usize| {
@@ -212,8 +219,8 @@ fn proc_stat() -> (u64, u64) {
             .and_then(|f| f.parse::<u64>().ok())
             .unwrap_or(0)
     };
-    // Field 12 is `majflt`, 14 `utime`, 15 `stime`; `fields[i]` is field `i + 3`.
-    (at(9), at(11) + at(12))
+    // Field 10 is `minflt`, 12 `majflt`, 14 `utime`, 15 `stime`; `fields[i]` is field `i + 3`.
+    (at(7), at(9), at(11) + at(12))
 }
 
 fn io_read_bytes() -> u64 {
@@ -230,11 +237,12 @@ fn io_read_bytes() -> u64 {
 
 impl Counters {
     fn now() -> Self {
-        let (majflt, cpu_ticks) = proc_stat();
+        let (minflt, majflt, cpu_ticks) = proc_stat();
         Counters {
             started: Instant::now(),
             cpu_s: process_cpu_s(),
             cpu_ticks,
+            minflt,
             majflt,
             read_bytes: io_read_bytes(),
         }
@@ -244,11 +252,12 @@ impl Counters {
     fn since(&self, ticks: f64) -> Value {
         let wall_s = self.started.elapsed().as_secs_f64();
         let cpu_s = process_cpu_s() - self.cpu_s;
-        let (majflt, cpu_ticks) = proc_stat();
+        let (minflt, majflt, cpu_ticks) = proc_stat();
         json!({
             "wall_s": wall_s,
             "cpu_s": cpu_s,
             "cpu_ticks_s": (cpu_ticks.saturating_sub(self.cpu_ticks)) as f64 / ticks,
+            "minflt": minflt.saturating_sub(self.minflt),
             "majflt": majflt.saturating_sub(self.majflt),
             "read_bytes": io_read_bytes().saturating_sub(self.read_bytes),
         })
@@ -500,8 +509,16 @@ struct BandOutcome {
     column_reads: u64,
     list_bytes: u64,
     list_entries_walked: u64,
-    /// Mask runs the list merges stepped through — the decode the shipped run tier also pays.
+    /// Mask runs the walks stepped through — the decode the shipped run tier also pays.
     runs_walked: u64,
+    /// `for_each_visible_run`'s own time and call count, and the caller's share of the same calls.
+    /// See [`WalkTimers`] for why the two are separated.
+    mask_walk_s: f64,
+    mask_walk_inside_s: f64,
+    mask_walk_calls: u64,
+    /// `seek_row`'s binary searches over the lists.
+    seek_s: f64,
+    seeks: u64,
     lz_bytes: u64,
     fp16_bytes: u64,
     /// Served rows whose cell code arrived with the `top-J.bin` entry that offered them, so the
@@ -574,6 +591,11 @@ impl BandOutcome {
             "list_bytes": self.list_bytes,
             "list_entries_walked": self.list_entries_walked,
             "runs_walked": self.runs_walked,
+            "mask_walk_s": self.mask_walk_s,
+            "mask_walk_inside_s": self.mask_walk_inside_s,
+            "mask_walk_calls": self.mask_walk_calls,
+            "seek_s": self.seek_s,
+            "seeks": self.seeks,
             "lz_bytes": self.lz_bytes,
             "fp16_bytes": self.fp16_bytes,
             "codes_from_list": self.codes_from_list,
@@ -644,6 +666,75 @@ fn lap(mark: &mut Instant) -> f64 {
     elapsed
 }
 
+/// One bitmap's croaring shape: the container mix, what each kind holds and what it costs.
+///
+/// What a run step costs is a property of the container the run comes out of, and a session whose
+/// grant is the whole corpus has a differently shaped `base` from one whose grant is a few terms.
+/// This is the only place either is published.
+fn bitmap_shape(bitmap: &Bitmap) -> Value {
+    let s = bitmap.statistics();
+    json!({
+        "cardinality": s.cardinality,
+        "containers": s.n_containers,
+        "array_containers": s.n_array_containers,
+        "run_containers": s.n_run_containers,
+        "bitset_containers": s.n_bitset_containers,
+        "values_in_array": s.n_values_array_containers,
+        "values_in_run": s.n_values_run_containers,
+        "values_in_bitset": s.n_values_bitset_containers,
+        "bytes_array": s.n_bytes_array_containers,
+        "bytes_run": s.n_bytes_run_containers,
+        "bytes_bitset": s.n_bytes_bitset_containers,
+        "min_value": s.min_value,
+        "max_value": s.max_value,
+    })
+}
+
+/// Where a band-route evaluation's time goes inside the mask, separated from the caller's work.
+///
+/// `EffectiveMask::for_each_visible_run` has two routes: with the diffs empty it walks `base` in
+/// place with a croaring cursor, and otherwise it materialises `rows_in_range` for the range
+/// first. Which one a session takes, and what a run step costs on whatever container form its
+/// `base` has, is not observable from the outside — so the walk is timed apart from the entry
+/// reads the caller does inside it.
+#[derive(Default, Clone, Copy)]
+struct WalkTimers {
+    /// The mask's own time: the call, less the time spent inside the caller's closure.
+    mask_walk_s: f64,
+    /// The caller's share of the same calls.
+    inside_s: f64,
+    mask_walk_calls: u64,
+    runs_walked: u64,
+    /// `seek_row`'s binary searches over the lists.
+    seek_s: f64,
+    seeks: u64,
+}
+
+/// `EffectiveMask::for_each_visible_run`, with the mask's own time separated from the caller's.
+///
+/// Two clock reads a call and two a run. At one run a tile that is four reads a tile, which is
+/// what a monotonic clock costs and not what a syscall counter would.
+fn walk_runs(
+    mask: &EffectiveMask,
+    range: Range<u32>,
+    timers: &mut WalkTimers,
+    mut f: impl FnMut(Range<u32>),
+) {
+    let started = Instant::now();
+    let mut inside = 0.0f64;
+    let mut runs = 0u64;
+    mask.for_each_visible_run(range, |run| {
+        runs += 1;
+        let entered = Instant::now();
+        f(run);
+        inside += entered.elapsed().as_secs_f64();
+    });
+    timers.mask_walk_calls += 1;
+    timers.runs_walked += runs;
+    timers.inside_s += inside;
+    timers.mask_walk_s += started.elapsed().as_secs_f64() - inside;
+}
+
 /// The entries of one `top-J.bin` inside `range` that the mask admits, as `(row, id, code)`.
 ///
 /// **A lockstep merge against the mask's runs, not a `contains` an entry.** Both sides are sorted
@@ -662,12 +753,15 @@ fn list_candidates(
     range: &Range<u32>,
     mask: &EffectiveMask,
     entries_read: &mut u64,
-    runs_walked: &mut u64,
+    timers: &mut WalkTimers,
     out: &mut Vec<(u32, u64, Option<u32>)>,
 ) {
     out.clear();
     let n = list.len() / ENTRY;
+    let seek_started = Instant::now();
     let mut cursor = seek_row(list, range.start);
+    timers.seek_s += seek_started.elapsed().as_secs_f64();
+    timers.seeks += 1;
     let mut current = if cursor < n {
         *entries_read += 1;
         Some(entry_at(list, cursor))
@@ -677,8 +771,7 @@ fn list_candidates(
     if current.is_none_or(|(row, _, _)| row >= range.end) {
         return;
     }
-    mask.for_each_visible_run(range.clone(), |run| {
-        *runs_walked += 1;
+    walk_runs(mask, range.clone(), timers, |run| {
         while let Some((row, id, code)) = current {
             // Past this run: the entry stays for the next one, and the cursor never goes back.
             if row >= run.end {
@@ -729,6 +822,9 @@ fn band_route(
     let mut groups: Vec<TileGroup> = Vec::new();
     let mut candidates: Vec<(u32, u64, Option<u32>)> = Vec::new();
     let mut wider: Vec<(u32, u64, Option<u32>)> = Vec::new();
+    // A local rather than a field of `out`, so a closure may borrow `out` and the walk may borrow
+    // this at the same time. Folded in below.
+    let mut timers = WalkTimers::default();
 
     // ---- Phase 1: the search, steps 1 to 4.
     let search_started = Instant::now();
@@ -776,7 +872,7 @@ fn band_route(
                 range,
                 inputs.mask,
                 &mut out.list_entries_walked,
-                &mut out.runs_walked,
+                &mut timers,
                 &mut candidates,
             );
             out.list_bytes += (out.list_entries_walked - before) * ENTRY as u64;
@@ -787,7 +883,7 @@ fn band_route(
             // Step 2b: no list is narrow enough, so the `lz` column decides membership and the
             // identity column answers each member. This is the sparse-principal route, and it is
             // the only reader of `lz.u8`.
-            inputs.mask.for_each_visible_run(range.clone(), |run| {
+            walk_runs(inputs.mask, range.clone(), &mut timers, |run| {
                 for row in run {
                     out.lz_bytes += 1;
                     if inputs.bands.lz(row) >= j {
@@ -806,7 +902,7 @@ fn band_route(
         let served_source: Vec<(u64, u32, Option<u32>)>;
         if from_scan {
             let mut smallest = Smallest::new(inputs.params.cap);
-            inputs.mask.for_each_visible_run(range.clone(), |run| {
+            walk_runs(inputs.mask, range.clone(), &mut timers, |run| {
                 for row in run {
                     let id = ids[row as usize];
                     out.column_reads += 1;
@@ -921,7 +1017,7 @@ fn band_route(
                             range,
                             inputs.mask,
                             &mut out.list_entries_walked,
-                            &mut out.runs_walked,
+                            &mut timers,
                             &mut wider,
                         );
                         let bytes = (out.list_entries_walked - before) * ENTRY as u64;
@@ -949,7 +1045,7 @@ fn band_route(
                         // identities directly is a page or two.
                         out.floor_settled_by_column += 1;
                         let mut smallest = Smallest::new(inputs.params.cap);
-                        inputs.mask.for_each_visible_run(range.clone(), |run| {
+                        walk_runs(inputs.mask, range.clone(), &mut timers, |run| {
                             for row in run {
                                 out.column_reads += 1;
                                 out.floor_column_rows_read += 1;
@@ -986,6 +1082,12 @@ fn band_route(
     out.search_wall_s = search_started.elapsed().as_secs_f64();
     out.search_cpu_s = process_cpu_s() - search_cpu;
     out.served_total = served.len() as u64;
+    out.mask_walk_s = timers.mask_walk_s;
+    out.mask_walk_inside_s = timers.inside_s;
+    out.mask_walk_calls = timers.mask_walk_calls;
+    out.runs_walked = timers.runs_walked;
+    out.seek_s = timers.seek_s;
+    out.seeks = timers.seeks;
 
     // ---- Phase 2: step 5, each served row's position at cell resolution.
     //
@@ -1246,6 +1348,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         d_star: u8,
         projection: Value,
         ladder_cost: Value,
+        mask_shape: Value,
     }
     let mut principals: Vec<Principal> = Vec::new();
     let mut generation = None;
@@ -1285,6 +1388,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .min_by_key(|&d| (THETA_TARGET * ladder[d as usize]).abs_diff(args.budget))
             .expect("the depth range is not empty");
         let visible_total = mask.visible_total();
+        // What composition produced for this session, and which route its run walk takes.
+        let (base, minus, plus, filtered) = mask.parts();
+        let mask_shape = json!({
+            "diffs_are_empty": mask.diffs_are_empty(),
+            "filtered": filtered,
+            "base": bitmap_shape(base),
+            "minus": bitmap_shape(minus),
+            "plus": bitmap_shape(plus),
+        });
         principals.push(Principal {
             name: name.to_string(),
             terms,
@@ -1295,6 +1407,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             d_star,
             projection,
             ladder_cost,
+            mask_shape,
         });
     }
     let generation = generation.expect("at least one principal");
@@ -1593,6 +1706,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "occupancy_cost": principal.ladder_cost,
             "d_star": principal.d_star,
             "projection_build": principal.projection,
+            "mask_shape": principal.mask_shape,
             "cases": case_values,
         }));
     }

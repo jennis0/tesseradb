@@ -53,6 +53,17 @@ clock read at each of four points a tile, into `candidates` (steps 1 and 2), `co
 `floor` (step 4); the three sum to a little under the search, the difference being the tile loop
 itself.
 
+- **The mask walk is timed apart from the work done inside it.** `for_each_visible_run` has two
+  routes — with the diffs empty it walks `base` in place with a croaring cursor, otherwise it
+  materialises `rows_in_range` for the range first — and either way it builds a fresh cursor and
+  seeks to the range per call. `mask_walk_s` is the call time less the time spent inside the
+  caller's closure, `mask_walk_inside_s` is that closure's share, `mask_walk_calls` and
+  `runs_walked` are the denominators, and `seek_s` / `seeks` are the lists' own binary searches.
+  Every run walk the band arm makes goes through this, not only the lists'.
+- **The composed mask's shape is recorded per principal**: `diffs_are_empty`, whether a filter is
+  set, and the croaring container mix, values and bytes of `base`, `minus` and `plus`. What a run
+  step costs is a property of the container it comes out of, and a session granted the whole
+  corpus has a differently shaped `base` from one granted a few terms.
 - **Membership is a lockstep merge, not a `contains` an entry.** A `top-J.bin` is sorted by row
   and `EffectiveMask::for_each_visible_run` yields the visible rows of a range as ascending runs,
   so one forward cursor settles every entry at the cost of a comparison. Asking the bitmap instead
@@ -114,7 +125,9 @@ cell-resolution render's position error, and the size models above.
   and would also reclaim the probe's own heap, so it is not used.
 - **R runs on the engine's pool and B is one thread.** Wall is not comparable between them; CPU is
   (`CLOCK_PROCESS_CPUTIME_ID`, every thread summed — `/proc/self/stat`'s tick figure is beside it
-  in the JSON and is 10 ms-resolution on this kernel). R also gathers the response and answers the
+  in the JSON and is 10 ms-resolution on this kernel). `minflt` and `majflt` are both recorded: a
+  cold arm's first touch of a mapped page it has already faulted once is a minor fault, so the two
+  separate a page the kernel had to fetch from one it merely had to map. R also gathers the response and answers the
   layers; B answers selection alone. B is an upper bound on what the structure costs rather than a
   lower one: it is the route written out, not a tuned version of it.
 - **`read_bytes` and `majflt` are the whole process's.** Nothing separates the engine's pool
@@ -240,6 +253,15 @@ case's whole column traffic, since the list route supplies every other identity.
 lists for 23,483 tiles: one each, because at `j = 5` only `J = 4` is eligible and the entry point
 has nothing to choose between. The alternative that was measured first, widening through `lz.u8`,
 cost 1.5 MB of that column at the same case and still left the identities to read.
+
+**Every principal's mask takes the fast decode route, and its `base` is nearly all run
+containers.** `diffs_are_empty` is true for all six, `minus` and `plus` are empty and no filter is
+set, so no run walk materialises anything. The whole-grant session's `base` is 395 run containers
+holding 25,846,007 values in 2,370 bytes — the cheapest shape there is, not a pathological one —
+against 50 containers for the 1% principal. The mask's own cost per `for_each_visible_run` call,
+with the caller's work removed, runs from 0.166 µs at 36 containers (`p5`) to 0.781 µs at 395
+(`p100`), and at `p100` every call yields exactly one run, so that figure is cursor construction
+and the seek rather than run iteration.
 
 **The merge does not show its value here.** The masks on this corpus are country-shaped and hold
 under one run a tile at every depth measured (28,266 runs over 36,833 tiles at `p100`'s

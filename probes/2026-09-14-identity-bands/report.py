@@ -134,6 +134,49 @@ def main(path):
             [["N_occ"] + [f"{n:,}" for n in p["occupancy_ladder"]]],
         )
 
+        shape = p["mask_shape"]
+        print(
+            f"Composed mask: `diffs_are_empty` **{shape['diffs_are_empty']}**, filter "
+            f"{'set' if shape['filtered'] else 'absent'}. "
+            "A false `diffs_are_empty` puts every run walk through `rows_in_range`, which "
+            "materialises the range before yielding it."
+        )
+        print()
+        table(
+            [
+                "bitmap",
+                "cardinality",
+                "containers",
+                "array",
+                "run",
+                "bitset",
+                "values in array",
+                "values in run",
+                "values in bitset",
+                "bytes array",
+                "bytes run",
+                "bytes bitset",
+            ],
+            [
+                [
+                    f"`{name}`",
+                    f"{b['cardinality']:,}",
+                    f"{b['containers']:,}",
+                    f"{b['array_containers']:,}",
+                    f"{b['run_containers']:,}",
+                    f"{b['bitset_containers']:,}",
+                    f"{b['values_in_array']:,}",
+                    f"{b['values_in_run']:,}",
+                    f"{b['values_in_bitset']:,}",
+                    f"{b['bytes_array']:,}",
+                    f"{b['bytes_run']:,}",
+                    f"{b['bytes_bitset']:,}",
+                ]
+                for name in ("base", "minus", "plus")
+                for b in [shape[name]]
+            ],
+        )
+
         cases = [c for c in p["cases"] if "refused" not in c]
         for c in p["cases"]:
             if "refused" in c:
@@ -156,6 +199,7 @@ def main(path):
                         cond,
                         ms(r["wall_s"]) if r else "—",
                         ms(r["cpu_s"]) if r else "—",
+                        r["minflt"] if r else "—",
                         r["majflt"] if r else "—",
                         mb(r["read_bytes"]) if r else "—",
                         ms(b["wall_s"]) if b else "—",
@@ -166,6 +210,7 @@ def main(path):
                         ms(b["floor_s"]) if b else "—",
                         ms(b["position_wall_s"]) if b else "—",
                         ms(b["position_cpu_s"]) if b else "—",
+                        b["minflt"] if b else "—",
                         b["majflt"] if b else "—",
                         mb(b["read_bytes"]) if b else "—",
                     ]
@@ -177,6 +222,7 @@ def main(path):
                 "cond",
                 "R wall ms",
                 "R cpu ms",
+                "R minflt",
                 "R majflt",
                 "R read MB",
                 "B wall ms",
@@ -187,6 +233,7 @@ def main(path):
                 "B floor ms",
                 "B posn ms",
                 "B posn cpu",
+                "B minflt",
                 "B majflt",
                 "B read MB",
             ],
@@ -222,6 +269,10 @@ def main(path):
                     mb(b["list_bytes"]),
                     mb(b["lz_bytes"]),
                     f"{b['runs_walked']:,}",
+                    ms(b["mask_walk_s"]),
+                    f"{b['mask_walk_calls']:,}",
+                    ms(b["seek_s"]),
+                    f"{b['seeks']:,}",
                     f"{b['codes_from_list']:,}",
                     f"{b['codes_from_cut_index']:,}",
                     f"{b['floor_widened_tiles']:,}",
@@ -248,6 +299,10 @@ def main(path):
                 "list MB",
                 "lz MB",
                 "runs walked",
+                "mask walk ms",
+                "mask calls",
+                "seek ms",
+                "seeks",
                 "codes from list",
                 "codes from cut index",
                 "floor widened",
