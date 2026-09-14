@@ -1,6 +1,13 @@
 mod identity;
 pub use identity::{IdentityError, IdentityKey, TesseraId, IDENTITY_CONSTRUCTION, IDENTITY_ROUNDS};
 
+/// The process's own memory — the allocator's retention and the kernel's resident figures.
+///
+/// Here because the build and the serve path both need it and this is the lowest crate both can
+/// see (decision 0139). It carries no feature gate: the calls are platform-gated inside the
+/// module, and a crate that never asks about its own memory never names it.
+pub mod process;
+
 /// The annotation layer declaration, shared by the WAL record that makes a registration durable,
 /// the manifest section that carries it, and the gate-filtered `/v1/meta` view.
 ///
