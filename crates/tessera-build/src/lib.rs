@@ -43,20 +43,14 @@ pub mod unique_key;
 /// tied to the source it came from. `build.rs` stamps it.
 pub const BUILD_COMMIT: &str = env!("TESSERA_BUILD_COMMIT");
 
-/// Return the allocator's free pages to the kernel.
-///
-/// glibc's main arena releases memory only from the top of the heap, so a stage that allocates a
-/// level of Roaring bitmaps and frees them leaves those pages resident behind whatever was
-/// allocated above them: 34 GB held for the rest of the run, and a page cache of 3 GB for the
-/// stages that depend on one
-/// (`docs/evidence/memos/2026-09-12-gbif-whole-corpus-build-observations.md` §5). A trim walks
-/// every arena's free lists and gives back what is whole pages.
+/// Return the allocator's free pages to the kernel — [`tessera_types::process::trim_heap`], which
+/// carries the argument and the platform gate.
 ///
 /// Called at each stage boundary ([`observer::StageTimer::end`]) and after the layer publication
-/// rehouses its memberships.
+/// rehouses its memberships. The build holds 34 GB without it
+/// (`docs/evidence/memos/2026-09-12-gbif-whole-corpus-build-observations.md` §5).
 pub(crate) fn trim_heap() {
-    // SAFETY: asks the allocator to return free pages to the kernel; no pointer is involved.
-    unsafe { libc::malloc_trim(0) };
+    tessera_types::process::trim_heap();
 }
 
 use rayon::prelude::*;

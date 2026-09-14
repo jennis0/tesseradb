@@ -14,6 +14,7 @@ pub mod error;
 mod filter_dto;
 pub mod health;
 mod ingest_json;
+pub mod memory;
 pub mod session;
 pub mod state;
 pub mod viewer;
@@ -129,6 +130,28 @@ fn validate_cache_bounds(config: &Config) -> Result<(), BoxError> {
             .into());
         }
     }
+    // **The occupancy memo is weighed against its own per-entry figure, not the projection's.** A
+    // rung is 512 B where a projection is 125 MB, so putting this key in the loop above would
+    // demand gigabytes for a structure whose live set is kilobytes. The relation is the same shape
+    // — the bound must admit the concurrency the deployment declared — and the figure is
+    // `tessera_engine::occupancy`'s, which owns the arithmetic.
+    let occupancy_live = (config.expected_concurrent_sessions as u64)
+        .saturating_mul(tessera_engine::occupancy::OCCUPANCY_LIVE_BYTES_PER_SESSION);
+    if config.occupancy_cache_bytes < occupancy_live {
+        return Err(format!(
+            "serve.occupancy_cache_bytes = {} B does not admit the live ladders of \
+             serve.expected_concurrent_sessions = {} sessions ({occupancy_live} B at {} B per \
+             session over one view). Refusing to start: a memo below its live set evicts rungs \
+             requests are about to read, so every session pays the mask-and-Morton walk again at \
+             each depth it visits. Raise serve.occupancy_cache_bytes — the default admits about \
+             480 publications of headroom above the live set, and it is a CEILING, not an \
+             allocation.",
+            config.occupancy_cache_bytes,
+            config.expected_concurrent_sessions,
+            tessera_engine::occupancy::OCCUPANCY_LIVE_BYTES_PER_SESSION,
+        )
+        .into());
+    }
     Ok(())
 }
 
@@ -174,6 +197,10 @@ fn validate_merge_size_relation(config: &Config, engine: &Engine) -> Result<(), 
 pub fn prepare(config_path: &Path) -> Result<Prepared, BoxError> {
     let config = config::load(config_path)?;
     validate_cache_bounds(&config)?;
+    // **Before the engine opens**, which is before the compute pool, the reactor and the write
+    // executor exist: the cap bounds arena creation and does nothing about arenas already made.
+    // See `memory::arena_max` for the width it takes and what capping costs.
+    memory::cap_arenas(config.compute_threads);
 
     // **The two serving secrets, read before anything is opened.** They are located in
     // `tessera.toml` and read here rather than at parse, because `tessera build` reads the same
@@ -284,6 +311,9 @@ pub fn prepare(config_path: &Path) -> Result<Prepared, BoxError> {
     // gives: it exists for a deployment that has a row-major layer at all, which is a property of
     // the corpus rather than of the box.
     engine.set_masked_count_cache_bytes(config.masked_count_cache_bytes);
+    // The memo's bound, by its own setter for the same reason and validated above against its own
+    // per-entry figure: a rung is 512 B, and the live set is one ladder per session per view.
+    engine.set_occupancy_cache_bytes(config.occupancy_cache_bytes);
     // The region leaf's two knobs (selection-operand §2, §6): the cell budget the descent stops
     // at, and the bound on the decompositions held across principals.
     engine.set_max_region_cells(config.max_region_cells);
@@ -313,6 +343,9 @@ pub fn prepare(config_path: &Path) -> Result<Prepared, BoxError> {
     let state = Arc::new(AppState {
         engine,
         sessions: Mutex::new(SessionRegistry::default()),
+        // Its baseline is the anonymous set as it stands here: the bundle is open and the caches
+        // are empty, so the first trim answers serving growth rather than the open.
+        heap: crate::memory::HeapWatch::default(),
         max_k: config.max_k,
         max_category_values: config.max_category_values,
         max_suggestions: config.max_suggestions,

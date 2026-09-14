@@ -1007,8 +1007,8 @@ fn value_column_jobs(plan: &FoldPlan, ctx: &FoldContext) -> Vec<ColumnJob> {
     jobs
 }
 
-/// The process's resident set as `/proc/self/status` reports it, in bytes: total, anonymous,
-/// file-backed. Zero for a field procfs does not offer, which is also what a non-Linux host gets.
+/// The process's resident set in bytes as a tuple — total, anonymous, file-backed — over
+/// [`tessera_types::process::resident_bytes`], which reads it and states what zeros mean.
 ///
 /// **Three numbers rather than one, because §3's budget is a claim about which of them grows.**
 /// Two of the budget's terms — `permutation.bin` and `ext-locator.u32` — are written *through a
@@ -1017,18 +1017,8 @@ fn value_column_jobs(plan: &FoldPlan, ctx: &FoldContext) -> Vec<ColumnJob> {
 /// its inputs became resident is behaving as designed. One whose *anonymous* half climbs with the
 /// corpus has a term nobody budgeted, and only the split tells the two apart.
 fn resident_set() -> (u64, u64, u64) {
-    let Ok(status) = std::fs::read_to_string("/proc/self/status") else {
-        return (0, 0, 0);
-    };
-    let field = |name: &str| -> u64 {
-        status
-            .lines()
-            .find(|line| line.starts_with(name))
-            .and_then(|line| line.split_whitespace().nth(1)?.parse::<u64>().ok())
-            .map(|kib| kib * 1024)
-            .unwrap_or(0)
-    };
-    (field("VmRSS:"), field("RssAnon:"), field("RssFile:"))
+    let r = tessera_types::process::resident_bytes();
+    (r.total, r.anon, r.file)
 }
 
 /// What one pass cost: its wall clock, and the process's resident set at the moment it ended.

@@ -1807,7 +1807,13 @@ impl Engine {
         let fold_paused = Arc::new(AtomicBool::new(false));
         let fold_publication_paused = Arc::new(AtomicBool::new(false));
         let merge_publication_paused = Arc::new(AtomicBool::new(false));
-        let occupancy = Arc::new(crate::single_flight::SingleFlightCache::new(u64::MAX));
+        // **Bounded from construction**, unlike the caches `tessera_server::prepare` bounds after
+        // `open`: the memo's entries are 512 B and its live set is one ladder per (session, view),
+        // so there is no figure a deployment would set. What the bound answers is the superseded
+        // part — see `occupancy::DEFAULT_OCCUPANCY_CACHE_BYTES`.
+        let occupancy = Arc::new(crate::single_flight::SingleFlightCache::new(
+            crate::occupancy::DEFAULT_OCCUPANCY_CACHE_BYTES,
+        ));
         let occupancy_walks = Arc::new(AtomicU64::new(0));
         let stage = crate::stage::StageDeps {
             walks: Arc::clone(&occupancy_walks),
@@ -2462,6 +2468,34 @@ impl Engine {
         self.row_projection_cache.prune_token(token_id)
     }
 
+    /// Drop every entry belonging to any of `token_ids` — the expiry sweep's form of
+    /// [`Self::prune_token`], and the same removal with the same argument.
+    ///
+    /// **One pass per cache, not one prune per session.** A sweep drops a batch, and five
+    /// `retain_keys` passes per session would take each of the five mutexes once per victim and
+    /// re-walk every surviving key each time. Here each cache is walked once with a set membership
+    /// test, so the cost is O(entries) in the batch rather than O(entries × victims). The stage
+    /// cancellations stay per token: each is a map removal under its own lock, and there is no
+    /// walk to share.
+    ///
+    /// Returns how many row projections were removed, as [`Self::prune_token`] does. Call it off
+    /// the request path — `tessera_server`'s `/session/authorise` hands it to `spawn_blocking`,
+    /// beside the authorisation it already runs there.
+    pub fn prune_tokens(&self, token_ids: &FxHashSet<u64>) -> usize {
+        if token_ids.is_empty() {
+            return 0;
+        }
+        for token_id in token_ids {
+            self.stage.cancel(*token_id);
+        }
+        self.masked_counts.prune_tokens(token_ids);
+        self.occupancy
+            .retain_keys(|key| !token_ids.contains(&key.token_id));
+        self.derived_geometry.prune_tokens(token_ids);
+        self.suggest_sets.prune_tokens(token_ids);
+        self.row_projection_cache.prune_tokens(token_ids)
+    }
+
     /// The masked-count cache's gauges — see [`crate::histogram::MaskedCountStats`]. Operator plane
     /// only; a count of structures, naming no artifact and no principal.
     pub fn masked_count_cache_stats(&self) -> crate::histogram::MaskedCountStats {
@@ -2568,6 +2602,23 @@ impl Engine {
     /// The region cache's gauges, beside the row-projection cache's.
     pub fn region_cache_stats(&self) -> crate::single_flight::CacheStats {
         self.region_cache.stats()
+    }
+
+    /// The occupancy memo's gauges — one entry per `(session, view, depth, generation)` rung of
+    /// θ's `N_occ` ladder. Operator plane only; a count of structures, naming no principal.
+    ///
+    /// `evictions` rising is the memo doing what its bound is for: the entries it removes are
+    /// rungs taken against a superseded generation, which no request can ask for again.
+    pub fn occupancy_cache_stats(&self) -> crate::single_flight::CacheStats {
+        self.occupancy.stats()
+    }
+
+    /// Bound the occupancy memo. An embedder that never calls this gets
+    /// [`crate::occupancy::DEFAULT_OCCUPANCY_CACHE_BYTES`], which is where the figure is argued.
+    /// A setter rather than an `EngineConfig` field, for [`Self::set_masked_count_cache_bytes`]'s
+    /// reason.
+    pub fn set_occupancy_cache_bytes(&self, bytes: u64) {
+        self.occupancy.set_bound_bytes(bytes);
     }
 
     /// How long a request parks on another request's in-flight row-projection build before it is

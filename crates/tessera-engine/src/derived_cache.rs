@@ -282,11 +282,17 @@ impl DerivedCache {
     /// worst failure is a needless rebuild, and what makes the keys safe to drop is that a
     /// `token_id` is never reused within a process.
     pub fn prune_token(&self, token_id: u64) {
+        self.prune_tokens(&std::iter::once(token_id).collect());
+    }
+
+    /// The same removal for a set of sessions, in one pass — the expiry sweep's form. See
+    /// `RowProjectionCache::prune_tokens` for why a batch is not a loop over single removals.
+    pub fn prune_tokens(&self, token_ids: &rustc_hash::FxHashSet<u64>) {
         let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let doomed: Vec<DerivedKey> = inner
             .entries
             .keys()
-            .filter(|key| key.token_id == token_id)
+            .filter(|key| token_ids.contains(&key.token_id))
             .cloned()
             .collect();
         for key in doomed {

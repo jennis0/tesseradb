@@ -408,6 +408,7 @@ async fn a_spent_walk_budget_reports_more_even_on_a_short_page() {
     let state = Arc::new(tessera_server::state::AppState {
         engine,
         sessions: parking_lot::Mutex::new(tessera_server::state::SessionRegistry::default()),
+        heap: tessera_server::memory::HeapWatch::default(),
         max_k,
         max_category_values: 4,
         // A budget of 2, so a walk over `department`'s 11 values stops on the walk-budget

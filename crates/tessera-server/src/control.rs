@@ -326,6 +326,13 @@ pub fn router(state: Arc<AppState>) -> Router {
             Arc::clone(&state),
             require_operator_credential,
         ))
+        // The allocator's trim cadence (`crate::memory`), outside the credential layer so a
+        // refused request is not a reason to skip a growth check the accepted ones caused. An
+        // ingest batch allocates a commit window, which is this plane's share of the growth.
+        .layer(axum::middleware::from_fn_with_state(
+            Arc::clone(&state),
+            crate::memory::trim_after_response,
+        ))
         .with_state(state)
 }
 
@@ -5496,6 +5503,16 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::V
     // `tessera-engine`'s crate root exists precisely so this call site has a nameable type.
     let projection_cache: tessera_engine::CacheStats = state.engine.row_projection_cache_stats();
     let fragment_cache: tessera_engine::FragmentCacheStats = state.engine.fragment_cache_stats();
+    // The four per-session caches beside the two above, and the memo. Each is keyed by `token_id`,
+    // each is bounded, and until they were published here an operator reading this response saw
+    // 127 MB of accounted cache on a node holding 15 GiB of anonymous memory and had nothing to
+    // read the difference against. `heap` below is the other half of that question.
+    let masked_counts = state.engine.masked_count_cache_stats();
+    let region_cache: tessera_engine::CacheStats = state.engine.region_cache_stats();
+    let derived_cache = state.engine.derived_cache_stats();
+    let suggest_sets = state.engine.suggest_set_stats();
+    let occupancy: tessera_engine::CacheStats = state.engine.occupancy_cache_stats();
+    let heap = state.heap.stats();
     let ingest = state.ingest_admission.status();
     let sessions = state.sessions.lock().stats();
     // **`tessera_engine::ViewSegments`, for `FragmentCacheStats`' reason** — the server may not
@@ -5966,6 +5983,95 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::V
             "sweeps": sessions.sweeps,
             "swept_total": sessions.swept_total,
             "sweep_at": sessions.sweep_at,
+        },
+        // **The four per-session caches and the memo**, each keyed by `token_id` and each released
+        // by `Engine::prune_token` at a revoke and at the expiry sweep. They are here for the
+        // question `row_projection_cache` and `fragment_cache` alone cannot answer: a node whose
+        // anonymous memory is climbing is either holding caches or holding allocator slack, and
+        // until every bounded cache is published an operator cannot tell which.
+        //
+        // `bytes` is the residency and the hit and miss pair is whether those bytes are earning
+        // anything. Three of these blocks carry the bound beside it — `region_cache` and
+        // `occupancy` from the single-flight cache's own gauges, and `row_projection_cache` and
+        // `fragment_cache` above — while `masked_count_cache`, `derived_cache` and `suggest_sets`
+        // publish `bytes` alone, because their types report residency without the bound. An alarm
+        // on those three needs the configured figure from the deployment file.
+        //
+        // The masked-count cache is the large one — ~4 B per artifact,
+        // 40 MB at 10⁷ — and the occupancy memo is the small one whose key space is the largest:
+        // a rung per (session, view, depth) per publication, which is why its evictions are the
+        // expected reading rather than an alarm.
+        "masked_count_cache": {
+            "entries": masked_counts.entries,
+            "bytes": masked_counts.resident_bytes,
+            "hits": masked_counts.hits,
+            "misses": masked_counts.misses,
+            "evictions": masked_counts.evictions,
+        },
+        "region_cache": {
+            "entries": region_cache.entries,
+            "bytes": region_cache.bytes,
+            "bound_bytes": region_cache.bound_bytes,
+            "hits": region_cache.hits,
+            "misses": region_cache.misses,
+            "building_refusals": region_cache.building_refusals,
+            "waits_satisfied": region_cache.waits_satisfied,
+            "evictions": region_cache.evictions,
+        },
+        "derived_cache": {
+            "entries": derived_cache.entries,
+            "bytes": derived_cache.resident_bytes,
+            "hits": derived_cache.hits,
+            "misses": derived_cache.misses,
+            "evictions": derived_cache.evictions,
+            // The figure this cache is judged on, and it is a figure about a pan. `null` before
+            // anything was looked up, for `fragmentation`'s reason: zero is a reading.
+            "hit_rate": derived_cache.hit_rate(),
+        },
+        // The suggestion route's per-session value sets (`value-suggestion.md` §5). `declined`
+        // rising is not a fault: it is a viewer too broad for the set route, taking the probe.
+        "suggest_sets": {
+            "entries": suggest_sets.entries,
+            "bytes": suggest_sets.resident_bytes,
+            "hits": suggest_sets.hits,
+            "misses": suggest_sets.misses,
+            "builds": suggest_sets.builds,
+            "declined": suggest_sets.declined,
+            "discarded": suggest_sets.discarded,
+            "evictions": suggest_sets.evictions,
+            "in_flight": suggest_sets.in_flight,
+        },
+        // θ's `N_occ` ladder, memoised per (session, view, depth, generation) —
+        // `tessera_engine::occupancy::DEFAULT_OCCUPANCY_CACHE_BYTES` argues the bound. `walks` is
+        // the counter the memo exists to hold down: one per (session, view, generation) is the
+        // claim, and one per request is the way that claim fails.
+        "occupancy": {
+            "entries": occupancy.entries,
+            "bytes": occupancy.bytes,
+            "bound_bytes": occupancy.bound_bytes,
+            "hits": occupancy.hits,
+            "misses": occupancy.misses,
+            "evictions": occupancy.evictions,
+            "walks": state.engine.occupancy_walks(),
+        },
+        // **The process's own memory, beside the caches that are accounted for** (`crate::memory`).
+        // The caches above name what the server knows it is holding; these three name what the
+        // kernel says the process holds. The difference is the C allocator's retention, and on a
+        // node whose bundle is larger than memory it is read directly against `file_bytes`: an
+        // anonymous set that grows is a page cache that shrinks.
+        //
+        // `trims` and `last_trim_returned_bytes` are how an operator tells retention from a leak.
+        // A trim that returns gigabytes was retention. A trim that returns nothing while
+        // `anon_bytes` stays high means the memory is live, and the caches above say whose.
+        "heap": {
+            "anon_bytes": heap.anon_bytes,
+            "file_bytes": heap.file_bytes,
+            "resident_bytes": heap.resident_bytes,
+            "trims": heap.trims,
+            "last_trim_returned_bytes": heap.last_trim_returned_bytes,
+            "last_trim_micros": heap.last_trim_micros,
+            "trim_baseline_bytes": heap.trim_baseline_bytes,
+            "trim_growth_bytes": crate::memory::TRIM_GROWTH_BYTES,
         },
     })))
 }

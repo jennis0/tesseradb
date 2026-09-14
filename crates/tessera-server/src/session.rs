@@ -29,6 +29,12 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/session/revoke", post(revoke))
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
+        // The allocator's trim cadence (`crate::memory`). This plane builds the mask fragments,
+        // which is where a new principal's anonymous growth arrives.
+        .layer(axum::middleware::from_fn_with_state(
+            Arc::clone(&state),
+            crate::memory::trim_after_response,
+        ))
         .with_state(state);
     match dev_cors {
         Some(layer) => router.layer(layer),
@@ -96,10 +102,25 @@ async fn authorise(
     // that grows the registry, so it is where the growth is bounded. The clock is read here, once
     // per request, rather than inside the lock — see `SessionRegistry`'s doc for what the sweep
     // costs, what bounds the pause, and why it is deliberately not a timer.
-    state
+    let (_entry, expired) = state
         .sessions
         .lock()
         .insert(session, crate::state::now_secs());
+    // The sweep's engine half, and the same removal a revocation makes. The registry removal is
+    // what makes a swept session unusable; this releases what the engine still holds under its
+    // token ids.
+    //
+    // **One batched call, on a blocking thread.** It walks five caches under five global mutexes,
+    // which is the reactor's least welcome work and the request path's most contended lock — the
+    // same reason the authorisation above runs on `spawn_blocking`. `Engine::prune_tokens` makes
+    // the batch one pass per cache rather than one per session. The response does not wait for it:
+    // the session is already inserted and the answer is already built, and a prune is memory
+    // hygiene whose timing nothing observes.
+    if !expired.is_empty() {
+        let doomed: rustc_hash::FxHashSet<u64> = expired.into_iter().collect();
+        let pruner = Arc::clone(&state);
+        tokio::task::spawn_blocking(move || pruner.engine.prune_tokens(&doomed));
+    }
     Ok(Json(resp))
 }
 

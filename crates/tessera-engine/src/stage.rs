@@ -55,7 +55,9 @@
 //! `crate::refresh`.
 //!
 //! **It must not outlive its session.** [`crate::Engine::prune_token`] flips this session's token
-//! at revoke, and the deepest step it cannot interrupt is one walk.
+//! at a revoke and [`crate::Engine::prune_tokens`] flips a batch of them at the registry's expiry
+//! sweep, which is how a session that was never revoked stops filling. The deepest step neither
+//! can interrupt is one walk.
 //!
 //! ## What it deliberately does not cover
 //!

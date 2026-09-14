@@ -70,6 +70,14 @@ const SWEEP_FLOOR_ENTRIES: usize = 16;
 /// `FrozenFragment`'s `CacheWeight` impl). **Dead sessions pin exactly the memory that bound exists
 /// to release**, which is why this is a memory mechanism rather than tidiness.
 ///
+/// The engine holds a second set of per-session structures under the same `token_id`: the row
+/// projection, the masked-count histogram, the occupancy rungs, the derived geometry and the
+/// suggest sets, reachable by the token id and by nothing else. [`Self::sweep_expired`] returns
+/// the ids it dropped and `/session/authorise` hands each to `Engine::prune_token` — the same call
+/// `/session/revoke` makes, so a session that ends by expiring costs the engine what a revoked one
+/// costs. Without it those entries would sit until a byte bound chose them, which for a 512 B
+/// occupancy rung is many publications away.
+///
 /// # When the sweep runs, and what bounds the pause
 ///
 /// It runs on **insert**, and on nothing else. Growth is the thing being bounded and insert is the
@@ -150,6 +158,26 @@ fn next_sweep_threshold(live: usize) -> usize {
     live.saturating_mul(2).max(SWEEP_FLOOR_ENTRIES)
 }
 
+/// Drop from the token-id index every entry whose token `live` rejects, and return the ids
+/// dropped.
+///
+/// A free function over the index alone, rather than three lines inside
+/// [`SessionRegistry::sweep_expired`], because the ids it returns are what the engine is told to
+/// prune and they are the one part of the sweep a test can reach: a [`Session`] owns an
+/// `Arc<FrozenFragment>`, which only the engine's cache can produce, so no unit test can build the
+/// map the rest of the sweep walks.
+fn prune_index(index: &mut FxHashMap<u64, String>, live: impl Fn(&str) -> bool) -> Vec<u64> {
+    let mut dropped = Vec::new();
+    index.retain(|token_id, token| {
+        let keep = live(token);
+        if !keep {
+            dropped.push(*token_id);
+        }
+        keep
+    });
+    dropped
+}
+
 /// What the registry has retained and reclaimed — `/control/status`'s `sessions` block.
 pub struct SessionRegistryStats {
     /// Sessions currently retained: **live and expired-but-not-yet-swept alike**. This is the `n`
@@ -172,17 +200,28 @@ impl SessionRegistry {
     /// clock is consulted once per request at the handler and so this method is a pure function of
     /// its inputs. It is a *wall-clock* second because `Session::expires_at` is one; a monotonic
     /// clock cannot be compared against a deadline minted from the system clock.
-    pub fn insert(&mut self, session: Session, now_secs: u64) -> std::sync::Arc<SessionEntry> {
+    ///
+    /// Returns the new entry and **the token ids the sweep removed**, which the caller passes to
+    /// `Engine::prune_token` once it has dropped this registry's lock. Returned rather than pruned
+    /// here for two reasons: the engine is not this type's to reach, and the prune cancels a stage
+    /// and walks five caches, which is not work to do under the mutex every viewer request takes.
+    pub fn insert(
+        &mut self,
+        session: Session,
+        now_secs: u64,
+    ) -> (std::sync::Arc<SessionEntry>, Vec<u64>) {
         let token = session.token.clone();
         let token_id = session.token_id;
         let entry = std::sync::Arc::new(SessionEntry { session });
         self.by_token
             .insert(token.clone(), std::sync::Arc::clone(&entry));
         self.token_id_to_token.insert(token_id, token);
-        if self.by_token.len() >= self.sweep_at {
-            self.sweep_expired(now_secs);
-        }
-        entry
+        let expired = if self.by_token.len() >= self.sweep_at {
+            self.sweep_expired(now_secs)
+        } else {
+            Vec::new()
+        };
+        (entry, expired)
     }
 
     /// Drop every session whose deadline has passed.
@@ -194,17 +233,25 @@ impl SessionRegistry {
     /// remove a session that is still being served, turning a 403 into a 401 early. Neither is a
     /// security difference, and that is the point: this pass can only ever remove what the
     /// authorisation check would already refuse.
-    fn sweep_expired(&mut self, now_secs: u64) {
+    ///
+    /// Returns the swept token ids, so the caller can give the engine the same treatment a
+    /// revocation gives it. A swept session's row projection, masked-count histogram, occupancy
+    /// rungs, derived geometry and suggest sets are keyed by `token_id` and reachable by nothing
+    /// else once the registry has dropped the token, so without the prune they are held until a
+    /// byte bound evicts them — and the occupancy memo and the suggest sets are cheap enough per
+    /// entry that a bound is a long way off.
+    fn sweep_expired(&mut self, now_secs: u64) -> Vec<u64> {
         let before = self.by_token.len();
         self.by_token
             .retain(|_, entry| entry.session.expires_at > now_secs);
         // The secondary index is pruned against the primary map rather than swept on its own
         // deadline, so the two cannot disagree about which sessions exist — `revoke` reaches
         // `by_token` only through this index, and an index entry outliving its session would make
-        // a revocation a silent no-op.
+        // a revocation a silent no-op. The ids dropped here are the ones the engine is told about.
         let by_token = &self.by_token;
-        self.token_id_to_token
-            .retain(|_, token| by_token.contains_key(token));
+        let swept = prune_index(&mut self.token_id_to_token, |token| {
+            by_token.contains_key(token)
+        });
         self.sweeps += 1;
         self.swept_total += (before - self.by_token.len()) as u64;
         self.sweep_at = next_sweep_threshold(self.by_token.len());
@@ -219,6 +266,7 @@ impl SessionRegistry {
             self.token_id_to_token.len(),
             "the token-id index must be pruned with the session map, or half the registry leaks"
         );
+        swept
     }
 
     pub fn get(&self, token: &str) -> Option<std::sync::Arc<SessionEntry>> {
@@ -584,6 +632,9 @@ impl Drop for SuggestGuard {
 pub struct AppState {
     pub engine: Engine,
     pub sessions: Mutex<SessionRegistry>,
+    /// The allocator's trim cadence and its gauges — see [`crate::memory`]. Process-wide, named
+    /// by no principal, and read by `/control/status`' `heap` block.
+    pub heap: crate::memory::HeapWatch,
     pub max_k: usize,
     /// `/v1/categories`' page-size ceiling and its default. See `Config::max_category_values`.
     pub max_category_values: usize,
@@ -751,6 +802,36 @@ mod session_registry_tests {
         // An absurd live set must not wrap to a *small* threshold, which would sweep constantly
         // rather than never — benign in direction, silently not the documented policy.
         assert_eq!(next_sweep_threshold(usize::MAX), usize::MAX);
+    }
+
+    /// The ids the sweep hands to `Engine::prune_tokens` are exactly the ones whose sessions went,
+    /// and the index keeps the rest. Both halves are asserted: an over-broad return would prune a
+    /// live session's caches, costing it a rebuild on its next request, and a short one would
+    /// leave a dead session's entries resident under an id nothing can present again.
+    #[test]
+    fn the_sweep_returns_the_ids_it_dropped_and_keeps_the_rest() {
+        let mut index: FxHashMap<u64, String> = (1..=4)
+            .map(|id| (id, format!("token-{id}")))
+            .collect();
+        let live = ["token-2", "token-4"];
+
+        let mut dropped = prune_index(&mut index, |token| live.contains(&token));
+        dropped.sort_unstable();
+
+        assert_eq!(dropped, vec![1, 3]);
+        let mut kept: Vec<u64> = index.keys().copied().collect();
+        kept.sort_unstable();
+        assert_eq!(kept, vec![2, 4]);
+    }
+
+    /// A sweep that removed nothing returns nothing, so the caller starts no prune and takes no
+    /// blocking thread for an empty batch.
+    #[test]
+    fn a_sweep_that_removes_nothing_returns_nothing() {
+        let mut index: FxHashMap<u64, String> =
+            (1..=3).map(|id| (id, format!("token-{id}"))).collect();
+        assert!(prune_index(&mut index, |_| true).is_empty());
+        assert_eq!(index.len(), 3);
     }
 }
 

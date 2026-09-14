@@ -796,6 +796,43 @@ pub(crate) struct OccupancyKey {
     pub fragment_watermark: u64,
 }
 
+/// The default byte bound on the memo, and the only one an embedder that never calls
+/// [`crate::Engine::set_occupancy_cache_bytes`] gets.
+///
+/// **The live working set is tiny and the key space is not.** A session holds one rung per depth
+/// per view, so eight concurrent sessions over one view hold 17 × 8 entries — 70 KB at the
+/// cache's 512 B per-entry floor. What grows is the superseded part: every flush, merge and fold
+/// moves `segments_version`, the fragment identity or `overlay_version`, and every rung taken
+/// before it becomes an entry no request can name again. Without a bound those entries stay for
+/// the life of the process, at one ladder per (session, view) per publication.
+///
+/// 32 MiB admits 65,536 entries, which is 480 publications' worth of ladders for eight sessions
+/// over one view before the LRU begins removing the coldest — and the coldest are exactly the
+/// superseded ones, because a live rung is re-read on every request that composes θ. A bound below
+/// the live set would cost walks, not correctness ([`crate::single_flight`]'s rule 3).
+///
+/// **What a deployment should set it to** (`serve.occupancy_cache_bytes`): the live set is
+/// [`OCCUPANCY_LIVE_BYTES_PER_SESSION`] per concurrently-querying session per view, and the
+/// headroom above it is how many publications of superseded ladders the memo carries before the
+/// LRU takes them. This default is the live set of eight sessions over one view — the
+/// `serve.expected_concurrent_sessions` default — with about 480 publications of headroom. A
+/// deployment that raises `expected_concurrent_sessions` to 1,000 needs 8.7 MB for the live set
+/// alone and should raise this in proportion if it wants the same headroom; leaving it here costs
+/// walks rather than correctness, and `/control/status`' `occupancy.evictions` beside `walks` is
+/// where that shows.
+pub const DEFAULT_OCCUPANCY_CACHE_BYTES: u64 = 32 * 1024 * 1024;
+
+/// What one session's live ladder charges the memo, over one view: one rung per depth at the
+/// cache's per-entry floor.
+///
+/// The 17 depths are `0..=16`, the whole quantisation grid — a session touches a handful, and the
+/// background fill ([`crate::stage`]) takes it to [`crate::stage::BACKGROUND_DEPTH`], so this is
+/// the ceiling rather than the typical charge. It is `pub` because
+/// `tessera_server::validate_cache_bounds` weighs the configured bound against it and the
+/// arithmetic must have one home.
+pub const OCCUPANCY_LIVE_BYTES_PER_SESSION: u64 =
+    17 * crate::single_flight::PER_ENTRY_FLOOR_BYTES;
+
 /// One memoised `N_occ(d)`.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct OccupiedTiles(pub u64);
@@ -811,6 +848,72 @@ impl crate::single_flight::CacheWeight for OccupiedTiles {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// One rung, for the memo's bound.
+    fn rung(token_id: u64, depth: u8, segments_version: u64) -> OccupancyKey {
+        OccupancyKey {
+            token_id,
+            view: "geo".to_string(),
+            depth,
+            segments_version,
+            overlay_version: 0,
+            fragment_identity: [0u8; 32],
+            fragment_watermark: 0,
+        }
+    }
+
+    /// **The memo is bounded, and the bound is above the live set by orders of magnitude.**
+    ///
+    /// The two halves the figure has to satisfy. Seventeen depths for each of eight sessions —
+    /// `serve.expected_concurrent_sessions`' default, the concurrency every other bound is sized
+    /// against — is the live set, and it must be resident together, because evicting a rung a
+    /// request is about to read costs a mask walk. And a key space that moves with every
+    /// publication must not accumulate, which is what the bound is for.
+    #[test]
+    fn the_memo_holds_the_live_set_and_bounds_the_superseded_one() {
+        let cache = crate::single_flight::SingleFlightCache::new(DEFAULT_OCCUPANCY_CACHE_BYTES);
+        for token_id in 0..8u64 {
+            for depth in 0..=16u8 {
+                let _ = cache.get_or_derive(rung(token_id, depth, 0), None, |_| OccupiedTiles(1));
+            }
+        }
+        let live = cache.stats();
+        assert_eq!(live.entries, 8 * 17, "the live set is resident together");
+        assert_eq!(live.evictions, 0);
+
+        // The superseded half is arithmetic rather than a filled cache: admitting 65,536 entries
+        // one at a time to watch the 65,537th evict is a minute of a debug build for a property
+        // the per-entry charge already fixes. `an_undersized_bound_evicts` below is where the
+        // eviction itself is exercised.
+        let admitted = DEFAULT_OCCUPANCY_CACHE_BYTES / crate::single_flight::PER_ENTRY_FLOOR_BYTES;
+        assert_eq!(admitted, 65_536);
+        assert!(
+            admitted > 400 * (8 * 17),
+            "the bound admits {admitted} entries, which is {} publications' worth of ladders for \
+             eight sessions — close enough to the live set to evict a rung a request is about to \
+             read",
+            admitted / (8 * 17),
+        );
+    }
+
+    /// The memo evicts under its bound rather than growing past it. Written against a bound small
+    /// enough to reach in a few entries; the figure the deployment gets is
+    /// [`DEFAULT_OCCUPANCY_CACHE_BYTES`], whose size is argued there.
+    #[test]
+    fn an_undersized_bound_evicts() {
+        let bound = 8 * crate::single_flight::PER_ENTRY_FLOOR_BYTES;
+        let cache = crate::single_flight::SingleFlightCache::new(bound);
+        for publication in 0..32u64 {
+            let _ = cache.get_or_derive(rung(0, 0, publication), None, |_| OccupiedTiles(1));
+        }
+        let stats = cache.stats();
+        assert!(stats.evictions > 0, "32 entries under a bound of 8 evict");
+        assert!(
+            stats.bytes <= bound,
+            "{} bytes over a bound of {bound}",
+            stats.bytes
+        );
+    }
 
     /// **`ln_q32` is a logarithm**, to a tolerance far finer than anything downstream can see.
     ///
