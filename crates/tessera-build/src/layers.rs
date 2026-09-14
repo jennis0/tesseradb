@@ -238,15 +238,44 @@ const MEMBER_ARTIFACT_BYTES: usize = 80;
 ///
 /// ⊘ Deliberately **not** added to `residency.rs`'s model, for that pass's reason: it is a
 /// sixteenth of the same budget the model is checked against, inside the factor of two that module
-/// states as its own error bar, and adding it would turn builds that fit today into refusals.
+/// states as its own error bar, and adding it would turn builds that fit today into refusals. The
+/// merge's open runs ([`member_merge_fan_in`]) are left out on the same argument and a second one:
+/// they are sized *from* this share and stand only while the accumulator is empty, so the two are
+/// one term and not two.
 const MEMBER_BUDGET_SHARE: u64 = 16;
 const MEMBER_BUDGET_MIN: u64 = 64 << 20;
 const MEMBER_BUDGET_MAX: u64 = 1 << 30;
 
-/// The most runs one merge opens at once. A run is a file descriptor and a 4 MiB read buffer, so
-/// this is what the merge's own residency is a function of. The text index's number, for the same
-/// reason it has one.
-const MEMBER_MERGE_FAN_IN: usize = 128;
+/// What the member accumulator may hold at `memory_budget` — the share, floored and capped.
+fn member_budget(memory_budget: u64) -> u64 {
+    (memory_budget / MEMBER_BUDGET_SHARE).clamp(MEMBER_BUDGET_MIN, MEMBER_BUDGET_MAX)
+}
+
+/// What one open run costs the merge: its read buffer, which is [`spill::SPILL_BUF_BYTES`]. The
+/// file descriptor, the reader's own fields and its place in the heap come to under a kibibyte
+/// beside it.
+const MEMBER_MERGE_BYTES_PER_RUN: u64 = spill::SPILL_BUF_BYTES as u64;
+
+/// The most runs one merge opens at once: **what the accumulator's own budget share pays for**,
+/// rather than a fixed number.
+///
+/// **The run count is the corpus's, and the fan-in is the budget's.** The accumulator spills a run
+/// each time it reaches [`member_budget`] at [`MEMBER_ENTRY_BYTES`] a pair, so a corpus of *E*
+/// pairs writes about `E × 16 / member_budget` runs — at a 24 GiB budget the share is capped at
+/// 1 GiB, which is 67.1×10⁶ pairs a run, and the whole GBIF corpus's 10.3×10⁹ pairs is 154 of
+/// them. A fixed 128 put that corpus one pass of the cascade below the merge it was already able
+/// to run: a full extra read and write of every pair, and the runs of both levels on the disk at
+/// once. The same share buys `1 GiB / 4 MiB = 256` open runs, so it does not fire.
+///
+/// **The cascade stays** for the budget that really cannot hold the runs. At the floor — 64 MiB,
+/// which is a `--memory-budget` under 1 GiB — a run is 4.19×10⁶ pairs and the merge opens 16 of
+/// them, so a corpus of more than 67×10⁶ pairs reduces before it merges. That is the trade the
+/// flag asks for.
+///
+/// At least two, because a pass that opens one run copies it and reduces nothing.
+fn member_merge_fan_in(memory_budget: u64) -> usize {
+    ((member_budget(memory_budget) / MEMBER_MERGE_BYTES_PER_RUN) as usize).max(2)
+}
 
 /// Every layer's member rows, accumulated as `(artifact, source)` pairs and spilled as **sorted
 /// runs** once the accumulator reaches its budget.
@@ -295,10 +324,9 @@ struct MemberSpill {
 
 impl MemberSpill {
     fn new(dir: &Path, budget: u64) -> MemberSpill {
-        let budget = budget / MEMBER_BUDGET_SHARE;
         MemberSpill {
             dir: dir.to_path_buf(),
-            budget: budget.clamp(MEMBER_BUDGET_MIN, MEMBER_BUDGET_MAX) as usize,
+            budget: member_budget(budget) as usize,
             bytes: 0,
             open: Vec::new(),
             receipts: Vec::new(),
@@ -1883,7 +1911,8 @@ fn merge_member_runs(
     if receipts.is_empty() {
         return Ok(spill::MemberTable::empty(plan.bodies.len()));
     }
-    let receipts = cascade_member_runs(receipts, &plan.members.dir)?;
+    let receipts =
+        cascade_member_runs(receipts, &plan.members.dir, member_merge_fan_in(plan.memory_budget))?;
     let path = plan.members.dir.join("member-table.spill");
     let mut writer = spill::MemberTableWriter::create(&path, plan.bodies.len())?;
     let mut merge = MemberRunMerge::open(&receipts)?;
@@ -1930,22 +1959,23 @@ fn merge_member_runs(
     writer.finish()
 }
 
-/// Reduce `receipts` to at most [`MEMBER_MERGE_FAN_IN`] runs, deleting each pass's inputs as it
-/// goes — so a build's transient disk is the runs at one level of the cascade and not all of them.
+/// Reduce `receipts` to at most `fan_in` runs, deleting each pass's inputs as it goes — so a
+/// build's transient disk is the runs at one level of the cascade and not all of them.
 ///
-/// ⊘ **Unreached by anything measured.** At the accumulator's ceiling a run holds 67×10⁶ pairs, and
-/// GeoNames' 68.4×10⁶ spilled **two**. It exists because a small `--memory-budget` over a large
-/// corpus is the caller's to choose: the budget is a sixteenth of that flag, so it is the flag and
-/// not the corpus that decides whether a cascade happens at all.
+/// ⊘ **Reached only where the budget cannot hold the runs** ([`member_merge_fan_in`]). A pass is a
+/// full extra read and write of every pair the corpus declares, and both levels' runs stand on the
+/// disk while it runs, so what decides whether it happens is the `--memory-budget` the caller
+/// chose and never the corpus's size on its own.
 fn cascade_member_runs(
     receipts: &[spill::SpillReceipt],
     dir: &Path,
+    fan_in: usize,
 ) -> Result<Vec<spill::SpillReceipt>> {
     let mut receipts = receipts.to_vec();
     let mut pass = 0usize;
-    while receipts.len() > MEMBER_MERGE_FAN_IN {
-        let mut merged = Vec::with_capacity(receipts.len().div_ceil(MEMBER_MERGE_FAN_IN));
-        for (group, runs) in receipts.chunks(MEMBER_MERGE_FAN_IN).enumerate() {
+    while receipts.len() > fan_in {
+        let mut merged = Vec::with_capacity(receipts.len().div_ceil(fan_in));
+        for (group, runs) in receipts.chunks(fan_in).enumerate() {
             let path = dir.join(format!("member-cascade-{pass}-{group:04}.spill"));
             let mut writer = spill::MemberRunWriter::create(&path)?;
             let mut merge = MemberRunMerge::open(runs)?;
@@ -4401,15 +4431,17 @@ mod tests {
         assert_eq!(drain(&forward), drain(&reversed));
     }
 
-    /// **The cascade is the same merge, and it holds every pair across a reduction.** Nothing
-    /// measured reaches it — GeoNames spills two runs against a fan-in of 128 — so the only
-    /// exercise it gets is this one, and it feeds the memberships every masked count divides by.
+    /// **The cascade is the same merge, and it holds every pair across a reduction.** Nothing a
+    /// measured corpus does reaches it — the fan-in is sized from the budget the runs were spilled
+    /// under — so the only exercise it gets is this one, and it feeds the memberships every masked
+    /// count divides by.
     #[test]
     fn a_cascade_reduces_the_runs_and_loses_no_pair() {
         let temp = tempfile::TempDir::new().unwrap();
+        let fan_in = 8usize;
         // Two full passes' worth: each run names three artifacts drawn from a space small enough
         // that every artifact is in most runs, which is the case a cascade has to gather.
-        let runs = MEMBER_MERGE_FAN_IN * 2 + 3;
+        let runs = fan_in * 2 + 3;
         let receipts: Vec<spill::SpillReceipt> = (0..runs)
             .map(|seq| {
                 let records: Vec<(u32, Vec<u64>)> = (0..3)
@@ -4421,8 +4453,8 @@ mod tests {
             })
             .collect();
         let direct = drain(&receipts);
-        let cascaded = cascade_member_runs(&receipts, temp.path()).unwrap();
-        assert!(cascaded.len() <= MEMBER_MERGE_FAN_IN, "the cascade reduces");
+        let cascaded = cascade_member_runs(&receipts, temp.path(), fan_in).unwrap();
+        assert!(cascaded.len() <= fan_in, "the cascade reduces");
         assert_eq!(drain(&cascaded), direct);
         assert_eq!(
             direct.iter().map(|(_, s)| s.len() as u64).sum::<u64>(),
@@ -4641,6 +4673,38 @@ mod tests {
             vec![1, 2, 3, 4, 5],
             "a batch always takes an artifact, whatever it costs"
         );
+    }
+
+    /// **The merge opens as many runs as the accumulator's own share of the budget pays for**, so
+    /// a corpus the budget could spill is a corpus the budget can merge. A fixed fan-in is a
+    /// cascade that fires on a corpus's size rather than on the memory it was given: at 24 GiB the
+    /// whole GBIF corpus spills about 154 runs, and 128 of them would have cost a full extra read
+    /// and write of 10.3×10⁹ pairs.
+    #[test]
+    fn the_merge_opens_the_runs_the_budget_pays_for() {
+        let runs_of = |memory_budget: u64, entries: u64| -> u64 {
+            entries.div_ceil(member_budget(memory_budget) / MEMBER_ENTRY_BYTES as u64)
+        };
+        // The ceiling: a 1 GiB share is 67.1×10⁶ pairs a run and 256 open runs.
+        assert_eq!(member_budget(24 << 30), MEMBER_BUDGET_MAX);
+        assert_eq!(
+            member_merge_fan_in(24 << 30),
+            (MEMBER_BUDGET_MAX / MEMBER_MERGE_BYTES_PER_RUN) as usize
+        );
+        assert_eq!(member_merge_fan_in(24 << 30), 256);
+        assert!(
+            runs_of(24 << 30, 10_300_000_000) <= member_merge_fan_in(24 << 30) as u64,
+            "the whole GBIF corpus spills {} run(s) against a fan-in of {}",
+            runs_of(24 << 30, 10_300_000_000),
+            member_merge_fan_in(24 << 30)
+        );
+        // The floor: 64 MiB is 4.19×10⁶ pairs a run and 16 open runs, so a corpus above about
+        // 67×10⁶ pairs cascades — which is what a budget under a gibibyte asks for.
+        assert_eq!(member_budget(1 << 20), MEMBER_BUDGET_MIN);
+        assert_eq!(member_merge_fan_in(1 << 20), 16);
+        assert!(runs_of(1 << 20, 100_000_000) > member_merge_fan_in(1 << 20) as u64);
+        // A pass that opened one run would copy it and reduce nothing.
+        assert!(member_merge_fan_in(0) >= 2);
     }
 
     /// The publication batch is the budget's share divided by what an entry costs, and never zero.
