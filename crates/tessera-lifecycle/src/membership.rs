@@ -343,9 +343,22 @@ fn bitmap_of_entities(entities: impl IntoIterator<Item = EntityId>) -> Bitmap {
     // Entity space is `u32` by I9, so the narrowing is total.
     let mut values: Vec<u32> = entities.into_iter().map(|e| e.raw() as u32).collect();
     values.sort_unstable();
-    values.dedup();
+    bitmap_of_sorted(&values)
+}
+
+/// The same membership, from entities a caller already holds **ascending**.
+///
+/// **One implementation of the append and two ways in**, differing only in who sorts. A build
+/// reads each artifact's members out of a table the member merge wrote in entity order, so the
+/// sort above would re-sort a sorted slice and the collect would hold a second copy of the
+/// largest artifact in the corpus.
+///
+/// **Duplicates are values here, not a fault.** The same document named twice for one artifact is
+/// two member entries and one member; `add_many` takes the second as the value the bitmap already
+/// holds. The count that reports entries reads the member table, not the set.
+fn bitmap_of_sorted(entities: &[u32]) -> Bitmap {
     let mut bitmap = Bitmap::new();
-    bitmap.add_many(&values);
+    bitmap.add_many(entities);
     bitmap
 }
 
@@ -426,6 +439,25 @@ impl IncomingArtifact {
         let mut artifact = IncomingArtifact::from_entities(key, members);
         artifact.contents = contents;
         artifact
+    }
+
+    /// The same, from members the caller already holds **ascending** — the build's route, where
+    /// the member table is written in entity order ([`bitmap_of_sorted`]).
+    pub fn with_content_sorted(
+        key: Option<String>,
+        members: &[u32],
+        contents: Vec<IncomingContent>,
+    ) -> Self {
+        IncomingArtifact {
+            key,
+            view: None,
+            members: bitmap_of_sorted(members),
+            excluding: None,
+            contents,
+            attached_to: None,
+            parent_keys: Vec::new(),
+            shape: None,
+        }
     }
 }
 
@@ -4341,5 +4373,43 @@ mod tests {
 
         store.mark_growth_packed();
         assert_eq!(store.wal_pin(), None);
+    }
+
+    /// **A membership built from an ascending slice is the one built from the same entities in
+    /// any order**, duplicates included. The build reads each artifact's members out of the member
+    /// table, which the merge wrote in entity order, so it hands the slice straight to the Roaring
+    /// append; every other caller sorts first. A set that differed between the two routes would be
+    /// a masked count that depended on which constructor a caller reached for.
+    #[test]
+    fn a_membership_from_a_sorted_slice_is_the_one_a_scattered_iterator_builds() {
+        // Scattered across a wide space so the containers are arrays, dense in one block so one
+        // is a bitset, and carrying duplicates at both ends of a container.
+        let mut members: Vec<u32> = (0..5_000u32).map(|i| i * 977).collect();
+        members.extend(70_000u32..78_000);
+        members.push(0);
+        members.push(77_999);
+        members.sort_unstable();
+
+        let sorted = IncomingArtifact::with_content_sorted(None, &members, Vec::new());
+        let mut scattered: Vec<u32> = members.clone();
+        scattered.reverse();
+        let any_order = IncomingArtifact::from_entities(
+            None,
+            scattered.iter().map(|e| EntityId::new(*e as u64)),
+        );
+        assert_eq!(sorted.members, any_order.members);
+
+        let mut distinct = members.clone();
+        distinct.dedup();
+        assert_eq!(
+            sorted.members.cardinality(),
+            distinct.len() as u64,
+            "a duplicate member entry is one member"
+        );
+        assert_eq!(
+            sorted.members.iter().collect::<Vec<u32>>(),
+            distinct,
+            "the set is the distinct members, ascending"
+        );
     }
 }

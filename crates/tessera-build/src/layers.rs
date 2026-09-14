@@ -174,15 +174,15 @@ struct ResolvedArtifact {
 /// spelled on the artifact's *own row* is one list per artifact in a file an author wrote, so it
 /// is held where it was read.
 ///
-/// The members are raw entity ids rather than [`EntityId`] because a source id and the entity it
-/// resolves to are both `u64`, so the inline case is rewritten in place rather than copied. The
-/// newtype goes back on at [`incoming_artifact`], the one place these leave this module.
+/// The members are raw `u32` entities rather than [`EntityId`] because that is the entity space I9
+/// states and it is what the store's bitmap takes: the newtype would be put on at
+/// [`incoming_artifact`] and taken straight off again.
 #[derive(Debug)]
 enum ResolvedMembers {
     /// At this artifact's extent of the merged member table.
     Table,
     /// Materialised here: the artifact row's `members`, or the complement of its `excluding`.
-    Inline(Vec<u64>),
+    Inline(Vec<u32>),
 }
 
 /// What the build reads: declarations, and the artifacts to publish into them.
@@ -1738,7 +1738,7 @@ pub fn publish(
                 // bitmaps plus the largest single artifact per thread, rather than a batch of
                 // entity vectors beside them.
                 .map_init(
-                    || (Vec::<u8>::new(), Vec::<u64>::new()),
+                    || (Vec::<u8>::new(), Vec::<u32>::new()),
                     |(scratch, buf), ((key, index), body)| {
                         incoming_artifact(
                             key,
@@ -2221,9 +2221,9 @@ type Address = (String, u32, String);
 #[derive(Default)]
 struct HierarchyBuffers {
     parent_bytes: Vec<u8>,
-    parent_buf: Vec<u64>,
+    parent_buf: Vec<u32>,
     child_bytes: Vec<u8>,
-    child_buf: Vec<u64>,
+    child_buf: Vec<u32>,
 }
 
 fn verify_hierarchies(
@@ -2412,7 +2412,7 @@ fn verify_hierarchies(
             // because the buffer is this task's own: nothing else is reading it, and the largest
             // membership at the Overture rung is 73.6×10⁶ entries, which a copy would be 589 MB of.
             scratch.parent_buf.dedup();
-            let held: &[u64] = &scratch.parent_buf;
+            let held: &[u32] = &scratch.parent_buf;
             // One bit per distinct member, so `covered.len()` becomes a popcount: 2.5 MB where the
             // second `HashSet` was 300 MB, and the counts it feeds are identical by construction.
             let mut covered = vec![0u64; held.len().div_ceil(64)];
@@ -2648,18 +2648,40 @@ fn resolve_artifact(
         }
         Ok(())
     };
+    // A **membership** narrows as it resolves: the store's bitmap is over the `u32` entity space
+    // I9 states, so carrying one twice as wide from here to the publication is a second copy of
+    // the artifact's members with nothing reading the top half. An id outside the space refuses,
+    // on the same rule an unassigned one does.
+    let narrow = |entity: u64, what: &str| -> Result<u32> {
+        u32::try_from(entity).map_err(|_| {
+            BuildError::Invalid(format!(
+                "{layer} level {level} artifact {key}: {what} names entity {entity}, which is \
+                 outside the u32 entity space (I9's ceiling)"
+            ))
+        })
+    };
+    let resolve_members = |ids: &[u64], what: &str| -> Result<Vec<u32>> {
+        let mut out = Vec::with_capacity(ids.len());
+        for &source in ids {
+            out.push(narrow(
+                resolve(source).ok_or_else(|| refuse(source, what))?,
+                what,
+            )?);
+        }
+        Ok(out)
+    };
 
     let members = match std::mem::take(&mut artifact.membership) {
         // The member sources' rows are in the merged table by now, resolved and sorted by the
         // merge — there is nothing here to do for them and nothing here to hold.
         PlannedMembership::Rows => ResolvedMembers::Table,
-        PlannedMembership::Included(mut ids) => {
-            in_place(&mut ids, "membership")?;
-            // **Sorted here, once, and not deduped.** Two readers want it in order — the
+        PlannedMembership::Included(ids) => {
+            let mut ids = resolve_members(&ids, "membership")?;
+            // **Sorted here, once, and not deduped.** Every reader wants it in order — the
             // containment pass, which walks parent and child together instead of hashing a set per
-            // parent, and `bitmap_of_entities`, which sorts before its bulk add. Deduping would be
-            // wrong: a containment violation counts member *entries* that escape, duplicates
-            // included, and that is the number an operator is given.
+            // parent, and the Roaring append, whose fast path is a value above the container's
+            // last. Deduping would be wrong: a containment violation counts member *entries* that
+            // escape, duplicates included, and that is the number an operator is given.
             ids.sort_unstable();
             ResolvedMembers::Inline(ids)
         }
@@ -2672,9 +2694,10 @@ fn resolve_artifact(
         // be held whichever side of the disk they sat — an `excluding` spelling is an authored one,
         // one row per artifact in a file somebody wrote, and the corpora that reach the spill do
         // not use it.
-        PlannedMembership::Excluded(mut ids) => {
-            in_place(&mut ids, "exclusion")?;
-            let excluded: std::collections::HashSet<u64> = ids.into_iter().collect();
+        PlannedMembership::Excluded(ids) => {
+            let excluded: std::collections::HashSet<u32> =
+                resolve_members(&ids, "exclusion")?.into_iter().collect();
+            let high_water = narrow(high_water, "this build's entity space")?;
             ResolvedMembers::Inline(
                 (0..high_water)
                     .filter(|entity| !excluded.contains(entity))
@@ -2742,8 +2765,7 @@ impl ResolvedArtifact {
 ///
 /// **The members are read into `buf` and turned into a bitmap here**, which is what keeps a level's
 /// publication holding a level of *bitmaps* and never a level of entity vectors: the vector is one
-/// artifact's, reused, and the `EntityId` newtype goes back on the raw ids at the one boundary that
-/// leaves this module.
+/// artifact's, reused, and it is the ascending `u32` slice the Roaring append takes.
 fn incoming_artifact(
     key: &str,
     body: PublishableBody,
@@ -2751,16 +2773,12 @@ fn incoming_artifact(
     index: usize,
     table: &spill::MemberTable,
     scratch: &mut Vec<u8>,
-    buf: &mut Vec<u64>,
+    buf: &mut Vec<u32>,
 ) -> Result<IncomingArtifact> {
     load_members(members, index, table, scratch, buf)?;
-    let entities = buf.iter().copied().map(EntityId::new);
-    let mut result = match body.attached_to {
-        None => IncomingArtifact::with_content(Some(key.to_string()), entities, body.contents),
-        Some(attached_to) => {
-            IncomingArtifact::attached(Some(key.to_string()), entities, body.contents, attached_to)
-        }
-    };
+    let mut result =
+        IncomingArtifact::with_content_sorted(Some(key.to_string()), buf, body.contents);
+    result.attached_to = body.attached_to;
     result.parent_keys = body.parent_keys;
     result.shape = body.shape;
     result.view = body.view;
@@ -2777,7 +2795,7 @@ fn load_members(
     index: usize,
     table: &spill::MemberTable,
     scratch: &mut Vec<u8>,
-    buf: &mut Vec<u64>,
+    buf: &mut Vec<u32>,
 ) -> Result<()> {
     match members {
         ResolvedMembers::Table => table.read_into(index, scratch, buf),
@@ -4544,7 +4562,7 @@ mod tests {
         let parents = 240usize;
         let mut index_of: BTreeMap<Address, usize> = BTreeMap::new();
         let mut resolved: Vec<ResolvedArtifact> = Vec::new();
-        let body = |members: Vec<u64>, parent_keys: Vec<String>| ResolvedArtifact {
+        let body = |members: Vec<u32>, parent_keys: Vec<String>| ResolvedArtifact {
             view: None,
             members: ResolvedMembers::Inline(members),
             contents: Vec::new(),
@@ -4553,7 +4571,7 @@ mod tests {
             shape: None,
         };
         for parent in 0..parents {
-            let member = parent as u64 * 10;
+            let member = parent as u32 * 10;
             index_of.insert(
                 ("clusters/a".to_string(), 0, format!("p{parent:03}")),
                 resolved.len(),
@@ -4566,7 +4584,7 @@ mod tests {
             // One member the parent holds and one it does not, so every parent has exactly one
             // violation to report and exactly one covered member.
             resolved.push(body(
-                vec![member, 1_000_000 + parent as u64],
+                vec![member, 1_000_000 + parent as u32],
                 vec![format!("p{parent:03}")],
             ));
         }

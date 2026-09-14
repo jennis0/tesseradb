@@ -2075,11 +2075,17 @@ impl MemberTable {
     /// `scratch` is the caller's byte buffer, reused across artifacts: an artifact's extent is
     /// read whole because it is contiguous and small beside the file, and allocating that buffer
     /// per artifact would be one allocation per artifact per pass.
+    ///
+    /// **The members come out `u32`, which is the entity space I9 states.** The deltas on disk
+    /// are `u64` varints — a member table is written from source ids before they are resolved in
+    /// any other pass — and an entity outside the space refuses rather than being truncated. What
+    /// the narrower buffer buys is the buffer: every reader of this holds one per thread, grown to
+    /// the largest artifact it met, and the largest artifact at the GBIF rung is 2.81×10⁹ members.
     pub(crate) fn read_into(
         &self,
         index: usize,
         scratch: &mut Vec<u8>,
-        out: &mut Vec<u64>,
+        out: &mut Vec<u32>,
     ) -> Result<()> {
         use std::os::unix::fs::FileExt;
         out.clear();
@@ -2112,7 +2118,12 @@ impl MemberTable {
             };
             last = entity;
             anchor = anchor.wrapping_add(mix64(mark ^ entity));
-            out.push(entity);
+            out.push(u32::try_from(entity).map_err(|_| {
+                self.malformed(
+                    index,
+                    &format!("member {entity} is outside the u32 entity space (I9)"),
+                )
+            })?);
         }
         if cursor != scratch.len() {
             return Err(self.malformed(
@@ -2886,7 +2897,7 @@ mod tests {
         writer.finish().unwrap()
     }
 
-    fn read_member_table(table: &MemberTable, artifacts: usize) -> Result<Vec<Vec<u64>>> {
+    fn read_member_table(table: &MemberTable, artifacts: usize) -> Result<Vec<Vec<u32>>> {
         let mut scratch = Vec::new();
         let mut out = Vec::new();
         for index in 0..artifacts {
@@ -2904,18 +2915,19 @@ mod tests {
         // Artifact 1 is named by no member row and keeps the empty extent, which is a legal
         // membership and not a missing one; artifact 3 holds the same entity twice.
         let rows = vec![
-            (0usize, vec![0u64, 1, 2, u64::MAX]),
+            (0usize, vec![0u64, 1, 2, u32::MAX as u64]),
             (2, (0..4_000u64).map(|e| e * 7).collect()),
             (3, vec![9, 9, 10]),
         ];
         let table = write_member_table(&path, 5, &rows);
+        let narrowed = |row: &Vec<u64>| -> Vec<u32> { row.iter().map(|e| *e as u32).collect() };
         assert_eq!(
             read_member_table(&table, 5).unwrap(),
             vec![
-                rows[0].1.clone(),
+                narrowed(&rows[0].1),
                 Vec::new(),
-                rows[1].1.clone(),
-                rows[2].1.clone(),
+                narrowed(&rows[1].1),
+                narrowed(&rows[2].1),
                 Vec::new(),
             ]
         );
@@ -2924,9 +2936,21 @@ mod tests {
         let mut scratch = Vec::new();
         let mut buf = Vec::new();
         table.read_into(3, &mut scratch, &mut buf).unwrap();
-        assert_eq!(buf, vec![9, 9, 10]);
+        assert_eq!(buf, vec![9u32, 9, 10]);
         table.read_into(0, &mut scratch, &mut buf).unwrap();
-        assert_eq!(buf, vec![0, 1, 2, u64::MAX]);
+        assert_eq!(buf, vec![0u32, 1, 2, u32::MAX]);
+    }
+
+    /// **A member outside the `u32` entity space refuses rather than being truncated.** Entity
+    /// space is `u32` by I9 and the table's deltas are `u64`, so the narrowing is where a source
+    /// id that reached the table unresolved would otherwise become another entity's member.
+    #[test]
+    fn member_table_refuses_a_member_outside_the_entity_space() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let path = temp.path().join("member-table.spill");
+        let table = write_member_table(&path, 1, &[(0, vec![1, u32::MAX as u64 + 1])]);
+        let message = err_string(read_member_table(&table, 1));
+        assert!(message.contains("outside the u32 entity space"), "{message}");
     }
 
     #[test]
@@ -2959,7 +2983,7 @@ mod tests {
     #[test]
     fn an_empty_member_table_answers_every_artifact() {
         let table = MemberTable::empty(3);
-        assert_eq!(read_member_table(&table, 3).unwrap(), vec![Vec::<u64>::new(); 3]);
+        assert_eq!(read_member_table(&table, 3).unwrap(), vec![Vec::<u32>::new(); 3]);
     }
 
     proptest! {
@@ -2993,10 +3017,10 @@ mod tests {
         #[test]
         fn any_member_table_round_trips(
             raw in prop::collection::vec(
-                prop::collection::vec(prop::num::u64::ANY, 0..8),
+                prop::collection::vec(prop::num::u32::ANY, 0..8),
                 1..20),
         ) {
-            let memberships: Vec<Vec<u64>> = raw
+            let memberships: Vec<Vec<u32>> = raw
                 .into_iter()
                 .map(|mut entities| {
                     entities.sort_unstable();
@@ -3005,9 +3029,9 @@ mod tests {
                 .collect();
             let rows: Vec<(usize, Vec<u64>)> = memberships
                 .iter()
-                .cloned()
+                .map(|entities| entities.iter().map(|e| *e as u64).collect())
                 .enumerate()
-                .filter(|(_, entities)| !entities.is_empty())
+                .filter(|(_, entities): &(usize, Vec<u64>)| !entities.is_empty())
                 .collect();
 
             let temp = tempfile::TempDir::new().unwrap();
