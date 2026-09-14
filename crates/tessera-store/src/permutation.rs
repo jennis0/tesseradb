@@ -192,6 +192,81 @@ pub struct ProjectScratch {
     members: Vec<u32>,
 }
 
+/// Emit the buckets' containers, union them into `out`, and leave the buckets empty for the next
+/// window.
+///
+/// **The union is what windowing costs.** A whole-result bucket pass emits each container once, in
+/// ascending key order, and one [`Sink`] stream is the answer; a windowed one emits each container
+/// once per window that touched it, so the parts have to be merged. The parts are disjoint by
+/// construction — each row is bucketed exactly once, by the one window whose entities reached it —
+/// so the union is the same set the single pass produced, container representation aside.
+///
+/// The first window is moved into `out` rather than unioned with an empty bitmap, so a mask that
+/// fits in one window pays nothing at all for the machinery.
+fn emit_window(
+    out: &mut croaring::Bitmap,
+    buckets: &mut [Vec<u32>],
+    stamp: &mut [u64],
+    marks: &mut [u64],
+    members: &mut Vec<u32>,
+) {
+    let mut sink = Sink::new();
+    let mut emitted = false;
+    for (index, rows) in buckets.iter().enumerate() {
+        if rows.is_empty() {
+            continue;
+        }
+        emitted = true;
+        let base = (index as u32) << BUCKET_SHIFT;
+        if rows.len() < SPARSE_BUCKET_ROWS {
+            emit_sparse(&mut sink, stamp, marks, members, rows, base);
+            continue;
+        }
+        // Which of the bucket's 64 containers hold anything. One `u64` covers them exactly,
+        // which is what lets the emit below skip the empty ones without scanning their words.
+        let mut occupied: u64 = 0;
+        for &row in rows.iter() {
+            let offset = row - base;
+            stamp[(offset >> 6) as usize] |= 1u64 << (offset & 63);
+            occupied |= 1u64 << (offset >> 16);
+        }
+        // Emitted and cleared in the same pass, container by container. Clearing *here* rather
+        // than in a second loop is worth stating: the container's words are in cache because
+        // the popcount just read them, and only the occupied ones are touched at all, so the
+        // bucket pays a sequential 8 KB wipe per container it filled. The alternative that
+        // looks frugal — re-walking each bucket's rows and zeroing the word each sits in — is
+        // O(rows) rather than O(width), which sounds better and is 250 million scattered writes
+        // at 10⁹ against 122 MB of sequential ones. Also not separately measured, and stated as
+        // reasoning rather than as a result.
+        for (container, words) in stamp.chunks_exact_mut(WORDS).enumerate() {
+            if occupied & (1u64 << container) == 0 {
+                continue;
+            }
+            let cardinality: u32 = words.iter().map(|word| word.count_ones()).sum();
+            let key = u16::try_from((base >> 16) + container as u32)
+                .expect("a row below 2^32 has a container key below 2^16");
+            sink.push_block(
+                key,
+                cardinality,
+                (&*words).try_into().expect("a bucket is whole containers"),
+            );
+            words.fill(0);
+        }
+    }
+    if !emitted {
+        return;
+    }
+    for bucket in buckets.iter_mut() {
+        bucket.clear();
+    }
+    let part = sink.finish();
+    if out.is_empty() {
+        *out = part;
+    } else {
+        out.or_inplace(&part);
+    }
+}
+
 /// Stamp one bucket's rows and emit the containers they landed in, reading only the stamp words
 /// that hold one — [`Permutation::project_with`]'s emit for a bucket under [`SPARSE_BUCKET_ROWS`].
 ///
@@ -255,6 +330,46 @@ fn emit_sparse(
 /// immediately re-read, and this is 32 KB that stays hot.
 const DECODE_WINDOW: usize = 8192;
 
+/// Row ids buffered in [`Permutation::project_with`]'s buckets before they are emitted and unioned
+/// into the result — the bound on that pass's transient memory.
+///
+/// Bucketing the whole result before emitting any of it costs four bytes a projected row: 14 GB at
+/// 3.5×10⁹ rows over a whole-corpus grant, a transient no configured budget bounds. Emitting a
+/// window at a time makes the bucket transient a constant — 64 MB of row ids, plus the quarter of
+/// slack [`Permutation::project_with`] reserves on top — and leaves the result itself as the only
+/// term that grows with the grant.
+///
+/// **What the window's size costs is modelled, not measured, and its sign is not fixed.** The union
+/// each window feeds is one insertion a row whatever the window is, so the window count does not
+/// move that term; what a smaller window adds is one container merge per window per container of
+/// the result, which beside the insertions is a rounding error. The term that is *not* a rounding
+/// error is [`emit_window`]'s per-bucket choice. A bucket holding fewer than
+/// [`SPARSE_BUCKET_ROWS`] rows has its containers read through the mark array and costs its own
+/// rows; a bucket at or above it has all 64 of its containers scanned, popcounted and wiped — 512 KB
+/// — whatever it holds. Windowing divides a bucket's rows by the window count and so can move a
+/// bucket from the second regime to the first, or leave it in the second and pay the 512 KB once
+/// per window instead of once.
+///
+/// Which way that goes is decided by a window's rows per bucket, `PROJECT_WINDOW_ROWS` over
+/// `bound >> BUCKET_SHIFT`, against [`SPARSE_BUCKET_ROWS`]. **Modelled at two points.** At 10⁹ rows
+/// over a 25% grant there are 239 buckets and 15 windows, leaving ~70 000 rows a bucket a window —
+/// above the threshold, so the whole-container emit runs 15 times over: ~1.8 GB of sequential scan
+/// and wipe against 122 MB, about +0.3 s on a *measured* 1 277 ms build. At 3.5×10⁹ rows the 834
+/// buckets leave ~20 000 rows a bucket a window, below the threshold, and the emit follows marks
+/// instead, so the term is absent. Neither is measured.
+///
+/// **Measured, at one point:** gbif-64p at 25 846 004 rows over 251 of its 252 country terms — 1.55
+/// windows — is +8% wall on the first viewport (172 and 162 ms against 186 and 186 ms), against a
+/// bucket transient of 80.5 MB rather than 104.6 MB.
+///
+/// 64 MB is chosen to sit far below any budget a serving box has, and the emit term is why it is not
+/// tuned further in either direction. Raising it weakens the memory bound and repeats the scan fewer
+/// times; lowering it strengthens the bound and repeats the scan more often, until the point where a
+/// window's rows per bucket fall below [`SPARSE_BUCKET_ROWS`] and the scan disappears instead. The
+/// cost is therefore not monotonic in the window, and no measurement has been taken on either side
+/// of the turn, so this figure is the bound's and not an optimum's.
+const PROJECT_WINDOW_ROWS: usize = (64 << 20) / 4;
+
 /// A memory-mapped `permutation.bin`. `row_of` and `project` are the only ways to cross from
 /// entity space to row space anywhere in the codebase (I4) — no other module may open this
 /// file or otherwise derive a row ID from an entity ID.
@@ -267,6 +382,17 @@ pub struct Permutation {
     present_count: usize,
     payload_start: usize,
     path: PathBuf,
+    /// The row count this file's slots claim exactly, where that is established.
+    ///
+    /// **What it is for:** a mask holding every entity in `[0, bound)` projects to every row this
+    /// mapping has, and this value is what says those rows are the contiguous range
+    /// `[0, dense_rows)` rather than some subset of it. With it, [`Self::project_with`] answers a
+    /// whole-domain mask as that range and reads no page; without it, it walks. Two routes set it,
+    /// and both are the same claim from a different source: [`Self::validate_rows`] counts the
+    /// slots and finds they number `row_count`, and [`Self::declare_dense_rows`] takes the writer's
+    /// word for the same count where the caller's premise is that this process wrote the file.
+    /// Unset means neither has spoken, and the walk answers everything.
+    dense_rows: std::sync::OnceLock<u32>,
 }
 
 impl Permutation {
@@ -309,6 +435,7 @@ impl Permutation {
             present_count: 0,
             payload_start: len,
             path: PathBuf::from("<empty permutation>"),
+            dense_rows: std::sync::OnceLock::new(),
         })
     }
 
@@ -406,6 +533,7 @@ impl Permutation {
             present_count,
             payload_start,
             path: path.to_path_buf(),
+            dense_rows: std::sync::OnceLock::new(),
         };
         permutation.validate_directory()?;
         Ok(permutation)
@@ -513,9 +641,17 @@ impl Permutation {
     /// A corrupt or hand-edited `permutation.bin` that points rows out of range, or that
     /// aliases two entities onto one row, must fail bundle open rather than let `row_of` or
     /// `project` later hand out a `RowId` that indexes `columns.arrow` out of bounds (I4/I11).
+    ///
+    /// **It also records whether the mapping is onto `[0, row_count)` and not merely into it.**
+    /// The checks below establish injectivity; counting the claims is what turns that into
+    /// surjectivity, since `row_count` distinct claims below `row_count` are all of them. Only the
+    /// surjective case is recorded, and only a recorded one enables [`Self::project_with`]'s
+    /// whole-domain answer — a file claiming fewer rows than the descriptor declares takes the
+    /// general path, where the image is read rather than assumed.
     pub fn validate_rows(&self, row_count: u32) -> Result<()> {
         let row_count_usize = row_count as usize;
         let mut seen = RowsSeen::new(row_count_usize);
+        let mut claimed: u64 = 0;
         for page in 0..self.page_count {
             let Some(slots) = self.page_of(page) else {
                 continue;
@@ -542,9 +678,30 @@ impl Permutation {
                         ),
                     });
                 }
+                claimed += 1;
             }
         }
+        if claimed == u64::from(row_count) {
+            let _ = self.dense_rows.set(row_count);
+        }
         Ok(())
+    }
+
+    /// Record that this mapping's slots are a bijection onto `[0, row_count)` on the **writer's**
+    /// word rather than on a scan of the file.
+    ///
+    /// [`Self::validate_rows`] establishes the same fact by reading every present page, which is
+    /// `O(bound)` and is the check a bundle arriving from storage must pay. A caller that wrote
+    /// these bytes itself, in this process, has the fact already: the writer emits one slot per row
+    /// of the segment it is writing, so the mapping is onto its own row count by construction. That
+    /// caller is `read::open_written_prefix`, whose doc carries the premise and the obligation it
+    /// puts on the one call site allowed to hold it.
+    ///
+    /// The first value recorded wins, so this cannot contradict a validation that already ran. It
+    /// records nothing else: a caller with no such premise omits the call and the projection walks,
+    /// which is correct at any cost.
+    pub fn declare_dense_rows(&self, row_count: u32) {
+        let _ = self.dense_rows.set(row_count);
     }
 
     /// Every entity that holds a row here, ascending, with the row it holds.
@@ -641,9 +798,34 @@ impl Permutation {
     /// The one-pass form has no parallel decomposition worth taking in any case — see
     /// [`DECODE_WINDOW`] for the range-split alternative and why bulk decode beats it.
     ///
-    /// **Transient memory** is one `u32` per row of the result — roughly 1 GB at 10⁹ over a 25%
-    /// grant, held once in the buckets, against the three simultaneous copies the previous form
-    /// peaked at. The mmap-backed pages are never copied, only read.
+    /// **Transient memory is [`PROJECT_WINDOW_ROWS`] row ids, whatever the grant.** The buckets
+    /// hold one window at a time: they are emitted into the result and cleared each time they fill,
+    /// so the 4 bytes a projected row that a whole-result bucket pass costs — 14 GB at 3.5×10⁹ rows
+    /// over a whole-corpus grant — is 64 MB and does not move with the mask. What still scales with
+    /// the grant is the result, which is the answer. The mmap-backed pages are never copied, only
+    /// read.
+    ///
+    /// **A mask holding every entity in `[0, bound)` is answered without reading a page.** Its
+    /// image is every row this mapping has, and [`Self::dense_rows`] is what establishes that those
+    /// are exactly `[0, row_count)` — so the answer is that range, built directly.
+    ///
+    /// **The served set is identical and the time taken is not, which is C4/C14's shape rather than
+    /// a new channel.** A mask over the whole domain maps onto the whole range under every
+    /// permutation, so the general path returns this same set from this same mask and no response
+    /// differs anywhere. What a principal can observe is that its own first viewport was faster,
+    /// and the quantity that decided it is whether its own grant covers the whole domain — a fact
+    /// the principal holds already, which is exactly C14's accepted reasoning ("the principal
+    /// already knows their own clearances, so this reveals nothing about data"). Nothing about the
+    /// corpus enters the branch: the mapping is not read on this path, and `bound` is the view's
+    /// entity-space width rather than anything a grant selects. So the residual sits inside C19's
+    /// accepted shape — work correlating with the principal's own coverage — and adds no quantity
+    /// to C4's open row, the same reading `tessera_engine`'s `DecodeSource` records for the
+    /// decode-source choice. No register row is added for it; whether Appendix C should name this
+    /// branch explicitly is the owner's call.
+    ///
+    /// The invariant this file carries is I4 — it is the only EntityId→RowId path — and both
+    /// routes keep it, neither handing an entity id or a `tessera_id` to a caller, so I10 stands
+    /// where it stood.
     pub fn project(&self, mask: &croaring::Bitmap) -> croaring::Bitmap {
         self.project_with(mask, &mut ProjectScratch::default())
     }
@@ -664,6 +846,31 @@ impl Permutation {
         mask: &croaring::Bitmap,
         scratch: &mut ProjectScratch,
     ) -> croaring::Bitmap {
+        if let Some(&rows) = self.dense_rows.get() {
+            if self.covers_domain(mask) {
+                return match rows {
+                    0 => croaring::Bitmap::new(),
+                    rows => croaring::Bitmap::from_range(0..rows),
+                };
+            }
+        }
+        self.project_windowed(mask, scratch, PROJECT_WINDOW_ROWS)
+    }
+
+    /// [`Self::project_with`]'s general path: the bucket walk, emitting and unioning every
+    /// `window_rows` rows.
+    ///
+    /// **The window is a parameter because the two forms have to be compared.** A windowed pass and
+    /// a single one must produce the same set, and the production window is 16.7 million rows —
+    /// larger than any fixture a test builds. Passing `usize::MAX` gives the single-pass form, which
+    /// is what the equality is checked against; [`Self::project_with`] passes
+    /// [`PROJECT_WINDOW_ROWS`].
+    fn project_windowed(
+        &self,
+        mask: &croaring::Bitmap,
+        scratch: &mut ProjectScratch,
+        window_rows: usize,
+    ) -> croaring::Bitmap {
         // Every row this permutation can yield is below `bound`: `validate_rows` establishes that
         // it is a bijection *onto* `[0, row_count)`, so each row is claimed by a distinct in-bound
         // entity and `row_count <= bound`. Sizing the buckets from `bound` therefore cannot
@@ -676,7 +883,11 @@ impl Permutation {
         // and a bucket at 10⁹ is megabytes, so that is a realloc and a memcpy of the whole thing on
         // half of them. Not separately measured — it was not separable from run-to-run variance at
         // this size — so it is here on the argument, not on a number.
-        let expected = (mask.cardinality() as usize / nbuckets)
+        // Sized from the window rather than from the mask, because a window is all a bucket ever
+        // holds. A mask below one window reserves for the mask instead, so a small projection
+        // reserves what it needs and no more.
+        let planned = (mask.cardinality() as usize).min(window_rows);
+        let expected = (planned / nbuckets)
             .saturating_mul(5)
             .saturating_div(4)
             .saturating_add(64);
@@ -690,6 +901,33 @@ impl Permutation {
             bucket.reserve(expected.saturating_sub(bucket.capacity()));
         }
 
+        // **Zeroed when it is sized and not again**, because both emits below clear every word they
+        // set. The whole-container one fills each occupied container as it stages it; the sparse
+        // one clears each stamp word and each mark word as it reads them. A scratch that has been
+        // through a projection therefore comes back all-zero, and re-zeroing it is 512 KB of stores
+        // on every call — the whole of a projection's cost for the small memberships an artifact
+        // level is mostly made of (`probes/2026-09-09-layers-cost/`).
+        let stamp = &mut scratch.stamp;
+        if stamp.len() != STAMP_WORDS {
+            stamp.clear();
+            stamp.resize(STAMP_WORDS, 0);
+        }
+        let marks = &mut scratch.marks;
+        if marks.len() != MARK_WORDS {
+            marks.clear();
+            marks.resize(MARK_WORDS, 0);
+        }
+        let members = &mut scratch.members;
+        debug_assert!(
+            stamp.iter().chain(marks.iter()).all(|word| *word == 0),
+            "both emits clear each word they write, so the stamp and its marks are zero on entry"
+        );
+
+        let mut rows = croaring::Bitmap::new();
+        // Rows in the buckets. The emit below runs whenever this reaches a window and starts it
+        // again from nothing, so the buckets never hold more than one window plus the tail of the
+        // decode block that filled them.
+        let mut buffered = 0usize;
         // The page the last entity landed in, held across the walk. A mask iterates ascending, so
         // this resolves the directory once per page rather than once per entity — and an absent
         // page is skipped as cheaply as a sentinel slot was.
@@ -724,73 +962,33 @@ impl Permutation {
                 let row = slots[(entity as usize) & (PAGE_ENTRIES - 1)];
                 if row != ROW_ABSENT {
                     buckets[(row >> BUCKET_SHIFT) as usize].push(row);
+                    buffered += 1;
                 }
             }
+            if buffered >= window_rows {
+                emit_window(&mut rows, buckets, stamp, marks, members);
+                buffered = 0;
+            }
         }
+        emit_window(&mut rows, buckets, stamp, marks, members);
+        rows
+    }
 
-        // **Zeroed when it is sized and not again**, because both emits below clear every word they
-        // set. The whole-container one fills each occupied container as it stages it; the sparse
-        // one clears each stamp word and each mark word as it reads them. A scratch that has been
-        // through a projection therefore comes back all-zero, and re-zeroing it is 512 KB of stores
-        // on every call — the whole of a projection's cost for the small memberships an artifact
-        // level is mostly made of (`probes/2026-09-09-layers-cost/`).
-        let stamp = &mut scratch.stamp;
-        if stamp.len() != STAMP_WORDS {
-            stamp.clear();
-            stamp.resize(STAMP_WORDS, 0);
+    /// Whether `mask` holds every entity this permutation covers, `[0, bound)`.
+    ///
+    /// `O(containers)` over entity space, and the first gap answers it — 65 536 containers at the
+    /// entity ceiling, against the pass it decides whether to run.
+    fn covers_domain(&self, mask: &croaring::Bitmap) -> bool {
+        let Some(hi) = self.bound.checked_sub(1) else {
+            // No entities, so every mask holds all of them.
+            return true;
+        };
+        match u32::try_from(hi) {
+            Ok(hi) => mask.contains_range(0..=hi),
+            // An entity id is a `u32` (I9), so a bound above the ceiling names entities no mask
+            // can hold. The general path answers it.
+            Err(_) => false,
         }
-        let marks = &mut scratch.marks;
-        if marks.len() != MARK_WORDS {
-            marks.clear();
-            marks.resize(MARK_WORDS, 0);
-        }
-        let members = &mut scratch.members;
-        debug_assert!(
-            stamp.iter().chain(marks.iter()).all(|word| *word == 0),
-            "both emits clear each word they write, so the stamp and its marks are zero on entry"
-        );
-        let mut sink = Sink::new();
-        for (index, rows) in buckets.iter().enumerate() {
-            if rows.is_empty() {
-                continue;
-            }
-            let base = (index as u32) << BUCKET_SHIFT;
-            if rows.len() < SPARSE_BUCKET_ROWS {
-                emit_sparse(&mut sink, stamp, marks, members, rows, base);
-                continue;
-            }
-            // Which of the bucket's 64 containers hold anything. One `u64` covers them exactly,
-            // which is what lets the emit below skip the empty ones without scanning their words.
-            let mut occupied: u64 = 0;
-            for &row in rows.iter() {
-                let offset = row - base;
-                stamp[(offset >> 6) as usize] |= 1u64 << (offset & 63);
-                occupied |= 1u64 << (offset >> 16);
-            }
-            // Emitted and cleared in the same pass, container by container. Clearing *here* rather
-            // than in a second loop is worth stating: the container's words are in cache because
-            // the popcount just read them, and only the occupied ones are touched at all, so the
-            // bucket pays a sequential 8 KB wipe per container it filled. The alternative that
-            // looks frugal — re-walking each bucket's rows and zeroing the word each sits in — is
-            // O(rows) rather than O(width), which sounds better and is 250 million scattered writes
-            // at 10⁹ against 122 MB of sequential ones. Also not separately measured, and stated as
-            // reasoning rather than as a result.
-            for (container, words) in stamp.chunks_exact_mut(WORDS).enumerate() {
-                if occupied & (1u64 << container) == 0 {
-                    continue;
-                }
-                let cardinality: u32 = words.iter().map(|word| word.count_ones()).sum();
-                let key = u16::try_from((base >> 16) + container as u32)
-                    .expect("a row below 2^32 has a container key below 2^16");
-                sink.push_block(
-                    key,
-                    cardinality,
-                    (&*words).try_into().expect("a bucket is whole containers"),
-                );
-                words.fill(0);
-            }
-        }
-        sink.finish()
     }
 
     /// The path this permutation was loaded from (for diagnostics only).
@@ -1293,5 +1491,219 @@ impl RowSpace {
     /// construction rests on.
     pub fn base(&self) -> &Arc<Permutation> {
         &self.base
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rand::rngs::StdRng;
+    use rand::seq::SliceRandom;
+    use rand::{Rng, SeedableRng};
+    use tessera_types::EntityId;
+
+    /// A permutation over `bound` entity slots in which each entity holds a row with probability
+    /// `density`, in an order the seed decides — written through the real writer and read back
+    /// through the real mmap path, so the slots the walk reads are the slots a bundle holds.
+    fn fixture(dir: &Path, bound: u64, density: f64, rng: &mut StdRng) -> Permutation {
+        let mut entities: Vec<EntityId> = (0..bound)
+            .filter(|_| rng.gen_bool(density))
+            .map(EntityId::new)
+            .collect();
+        entities.shuffle(rng);
+        let path = dir.join("permutation.bin");
+        crate::write::write_permutation(&path, &entities, bound).expect("write_permutation");
+        Permutation::load(&path).expect("load permutation")
+    }
+
+    /// `count` entities drawn from `[0, bound)`, plus a handful above it — which a real mask holds
+    /// whenever a flush has issued ids the base does not cover, and which the walk skips.
+    fn mask_of(bound: u64, count: usize, rng: &mut StdRng) -> croaring::Bitmap {
+        let mut mask = croaring::Bitmap::new();
+        for _ in 0..count {
+            mask.add(rng.gen_range(0..bound) as u32);
+        }
+        for above in 0..8u64 {
+            mask.add((bound + above).min(u64::from(u32::MAX)) as u32);
+        }
+        mask
+    }
+
+    /// Windowing changes when containers are emitted, not which rows reach them. Several seeds
+    /// rather than one fixture, because the property is over permutations and masks and a single
+    /// pair of them checks one point of that space.
+    #[test]
+    fn a_windowed_pass_projects_what_a_single_pass_projects() {
+        // Two buckets, the second a sliver, so the union runs across a bucket boundary; 5% of the
+        // entities hold no row, so the walk skips sentinels as well as the ids above `bound` the
+        // mask carries.
+        const BOUND: u64 = (1 << 22) + 600_000;
+        for seed in 0..3u64 {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let mut rng = StdRng::seed_from_u64(seed);
+            let perm = fixture(dir.path(), BOUND, 0.95, &mut rng);
+            for count in [5_000usize, 1_000_000] {
+                let mask = mask_of(BOUND, count, &mut rng);
+                let mut scratch = ProjectScratch::default();
+                let single = perm.project_windowed(&mask, &mut scratch, usize::MAX);
+                for window in [1usize, 997, 100_000] {
+                    let windowed = perm.project_windowed(&mask, &mut scratch, window);
+                    assert_eq!(
+                        windowed.iter().collect::<Vec<u32>>(),
+                        single.iter().collect::<Vec<u32>>(),
+                        "seed {seed}, {count} entities, window {window}: a windowed pass must \
+                         project exactly what a single pass projects"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The buckets hold one window and not the whole result, which is the bound the windowing
+    /// exists for. Measured on the buckets themselves rather than on process memory: a window's
+    /// worth of `u32`s plus the decode block that overshot it, and nothing proportional to the mask.
+    #[test]
+    fn the_buckets_never_hold_more_than_a_window() {
+        const BOUND: u64 = (1 << 22) + 100_000;
+        const WINDOW: usize = 10_000;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut rng = StdRng::seed_from_u64(7);
+        let perm = fixture(dir.path(), BOUND, 1.0, &mut rng);
+        let mask = croaring::Bitmap::from_range(0..BOUND as u32);
+        let mut scratch = ProjectScratch::default();
+        let rows = perm.project_windowed(&mask, &mut scratch, WINDOW);
+        assert_eq!(rows.cardinality(), BOUND, "every entity holds a row here");
+        let held: usize = scratch.buckets.iter().map(|b| b.capacity()).sum();
+        // A window plus the decode block that overshot it, doubled because one bucket can take the
+        // whole window and a `Vec` that outgrows its reservation doubles. What the ceiling is a
+        // function of is the window; what it is not a function of is the 4.29 million rows the mask
+        // projected to, which is the whole of the property.
+        let ceiling = 2 * (WINDOW + DECODE_WINDOW) + 64 * scratch.buckets.len();
+        assert!(
+            held <= ceiling,
+            "the buckets kept {held} slots against a ceiling of {ceiling} for a {WINDOW}-row \
+             window over {BOUND} rows"
+        );
+    }
+
+    /// A mask over the whole of `[0, bound)` is answered as the row range, and that answer is the
+    /// one the walk produces from the same mask.
+    #[test]
+    fn a_whole_domain_mask_is_the_row_range() {
+        const BOUND: u64 = 200_000;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut rng = StdRng::seed_from_u64(11);
+        let perm = fixture(dir.path(), BOUND, 0.6, &mut rng);
+        let rows = u32::try_from(
+            (0..BOUND)
+                .filter(|&e| perm.row_of(EntityId::new(e)).is_some())
+                .count(),
+        )
+        .expect("fixture rows fit u32");
+        perm.validate_rows(rows).expect("the fixture is a bijection");
+        assert_eq!(perm.dense_rows.get(), Some(&rows));
+
+        let mask = croaring::Bitmap::from_range(0..BOUND as u32);
+        let mut scratch = ProjectScratch::default();
+        let walked = perm.project_windowed(&mask, &mut scratch, usize::MAX);
+        let answered = perm.project(&mask);
+        assert_eq!(
+            answered.iter().collect::<Vec<u32>>(),
+            walked.iter().collect::<Vec<u32>>(),
+            "the whole-domain answer must be the set the walk produces"
+        );
+        assert_eq!(answered, croaring::Bitmap::from_range(0..rows));
+
+        // **The shape a flush leaves**: the grant covers this base's whole domain and also holds
+        // entities above `bound`, which a later segment issued and this mapping knows nothing
+        // about. Those are skipped, here as everywhere, so the base's answer is still the row
+        // range — and this is the case a domain test written as "the mask is exactly `[0, bound)`"
+        // would send down the walk for no reason.
+        let mut with_flushed = mask.clone();
+        for above in 0..64u64 {
+            with_flushed.add((BOUND + above) as u32);
+        }
+        assert!(perm.covers_domain(&with_flushed));
+        assert_eq!(
+            perm.project(&with_flushed)
+                .iter()
+                .collect::<Vec<u32>>(),
+            perm.project_windowed(&with_flushed, &mut scratch, usize::MAX)
+                .iter()
+                .collect::<Vec<u32>>(),
+            "entities above `bound` have no row here and must not change either route's answer"
+        );
+        assert_eq!(perm.project(&with_flushed), croaring::Bitmap::from_range(0..rows));
+
+        // One entity short of the whole domain is not the whole domain, and takes the walk.
+        let mut short = mask.clone();
+        short.remove(rng.gen_range(0..BOUND) as u32);
+        assert!(!perm.covers_domain(&short));
+        assert_eq!(
+            perm.project(&short).iter().collect::<Vec<u32>>(),
+            perm.project_windowed(&short, &mut scratch, usize::MAX)
+                .iter()
+                .collect::<Vec<u32>>()
+        );
+    }
+
+    /// The writer's word does what the scan's does, and the first word recorded is the one kept.
+    ///
+    /// `read::open_written_prefix` is the caller — a compaction opening a prefix this process just
+    /// wrote, where the scan is skipped and its result is declared instead.
+    #[test]
+    fn a_declared_row_count_answers_a_whole_domain_mask() {
+        const BOUND: u64 = 100_000;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut rng = StdRng::seed_from_u64(17);
+        let perm = fixture(dir.path(), BOUND, 1.0, &mut rng);
+        let mask = croaring::Bitmap::from_range(0..BOUND as u32);
+        let mut scratch = ProjectScratch::default();
+        let walked = perm.project_windowed(&mask, &mut scratch, usize::MAX);
+
+        assert_eq!(perm.dense_rows.get(), None, "nothing has spoken yet");
+        perm.declare_dense_rows(BOUND as u32);
+        assert_eq!(perm.dense_rows.get(), Some(&(BOUND as u32)));
+        assert_eq!(
+            perm.project(&mask).iter().collect::<Vec<u32>>(),
+            walked.iter().collect::<Vec<u32>>(),
+            "a declared row count must answer what the walk answers"
+        );
+
+        // A second declaration cannot overwrite the first, so a later scan and an earlier
+        // declaration cannot disagree about what this mapping is.
+        perm.declare_dense_rows(1);
+        assert_eq!(perm.dense_rows.get(), Some(&(BOUND as u32)));
+    }
+
+    /// A mapping that claims fewer rows than the descriptor declares is injective into
+    /// `[0, row_count)` but not onto it, so the whole-domain answer must not be offered for it.
+    ///
+    /// **The fixture's image happens to be `[0, claimed)`, and that is not what makes the case.**
+    /// What `validate_rows` can conclude from a short count is only that the image is *some* subset
+    /// of `[0, row_count)` of size `claimed`; nothing in the file says which. So the count is not
+    /// recorded, and the walk — which reads the image rather than assuming it — answers.
+    #[test]
+    fn a_mapping_that_claims_fewer_rows_than_declared_takes_the_walk() {
+        const BOUND: u64 = 50_000;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut rng = StdRng::seed_from_u64(13);
+        let perm = fixture(dir.path(), BOUND, 0.5, &mut rng);
+        let claimed = u32::try_from(
+            (0..BOUND)
+                .filter(|&e| perm.row_of(EntityId::new(e)).is_some())
+                .count(),
+        )
+        .expect("fixture rows fit u32");
+        perm.validate_rows(claimed + 100)
+            .expect("every slot is still in bound and distinct");
+        assert_eq!(perm.dense_rows.get(), None);
+
+        let mask = croaring::Bitmap::from_range(0..BOUND as u32);
+        let mut scratch = ProjectScratch::default();
+        assert_eq!(
+            perm.project(&mask),
+            perm.project_windowed(&mask, &mut scratch, usize::MAX)
+        );
     }
 }

@@ -1919,11 +1919,20 @@ const DEFAULT_COALESCE_WIDTH: usize = 8;
 /// 1. It is the *serialised* size. `get_serialized_size_in_bytes` can underestimate the in-memory
 ///    footprint — but **not at this operating point**. The ~2× gap is an **array-container**
 ///    property:
-///    a `Vec<u16>` of values carries capacity slack that the serialised form does not. A mask that
-///    serialises to the 125.12 MB dense bound is by construction dominated by **bitmap**
-///    containers, whose in-memory size *is* their serialised size (8 KB, a fixed 2¹⁶-bit block) —
-///    ratio ≈ 1.0. So at the figure this constant describes, the factor does not apply; it applies
-///    to sparse, array-container-dominated masks, which are small in absolute terms anyway.
+///    a `Vec<u16>` of values carries capacity slack that the serialised form does not. A mask
+///    dominated by **bitmap** containers has an in-memory size that *is* its serialised size
+///    (8 KB, a fixed 2¹⁶-bit block) — ratio ≈ 1.0 — and 125.12 MB over a 10⁹ row space is that
+///    mask. So the factor does not apply at this figure; it applies to sparse,
+///    array-container-dominated masks, which are small in absolute terms anyway.
+///
+///    **This argument does not reach a run-optimised projection, and does not need to.**
+///    `tessera_engine`'s `RowProjection::from_rows` run-optimises, so a grant covering runs of row
+///    space holds run containers where this argument assumes bitmap ones, and croaring converts a
+///    container only where the run form is smaller. The measured figure is therefore an
+///    over-estimate of what such an entry is charged rather than a bound that has stopped holding
+///    — the error is in the direction that over-provisions the cache, and the validation below
+///    stays a floor. A projection that runs badly is charged the 125.12 MB shape this constant
+///    describes, which is the case the floor exists for.
 /// 2. It is the 10⁹ figure, so a smaller corpus leaves the bounds below over-provisioned rather
 ///    than wrong.
 /// 3. It is **per (session, view, segments_version) entry**, not per session — the cache key's
