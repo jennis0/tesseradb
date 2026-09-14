@@ -6,21 +6,25 @@
 //! the head of that prefix. Whether that is cheaper than reading the rows depends on one property
 //! of the corpus — how many rows a cell holds — and this sweeps it.
 //!
-//! Two arms over identical inputs:
+//! Two timed arms over identical inputs, both of them shipped code:
 //!
-//! - `scan` — the mechanism the route replaced, transcribed: one contiguous identity slice per
-//!   part, a branchless filter-count for the threshold, then the peek-reject heap over every
-//!   visible row. This is the `scan_slice` form `select.rs` carried for the two dense tiers.
-//! - `route` — `Selection::of` exactly as shipped, so the figure is the code that runs and not a
-//!   model of it.
+//! - `scan` — `Selection::routed` under `CellRoute::Rows`: one contiguous identity slice per run,
+//!   a branchless filter-count for the threshold, then the peek-reject heap over every visible row.
+//! - `route` — `Selection::routed` under `CellRoute::Cells`: the per-cell walk.
 //!
-//! The two must return the same rows at every point of the sweep; the example asserts it, because
-//! a cost table for a route that answers differently is a table for nothing.
+//! Naming the mechanism rather than letting `Selection::of` gate it is what lets the sweep measure
+//! the cell route on the side of the break-even the gate declines; a crossing cannot be found from
+//! one side of it. Beside them runs an untimed third, a transcription of the per-row mechanism
+//! written out here, as the answer oracle: all three must return the same rows at every point of
+//! the sweep, because a cost table for a route that answers differently is a table for nothing.
 //!
 //! **What to read off it.** `ns/row` for the scan is flat in cells (it reads rows), `ns/cell` for
 //! the route is flat in rows a cell (it reads cells), and the break-even is where the route's
-//! per-cell cost meets the scan's per-row cost times the rows in a cell. The two GBIF corpora in
-//! `select.rs`'s table sit either side of it: 7.4 rows a cell at 25.8M rows, 83.4 at 3.50G.
+//! per-cell cost meets the scan's per-row cost times the rows in a cell — the `route/scan` column
+//! crossing 1.00. `select.rs`'s `CELL_ROUTE_MIN_ROWS_PER_CELL` is set from that crossing and is
+//! printed beside it, so a run that moves the crossing shows the constant that no longer matches
+//! it. The two GBIF corpora in `select.rs`'s table sit either side of it: 7.4 rows a cell at 25.8M
+//! rows, 83.4 at 3.50G.
 //!
 //! The absolute figures are one box's and the ratio is what travels. The threshold is the real
 //! depth-0 cut for this row count (`Threshold::at_depth`, `m_target = 16`, `N_occ = 1`), which is
@@ -42,7 +46,8 @@ use tempfile::TempDir;
 use tessera_authz::{write_postings, FragmentCache, PostingsReader};
 use tessera_engine::compose::{compose, EffectiveMask, RowProjection};
 use tessera_engine::select::{
-    decode_tier, DecodeTier, SelectParams, Selection, SelectionPart, SelectionParts, Threshold,
+    cell_route_pays, decode_tier, CellRoute, DecodeTier, SelectParams, Selection, SelectionPart,
+    SelectionParts, Threshold, CELL_ROUTE_MIN_ROWS_PER_CELL,
 };
 use tessera_lifecycle::{IngestBuffer, Overlay};
 use tessera_spatial::{fixed32, tiler::sort_batch, Bounds, TilerItem};
@@ -58,9 +63,11 @@ const EXTENT: Bounds = Bounds {
     y_min: 0.0,
     y_max: 1024.0,
 };
-/// `min(k, k_max_marks)`. Two of them: the client default and the operating point, to show the
-/// break-even is not a function of the cap.
-const CAPS: [usize; 2] = [30, 500];
+/// `min(k, k_max_marks)`, across the band a deployment can configure: the typical client request,
+/// the operating point (`k_max_marks` defaults to 500, so this is the default ceiling), and a
+/// deployment raising the ceiling to `max_k`. Three of them, to show where the break-even moves
+/// with the cap and where it does not.
+const CAPS: [usize; 3] = [30, 500, 5_000];
 const TRIALS: u32 = 5;
 const REPS: u32 = 3;
 
@@ -69,16 +76,18 @@ fn main() {
     let threshold = Threshold::at_depth(u64::from(ROWS), 16, 1);
     println!(
         "{ROWS} rows, depth-0 threshold {threshold:?}, best of {TRIALS}x{REPS}\n\
-         'route' is Selection::of as shipped; 'scan' is the per-row mechanism it replaced.\n"
+         'route' is the per-cell walk, 'scan' the per-row one, both as shipped and both forced;\n\
+         'gate' is which of them Selection::of would take at that occupancy.\n"
     );
 
     for cap in CAPS {
         println!("cap = {cap}");
         println!(
-            "{:>9} {:>9} {:>11} {:>11} {:>11} {:>11}",
-            "rows/cell", "cells", "scan ns/row", "route ns/c", "route ns/r", "route/scan"
+            "{:>9} {:>9} {:>11} {:>11} {:>11} {:>11} {:>6}",
+            "rows/cell", "cells", "scan ns/row", "route ns/c", "route ns/r", "route/scan", "gate"
         );
-        for rows_per_cell in [1u32, 2, 4, 8, 16, 32, 64, 128] {
+        let mut crossed_at: Option<u32> = None;
+        for rows_per_cell in [1u32, 2, 3, 4, 5, 6, 8, 12, 16, 32, 64, 128] {
             let cells = ROWS / rows_per_cell;
             let seg = segment_of(rows_per_cell);
             // Every row visible: the whole-range tier, which is the zoom-0 whole-extent request
@@ -100,30 +109,53 @@ fn main() {
             let parts = [SelectionPart::base(&seg.data, range.clone(), vis)];
             let parts = SelectionParts::new(&parts);
 
-            // Same answer, or the figures below compare two different computations.
-            let route_rows = Selection::of(&mask, &parts, &params, vis).rows;
-            let scan_rows = scan(&seg, &range, &params, vis).0;
+            // Same answer, or the figures below compare different computations. The oracle is the
+            // transcription, so the two shipped mechanisms are each checked against something
+            // neither of them is.
+            let route_rows = Selection::routed(&mask, &parts, &params, vis, CellRoute::Cells).rows;
+            let scan_rows = Selection::routed(&mask, &parts, &params, vis, CellRoute::Rows).rows;
+            let oracle_rows = scan(&seg, &range, &params, vis).0;
             assert_eq!(
-                route_rows, scan_rows,
-                "route and scan disagree at {rows_per_cell} rows a cell"
+                route_rows, oracle_rows,
+                "the cell route disagrees with the oracle at {rows_per_cell} rows a cell"
+            );
+            assert_eq!(
+                scan_rows, oracle_rows,
+                "the scan disagrees with the oracle at {rows_per_cell} rows a cell"
             );
 
             let scan_ns = best_of(|| {
-                let (rows, c) = scan(&seg, &range, &params, vis);
-                rows.len() as u64 ^ c
+                let out = Selection::routed(&mask, &parts, &params, vis, CellRoute::Rows);
+                out.rows.len() as u64 ^ out.rows_visited
             });
             let route_ns = best_of(|| {
-                let out = Selection::of(&mask, &parts, &params, vis);
+                let out = Selection::routed(&mask, &parts, &params, vis, CellRoute::Cells);
                 out.rows.len() as u64 ^ out.rows_visited
             });
 
+            let ratio = route_ns as f64 / scan_ns as f64;
+            if ratio < 1.0 && crossed_at.is_none() {
+                crossed_at = Some(rows_per_cell);
+            }
             println!(
-                "{rows_per_cell:>9} {cells:>9} {:>11.3} {:>11.3} {:>11.3} {:>11.2}",
+                "{rows_per_cell:>9} {cells:>9} {:>11.3} {:>11.3} {:>11.3} {:>11.2} {:>6}",
                 scan_ns as f64 / f64::from(ROWS),
                 route_ns as f64 / f64::from(cells),
                 route_ns as f64 / f64::from(ROWS),
-                route_ns as f64 / scan_ns as f64,
+                ratio,
+                if cell_route_pays(ROWS, cells as usize) {
+                    "cells"
+                } else {
+                    "rows"
+                },
             );
+        }
+        match crossed_at {
+            Some(rows_per_cell) => println!(
+                "  crossing at {rows_per_cell} rows a cell; the gate takes the cell route from \
+                 {CELL_ROUTE_MIN_ROWS_PER_CELL}"
+            ),
+            None => println!("  no crossing in the sweep; the scan wins throughout"),
         }
         println!();
     }
@@ -143,11 +175,12 @@ fn best_of(mut f: impl FnMut() -> u64) -> u128 {
         .expect("TRIALS is non-zero")
 }
 
-/// The mechanism the cell route replaced, transcribed: a branchless filter-count over the tile's
-/// contiguous identity slice, then the peek-reject heap over every visible row.
+/// The answer oracle: a branchless filter-count over the tile's contiguous identity slice, then
+/// the peek-reject heap over every visible row, written out here rather than called.
 ///
-/// Every row of the range is visible in this example, which is what lets the arm be a plain slice
-/// scan — the whole-range tier's shape, and the one the route competes with.
+/// Every row of the range is visible in this example, which is what lets the oracle be a plain
+/// slice scan — the whole-range tier's shape, and the one the route competes with. Both shipped
+/// mechanisms are compared against it, so neither is checked only against the other.
 fn scan(
     seg: &Segment,
     range: &std::ops::Range<u32>,
