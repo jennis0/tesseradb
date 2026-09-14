@@ -368,21 +368,21 @@ impl crate::Engine {
                     store,
                     walked,
                 );
-                (
-                    self.artifact_projections.get_or_build(
-                        &generation.prefix,
-                        view,
-                        req.layer,
-                        walked,
-                        store,
-                        &view_data.row_space,
-                        Some(&source),
-                        recorded,
-                        predicate.as_ref(),
-                        generation.segments_version,
-                        self.serves_column_only(req.layer),
-                    ),
-                    store.level_version(req.layer, walked),
+                // The version the form is of, not the store's — see
+                // `ArtifactProjections::get_or_build`. The histogram below is filed under it and
+                // is the same entry a viewport reads.
+                self.artifact_projections.get_or_build(
+                    &generation.prefix,
+                    view,
+                    req.layer,
+                    walked,
+                    store,
+                    &view_data.row_space,
+                    Some(&source),
+                    recorded,
+                    predicate.as_ref(),
+                    generation.segments_version,
+                    self.serves_column_only(req.layer),
                 )
             });
             let counts = self.masked_counts(

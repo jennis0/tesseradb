@@ -598,7 +598,7 @@ fn a_growth_between_two_reads_would_leave_the_extent_narrow() {
     // And what a request gets is the second arm, because the growth moved the level's version and
     // the whole family is rebuilt under one key.
     let projections = ArtifactProjections::new(std::env::temp_dir());
-    let before = projections.get_or_build(
+    let (before, _) = projections.get_or_build(
         "v0",
         "s0",
         LAYER,
@@ -714,7 +714,7 @@ fn a_tile_index_is_claimed_at_its_own_coordinate_and_at_no_other() {
     // The coordinate holds: claimed, and the level's first request derives nothing.
     let projections = ArtifactProjections::new(std::env::temp_dir());
     projections.adopt_indexes(tmp.path(), "v00000", &[entry("s0", projected_at)], &store);
-    let rows = projections.get_or_build(
+    let (rows, _) = projections.get_or_build(
         "v00000",
         "s0",
         LAYER,
@@ -937,19 +937,21 @@ fn an_entry_held_for_the_published_prefix_survives_a_claim_under_the_outgoing_on
                  prefix: &str,
                  store: &tessera_lifecycle::membership::ArtifactStore,
                  layout: ServingLayout| {
-        projections.get_or_build(
-            prefix,
-            "s0",
-            LAYER,
-            0,
-            store,
-            &fx.row_space,
-            None,
-            layout,
-            None,
-            0,
-            false,
-        )
+        projections
+            .get_or_build(
+                prefix,
+                "s0",
+                LAYER,
+                0,
+                store,
+                &fx.row_space,
+                None,
+                layout,
+                None,
+                0,
+                false,
+            )
+            .0
     };
 
     // The index, for an artifact-major level. The outgoing prefix held an entry of its own; the

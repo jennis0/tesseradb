@@ -24,6 +24,14 @@
 //! - **`view`**, **`layer`**, **`level`** — what the column is *of*.
 //! - **`level_version`** — a publication adds artifacts the column has never labelled, so a stale
 //!   histogram is short for the new ones and, worse, is indexed by ordinals that have since moved.
+//!   **The version of the row form the walk read, which is not always the store's**: a form waiting
+//!   for a tick's delta stands at the earlier version, so a caller that read the store instead
+//!   would file a histogram of the pre-delta column under the post-delta key, and every request in
+//!   the session would then read it as the grown column's. It comes back from
+//!   `ArtifactProjections::get_or_build` beside the form, which is the only place the two are read
+//!   together. On a row-major level this decides existence and not only the number beside it: an
+//!   artifact whose only visible rows arrived in the growth would be withheld for the life of the
+//!   key.
 //! - **`segments_version`** — row ids mean something only within one geometry.
 //! - **`overlay_version`**, and this is the disclosure-adjacent one. A suppression or a deletion
 //!   removes rows from the composed mask, so a count taken before it is **high** — an artifact

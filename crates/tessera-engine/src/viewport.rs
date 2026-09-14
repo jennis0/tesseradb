@@ -4926,7 +4926,7 @@ impl Engine {
                     // **The engine's own pool**, for `Engine::masked_counts`' reason: the
                     // projection's decode fans out, and a build outside `install` would take
                     // rayon's global pool rather than the one the deployment sized.
-                    let (rows, level_version, lineage_version) = self.pool.install(|| {
+                    let ((rows, level_version), lineage_version) = self.pool.install(|| {
                         self.write.with_artifacts(|store| {
                             let predicate = predicate_source(
                                 &layer.declaration,
@@ -4953,7 +4953,6 @@ impl Engine {
                                     generation.segments_version,
                                     crate::artifacts::serves_column_only(&layer.declaration),
                                 ),
-                                store.level_version(&layer.declaration.name, level),
                                 store.lineage_version(&layer.declaration.name, level),
                             )
                         })
@@ -5305,21 +5304,22 @@ impl Engine {
                 store,
                 level,
             );
-            (
-                self.artifact_projections.get_or_build(
-                    &generation.prefix,
-                    view,
-                    &name,
-                    level,
-                    store,
-                    &view_data.row_space,
-                    Some(&source),
-                    recorded,
-                    predicate.as_ref(),
-                    generation.segments_version,
-                    self.serves_column_only(&name),
-                ),
-                store.level_version(&name, level),
+            // **The version the form is of, not the store's.** Between an accepted write and
+            // the tick that publishes its delta the two differ, and anything keyed on the store's
+            // would name a derivation of a form that has not taken the write
+            // (`ArtifactProjections::get_or_build`).
+            self.artifact_projections.get_or_build(
+                &generation.prefix,
+                view,
+                &name,
+                level,
+                store,
+                &view_data.row_space,
+                Some(&source),
+                recorded,
+                predicate.as_ref(),
+                generation.segments_version,
+                self.serves_column_only(&name),
             )
         });
         // ⊘ **A cold drill-down on a row-major level pays the level's whole histogram**, because
@@ -6070,21 +6070,19 @@ impl Engine {
                 store,
                 attachment.level,
             );
-            (
-                self.artifact_projections.get_or_build(
-                    &ctx.generation.prefix,
-                    ctx.view,
-                    &attachment.layer,
-                    attachment.level,
-                    store,
-                    &ctx.view_data.row_space,
-                    Some(&ctx.generation.partition_source()),
-                    recorded,
-                    predicate.as_ref(),
-                    ctx.generation.segments_version,
-                    self.serves_column_only(&attachment.layer),
-                ),
-                store.level_version(&attachment.layer, attachment.level),
+            // The version the form is of — `Engine::gated_artifact`'s note, and the same reason.
+            self.artifact_projections.get_or_build(
+                &ctx.generation.prefix,
+                ctx.view,
+                &attachment.layer,
+                attachment.level,
+                store,
+                &ctx.view_data.row_space,
+                Some(&ctx.generation.partition_source()),
+                recorded,
+                predicate.as_ref(),
+                ctx.generation.segments_version,
+                self.serves_column_only(&attachment.layer),
             )
         });
         // The target's own count, from whichever structure its layout puts it in — the same
@@ -6332,7 +6330,7 @@ impl Engine {
                     continue;
                 }
                 let recorded = layer.layout_of(level);
-                let (rows, level_version, lineage_version) = self.write.with_artifacts(|store| {
+                let ((rows, level_version), lineage_version) = self.write.with_artifacts(|store| {
                     let predicate = predicate_source(
                         &layer.declaration,
                         generation,
@@ -6345,6 +6343,12 @@ impl Engine {
                         level,
                     );
                     (
+                        // **The form and the version it is of, from the one call.** A form still
+                        // waiting for a tick's delta stands at the earlier level version, and the
+                        // masked-count histogram below decides candidacy on a row-major level —
+                        // so a histogram of this form filed under the store's later version would
+                        // be read, after the tick, as though it had counted the grown column
+                        // (`ArtifactProjections::get_or_build`).
                         self.artifact_projections.get_or_build(
                             &generation.prefix,
                             view,
@@ -6358,7 +6362,6 @@ impl Engine {
                             generation.segments_version,
                             self.serves_column_only(&name),
                         ),
-                        store.level_version(&name, level),
                         store.lineage_version(&name, level),
                     )
                 });

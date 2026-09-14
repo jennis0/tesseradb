@@ -825,7 +825,45 @@ fn the_masked_count_cache_is_bounded_and_a_deny_is_not_outlived() {
         "the unsuppress re-derives, so the deleted member does not come back"
     );
 
-    // **A growth** moves the level version, and the counts move with it.
+    // **A growth of an artifact the level already holds, asked inside the window between the
+    // write and the tick.** That window is where the store and the row form disagree about the
+    // level version: `ArtifactProjections::get_or_build` hands back the level as last published,
+    // and the store already counts the write. A histogram of that form filed under the *store's*
+    // version is the entry every later request in the session reads once the tick has moved the
+    // form to it — and on a row-major level the histogram decides existence as well as the number
+    // beside it, so an artifact whose only visible rows arrived in the growth would be withheld
+    // for the life of the key.
+    //
+    // **The ordinal count does not move here, which is what makes this the case that matters.** A
+    // publication resizes the column, so candidacy's length check against the histogram catches a
+    // stale entry; a growth leaves both at the level's ordinal count. Rows 8,000 onwards are in no
+    // artifact of this layer, so the memberships stay disjoint and the level keeps its column.
+    engine
+        .grow_memberships(
+            FLAT.into(),
+            0,
+            vec![tessera_lifecycle::IncomingGrowth::from_entities(
+                "p0".into(),
+                fx.members(8_000..8_500),
+            )],
+        )
+        .expect("points joining an artifact that exists is an ordinary write");
+    let in_window = ask(&engine);
+    assert_eq!(
+        in_window[&Some("p0".to_string())],
+        deleted[&Some("p0".to_string())],
+        "the form in the window is the level as last published, so the count is the pre-growth one"
+    );
+    tick(&engine);
+    let joined = ask(&engine);
+    assert_eq!(
+        joined[&Some("p0".to_string())],
+        deleted[&Some("p0".to_string())] + 500,
+        "the growth reaches the count on the first request after the tick; a histogram of the \
+         pre-tick form filed under the store's version would still be the pre-growth one"
+    );
+
+    // **A publication** moves the level version too, and the counts move with it.
     engine
         .publish_artifacts(
             FLAT.into(),
@@ -834,6 +872,7 @@ fn the_masked_count_cache_is_bounded_and_a_deny_is_not_outlived() {
             vec![labelled(&fx, "grown", (2..400).collect(), vec![9, 18, 27])],
         )
         .unwrap();
+    let _ = ask(&engine);
     tick(&engine);
     let grown = ask(&engine);
     assert!(
@@ -842,7 +881,7 @@ fn the_masked_count_cache_is_bounded_and_a_deny_is_not_outlived() {
     );
     assert_eq!(
         grown[&Some("p0".to_string())],
-        deleted[&Some("p0".to_string())],
+        joined[&Some("p0".to_string())],
         "and the artifacts that did not move keep their counts"
     );
 

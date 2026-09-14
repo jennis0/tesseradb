@@ -3308,6 +3308,14 @@ impl ArtifactProjections {
     /// built from records that have since moved. That is the whole of the freshness argument, and
     /// a stale form here is a wrong masked count with nothing reporting a fault.
     ///
+    /// **The returned version is the form's own, which is not always the store's.** The level
+    /// version is a floor here ([`ProjectionKey::stale_form_of`]), so between an accepted write and
+    /// the tick that publishes its delta the form handed back is the level as last published and
+    /// stands at the *earlier* version. A caller keying anything on the store's version instead
+    /// would file a derivation of this form under a version it is not of — and the masked-count
+    /// histogram, which decides a row-major level's candidacy, would then be read by every later
+    /// request in the session as though it had counted the grown column.
+    ///
     /// **The build runs outside this cache's lock**, so a slow projection does not block every
     /// other layer's requests behind it. Two threads racing the same key both build and the last
     /// one wins; they build from the same level version over the same row space, so the two
@@ -3331,7 +3339,7 @@ impl ArtifactProjections {
         predicate: Option<&PredicateSource<'_>>,
         segments_version: u64,
         column_only: bool,
-    ) -> Arc<ArtifactRows> {
+    ) -> (Arc<ArtifactRows>, u64) {
         let key = ProjectionKey {
             prefix: prefix.to_string(),
             view: view.to_string(),
@@ -3368,7 +3376,10 @@ impl ArtifactProjections {
             // equality: a form under another prefix, or of another view, or of an attribute
             // predicate whose value column the geometry has moved, describes something else.
             if held.key.stale_form_of(&key) && held.rows.covers(space) {
-                return Arc::clone(&held.rows);
+                // **Its own version and not `key`'s**: see the doc above. A form still waiting for
+                // a tick's delta is the level at the earlier version, and that is what anything
+                // derived from it must be filed under.
+                return (Arc::clone(&held.rows), held.key.level_version);
             }
         }
 
@@ -3471,6 +3482,7 @@ impl ArtifactProjections {
             );
             self.builds
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let version = key.level_version;
             self.insert_newest(
                 map_key,
                 Held {
@@ -3479,7 +3491,7 @@ impl ArtifactProjections {
                     rows: Arc::clone(&rows),
                 },
             );
-            return rows;
+            return (rows, version);
         }
         let mut adopted = self.claim_index(prefix, view, layer, level, key.level_version);
         let from_prefix = adopted.is_some();
@@ -3644,6 +3656,7 @@ impl ArtifactProjections {
         );
         self.builds
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let version = key.level_version;
         self.insert_newest(
             map_key,
             Held {
@@ -3652,7 +3665,7 @@ impl ArtifactProjections {
                 rows: Arc::clone(&rows),
             },
         );
-        rows
+        (rows, version)
     }
 
     /// Take the fold-written index for this `(view, layer, level)` if one was adopted and its

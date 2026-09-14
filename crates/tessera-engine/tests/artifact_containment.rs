@@ -389,7 +389,7 @@ fn no_partition_is_built_under_a_plugin_that_is_not_the_builtin() {
         postings: &fx.postings,
         data_plugin_hash: "a plugin nobody here has seen",
     };
-    let rows = projections.get_or_build(
+    let (rows, _) = projections.get_or_build(
         "v00000",
         "s0",
         LAYER,
@@ -419,7 +419,7 @@ fn no_partition_is_built_under_a_plugin_that_is_not_the_builtin() {
         postings: &fx.postings,
         data_plugin_hash: &builtin,
     };
-    let rows = projections.get_or_build(
+    let (rows, _) = projections.get_or_build(
         "v00000",
         "s0",
         LAYER,
@@ -439,7 +439,7 @@ fn no_partition_is_built_under_a_plugin_that_is_not_the_builtin() {
     // signatures, which no row space is involved in, so the dear half of a level's build — one
     // pass over every term's posting — is paid once however many views carry the layer. What is
     // per view is the projection-loss test, and that stays on the row form.
-    let second = projections.get_or_build(
+    let (second, _) = projections.get_or_build(
         "v00000",
         "s1",
         LAYER,
@@ -519,7 +519,7 @@ fn a_partition_is_adopted_at_its_own_coordinate_and_at_no_other() {
     let projections = ArtifactProjections::new(std::env::temp_dir());
     projections.adopt_all(tmp.path(), "v00000", &[entry(composed_at)], &store);
     assert_eq!(projections.adopted(), 1);
-    let rows = projections.get_or_build(
+    let (rows, _) = projections.get_or_build(
         "v00000",
         "s0",
         LAYER,
@@ -548,7 +548,7 @@ fn a_partition_is_adopted_at_its_own_coordinate_and_at_no_other() {
             0,
             "a partition composed at {moved} must not answer for a level at {composed_at}"
         );
-        let rows = projections.get_or_build(
+        let (rows, _) = projections.get_or_build(
             "v00000",
             "s0",
             LAYER,
