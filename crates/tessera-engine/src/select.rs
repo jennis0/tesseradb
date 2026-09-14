@@ -23,6 +23,21 @@
 //! cells a scattered mask touches. [`scan_cell_piece`] carries the equality argument. Both routes
 //! evaluate the same definition over the same composed mask and return the same rows.
 //!
+//! **What the cell route costs, and where it starts paying** (measured 2026-09-14, zoom 0 over the
+//! whole extent, every row visible, hot, one core). A cell step costs about 5 ns and a scanned row
+//! about 0.8 ns, so the break-even is near six rows to a cell and the margin then grows with the
+//! cell. The two corpora measured sit either side of that:
+//!
+//! | corpus | rows | occupied cells | rows a cell | scan | cell route |
+//! |---|---|---|---|---|---|
+//! | GBIF at `data/ladder/gbif-64p` | 25,846,007 | 3,508,005 | 7.4 | 21.5 ms | 17.4–18.9 ms |
+//! | GBIF whole (rung 6) | 3,495,729,729 | 41,899,178 | 83.4 | ~2.8 s | ~0.2 s |
+//!
+//! The rung-6 row counts its cells from that bundle's Morton column (measured); its two times are
+//! the same two rates applied to them, so they are **modelled from measured inputs** rather than
+//! served. What the route removes there is the 28 GB of identity column the scan reads, which is
+//! also what made the whole-extent request cost 20 s from disc under a 24 GiB cap.
+//!
 //! **Two things a reader needs that are not obvious from the code:**
 //!
 //! - **Nesting holds only for a fixed `cap`.** `cap = min(request_k, k_max_marks)` and
@@ -459,10 +474,10 @@ impl CellWalk<'_> {
 /// How many of `slice`'s ascending identities are below `cut`, and how many of them were read.
 ///
 /// **The two ends are answered before the search runs**, and that is a measured shape rather than
-/// a tidiness: the cells of a real corpus are short — 7.4 rows a cell over the 25.8M-row GBIF
-/// corpus — so a binary search over one is three unpredictable branches where the answer is
-/// usually at an end. At a whole-map zoom `P_d` is a millionth of the identity space and the first
-/// identity settles almost every cell; under a saturating threshold the last one does.
+/// a tidiness: the cells of a real corpus hold tens of rows at most (the module doc's table), so a
+/// binary search over one is three unpredictable branches where the answer is usually at an end.
+/// At a whole-map zoom `P_d` is a millionth of the identity space and the first identity settles
+/// almost every cell; under a saturating threshold the last one does.
 ///
 /// The probe count is the route's cost, and [`Selection::rows_visited`] is an observation of that
 /// cost rather than a restatement of the tile's visible count — hence returning it. A binary
@@ -523,10 +538,10 @@ fn scan_cell_piece(
     // **The head settles most cells, and settling them on one read is what makes the route pay.**
     // The piece's identities ascend, so its first is the smallest that can enter either answer: a
     // head at or above `P_d` puts the whole rest of the cell above it, and a head the heap already
-    // rejects is followed only by larger ones. At a whole-map zoom both hold almost everywhere —
+    // rejects is followed only by larger ones. At a whole-map zoom both hold almost everywhere:
     // `P_d` is a millionth of the identity space and the `cap` smallest identities of a corpus are
-    // smaller still — and the cells of a real corpus are short, 7.4 rows over the 25.8M-row GBIF
-    // corpus, so a cell walked in full would cost more than the rows it holds.
+    // smaller still. Without this a cell is walked in full, which on a corpus of short cells costs
+    // more than the rows the cell holds — the module doc's table has what that measured.
     let head = slice[0];
     let head_counts = !walk.count_done && params.threshold.admits(head);
     let head_enters = !walk.heap_done

@@ -1523,10 +1523,11 @@ impl MortonSlice {
 ///
 /// # Size
 ///
-/// One `u32` per **occupied cell**, not per row — 4 B × 3,508,005 = 14.0 MB for the 25,846,007-row
-/// GBIF corpus at `data/ladder/gbif-64p` (measured, 2026-09-14), where `morton.u32` is 103 MB and
-/// the identity column 207 MB. A corpus whose cells are large pays less per row, not more; the
-/// ceiling is 4 B/row, reached only where every row has a cell to itself.
+/// One `u32` per **occupied cell**, not per row. Both GBIF corpora, counted from their Morton
+/// columns (measured, 2026-09-14): 3,508,005 cells over 25,846,007 rows is 14.0 MB against 103 MB
+/// of `morton.u32` and 207 MB of identity column, and 41,899,178 cells over 3,495,729,729 rows is
+/// 167.6 MB against 14.0 GB and 28.0 GB. A corpus whose cells are large pays less per row, not
+/// more; the ceiling is 4 B/row, reached only where every row has a cell to itself.
 #[derive(Debug)]
 pub struct CutIndex {
     mmap: Mmap,
