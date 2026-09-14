@@ -14,6 +14,15 @@
 //! tiles are equal screen area, so mark count *is* density), and a **cap**. §7.2 carries the
 //! reasoning, the nesting proof and the accepted residuals; this module implements it.
 //!
+//! **Two routes through the definition, one answer.** Rows are stored in `(morton, tessera_id)`
+//! order, so within a leaf Morton cell the identities ascend: `C_θ` for that cell is a prefix
+//! length and the cell's smallest visible identities are the head of it. Where a tile's mask is
+//! dense enough to decode as ranges, selection walks the cells (`tessera_store::read::CutIndex`
+//! says where they begin) and reads a bounded number of identities in each, instead of every
+//! visible row of the tile; where it is sparse it scans, which is cheaper than visiting the many
+//! cells a scattered mask touches. [`scan_cell_piece`] carries the equality argument. Both routes
+//! evaluate the same definition over the same composed mask and return the same rows.
+//!
 //! **Two things a reader needs that are not obvious from the code:**
 //!
 //! - **Nesting holds only for a fixed `cap`.** `cap = min(request_k, k_max_marks)` and
@@ -192,19 +201,12 @@ pub struct SelectParams {
     /// `min(request_k, k_max_marks)`. Applied *inside* the definition, which is free: `served(T)`
     /// is a `tessera_id` prefix, so computing at `min(k, k_max_marks)` and computing at
     /// `k_max_marks` then truncating to `k` give identical output. Doing it inside bounds the
-    /// selection heap and the output gather. **It does not bound the count pass** — `C_θ` is a
-    /// masked count over the tile, and the direct-evaluation route implemented here reads every
-    /// visible row to obtain it.
-    ///
-    /// That is a property of *this route*, not of the definition, and the distinction is worth
-    /// keeping straight because the opposite claim is easy to make and wrong. Exact sub-Σvisible
-    /// evaluations exist: storage order is `(morton, tessera_id)`, so within a single leaf Morton
-    /// cell the identity column is **sorted** — one binary search finds where ids reach `P_d`, and
-    /// `C_θ` for that cell is a range cardinality over the mask, which is O(containers touched)
-    /// rather than O(rows). A coarser tile is a merge of `4^(16-d)` such runs, so the trick pays
-    /// where the runs are few or the tile is dense, and the scan wins where they are many. None of
-    /// it is built, the obviously-correct single pass being preferred until the trigger §7.2 records
-    /// is met.
+    /// selection heap and the output gather. **It does not bound `C_θ`**, which is a masked count
+    /// over the whole tile — but the route does not read the whole tile to obtain it: storage
+    /// order is `(morton, tessera_id)`, so identities ascend within a leaf Morton cell, and the
+    /// rows below `P_d` are a prefix of each cell that a binary search finds. The two dense tiers
+    /// evaluate per cell ([`scan_cell_piece`]); the value tier scans, which is what costs least
+    /// where the visible rows are scattered over many cells.
     pub cap: usize,
     pub threshold: Threshold,
 }
@@ -415,6 +417,137 @@ impl<'a> SelectionParts<'a> {
     }
 }
 
+/// Where the leaf Morton cell being walked ends, and what is already settled about it.
+///
+/// Storage order is `(morton, tessera_id)`, so identities ascend **within** a leaf cell and not
+/// across one. Both of selection's quantities are therefore prefix questions per cell, and both
+/// answer themselves before the cell is exhausted: the rows below `P_d` are a prefix, and the rows
+/// that can still enter the heap are a prefix. `count_done` and `heap_done` are those two prefixes
+/// having ended. A cell's rows may arrive in several pieces (a run of the mask can end inside one),
+/// so the state belongs to the cell rather than to the piece.
+struct CellWalk<'a> {
+    /// The cell starts strictly inside the part's row range, segment-local and ascending — the
+    /// boundaries the walk crosses ([`tessera_store::read::CutIndex`]).
+    starts: &'a [u32],
+    next: usize,
+    /// Where the current cell ends, in **view** row space. Starts at the part's own range start,
+    /// so the first row walked opens the first cell.
+    end: u32,
+    count_done: bool,
+    heap_done: bool,
+}
+
+impl CellWalk<'_> {
+    /// Advance to the cell holding `row`, resetting the prefix state at each boundary crossed.
+    ///
+    /// Rows arrive ascending, so this only ever moves forward; the last cell of a part ends at
+    /// the part's range end, which is where the boundary list runs out.
+    fn at(&mut self, row: u32, base: u32, part_end: u32) {
+        while row >= self.end {
+            self.end = match self.starts.get(self.next) {
+                Some(&start) => base + start,
+                None => part_end,
+            };
+            self.next += 1;
+            self.count_done = false;
+            self.heap_done = false;
+        }
+    }
+}
+
+/// `slice.partition_point(|&id| id < cut)`, reporting how many identities it read.
+///
+/// Written out rather than called on the slice because the probe count is the route's cost and
+/// [`Selection::rows_visited`] is an observation of that cost, not a restatement of the tile's
+/// visible count.
+fn identities_below(slice: &[u64], cut: u64, probes: &mut usize) -> usize {
+    let (mut lo, mut hi) = (0usize, slice.len());
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        *probes += 1;
+        if slice[mid] < cut {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    lo
+}
+
+/// One contiguous piece of visible rows inside one leaf cell: its contribution to `C_θ` and to the
+/// heap, read from the head of the piece and no further than it must be.
+///
+/// **Both halves compute exactly what the row-by-row scan computes, and the equality is the point
+/// of the construction rather than an approximation of it.**
+///
+/// - `C_θ`. The piece's identities ascend, so `{ i ∈ piece : id(i) < P_d }` is a prefix of it and
+///   its size is a binary search. Every row of the piece is visible — it came from the mask's own
+///   runs — so the prefix's size *is* the masked count, which is what
+///   [`design §7.2`](../../../docs/design/architecture.md) defines `C_θ` as. Once a piece's prefix
+///   ends short of the piece, no later row of the cell is below `P_d` either, and the cell is
+///   settled for counting.
+/// - The heap. Rows enter it in exactly the order and under exactly the test the scan applies.
+///   What the cell route adds is leaving the cell early: an identity the heap rejects is followed,
+///   within the cell, only by larger ones, and the heap's largest member never grows — so every row
+///   the walk skips is a row the scan would have rejected. The served set is identical, not merely
+///   equivalent.
+///
+/// **This is still direct evaluation, and not the candidate-list route decision 0008 declined.**
+/// Nothing precomputed is consulted for *which items exist*: every identity read is read because
+/// the composed mask says its row is visible, the floor and the cap are evaluated over that mask,
+/// and the answer is the same set of rows the scan returns for every mask, every `k` and every
+/// threshold. The index the walk follows says only where one leaf cell's rows end and the next
+/// begins — a property of row order, identical for every principal, carrying no identity and no
+/// membership. There is no fixed-width per-node list to exhaust, so the empty-tile cliff a
+/// candidate list has below coverage `1/c` has nothing to arise from: a sparse principal's tile is
+/// still walked to its end, and still serves `k_min` (I7).
+#[allow(clippy::too_many_arguments)]
+fn scan_cell_piece(
+    start_row: u32,
+    slice: &[u64],
+    params: &SelectParams,
+    walk: &mut CellWalk<'_>,
+    rows_visited: &mut u64,
+    c_theta: &mut u64,
+    heap: &mut BinaryHeap<(u64, u32)>,
+) {
+    if slice.is_empty() {
+        return;
+    }
+    let mut probes = 0usize;
+    if !walk.count_done {
+        match params.threshold {
+            // θ_d ≥ 1 admits every identity, so the count needs no identity read at all.
+            Threshold::Saturated => *c_theta += slice.len() as u64,
+            Threshold::Cut(cut) => {
+                let below = identities_below(slice, cut, &mut probes);
+                *c_theta += below as u64;
+                if below < slice.len() {
+                    walk.count_done = true;
+                }
+            }
+        }
+    }
+    let mut read = 0usize;
+    if !walk.heap_done {
+        for (i, &id) in slice.iter().enumerate() {
+            read = i + 1;
+            if heap.len() == params.cap {
+                // Safe: len == cap >= 1 here, since cap == 0 returned early in `of`.
+                if id >= heap.peek().expect("non-empty at len == cap").0 {
+                    walk.heap_done = true;
+                    break;
+                }
+                heap.pop();
+            }
+            heap.push((id, start_row + i as u32));
+        }
+    }
+    // The two halves read overlapping positions of one piece, and no route can read more distinct
+    // rows than the piece holds — so the charge is their sum, bounded by the piece.
+    *rows_visited += ((read + probes) as u64).min(slice.len() as u64);
+}
+
 /// One tile's selected rows, ascending by `tessera_id`.
 pub struct Selection {
     /// Row indices in **view row space**, **ascending by the row's `tessera_id`** — not by row
@@ -577,37 +710,6 @@ impl Selection {
             let heap_cap = params.cap.min(visible as usize).saturating_add(1);
             let mut heap: BinaryHeap<(u64, u32)> = BinaryHeap::with_capacity(heap_cap);
 
-            // The slice consumer, shared by the two contiguous tiers — one transcription, so the
-            // tiers cannot disagree about what a row means. A nested fn rather than a closure:
-            // the state is passed explicitly, which keeps the value tier free to drive its own
-            // loop over the same variables below.
-            fn scan_slice(
-                run_start: u32,
-                slice: &[u64],
-                params: &SelectParams,
-                rows_visited: &mut u64,
-                c_theta: &mut u64,
-                heap: &mut BinaryHeap<(u64, u32)>,
-            ) {
-                *rows_visited += slice.len() as u64;
-                match params.threshold {
-                    Threshold::Saturated => *c_theta += slice.len() as u64,
-                    Threshold::Cut(cut) => {
-                        *c_theta += slice.iter().filter(|&&id| id < cut).count() as u64;
-                    }
-                }
-                for (i, &id) in slice.iter().enumerate() {
-                    if heap.len() == params.cap {
-                        // Safe: len == cap >= 1 here, since cap == 0 returned early in `of`.
-                        if id >= heap.peek().expect("non-empty at len == cap").0 {
-                            continue;
-                        }
-                        heap.pop();
-                    }
-                    heap.push((id, run_start + i as u32));
-                }
-            }
-
             // **One `c_theta`, one heap, across every part.** This is where §7.2's "per tile, not
             // per segment" actually lands: the counting pass accumulates over the union, and the
             // heap's `cap` is the tile's whole budget, so the `cap` smallest ids in the *union*
@@ -621,28 +723,53 @@ impl Selection {
                 let base = part.row_base;
                 let view_range = part.view_range();
                 let range_len = u64::from(view_range.end - view_range.start);
-                match decode_tier(part.visible, range_len) {
-                    DecodeTier::FullRange => {
-                        scan_slice(
-                            view_range.start,
-                            &ids[part.range.start as usize..part.range.end as usize],
-                            params,
-                            &mut rows_visited,
-                            &mut c_theta,
-                            &mut heap,
-                        );
+                let tier = decode_tier(part.visible, range_len);
+                match tier {
+                    DecodeTier::FullRange | DecodeTier::Runs => {
+                        // Per cell, not per row — see [`CellWalk`]. The boundaries are the cell
+                        // starts strictly inside the part's range: the range's own start opens
+                        // the first cell whether or not a cell begins there, so a range that is
+                        // not cell-aligned is walked as correctly as one that is.
+                        let mut walk = CellWalk {
+                            starts: part
+                                .segment
+                                .cuts
+                                .starts_within(part.range.start.saturating_add(1), part.range.end),
+                            next: 0,
+                            end: view_range.start,
+                            count_done: false,
+                            heap_done: false,
+                        };
+                        let rows_visited = &mut rows_visited;
+                        let c_theta = &mut c_theta;
+                        let heap = &mut heap;
+                        let mut consume = |run: Range<u32>| {
+                            // `run` is in view space; the identity column is indexed
+                            // segment-locally. A run is cut at every cell boundary it crosses,
+                            // because the ordering the route rests on holds within a cell and
+                            // not across one.
+                            let mut lo = run.start;
+                            while lo < run.end {
+                                walk.at(lo, base, view_range.end);
+                                let hi = run.end.min(walk.end);
+                                scan_cell_piece(
+                                    lo,
+                                    &ids[(lo - base) as usize..(hi - base) as usize],
+                                    params,
+                                    &mut walk,
+                                    rows_visited,
+                                    c_theta,
+                                    heap,
+                                );
+                                lo = hi;
+                            }
+                        };
+                        match tier {
+                            // Every row of the range is visible, so the range is one run.
+                            DecodeTier::FullRange => consume(view_range.clone()),
+                            _ => mask.for_each_visible_run(view_range.clone(), &mut consume),
+                        }
                     }
-                    DecodeTier::Runs => mask.for_each_visible_run(view_range.clone(), |run| {
-                        // `run` is in view space; the identity column is indexed segment-locally.
-                        scan_slice(
-                            run.start,
-                            &ids[(run.start - base) as usize..(run.end - base) as usize],
-                            params,
-                            &mut rows_visited,
-                            &mut c_theta,
-                            &mut heap,
-                        );
-                    }),
                     DecodeTier::Values => {
                         // The loop is driven here rather than fed through a closure, and that is a
                         // measured decision, not style: routing this per-value state through a
