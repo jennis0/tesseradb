@@ -17,25 +17,28 @@
 //! **Two routes through the definition, one answer.** Rows are stored in `(morton, tessera_id)`
 //! order, so within a leaf Morton cell the identities ascend: `C_θ` for that cell is a prefix
 //! length and the cell's smallest visible identities are the head of it. Where a tile's mask is
-//! dense enough to decode as ranges, selection walks the cells (`tessera_store::read::CutIndex`
-//! says where they begin) and reads a bounded number of identities in each, instead of every
-//! visible row of the tile; where it is sparse it scans, which is cheaper than visiting the many
-//! cells a scattered mask touches. [`scan_cell_piece`] carries the equality argument. Both routes
-//! evaluate the same definition over the same composed mask and return the same rows.
+//! dense enough to decode as ranges, and the segment's cells are long enough to pay for a cell
+//! step ([`cell_route_pays`]), selection walks the cells (`tessera_store::read::CutIndex` says
+//! where they begin) and reads a bounded number of identities in each, instead of every visible
+//! row of the tile. Where the mask is sparse it scans, which is cheaper than visiting the many
+//! cells a scattered mask touches, and where the cells are short it scans for the reason the next
+//! paragraph measures. [`scan_cell_piece`] carries the equality argument. Both routes evaluate the
+//! same definition over the same composed mask and return the same rows.
 //!
 //! **What the cell route costs, and where it starts paying.** The trade is one cell step against
 //! the rows a cell holds, so the corpus decides it. `examples/cell_route.rs` sweeps rows a cell at
 //! a fixed row count with both mechanisms over identical inputs — re-run it rather than trusting
-//! these numbers second-hand — and measures a scanned row at **0.63–0.87 ns** and a cell step at
-//! **2.9 ns** where cells are short, rising to 5.2 (`cap` 30) or 20.5 (`cap` 500) by 128 rows a
-//! cell as the count's search lengthens. The break-even is therefore near **four to eight rows a
-//! cell**, and the margin grows with the cell: 0.10× the scan at 64 rows a cell, `cap` 30.
+//! these numbers second-hand — and measures a scanned row at **0.70–0.92 ns** and a cell step at
+//! **3.1–4.0 ns** where cells are short, rising to 5.4–5.6 (`cap` 30) or 21.1–22.7 (`cap` 500) by
+//! 128 rows a cell as the count's search lengthens. The break-even is between **four and five rows
+//! a cell** at the caps a default deployment serves, and the margin grows with the cell: 0.10× the
+//! scan at 64 rows a cell, `cap` 30. [`CELL_ROUTE_MIN_ROWS_PER_CELL`] carries the whole sweep.
 //!
-//! **Below that the route is the slower one**, by up to 4.2× at one row a cell, where every cell
-//! step buys a single row. No gate excludes such a corpus: the tier is chosen from the mask's
-//! density and not from the segment's cell occupancy, so a corpus of distinct positions pays the
-//! loss. The two GBIF corpora are both past the break-even, which is why the gate does not exist
-//! yet rather than why it should not.
+//! **Below that the route is the slower one**, by up to 4.5× at one row a cell, where every cell
+//! step buys a single row. [`CELL_ROUTE_MIN_ROWS_PER_CELL`] is the gate that keeps such a corpus
+//! off it: the tier is still chosen from the mask's density, and a dense part whose segment holds
+//! fewer than that many rows a cell is then read row by row ([`scan_row_piece`]) rather than cell
+//! by cell. The two GBIF corpora are both past it and take the cell route.
 //!
 //! | corpus | rows | occupied cells | rows a cell | scan | cell route |
 //! |---|---|---|---|---|---|
@@ -328,7 +331,7 @@ pub const RUN_DECODE_MIN_DENSITY_PCT: u64 = 95;
 ///
 /// Both inputs are already disclosed per tile (§7.1 discloses `visible`; the tile grid discloses
 /// `range.len()`), so the tier — though observable in timing — is a function of quantities the
-/// viewer already has. (C19 register note pending owner sign-off; recorded at landing, not here.)
+/// viewer already has. Appendix C's **C19** accepts the timing variance that follows.
 pub fn decode_tier(visible: u64, range_len: u64) -> DecodeTier {
     if visible == range_len {
         DecodeTier::FullRange
@@ -337,6 +340,75 @@ pub fn decode_tier(visible: u64, range_len: u64) -> DecodeTier {
     } else {
         DecodeTier::Values
     }
+}
+
+/// The mean rows a leaf Morton cell at which the per-cell route starts costing less than reading
+/// every visible row of a dense part.
+///
+/// **Measured, re-runnable and dated** (`examples/cell_route.rs`, 2026-09-14, one box, three runs:
+/// 2²⁰ rows laid out on a lattice of a fixed number of rows to the cell, the whole-range tier, the
+/// real depth-0 cut, best of 5×3). The trade is one cell step against the rows that step skips,
+/// and the runner measures a scanned row at 0.70–0.92 ns against a cell step at 3.1–4.0 ns where
+/// cells are short. Its `route/scan` column, as a range over those runs — below 1.00 the cell
+/// route is the cheaper one:
+///
+/// | rows a cell | 1 | 2 | 3 | 4 | 5 | 6 | 8 | 16 | 64 |
+/// |---|---|---|---|---|---|---|---|---|---|
+/// | `cap` 30 | 4.2–4.5 | 2.1–2.3 | 1.3–1.5 | 1.04–1.08 | 0.85–0.88 | 0.68–0.93 | 0.52–0.56 | 0.30 | 0.10 |
+/// | `cap` 500 | 3.6–3.8 | 2.0–2.1 | 1.4–1.5 | 1.09–1.16 | 0.92–0.98 | 0.82–0.84 | 0.65–0.66 | 0.44 | 0.23 |
+/// | `cap` 5000 | 2.1–2.2 | 1.4–1.5 | 1.2–1.3 | 1.12 | 1.04–1.08 | 0.99–1.00 | 0.94–0.96 | 0.83 | 0.72 |
+///
+/// **Six, where the crossing at the default caps is between four and five.** `cap` is
+/// `min(k, k_max_marks)` and `k_max_marks` defaults to 500, so the first two rows are the band a
+/// default deployment serves in, and they cross cleanly: the route loses by 4–16% at four rows a
+/// cell and wins by 2–15% at five. Raising `k_max_marks` towards `max_k` moves the crossing out
+/// rather than in, because a larger heap makes each cell step dearer while a scanned row barely
+/// moves — at `cap` 5000 the route still loses at five and only reaches parity at six. Six is
+/// therefore the lowest occupancy at which the route loses at no measured cap, and it is a margin
+/// of one step over the crossing in the band a deployment reaches by default.
+///
+/// **The other end is what the gate exists for.** At one row a cell — a corpus of distinct
+/// full-precision positions — a cell step buys a single row and the route costs 2.1–4.5× the scan.
+/// Both GBIF corpora sit well past the constant (7.4 and 83.4 rows a cell, measured), so it moves
+/// neither of them; what it moves is the corpus nothing else excluded. Moving the constant without
+/// re-running the runner is guesswork.
+pub const CELL_ROUTE_MIN_ROWS_PER_CELL: u64 = 6;
+
+/// Does a segment of `row_count` rows over `occupied_cells` leaf Morton cells take the per-cell
+/// route on its dense tiers?
+///
+/// **Both inputs are mask-free.** The row count and the length of `cuts.u32` are properties of the
+/// segment: they are the same numbers for every principal, every token and every viewport, and
+/// neither moves when a grant does. So the route a part takes is not a function of the viewer's
+/// mask at all, and the timing it produces carries nothing about the viewer's own coverage — a
+/// weaker residual than the tier gate above, whose inputs are per-viewer quantities §7.1 already
+/// discloses. Appendix C's **C19** records it.
+///
+/// The comparison is `rows >= T · cells` rather than `rows / cells >= T` so that a segment sitting
+/// on the boundary is decided exactly rather than by where the division floors. A segment with no
+/// cells has no rows either, and takes the scan, whose loops are empty for it.
+///
+/// Public for the same reason [`decode_tier`] is: the equivalence test and
+/// `examples/cell_route.rs` ask the shipped predicate rather than a transcription of it.
+pub fn cell_route_pays(row_count: u32, occupied_cells: usize) -> bool {
+    occupied_cells > 0
+        && u64::from(row_count) >= CELL_ROUTE_MIN_ROWS_PER_CELL * occupied_cells as u64
+}
+
+/// Which mechanism a dense part is evaluated by, for the callers that must pin it.
+///
+/// [`Selection::of`] answers [`CellRoute::Gated`], which is what the service serves. The other two
+/// exist so that the equivalence test can run both mechanisms over one part and compare their
+/// served rows, and so that `examples/cell_route.rs` can time the route the gate would have
+/// declined — a break-even cannot be measured from the side of it the gate allows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CellRoute {
+    /// [`cell_route_pays`] decides, per part.
+    Gated,
+    /// Per leaf Morton cell, whatever the occupancy.
+    Cells,
+    /// Per visible row.
+    Rows,
 }
 
 /// One segment's contribution to one tile: the segment, its own row range for that tile, and
@@ -598,12 +670,63 @@ fn scan_cell_piece(
     *rows_visited += ((read + probes) as u64).min(slice.len() as u64);
 }
 
+/// One contiguous piece of visible rows, read row by row: the whole piece counted against the
+/// threshold, and every row of it offered to the heap.
+///
+/// **The mechanism the cell route replaced, kept because on a corpus of short cells it is the
+/// cheaper one.** It reads no cut index and makes no ordering assumption, so it is correct over
+/// any piece of any part; what it cannot do is leave a cell early, because it does not know where
+/// the cells are. [`cell_route_pays`] chooses between the two, and the equivalence test pins them
+/// to the same served rows.
+///
+/// `rows_visited` takes the whole piece here — every row is read — where the cell route takes the
+/// probes and heap reads it actually made. The field is what the mechanism read, so the two
+/// differ by exactly what the cell route skips.
+#[inline]
+fn scan_row_piece(
+    start_row: u32,
+    slice: &[u64],
+    params: &SelectParams,
+    rows_visited: &mut u64,
+    c_theta: &mut u64,
+    heap: &mut BinaryHeap<(u64, u32)>,
+) {
+    if slice.is_empty() {
+        return;
+    }
+    // A branchless filter-count over the contiguous identity view, which the compiler vectorises;
+    // the heap feed follows it rather than interleaving, as the cell route's two halves also do.
+    match params.threshold {
+        Threshold::Saturated => *c_theta += slice.len() as u64,
+        Threshold::Cut(cut) => *c_theta += slice.iter().filter(|&&id| id < cut).count() as u64,
+    }
+    for (i, &id) in slice.iter().enumerate() {
+        if heap.len() == params.cap {
+            // Safe: len == cap >= 1 here, since cap == 0 returned early in `of`.
+            if id >= heap.peek().expect("non-empty at len == cap").0 {
+                continue;
+            }
+            heap.pop();
+        }
+        heap.push((id, start_row + i as u32));
+    }
+    *rows_visited += slice.len() as u64;
+}
+
 /// One tile's selected rows, ascending by `tessera_id`.
 pub struct Selection {
     /// Row indices in **view row space**, **ascending by the row's `tessera_id`** — not by row
     /// index. Resolve each to its segment with [`SelectionParts::resolve`] before gathering.
     pub rows: Vec<u32>,
     /// How many rows this call actually read, counted **inside** the loops that read them.
+    ///
+    /// **Each mechanism charges what it read, so the number moves with the route and the served
+    /// rows do not.** [`scan_row_piece`] charges every row of a piece, because it reads every row
+    /// of it. [`scan_cell_piece`] charges the identity probes plus the heap reads it made, clamped
+    /// to the piece, because that is what it read and the rows it skipped were never touched. The
+    /// value tier charges one per decoded value. A part that crosses [`cell_route_pays`] therefore
+    /// reports a different figure for the same tile and the same mask, which is the cost the gate
+    /// exists to choose between.
     ///
     /// Counted here rather than inferred by the caller, and that distinction is the whole value of
     /// the field. An earlier version had the caller increment its stage counter from the tile's
@@ -637,6 +760,22 @@ impl Selection {
         parts: &SelectionParts<'_>,
         params: &SelectParams,
         visible: u64,
+    ) -> Self {
+        Selection::routed(mask, parts, params, visible, CellRoute::Gated)
+    }
+
+    /// [`Selection::of`] with the dense tiers' mechanism named rather than gated.
+    ///
+    /// The served rows are the same for every value of `route` — that is what the equivalence test
+    /// asserts, over one part evaluated both ways — and `rows_visited` is not, because it is what
+    /// the mechanism read. The service calls [`Selection::of`]; this exists so that a caller who
+    /// must compare the two mechanisms, or time the one the gate would decline, can reach them.
+    pub fn routed(
+        mask: &EffectiveMask,
+        parts: &SelectionParts<'_>,
+        params: &SelectParams,
+        visible: u64,
+        route: CellRoute,
     ) -> Self {
         // A request that asks for no points still wants counts (the `k = 0` count-only arm the
         // benches measure). Without this the general branch would run a full counting pass whose
@@ -774,7 +913,38 @@ impl Selection {
                 let view_range = part.view_range();
                 let range_len = u64::from(view_range.end - view_range.start);
                 let tier = decode_tier(part.visible, range_len);
+                let per_cell = match route {
+                    CellRoute::Cells => true,
+                    CellRoute::Rows => false,
+                    // Mask-free, and cheap enough to ask per part: two numbers the segment
+                    // already holds and one multiply. See [`cell_route_pays`].
+                    CellRoute::Gated => {
+                        cell_route_pays(part.segment.row_count, part.segment.cuts.len())
+                    }
+                };
                 match tier {
+                    DecodeTier::FullRange | DecodeTier::Runs if !per_cell => {
+                        // The cells are too short for a cell step to buy the rows it skips, so
+                        // the piece is read row by row. The runs are the same runs, cut at no
+                        // cell boundary, because nothing here depends on the order within a cell.
+                        let rows_visited = &mut rows_visited;
+                        let c_theta = &mut c_theta;
+                        let heap = &mut heap;
+                        let mut consume = |run: Range<u32>| {
+                            scan_row_piece(
+                                run.start,
+                                &ids[(run.start - base) as usize..(run.end - base) as usize],
+                                params,
+                                rows_visited,
+                                c_theta,
+                                heap,
+                            );
+                        };
+                        match tier {
+                            DecodeTier::FullRange => consume(view_range.clone()),
+                            _ => mask.for_each_visible_run(view_range.clone(), &mut consume),
+                        }
+                    }
                     DecodeTier::FullRange | DecodeTier::Runs => {
                         // Per cell, not per row — see [`CellWalk`]. The boundaries are the cell
                         // starts strictly inside the part's range: the range's own start opens

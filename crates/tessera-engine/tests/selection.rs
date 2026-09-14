@@ -23,7 +23,8 @@ use tessera_engine::occupancy::{
     occupied_tiles, occupied_tiles_ladder_with_precision, TileSketch, SKETCH_PRECISION,
 };
 use tessera_engine::select::{
-    decode_tier, DecodeTier, SelectParams, Selection, SelectionPart, SelectionParts, Threshold,
+    cell_route_pays, decode_tier, CellRoute, DecodeTier, SelectParams, Selection, SelectionPart,
+    SelectionParts, Threshold,
 };
 use tessera_lifecycle::{ChangeOp, IngestBuffer, Overlay};
 use tessera_spatial::{fixed32, morton_of, tiler::sort_batch, Bounds, Tile, TilerItem};
@@ -1489,24 +1490,69 @@ fn lattice_points(n: usize, positions: usize, seed: u64) -> Vec<(f32, f32, u64)>
         .collect()
 }
 
-/// **The per-cell route returns exactly what the scan returns**, over cells holding many rows,
-/// every decode tier, every internal branch, four caps and seven thresholds.
+/// **The per-cell route returns exactly what the scan returns**, over every decode tier, every
+/// internal branch, four caps, seven thresholds, and two corpora placed either side of
+/// [`cell_route_pays`].
 ///
 /// The reference is [`per_value_selection`] — the row-by-row scan, kept as a transcription so that
 /// the thing being compared against is the mechanism the definition was first implemented as, not
-/// a second derivation of the definition. What the route changes is which rows it *reads*
+/// a second derivation of the definition. What a route changes is which rows it *reads*
 /// (`rows_visited`, asserted never to exceed the scan's and asserted below to be genuinely fewer
 /// somewhere); what it must not change is a single served row.
+///
+/// **Both sides of the occupancy gate, and both mechanisms on each side.** One fixture puts 20
+/// rows in each leaf Morton cell and the other puts one, so `Selection::of` takes the cell route
+/// on the first and the per-row route on the second; the test asserts that it did, because two
+/// fixtures on the same side of the gate would test one route twice. On every case it then runs both
+/// mechanisms explicitly ([`CellRoute::Cells`], [`CellRoute::Rows`]) and requires the same served
+/// rows from each — which is the claim the gate rests on, that it chooses a cost and never an
+/// answer.
 ///
 /// The thresholds include three taken from the fixture's own identity distribution, because the
 /// interesting case for the count is a cut that falls *inside* a cell: a cut below every identity
 /// and a cut above every identity both settle a cell on its first row.
 #[test]
 fn per_cell_selection_returns_what_the_scan_returns() {
-    let mut rng = StdRng::seed_from_u64(0xCE11_0001);
-    let points = lattice_points(3_000, 150, 0xCE11_0002);
+    let mut fired = [0u32; 3];
+    let mut routed = [0u32; 2];
+    let mut read_fewer = 0u32;
+    // 20 rows a cell, then one: the gate takes the cell route on the first and the scan on the
+    // second, at any plausible value of the constant.
+    for positions in [150usize, 3_000] {
+        per_cell_selection_over(positions, &mut fired, &mut routed, &mut read_fewer);
+    }
+    for (tier, &count) in fired.iter().enumerate() {
+        assert!(count > 0, "tier {tier} was never reached, so it was not tested");
+    }
+    assert!(
+        routed[0] > 0 && routed[1] > 0,
+        "the gate sent every part the same way ({routed:?}), so only one route was tested"
+    );
+    assert!(
+        read_fewer > 0,
+        "the per-cell route never read fewer rows than the scan, so the fixture tested nothing \
+         the scan does not already do"
+    );
+}
+
+/// One corpus of [`per_cell_selection_returns_what_the_scan_returns`], of 3,000 rows over
+/// `positions` occupied leaf Morton cells.
+fn per_cell_selection_over(
+    positions: usize,
+    fired: &mut [u32; 3],
+    routed: &mut [u32; 2],
+    read_fewer: &mut u32,
+) {
+    let mut rng = StdRng::seed_from_u64(0xCE11_0001 + positions as u64);
+    let points = lattice_points(3_000, positions, 0xCE11_0002);
     let seg = segment_of(&points);
     let n = seg.row_count();
+    assert_eq!(
+        seg.data.cuts.len(),
+        positions,
+        "the lattice must occupy one cell per position, or the occupancy is not what it says"
+    );
+    let takes_cells = cell_route_pays(n, seg.data.cuts.len());
 
     // Cuts inside the identity distribution: the count ends part-way through a cell there.
     let mut all_ids: Vec<u64> = (0..n).map(|row| seg.id_at(row)).collect();
@@ -1523,8 +1569,6 @@ fn per_cell_selection_returns_what_the_scan_returns() {
 
     // Four visibility densities, so the tier gate sends the same corpus down all three tiers, and
     // an overlay arm so the composed-bitmap decode route is exercised beside the in-place one.
-    let mut fired = [0u32; 3];
-    let mut read_fewer = 0u32;
     for (density_pct, diffs_present) in [
         (100u32, false),
         (97, false),
@@ -1580,32 +1624,44 @@ fn per_cell_selection_returns_what_the_scan_returns() {
                         if vis == 0 {
                             continue;
                         }
-                        let got = Selection::of(
-                            &mask,
-                            &SelectionParts::new(&[SelectionPart::base(
-                                &seg.data,
-                                range.clone(),
-                                vis,
-                            )]),
-                            &p,
-                            vis,
-                        );
+                        let parts = [SelectionPart::base(&seg.data, range.clone(), vis)];
+                        let parts = SelectionParts::new(&parts);
+                        let got = Selection::of(&mask, &parts, &p, vis);
                         let (want_rows, want_visited) =
                             per_value_selection(&seg, &mask, range.clone(), &p, vis);
-                        assert_eq!(
-                            got.rows, want_rows,
-                            "the per-cell route diverged from the scan: diffs={diffs_present} \
+                        let case = format!(
+                            "positions={positions} diffs={diffs_present} \
                              density={density_pct} k_min={k_min} cap={cap} \
                              threshold={threshold:?} range={range:?} visible={vis}"
                         );
+                        assert_eq!(
+                            got.rows, want_rows,
+                            "the selection diverged from the scan: {case}"
+                        );
                         assert!(
                             got.rows_visited <= want_visited,
-                            "the per-cell route read {} rows where the scan read {want_visited}",
+                            "the selection read {} rows where the scan read {want_visited}: {case}",
                             got.rows_visited
                         );
                         if got.rows_visited < want_visited {
-                            read_fewer += 1;
+                            *read_fewer += 1;
                         }
+                        // The gate chooses a cost, never an answer: both mechanisms over this
+                        // same part, against the same reference.
+                        for route in [CellRoute::Cells, CellRoute::Rows] {
+                            let forced = Selection::routed(&mask, &parts, &p, vis, route);
+                            assert_eq!(
+                                forced.rows, want_rows,
+                                "{route:?} diverged from the scan: {case}"
+                            );
+                            assert!(
+                                forced.rows_visited <= want_visited,
+                                "{route:?} read {} rows where the scan read {want_visited}: \
+                                 {case}",
+                                forced.rows_visited
+                            );
+                        }
+                        routed[usize::from(takes_cells)] += 1;
                         let tier = match decode_tier(vis, u64::from(range.end - range.start)) {
                             DecodeTier::FullRange => 0,
                             DecodeTier::Runs => 1,
@@ -1617,14 +1673,6 @@ fn per_cell_selection_returns_what_the_scan_returns() {
             }
         }
     }
-    for (tier, &count) in fired.iter().enumerate() {
-        assert!(count > 0, "tier {tier} was never reached, so it was not tested");
-    }
-    assert!(
-        read_fewer > 0,
-        "the per-cell route never read fewer rows than the scan, so the fixture tested nothing \
-         the scan does not already do"
-    );
 }
 
 /// [`per_value_selection`] over a tile that draws rows from more than one segment: the same
