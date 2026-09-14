@@ -48,19 +48,33 @@ expectation, so its ratio is `1 ± O(2^{J/2}/√n)`.
 **B is timed in two parts, because it answers two questions.** `search` is steps 1 to 4 — the
 band `j = P_d.leading_zeros()`, the candidate rows it offers inside the mask, the exact count and
 the served set. `position` is step 5, each served row's cell. The comparison against R is the
-probe's own check and is timed as part of neither.
+probe's own check and is timed as part of neither. The search is further split, by one monotonic
+clock read at each of four points a tile, into `candidates` (steps 1 and 2), `count` (step 3) and
+`floor` (step 4); the three sum to a little under the search, the difference being the tile loop
+itself.
+
+- **Membership is a lockstep merge, not a `contains` an entry.** A `top-J.bin` is sorted by row
+  and `EffectiveMask::for_each_visible_run` yields the visible rows of a range as ascending runs,
+  so one forward cursor settles every entry at the cost of a comparison. Asking the bitmap instead
+  is a container search each time, measured at rung 6 at about 700 ns an entry over a
+  53,000-container mask, which was the whole of the arm's cost there. The run walk is the decode
+  the shipped run tier performs, so the two arms decode the mask the same way; `runs_walked`
+  records how many runs it stepped through.
 
 - **The band's own list supplies the position.** A `top-J.bin` entry carries `(row, id, code)`,
   so a served row a list offered needs no lookup at all; only the rest cost a `cuts.u32` binary
   search and a `cell-codes.u32` read. The report counts the two separately.
 - **The floor widens through the lists, not through `lz.u8`.** When `C_θ < m`, the route first
   takes the band already in hand — which held fewer than `m` rows *below the cut*, not fewer than
-  `m` rows — then steps down the wider lists (`J` below `j`, narrowest first), each a slice of the
-  tile's row range located by binary search. A settled step costs no identity read: the entries
-  carry the identities. Only where even `J = 4` (one row in sixteen) holds fewer than `m` of the
-  tile's visible rows does the route read the tile's visible identities from the column, and such
-  a tile has few visible rows. `lz.u8` is read by step 2b alone, the sparse-principal route where
-  no list is narrow enough to be the band.
+  `m` rows — then steps down the wider lists (`J` below `j`), each a slice of the tile's row range
+  located by binary search. A settled step costs no identity read: the entries carry the
+  identities. It enters at the list expected to answer rather than at the narrowest: a tile of
+  `visible` rows holds about `visible / 2^J` of a list's entries, so the first `J` with
+  `visible / 2^J >= 4·m` is the narrowest one likely to reach the floor, and `floor_lists_walked`
+  says how many lists were walked in the end. Only where even `J = 4` (one row in sixteen) holds
+  fewer than `m` of the tile's visible rows does the route read the tile's visible identities from
+  the column, and such a tile has few visible rows. `lz.u8` is read by step 2b alone, the
+  sparse-principal route where no list is narrow enough to be the band.
 - **The quantised counts.** Beside the exact count, B records the band's own population `|S|` and
   the next band up, both free because every candidate's identity is already in hand. The `fp16`
   count is behind `--fp16` and is **an experiment on top of the route rather than part of it**:
@@ -110,6 +124,11 @@ cell-resolution render's position error, and the size models above.
   and `lz.u8`; it applies to the *mapping*, so it reaches the reference arm's reads of the same
   column as well as the band arm's, and a served path would decide it per mapping rather than per
   process.
+- **The merge's cost is the mask's run count, not the probe's.** Stepping the runs is what the
+  shipped run tier does, but a mask whose runs are short in a tile's range costs a step a run
+  where a `contains` would have cost one search an entry. On the small corpus the masks are
+  country-shaped and hold under one run a tile at every depth measured, so the merge neither helps
+  nor hurts there; the mask it was made for is rung 6's.
 - **The share of positions a list supplies is a property of `j`.** Where the cut lands in a band a
   list covers, nearly every served row's code arrives with its entry; where it does not, every one
   costs a cut-index search. The two counts are reported separately rather than summed.
@@ -190,34 +209,43 @@ every tile in memory whether or not it is written out.
 
 **Small corpus, 2026-09-14, `data/ladder/gbif-64p` rebuilt at 25,846,007 rows in one segment over
 3,508,005 occupied leaf cells, six principals from 1% to 100%, ten cases each, both conditions,
-every arm, the cell-code check on. The box was shared with another session's measurement
-throughout, so the wall figures carry that and the run-to-run spread is a few per cent.**
+every arm, the cell-code check on. The box was shared with other sessions throughout, so the wall
+figures carry that and the run-to-run spread is a few per cent.**
 
 Every tile of every case agreed between the band route and the shipped selection: 0 disagreements
-over the sixty principal-and-case pairs. The builder's file sizes matched their models to within
-0.5% (`top-10.bin`, the smallest list, at 0.9895) except `lz.u8`, whose 8/3 ratio is the packed
-model against a byte-a-row file as described above. The band's own population `|S|` ran 1.01× to
-2.07× the exact count and the next band up 0.40× to 0.99×, bracketing it as the powers-of-two
-spacing predicts. With `--fp16`, the quantised count equalled the exact count in every case at 2 B
-a candidate row plus a handful of identity reads for equal prefixes (379 ties over 588,510 counted
+over the sixty principal-and-case pairs, with the lockstep merge returning the identical candidate
+set the per-entry `contains` returned (`Σ|S|` 806,090 and 140,771 identity reads at `p100`'s
+`whole_budget`, both unchanged). The builder's file sizes matched their models to within 0.5%
+(`top-10.bin`, the smallest list, at 0.9895) except `lz.u8`, whose 8/3 ratio is the packed model
+against a byte-a-row file as described above. The band's own population `|S|` ran 1.01× to 2.07×
+the exact count and the next band up 0.40× to 0.99×, bracketing it as the powers-of-two spacing
+predicts. With `--fp16`, the quantised count equalled the exact count in every case at 2 B a
+candidate row plus a handful of identity reads for equal prefixes (379 ties over 588,510 counted
 rows in `p100`'s `whole_budget`).
 
 **Where the positions come from decides what step 5 costs.** At `p100`'s `whole_budget` — the
 whole extent at the depth a 2,000,000-mark budget chooses — 501,828 of 536,448 served rows took
 their cell code from the `top-4.bin` entry that offered them and 34,620 needed a cut-index search,
-so the position phase was 6.8 ms cold and 5.6 ms hot against a 110.1 / 89.0 ms arm. Where no list
+so the position phase was 7.3 ms cold and 7.6 ms hot against a 120.4 / 99.1 ms arm. Where no list
 is narrow enough to be the band the share inverts: `p100`'s `zoom_2` (cut in band 2) took every
-one of its 1,134,142 positions from the cut index, at 33.7 / 32.5 ms. Across every case of the run
+one of its 1,134,142 positions from the cut index, at 34.2 / 33.2 ms. Across every case of the run
 the split is 793,560 from lists against 6,889,988 from the cut index, because the deep-zoom cases
 saturate the threshold and have no band at all.
 
-**The floor's widening reaches the column more often than the lists.** Of 67,908 floor-widened
-tiles across the run, 7,232 were settled by the band already in hand, 5,703 by a wider list and
-54,973 by reading the tile's visible identities from the column. Those are the tiles with too few
-visible rows for one row in sixteen to reach the floor, and at `p100`'s `whole_budget` they cost
-140,771 identity reads — which is the whole of that case's column traffic, since the list route
-supplies every other identity. The alternative that was measured first, widening through `lz.u8`,
+**Inside the search, the floor is the expensive third.** At `p100`'s `whole_budget` the split is
+29.9 ms gathering the band's candidates, 16.0 ms counting and 27.6 ms in the floor, hot. The floor
+widened 24,697 of 36,833 tiles, settling 1,214 on the band already in hand, 3,000 on a wider list
+and 20,483 by reading the tile's visible identities from the column — 140,771 reads, which is that
+case's whole column traffic, since the list route supplies every other identity. It walked 23,483
+lists for 23,483 tiles: one each, because at `j = 5` only `J = 4` is eligible and the entry point
+has nothing to choose between. The alternative that was measured first, widening through `lz.u8`,
 cost 1.5 MB of that column at the same case and still left the identities to read.
+
+**The merge does not show its value here.** The masks on this corpus are country-shaped and hold
+under one run a tile at every depth measured (28,266 runs over 36,833 tiles at `p100`'s
+`whole_budget`), so a bitmap `contains` is a cheap container hit and the merge replaces it with a
+comparable cost. It was made for rung 6, where the same call was measured at about 700 ns over a
+53,000-container mask.
 
 What the small corpus does not answer is whether the structure saves anything, for the reason in
 "what it cannot attribute": at this row count a 2,000,000-mark budget is 8% of the corpus, so the

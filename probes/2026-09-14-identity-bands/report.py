@@ -161,7 +161,9 @@ def main(path):
                         ms(b["wall_s"]) if b else "—",
                         ms(b["cpu_s"]) if b else "—",
                         ms(b["search_wall_s"]) if b else "—",
-                        ms(b["search_cpu_s"]) if b else "—",
+                        ms(b["candidates_s"]) if b else "—",
+                        ms(b["count_s"]) if b else "—",
+                        ms(b["floor_s"]) if b else "—",
                         ms(b["position_wall_s"]) if b else "—",
                         ms(b["position_cpu_s"]) if b else "—",
                         b["majflt"] if b else "—",
@@ -180,7 +182,9 @@ def main(path):
                 "B wall ms",
                 "B cpu ms",
                 "B search ms",
-                "B search cpu",
+                "B cand ms",
+                "B count ms",
+                "B floor ms",
                 "B posn ms",
                 "B posn cpu",
                 "B majflt",
@@ -191,7 +195,9 @@ def main(path):
         print(
             "R runs on the engine's pool and includes the gather; B is one thread and answers the "
             "selection alone. CPU is the comparable column. B's arm total also carries the "
-            "comparison against R, which the search and position sub-timers exclude."
+            "comparison against R, which the search and position sub-timers exclude; the search's "
+            "three parts sum to a little under `B search ms`, the difference being the tile "
+            "loop's own overhead."
         )
         print()
 
@@ -215,11 +221,13 @@ def main(path):
                     f"{b['column_reads']:,}",
                     mb(b["list_bytes"]),
                     mb(b["lz_bytes"]),
+                    f"{b['runs_walked']:,}",
                     f"{b['codes_from_list']:,}",
                     f"{b['codes_from_cut_index']:,}",
                     f"{b['floor_widened_tiles']:,}",
                     f"{b['floor_settled_by_band']:,}/{b['floor_settled_by_list']:,}/"
                     f"{b['floor_settled_by_column']:,}",
+                    f"{b['floor_lists_walked']:,}",
                     f"{b['floor_column_rows_read']:,}",
                     f"{b['fallback_scan_tiles']:,}",
                     f"{r['points']:,}" if r else "—",
@@ -239,10 +247,12 @@ def main(path):
                 "column reads",
                 "list MB",
                 "lz MB",
+                "runs walked",
                 "codes from list",
                 "codes from cut index",
                 "floor widened",
                 "floor band/list/col",
+                "floor lists walked",
                 "floor col rows",
                 "fallback scan",
                 "R served",

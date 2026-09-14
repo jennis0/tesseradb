@@ -500,6 +500,8 @@ struct BandOutcome {
     column_reads: u64,
     list_bytes: u64,
     list_entries_walked: u64,
+    /// Mask runs the list merges stepped through — the decode the shipped run tier also pays.
+    runs_walked: u64,
     lz_bytes: u64,
     fp16_bytes: u64,
     /// Served rows whose cell code arrived with the `top-J.bin` entry that offered them, so the
@@ -518,6 +520,9 @@ struct BandOutcome {
     /// for, so the floor's cost is separable from the search's.
     floor_list_bytes: u64,
     floor_column_rows_read: u64,
+    /// Lists the floor's widening actually walked, which the expected-size start point below
+    /// keeps near one.
+    floor_lists_walked: u64,
     fallback_scan_tiles: u64,
     /// Tiles whose threshold was saturated, so no cut existed to band against.
     saturated_tiles: u64,
@@ -526,6 +531,12 @@ struct BandOutcome {
     /// Steps 1 to 4 — candidates, counts and the served set — over every tile.
     search_wall_s: f64,
     search_cpu_s: f64,
+    /// The search's three parts, summed over tiles from a monotonic clock: gathering the band's
+    /// candidates (steps 1 and 2), the counts and the served set (step 3), and the floor's
+    /// widening (step 4). Their sum is below [`Self::search_wall_s`] by the loop's own overhead.
+    candidates_s: f64,
+    count_s: f64,
+    floor_s: f64,
     /// Step 5 — each served row's position at cell resolution — over every served row.
     position_wall_s: f64,
     position_cpu_s: f64,
@@ -562,6 +573,7 @@ impl BandOutcome {
             "column_reads": self.column_reads,
             "list_bytes": self.list_bytes,
             "list_entries_walked": self.list_entries_walked,
+            "runs_walked": self.runs_walked,
             "lz_bytes": self.lz_bytes,
             "fp16_bytes": self.fp16_bytes,
             "codes_from_list": self.codes_from_list,
@@ -572,11 +584,15 @@ impl BandOutcome {
             "floor_settled_by_column": self.floor_settled_by_column,
             "floor_list_bytes": self.floor_list_bytes,
             "floor_column_rows_read": self.floor_column_rows_read,
+            "floor_lists_walked": self.floor_lists_walked,
             "fallback_scan_tiles": self.fallback_scan_tiles,
             "saturated_tiles": self.saturated_tiles,
             "top_band_tiles": self.top_band_tiles,
             "search_wall_s": self.search_wall_s,
             "search_cpu_s": self.search_cpu_s,
+            "candidates_s": self.candidates_s,
+            "count_s": self.count_s,
+            "floor_s": self.floor_s,
             "position_wall_s": self.position_wall_s,
             "position_cpu_s": self.position_cpu_s,
             "compared": self.compared,
@@ -620,31 +636,66 @@ struct TileGroup {
     len: usize,
 }
 
+/// One monotonic lap: the seconds since `mark`, leaving `mark` at now.
+fn lap(mark: &mut Instant) -> f64 {
+    let now = Instant::now();
+    let elapsed = now.duration_since(*mark).as_secs_f64();
+    *mark = now;
+    elapsed
+}
+
 /// The entries of one `top-J.bin` inside `range` that the mask admits, as `(row, id, code)`.
 ///
-/// Every entry of the list carries `lz >= J` by construction, so a caller wanting a narrower band
-/// than the list's own filters on the identity afterwards.
+/// **A lockstep merge against the mask's runs, not a `contains` an entry.** Both sides are sorted
+/// by row — the list by construction, the runs by [`EffectiveMask::for_each_visible_run`] — so one
+/// forward cursor settles membership for every entry at the cost of one comparison, where a
+/// bitmap `contains` is a container search each time it is asked. Measured at rung 6 before this:
+/// about 700 ns an entry over a 53,000-container mask, which was the whole of the arm's cost.
+///
+/// The run walk is the route the shipped run tier decodes the mask through, so the two arms decode
+/// it the same way. A tile whose list holds no entry at all skips the walk, because there is then
+/// nothing for the runs to be merged against.
+///
+/// Every entry inside the range is read exactly once, and entries past the last run are not read.
 fn list_candidates(
     list: &Mmap,
     range: &Range<u32>,
     mask: &EffectiveMask,
-    entries_walked: &mut u64,
+    entries_read: &mut u64,
+    runs_walked: &mut u64,
     out: &mut Vec<(u32, u64, Option<u32>)>,
 ) {
     out.clear();
-    let mut i = seek_row(list, range.start);
     let n = list.len() / ENTRY;
-    while i < n {
-        let (row, id, code) = entry_at(list, i);
-        if row >= range.end {
-            break;
-        }
-        *entries_walked += 1;
-        if mask.contains_row(row) {
-            out.push((row, id, Some(code)));
-        }
-        i += 1;
+    let mut cursor = seek_row(list, range.start);
+    let mut current = if cursor < n {
+        *entries_read += 1;
+        Some(entry_at(list, cursor))
+    } else {
+        None
+    };
+    if current.is_none_or(|(row, _, _)| row >= range.end) {
+        return;
     }
+    mask.for_each_visible_run(range.clone(), |run| {
+        *runs_walked += 1;
+        while let Some((row, id, code)) = current {
+            // Past this run: the entry stays for the next one, and the cursor never goes back.
+            if row >= run.end {
+                break;
+            }
+            if row >= run.start {
+                out.push((row, id, Some(code)));
+            }
+            cursor += 1;
+            current = if cursor < n {
+                *entries_read += 1;
+                Some(entry_at(list, cursor))
+            } else {
+                None
+            };
+        }
+    });
 }
 
 /// Evaluate §7.2's definition over every tile of one request by the band route.
@@ -691,6 +742,7 @@ fn band_route(
             continue;
         }
         out.tiles += 1;
+        let mut mark = Instant::now();
 
         // Step 1: the band holding the cut. `{id < P_d} ⊆ {lz ≥ j}` because an identity below a
         // cut with `j` leading zeros has at least `j` of its own. A saturated threshold, or a cut
@@ -715,14 +767,16 @@ fn band_route(
             out.fallback_scan_tiles += 1;
             from_scan = true;
         } else if let Some((list_j, list)) = inputs.bands.list_for(j) {
-            // Step 2a: the band's own list, located by binary search and then walked. The list's
-            // `J` is at or below `j`, so its entries are filtered down to band `j` here.
+            // Step 2a: the band's own list, located by binary search and then merged against the
+            // mask's runs. The list's `J` is at or below `j`, so its entries are filtered down to
+            // band `j` here.
             let before = out.list_entries_walked;
             list_candidates(
                 list,
                 range,
                 inputs.mask,
                 &mut out.list_entries_walked,
+                &mut out.runs_walked,
                 &mut candidates,
             );
             out.list_bytes += (out.list_entries_walked - before) * ENTRY as u64;
@@ -743,6 +797,8 @@ fn band_route(
                 }
             });
         }
+
+        out.candidates_s += lap(&mut mark);
 
         // Step 3: the exact count, and the quantised counts beside it.
         let mut exact: u64 = 0;
@@ -767,6 +823,7 @@ fn band_route(
                 .into_iter()
                 .map(|(id, row)| (id, row, None))
                 .collect();
+            out.count_s += lap(&mut mark);
         } else {
             out.band_tiles += 1;
             out.s_total += candidates.len() as u64;
@@ -808,7 +865,9 @@ fn band_route(
                 below.sort_unstable();
                 below.truncate(m);
                 served_source = below;
+                out.count_s += lap(&mut mark);
             } else {
+                out.count_s += lap(&mut mark);
                 // Step 4: the floor binds, so the served set is not a prefix of `{id < P_d}` and
                 // the route must widen until some band holds `m` visible rows of the tile. A band
                 // is an identity-space prefix, so the `m` smallest visible identities lie inside
@@ -834,19 +893,35 @@ fn band_route(
                     kept.truncate(m);
                     settled = Some(kept);
                 }
-                // Then the wider lists, narrowest first. A list whose `J` is at or above `j`
-                // addresses a subset of the band just rejected and cannot hold more than it did.
+                // Then the wider lists. A list whose `J` is at or above `j` addresses a subset of
+                // the band just rejected and cannot hold more than it did, so only `J < j` can
+                // help.
+                //
+                // **Entered at the list expected to answer, not at the narrowest.** A tile of
+                // `visible` rows holds about `visible / 2^J` of any list's entries, so the first
+                // list with `visible / 2^J >= 4·m` is the narrowest one likely to reach the floor
+                // and the ones above it are walks that would find too few. Where no list clears
+                // that bar the widest is entered directly. The fall-through below is unchanged, so
+                // a tile whose expectation was wrong still widens until a list holds `m`.
                 if settled.is_none() {
-                    for (list_j, list) in inputs.bands.lists.iter().rev() {
-                        if *list_j >= j {
-                            continue;
-                        }
+                    let eligible: Vec<usize> = (0..inputs.bands.lists.len())
+                        .rev()
+                        .filter(|&i| inputs.bands.lists[i].0 < j)
+                        .collect();
+                    let entered = eligible
+                        .iter()
+                        .position(|&i| visible >> inputs.bands.lists[i].0 >= 4 * m as u64)
+                        .unwrap_or(eligible.len().saturating_sub(1));
+                    for &i in eligible.iter().skip(entered) {
+                        let list = &inputs.bands.lists[i].1;
+                        out.floor_lists_walked += 1;
                         let before = out.list_entries_walked;
                         list_candidates(
                             list,
                             range,
                             inputs.mask,
                             &mut out.list_entries_walked,
+                            &mut out.runs_walked,
                             &mut wider,
                         );
                         let bytes = (out.list_entries_walked - before) * ENTRY as u64;
@@ -888,6 +963,7 @@ fn band_route(
                             .collect()
                     }
                 };
+                out.floor_s += lap(&mut mark);
             }
         }
 
