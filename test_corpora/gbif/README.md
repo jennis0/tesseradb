@@ -283,21 +283,21 @@ a measurement.** It is sound for sizing and it is not a substitute for the run's
 | the build | **~3.0 h** at 61.9 B/row — a floor, `layers` and `manifests` being superlinear |
 | **the bundle** | **~219 GB** |
 
-## Not run — the whole corpus, and the reason is disk
+## Measured — whole corpus
 
-**The whole-corpus pipeline has not been run and neither has its build.** The modelled total is
-**~304 GB of derived data** — `points.parquet` 59.0 GB, the member file 25.7 GB and the bundle
-219 GB — against **~200 GB free** on this box's root volume with five other rungs' sources in
-use.
-It does not fit, and the census's 250–450 GB estimate is confirmed at its lower end.
+Built twice, 2026-09-13, to measure the bounded-assembly design that the fraction's projections
+above named as open (`layers` at scale, disk against the ~304 GB modelled here). Full figures,
+both runs, are [`../../docs/ingest-campaign.md`](../../docs/ingest-campaign.md) §4d.
 
-That is the decision the campaign's second volume exists for
-(`docs/evidence/memos/2026-08-27-ingest-campaign-plan.md` §4), and it is one value —
-`TESSERA_LADDER` — that moves when the volume appears. Nothing else in this rung needs to change.
+**3,495,729,729 placed rows** built under `--memory-budget 24g` to a **196 GiB bundle in 3 h 30 m
+55 s** (record-blob format 10, after six branches that bound the build's memory landed on main),
+against 207 GiB in 4 h 09 m 35 s before them. `verify --deep` clean in **14 m 42 s at 0.61 GB
+peak anonymous**. `tessera serve` opens to `/readyz` in **193 s at 6.5 GB anonymous** under a
+24 GiB cap, `oom_kill` 0 — before the merge set, the open was modelled at ~60 GB anonymous and
+could not be attempted on this box. One stage, `filter_postings`, still held 7.6 GB over the
+budget; the campaign section has the diagnosis and the fix, not yet built.
 
-Two things a whole-corpus run would settle that no fraction can:
-
-- **What `layers` costs at 1.0×10¹⁰ membership entries.** It is the largest stage of the fraction's
-  build and its resident set is the largest artifact's members, which family caps at ~1.4 GB.
-- **Which serving layout each level takes.** The pick moved between the two fractions and is
-  re-evaluated at every fold, so it is a property of the whole row space.
+Disk stayed well inside the fraction's projection: 429 GB free at the start, a minimum of 221 GB
+free at the end, against a pre-flight forecast of ~539 GB that is known to overstate. The taxonomy
+still starts at family, as ruled above; what a whole-corpus `layers` costs is now measured rather
+than modelled, in the campaign section.

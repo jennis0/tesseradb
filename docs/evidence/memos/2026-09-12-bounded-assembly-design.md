@@ -1,11 +1,11 @@
 # A build whose memory does not scale with the corpus
 
 **Date:** 2026-09-12
-**Status:** Provisional. A design for decision, revised once after an adversarial review. It
-answers the findings of
+**Status:** Built and merged on main at `d7d26c16`, measured at rung 6 on 2026-09-13 —
+[`../../ingest-campaign.md`](../../ingest-campaign.md) §4d. It answers the findings of
 [`2026-09-12-gbif-whole-corpus-build-observations.md`](2026-09-12-gbif-whole-corpus-build-observations.md)
-with one rule and one primitive, and names the work packages that apply them. Nothing here is
-built. §9 lists what the owner has to decide.
+with one rule and one primitive, and names the work packages that apply them. §9 lists the
+decisions it asked for.
 
 ## 1. What the whole-corpus run showed
 

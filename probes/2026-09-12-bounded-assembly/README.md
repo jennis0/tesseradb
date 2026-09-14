@@ -72,4 +72,36 @@ after>/<limit>/` keeps `proc.tsv`, `stages.json` and `build.log`.
 
 ## Results
 
-Not yet run.
+Superseded by a whole-corpus run rather than by this probe's own prefix comparison: the design was
+accepted and merged, then measured directly at rung 6 (3,495,729,729 rows) against a build from
+before it, on main `a4152e79` (before) and `d7d26c16` (after). Full figures are
+[`../../docs/ingest-campaign.md`](../../docs/ingest-campaign.md) §4d; this section states what
+those runs showed against the design's own acceptance bar (§8 above).
+
+**The build fits the 24 GB budget except one stage.** Peak anonymous RSS after the design landed
+was 22.4 GB in the batch loop and 17.9 GB in `record_blob`, both under budget. `filter_postings`
+did not fit: it held 31.6 GB anonymous — 7.6 GB over — for about twenty minutes. The cause is not
+a stage this design bounds. `ExtentColumn::open` still deserialises every extent's has-row bitmap
+onto the heap and builds a per-extent live set by subtraction, and the two string columns' 988
+extents each turn a 2.2 GB run-encoded has-row file into about 7 GB of array-container live sets.
+The design's rule — no structure whose size is the row count is anonymous memory — was not applied
+to this pass, and the residency model still has no term for it. Diagnosed, with a designed fix
+(open extents cursor-only, one duplicate map a column built in one sequential pass); not built.
+
+**The disk transient never exceeded the finished bundle.** 429 GB free at the start of the
+post-design run, 221 GB free at the end — the bundle itself is 196 GiB (210 GB), so nothing
+intermediate grew past it. The disk minimum fell at 21:49, during `artifact_pass` at the end of
+the build, which is the assembly phase the design's phase table in §7 named as the binding one —
+right about the phase, and wrong only about the magnitude: the pre-flight's own forecast, ~539 GB,
+is a model that sums three ceilings (artifact-pass buckets, row-column lanes, ordinal geometry)
+known to overstate, and it overstated here by close to 3×.
+
+**What the design's own mechanisms bought, measured**: the assignment-walk hoist that removed the
+scattered entity-map writes (§4.4) took about 12% off the batch loop, smaller than expected
+because most of the loop's remaining cost is one core at 100% with no disk traffic rather than
+writeback — the next step is a `perf` profile, not a further change to this design. The keyword
+dictionary's 16 TB scattered read (observations memo §6) is gone: `filter_postings` fell from
+3,677 s to 1,606 s with reads of about 25 GB. `layers`' dead heap (observations memo §5) did not
+recur — its anonymous peak was 9.1 GB — and the tiler sort (§7) ran within budget at 328 s. This
+probe's own prefix comparison across the four `--limit` sizes was not run; the whole-corpus pair
+above is what settled the design's acceptance question instead.
