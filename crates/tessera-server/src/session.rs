@@ -29,6 +29,12 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/session/revoke", post(revoke))
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
+        // The allocator's trim cadence (`crate::memory`). This plane builds the mask fragments,
+        // which is where a new principal's anonymous growth arrives.
+        .layer(axum::middleware::from_fn_with_state(
+            Arc::clone(&state),
+            crate::memory::trim_after_response,
+        ))
         .with_state(state);
     match dev_cors {
         Some(layer) => router.layer(layer),
@@ -96,10 +102,17 @@ async fn authorise(
     // that grows the registry, so it is where the growth is bounded. The clock is read here, once
     // per request, rather than inside the lock — see `SessionRegistry`'s doc for what the sweep
     // costs, what bounds the pause, and why it is deliberately not a timer.
-    state
+    let (_entry, expired) = state
         .sessions
         .lock()
         .insert(session, crate::state::now_secs());
+    // The sweep's engine half, and the same call a revocation makes. The registry removal is what
+    // makes a swept session unusable; this releases what the engine still holds under its token id.
+    // Outside the lock above — the temporary guard is dropped at the end of that statement —
+    // because a prune cancels a stage and walks five caches.
+    for token_id in expired {
+        state.engine.prune_token(token_id);
+    }
     Ok(Json(resp))
 }
 

@@ -52,6 +52,12 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/artifacts/browse", post(browse))
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
+        // The allocator's trim cadence (`crate::memory`), mounted on every plane so a node that
+        // never ingests still answers its serving growth.
+        .layer(axum::middleware::from_fn_with_state(
+            Arc::clone(&state),
+            crate::memory::trim_after_response,
+        ))
         .with_state(state);
     match cors {
         Some(layer) => router.layer(layer),

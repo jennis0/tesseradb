@@ -573,6 +573,73 @@ async fn the_sweep_keeps_every_live_session() {
     );
 }
 
+/// The sweep's engine half: what the registry drops, the engine drops too.
+///
+/// A session that has served a viewport owns a row projection, and the cache holding it is keyed by
+/// `token_id` — which the registry is the only holder of. Sweeping the registry without telling the
+/// engine leaves that projection resident until a byte bound chooses it, which for a small entry is
+/// a long way off, and the session it belongs to can never be presented again.
+///
+/// **This case sleeps, and the three above it do not.** They reach expiry with
+/// `token_max_lifetime_secs = 0`, which mints a session that is expired on arrival and can
+/// therefore never serve a request — so there would be no engine-side entry to prune. A session
+/// that works and *then* expires needs a lifetime the clock can pass, and `expires_at` is a
+/// wall-clock second.
+#[tokio::test]
+async fn the_sweep_prunes_what_the_engine_holds_for_an_expired_session() {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+    let mut config = default_engine_config();
+    config.token_max_lifetime_secs = 2;
+    let server = spawn_server_with_config(
+        &bundle_root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+        config,
+    )
+    .await;
+
+    let doomed = authorise(&server, &["0"]).await;
+    let resp = server
+        .client
+        .post(server.viewer_url("/v1/viewport"))
+        .bearer_auth(doomed["token"].as_str().unwrap())
+        .json(&serde_json::json!({
+            "view": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let status = control_status(&server).await;
+    assert_eq!(
+        status["row_projection_cache"]["entries"].as_u64().unwrap(),
+        1,
+        "a served viewport leaves the session's row projection resident"
+    );
+
+    // Past the deadline, then over the sweep threshold. The sessions minted here expire on the
+    // same schedule and are swept in their turn; what is asserted is the first one's entry.
+    tokio::time::sleep(std::time::Duration::from_millis(2_500)).await;
+    authorise_n(&server, 20).await;
+
+    let status = control_status(&server).await;
+    assert!(
+        status["sessions"]["swept_total"].as_u64().unwrap() > 0,
+        "the sweep must have run, or this case asserts nothing"
+    );
+    assert_eq!(
+        status["row_projection_cache"]["entries"].as_u64().unwrap(),
+        0,
+        "the swept session's engine-side entries go with it, as a revocation's do"
+    );
+}
+
 /// **Revocation is immediate and owes nothing to the sweep.** A revoked session must not survive
 /// until some later pass notices it — that would be fail-open for the interval in between.
 ///

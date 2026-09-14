@@ -14,6 +14,7 @@ pub mod error;
 mod filter_dto;
 pub mod health;
 mod ingest_json;
+pub mod memory;
 pub mod session;
 pub mod state;
 pub mod viewer;
@@ -174,6 +175,10 @@ fn validate_merge_size_relation(config: &Config, engine: &Engine) -> Result<(), 
 pub fn prepare(config_path: &Path) -> Result<Prepared, BoxError> {
     let config = config::load(config_path)?;
     validate_cache_bounds(&config)?;
+    // **Before the engine opens**, which is before the compute pool, the reactor and the write
+    // executor exist: the cap bounds arena creation and does nothing about arenas already made.
+    // See `memory::arena_max` for the width it takes and what capping costs.
+    memory::cap_arenas(config.compute_threads);
 
     // **The two serving secrets, read before anything is opened.** They are located in
     // `tessera.toml` and read here rather than at parse, because `tessera build` reads the same
@@ -313,6 +318,9 @@ pub fn prepare(config_path: &Path) -> Result<Prepared, BoxError> {
     let state = Arc::new(AppState {
         engine,
         sessions: Mutex::new(SessionRegistry::default()),
+        // Its baseline is the anonymous set as it stands here: the bundle is open and the caches
+        // are empty, so the first trim answers serving growth rather than the open.
+        heap: crate::memory::HeapWatch::default(),
         max_k: config.max_k,
         max_category_values: config.max_category_values,
         max_suggestions: config.max_suggestions,
