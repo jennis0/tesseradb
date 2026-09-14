@@ -30,7 +30,7 @@
 //! — a read-only deployment publishes nothing, so the tick that would carry it never fires.
 //!
 //! The growth test costs one `/proc/self/status` read, so a time gate sits in front of it: at most
-//! one reading per [`CHECK_INTERVAL`], claimed by one thread. The trim itself runs on a blocking
+//! one reading per [`CHECK_INTERVAL_MS`], claimed by one thread. The trim itself runs on a blocking
 //! thread, never on the reactor and never on a compute worker, because `malloc_trim` walks every
 //! arena's free lists and takes each arena's lock as it goes.
 //!
@@ -55,12 +55,21 @@ use crate::state::AppState;
 
 /// Anonymous growth since the last trim that asks for the next one.
 ///
-/// The figure sets the amortised cost: one `malloc_trim` per this much net anonymous growth. At
-/// 256 MiB the rung 6 battery's 14.15 GiB of retention is about 56 trims, each measured at
-/// 6.9 ms on a warmed 64p node — 0.4 s of one blocking thread across a battery that ran for an
-/// hour. Smaller returns memory sooner and pays the walk more often; larger lets the ratchet climb
-/// further between trims. It is not a bound on retention: what a trim returns is what the
-/// allocator has free, and a node holding 10 GB of live bitmaps keeps holding them.
+/// The figure sets the amortised cost: one `malloc_trim` per this much net anonymous growth.
+///
+/// **What a trim costs, measured** on a warmed 64p node (25,846,007 rows, six principals, three
+/// batteries in one process, 2026-09-14): the two trims this threshold produced took 7.4 ms
+/// returning 67.7 MB and 11.1 ms returning 100.1 MB. The cost tracks what is returned rather than
+/// how often the walk runs — the same battery at a 16 MiB threshold took 102 trims of about 2.1 ms
+/// each, returning 7.6 to 18.4 MB apiece. So a smaller threshold does not cost more in total; it
+/// returns memory sooner and holds `RssAnon` lower (742 MiB against 761 MiB after two batteries).
+/// 256 MiB is the conservative end of that: it keeps the cadence rare on a node whose growth is
+/// ordinary and still answers the rung 6 ratchet, where 14.15 GiB of retention is about 56 trims.
+///
+/// It is not a bound on retention: what a trim returns is what the allocator has free, and a node
+/// holding 10 GB of live bitmaps keeps holding them. At the 64p scale the trims returned 7 to 11%
+/// of `RssAnon`, because most of that node's anonymous memory is the masked-count cache doing its
+/// job — which is exactly the reading `/control/status`' cache blocks beside `heap` are for.
 pub const TRIM_GROWTH_BYTES: u64 = 256 * 1024 * 1024;
 
 /// The shortest interval between two readings of `/proc/self/status`.
@@ -232,10 +241,22 @@ pub async fn trim_after_response(
 /// is enough for the fan-out to proceed without two workers sharing a lock most of the time, and it
 /// is eight times fewer than the `8 × cores` glibc would otherwise reach.
 ///
-/// **What the cap costs.** With more simultaneously allocating threads than arenas, threads share
-/// an arena and serialise on its lock. Measured at the 64p scale against an uncapped node: the
-/// hot p50 at zoom 6 and zoom 12 for the 100% principal is in `docs/evidence`'s serve battery
-/// output for this change, and neither moved beyond run-to-run scatter.
+/// **What the cap costs, and what it buys, measured.** With more simultaneously allocating threads
+/// than arenas, threads share an arena and serialise on its lock. One battery each on a 64p node
+/// (25,846,007 rows, six principals, 12 cores, 2026-09-14), capped at 12 against the same binary
+/// allowed 4,096:
+///
+/// | | uncapped | capped at 12 |
+/// |---|---|---|
+/// | arena-shaped anonymous regions | 44 | 15 |
+/// | anonymous address space | 3,013 MiB | 1,157 MiB |
+/// | hot p50, zoom 6, 100% principal | 2.73 / 3.04 ms | 2.58 / 2.76 ms |
+/// | hot p50, zoom 12, 100% principal | 12.80 / 29.58 ms | 13.78 / 29.49 ms |
+///
+/// Two cells per zoom, both reported. The latency differences are inside the scatter between
+/// repeats of one binary — three batteries in one capped process gave 14.53, 14.69 and 15.46 ms at
+/// the first zoom 12 cell — so at this concurrency the cap costs nothing measurable and takes 1.9
+/// GiB off the address space. It is not a claim about a box with far more cores than this one.
 ///
 /// The floor of 4 is for a single-core box, where `8 × cores` would still be 8: a cap that made an
 /// unusual deployment allocate through one arena would be a contention change nobody measured.
