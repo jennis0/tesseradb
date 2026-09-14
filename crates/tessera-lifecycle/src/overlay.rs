@@ -239,7 +239,13 @@ impl Overlay {
 
 /// Entity ids are capped at `u32::MAX` by the I9 allocator (contracts §2.6 r6), which is what lets
 /// the deny sets be Roaring bitmaps at all.
-fn as_u32(entity: EntityId) -> u32 {
+///
+/// **Checked, and the one narrowing in this crate.** A membership is a Roaring bitmap too, so
+/// [`crate::membership`] builds one through this rather than through a second `as` that would
+/// truncate an id outside the space into another entity's — a document nobody named put into an
+/// artifact, with nothing reporting it. The build refuses the same id where it decodes one
+/// (`tessera_build::spill`'s member table).
+pub(crate) fn as_u32(entity: EntityId) -> u32 {
     u32::try_from(entity.raw())
         .expect("entity ids are capped at u32::MAX by the I9 allocator (contracts §2.6 r6)")
 }

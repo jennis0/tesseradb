@@ -256,6 +256,22 @@ fn member_budget(memory_budget: u64) -> u64 {
 /// beside it.
 const MEMBER_MERGE_BYTES_PER_RUN: u64 = spill::SPILL_BUF_BYTES as u64;
 
+/// The most runs one merge may hold **open**, whatever the budget pays for.
+///
+/// **A merge holds a file descriptor per run, and memory is not what bounds that.** The budget
+/// share buys 256 runs at the accumulator's present ceiling, so the cap does not bind today; it
+/// binds the moment [`MEMBER_BUDGET_MAX`] is raised, where a 8 GiB share would otherwise ask for
+/// 2,048 descriptors and fail with `EMFILE` at hour two on exactly the corpus this shape exists to
+/// make buildable. The text index's merge has the same cap for the same reason
+/// ([`crate::pipeline`]'s `RUN_MERGE_FAN_IN`), at a lower number because it runs one merge per
+/// thread and this one runs a merge at a time.
+///
+/// Five hundred and twelve: half the 1,024 soft limit a Linux process ordinarily starts with. The
+/// other half is what the build holds open beside this merge — the source Parquet readers, the
+/// mapped arenas, the member table it is writing and the membership packs that follow it — none of
+/// which scales with the run count, so half is headroom rather than an estimate.
+const MEMBER_MERGE_DESCRIPTOR_CAP: usize = 512;
+
 /// The most runs one merge opens at once: **what the accumulator's own budget share pays for**,
 /// rather than a fixed number.
 ///
@@ -270,11 +286,19 @@ const MEMBER_MERGE_BYTES_PER_RUN: u64 = spill::SPILL_BUF_BYTES as u64;
 /// **The cascade stays** for the budget that really cannot hold the runs. At the floor — 64 MiB,
 /// which is a `--memory-budget` under 1 GiB — a run is 4.19×10⁶ pairs and the merge opens 16 of
 /// them, so a corpus of more than 67×10⁶ pairs reduces before it merges. That is the trade the
-/// flag asks for.
+/// flag asks for, and the floor is also what makes a pass always reduce: sixteen runs into one is
+/// a reduction where one run into one would be a copy.
 ///
-/// At least two, because a pass that opens one run copies it and reduces nothing.
+/// [`MEMBER_MERGE_DESCRIPTOR_CAP`] bounds it above, memory not being what limits how many files a
+/// process may hold open.
 fn member_merge_fan_in(memory_budget: u64) -> usize {
-    ((member_budget(memory_budget) / MEMBER_MERGE_BYTES_PER_RUN) as usize).max(2)
+    open_runs_for(member_budget(memory_budget))
+}
+
+/// How many runs a budget share of `bytes` pays for, held under the descriptor cap. Split out so
+/// the cap can be read at a share the accumulator's present ceiling does not reach.
+fn open_runs_for(bytes: u64) -> usize {
+    ((bytes / MEMBER_MERGE_BYTES_PER_RUN) as usize).min(MEMBER_MERGE_DESCRIPTOR_CAP)
 }
 
 /// Every layer's member rows, accumulated as `(artifact, source)` pairs and spilled as **sorted
@@ -2636,9 +2660,10 @@ fn resolve_artifact(
              divides by"
         ))
     };
-    // **Rewritten where they sit.** A source id and the entity it resolves to are both `u64`, so
-    // the plan's vector is the resolved one and no second allocation of the corpus's whole
-    // membership exists to hold beside it.
+    // **A generating set is rewritten where it sits.** A source id and the entity it resolves to
+    // are both `u64`, so the plan's vector is the resolved one. It stays `u64` because it leaves
+    // here as [`EntityId`]s for a content's own bitmap, which is one list per ranked content per
+    // artifact and not a term any corpus makes large.
     let in_place = |ids: &mut Vec<u64>, what: &str| -> Result<()> {
         for id in ids.iter_mut() {
             let source = *id;
@@ -2658,6 +2683,13 @@ fn resolve_artifact(
             ))
         })
     };
+    // **A membership is not rewritten in place, and holds both widths while it resolves**: the
+    // `Vec<u64>` the plan read and the `Vec<u32>` this builds, 12 bytes an entry against the
+    // 8 an in-place rewrite would hold. That is the trade for a membership half as wide
+    // everywhere downstream, and it is bounded: the two spellings that reach here are an
+    // artifact row's own `members` and its `excluding`, one list per artifact in a file somebody
+    // wrote. A member source's rows never come this way — they are in the merged member table,
+    // which resolves in the merge's own buffer.
     let resolve_members = |ids: &[u64], what: &str| -> Result<Vec<u32>> {
         let mut out = Vec::with_capacity(ids.len());
         for &source in ids {
@@ -2695,9 +2727,18 @@ fn resolve_artifact(
         PlannedMembership::Excluded(ids) => {
             let excluded: std::collections::HashSet<u32> =
                 resolve_members(&ids, "exclusion")?.into_iter().collect();
-            let high_water = narrow(high_water, "this build's entity space")?;
+            // **`high_water` is one past the last entity**, so a build that assigned the whole
+            // `u32` space has `high_water == 2³²` and every entity in it still fits. Narrowing the
+            // mark itself would refuse that complement, which is a legal one.
+            if high_water > u32::MAX as u64 + 1 {
+                return Err(BuildError::Invalid(format!(
+                    "{layer} level {level} artifact {key}: this build assigned entities up to \
+                     {high_water}, which is outside the u32 entity space (I9's ceiling)"
+                )));
+            }
             ResolvedMembers::Inline(
                 (0..high_water)
+                    .map(|entity| entity as u32)
                     .filter(|entity| !excluded.contains(entity))
                     .collect(),
             )
@@ -4719,8 +4760,17 @@ mod tests {
         assert_eq!(member_budget(1 << 20), MEMBER_BUDGET_MIN);
         assert_eq!(member_merge_fan_in(1 << 20), 16);
         assert!(runs_of(1 << 20, 100_000_000) > member_merge_fan_in(1 << 20) as u64);
-        // A pass that opened one run would copy it and reduce nothing.
-        assert!(member_merge_fan_in(0) >= 2);
+        // The floor is what makes a pass reduce rather than copy, at every budget.
+        assert_eq!(member_merge_fan_in(0), 16);
+        // **The descriptors bound it above**, and do not bind at the present ceiling. A share
+        // eight times that ceiling pays for 2,048 open files, which is twice the soft limit a
+        // Linux process starts with: it gets the cap instead.
+        assert_eq!(open_runs_for(MEMBER_BUDGET_MAX), 256);
+        assert_eq!(MEMBER_BUDGET_MAX * 8 / MEMBER_MERGE_BYTES_PER_RUN, 2_048);
+        assert_eq!(
+            open_runs_for(MEMBER_BUDGET_MAX * 8),
+            MEMBER_MERGE_DESCRIPTOR_CAP
+        );
     }
 
     /// The publication batch is the budget's share divided by what an entry costs, and never zero.

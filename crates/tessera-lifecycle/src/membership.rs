@@ -340,8 +340,15 @@ pub struct IncomingContent {
 ///
 /// The order a set is built in is not observable in the set, so this changes no result.
 fn bitmap_of_entities(entities: impl IntoIterator<Item = EntityId>) -> Bitmap {
-    // Entity space is `u32` by I9, so the narrowing is total.
-    let mut values: Vec<u32> = entities.into_iter().map(|e| e.raw() as u32).collect();
+    // **Checked, through the crate's one narrowing** ([`crate::overlay::as_u32`]). Entity space is
+    // `u32` by I9 and the allocator will not issue an id outside it, so this never fires; an `as`
+    // here would turn an id that somehow was outside into another entity's, which is a document
+    // nobody named put into the artifact. The build refuses the same id where it decodes a member
+    // table, and refusing rather than truncating is what makes the two entry points agree.
+    let mut values: Vec<u32> = entities
+        .into_iter()
+        .map(crate::overlay::as_u32)
+        .collect();
     values.sort_unstable();
     bitmap_of_sorted(&values)
 }
@@ -1883,7 +1890,7 @@ impl ArtifactStore {
         let Some(slots) = self.levels.get_mut(&address) else {
             return 0;
         };
-        let vacated = self.vacated.entry(address).or_default();
+        let vacated = self.vacated.entry(address.clone()).or_default();
         let mut done = 0;
         for ordinal in lo..lo + count {
             let Some(record) = slots.get_mut(ordinal as usize).and_then(Option::as_mut) else {
@@ -1896,6 +1903,12 @@ impl ArtifactStore {
             vacated.insert(ordinal, record.members.cardinality());
             record.members = Members::owned(Bitmap::new());
             done += 1;
+        }
+        // A range naming no record leaves no entry, on [`Self::rehouse_members`]'s rule: an empty
+        // level is not a level with nothing vacated in it, and the two must not be told apart by
+        // whether a range was once passed over.
+        if vacated.is_empty() {
+            self.vacated.remove(&address);
         }
         done
     }
