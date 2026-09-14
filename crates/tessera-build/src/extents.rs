@@ -713,6 +713,63 @@ mod tests {
         );
     }
 
+    /// **The fold changes no output byte, which is the claim that lets `merge_fan_in` set the
+    /// fan-in by the budget rather than by what a reader would prefer.** A bundle-level proof of it
+    /// is not reachable from a build here: the extent count is `JOIN_STAGE_BYTES` over the staged
+    /// row width, a constant of the code, while the fan-in is the memory budget over sixty-four
+    /// 256 KiB blocks — so folding a 10⁷-row corpus wants a budget under 82 MB and its entity-order
+    /// stages refuse under 1,082 MiB. The two meet at the 3.5×10⁹-row rung and nowhere a test can
+    /// go. So the claim is made here, over the one artefact a fold can change: the record blob its
+    /// extents merge into, written from a folded column and an unfolded one and compared byte for
+    /// byte.
+    #[test]
+    fn a_fold_changes_no_byte_of_the_blob_its_extents_merge_into() {
+        let plain_dir = tempfile::tempdir().expect("a temp dir");
+        let plain = three_extents(plain_dir.path());
+        let folded_dir = tempfile::tempdir().expect("a temp dir");
+        let mut folded = three_extents(folded_dir.path());
+        folded.cascade(2).expect("the fold runs");
+        assert_eq!(folded.extents.len(), 2, "three extents fold into two");
+
+        let plain_blob = blob_of(&plain, plain_dir.path());
+        let folded_blob = blob_of(&folded, folded_dir.path());
+        for (a, b) in plain_blob.iter().zip(&folded_blob) {
+            assert_eq!(
+                std::fs::read(a).expect("the file reads"),
+                std::fs::read(b).expect("the file reads"),
+                "{} and {} differ",
+                a.display(),
+                b.display()
+            );
+        }
+    }
+
+    /// The record blob one column's extents merge into, as `write_record_blob` writes it: the three
+    /// files, in the order [`ExtentPaths`] names them.
+    fn blob_of(column: &ExtentColumn, dir: &Path) -> Vec<PathBuf> {
+        let open = column.open().expect("the extents open");
+        let out = ExtentPaths {
+            blocks: dir.join("merged.blocks.bin"),
+            hasrow: dir.join("merged.hasrow.roaring"),
+            directory: dir.join("merged.directory.arrow"),
+        };
+        let mut rows = ExtentRows::over(&open);
+        let mut sources: Vec<&mut dyn tessera_filter_write::RecordRows> = rows
+            .iter_mut()
+            .map(|r| r as &mut dyn tessera_filter_write::RecordRows)
+            .collect();
+        tessera_filter_write::merge_record_rows(
+            &mut sources,
+            &Bitmap::new(),
+            &out.blocks,
+            &out.hasrow,
+            &out.directory,
+            RECORD_BLOCK_TARGET,
+        )
+        .expect("the merge writes");
+        vec![out.blocks, out.hasrow, out.directory]
+    }
+
     /// The check `RecordBlob::open_rows_only` gives up, made where a fold consumes its inputs: the
     /// extents a group takes in are unlinked before `open` ever sees them, so a has-row file that
     /// disagrees with its directory has to refuse here or never.
