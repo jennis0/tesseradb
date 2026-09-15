@@ -5186,7 +5186,7 @@ impl Engine {
     /// evaluating selection a second way evaluates it over the served input rather than over a
     /// transcription of the composition rule. The generation comes back beside the mask because
     /// the segments the mask addresses are its bundle's.
-    // probe/identity-bands: exposed for the probe
+    // Public for `tessera-bench`'s `identity_bands_probe`; not part of the engine's API.
     #[doc(hidden)]
     pub fn composed_mask(
         &self,
@@ -7608,7 +7608,7 @@ pub(crate) fn segment_row_of<'a>(
 /// and `Engine::item` resolves a single row to its owner; when `item` had its own version — take
 /// `segments.first()` and index it with a *view*-space row — a drill-down on any flushed item
 /// read past the build segment's end and panicked. A second copy is how the two come to disagree.
-// probe/identity-bands: exposed for the probe
+// Public for `tessera-bench`'s `identity_bands_probe`; not part of the engine's API.
 #[doc(hidden)]
 pub fn segments_with_row_bases<'a>(
     view: &str,

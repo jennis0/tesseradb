@@ -813,7 +813,7 @@ impl EffectiveMask {
     /// Which route [`Self::for_each_visible_run`] takes, and what one run step costs, are
     /// properties of these — the container mix of `base` above all — and nothing else publishes
     /// them. For a measurement asking why one session's decode costs what it does.
-    // probe/identity-bands: exposed for the probe
+    // Public for `tessera-bench`'s `identity_bands_probe`; not part of the engine's API.
     #[doc(hidden)]
     pub fn parts(&self) -> (&Bitmap, &Bitmap, &Bitmap, bool) {
         (
