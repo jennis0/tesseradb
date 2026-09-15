@@ -83,6 +83,10 @@ rayon = { workspace = true }
 rustc-hash = "1"
 toml = "0.8"
 libc = "0.2"
+# `identity_bands_probe` maps the band files the way the structure under test would be mapped at
+# open, and reads them scattered; a `read` per lookup would price the syscall rather than the
+# structure.
+memmap2 = { workspace = true }
 # `suggest_walk` writes its synthetic index and postings somewhere the run cleans up after itself.
 tokio = { version = "1", features = ["full"] }
 # `blocking` for the campaign's ingest arm: a driver that posts one batch and reads its answer

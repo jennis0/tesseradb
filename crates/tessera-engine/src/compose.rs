@@ -808,6 +808,22 @@ impl EffectiveMask {
         self.minus.is_empty() && self.plus.is_empty() && self.filter.is_none()
     }
 
+    /// The three bitmaps composition produced, and whether a filter narrows them.
+    ///
+    /// Which route [`Self::for_each_visible_run`] takes, and what one run step costs, are
+    /// properties of these — the container mix of `base` above all — and nothing else publishes
+    /// them. For a measurement asking why one session's decode costs what it does.
+    // Public for `tessera-bench`'s `identity_bands_probe`; not part of the engine's API.
+    #[doc(hidden)]
+    pub fn parts(&self) -> (&Bitmap, &Bitmap, &Bitmap, bool) {
+        (
+            self.base.bitmap(),
+            &self.minus,
+            &self.plus,
+            self.filter.is_some(),
+        )
+    }
+
     /// Visit the visible rows of `r` as ascending, non-overlapping, half-open runs — selection's
     /// decode path, replacing per-value bitmap iteration with contiguous row ranges the caller can
     /// scan as slices.

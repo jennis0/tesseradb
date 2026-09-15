@@ -5178,6 +5178,51 @@ impl Engine {
         Ok(self.occupied_tiles(&mask_identity, view, &segments, &mask, depth))
     }
 
+    /// The generation a request would be answered from, and this session's composed mask over one
+    /// of its views.
+    ///
+    /// Composed here by the same three calls [`Engine::viewport_stream`] makes — the session's
+    /// geometry, this generation's overlay and buffer, this view's deny mask — so that a caller
+    /// evaluating selection a second way evaluates it over the served input rather than over a
+    /// transcription of the composition rule. The generation comes back beside the mask because
+    /// the segments the mask addresses are its bundle's.
+    // Public for `tessera-bench`'s `identity_bands_probe`; not part of the engine's API.
+    #[doc(hidden)]
+    pub fn composed_mask(
+        &self,
+        session: &Session,
+        view: &str,
+    ) -> Result<(Arc<Generation>, EffectiveMask)> {
+        let generation = self.generation.load_full();
+        let mut probe = Probe::new();
+        let mask = {
+            let view_data = generation
+                .bundle
+                .partitions
+                .values()
+                .find_map(|partition| partition.views.get(view))
+                .ok_or_else(|| EngineError::UnknownView(view.to_string()))?;
+            let geometry =
+                self.session_geometry(session, &generation, view, view_data, &None, &mut probe)?;
+            let denied =
+                generation
+                    .denied
+                    .get(view)
+                    .ok_or_else(|| EngineError::DenyMaskMissing {
+                        view: view.to_string(),
+                    })?;
+            compose(
+                &session.satisfied,
+                &generation.overlay,
+                &generation.buffer,
+                Arc::clone(&geometry.projection),
+                &view_data.row_space,
+                denied,
+            )
+        };
+        Ok((generation, mask))
+    }
+
     /// This level's masked counts, where the level is served row-major and so has no other route to
     /// them.
     ///
@@ -7563,7 +7608,9 @@ pub(crate) fn segment_row_of<'a>(
 /// and `Engine::item` resolves a single row to its owner; when `item` had its own version — take
 /// `segments.first()` and index it with a *view*-space row — a drill-down on any flushed item
 /// read past the build segment's end and panicked. A second copy is how the two come to disagree.
-pub(crate) fn segments_with_row_bases<'a>(
+// Public for `tessera-bench`'s `identity_bands_probe`; not part of the engine's API.
+#[doc(hidden)]
+pub fn segments_with_row_bases<'a>(
     view: &str,
     view_data: &'a tessera_store::read::ViewData,
 ) -> Result<Vec<(&'a SegmentData, u32)>> {
