@@ -3,7 +3,7 @@
 **Date:** 2026-09-14
 **Status:** Measured. Every figure is from rung 6 (3,495,729,729 rows, one segment, format 11)
 under the 24 GiB serve cap on the WSL2 box, unless marked modelled. The probe, its raw results
-and the table script are in `probes/2026-09-14-identity-bands/` on branch `probe/identity-bands`.
+and the table script are in `probes/2026-09-14-identity-bands/`.
 Nothing here ships: no bundle format knows the files, and the engine is unchanged except for
 three `#[doc(hidden)]` accessors the probe reads through. The decisions this asks for are in §8.
 The problem it answers is `2026-09-14-whole-map-selection-under-a-cap.md` §1; the proposal it
@@ -200,8 +200,8 @@ lists' identities, and none of the routes above is one.
 
 Not fixed here: session start, which at rung 6 is a 6 to 38 s projection build per principal;
 the handover for it is `2026-09-14-session-start-handover.md`. Nor the emit. The serve battery
-at the client's request shape (`battery/budget-request`: the whole extent at depth 9, `k` at the
-ceiling, layers on; `rung6/battery-budget.json` beside the probe's results) measured the
+at the client's request shape (`test_corpora/common/serve_battery.py`: the whole extent at depth
+9, `k` at the ceiling, layers on; `rung6/battery-budget.json` beside the probe's results) measured the
 end-to-end whole map hot at 0.6 s for the 1% principal, 23 s at 10%, 35 s at 25%, 80 s at 50%
 and 95 s at 100%, of which the time to first flush, which is what the search above replaces, was
 0.1, 6.8, 5.5, 11.5 and 13.6 s. The remainder is the emit: the scattered gather of the served
@@ -229,12 +229,10 @@ For the owner:
   change to §3.2.
 - **D. The run reader.** Whether the engine's `for_each_run_in` should bound its read for
   long-run masks that are not the whole view.
-- **E. The probe branch.** Whether to merge it as evidence: two bench binaries, the probe
-  directory with the rung 6 results, and three hidden engine accessors.
 
 ## 9. Pointers
 
-- `probes/2026-09-14-identity-bands/` on `probe/identity-bands`: README (method, what it
+- `probes/2026-09-14-identity-bands/`: README (method, what it
   cannot attribute, the run reader finding), `run.sh`, `report.py`, and `rung6/` with the raw
   results of the three rung 6 runs, the builder's `bands.json`, and `tables.py`, which
   renders every table above from them.
