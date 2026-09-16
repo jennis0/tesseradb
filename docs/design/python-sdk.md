@@ -74,6 +74,10 @@ db = td.create(path=None, replace=False)
 db = td.open(path)
 ```
 
+The SDK keeps its own copy of the declaration as JSON under `.tessera/`, written at every
+`declare_*`, so `open()` reads the blocks back without parsing TOML and a saved database that has
+not committed yet reopens in the Declared state.
+
 `create()` with no path makes a temporary directory that `close()` removes, on a RAM-backed
 filesystem where the platform has one (`/dev/shm` on Linux and WSL2) and on disk otherwise, and
 says which. The build reads and the server maps that directory, so a small corpus on the
@@ -113,8 +117,9 @@ written to `sources/<name>.parquet`; a path is recorded and read in place, so a 
 not copied. Staging a name twice before the first commit replaces the earlier data.
 
 `default=True` makes this source the declaration's `[defaults].source`: a declaration block
-that names no source reads it. Without a default the SDK writes no `[defaults]` block, and a
-block with no source is refused at `check()` naming the block. A second `default=True` replaces
+that names no source reads it. Without a default the SDK writes no `source` under `[defaults]`
+(the block still carries `allocation_view`, §4.2), and a block with no source is refused at
+`check()` naming the block. A second `default=True` replaces
 the first and the call says so.
 
 **Identity.** The build reads a `u64` source id from each points file's `entity_id` column
@@ -459,8 +464,10 @@ which the SDK writes with:
   Until it exists the SDK writes `cors_origins` from `TESSERA_NOTEBOOK_ORIGIN`, and a widget
   from an unlisted origin is refused by the browser.
 
-The binary is found on `PATH`, at `TESSERA_BIN`, or in a checkout's target directory. At release
-a platform wheel carries it (§11.2 E).
+The binary is `TESSERA_BIN` when set, else the first `tessera` on `PATH`, else a checkout's
+target directory, release before debug; the create report names the one used. At release a
+platform wheel carries it (§11.2 E). The SDK generates an operator credential beside the
+session credential, since the deployment file requires both.
 
 `db.close()` stops the child; the kernel's exit does the same.
 

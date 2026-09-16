@@ -98,8 +98,16 @@ pub enum ConfigError {
     /// The `[disclosure]` section is present but missing one of its required keys.
     MissingDisclosureKey(&'static str),
     /// Neither `*_credential_file` nor `*_credential_env` was set for this credential, or the
-    /// named file/env var could not be read.
+    /// named environment variable was not set.
     MissingCredential(&'static str),
+    /// A `*_credential_file` was named and could not be read. Separate from [`ConfigError::Io`]
+    /// so the refusal carries the path it tried, which a bare `No such file or directory` does
+    /// not, and the path is the resolved one.
+    CredentialFileUnreadable {
+        which: &'static str,
+        path: PathBuf,
+        source: std::io::Error,
+    },
     BadAddr(String),
     /// Only `builtin:passthrough` is available; the wasmtime plugin host is not built.
     UnsupportedPlugin(String),
@@ -432,6 +440,16 @@ impl std::fmt::Display for ConfigError {
                 "tessera.toml's [disclosure] section is missing '{key}' — design §7.5/§2.3: \
                  disclosure parameters have no defaults, so startup refuses rather than silently \
                  choosing one"
+            ),
+            ConfigError::CredentialFileUnreadable {
+                which,
+                path,
+                source,
+            } => write!(
+                f,
+                "cannot read the '{which}' credential file '{}': {source}. The path named in \
+                 [serve] resolves against tessera.toml's own directory, not the working directory",
+                path.display()
             ),
             ConfigError::MissingCredential(which) => write!(
                 f,
@@ -2145,11 +2163,16 @@ pub fn load(path: &Path) -> Result<Config> {
     // the document came from.
     let base = path.parent().unwrap_or(Path::new(""));
     for slot in [
-        &mut config.bundle_path,
-        &mut config.cache_dir,
-        &mut config.wal_path,
-        &mut config.schema_path,
-    ] {
+        Some(&mut config.bundle_path),
+        Some(&mut config.cache_dir),
+        Some(&mut config.wal_path),
+        Some(&mut config.schema_path),
+        config.session_credential.file.as_mut(),
+        config.operator_credential.file.as_mut(),
+    ]
+    .into_iter()
+    .flatten()
+    {
         if slot.is_relative() {
             *slot = base.join(&*slot);
         }
@@ -2874,7 +2897,14 @@ impl Credential {
     /// reads this same file never needs one.
     pub fn resolve(&self, name: &'static str) -> Result<String> {
         if let Some(path) = &self.file {
-            return Ok(fs::read_to_string(path)?.trim().to_string());
+            let secret = fs::read_to_string(path).map_err(|source| {
+                ConfigError::CredentialFileUnreadable {
+                    which: name,
+                    path: path.clone(),
+                    source,
+                }
+            })?;
+            return Ok(secret.trim().to_string());
         }
         if let Some(var) = &self.env {
             return std::env::var(var).map_err(|_| ConfigError::MissingCredential(name));
@@ -3308,6 +3338,70 @@ compaction_after_deletions = 9000
         assert_eq!(config.cache_dir, tmp.path().join("c"));
         assert_eq!(config.wal_path, tmp.path().join("w"));
         assert_eq!(config.schema_path, tmp.path().join(DEFAULT_SCHEMA_FILE));
+    }
+
+    /// **A credential file resolves against the deployment file's directory too**, and a missing
+    /// one is refused naming the path that was tried. Resolving it against the working directory
+    /// makes `tessera serve --deployment <dir>/tessera.toml` from anywhere but `<dir>` refuse with
+    /// an error naming nothing.
+    #[test]
+    fn a_credential_file_resolves_against_the_deployment_files_own_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let at = tmp.path().join(DEPLOYMENT_FILE);
+        // The process's working directory is the crate root, which holds no `session.cred`, so a
+        // path read against it cannot be the one that resolves.
+        std::fs::write(
+            tmp.path().join("session.cred"),
+            "s3cret
+",
+        )
+        .unwrap();
+        std::fs::write(
+            &at,
+            valid_toml("session_credential_file = \"session.cred\"\n").replace(
+                "session_credential_env = \"TESSERA_TEST_SESSION_CRED\"\n",
+                "",
+            ),
+        )
+        .unwrap();
+        assert!(
+            !Path::new("session.cred").exists(),
+            "the cwd must not hold one"
+        );
+
+        let config = load(&at).expect("the file loads");
+        assert_eq!(
+            config.session_credential.file.as_deref(),
+            Some(tmp.path().join("session.cred").as_path())
+        );
+        assert_eq!(
+            config.session_credential.resolve("session").unwrap(),
+            "s3cret"
+        );
+
+        // A file named and absent is refused naming the resolved path, not a bare io error.
+        let at = tmp.path().join("absent").join(DEPLOYMENT_FILE);
+        std::fs::create_dir_all(at.parent().unwrap()).unwrap();
+        std::fs::write(
+            &at,
+            valid_toml("operator_credential_file = \"operator.cred\"\n").replace(
+                "operator_credential_env = \"TESSERA_TEST_OPERATOR_CRED\"\n",
+                "",
+            ),
+        )
+        .unwrap();
+        let config = load(&at).expect("the file loads");
+        let err = config
+            .operator_credential
+            .resolve("operator")
+            .expect_err("an absent credential file is refused");
+        let message = err.to_string();
+        let resolved = tmp.path().join("absent").join("operator.cred");
+        assert!(
+            message.contains(&resolved.display().to_string()),
+            "{message}"
+        );
+        assert!(message.contains("operator"), "{message}");
     }
 
     /// **A serving secret is read at startup, never at parse.** `tessera build` reads this same
