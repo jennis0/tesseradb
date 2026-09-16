@@ -112,5 +112,116 @@ class CommitReport(Report):
         return out
 
 
+@dataclass
+class PagedReport:
+    """What a later `check()` and `commit()` hand back (§6.2's last paragraph, §6.3).
+
+    `check()` returns it with `sent` false: the plan and the pre-flight, with nothing sent. The two
+    are one object because they come from one planner, so what a check prints is what a commit
+    does.
+    """
+
+    sent: bool = False
+    plan: list[str] = field(default_factory=list)
+    findings: list = field(default_factory=list)
+    rows_accepted: dict = field(default_factory=dict)
+    artifacts_minted: int = 0
+    memberships_joined: int = 0
+    values_filled: int = 0
+    #: Parts a page supplied that the database already held: the fill rule's no-effect arm.
+    already_present: int = 0
+    without_content: int = 0
+    clipped: int = 0
+    refusals: list = field(default_factory=list)
+    #: Batch ids the commit log already held, so the page was not sent again (§6.4).
+    skipped: list = field(default_factory=list)
+    #: The identities the ingest route answered with, one per accepted row.
+    tessera_ids: list = field(default_factory=list)
+    #: The identity each published artifact was given, by layer and key. A layer's own
+    #: `tessera_id` is the only address by which it can later be addressed (I10).
+    artifact_ids: dict = field(default_factory=dict)
+    flush_wait: float | None = None
+    flush_reached: bool = True
+
+    @property
+    def ok(self) -> bool:
+        return not self.refusals and not any(finding.refuses for finding in self.findings)
+
+    @property
+    def rows(self) -> int:
+        return sum(self.rows_accepted.values())
+
+    def lines(self) -> list[str]:
+        what = "commit" if self.sent else "check"
+        out = [f"{what}: {'ok' if self.ok else 'FAILED'}"]
+        if self.plan:
+            out.append(f"plan ({len(self.plan)} request(s), in the order §6.2 fixes)")
+            out += [f"  {line}" for line in self.plan]
+        else:
+            out.append("plan: nothing to send")
+        if self.findings:
+            out.append("pre-flight")
+            out += [f"  {finding}" for finding in self.findings]
+        if not self.sent:
+            return out
+        out.append("sent")
+        for view, rows in self.rows_accepted.items():
+            out.append(f"  rows accepted into view '{view}': {rows}")
+        out.append(f"  artifacts minted: {self.artifacts_minted}")
+        out.append(f"  memberships joined: {self.memberships_joined}")
+        if self.values_filled:
+            out.append(f"  values filled: {self.values_filled}")
+        out.append(f"  parts already present: {self.already_present}")
+        if self.without_content:
+            out.append(f"  artifacts published without their declared content: {self.without_content}")
+        if self.clipped:
+            out.append(f"  rows clipped onto the frame's edge by the projection: {self.clipped}")
+        if self.skipped:
+            out.append(f"  pages this database had already had acknowledged: {len(self.skipped)}")
+        if self.flush_wait is not None:
+            reached = "" if self.flush_reached else ", not reached within the wait"
+            out.append(f"  flush: {self.flush_wait:.2f} s to the publication{reached}")
+        for refusal in self.refusals:
+            out.append(
+                f"  refused {refusal['status']} on {refusal['what']}: {refusal['detail']}"
+            )
+        return out
+
+    def __str__(self) -> str:
+        return "\n".join(self.lines())
+
+    __repr__ = __str__
+
+
+@dataclass
+class ChangeReport:
+    """What `remove`, `suppress` and `unsuppress` hand back (§6.5)."""
+
+    op: str
+    requested: int = 0
+    unknown: list = field(default_factory=list)
+    refusals: list = field(default_factory=list)
+
+    @property
+    def ok(self) -> bool:
+        return not self.refusals
+
+    def lines(self) -> list[str]:
+        out = [f"{self.op}: {self.requested} id(s), {'ok' if self.ok else 'FAILED'}"]
+        if self.unknown:
+            out.append(
+                f"  {len(self.unknown)} id(s) this database's map does not hold, so nothing "
+                f"addresses them: {', '.join(repr(i) for i in self.unknown[:10])}"
+            )
+        for refusal in self.refusals:
+            out.append(f"  refused {refusal['status']}: {refusal['detail']}")
+        return out
+
+    def __str__(self) -> str:
+        return "\n".join(self.lines())
+
+    __repr__ = __str__
+
+
 def render_columns_of(attributes: Sequence[dict]) -> list[str]:
     return [block["name"] for block in attributes if block.get("render")]

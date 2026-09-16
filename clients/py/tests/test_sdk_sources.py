@@ -63,7 +63,7 @@ def test_a_default_index_is_the_row_position_at_the_first_commit_and_refused_on_
     assert "row positions" in " ".join(staged.notes)
     db.built = True
     with pytest.raises(Refusal, match="id="):
-        db.stage("points", frame(), default=True)
+        db.stage("points", frame())
 
 
 def test_a_points_file_with_an_integer_entity_id_is_read_in_place(tmp_path):
@@ -177,18 +177,31 @@ def test_open_reads_the_blocks_back_from_the_sdks_own_copy(tmp_path):
         open_database(tmp_path)
 
 
-def test_a_built_database_refuses_the_verbs_that_would_start_a_later_commit(tmp_path):
+def test_a_built_database_refuses_the_declarations_that_have_no_runtime_route(tmp_path):
+    """The emitter behind `PUT /control/layers` covers layers, so the other four blocks refuse."""
     db = Database(tmp_path)
     db.built = True
     for call in (
         lambda: db.declare_view("v", source="points"),
         lambda: db.declare_attribute("a", type="u8"),
-        lambda: db.check(),
-        lambda: db.commit(),
-        lambda: db.remove(["p"]),
+        lambda: db.declare_vocabulary("v", values=["a"], closed=True),
+        lambda: db.declare("attribute", {"name": "a", "type": "u8"}),
     ):
         with pytest.raises(Refusal, match="not built yet"):
             call()
+    # A layer is declarable, and so is the generic form that writes one.
+    assert db.declare("layer", {"name": "l"})["name"] == "l"
+
+
+def test_a_delta_names_a_source_the_declaration_knows(tmp_path):
+    db = create(tmp_path / "db")
+    db.stage("points", frame(), default=True)
+    db.declare_view("map", source="points")
+    db.built = True
+    with pytest.raises(Refusal, match="no block of this declaration reads"):
+        db.stage("nothing_reads_this", frame(id=["a", "b", "c"]), id="id")
+    with pytest.raises(Refusal, match="default source"):
+        db.stage("points", frame(id=["a", "b", "c"]), id="id", default=True)
 
 
 def in_place_points(tmp_path, ids=(7, 8)):
@@ -216,7 +229,10 @@ def test_a_points_file_read_in_place_makes_the_map_the_identity(tmp_path):
         "members", pd.DataFrame({"key": ["a", "a"], "entity": [7, 8]})
     )
     assert pq.read_table(members.path)["entity"].to_pylist() == [7, 8]
-    assert len(db.id_map) == 0
+    # Nothing was assigned: the ids pass through as they are. They are recorded all the same, so
+    # that each carries a state and a delta's held rows can be told from its new ones.
+    assert db.id_map.source_id_of(7) == 7
+    assert db.id_map.state_of(7) == ASSIGNED
     # A members file beside it is read where it lies, on the same ground.
     path = tmp_path / "members.parquet"
     pq.write_table(pa.table({"key": ["a"], "entity": pa.array([7], type=pa.uint64())}), path)

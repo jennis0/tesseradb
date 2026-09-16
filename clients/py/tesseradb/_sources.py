@@ -116,6 +116,7 @@ def stage_frame(
     id: str | None = None,
     default: bool = False,
     first_commit: bool = True,
+    folder: str = "sources",
 ) -> StagedSource:
     table, id_column, index_is_the_id, index_values = to_table(data, id)
     notes: list[str] = []
@@ -124,11 +125,11 @@ def stage_frame(
     if id_column is None and entity_column is None and not default:
         # Nothing here names an entity. A view or a members block may still read it, and the
         # declaration is what says so, so the ids wait for the document.
-        pq.write_table(table, _sources_path(directory, name))
+        pq.write_table(table, _sources_path(directory, name, folder))
         return StagedSource(
             name=name,
-            path=_sources_path(directory, name),
-            declared_path=f"sources/{name}.parquet",
+            path=_sources_path(directory, name, folder),
+            declared_path=f"{folder}/{name}.parquet",
             default=default,
             index_available=index_is_the_id,
             pending_ids=True,
@@ -168,12 +169,12 @@ def stage_frame(
         notes.append("the frame's default index: ids are row positions")
 
     table = _with_entity_ids(table, target, id_map.source_ids(user_ids, name))
-    path = _sources_path(directory, name)
+    path = _sources_path(directory, name, folder)
     pq.write_table(table, path)
     return StagedSource(
         name=name,
         path=path,
-        declared_path=f"sources/{name}.parquet",
+        declared_path=f"{folder}/{name}.parquet",
         default=default,
         user_id_column=id_column if entity_column is None else None,
         default_index=index_is_the_id and id_column is None,
@@ -191,6 +192,7 @@ def stage_path(
     id_map: IdMap,
     id: str | None = None,
     default: bool = False,
+    folder: str = "sources",
 ) -> StagedSource:
     """A file. Read where it lies where its ids already are what the build reads, rewritten where
     they are not.
@@ -230,12 +232,12 @@ def stage_path(
     user_ids = table[entity_column].to_pylist()
     target = entity_column if entity_column in ENTITY_COLUMNS else "entity_id"
     table = _with_entity_ids(table, target, id_map.source_ids(user_ids, name))
-    written = _sources_path(directory, name)
+    written = _sources_path(directory, name, folder)
     pq.write_table(table, written)
     return StagedSource(
         name=name,
         path=written,
-        declared_path=f"sources/{name}.parquet",
+        declared_path=f"{folder}/{name}.parquet",
         default=default,
         user_id_column=entity_column if entity_column not in ENTITY_COLUMNS else None,
         rows=table.num_rows,
@@ -320,8 +322,8 @@ def _with_entity_ids(table: pa.Table, column: str, ids: list[int]) -> pa.Table:
     return table.append_column(column, values)
 
 
-def _sources_path(directory: Path, name: str) -> Path:
-    path = directory / "sources" / f"{name}.parquet"
+def _sources_path(directory: Path, name: str, folder: str = "sources") -> Path:
+    path = directory / folder / f"{name}.parquet"
     path.parent.mkdir(parents=True, exist_ok=True)
     return path
 
