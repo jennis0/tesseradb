@@ -370,6 +370,19 @@ class Database:
         )
         return self.listening
 
+    @property
+    def session_credential(self) -> str:
+        """The credential this database mints its tokens with, which stays in the kernel (§8)."""
+        return (self.path / ".tessera" / "session.cred").read_text(encoding="utf-8").strip()
+
+    @property
+    def viewer_url(self) -> str | None:
+        return None if self.listening is None else f"http://{self.listening.viewer}"
+
+    @property
+    def session_url(self) -> str | None:
+        return None if self.listening is None else f"http://{self.listening.session}"
+
     def _run(self, arguments: Sequence[str]) -> subprocess.CompletedProcess:
         return subprocess.run(
             [_instance.find_binary(), *arguments],

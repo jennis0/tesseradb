@@ -9,13 +9,16 @@ path, which is what makes it the thing to compare.
 Beside it, the first commit through `tessera build --mint-external-ids`.
 """
 
+import json
 import os
 import subprocess
+import urllib.request
 from pathlib import Path
 
 import pytest
 
 from tesseradb import _instance
+from tesseradb._auth import authorise
 from tesseradb._database import create
 
 pytest.importorskip("pyarrow")
@@ -281,10 +284,8 @@ def test_the_first_commit_builds_a_bundle_and_mints_every_external_id(tmp_path):
     db = create(tmp_path / "db")
     declare_notebook(db, corpus)
     try:
-        db.commit()
-    except _instance.ServeRefused:
-        # The build is done by then; the serve step waits on the announce line (§11.2 A).
-        pass
+        report = db.commit()
+        assert report.ok, report.output
     finally:
         db.close()
     bundle = db.path / "bundle"
@@ -294,3 +295,51 @@ def test_the_first_commit_builds_a_bundle_and_mints_every_external_id(tmp_path):
     # routes and in `remove()`.
     assert (entities / "ext-locator.u32").exists()
     assert list(entities.glob("external-ids-*.arrow"))
+
+
+def test_the_committed_database_is_served_and_close_stops_the_child(tmp_path):
+    """The first commit through to a served answer: the announce line, a token, `/v1/meta`."""
+    binary()
+    corpus = notebook_corpus()
+    db = create(tmp_path / "db")
+    declare_notebook(db, corpus)
+    report = db.commit()
+    try:
+        assert report.ok, report.output
+        # The addresses are the child's own, read from the line it printed: the SDK declared port
+        # 0 on each plane, so nothing here was guessed.
+        for address in (report.viewer, report.session, report.control):
+            assert address and address.startswith("127.0.0.1:")
+            assert not address.endswith(":0")
+        token = authorise(db.session_url, db.session_credential, ["public"])
+        assert token.token and token.seconds_left > 0
+        meta = json.loads(
+            urllib.request.urlopen(
+                urllib.request.Request(
+                    db.viewer_url + "/v1/meta",
+                    headers={"authorization": f"Bearer {token.token}"},
+                ),
+                timeout=30,
+            ).read()
+        )
+        assert {view["id"] for view in meta["views"]} == {"s0"}
+        columns = {column["name"]: column for column in meta["declared_scalars"]}
+        assert set(columns) == {
+            "archive",
+            "primary_category",
+            "submitted_at",
+            "title",
+            "abstract",
+            "arxiv_id",
+        }
+        # The render flags the first commit froze, and the vocabulary a category names.
+        assert [c for c in columns.values() if c["render"]] and columns["title"]["render"] is False
+        assert columns["archive"]["category"]["vocabulary"] == "archive"
+        layers = {layer["name"] for layer in meta["layers"]}
+        assert {"clusters/kmeans", "topics/kmeans", "taxonomy/arxiv"} <= layers
+        child = db._child.pid
+    finally:
+        db.close()
+    assert db.listening is None
+    with pytest.raises(OSError):
+        os.kill(child, 0)

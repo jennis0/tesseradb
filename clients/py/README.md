@@ -51,13 +51,9 @@ whatever block it is given in the meantime.
 The binary is found at `TESSERA_BIN`, on `PATH`, or in a checkout's target directory. The database
 directory keeps its own session credential, operator credential and identity key under `.tessera/`,
 owner-only; `commit()` starts `tessera serve` as a child process on loopback at port 0 and reads
-the three bound addresses from the JSON line the child prints. It kills that child by its pid at
+the three bound addresses from the JSON line the child prints once all three planes are listening.
+`db.viewer_url`, `db.session_url` and `db.session_credential` are what a token is minted against. It kills that child by its pid at
 `close()` and at interpreter exit.
-
-**Not built yet on `main`: the announce line.** `tessera serve` binds the addresses the deployment
-file names and announces nothing, so `commit()` builds and then waits for a line that does not come
-and says so, naming python-sdk.md §11.2 A. There is no port-guessing fallback: the SDK would be
-racing another process for the port it guessed.
 
 **Not built yet: the viewer plane's origin list for a notebook page.** The SDK writes
 `serve.cors_origins` from `TESSERA_NOTEBOOK_ORIGIN`, and a widget served from an origin that names

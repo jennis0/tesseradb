@@ -5,11 +5,10 @@ The three planes are on loopback at port 0, so the kernel does not pick ports an
 process for them; the child says which ports it bound by printing one JSON line on stdout, and
 this module reads it.
 
-Not built yet: that announce line. `serve` binds the addresses the file names and announces
-nothing (python-sdk.md §11.2 A), so [`start`] below times out against the binary on `main` and
-says so, naming the line it waited for. There is no port-guessing fallback: guessing is the race
-the port-0 arrangement exists to remove, and a wrong guess would hand the notebook a URL that
-answers for somebody else's server.
+The line is written once all three planes are listening, so the announced viewer address is
+already answering when it arrives. There is no port-guessing fallback: guessing is the race the
+port-0 arrangement exists to remove, and a wrong guess would hand the notebook a URL that answers
+for somebody else's server. A child that announces nothing is a refusal carrying its stderr.
 
 The child is killed by its pid, at `close()` and at interpreter exit. Never by name: a kill by
 process name has taken out another session's server on this machine.
