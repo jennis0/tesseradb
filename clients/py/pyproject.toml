@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "tesseradb"
 version = "0.1.0"
-description = "Tessera's Python package: the notebook widget as the [widget] extra; the SDK and the in-process instance join it later (decision 0095)."
+description = "Tessera's Python package: the notebook widget as the [widget] extra, the SDK as the [local] one; the in-process instance joins them later (decision 0095)."
 requires-python = ">=3.10"
 # The base install has no JavaScript in it and no dependency beyond the standard library:
 # `authorise` is one HTTPS call, made with `urllib`. A consumer, never a component (CLAUDE.md).
@@ -16,7 +16,10 @@ dependencies = []
 # (`hatch_build.py`) builds with Node at wheel-build time and packages under `tesseradb/static/`.
 # A user installing the wheel needs no Node; a developer installing from this checkout does.
 widget = ["anywidget>=0.9"]
-dev = ["anywidget>=0.9", "pytest", "ruff"]
+# The SDK: a database in a directory, filled from frames and files. pyarrow is the only hard
+# dependency — a pandas or polars frame reaches it through `pa.table`, so neither is required.
+local = ["pyarrow>=14"]
+dev = ["anywidget>=0.9", "pyarrow>=14", "pandas", "pytest", "ruff"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["tesseradb"]

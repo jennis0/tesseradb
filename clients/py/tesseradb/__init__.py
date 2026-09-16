@@ -1,19 +1,22 @@
 """``tesseradb`` — Tessera's Python package (decision 0095).
 
 The base install is ``authorise`` and ``Token`` and depends on nothing outside the standard
-library. ``pip install tesseradb[widget]`` adds anywidget and the notebook widget, ``Map``; the
-SDK and the in-process instance join this package later.
+library. ``pip install tesseradb[widget]`` adds anywidget and the notebook widget, ``Map``;
+``pip install tesseradb[local]`` adds the SDK, which creates a Tessera database in a directory,
+fills it from frames and files and commits it through the ``tessera`` binary (python-sdk.md).
 
-``Map`` is imported on first use rather than at import time, so the base install does not need
-anywidget to ``import tesseradb``.
+``Map`` and the SDK's verbs are imported on first use rather than at import time, so the base
+install needs neither anywidget nor pyarrow to ``import tesseradb``.
 """
 
 from __future__ import annotations
 
 from ._auth import Token, authorise
 
-__all__ = ["Map", "Token", "authorise", "__version__"]
+__all__ = ["Map", "Token", "authorise", "create", "open", "__version__"]
 __version__ = "0.1.0"
+
+_SDK = {"create": "create", "open": "open", "Database": "Database"}
 
 
 def __getattr__(name: str):
@@ -25,4 +28,12 @@ def __getattr__(name: str):
                 "tesseradb.Map needs the widget extra: pip install 'tesseradb[widget]'"
             ) from e
         return Map
+    if name in _SDK:
+        try:
+            from . import _database
+        except ImportError as e:  # pyarrow absent
+            raise ImportError(
+                "the tesseradb SDK needs the local extra: pip install 'tesseradb[local]'"
+            ) from e
+        return getattr(_database, _SDK[name])
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
