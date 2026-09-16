@@ -249,6 +249,11 @@ impl Buckets<'_> {
     #[cold]
     #[inline(never)]
     fn push_into_new_chunk(&mut self, bucket: usize, row: u32) {
+        // A cursor with room whose slot is outside the pool would abandon a partly filled chunk
+        // that `len` still counts as full. Chunk ids are below the pool's chunk count, so this
+        // cannot happen; the assertion says so where the tests will see it.
+        let cursor = self.cursors[bucket];
+        debug_assert_eq!(cursor.next, cursor.end, "a chunk with room was abandoned");
         let chunk = self.free.pop().expect(
             "the pool holds a window and a partial chunk per bucket, which is all a walk buffers",
         );
