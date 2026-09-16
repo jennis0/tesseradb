@@ -2087,7 +2087,12 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Command::Serve { deployment } => {
-            tracing_subscriber::fmt::init();
+            // Diagnostics on stderr, because stdout carries one thing: the JSON line naming the
+            // three bound addresses, which a supervisor reads as the process's first stdout line
+            // (`tessera_server::serve_announcing`).
+            tracing_subscriber::fmt()
+                .with_writer(std::io::stderr)
+                .init();
             let deployment = match tessera_server::config::discover(
                 deployment.as_deref(),
                 &std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
