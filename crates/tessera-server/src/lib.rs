@@ -3,9 +3,10 @@
 //!
 //! [`prepare`] does everything that can fail *before* any listener is bound: load `tessera.toml`
 //! (fail-closed on a missing `[disclosure]` section — design §7.5/§2.3), open the engine (bundle
-//! digest verification, WAL replay, plugin load). [`run`] takes the result and binds/serves the
-//! three planes forever. Splitting the two means "the process refuses to start" (test (h)) is
-//! observable without ever attempting to listen on a socket.
+//! digest verification, WAL replay, plugin load). [`run`] takes the result, binds the three
+//! planes, announces the bound addresses on stdout and serves them forever. Splitting the two
+//! means "the process refuses to start" (test (h)) is observable without ever attempting to
+//! listen on a socket.
 
 pub mod config;
 pub mod control;
@@ -213,7 +214,9 @@ pub fn prepare(config_path: &Path) -> Result<Prepared, BoxError> {
     // **The addresses, for the same reason and with the same posture.** `[serve]` is optional in
     // the deployment file because `tessera build` reads it too and a build has nothing to listen
     // on; what is not optional is a *server* coming up without them. Refused here rather than
-    // defaulted, on SA §7's rule — a default port is a listening socket nobody chose.
+    // defaulted, on SA §7's rule — a default port is a listening socket nobody chose. A declared
+    // TCP address may name port 0, which is a port the caller asked the kernel to choose and then
+    // reads back from the announce line `run` writes; it is a stated address, not a default.
     for (what, declared) in [
         ("viewer", config.viewer_addr.is_some()),
         ("session", config.session_addr.is_some()),
@@ -407,10 +410,41 @@ pub fn prepare(config_path: &Path) -> Result<Prepared, BoxError> {
     Ok(Prepared { state, config })
 }
 
+/// The one line `run` writes to stdout once all three planes are listening: where each plane
+/// ended up. A TCP address a deployment declares with port 0 is a kernel-chosen port, so the
+/// address a supervisor needs exists only after the bind, and only the process can report it.
+///
+/// The field order is the line's key order, which is why this is a struct and not a map.
+#[derive(serde::Serialize)]
+struct Listening<'a> {
+    event: &'a str,
+    viewer: String,
+    session: String,
+    control: String,
+}
+
 /// Bind all three listeners and serve forever (or until one of them errors). The viewer and
 /// session planes always bind TCP; the control plane binds a unix socket unless configured as
 /// loopback TCP (tests, and the documented Windows shape — SA §4.2).
+///
+/// The bound addresses are announced on stdout before any plane accepts a connection; see
+/// [`serve_announcing`] for the rule that keeps that line readable.
 pub async fn run(prepared: Prepared) -> Result<(), BoxError> {
+    serve_announcing(prepared, std::io::stdout()).await
+}
+
+/// [`run`], with the announce line written somewhere a test can read.
+///
+/// **Stdout carries the announce line and nothing else.** The line is a single JSON object,
+/// `{"event":"listening","viewer":…,"session":…,"control":…}`, written and flushed once every
+/// plane is bound and every router is built, so a supervisor that has read it can send a request
+/// immediately. A unix-socket control plane reports `unix:` and its path. The process's own
+/// diagnostics go to stderr (`tessera serve` mounts the tracing subscriber there), which is what
+/// makes the first stdout line a supervisor can rely on.
+pub async fn serve_announcing<W: std::io::Write>(
+    prepared: Prepared,
+    mut announce_to: W,
+) -> Result<(), BoxError> {
     let Prepared { state, config } = prepared;
 
     // `prepare` refused a deployment declaring no addresses, so these are present by construction.
@@ -423,26 +457,48 @@ pub async fn run(prepared: Prepared) -> Result<(), BoxError> {
     let viewer_listener = tokio::net::TcpListener::bind(viewer_addr).await?;
     let session_listener = tokio::net::TcpListener::bind(session_addr).await?;
 
+    // Bound before the announce, so the line names three live planes rather than two.
+    enum ControlBound {
+        Tcp(tokio::net::TcpListener),
+        Unix(tokio::net::UnixListener, std::path::PathBuf),
+    }
+    let control_bound = match config
+        .control_listen
+        .expect("prepare() refuses a serve with no control address")
+    {
+        ControlListen::Tcp(addr) => ControlBound::Tcp(tokio::net::TcpListener::bind(addr).await?),
+        ControlListen::Unix(path) => {
+            let _ = std::fs::remove_file(&path);
+            let listener = tokio::net::UnixListener::bind(&path)?;
+            ControlBound::Unix(listener, path)
+        }
+    };
+
     let viewer_router = viewer::router(Arc::clone(&state));
     let session_router = session::router(Arc::clone(&state));
     let control_router = control::router(Arc::clone(&state));
+
+    let listening = Listening {
+        event: "listening",
+        viewer: viewer_listener.local_addr()?.to_string(),
+        session: session_listener.local_addr()?.to_string(),
+        control: match &control_bound {
+            ControlBound::Tcp(listener) => listener.local_addr()?.to_string(),
+            ControlBound::Unix(_, path) => format!("unix:{}", path.display()),
+        },
+    };
+    writeln!(announce_to, "{}", serde_json::to_string(&listening)?)?;
+    announce_to.flush()?;
 
     let viewer_task =
         tokio::spawn(async move { axum::serve(viewer_listener, viewer_router).await });
     let session_task =
         tokio::spawn(async move { axum::serve(session_listener, session_router).await });
-
-    let control_task = match config
-        .control_listen
-        .expect("prepare() refuses a serve with no control address")
-    {
-        ControlListen::Tcp(addr) => {
-            let listener = tokio::net::TcpListener::bind(addr).await?;
+    let control_task = match control_bound {
+        ControlBound::Tcp(listener) => {
             tokio::spawn(async move { axum::serve(listener, control_router).await })
         }
-        ControlListen::Unix(path) => {
-            let _ = std::fs::remove_file(&path);
-            let listener = tokio::net::UnixListener::bind(&path)?;
+        ControlBound::Unix(listener, _) => {
             tokio::spawn(async move { axum::serve(listener, control_router).await })
         }
     };
