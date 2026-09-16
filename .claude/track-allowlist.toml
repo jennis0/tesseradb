@@ -36,3 +36,20 @@ paths = [
   "conformance/suite/test_endurance.py",
   "conformance/tests/*",
 ]
+
+# The Python SDK campaign (controller, 2026-09-16): docs/design/python-sdk.md §12. Two tracks off
+# e8da6c1a. `sdk-serve` is the server's port-0 announce line (§11.2 A) and later the payload
+# emitter (§11.2 C); `sdk-py` is the package. Design documents are frozen: a sentence one of these
+# tracks needs in system-architecture §7 or configuration.md is reported, and the controller adds it.
+[track.sdk-serve]
+paths = [
+  "crates/tessera-server/src/*",
+  "crates/tessera-server/tests/*",
+  "crates/tessera-cli/src/*",
+  "crates/tessera-build/src/config.rs",
+]
+
+[track.sdk-py]
+paths = [
+  "clients/py/*",
+]
