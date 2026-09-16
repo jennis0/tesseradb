@@ -1,0 +1,255 @@
+{
+  "bound": 3495729729,
+  "bundle": "/home/joe/code/tessera/data/ladder/gbif/bundle",
+  "commit": "f48c0fb4",
+  "open_s": 84.189353147,
+  "principals": [
+    {
+      "entity_share": 0.5000004169372672,
+      "name": "countries-p50",
+      "result": {
+        "array": 3860,
+        "bitset": 26979,
+        "containers": 30839,
+        "coverage": 0.5000004169372672,
+        "digest_optimised": "13c56300fdaf2256-1779865",
+        "portable_bytes": 222096054,
+        "rows": 1747866322,
+        "run": 0
+      },
+      "runs": [
+        {
+          "anon": {
+            "base_bytes": 1663807488,
+            "end_above_base_bytes": 296771584,
+            "end_bytes": 1960579072,
+            "peak_above_base_bytes": 367898624,
+            "peak_bytes": 2031706112
+          },
+          "anon_after_drop_and_trim": 1663807488,
+          "wall_s": 12.661124849
+        },
+        {
+          "anon": {
+            "base_bytes": 1663807488,
+            "end_above_base_bytes": 297144320,
+            "end_bytes": 1960951808,
+            "peak_above_base_bytes": 368271360,
+            "peak_bytes": 2032078848
+          },
+          "anon_after_drop_and_trim": 1663836160,
+          "wall_s": 6.768459689
+        },
+        {
+          "anon": {
+            "base_bytes": 1663836160,
+            "end_above_base_bytes": 296718336,
+            "end_bytes": 1960554496,
+            "peak_above_base_bytes": 367845376,
+            "peak_bytes": 2031681536
+          },
+          "anon_after_drop_and_trim": 1663848448,
+          "wall_s": 6.769001627
+        }
+      ]
+    },
+    {
+      "entity_share": 0.4908256415723608,
+      "name": "specieskey-weighted-1000",
+      "result": {
+        "array": 3703,
+        "bitset": 49512,
+        "containers": 53215,
+        "coverage": 0.4908256415723608,
+        "digest_optimised": "cd08ce806a5fc779-415089232",
+        "portable_bytes": 415768250,
+        "rows": 1715793787,
+        "run": 0
+      },
+      "runs": [
+        {
+          "anon": {
+            "base_bytes": 1663836160,
+            "end_above_base_bytes": 515022848,
+            "end_bytes": 2178859008,
+            "peak_above_base_bytes": 588058624,
+            "peak_bytes": 2251894784
+          },
+          "anon_after_drop_and_trim": 1663885312,
+          "wall_s": 17.737014548
+        },
+        {
+          "anon": {
+            "base_bytes": 1663885312,
+            "end_above_base_bytes": 515121152,
+            "end_bytes": 2179006464,
+            "peak_above_base_bytes": 588156928,
+            "peak_bytes": 2252042240
+          },
+          "anon_after_drop_and_trim": 1663868928,
+          "wall_s": 10.638397856
+        },
+        {
+          "anon": {
+            "base_bytes": 1663868928,
+            "end_above_base_bytes": 515018752,
+            "end_bytes": 2178887680,
+            "peak_above_base_bytes": 588054528,
+            "peak_bytes": 2251923456
+          },
+          "anon_after_drop_and_trim": 1663889408,
+          "wall_s": 10.380392159
+        }
+      ]
+    },
+    {
+      "entity_share": 0.7860426571896457,
+      "name": "specieskey-weighted-10000",
+      "result": {
+        "array": 1576,
+        "bitset": 51759,
+        "containers": 53335,
+        "coverage": 0.7860426571896457,
+        "digest_optimised": "d11393e02ed307ab-368713921",
+        "portable_bytes": 427050368,
+        "rows": 2747792685,
+        "run": 0
+      },
+      "runs": [
+        {
+          "anon": {
+            "base_bytes": 1663873024,
+            "end_above_base_bytes": 530464768,
+            "end_bytes": 2194337792,
+            "peak_above_base_bytes": 605605888,
+            "peak_bytes": 2269478912
+          },
+          "anon_after_drop_and_trim": 1663877120,
+          "wall_s": 13.43367183
+        },
+        {
+          "anon": {
+            "base_bytes": 1663873024,
+            "end_above_base_bytes": 529743872,
+            "end_bytes": 2193616896,
+            "peak_above_base_bytes": 604884992,
+            "peak_bytes": 2268758016
+          },
+          "anon_after_drop_and_trim": 1663844352,
+          "wall_s": 13.583125899
+        },
+        {
+          "anon": {
+            "base_bytes": 1663844352,
+            "end_above_base_bytes": 530976768,
+            "end_bytes": 2194821120,
+            "peak_above_base_bytes": 606117888,
+            "peak_bytes": 2269962240
+          },
+          "anon_after_drop_and_trim": 1663848448,
+          "wall_s": 13.315559335
+        }
+      ]
+    },
+    {
+      "entity_share": 0.8978359430830014,
+      "name": "specieskey-weighted-100000",
+      "result": {
+        "array": 1238,
+        "bitset": 52100,
+        "containers": 53338,
+        "coverage": 0.8978359430830014,
+        "digest_optimised": "31dd51d745c2deb4-288358698",
+        "portable_bytes": 431902390,
+        "rows": 3138591798,
+        "run": 0
+      },
+      "runs": [
+        {
+          "anon": {
+            "base_bytes": 1663819776,
+            "end_above_base_bytes": 551903232,
+            "end_bytes": 2215723008,
+            "peak_above_base_bytes": 627191808,
+            "peak_bytes": 2291011584
+          },
+          "anon_after_drop_and_trim": 1663926272,
+          "wall_s": 14.423894019
+        },
+        {
+          "anon": {
+            "base_bytes": 1663926272,
+            "end_above_base_bytes": 551804928,
+            "end_bytes": 2215731200,
+            "peak_above_base_bytes": 627093504,
+            "peak_bytes": 2291019776
+          },
+          "anon_after_drop_and_trim": 1663905792,
+          "wall_s": 14.107567582
+        },
+        {
+          "anon": {
+            "base_bytes": 1663897600,
+            "end_above_base_bytes": 551792640,
+            "end_bytes": 2215690240,
+            "peak_above_base_bytes": 627081216,
+            "peak_bytes": 2290978816
+          },
+          "anon_after_drop_and_trim": 1663844352,
+          "wall_s": 13.932688829
+        }
+      ]
+    },
+    {
+      "entity_share": 0.5893760538488129,
+      "name": "year-uniform-300",
+      "result": {
+        "array": 177,
+        "bitset": 53056,
+        "containers": 53233,
+        "coverage": 0.5893760538488129,
+        "digest_optimised": "5d412d7900a34700-427432151",
+        "portable_bytes": 435414994,
+        "rows": 2060299393,
+        "run": 0
+      },
+      "runs": [
+        {
+          "anon": {
+            "base_bytes": 1663815680,
+            "end_above_base_bytes": 571289600,
+            "end_bytes": 2235105280,
+            "peak_above_base_bytes": 645070848,
+            "peak_bytes": 2308886528
+          },
+          "anon_after_drop_and_trim": 1662427136,
+          "wall_s": 11.999186137
+        },
+        {
+          "anon": {
+            "base_bytes": 1662423040,
+            "end_above_base_bytes": 571461632,
+            "end_bytes": 2233884672,
+            "peak_above_base_bytes": 645242880,
+            "peak_bytes": 2307665920
+          },
+          "anon_after_drop_and_trim": 1662435328,
+          "wall_s": 12.467432657
+        },
+        {
+          "anon": {
+            "base_bytes": 1662431232,
+            "end_above_base_bytes": 571621376,
+            "end_bytes": 2234052608,
+            "peak_above_base_bytes": 645402624,
+            "peak_bytes": 2307833856
+          },
+          "anon_after_drop_and_trim": 1662451712,
+          "wall_s": 12.153870983
+        }
+      ]
+    }
+  ],
+  "seed": 20260916,
+  "total_rows": 3495729729
+}

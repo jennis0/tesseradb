@@ -1,0 +1,89 @@
+{
+  "bundle": "<scratch>/f1/../smoke/bundle64",
+  "commit": "f48c0fb4 with the pool sized exactly",
+  "dimension": "specieskey",
+  "runs": [
+    {
+      "minor_faults": 3165,
+      "order": "term",
+      "rep": 0,
+      "rows": 23955426,
+      "thread_cpu_s": 0.83935894,
+      "wall_s": 0.824127444
+    },
+    {
+      "minor_faults": 3364,
+      "order": "rising",
+      "rep": 0,
+      "rows": 23955426,
+      "thread_cpu_s": 0.8965684350000003,
+      "wall_s": 0.876847208
+    },
+    {
+      "minor_faults": 2479,
+      "order": "term",
+      "rep": 1,
+      "rows": 23955426,
+      "thread_cpu_s": 0.882559476,
+      "wall_s": 0.863135246
+    },
+    {
+      "minor_faults": 2502,
+      "order": "rising",
+      "rep": 1,
+      "rows": 23955426,
+      "thread_cpu_s": 0.9229185150000001,
+      "wall_s": 0.90407776
+    },
+    {
+      "minor_faults": 1800,
+      "order": "term",
+      "rep": 2,
+      "rows": 23955426,
+      "thread_cpu_s": 0.8710484879999996,
+      "wall_s": 0.851883293
+    },
+    {
+      "minor_faults": 2049,
+      "order": "rising",
+      "rep": 2,
+      "rows": 23955426,
+      "thread_cpu_s": 0.9363161819999997,
+      "wall_s": 0.915728703
+    },
+    {
+      "minor_faults": 1812,
+      "order": "term",
+      "rep": 3,
+      "rows": 23955426,
+      "thread_cpu_s": 0.875605331,
+      "wall_s": 0.856368065
+    },
+    {
+      "minor_faults": 2020,
+      "order": "rising",
+      "rep": 3,
+      "rows": 23955426,
+      "thread_cpu_s": 0.8962853190000004,
+      "wall_s": 0.876743844
+    },
+    {
+      "minor_faults": 1608,
+      "order": "term",
+      "rep": 4,
+      "rows": 23955426,
+      "thread_cpu_s": 0.8313655300000002,
+      "wall_s": 0.813554306
+    },
+    {
+      "minor_faults": 2016,
+      "order": "rising",
+      "rep": 4,
+      "rows": 23955426,
+      "thread_cpu_s": 0.9107367840000009,
+      "wall_s": 0.890952903
+    }
+  ],
+  "terms": 185418,
+  "build": "exact"
+}
