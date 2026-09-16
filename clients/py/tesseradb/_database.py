@@ -1,19 +1,24 @@
 """A Tessera database in a directory: create it, fill it, commit it (python-sdk.md §2, §6).
 
 The directory is everything `tessera build` and `tessera serve` read, so a notebook prototype
-becomes a deployment by copying it: `tessera serve --deployment <dir>/tessera.toml` on another
-machine serves the same database.
+becomes a deployment by copying it: `tessera serve --deployment <dir>/tessera.toml` serves the
+same database from wherever it was copied to.
 
 Three verbs carry the model. `stage` binds a named source to a frame or a file, `declare_*` adds a
 block to the declaration and names the sources it reads, and `commit` makes the staged data part
 of the database. `check` is `commit` with nothing sent.
 
-Stage S1 of §12: the first commit, which builds. Later commits page through the control plane and
-are stage S3; the verbs that would start one refuse naming it.
+Beside the declaration the SDK writes, it keeps its own copy of the blocks as JSON under
+`.tessera/`, written at every staging and every declaration, so `open()` reads them back without
+parsing TOML and a database saved before its first commit reopens where it was left.
+
+Not built yet: the commit that pages a delta through the control plane. The first commit builds,
+and a verb that would start a later one says so and names what it would take.
 """
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -27,15 +32,24 @@ import pyarrow.parquet as pq
 from . import _declaration as D
 from . import _infer, _instance
 from ._idmap import IdMap
+from ._refusal import Refusal
 from ._reports import CommitReport, Inference, Report, render_columns_of
-from ._sources import Refusal, StagedSource, is_pandas_frame, stage_frame, stage_path
-from ._toml import dumps
+from ._sources import (
+    StagedSource,
+    copy_column,
+    is_integer_type,
+    mint_entity_ids,
+    stage_frame,
+    stage_path,
+)
+from ._toml import Inline, dumps
 
 #: A temporary database goes here when the platform has a RAM-backed filesystem (§2).
 RAM_BACKED = Path("/dev/shm")
 
-LATER_COMMITS = (
-    "later commits page through the control plane and are stage S3 of python-sdk.md §12"
+LATER_COMMIT = (
+    "not built yet, a commit into a built database: a delta pages through the control plane, and "
+    "only the first commit builds"
 )
 
 
@@ -66,10 +80,10 @@ class Database:
         """Bind `name` in `[sources]` to a frame or a file (§3).
 
         A frame is written to `sources/<name>.parquet` with the `entity_id` column the build
-        reads; a path is recorded and read in place where its ids already are what the build
+        reads; a path is recorded and read where it lies where its ids already are what the build
         reads. Staging a name twice before the first commit replaces the earlier data.
         """
-        if isinstance(data, (str, os.PathLike)) and not is_pandas_frame(data):
+        if isinstance(data, (str, os.PathLike)):
             staged = stage_path(name, data, self.path, self.id_map, id=id, default=default)
         else:
             staged = stage_frame(
@@ -88,6 +102,7 @@ class Database:
                     staged.notes.append(f"the default source, replacing '{other.name}'")
         self.sources[name] = staged
         self.id_map.save()
+        self._save_state()
         return staged
 
     @property
@@ -103,34 +118,36 @@ class Database:
         """One block of the declaration, spelled with configuration.md's own keys (§4.1).
 
         Every block is expressible this way; the typed verbs below build the dict and call here,
-        and this is the escape hatch for a key whose verb has not landed.
+        and this is the way to write a key whose verb is not built yet.
         """
-        self._refuse_after_the_first_commit("declare")
-        return self.blocks.add(kind, block)
+        self._refuse_a_later_commit("declare")
+        return self._declared(self.blocks.add(kind, block))
 
     def declare_view(self, name: str, source: str | None = None, **kwargs) -> dict:
-        self._refuse_after_the_first_commit("declare_view")
-        return self.blocks.add("view", D.view_block(name, source, **kwargs))
+        self._refuse_a_later_commit("declare_view")
+        return self._declared(self.blocks.add("view", D.view_block(name, source, **kwargs)))
 
     def declare_view_group(self, *args, **kwargs):
         raise Refusal(
-            "declare_view_group is stage S5 of python-sdk.md §12. Write the block through "
-            "declare('view_group', …) until it lands"
+            "not built yet, declare_view_group. declare('view_group', block) writes the block as "
+            "given"
         )
 
     def declare_vocabulary(self, name: str, **kwargs) -> dict:
-        self._refuse_after_the_first_commit("declare_vocabulary")
-        return self.blocks.add("vocabulary", D.vocabulary_block(name, **kwargs))
+        self._refuse_a_later_commit("declare_vocabulary")
+        return self._declared(self.blocks.add("vocabulary", D.vocabulary_block(name, **kwargs)))
 
     def declare_attribute(self, name: str, type: str, **kwargs) -> dict:
-        self._refuse_after_the_first_commit("declare_attribute")
-        return self.blocks.add("attribute", D.attribute_block(name, type, **kwargs))
+        self._refuse_a_later_commit("declare_attribute")
+        return self._declared(
+            self.blocks.add("attribute", D.attribute_block(name, type, **kwargs))
+        )
 
     def declare_layer(self, name: str, kind: str, **kwargs) -> dict:
-        self._refuse_after_the_first_commit("declare_layer")
+        self._refuse_a_later_commit("declare_layer")
         views = kwargs.get("views")
         block = D.layer_block(name, kind, self._points_source(views), **kwargs)
-        return self.blocks.add("layer", block)
+        return self._declared(self.blocks.add("layer", block))
 
     def declare_labels(
         self,
@@ -141,22 +158,31 @@ class Database:
         **kwargs,
     ) -> dict:
         """A label set over a clustering: the `[layer.labels]` block on the layer `of` (§4.7)."""
-        self._refuse_after_the_first_commit("declare_labels")
+        self._refuse_a_later_commit("declare_labels")
         parent = self.blocks.layer(of)
-        if isinstance(source, dict):
-            source = self._stage_label_text(name, source)
-        block = D.labels_block(name, source, members=members, **kwargs)
         if "labels" in parent:
             raise Refusal(
                 f"layer {of!r} already carries a label set. A second one is a `[[layer]]` of its "
                 f"own; write it through declare_layer"
             )
-        parent["labels"] = block
+        if isinstance(source, dict):
+            source = self._stage_label_text(name, source)
+        parent["labels"] = D.labels_block(name, source, members=members, **kwargs)
+        self._save_state()
+        return parent["labels"]
+
+    def _declared(self, block: dict) -> dict:
+        self._save_state()
         return block
 
     def _stage_label_text(self, name: str, mapping: dict) -> str:
         """A mapping from cluster key to text, as the `(key, contents)` table the block reads."""
         source_name = name.replace("/", "_")
+        if source_name in self.sources:
+            raise Refusal(
+                f"labels {name!r} would write its text to source {source_name!r}, which is "
+                f"already staged. Stage the (key, contents) table yourself and name it in source="
+            )
         table = pa.table(
             {
                 "level": pa.array([0] * len(mapping), type=pa.uint32()),
@@ -189,9 +215,9 @@ class Database:
                     return block["source"]
         return self.default_source
 
-    def _refuse_after_the_first_commit(self, verb: str) -> None:
+    def _refuse_a_later_commit(self, verb: str) -> None:
         if self.built:
-            raise Refusal(f"{verb}: this database is built, and {LATER_COMMITS}")
+            raise Refusal(f"{verb}: {LATER_COMMIT}")
 
     # ------------------------------------------------------------------ the document
 
@@ -203,6 +229,7 @@ class Database:
         return dumps(self._document())
 
     def _document(self) -> dict:
+        self._resolve_sources()
         inferred_attributes, inferred_vocabularies = self._infer_columns()
         document = self.blocks.document(
             {name: staged.declared_path for name, staged in self.sources.items()},
@@ -223,6 +250,61 @@ class Database:
                         )
                     block["source"] = self.default_source
         return document
+
+    def _resolve_sources(self) -> None:
+        """Settle what each staged source is, now that the declaration says what reads it.
+
+        Three things are decided here rather than at staging, because staging does not know which
+        source is a view's points and which is a layer's members: whether the map is the identity
+        over a points file read in place, which staged frames need the `entity_id` column a block
+        that reads them requires, and which second view needs the first view's access column.
+        """
+        for staged, _ in self._view_sources():
+            if staged.in_place and not self.id_map.identity:
+                entity = next(
+                    (c for c in ("entity_id", "entity") if c in staged.columns),
+                    None,
+                )
+                if entity is not None and is_integer_type(staged.columns[entity]):
+                    self.id_map.use_identity(staged.name)
+        for staged, _ in self._view_sources():
+            if staged.pending_ids:
+                mint_entity_ids(staged, self.id_map, "a view's points")
+        for block in self.blocks.blocks["layer"]:
+            members = block.get("members")
+            staged = self.sources.get(members.get("source")) if isinstance(members, dict) else None
+            if staged is not None and staged.pending_ids:
+                mint_entity_ids(staged, self.id_map, "a layer's members")
+        self._copy_access_columns()
+        self.id_map.save()
+
+    def _view_sources(self) -> list[tuple[StagedSource, dict]]:
+        pairs = []
+        for block in self.blocks.blocks["view"]:
+            staged = self.sources.get(block.get("source") or self.default_source)
+            if staged is not None:
+                pairs.append((staged, block))
+        return pairs
+
+    def _copy_access_columns(self) -> None:
+        """A second view over the same entities carries the first view's labels (§4.2).
+
+        The build refuses an entity whose labels disagree between views, so a frame that lacks the
+        column has it joined in by id from the view that holds it.
+        """
+        holder: StagedSource | None = None
+        for staged, block in self._view_sources():
+            access = dict(block.get("point_visibility", {})).get("field")
+            if access is None:
+                continue
+            if access in staged.columns:
+                holder = holder or staged
+                continue
+            if holder is None:
+                # No view holds the column, so there is nothing to copy from. `tessera check`
+                # refuses it naming the object, the field and the columns the file does carry.
+                continue
+            copy_column(holder, staged, access)
 
     def _infer_columns(self) -> tuple[list[dict], list[dict]]:
         """§4.5's inference over the default source's unclaimed columns."""
@@ -280,16 +362,40 @@ class Database:
         self._loaded_text = None
         return document
 
+    def _save_state(self) -> None:
+        """The SDK's own copy of the declaration, so `open()` reads the blocks back (§2)."""
+        state = {
+            "sources": {
+                name: {
+                    "path": str(staged.path),
+                    "declared_path": staged.declared_path,
+                    "default": staged.default,
+                    "in_place": staged.in_place,
+                    "user_id_column": staged.user_id_column,
+                    "default_index": staged.default_index,
+                    "index_available": staged.index_available,
+                    "pending_ids": staged.pending_ids,
+                    "rows": staged.rows,
+                    "columns": {c: str(t) for c, t in staged.columns.items()},
+                    "notes": staged.notes,
+                }
+                for name, staged in self.sources.items()
+            },
+            "blocks": _tagged(self.blocks.blocks),
+        }
+        path = self.path / ".tessera" / "declaration.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(state, indent=1), encoding="utf-8")
+
     # ------------------------------------------------------------------ check and commit
 
     def check(self) -> Report:
         """`tessera check` over this directory: what the declaration reads, and what it discloses.
 
-        Schemas only, no rows. After the first commit this plans the commit and runs the
-        pre-flight, which is stage S3.
+        Schemas only, no rows. Not built yet: the plan and the pre-flight a later commit checks,
+        which need the control plane; this is the first commit's check.
         """
-        if self.built:
-            raise Refusal(f"check: this database is built, and {LATER_COMMITS}")
+        self._refuse_a_later_commit("check")
         document = self.write()
         result = self._run(["check", "--deployment", str(self.path / "tessera.toml")])
         return Report(
@@ -309,8 +415,7 @@ class Database:
         fixed, the column types and render flags are fixed, and the allocation is signature-sorted
         over the whole staged corpus (§6.1).
         """
-        if self.built:
-            raise Refusal(f"commit: this database is built, and {LATER_COMMITS}")
+        self._refuse_a_later_commit("commit")
         document = self.write()
         self._refuse_an_empty_build(document)
         check = self._run(["check", "--deployment", str(self.path / "tessera.toml")])
@@ -354,7 +459,9 @@ class Database:
             staged = self.sources.get(block.get("source"))
             if staged is not None and staged.rows:
                 continue
-            if isinstance(block.get("extent"), dict):
+            extent = block.get("extent")
+            fitted = extent == "auto" or (isinstance(extent, dict) and extent.get("auto"))
+            if fitted:
                 raise Refusal(
                     f"commit: view {block['name']!r} has no staged rows to fit a frame around. "
                     f"An empty database needs extent= on every view"
@@ -365,8 +472,9 @@ class Database:
         if self._child is not None:
             return self.listening
         identity = (self.path / ".tessera" / "identity.key").read_text(encoding="utf-8").strip()
+        binary, _ = _instance.find_binary()
         self._child, self.listening = _instance.start(
-            _instance.find_binary(), self.path / "tessera.toml", identity
+            binary, self.path / "tessera.toml", identity
         )
         return self.listening
 
@@ -384,8 +492,9 @@ class Database:
         return None if self.listening is None else f"http://{self.listening.session}"
 
     def _run(self, arguments: Sequence[str]) -> subprocess.CompletedProcess:
+        binary, _ = _instance.find_binary()
         return subprocess.run(
-            [_instance.find_binary(), *arguments],
+            [binary, *arguments],
             capture_output=True,
             text=True,
             cwd=self.path,
@@ -398,7 +507,7 @@ class Database:
         ]
 
     def _notes(self) -> list[str]:
-        notes = [f"{len(self.id_map)} id(s) in the map"] if len(self.id_map) else []
+        notes = []
         for staged in self.sources.values():
             for note in staged.notes:
                 notes.append(f"source '{staged.name}': {note}")
@@ -424,8 +533,12 @@ class Database:
             shutil.rmtree(self.path, ignore_errors=True)
 
     def remove(self, ids: Iterable[Hashable]) -> int:
-        """Mark ids removed in the map. The `/control/changes` call is stage S3."""
-        raise Refusal(f"remove: {LATER_COMMITS}")
+        """Not built yet: `remove(ids)` sends `/control/changes`, which a later commit pages.
+
+        The ids the map holds are marked removed at that point, and a removed id staged again goes
+        as a point row (decision 0047).
+        """
+        raise Refusal(f"remove: {LATER_COMMIT}")
 
     def __enter__(self) -> "Database":
         return self
@@ -465,35 +578,98 @@ def create(path: str | os.PathLike | None = None, replace: bool = False) -> Data
             if not replace:
                 raise Refusal(
                     f"create: {directory} is not empty. open() reads a saved database, and "
-                    f"replace=True removes what is there first"
+                    f"replace=True removes a Tessera database that is there first"
+                )
+            if not (directory / "tessera.toml").exists():
+                raise Refusal(
+                    f"create: {directory} is not empty and holds no tessera.toml, so it is not a "
+                    f"Tessera database. replace=True removes a database, never a directory of "
+                    f"somebody else's files"
                 )
             shutil.rmtree(directory)
         directory.mkdir(parents=True, exist_ok=True)
         database = Database(directory)
     (database.path / "sources").mkdir(parents=True, exist_ok=True)
     (database.path / ".tessera").mkdir(parents=True, exist_ok=True)
+    print(f"tesseradb: {_binary_in_words()}")
     return database
 
 
-def open(path: str | os.PathLike) -> Database:  # noqa: A001 — the design's verb is `td.open`
-    """A saved database: the directory, its bundle and its id map (§2).
+def _binary_in_words() -> str:
+    try:
+        binary, where = _instance.find_binary()
+    except Refusal as why:
+        return str(why)
+    return f"the binary is {binary} (from {where})"
 
-    Its next `commit()` ingests rather than builds, the bundle being present, which is stage S3 of
-    §12. `db.declaration` is the declaration on disk.
 
-    A directory with no bundle is refused naming `create()`: the SDK does not read a declaration
-    back into blocks, so an unbuilt directory cannot be added to through the verbs.
+def open(path: str | os.PathLike) -> Database:  # noqa: A001, the design's verb is `td.open`
+    """A saved database: the directory, its sources, its declaration and its id map (§2).
+
+    A database that has committed reopens built, and its next commit ingests; one saved before its
+    first commit reopens where it was left, the SDK's own copy of the blocks being what it reads
+    rather than the TOML it wrote.
     """
     directory = Path(path).expanduser()
     if not (directory / "tessera.toml").exists():
         raise Refusal(f"open: {directory} holds no tessera.toml. create() makes a new database")
-    if not (directory / "bundle" / "CURRENT").exists():
-        raise Refusal(
-            f"open: {directory} holds no built bundle. create(path, replace=True) starts again "
-            f"from the frames and files"
-        )
     database = Database(directory)
-    schema = directory / "schema.toml"
-    if schema.exists():
-        database._loaded_text = schema.read_text(encoding="utf-8")
+    state = directory / ".tessera" / "declaration.json"
+    if state.exists():
+        _load(database, json.loads(state.read_text(encoding="utf-8")))
+    elif (directory / "schema.toml").exists():
+        database._loaded_text = (directory / "schema.toml").read_text(encoding="utf-8")
     return database
+
+
+def _arrow_type(alias: str):
+    """The Arrow type a column carried, or its name where pyarrow spells no alias for it."""
+    try:
+        return pa.type_for_alias(alias)
+    except ValueError:
+        return alias
+
+
+def _load(database: Database, state: dict) -> None:
+    for name, source in state.get("sources", {}).items():
+        database.sources[name] = StagedSource(
+            name=name,
+            path=Path(source["path"]),
+            declared_path=source["declared_path"],
+            default=source["default"],
+            in_place=source["in_place"],
+            user_id_column=source["user_id_column"],
+            default_index=source["default_index"],
+            index_available=source["index_available"],
+            pending_ids=source["pending_ids"],
+            rows=source["rows"],
+            columns={c: _arrow_type(t) for c, t in source["columns"].items()},
+            notes=list(source["notes"]),
+        )
+    for kind, blocks in state.get("blocks", {}).items():
+        database.blocks.blocks[kind] = [_untagged(block) for block in blocks]
+
+
+#: How an inline table is marked in the SDK's JSON copy. A plain dict is a block of its own, and
+#: reading one back as the other would move `extent` out of its view's table.
+INLINE = "__inline__"
+
+
+def _tagged(value: Any) -> Any:
+    if isinstance(value, Inline):
+        return {INLINE: {k: _tagged(v) for k, v in value.items()}}
+    if isinstance(value, dict):
+        return {k: _tagged(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_tagged(v) for v in value]
+    return value
+
+
+def _untagged(value: Any) -> Any:
+    if isinstance(value, dict):
+        if set(value) == {INLINE}:
+            return Inline({k: _untagged(v) for k, v in value[INLINE].items()})
+        return {k: _untagged(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_untagged(v) for v in value]
+    return value

@@ -7,7 +7,7 @@ declaration is proved to parse by `tessera check` reading it in `test_sdk_corpus
 import pytest
 
 from tesseradb._database import create
-from tesseradb._sources import Refusal
+from tesseradb._refusal import Refusal
 from tesseradb._toml import Inline, dumps
 
 pd = pytest.importorskip("pandas")
@@ -192,17 +192,17 @@ def test_a_label_set_from_a_mapping_is_written_as_a_key_contents_table(db):
     assert 'source = "topics"' in db.declaration
 
 
-def test_the_later_stages_refuse_naming_the_stage(db):
+def test_what_is_not_built_yet_says_so_and_names_what_writes_it(db):
     db.stage("members", pd.DataFrame({"key": ["a"], "entity": [1]}))
     db.declare_view("s0")
-    with pytest.raises(Refusal, match="S5"):
-        db.declare_view_group("g")
-    with pytest.raises(Refusal, match="S4"):
-        db.declare_layer("s", kind="flat", members="members", membership="spatial")
-    with pytest.raises(Refusal, match="S4"):
-        db.declare_layer("s", kind="flat", members="members", layout="column")
-    with pytest.raises(Refusal, match="S5"):
-        db.declare_attribute("a", type="u8", scope={"group": "g"})
+    for call in (
+        lambda: db.declare_view_group("g"),
+        lambda: db.declare_layer("s", kind="flat", members="members", membership="spatial"),
+        lambda: db.declare_layer("s", kind="flat", members="members", layout="column"),
+        lambda: db.declare_attribute("a", type="u8", scope={"group": "g"}),
+    ):
+        with pytest.raises(Refusal, match="not built yet"):
+            call()
     # The generic form carries what the typed verbs do not: it writes whatever block it is given.
     db.declare("view_group", {"name": "quarter", "source": "points"})
     assert "[[view_group]]" in db.declaration

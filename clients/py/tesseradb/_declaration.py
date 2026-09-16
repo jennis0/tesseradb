@@ -14,8 +14,8 @@ from __future__ import annotations
 
 from typing import Any, Iterable, Sequence
 
-from ._sources import Refusal
-from ._toml import Inline, dumps
+from ._refusal import Refusal
+from ._toml import Inline
 
 KINDS = ("view", "view_group", "vocabulary", "attribute", "layer")
 
@@ -118,9 +118,6 @@ class Declaration:
         if layers:
             document["layer"] = layers
         return document
-
-    def to_toml(self, *args, **kwargs) -> str:
-        return dumps(self.document(*args, **kwargs))
 
 
 # ------------------------------------------------------------------ the typed verbs' blocks
@@ -233,8 +230,8 @@ def attribute_block(
         raise Refusal(f"attribute {name!r}: a category names its vocabulary. Give vocabulary=")
     if scope != "entity":
         raise Refusal(
-            f"attribute {name!r}: a group-scoped attribute is stage S5 of python-sdk.md §12. "
-            f"Write the block through declare('attribute', …) until it lands"
+            f"attribute {name!r}: not built yet, a group-scoped attribute. "
+            f"declare('attribute', block) writes the block as given"
         )
     block: dict[str, Any] = {"name": name}
     if title is not None:
@@ -354,19 +351,19 @@ def layer_block(
 def _refuse_later_stages(name, membership, shape, artifacts, layout, scope) -> None:
     if membership != "enumerated":
         raise Refusal(
-            f"layer {name!r}: spatial and attribute membership are stage S4 of python-sdk.md §12. "
-            f"Write the block through declare('layer', …) until it lands"
+            f"layer {name!r}: not built yet, spatial and attribute membership. "
+            f"declare('layer', block) writes the block as given"
         )
     for value, what in ((shape, "shape="), (artifacts, "inline artifacts"), (layout, "layout=")):
         if value:
             raise Refusal(
-                f"layer {name!r}: {what} is stage S4 of python-sdk.md §12. Write the block "
-                f"through declare('layer', …) until it lands"
+                f"layer {name!r}: not built yet, {what}. declare('layer', block) writes the block "
+                f"as given"
             )
     if scope != "entity":
         raise Refusal(
-            f"layer {name!r}: a group-scoped layer is stage S5 of python-sdk.md §12. Write the "
-            f"block through declare('layer', …) until it lands"
+            f"layer {name!r}: not built yet, a group-scoped layer. declare('layer', block) writes "
+            f"the block as given"
         )
 
 

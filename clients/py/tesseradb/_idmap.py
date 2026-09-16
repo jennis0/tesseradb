@@ -2,16 +2,24 @@
 
 The build reads a `u64` source id from each points file's `entity_id` column and mints the
 external id from it. The SDK assigns that source id, so a user identifies a row by whatever they
-identify it by — a string, an integer — and one user id is one entity in every source that names
+identify it by, a string or an integer, and one user id is one entity in every source that names
 entities.
+
+**Identity mode.** A points file read in place already carries the ids the build will read, so the
+map over that database is the identity: an integer entity column on every later source passes
+through unchanged, and a non-integer id column is refused naming the file the ids came from.
+Mapping them instead would re-key a members table against a points file nobody rewrote, which
+attaches every cluster to the wrong rows and reports nothing.
 
 Each id carries a state. `assigned` is what staging gives it, `acknowledged` is what a commit
 gives it, and `removed` is what `remove()` gives it. The pre-flight reads `acknowledged` alone, so
 a page refused at one commit is sent at the next, and a removed id staged again goes as a point
-row (decision 0047).
+row (decision 0047). Not built yet: the commit that reads those states is the paged one, which
+sends deltas through the control plane, so `acknowledge`, `remove` and `acknowledged` are written
+here and exercised by tests alone until it lands.
 
 The map is a JSON document under `.tessera/`, written whole at each save. It holds one entry per
-entity, so a corpus of 10^8 entities is a file of that order; the shape that would replace it is a
+entity, so a corpus of 10^8 entities is a file of that order. The shape that would replace it is a
 sorted sidecar, and the cost of writing one is not paid for a notebook corpus.
 """
 
@@ -20,6 +28,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from typing import Hashable, Iterable
+
+from ._refusal import Refusal
 
 ASSIGNED = "assigned"
 ACKNOWLEDGED = "acknowledged"
@@ -34,19 +44,39 @@ class IdMap:
         self._ids: dict[tuple[str, str], int] = {}
         self._states: dict[int, str] = {}
         self._next = 1
+        #: The source whose ids this map is the identity over, where it is in identity mode.
+        self.identity_source: str | None = None
         if self.path.exists():
             self._load()
 
-    # The key carries its type name beside its text: `1` and `"1"` are two ids, and a map that
-    # spelled both `"1"` would join two entities the user kept apart.
+    @property
+    def identity(self) -> bool:
+        return self.identity_source is not None
+
+    def use_identity(self, source: str) -> None:
+        """Take this source's own integer ids as the source ids, for this database's life."""
+        if self.identity_source == source:
+            return
+        if self._ids:
+            raise Refusal(
+                f"source {source!r} is read in place, so its ids are the source ids, but ids have "
+                f"already been assigned to staged frames. Stage the points file first, or stage it "
+                f"as a frame so that every source is mapped alike"
+            )
+        self.identity_source = source
+
     @staticmethod
     def _key(user_id: Hashable) -> tuple[str, str]:
+        """The key carries its type beside its text: `1` and `"1"` are two ids."""
         return (type(user_id).__name__, str(user_id))
 
-    def source_ids(self, user_ids: Iterable[Hashable]) -> list[int]:
+    def source_ids(self, user_ids: Iterable[Hashable], source: str = "this source") -> list[int]:
         """The source id of each user id, assigning one in staging order to an id not seen."""
+        values = list(user_ids)
+        if self.identity:
+            return self._identity_ids(values, source)
         out = []
-        for user_id in user_ids:
+        for user_id in values:
             key = self._key(user_id)
             source_id = self._ids.get(key)
             if source_id is None:
@@ -55,6 +85,19 @@ class IdMap:
                 self._ids[key] = source_id
                 self._states[source_id] = ASSIGNED
             out.append(source_id)
+        return out
+
+    def _identity_ids(self, values: list[Hashable], source: str) -> list[int]:
+        out = []
+        for user_id in values:
+            if isinstance(user_id, bool) or not isinstance(user_id, int) or user_id < 0:
+                raise Refusal(
+                    f"source {source!r}: {user_id!r} is not a source id. The points source "
+                    f"{self.identity_source!r} is read where it lies, so its own integer ids are "
+                    f"what the build reads and every source beside it names entities by those "
+                    f"ids. Stage {self.identity_source!r} as a frame to map both alike"
+                )
+            out.append(user_id)
         return out
 
     def state_of(self, user_id: Hashable) -> str | None:
@@ -94,6 +137,7 @@ class IdMap:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         document = {
             "next": self._next,
+            "identity_source": self.identity_source,
             "entries": [
                 [kind, text, source_id, self._states[source_id]]
                 for (kind, text), source_id in self._ids.items()
@@ -104,6 +148,7 @@ class IdMap:
     def _load(self) -> None:
         document = json.loads(self.path.read_text(encoding="utf-8"))
         self._next = document["next"]
+        self.identity_source = document.get("identity_source")
         for kind, text, source_id, state in document["entries"]:
             self._ids[(kind, text)] = source_id
             self._states[source_id] = state

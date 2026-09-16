@@ -1,17 +1,16 @@
 """The local instance: the deployment file, its secrets, and the `tessera serve` child (§7).
 
 `commit()` starts `tessera serve` as a child of the kernel over the directory's `tessera.toml`.
-The three planes are on loopback at port 0, so the kernel does not pick ports and race another
-process for them; the child says which ports it bound by printing one JSON line on stdout, and
-this module reads it.
+The three planes are on loopback at port 0, so the kernel picks no ports and the child says which
+ones it bound by printing one JSON line on stdout. The line is written once all three planes are
+listening, so the announced viewer address is already answering when it arrives.
 
-The line is written once all three planes are listening, so the announced viewer address is
-already answering when it arrives. There is no port-guessing fallback: guessing is the race the
-port-0 arrangement exists to remove, and a wrong guess would hand the notebook a URL that answers
-for somebody else's server. A child that announces nothing is a refusal carrying its stderr.
+There is no fallback that guesses a port. A guess is a second process's port as readily as this
+one's, and the notebook would then hold a URL answering for somebody else's server. A child that
+announces nothing is a refusal carrying what the child wrote.
 
-The child is killed by its pid, at `close()` and at interpreter exit. Never by name: a kill by
-process name has taken out another session's server on this machine.
+The child is killed by its pid, at `close()` and at interpreter exit, never by process name: a
+kill by name reaches every other server on the machine.
 """
 
 from __future__ import annotations
@@ -28,16 +27,20 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from ._sources import Refusal
+from ._refusal import Refusal
 from ._toml import dumps
 
 #: How long `start` waits for the announce line before it gives up, in seconds, unless
 #: `TESSERADB_SERVE_TIMEOUT` names another.
 SERVE_TIMEOUT = 30.0
 
+#: How many of the child's lines are kept for a refusal message.
+KEPT_LINES = 200
+
 
 def serve_timeout() -> float:
     return float(os.environ.get("TESSERADB_SERVE_TIMEOUT", SERVE_TIMEOUT))
+
 
 #: The deployment's token lifetime, which `[disclosure]` requires and has no backstop default.
 TOKEN_MAX_LIFETIME = 3600
@@ -47,7 +50,7 @@ IDENTITY_ENV = "TESSERA_IDENTITY_KEY"
 _running: dict[int, subprocess.Popen] = {}
 
 
-class ServeRefused(RuntimeError):
+class ServeRefused(Refusal):
     """The child did not announce three bound addresses."""
 
 
@@ -63,16 +66,13 @@ class Listening:
 def write_deployment(directory: Path, cors_origins: list[str] | None = None) -> Path:
     """`tessera.toml`, as `tessera build` and `tessera serve` both read it (SA §7).
 
-    Every path resolves against this file's own directory, so the database directory moves whole.
+    Every path in it resolves against this file's own directory, so the database directory serves
+    from wherever it is copied to.
     """
     serve = {
         "viewer": "127.0.0.1:0",
         "session": "127.0.0.1:0",
         "control": "127.0.0.1:0",
-        # Relative, so the directory travels whole. `config::load` resolves `bundle.path`,
-        # `bundle.cache`, `bundle.wal` and `build.schema` against this file's own directory and
-        # these two against the process's working directory, so the child is started in the
-        # database directory (see `start`).
         "session_credential_file": ".tessera/session.cred",
         "operator_credential_file": ".tessera/operator.cred",
     }
@@ -111,21 +111,22 @@ def notebook_origins() -> list[str]:
 
 
 def secrets_for(directory: Path) -> tuple[str, str]:
-    """The session credential and the identity key, generated once per database.
+    """The session credential, the operator credential and the identity key, once per database.
 
-    Both are written under `.tessera/` with owner-only permissions. The identity key is named by
-    `[identity].env` rather than by a path, so it is passed to the child in its environment; the
-    file is where this database keeps it between processes.
+    All three are written under `.tessera/`, which is owner-only, and each file is created
+    owner-only rather than created and then narrowed: between a write and a `chmod` the secret is
+    readable by anyone on the machine. The identity key is named by `[identity].env` rather than
+    by a path, so it is passed to the child in its environment; the file is where this database
+    keeps it between processes. The operator credential is generated beside the session one
+    because the deployment file requires both.
     """
     private = directory / ".tessera"
     private.mkdir(parents=True, exist_ok=True)
+    private.chmod(0o700)
     session = _secret(private / "session.cred", lambda: secrets.token_urlsafe(32))
     _secret(private / "operator.cred", lambda: secrets.token_urlsafe(32))
     identity = _secret(private / "identity.key", lambda: secrets.token_hex(16))
-    identity_file = private / "identity.toml"
-    if not identity_file.exists():
-        identity_file.write_text(f'[identity]\nkey = "{identity}"\n', encoding="utf-8")
-        identity_file.chmod(0o600)
+    _secret(private / "identity.toml", lambda: f'[identity]\nkey = "{identity}"\n')
     return session, identity
 
 
@@ -133,9 +134,10 @@ def _secret(path: Path, mint) -> str:
     if path.exists():
         return path.read_text(encoding="utf-8").strip()
     value = mint()
-    path.write_text(value + "\n", encoding="utf-8")
-    path.chmod(0o600)
-    return value
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(descriptor, "w") as file:
+        file.write(value if value.endswith("\n") else value + "\n")
+    return value.strip()
 
 
 def start(
@@ -159,49 +161,68 @@ def start(
     _running[child.pid] = child
     errors = _drain(child.stderr)
     try:
-        listening = read_announce(
+        return child, read_announce(
             child.stdout, serve_timeout() if timeout is None else timeout, lambda: "".join(errors)
         )
     except ServeRefused:
         stop(child)
         raise
-    _drain(child.stdout)
-    return child, listening
 
 
 def read_announce(stdout, timeout: float, stderr_text) -> Listening:
     """Read the child's stdout until one line is the announce line (§11.2 A).
 
     The line is JSON carrying `event: "listening"` and the three planes' bound addresses. Lines
-    that are not that are skipped: the child's own logging shares the stream.
+    that are not that are skipped, the child's own logging having shared the stream before now.
+
+    One reader holds the stream for the life of the child: it stops queueing lines once the
+    announce line is found and keeps reading, so a child that logs after it has started never
+    fills the pipe and blocks.
     """
-    lines: queue.Queue = queue.Queue()
-    reader = threading.Thread(target=_read_lines, args=(stdout, lines), daemon=True)
+    reader = _Reader(stdout)
     reader.start()
     deadline = time.monotonic() + timeout
-    seen: list[str] = []
     while True:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             break
         try:
-            line = lines.get(timeout=min(remaining, 0.25))
+            line = reader.lines.get(timeout=min(remaining, 0.25))
         except queue.Empty:
             continue
         if line is None:
             break
-        seen.append(line)
         announce = _announce(line)
         if announce is not None:
+            reader.queueing = False
             return announce
     raise ServeRefused(
         "tessera serve announced no listening line within "
         f"{timeout:g}s. The SDK waits for one line of JSON on stdout carrying "
-        '\'"event": "listening"\' and the viewer, session and control addresses '
-        "(python-sdk.md §11.2 A, not built on main). What the child wrote:\n"
-        + "".join(f"  stdout: {line}" for line in seen[-20:])
+        '\'"event": "listening"\' and the viewer, session and control addresses. '
+        "What the child wrote:\n"
+        + "".join(f"  stdout: {line}" for line in reader.kept[-20:])
         + _tail(stderr_text())
     )
+
+
+class _Reader(threading.Thread):
+    """One thread per stream: it queues lines while `queueing`, and keeps the last of them."""
+
+    def __init__(self, stream) -> None:
+        super().__init__(daemon=True)
+        self.stream = stream
+        self.lines: queue.Queue = queue.Queue()
+        self.kept: list[str] = []
+        self.queueing = True
+
+    def run(self) -> None:
+        for line in self.stream:
+            self.kept.append(line)
+            del self.kept[:-KEPT_LINES]
+            if self.queueing:
+                self.lines.put(line)
+        self.lines.put(None)
 
 
 def _announce(line: str) -> Listening | None:
@@ -226,23 +247,12 @@ def _announce(line: str) -> Listening | None:
     )
 
 
-def _read_lines(stream, lines: queue.Queue) -> None:
-    for line in stream:
-        lines.put(line)
-    lines.put(None)
-
-
 def _drain(stream) -> list[str]:
-    """Keep reading a pipe after it has said what was wanted, so the child never blocks on it."""
-    kept: list[str] = []
-
-    def run() -> None:
-        for line in stream:
-            kept.append(line)
-            del kept[:-200]
-
-    threading.Thread(target=run, daemon=True).start()
-    return kept
+    """Keep reading a pipe the SDK does not parse, so the child never blocks writing to it."""
+    reader = _Reader(stream)
+    reader.queueing = False
+    reader.start()
+    return reader.kept
 
 
 def _tail(text: str) -> str:
@@ -276,28 +286,28 @@ def _stop_everything() -> None:
         stop(child)
 
 
-def find_binary() -> str:
-    """The `tessera` binary: `TESSERA_BIN`, `PATH`, or a checkout's target directory (§7).
+def find_binary() -> tuple[str, str]:
+    """The `tessera` binary and where it came from (§7).
 
-    At release a platform wheel carries it (§11.2 E).
+    `TESSERA_BIN` when set, else the first `tessera` on `PATH`, else a checkout's target
+    directory, release before debug. At release a platform wheel carries it (§11.2 E).
     """
     named = os.environ.get("TESSERA_BIN")
     if named:
         if not Path(named).exists():
             raise Refusal(f"TESSERA_BIN names {named}, which does not exist")
-        return named
+        return named, "TESSERA_BIN"
     from shutil import which
 
     found = which("tessera")
     if found:
-        return found
-    here = Path(__file__).resolve()
-    for parent in here.parents:
+        return found, "PATH"
+    for parent in Path(__file__).resolve().parents:
         for profile in ("release", "debug"):
             candidate = parent / "target" / profile / "tessera"
             if candidate.exists():
-                return str(candidate)
+                return str(candidate), f"this checkout's target/{profile}"
     raise Refusal(
-        "no `tessera` binary on PATH, at TESSERA_BIN, or in a checkout's target directory. "
+        "no `tessera` binary at TESSERA_BIN, on PATH, or in a checkout's target directory. "
         "Build it with `cargo build --release -p tessera-cli`"
     )

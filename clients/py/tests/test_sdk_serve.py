@@ -1,7 +1,7 @@
 """The supervisor: the deployment file, the announce line, and stopping the child by its pid (§7).
 
-The announce line is read from a fake child here — a Python script printing what `tessera serve`
-prints — so the parser is covered without a bundle and without the binary.
+The announce line is read from a fake child here, a Python script printing what `tessera serve`
+prints, so the parser is covered without a bundle and without the binary.
 """
 
 import os
@@ -131,6 +131,8 @@ def test_the_secrets_are_generated_once_and_owner_only(tmp_path):
     assert len(identity) == 32 and int(identity, 16) >= 0
     for name in ("session.cred", "operator.cred", "identity.key", "identity.toml"):
         assert oct((tmp_path / ".tessera" / name).stat().st_mode)[-3:] == "600"
+    # The directory too, and each file is created owner-only rather than narrowed afterwards.
+    assert oct((tmp_path / ".tessera").stat().st_mode)[-3:] == "700"
     again = _instance.secrets_for(tmp_path)
     assert again == (session, identity)
 
@@ -139,7 +141,7 @@ def test_the_binary_is_found_at_tessera_bin(tmp_path, monkeypatch):
     binary = tmp_path / "tessera"
     binary.write_text("")
     monkeypatch.setenv("TESSERA_BIN", str(binary))
-    assert _instance.find_binary() == str(binary)
+    assert _instance.find_binary() == (str(binary), "TESSERA_BIN")
     monkeypatch.setenv("TESSERA_BIN", str(tmp_path / "absent"))
     with pytest.raises(Exception, match="does not exist"):
         _instance.find_binary()

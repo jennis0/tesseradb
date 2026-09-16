@@ -1,8 +1,8 @@
 """What `check()` and `commit()` hand back.
 
 Both return an object that prints as a table. The binary's own output is carried through rather
-than re-formatted — `tessera check`'s disclosure table is what a reader of the declaration is
-meant to read — and beside it the SDK states what it decided for the user: what it inferred and
+than re-formatted, `tessera check`'s disclosure table being what a reader of the declaration is
+meant to read. Beside it the SDK states what it decided for the user: what it inferred and
 under which thresholds, the frame each view got, the render columns the first commit froze, and
 the vocabularies it declared open.
 """
@@ -29,8 +29,8 @@ class Inference:
         out = [
             f"inferred from '{self.source}', the default source "
             f"(at most {FEW_DISTINCT} distinct values is a category; a median length under "
-            f"{SHORT_MEDIAN} characters is a keyword — both assumed, both overridden by one "
-            f"declare_attribute call)",
+            f"{SHORT_MEDIAN} characters is a keyword. Both are assumed, and one "
+            f"declare_attribute call overrides either for one column)",
             f"  {'column':<26} {'dtype':<16} {'declared as':<14} {'render':<7} {'index':<6} why",
         ]
         for column in self.columns:
@@ -42,7 +42,7 @@ class Inference:
             out.append(
                 "  vocabularies declared open and public, minted from the data: "
                 + ", ".join(self.vocabularies)
-                + " — every principal is told their value names. On a local database the user is "
+                + ". Every principal is told their value names, and on a local database the user is "
                 "the authority that choice asks for"
             )
         return out
@@ -91,13 +91,24 @@ class CommitReport(Report):
     viewer: str | None = None
     session: str | None = None
     control: str | None = None
+    #: How many ids the map assigned. Zero where every source was read in place, the map being the
+    #: identity over their own ids.
     entities: int = 0
 
     def lines(self) -> list[str]:
         out = super().lines()
+        if self.entities:
+            out.insert(1, f"  {self.entities} entity id(s) assigned from the user's own ids")
+        out.insert(
+            1,
+            "  the allocation is signature-sorted over the whole staged corpus, which affects "
+            "posting compression and latency and never what is served",
+        )
         if self.viewer:
             out.append("")
-            out.append(f"serving  viewer {self.viewer}  session {self.session}  control {self.control}")
+            out.append(
+                f"serving  viewer {self.viewer}  session {self.session}  control {self.control}"
+            )
         return out
 
 

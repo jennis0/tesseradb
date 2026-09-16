@@ -40,20 +40,28 @@ verb to block is checked by the binary rather than mirrored in Python. The direc
 the binary reads, so `db.save("~/somewhere")` and `tessera serve --deployment
 ~/somewhere/tessera.toml` on another machine serve the same database.
 
-**What is here is stage S1 of python-sdk.md §12:** `create`, `open`, `stage` with the id map,
-`declare` and the typed verbs for plain views, vocabularies, attributes, enumerated layers of every
-kind and labels, inference, `check()`, and the first commit. `map()` and `viewer(terms)` are S2;
-later commits — a delta into a running database — are S3, and the verbs that would start one refuse
-naming it. A spatial or attribute membership, a shape, an inline artifacts table and a view group
-are S4 and S5; the typed verbs refuse each naming its stage, and `declare(kind, block)` writes
-whatever block it is given in the meantime.
+What is built is the first commit: `create`, `open`, `stage` with the id map, `declare` and the
+typed verbs for plain views, vocabularies, attributes, enumerated layers of every kind and labels,
+inference, `check()`, and the build and the server the commit starts.
 
-The binary is found at `TESSERA_BIN`, on `PATH`, or in a checkout's target directory. The database
-directory keeps its own session credential, operator credential and identity key under `.tessera/`,
-owner-only; `commit()` starts `tessera serve` as a child process on loopback at port 0 and reads
-the three bound addresses from the JSON line the child prints once all three planes are listening.
-`db.viewer_url`, `db.session_url` and `db.session_credential` are what a token is minted against. It kills that child by its pid at
-`close()` and at interpreter exit.
+Not built yet, and what each does instead:
+
+- **`map()` and `viewer(terms)`.** `tesseradb.Map(db.viewer_url, token=...)` is the widget, and
+  `tesseradb.authorise(db.session_url, db.session_credential, terms)` is the token for it.
+- **A commit into a built database.** A delta pages through the control plane, and only the first
+  commit builds. `stage()` accepts a delta; `commit()`, `check()`, `remove()` and the declare
+  verbs on a built database say so.
+- **A view group, a spatial or attribute membership, a shape and an inline artifacts table.** The
+  typed verbs refuse each, saying it is not built; `declare(kind, block)` writes any block it is
+  given, so the declaration surface is reachable in full.
+
+The binary is `TESSERA_BIN` when set, else the first `tessera` on `PATH`, else a checkout's target
+directory, release before debug; `create()` names the one it found. The database directory keeps
+its own session credential, operator credential and identity key under `.tessera/`, each file
+owner-only. `commit()` starts `tessera serve` as a child process on loopback at port 0 and reads
+the three bound addresses from the JSON line the child prints once all three planes are listening;
+`db.viewer_url`, `db.session_url` and `db.session_credential` are what a token is minted against.
+The child is killed by its pid at `close()` and at interpreter exit.
 
 **Not built yet: the viewer plane's origin list for a notebook page.** The SDK writes
 `serve.cors_origins` from `TESSERA_NOTEBOOK_ORIGIN`, and a widget served from an origin that names

@@ -1,9 +1,9 @@
-"""The proof §12 asks each stage for: a corpus declaration regenerated from calls.
+"""The proof python-sdk.md asks for: a corpus declaration regenerated from calls.
 
 `tessera check` prints its disclosure table on stdout and the schemas it read, with their paths, on
-stderr. The declarations name the same files by different paths — one reads `data/notebook/`
-directly, the other reads it through a relative path from a temporary directory — so **stdout is
-compared and stderr is not**. That is the whole normalisation: the disclosure table carries no
+stderr. The declarations name the same files by different paths: one reads `data/notebook/`
+directly, the other reads it through a relative path from a temporary directory. **Stdout is
+compared whole, and stderr by its file names.** That is the whole normalisation: the disclosure table carries no
 path, which is what makes it the thing to compare.
 
 Beside it, the first commit through `tessera build --mint-external-ids`.
@@ -26,8 +26,8 @@ pytest.importorskip("pyarrow")
 
 def binary() -> str:
     try:
-        return _instance.find_binary()
-    except Exception as why:  # noqa: BLE001 — the skip message is the whole point
+        return _instance.find_binary()[0]
+    except Exception as why:  # noqa: BLE001, the skip message is the whole point
         pytest.skip(f"no tessera binary: {why}")
 
 
@@ -143,7 +143,25 @@ def declare_notebook(db, corpus: Path) -> None:
     )
 
 
-def check_committed(tessera: str, declaration: Path, directory: Path) -> str:
+def read_schema_lines(stderr: str) -> list[str]:
+    """`tessera check`'s "read schema" lines, with the path column cut to its file name.
+
+    The two declarations name one set of files by two paths, one relative to `data/notebook/` and
+    one relative to a temporary directory, so the file name is what can be compared. What is being
+    compared is which object reads which file, which the name carries.
+    """
+    lines = []
+    for line in stderr.splitlines():
+        if "read schema" not in line and "no source" not in line:
+            continue
+        head, _, path = line.rpartition(" ")
+        # The object column is padded to a width the longer object names overflow, so the spacing
+        # is collapsed before the two runs are compared.
+        lines.append(" ".join(head.split()) + "  " + Path(path.strip()).name)
+    return lines
+
+
+def check_committed(tessera: str, declaration: Path, directory: Path) -> tuple[str, str]:
     """`tessera check` over a declaration this repository holds, and its disclosure table."""
     (directory / "cache").mkdir(parents=True, exist_ok=True)
     (directory / "tessera.toml").write_text(
@@ -159,7 +177,7 @@ def check_committed(tessera: str, declaration: Path, directory: Path) -> str:
         text=True,
     )
     assert done.returncode == 0, done.stderr
-    return done.stdout
+    return done.stdout, done.stderr
 
 
 def test_the_notebook_declaration_regenerated_discloses_what_the_committed_one_discloses(tmp_path):
@@ -169,9 +187,15 @@ def test_the_notebook_declaration_regenerated_discloses_what_the_committed_one_d
     declare_notebook(db, corpus)
     report = db.check()
     assert report.ok, report.output
-    committed = check_committed(tessera, corpus / "schema.toml", tmp_path / "committed")
+    committed, committed_stderr = check_committed(
+        tessera, corpus / "schema.toml", tmp_path / "committed"
+    )
     generated = report.output[: report.output.index("  read schema")]
     assert generated.strip() == committed.strip()
+    # And the same files read by the same objects: the paths differ, the file names do not.
+    read = read_schema_lines(report.output)
+    assert len(read) == 12
+    assert read == read_schema_lines(committed_stderr)
 
 
 def test_the_regenerated_declaration_states_what_the_committed_one_leaves_to_a_default(tmp_path):
@@ -185,13 +209,19 @@ def test_the_regenerated_declaration_states_what_the_committed_one_leaves_to_a_d
     # Two vocabularies and three layers. A `[layer.labels]` block takes no value set: its keys
     # are configuration.md's labels table, and a key that table does not name is refused at parse.
     assert text.count("value_set") == 2 + 3
-    # Three layers, and each label set twice — the layer grain and the content grain.
+    # Three layers, and each label set twice: the layer grain and the content grain.
     assert text.count("require_member_visibility") == 3 + 2 * 2
     assert text.count("artifact_visibility") == 3 + 2
     assert text.count('visibility = "public"') == 2 + 1 + 3
     # The points file's ids are integers, so it is read in place and its user id is the source id:
     # no keyword attribute is written for it beyond the one the declaration names.
     assert text.count('type = "keyword"') == 1
+    # Each layer's value set, written whether the user chose it or the SDK did: every one of these
+    # names its artifacts in a table, so every one is closed.
+    layers = text.split("[[layer]]")[1:]
+    assert len(layers) == 3
+    for layer in layers:
+        assert 'value_set = "closed"' in layer
     assert "/dev/shm" not in text and not any(
         line.startswith('points = "/') for line in text.splitlines()
     )
@@ -273,9 +303,10 @@ def test_the_arxiv_declaration_regenerated_discloses_what_the_committed_one_disc
         )
     report = db.check()
     assert report.ok, report.output
-    committed = check_committed(tessera, declaration, tmp_path / "committed")
+    committed, committed_stderr = check_committed(tessera, declaration, tmp_path / "committed")
     generated = report.output[: report.output.index("  read schema")]
     assert generated.strip() == committed.strip()
+    assert read_schema_lines(report.output) == read_schema_lines(committed_stderr)
 
 
 def test_the_first_commit_builds_a_bundle_and_mints_every_external_id(tmp_path):
@@ -295,6 +326,31 @@ def test_the_first_commit_builds_a_bundle_and_mints_every_external_id(tmp_path):
     # routes and in `remove()`.
     assert (entities / "ext-locator.u32").exists()
     assert list(entities.glob("external-ids-*.arrow"))
+    # The regeneration proved through the build: the bundle's own disclosure report, which carries
+    # no path, is what the committed declaration's build writes.
+    built = build_committed(binary(), corpus / "schema.toml", tmp_path / "committed")
+    assert json.loads((bundle / "reports" / "disclosure.json").read_text()) == json.loads(
+        built.read_text()
+    )
+
+
+def build_committed(tessera: str, declaration: Path, directory: Path) -> Path:
+    """Build a declaration this repository holds, and return its disclosure report."""
+    check_committed(tessera, declaration, directory)
+    done = subprocess.run(
+        [
+            tessera,
+            "build",
+            "--deployment",
+            str(directory / "tessera.toml"),
+            "--mint-external-ids",
+            "--mint-id-key",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert done.returncode == 0, done.stderr
+    return directory / "bundle" / "reports" / "disclosure.json"
 
 
 def test_the_committed_database_is_served_and_close_stops_the_child(tmp_path):
@@ -336,7 +392,22 @@ def test_the_committed_database_is_served_and_close_stops_the_child(tmp_path):
         assert [c for c in columns.values() if c["render"]] and columns["title"]["render"] is False
         assert columns["archive"]["category"]["vocabulary"] == "archive"
         layers = {layer["name"] for layer in meta["layers"]}
-        assert {"clusters/kmeans", "topics/kmeans", "taxonomy/arxiv"} <= layers
+        assert layers == {
+            "clusters/kmeans",
+            "topics/kmeans",
+            "clusters/hdbscan",
+            "topics/hdbscan",
+            "taxonomy/arxiv",
+        }
+        shapes = {
+            layer["name"]: (layer["hierarchy"]["kind"], [level["level"] for level in layer["levels"]])
+            for layer in meta["layers"]
+        }
+        assert shapes["clusters/kmeans"] == ("flat", [])
+        assert shapes["clusters/hdbscan"] == ("nested", [])
+        assert shapes["taxonomy/arxiv"] == ("tiered", [0, 1])
+        # A label set expands to a flat layer of its own, depending on the clustering it names.
+        assert shapes["topics/kmeans"] == ("flat", [])
         child = db._child.pid
     finally:
         db.close()

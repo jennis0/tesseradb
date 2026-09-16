@@ -5,6 +5,11 @@ column; every other column of the **default** source becomes an attribute by the
 the SDK prints what it did once. An explicit `declare_attribute` on the same name overrides the
 inferred block, and on a source that is not the default nothing is inferred.
 
+Deciding a string column costs a read of that column: the distinct count and the median length
+are facts about the values, and a Parquet footer carries neither. Only columns no block declares
+are read, and only from the default source, so a declaration that names its columns reads none of
+them; a declaration that names none reads each once per call.
+
 The two thresholds are assumed rather than measured: a string column of at most 4,096 distinct
 values is a category, and one whose median length is under 64 characters is a keyword. They decide
 a default, and the user overrides one column with one call, so the cost of either being wrong is a
@@ -17,8 +22,6 @@ import statistics
 from dataclasses import dataclass
 
 import pyarrow as pa
-
-from ._toml import Inline
 
 #: At most this many distinct values makes a string column a category (assumed).
 FEW_DISTINCT = 4096
@@ -147,20 +150,9 @@ def _vocabulary(table: pa.Table, name: str) -> dict:
 
 
 def width_above(distinct: int) -> str:
-    """One width above what `distinct` values need, `u16` at least.
+    """One width above what `distinct` values need, `u16` at least, and `u32` at the ceiling.
 
     An open vocabulary at the width its first values fill has no code for the next one, and the
     width is fixed at the first commit.
     """
-    if distinct < 2**16 - 1:
-        return "u16" if distinct < 2**8 - 1 else "u32"
-    return "u32"
-
-
-def point_visibility(field: str | None, default: str | None) -> Inline:
-    block: dict[str, str] = {}
-    if field is not None:
-        block["field"] = field
-    if default is not None:
-        block["default"] = default
-    return Inline(block)
+    return "u16" if distinct < 2**8 - 1 else "u32"
