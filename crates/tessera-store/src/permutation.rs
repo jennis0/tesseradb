@@ -182,18 +182,19 @@ const SPARSE_BUCKET_ROWS: usize = STAMP_WORDS;
 /// window share it ever took, and a principal whose entities are issued in clustered order hands
 /// most of a window to a few dozen buckets and the next window to a different few dozen. Measured
 /// at rung 6 (3.5×10⁹ rows, 834 buckets) over a 50% country principal: the buckets' capacity grew
-/// from 84 MB to 2,733 MB across 105 windows while no window held more than 64 MB, against a result
-/// of 222 MB. A shared pool bounds the buckets by one window whatever order the rows arrive in.
+/// from 80 MiB to 2,606 MiB across 105 windows while no window held more than 64 MiB, against a
+/// result of 212 MiB. A shared pool bounds the buckets by one window whatever order the rows arrive in.
 ///
-/// **Measured after, same principals at rung 6** (`store/project-transient`, 2026-09-16): anonymous
-/// peak 2,414 MiB to 350 MiB at the country principal and 4,501 MiB to 597 MiB at a 90% species
-/// principal, each now the result as held plus 68 to 72 MiB, with the walk 9.7 s to 7.3 s and
-/// 21.3 s to 15.3 s, medians of three. The walk is faster because no bucket is reallocated and
+/// **Measured after, same principals at rung 6** (`probes/2026-09-16-project-transient/`):
+/// anonymous peak 2,413 MiB to 351 MiB at the country principal and 4,501 MiB to 598 MiB at a 90%
+/// species principal, each now the result as held plus 68 to 72 MiB, with the walk 9.5 s to 6.8 s
+/// and 19.1 s to 14.1 s, medians of three. The walk is faster because no bucket is reallocated and
 /// copied as it grows, and the pool's chunks are reused hot; that reason is inferred, not
 /// separately measured.
 ///
 /// 4,096 rows is 16 KB. The pool carries one partly filled chunk per bucket beyond the window, so
-/// this sets that term (13 MB at 834 buckets); taking a chunk is one branch per 4,096 rows.
+/// this sets that term (13 MiB at 834 buckets). Every row tests whether its bucket's chunk is full;
+/// taking a chunk, the out-of-line call, runs once per chunk.
 const CHUNK_ROWS_MAX: usize = 1 << 12;
 
 /// Chunk size floor, for the small masks an artifact pass projects by the hundred thousand: the
@@ -217,13 +218,20 @@ pub struct ProjectScratch {
     free: Vec<u32>,
     /// Per bucket, its chunks in the order they were filled.
     chains: Vec<Vec<u32>>,
-    /// Per bucket, the pool index the next row is written at, and the end of its current chunk.
-    /// Equal when the bucket has no chunk with room, which is also how an empty bucket starts.
-    next: Vec<usize>,
-    end: Vec<usize>,
+    /// Per bucket, where its next row is written.
+    cursors: Vec<Cursor>,
     stamp: Vec<u64>,
     marks: Vec<u64>,
     members: Vec<u32>,
+}
+
+/// A bucket's position in the pool: the index its next row is written at, and the end of its
+/// current chunk. The two are equal when the bucket has no chunk with room, which is also how an
+/// empty bucket starts. Kept side by side so a push reads one 16-byte entry.
+#[derive(Clone, Copy, Default)]
+struct Cursor {
+    next: usize,
+    end: usize,
 }
 
 /// The chunks a walk's buckets fill, and the cursors into them.
@@ -231,39 +239,53 @@ struct Buckets<'a> {
     pool: &'a mut [u32],
     free: &'a mut Vec<u32>,
     chains: &'a mut [Vec<u32>],
-    next: &'a mut [usize],
-    end: &'a mut [usize],
+    cursors: &'a mut [Cursor],
     chunk_rows: usize,
 }
 
 impl Buckets<'_> {
-    /// Give `bucket` a fresh chunk. Out of line: it runs once per `chunk_rows` rows a bucket takes.
+    /// Give `bucket` a fresh chunk and write `row` as its first. Out of line: it runs once per
+    /// `chunk_rows` rows a bucket takes.
     #[cold]
     #[inline(never)]
-    fn take_chunk(&mut self, bucket: usize) {
+    fn push_into_new_chunk(&mut self, bucket: usize, row: u32) {
         let chunk = self.free.pop().expect(
             "the pool holds a window and a partial chunk per bucket, which is all a walk buffers",
         );
         self.chains[bucket].push(chunk);
         let at = chunk as usize * self.chunk_rows;
-        self.next[bucket] = at;
-        self.end[bucket] = at + self.chunk_rows;
+        self.pool[at] = row;
+        self.cursors[bucket] = Cursor {
+            next: at + 1,
+            end: at + self.chunk_rows,
+        };
     }
 
+    /// The store into the pool is checked with `get_mut` and falls to the chunk-taking path when it
+    /// is out of range, so the hot path carries no panic branch for the pool index. Measured on the
+    /// 64-part smoke bundle's 185,418 species images through one scratch, an indexed store cost
+    /// 9–12% more CPU than a `Vec` per bucket, and this form is within 2% of one.
     #[inline(always)]
     fn push(&mut self, bucket: usize, row: u32) {
-        if self.next[bucket] == self.end[bucket] {
-            self.take_chunk(bucket);
+        let cursor = &mut self.cursors[bucket];
+        if cursor.next != cursor.end {
+            if let Some(slot) = self.pool.get_mut(cursor.next) {
+                *slot = row;
+                cursor.next += 1;
+                return;
+            }
         }
-        self.pool[self.next[bucket]] = row;
-        self.next[bucket] += 1;
+        self.push_into_new_chunk(bucket, row);
     }
 
     /// Rows buffered in `bucket`.
     fn len(&self, bucket: usize) -> usize {
         match self.chains[bucket].len() {
             0 => 0,
-            chunks => chunks * self.chunk_rows - (self.end[bucket] - self.next[bucket]),
+            chunks => {
+                let cursor = self.cursors[bucket];
+                chunks * self.chunk_rows - (cursor.end - cursor.next)
+            }
         }
     }
 
@@ -272,7 +294,8 @@ impl Buckets<'_> {
         let chain = &self.chains[bucket];
         let last = chain.len().saturating_sub(1);
         let chunk_rows = self.chunk_rows;
-        let tail = chunk_rows - (self.end[bucket] - self.next[bucket]);
+        let cursor = self.cursors[bucket];
+        let tail = chunk_rows - (cursor.end - cursor.next);
         chain.iter().enumerate().map(move |(i, chunk)| {
             let at = *chunk as usize * chunk_rows;
             let rows = if i == last { tail } else { chunk_rows };
@@ -283,8 +306,7 @@ impl Buckets<'_> {
     /// Return every chunk of `bucket` to the pool.
     fn clear(&mut self, bucket: usize) {
         self.free.append(&mut self.chains[bucket]);
-        self.next[bucket] = 0;
-        self.end[bucket] = 0;
+        self.cursors[bucket] = Cursor::default();
     }
 }
 
@@ -316,7 +338,14 @@ fn emit_window(
         emitted = true;
         let base = (index as u32) << BUCKET_SHIFT;
         if len < SPARSE_BUCKET_ROWS {
-            emit_sparse(&mut sink, stamp, marks, members, buckets.slices(index), base);
+            emit_sparse(
+                &mut sink,
+                stamp,
+                marks,
+                members,
+                buckets.slices(index),
+                base,
+            );
             buckets.clear(index);
             continue;
         }
@@ -436,7 +465,8 @@ const DECODE_WINDOW: usize = 8192;
 /// Bucketing the whole result before emitting any of it costs four bytes a projected row: 14 GB at
 /// 3.5×10⁹ rows over a whole-corpus grant, a transient no configured budget bounds. Emitting a
 /// window at a time makes the bucket transient a constant — 64 MB of row ids, plus one partly
-/// filled chunk per bucket ([`CHUNK_ROWS_MAX`]), 81 MB in all at 834 buckets (modelled) — and leaves the result
+/// filled chunk per bucket ([`CHUNK_ROWS_MAX`]): 77 MiB in all at rung 6's 834 buckets, and at most
+/// 82 MiB at the 1,025 buckets of the `u32` entity ceiling (both modelled) — and leaves the result
 /// itself as the only term that grows with the grant. The constant holds only because the buckets
 /// share one pool: see [`CHUNK_ROWS_MAX`] for what a `Vec` per bucket kept instead.
 ///
@@ -903,7 +933,8 @@ impl Permutation {
     /// filled chunk per bucket. The buckets hold one window at a time, in one pool they share: they
     /// are emitted into the result and cleared each time they fill, so the 4 bytes a projected row
     /// that a whole-result bucket pass costs — 14 GB at 3.5×10⁹ rows over a whole-corpus grant — is
-    /// 81 MB and moves neither with the mask nor with the order its rows arrive in. What still scales with
+    /// at most 82 MiB (at the 1,025 buckets of the `u32` entity ceiling; 77 MiB at 834) and
+    /// moves neither with the mask nor with the order its rows arrive in. What still scales with
     /// the grant is the result, which is the answer. The mmap-backed pages are never copied, only
     /// read.
     ///
@@ -1000,9 +1031,22 @@ impl Permutation {
             .expect("a window's chunks fit in the address space");
         let pool = &mut scratch.pool;
         if pool.len() < pool_rows {
+            // **Grown geometrically, and capped at a window's pool.** An artifact pass projects
+            // hundreds of thousands of masks through one scratch, and a pool sized exactly to each
+            // new largest mask is replaced, and its pages faulted again, every time the largest
+            // grows. Doubling replaces it a logarithmic number of times. Sizing every scratch for a
+            // full window from the first call was the other choice; it is declined because a
+            // caller that only ever projects small masks would keep a window's address space and,
+            // once its chunks have wandered across it, a window's resident pages. The cap is the
+            // largest pool any `chunk_rows` needs, so doubling never overshoots what a window uses.
+            //
             // A fresh zeroed allocation rather than `resize`, so the pages are the kernel's zero
             // pages until a row is written to them: a large pool is not paid for up front.
-            *pool = vec![0; pool_rows];
+            let window_pool = window_rows
+                .saturating_add(DECODE_WINDOW)
+                .saturating_add((nbuckets + 1).saturating_mul(CHUNK_ROWS_MAX));
+            let grown = pool.len().saturating_mul(2).min(window_pool).max(pool_rows);
+            *pool = vec![0; grown];
         }
         let free = &mut scratch.free;
         free.clear();
@@ -1014,16 +1058,13 @@ impl Permutation {
         }
         chains.resize_with(nbuckets, Vec::new);
         chains.truncate(nbuckets);
-        scratch.next.clear();
-        scratch.next.resize(nbuckets, 0);
-        scratch.end.clear();
-        scratch.end.resize(nbuckets, 0);
+        scratch.cursors.clear();
+        scratch.cursors.resize(nbuckets, Cursor::default());
         let buckets = &mut Buckets {
             pool: &mut pool[..pool_rows],
             free,
             chains,
-            next: &mut scratch.next,
-            end: &mut scratch.end,
+            cursors: &mut scratch.cursors,
             chunk_rows,
         };
 
@@ -1747,6 +1788,111 @@ mod tests {
                  the mask projects to {} rows",
                 scratch.pool.len(),
                 single.cardinality()
+            );
+        }
+    }
+
+    /// **The pool's worst case, driven directly.** Every bucket stops one row into a fresh chunk,
+    /// `k·c + 1` rows, which is the layout that uses the most chunks for the rows buffered. A pool
+    /// of exactly that many chunks must be drained to zero without the `expect` in
+    /// `push_into_new_chunk` firing, each bucket's chunks must read back as the rows pushed into it
+    /// in order, and the sizing `project_windowed` does for the same rows must be at least that
+    /// pool.
+    #[test]
+    fn the_worst_chunk_layout_drains_the_pool_exactly() {
+        const NBUCKETS: usize = 37;
+        const CHUNK: usize = 4;
+        const K: usize = 3;
+        let per_bucket = K * CHUNK + 1;
+        let chunks = NBUCKETS * (K + 1);
+        let mut pool = vec![0u32; chunks * CHUNK];
+        let mut free: Vec<u32> = (0..chunks as u32).rev().collect();
+        let mut chains = vec![Vec::new(); NBUCKETS];
+        let mut cursors = vec![Cursor::default(); NBUCKETS];
+        let mut buckets = Buckets {
+            pool: &mut pool,
+            free: &mut free,
+            chains: &mut chains,
+            cursors: &mut cursors,
+            chunk_rows: CHUNK,
+        };
+        let mut pushed = vec![Vec::new(); NBUCKETS];
+        // Interleaved across buckets, so each bucket's chunks are scattered through the pool
+        // rather than contiguous, which is what `slices` has to read back in order.
+        let mut row = 0u32;
+        for _ in 0..per_bucket {
+            for (bucket, rows) in pushed.iter_mut().enumerate() {
+                buckets.push(bucket, row);
+                rows.push(row);
+                row += 1;
+            }
+        }
+        assert_eq!(
+            buckets.free.len(),
+            0,
+            "the worst layout uses every chunk of an exact pool"
+        );
+        for (bucket, rows) in pushed.iter().enumerate() {
+            assert_eq!(buckets.len(bucket), per_bucket);
+            let read: Vec<u32> = buckets.slices(bucket).flatten().copied().collect();
+            assert_eq!(
+                &read, rows,
+                "bucket {bucket} reads back what was pushed, in order"
+            );
+        }
+        for bucket in 0..NBUCKETS {
+            buckets.clear(bucket);
+            assert_eq!(buckets.len(bucket), 0);
+        }
+        assert_eq!(buckets.free.len(), chunks, "clearing returns every chunk");
+        // The sizing rule in `project_windowed`, applied to the same buffered rows.
+        let buffered = NBUCKETS * per_bucket;
+        assert!(buffered.div_ceil(CHUNK) + NBUCKETS >= chunks);
+    }
+
+    /// One scratch carried across permutations with different bucket counts, and a mask whose
+    /// cardinality is exactly the window, each checked against a single pass through a fresh
+    /// scratch.
+    #[test]
+    fn a_reused_scratch_and_an_exact_window_project_what_a_single_pass_projects() {
+        let mut scratch = ProjectScratch::default();
+        let mut rng = StdRng::seed_from_u64(23);
+        // Five buckets, then two, then five again: the chains and cursors shrink and regrow, and
+        // the pool is reused at a different chunk size.
+        for (index, bound) in [
+            (5u64 << BUCKET_SHIFT) - 1_000,
+            (1u64 << BUCKET_SHIFT) + 7,
+            5 << BUCKET_SHIFT,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let perm = fixture(dir.path(), bound, 0.9, &mut rng);
+            for count in [300usize, 200_000] {
+                let mask = mask_of(bound, count, &mut rng);
+                let single =
+                    perm.project_windowed(&mask, &mut ProjectScratch::default(), usize::MAX);
+                for window in [5_000usize, usize::MAX] {
+                    let reused = perm.project_windowed(&mask, &mut scratch, window);
+                    assert_eq!(
+                        reused, single,
+                        "permutation {index}, {count} entities, window {window}: a reused scratch \
+                         projects what a fresh single pass projects"
+                    );
+                }
+            }
+            // Cardinality exactly the window, every entity in bound.
+            const WINDOW: usize = 65_536;
+            let mut exact = croaring::Bitmap::new();
+            while exact.cardinality() < WINDOW as u64 {
+                exact.add(rng.gen_range(0..bound) as u32);
+            }
+            let single = perm.project_windowed(&exact, &mut ProjectScratch::default(), usize::MAX);
+            let windowed = perm.project_windowed(&exact, &mut scratch, WINDOW);
+            assert_eq!(
+                windowed, single,
+                "permutation {index}: a mask of exactly one window"
             );
         }
     }
