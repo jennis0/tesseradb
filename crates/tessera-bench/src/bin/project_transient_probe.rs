@@ -3,11 +3,21 @@
 //! result that a second build can be checked against.
 //!
 //! Principals are country terms from `terms/postings.arrow` (`--country NAME=TERM,...` or
-//! `NAME=@PATH`) or draws over a value column (`--dim NAME=K:weighted` or `NAME=K:uniform`), drawn
-//! the way `term_images_probe` draws them, from `--seed`. The same seed and the same bundle give the
-//! same fragments, so two builds of this probe run the same walks.
+//! `NAME=@PATH`) or draws of K terms over a value column (`--dim NAME=K:weighted` or
+//! `NAME=K:uniform`). A weighted draw is without replacement with probability proportional to a
+//! term's entity count (Efraimidis and Spirakis); both draw from one generator seeded by `--seed`,
+//! in argument order. The same seed, arguments and bundle give the same fragments, so two builds of
+//! this probe run the same walks.
 //!
-//! The anonymous sampler and the heap trim are copied from `term_images_probe.rs`.
+//! `--term-images DIM` instead projects every term of a value column through
+//! `RowSpace::project_base_with` with one reused scratch, the way the artifact pass projects its
+//! artifacts, once in term order and once in rising size, and records the wall clock and minor
+//! faults of each pass. Rising size is the order in which a scratch sized exactly to each new
+//! largest mask is replaced most often.
+//!
+//! Each walk is preceded by `malloc_trim(0)`, so its baseline is not the previous step's free
+//! lists, and a second thread reads `RssAnon` from `/proc/self/status` every millisecond while it
+//! runs; the peak is the largest reading, and the end is read after the walk returns.
 
 use std::path::PathBuf;
 use std::time::Instant;
@@ -38,12 +48,13 @@ struct Args {
     dims: Vec<String>,
     #[arg(long, default_value_t = 20260916)]
     seed: u64,
-    /// Untraced walks per principal.
+    /// Walks per principal.
     #[arg(long, default_value_t = 2)]
     reps: usize,
-    /// Also run one walk with `TESSERA_WALK_TRACE` set, where the build carries the trace.
+    /// Project every term of this value column through one scratch, in term order and in rising
+    /// size, `--reps` times each, and record nothing else.
     #[arg(long)]
-    trace: bool,
+    term_images: Option<String>,
     #[arg(long)]
     commit: Option<String>,
     #[arg(long)]
@@ -54,7 +65,13 @@ fn rss_anon() -> u64 {
     let s = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
     for l in s.lines() {
         if let Some(r) = l.strip_prefix("RssAnon:") {
-            return r.trim().trim_end_matches("kB").trim().parse::<u64>().unwrap_or(0) * 1024;
+            return r
+                .trim()
+                .trim_end_matches("kB")
+                .trim()
+                .parse::<u64>()
+                .unwrap_or(0)
+                * 1024;
         }
     }
     0
@@ -180,6 +197,109 @@ fn digest(b: &Bitmap) -> String {
     format!("{:016x}-{}", h.finish(), bytes.len())
 }
 
+fn thread_cpu_s() -> f64 {
+    // SAFETY: `clock_gettime` writes into the struct it is given.
+    unsafe {
+        let mut ts: libc::timespec = std::mem::zeroed();
+        libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut ts);
+        ts.tv_sec as f64 + ts.tv_nsec as f64 * 1e-9
+    }
+}
+
+fn minor_faults() -> u64 {
+    // SAFETY: `getrusage` writes into the struct it is given.
+    unsafe {
+        let mut usage: libc::rusage = std::mem::zeroed();
+        libc::getrusage(libc::RUSAGE_SELF, &mut usage);
+        usage.ru_minflt as u64
+    }
+}
+
+/// Every term's entity set, bucketed out of one pass over the column.
+fn term_sets<T: Copy + Into<u32>>(presence: &Bitmap, values: &[T]) -> Vec<Bitmap> {
+    let mut sets: Vec<Vec<u32>> = Vec::new();
+    let mut cursor = presence.cursor();
+    let mut window = vec![0u32; 1 << 16];
+    let mut slot = 0usize;
+    loop {
+        let n = cursor.read_many(&mut window);
+        if n == 0 {
+            break;
+        }
+        for (entity, value) in window[..n].iter().zip(&values[slot..slot + n]) {
+            let at = Into::<u32>::into(*value) as usize;
+            if at >= sets.len() {
+                sets.resize_with(at + 1, Vec::new);
+            }
+            sets[at].push(*entity);
+        }
+        slot += n;
+    }
+    sets.iter()
+        .filter(|s| !s.is_empty())
+        .map(|s| Bitmap::of(s))
+        .collect()
+}
+
+fn term_images(args: &Args, row_space: &tessera_store::RowSpace, dir: &std::path::Path) {
+    let name = args.term_images.as_deref().expect("a dimension");
+    let column = ValueColumn::open_dir(&dir.join("attrs").join(name), Access::MappedSequential)
+        .expect("the value column");
+    let presence = column.present();
+    let sets = match column.codes() {
+        Codes::U32(v) => term_sets::<u32>(&presence, v.as_ref()),
+        Codes::U16(v) => term_sets::<u16>(&presence, v.as_ref()),
+        _ => panic!("u16 or u32 codes"),
+    };
+    let mut rising: Vec<&Bitmap> = sets.iter().collect();
+    rising.sort_by_key(|b| b.cardinality());
+    let in_order: Vec<&Bitmap> = sets.iter().collect();
+    eprintln!(
+        "{name}: {} terms, largest {} entities",
+        sets.len(),
+        rising.last().map_or(0, |b| b.cardinality())
+    );
+    let mut records = Vec::new();
+    for rep in 0..args.reps {
+        for (order, masks) in [("term", &in_order), ("rising", &rising)] {
+            trim_heap();
+            let mut scratch = tessera_store::permutation::ProjectScratch::default();
+            let faults = minor_faults();
+            let cpu = thread_cpu_s();
+            let t = Instant::now();
+            let mut rows = 0u64;
+            for mask in masks.iter() {
+                rows += row_space
+                    .project_base_with(mask, &mut scratch)
+                    .cardinality();
+            }
+            let wall = t.elapsed().as_secs_f64();
+            let cpu = thread_cpu_s() - cpu;
+            let faults = minor_faults() - faults;
+            eprintln!(
+                "{order} rep {rep}: {wall:.3} s wall, {cpu:.3} s cpu, {faults} minor faults, \
+                 {rows} rows"
+            );
+            records.push(json!({
+                "order": order,
+                "rep": rep,
+                "wall_s": wall,
+                "thread_cpu_s": cpu,
+                "minor_faults": faults,
+                "rows": rows,
+            }));
+        }
+    }
+    let out = json!({
+        "bundle": args.bundle.display().to_string(),
+        "commit": args.commit,
+        "dimension": name,
+        "terms": sets.len(),
+        "runs": records,
+    });
+    std::fs::write(&args.out, serde_json::to_string_pretty(&out).unwrap()).unwrap();
+}
+
 fn main() {
     let args = Args::parse();
     let mut rng = StdRng::seed_from_u64(args.seed);
@@ -196,6 +316,10 @@ fn main() {
     let total_rows = row_space.total_rows();
     let partition_dir = prefix_dir.join("partitions").join(phash);
     eprintln!("bound {bound}, total_rows {total_rows}, opened in {open_s:.1} s");
+    if args.term_images.is_some() {
+        term_images(&args, row_space, &partition_dir);
+        return;
+    }
 
     let mut principals: Vec<(String, Bitmap)> = Vec::new();
     if !args.countries.is_empty() {
@@ -234,8 +358,11 @@ fn main() {
         let (name, rest) = spec.split_once('=').expect("DIM=K:kind");
         let (k, kind) = rest.split_once(':').expect("K:kind");
         let k: usize = k.parse().unwrap();
-        let column = ValueColumn::open_dir(&partition_dir.join("attrs").join(name), Access::MappedSequential)
-            .expect("the value column");
+        let column = ValueColumn::open_dir(
+            &partition_dir.join("attrs").join(name),
+            Access::MappedSequential,
+        )
+        .expect("the value column");
         let presence = column.present();
         let counts = match column.codes() {
             Codes::U32(v) => count_terms::<u32>(v.as_ref()),
@@ -281,15 +408,6 @@ fn main() {
                 anon["peak_above_base_bytes"], anon["end_above_base_bytes"]
             );
             runs.push(json!({"wall_s": wall, "anon": anon, "anon_after_drop_and_trim": after}));
-        }
-        if args.trace {
-            trim_heap();
-            std::env::set_var("TESSERA_WALK_TRACE", "1");
-            eprintln!("TRACE-BEGIN {name}");
-            let rows = row_space.project(fragment);
-            eprintln!("TRACE-END {name}");
-            std::env::remove_var("TESSERA_WALK_TRACE");
-            drop(rows);
         }
         eprintln!("{name}: entity share {share:.4}, {shape}");
         records.push(json!({"name": name, "entity_share": share, "result": shape, "runs": runs}));
