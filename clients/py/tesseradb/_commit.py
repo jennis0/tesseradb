@@ -399,7 +399,8 @@ class Planner:
         artifacts = self.db.deltas.get(block.get("source"))
         members_source = (block.get("members") or {}).get("source")
         members = self.db.deltas.get(members_source)
-        if artifacts is None and members is None:
+        inline = block.get("artifacts")
+        if artifacts is None and members is None and not inline:
             return
         if parent is not None and not self._clustering_is_reachable(parent):
             self.findings.append(
@@ -411,7 +412,7 @@ class Planner:
                 )
             )
             return
-        rows = _artifact_rows(artifacts, members, block)
+        rows = _artifact_rows(artifacts, members, block, inline)
         if not rows:
             return
         self._publish(block, rows)
@@ -489,8 +490,26 @@ class Planner:
         most = int(publish_limits.get("max_artifacts_per_request", 10_000))
         planned: set[str] = self._planned_keys.setdefault(layer, set())
 
+        most_excluded = int(publish_limits.get("max_excluded_per_request", 1_000_000))
+        spatial = block.get("membership") == "spatial"
+
         new_rows: list[dict] = []
         for row in rows:
+            excluding = row.get("excluding")
+            if excluding is not None and len(excluding) > most_excluded:
+                self.findings.append(
+                    Finding(
+                        "an exclusion list over the route's bound",
+                        f"layer '{layer}', artifact '{row['key']}': the membership leaves out "
+                        f"{len(excluding)} entities, over the {most_excluded} the exclusion "
+                        f"spelling admits (limits.publish.max_excluded_per_request). What must "
+                        f"fit one request is the list, the complement being taken against the "
+                        f"view's entities on the executor. Name the members the artifact holds "
+                        f"instead, which pages",
+                        refuses=True,
+                    )
+                )
+                continue
             state = held.get(row["key"])
             if state is None:
                 new_rows.append(row)
@@ -526,6 +545,10 @@ class Planner:
                         f"new key",
                     )
                 )
+            if spatial:
+                # A spatial artifact's membership is its shape, resolved per request against each
+                # generation's own segments, so there is no member set to page (§6.2 step 4).
+                continue
             self._grow(block, row, gates, grow_limits, state)
 
         for level in sorted({int(row.get("level") or 0) for row in new_rows}):
@@ -887,6 +910,11 @@ def _artifact_block(row: dict, budget: int) -> tuple[bytes, list, int]:
         record["parent"] = list(row["parent"])
     if row.get("attached"):
         record["attached_to"] = row["attached"]
+    for shape_field in SHAPE_FIELDS:
+        if row.get(shape_field) is not None:
+            record[shape_field] = row[shape_field]
+    if row.get("space") is not None:
+        record["space"] = row["space"]
     members = list(row.get("members", []))
     sets = [list(one) for one in row.get("sets", [])]
     contents = row.get("content") or []
@@ -898,9 +926,15 @@ def _artifact_block(row: dict, budget: int) -> tuple[bytes, list, int]:
             }
             for rank, values in enumerate(contents)
         ]
-    record["members"] = [addressed(e) for e in members]
+    if row.get("excluding") is not None:
+        # A membership spelled by exclusion travels whole: the executor complements the list
+        # against the view's entities as of that step, so a second page would name a different
+        # set (ingest §2.3). The route's count bound is checked before the plan is built.
+        record["excluding"] = [addressed(e) for e in row["excluding"]]
+    else:
+        record["members"] = [addressed(e) for e in members]
     body = json.dumps(record).encode()
-    while len(body) > budget and (members or any(sets)):
+    while len(body) > budget and "members" in record and (members or any(sets)):
         # Trim the membership first, then each generating set from the last rank down: the page
         # that follows carries the rest, and a set's own page is a `PATCH` at its rank.
         if len(members) > 1:
@@ -974,43 +1008,52 @@ def _publish_body(level: int, blocks: list[bytes]) -> bytes:
     )
 
 
-def _artifact_rows(artifacts, members, block: dict) -> list[dict]:
+#: An artifact row's shape, in its layer's kind's field and no other (configuration.md §1).
+SHAPE_FIELDS = ("bbox", "circle", "ellipse", "wkt")
+
+
+def _blank(key: str, level: int) -> dict:
+    return {"key": key, "level": level, "members": [], "sets": [], "content": [], "parent": [],
+            "attached": None, "excluding": None, "space": None}
+
+
+def _artifact_rows(artifacts, members, block: dict, inline=None) -> list[dict]:
     """One layer's staged tables as artifact records: the key, its parts and its sets.
 
     A member table's grain is `(key, entity, rank)`: a null rank is the membership and rank *k* is
     content *k*'s generating set (annotation-write-cycle §6.1). An artifacts table's `contents` is
-    one value list per rank, positional over the kinds the layer declares.
+    one value list per rank, positional over the kinds the layer declares. A shape column, `space`
+    and `excluding` ride the artifact row and reach the publication as they are written
+    (contracts §3.4).
     """
     rows: dict[tuple[int, str], dict] = {}
-    if artifacts is not None:
-        table = pq.read_table(artifacts.path)
-        fields = table.column_names
-        for i in range(table.num_rows):
-            level = int(table["level"][i].as_py() or 0) if "level" in fields else 0
-            key = str(table["key"][i].as_py())
-            record = rows.setdefault(
-                (level, key),
-                {"key": key, "level": level, "members": [], "sets": [], "content": [],
-                 "parent": [], "attached": None},
-            )
-            if "contents" in fields:
-                contents = table["contents"][i].as_py()
-                if contents:
-                    record["content"] = [list(values) for values in contents]
-            if "parent" in fields:
-                parent = table["parent"][i].as_py()
-                if parent is not None:
-                    record["parent"] = [parent] if isinstance(parent, str) else list(parent)
-            if "attached_layer" in fields:
-                target = table["attached_layer"][i].as_py()
-                key_of = table["attached_key"][i].as_py() if "attached_key" in fields else None
-                if target and key_of:
-                    attached = {"layer": target, "key": key_of}
-                    if "attached_level" in fields:
-                        at = table["attached_level"][i].as_py()
-                        if at is not None:
-                            attached["level"] = int(at)
-                    record["attached"] = attached
+    for record in _declared_artifacts(artifacts, inline):
+        level = int(record.get("level") or 0)
+        key = str(record["key"])
+        row = rows.setdefault((level, key), _blank(key, level))
+        contents = record.get("contents")
+        if contents:
+            row["content"] = [list(values) for values in contents]
+        parent = record.get("parent")
+        if parent is not None:
+            row["parent"] = [parent] if isinstance(parent, str) else list(parent)
+        target = record.get("attached_layer")
+        key_of = record.get("attached_key")
+        if target and key_of:
+            attached = {"layer": target, "key": key_of}
+            at = record.get("attached_level")
+            if at is not None:
+                attached["level"] = int(at)
+            row["attached"] = attached
+        for shape_field in SHAPE_FIELDS:
+            if record.get(shape_field) is not None:
+                row[shape_field] = record[shape_field]
+        if record.get("space") is not None:
+            row["space"] = record["space"]
+        if record.get("excluding") is not None:
+            row["excluding"] = list(record["excluding"])
+        if record.get("members") is not None:
+            row["members"] = list(record["members"])
     if members is not None:
         table = pq.read_table(members.path)
         fields = table.column_names
@@ -1021,11 +1064,7 @@ def _artifact_rows(artifacts, members, block: dict) -> list[dict]:
         entities = table[entity_column].to_pylist()
         for level, key, rank, entity in zip(levels, keys, ranks, entities):
             level = int(level or 0)
-            record = rows.setdefault(
-                (level, str(key)),
-                {"key": str(key), "level": level, "members": [], "sets": [], "content": [],
-                 "parent": [], "attached": None},
-            )
+            record = rows.setdefault((level, str(key)), _blank(str(key), level))
             if rank is None:
                 record["members"].append(entity)
             else:
@@ -1034,6 +1073,21 @@ def _artifact_rows(artifacts, members, block: dict) -> list[dict]:
                     record["sets"].append([])
                 record["sets"][rank].append(entity)
     return list(rows.values())
+
+
+def _declared_artifacts(artifacts, inline) -> list[dict]:
+    """The layer's own artifact rows: a staged table's, then any the declaration carries inline."""
+    records: list[dict] = []
+    if artifacts is not None:
+        table = pq.read_table(artifacts.path)
+        fields = table.column_names
+        columns = {name: table[name].to_pylist() for name in fields}
+        records += [
+            {name: values[i] for name, values in columns.items() if values[i] is not None}
+            for i in range(table.num_rows)
+        ]
+    records += [dict(row) for row in (inline or [])]
+    return records
 
 
 # ---------------------------------------------------------------------------- the run

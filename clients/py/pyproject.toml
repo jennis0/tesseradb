@@ -19,7 +19,12 @@ widget = ["anywidget>=0.9"]
 # The SDK: a database in a directory, filled from frames and files. pyarrow is the only hard
 # dependency — a pandas or polars frame reaches it through `pa.table`, so neither is required.
 local = ["pyarrow>=14"]
-dev = ["anywidget>=0.9", "pyarrow>=14", "pandas", "pytest", "ruff"]
+# `tomli` is the TOML reader the corpus regeneration tests parse both documents with, on the
+# Pythons below 3.11 that carry no `tomllib`. It is a test dependency and reaches no other extra.
+dev = [
+  "anywidget>=0.9", "pyarrow>=14", "pandas", "pytest", "ruff",
+  "tomli>=2; python_version < '3.11'",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["tesseradb"]
