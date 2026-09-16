@@ -39,6 +39,10 @@ MAX_BACKOFF = 30.0
 #: How many times one page is re-sent after a `429` before the SDK reports it as a refusal.
 MAX_ATTEMPTS = 600
 
+#: The status an answer carries when the request reached no server at all. Not an HTTP status: the
+#: request was never answered, so there is none to report.
+UNANSWERED = 0
+
 
 def external_id(source_id: int) -> bytes:
     """The external id of a row: the source id in eight little-endian bytes (§3).
@@ -124,6 +128,17 @@ class Control:
                     continue
                 return Answer(
                     refusal.code, _decoded(text), text, attempts, time.monotonic() - started
+                )
+            except (urllib.error.URLError, OSError) as unreachable:
+                # A connection that never answered is a refusal the report carries, not an
+                # exception out of `commit()`: the pages already acknowledged stay acknowledged,
+                # and an unanswered request is resent with identical bytes at the next commit.
+                return Answer(
+                    UNANSWERED,
+                    {},
+                    f"{self.base + path} did not answer: {unreachable}",
+                    attempts,
+                    time.monotonic() - started,
                 )
 
     # ------------------------------------------------------------------ the routes
@@ -231,6 +246,10 @@ class CommitLog:
         self.batches: dict[str, dict] = {}
         self.layers: list[str] = []
         self.keys: dict[str, dict[str, dict]] = {}
+        #: The digest of every set this database has sent whole, by layer and `key|rank`. A set is
+        #: a delta on the wire, so a page of it re-sent is a lawful no-op; recording what was sent
+        #: is what lets a cell re-run send nothing at all.
+        self.sets: dict[str, dict[str, str]] = {}
         #: Every access label this database has staged, plus each view's default (§8).
         self.terms: list[str] = []
         if self.path.exists():
@@ -238,6 +257,7 @@ class CommitLog:
             self.batches = document.get("batches", {})
             self.layers = document.get("layers", [])
             self.keys = document.get("keys", {})
+            self.sets = document.get("sets", {})
             self.terms = document.get("terms", [])
 
     def holds(self, batch: str) -> bool:
@@ -255,16 +275,29 @@ class CommitLog:
                 self.layers.append(layer)
 
     def published(self, layer: str) -> dict[str, dict]:
-        """The keys this database has published into a layer, each saying whether it carried
-        content. A content gated `all` has no fill route, so the plan reads this to refuse one on
-        an artifact published without it rather than sending a request the server would refuse."""
+        """The keys this database has published into a layer, each with its content's digest.
+
+        The digest is `None` where the artifact was published without content. A content gated
+        `all` has no fill route, so the plan reads this to refuse one on an artifact published
+        without it rather than sending a request the server would refuse, and to tell a content
+        re-supplied unchanged from one that differs.
+        """
         return self.keys.get(layer, {})
 
-    def publish(self, layer: str, keys: Iterable[tuple[str, bool]]) -> None:
+    def publish(self, layer: str, keys: Iterable[tuple[str, str | None, str | None]]) -> None:
         held = self.keys.setdefault(layer, {})
-        for key, content in keys:
-            state = held.setdefault(key, {"content": False})
-            state["content"] = state["content"] or bool(content)
+        for key, content, parts in keys:
+            state = held.setdefault(key, {"content": None, "parts": None})
+            state["content"] = state["content"] or content
+            state["parts"] = state.get("parts") or parts
+
+
+    def holds_set(self, layer: str, key: str, rank: int | None, digest: str) -> bool:
+        """Whether this database has already sent that set whole, under that digest."""
+        return self.sets.get(layer, {}).get(set_key(key, rank)) == digest
+
+    def record_set(self, layer: str, key: str, rank: int | None, digest: str) -> None:
+        self.sets.setdefault(layer, {})[set_key(key, rank)] = digest
 
     def add_terms(self, terms: Iterable[str]) -> None:
         for term in terms:
@@ -279,12 +312,56 @@ class CommitLog:
                     "batches": self.batches,
                     "layers": self.layers,
                     "keys": self.keys,
+                    "sets": self.sets,
                     "terms": self.terms,
                 },
                 indent=1,
             ),
             encoding="utf-8",
         )
+
+
+def set_key(key: str, rank: int | None) -> str:
+    """How a set is named in the log: an artifact's key, and the rank of the content it belongs to.
+
+    A rank of `None` is the membership and a rank of *k* is content *k*'s generating set, which is
+    the member table's own grain (annotation-write-cycle §6.1).
+    """
+    return f"{key}|{'' if rank is None else rank}"
+
+
+def members_digest(source_ids: Iterable[int]) -> str:
+    """A stable digest of the ids a set holds, in the order the caller staged them."""
+    return hashlib.sha256(
+        b",".join(str(int(i)).encode() for i in source_ids)
+    ).hexdigest()[:16]
+
+
+def parts_digest(parent: Any, attached: Any) -> str | None:
+    """A stable digest of an artifact's fixed parts, or `None` where it carries none.
+
+    `parent` and `attached_to` are filled once and never replaced (ingest §1.5), so an artifact
+    this database published with them takes no second record carrying the same ones.
+    """
+    if not parent and not attached:
+        return None
+    return hashlib.sha256(
+        json.dumps({"parent": list(parent or []), "attached_to": attached}, sort_keys=True).encode()
+    ).hexdigest()[:16]
+
+
+def content_digest(content: Any) -> str | None:
+    """A stable digest of an artifact's supplied content, or `None` where it carries none.
+
+    A content is a fixed part: supplied once and replaced never. The digest is what lets a later
+    commit tell a cell re-run, which supplies the same values again, from a caller supplying
+    different ones, which no route can apply.
+    """
+    if not content:
+        return None
+    return hashlib.sha256(
+        json.dumps([list(values) for values in content], sort_keys=True).encode()
+    ).hexdigest()[:16]
 
 
 def arrow_body(table: Any) -> bytes:

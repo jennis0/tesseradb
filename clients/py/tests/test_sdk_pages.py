@@ -164,6 +164,60 @@ def test_a_delta_of_new_papers_with_a_cluster_and_a_label_is_served(served, corp
     assert set(report.artifact_ids["topics/kmeans"]) == {"k-new-label"}
 
 
+@pytest.mark.xfail(
+    strict=True,
+    reason="issue #150: a content gated `all` whose generating set holds entities that arrived by "
+    "ingest fails containment for every principal, so the label is served to nobody. The "
+    "publication is accepted and the artifact exists; the same label over entities the build read "
+    "is served, which `test_a_label_set_declared_after_the_first_commit_is_declared_and_served` "
+    "shows",
+)
+def test_the_new_label_is_served_over_the_rows_the_same_commit_ingested(served, corpus):
+    """§10.3's last step: the label's own text, as the viewport's artifacts frame carries it."""
+    db = notebook(served, corpus)
+    db.stage("points", new_papers(db))
+    stage_the_new_cluster(db)
+    assert db.commit().ok
+    served_labels = [
+        (layer, key, content)
+        for layer, key, content, _ in artifact_rows_of(db, view="s0", frame=whole_frame(db))
+        if key == "k-new-label"
+    ]
+    assert served_labels == [("topics/kmeans", "k-new-label", ["Audio diffusion"])]
+
+
+def test_the_same_delta_staged_twice_on_an_in_place_corpus_sends_nothing_the_second_time(
+    served, corpus
+):
+    """§3: the same frame staged again is wholly already present, and nothing is sent.
+
+    The notebook corpus is read where it lies, so the map is the identity over its ids and nothing
+    is assigned. An id still carries a state, and it is the state that tells a delta's held rows
+    from its new ones: without one the page would be offered again at every commit and, past the
+    WAL retention window, refused as a page of duplicates.
+    """
+    db = notebook(served, corpus)
+    delta = new_papers(db)
+    db.stage("points", delta)
+    stage_the_new_cluster(db)
+    first = db.commit()
+    assert first.ok and first.rows_accepted == {"s0": len(NEW_IDS)}
+    assert first.artifacts_minted == 2
+
+    db.stage("points", delta)
+    stage_the_new_cluster(db)
+    plan = db.check()
+    assert plan.ok, plan
+    assert any("already holds" in str(f) for f in plan.findings), plan
+    # Nothing at all: the rows are held, every set was sent whole at the first commit, and the
+    # fixed parts are the ones the publication carried, so the plan has no request in it.
+    assert plan.plan == [], plan
+    again = db.commit()
+    assert again.ok, again
+    assert again.plan == [] and again.rows_accepted == {} and again.artifacts_minted == 0
+    assert not again.refusals
+
+
 # ---------------------------------------------------------------------------- §10.4
 
 
@@ -308,7 +362,10 @@ def test_remove_stops_a_row_being_served_and_a_removed_id_restages_as_a_point(se
     db.stage("points", new_papers(db, ids=[7]))
     plan = db.check()
     assert any(line.startswith("points") for line in plan.plan), plan
-    assert db.commit().ok
+    again = db.commit()
+    assert again.ok, again
+    assert again.rows_accepted == {"s0": 1}
+    assert viewport(db, "s0", frame)["counts"]["visible"] == before
 
 
 def test_suppress_hides_a_row_and_unsuppress_returns_it(served, corpus):
@@ -321,15 +378,22 @@ def test_suppress_hides_a_row_and_unsuppress_returns_it(served, corpus):
     assert viewport(db, "s0", frame)["counts"]["visible"] == before
 
 
-def test_leave_shrinks_a_generating_set(served, corpus):
-    db = notebook(served, corpus)
-    db.stage("points", new_papers(db))
-    stage_the_new_cluster(db)
+def test_leave_shrinks_a_generating_set_and_emptying_it_withdraws_the_content(served, corpus):
+    """The one set that may shrink (decision 0135, §6.5), read back from what is served."""
+    db = served(clustering)
+    db.declare_labels("topics", of="clusters", source="lb", members="lbm", content_requires="all")
+    db.stage("lb", label_rows())
+    db.stage("lbm", label_members(n=5))
     assert db.commit().ok
-    # The one set that may shrink (decision 0135). Two of the three leave, so the content is served
-    # against what remains rather than withdrawn.
-    report = db.leave("topics/kmeans", "k-new-label", NEW_IDS[:2], rank=0)
-    assert report.ok, report
+    assert ("topics", "l0", ["A generated label"], 20) in artifact_rows_of(db)
+
+    # Three of the five leave: the content is served against the two that remain.
+    assert db.leave("topics", "l0", ["p0", "p1", "p2"], rank=0).ok
+    assert ("topics", "l0", ["A generated label"], 20) in artifact_rows_of(db)
+
+    # The page that empties the set withdraws the content, and it does not come back on its own.
+    assert db.leave("topics", "l0", ["p3", "p4"], rank=0).ok
+    assert not [row for row in artifact_rows_of(db) if row[0] == "topics" and row[2]]
 
 
 # ---------------------------------------------------------------------------- §6.3
@@ -426,10 +490,9 @@ def test_a_key_column_for_a_layer_with_supplied_content_is_refused(served, corpu
     db.declare_layer(
         "topics/inline",
         kind="flat",
-        members="topic_members",
+        from_column="topic",
         supplied=[("topic", "text", "inherited")],
     )
-    db.from_columns["topics/inline"] = "topic"
     db.stage(
         "points",
         pa.table(
@@ -511,7 +574,7 @@ def label_members(key: str = "l0", n: int = 5, ranked: bool = True) -> pa.Table:
     )
 
 
-def artifact_rows_of(db, view: str = "map") -> list[tuple]:
+def artifact_rows_of(db, view: str = "map", frame=None) -> list[tuple]:
     """The kind-5 artifacts frame of a whole-extent viewport: layer, key, content, masked count."""
     import io
 
@@ -519,10 +582,11 @@ def artifact_rows_of(db, view: str = "map") -> list[tuple]:
 
     from conftest import post
 
+    box = [-5.0, -5.0, 40.0, 40.0] if frame is None else list(frame)
     content = post(
         db.viewer_url + "/v1/viewport",
         db.token().token,
-        {"view": view, "zoom": 0, "bbox": [-5.0, -5.0, 40.0, 40.0], "k": 16, "layers": "all"},
+        {"view": view, "zoom": 0, "bbox": box, "k": 16, "layers": "all"},
     )
     at = 0
     rows: list[tuple] = []

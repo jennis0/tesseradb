@@ -82,14 +82,19 @@ is addressed by its external id, which is the source id in eight little-endian b
 and the first commit passes `--mint-external-ids` so that every built row is addressable.
 
 A page's batch id is derived from the source name, the page index and a hash of the bytes, and the
-commit log under `.tessera/` records each acknowledgement. Re-running a cell therefore sends
-nothing: the same frame produces the same pages, and the log already holds them. A value that
-changed is a `409` on that part, reported and not retried, because an edit is a delete and a
-re-ingest. A `429` is backpressure and is retried after its `Retry-After` with identical bytes.
+commit log under `.tessera/` records each acknowledgement, the sets it sent whole and the fixed
+parts each artifact was published with. Re-running a cell therefore sends nothing: the rows are
+held, the sets were sent, and the parts are the ones the publication carried. A value that changed
+is a `409` on that part, reported and not retried, because an edit is a delete and a re-ingest. A
+`429` is backpressure and is retried after its `Retry-After` with identical bytes, and a request
+that reached no server is reported as a refusal rather than raised, so the pages already
+acknowledged stay acknowledged.
 
 The pre-flight runs before a byte is sent. Rows outside a view's frame are dropped and listed with
 the frame, rows whose id this database already holds are listed and not sent, and a column no block
-declares is refused by name.
+declares is refused by name. A content is supplied once and replaced never, so one gated `all` on
+an artifact published without it is refused naming the artifact, and one that differs from the held
+content is reported and not sent.
 
 `remove(ids)`, `suppress(ids)` and `unsuppress(ids)` take the user's own ids and map them; a
 removed id staged again goes as a point row. `leave(layer, key, ids, rank)` shrinks a content's

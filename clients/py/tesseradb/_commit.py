@@ -9,26 +9,34 @@ so the order matters for existence and for nothing else.
 `check()` runs the planner and the pre-flight and sends nothing; `commit()` runs the same plan.
 The two therefore cannot disagree about what would be sent.
 
-**What "a staged attribute delta" is, at step 3.** §6.3's table says that a row of a points delta
-whose id the map already holds as acknowledged is listed and not sent, which is what makes a
-re-staged frame read as already present rather than as a page of refusals. A points delta's held
-rows therefore send nothing on the values route, and what that route carries is a delta on a source
-that feeds attributes and no view. The one part of a held row that does travel is a from-column
-layer's key, which §6.2 sends as a publication in step 4.
+A points delta's held rows send nothing. python-sdk.md §6.3 lists a row whose id the map already
+holds as acknowledged and does not send it, which is what makes a re-staged frame read as already
+present rather than as a page of refusals, and the values route at step 3 therefore carries a delta
+on a source that feeds attributes and no view. The one part of a held row that travels is a
+from-column layer's key, which §6.2 step 3 sends as a publication in step 4.
 """
 
 from __future__ import annotations
 
 import json
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Iterable, Sequence
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 
 from . import _control
-from ._control import Answer, Control, addressed, arrow_body, batch_id
+from ._control import (
+    Answer,
+    Control,
+    addressed,
+    arrow_body,
+    batch_id,
+    content_digest,
+    members_digest,
+    parts_digest,
+)
 from ._refusal import Refusal
 
 #: How long `commit()` waits for the publication after its last acknowledgement, in seconds. The
@@ -72,6 +80,9 @@ class Page:
     level: int = 0
     #: The source ids a points page carries, moved to `acknowledged` at its acknowledgement (§3).
     entities: tuple = ()
+    #: The sets this page is the last of, as `(layer, key, rank, digest)`. Recorded at the page's
+    #: acknowledgement, so a later commit knows the set was sent whole and plans no page for it.
+    completes: list = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------- the pre-flight
@@ -90,6 +101,11 @@ class Planner:
         self.pages: list[Page] = []
         #: The keys this plan will publish per layer, so a later step reads them as held.
         self._planned_keys: dict[str, set[str]] = {}
+        #: How many artifact pages this plan has built per layer, which is a page's index in its
+        #: batch id. The artifact routes carry no batch-id header, so the id is the SDK's own
+        #: bookkeeping: the commit log holds it and a re-run skips the page rather than re-sending
+        #: a publication whose every part the level already holds.
+        self._artifact_pages: dict[str, int] = {}
 
     # ------------------------------------------------------------------ entry
 
@@ -420,6 +436,10 @@ class Planner:
         there. The delta is grouped by key instead and sent as publications, each artifact carrying
         its members, which is what the column would have done at the build. A key on a row this
         commit creates travels with the row and mints its artifact at the window close.
+
+        The column is read from the first of the layer's views whose points source has a delta. A
+        layer drawn on several views reads one of them, the column naming one key per entity and an
+        entity holding one row per view.
         """
         views = block.get("views")
         source = None
@@ -488,7 +508,25 @@ class Planner:
                     )
                 )
                 continue
-            self._grow(block, row, gates, grow_limits)
+            if (
+                row["content"]
+                and "all" in gates
+                and content_digest(row["content"]) != state.get("content")
+            ):
+                # The artifact holds a different content, and a content is a fixed part: supplied
+                # once and replaced never (ingest §1.5). The route refuses a content fill on a
+                # layer whose content requires every member visible, so this one is not sent, and
+                # the caller is told rather than left to read an unchanged label as an applied one.
+                # A content re-supplied unchanged is a cell re-run and says nothing.
+                self.findings.append(
+                    Finding(
+                        "content gated `all` differs from the one the artifact holds",
+                        f"layer '{layer}', artifact '{row['key']}': a content is supplied once and "
+                        f"replaced never, so this one is not sent. Publish the artifact under a "
+                        f"new key",
+                    )
+                )
+            self._grow(block, row, gates, grow_limits, state)
 
         for level in sorted({int(row.get("level") or 0) for row in new_rows}):
             at_level = [row for row in new_rows if int(row.get("level") or 0) == level]
@@ -497,23 +535,45 @@ class Planner:
                 body = _publish_body(level, blocks)
                 keys = [row["key"] for row in artifacts]
                 planned.update(keys)
-                self.pages.append(
-                    Page(
-                        kind="publish",
-                        name=layer,
-                        level=level,
-                        line=f"publish {len(keys)} artifact(s) into '{layer}' level {level}",
-                        body=body,
-                        artifacts=len(keys),
-                        members=members,
-                    )
+                self._artifact_page(
+                    "publish",
+                    layer,
+                    level,
+                    f"publish {len(keys)} artifact(s) into '{layer}' level {level}",
+                    body,
+                    artifacts=len(keys),
+                    members=members,
                 )
+                page = self.pages[-1]
                 for row in artifacts:
+                    # The publication carries a first page of every set; what did not fit follows
+                    # as growths. The page that carries the last of a set is the one that records
+                    # it, so a set half sent is a set this database does not claim to hold.
+                    last: dict[Any, Page] = {}
                     for rank, remainder in row.get("remainders", []):
-                        self._grow_pages(layer, level, row["key"], rank, remainder, grow_limits)
+                        grown = self._grow_pages(
+                            layer, level, row["key"], rank, remainder, grow_limits
+                        )
+                        if grown:
+                            last[rank] = grown[-1]
+                    for rank, members in [(None, row.get("members", []))] + list(
+                        enumerate(row.get("sets", []))
+                    ):
+                        if not members:
+                            continue
+                        carrier = last.get(rank, page)
+                        carrier.completes.append(
+                            (layer, row["key"], rank, members_digest(members))
+                        )
 
-    def _grow(self, block: dict, row: dict, gates: set[str], grow_limits: dict) -> None:
-        """A key the level holds: its members join, and an `inherited` content is filled."""
+    def _grow(
+        self, block: dict, row: dict, gates: set[str], grow_limits: dict, state: dict
+    ) -> None:
+        """A key the level holds: its members join, and an `inherited` content is filled.
+
+        A set this database has already sent whole is not sent again. A page of it would be a
+        lawful no-op, the join answering `joined: 0`, but §3 says a re-staged frame sends nothing.
+        """
         layer = block["name"]
         level = int(row.get("level") or 0)
         fills: dict[str, Any] = {"key": row["key"]}
@@ -523,28 +583,74 @@ class Planner:
                 for rank, values in enumerate(row["content"])
                 if values is not None
             ]
-        if row.get("parent"):
-            fills["parent"] = list(row["parent"])
-        if row.get("attached"):
-            fills["attached_to"] = row["attached"]
+        # A fixed part this database published with the artifact is already what the artifact
+        # holds, so no record carries it a second time.
+        if parts_digest(row.get("parent"), row.get("attached")) != state.get("parts"):
+            if row.get("parent"):
+                fills["parent"] = list(row["parent"])
+            if row.get("attached"):
+                fills["attached_to"] = row["attached"]
         if len(fills) > 1:
             body = json.dumps(
                 {"level": level, "addressing": "external", "artifacts": [fills]}
             ).encode()
-            self.pages.append(
-                Page(
-                    kind="grow",
-                    name=layer,
-                    level=level,
-                    line=f"fill '{row['key']}' in '{layer}' level {level}",
-                    body=body,
-                    artifacts=1,
-                )
+            self._artifact_page(
+                "grow",
+                layer,
+                level,
+                f"fill '{row['key']}' in '{layer}' level {level}",
+                body,
+                artifacts=1,
             )
-        self._grow_pages(layer, level, row["key"], None, row.get("members", []), grow_limits)
-        for rank, members in enumerate(row.get("sets", [])):
-            if members:
-                self._grow_pages(layer, level, row["key"], rank, members, grow_limits)
+        for rank, members in [(None, row.get("members", []))] + list(
+            enumerate(row.get("sets", []))
+        ):
+            self._set_pages(layer, level, row["key"], rank, members, grow_limits)
+
+    def _set_pages(
+        self,
+        layer: str,
+        level: int,
+        key: str,
+        rank: int | None,
+        members: Sequence[int],
+        grow_limits: dict,
+    ) -> None:
+        """One set's growth pages, unless this database has already sent that set whole."""
+        if not members:
+            return
+        digest = members_digest(members)
+        if self.log.holds_set(layer, key, rank, digest):
+            return
+        pages = self._grow_pages(layer, level, key, rank, members, grow_limits)
+        if pages:
+            pages[-1].completes.append((layer, key, rank, digest))
+
+    def _artifact_page(
+        self,
+        kind: str,
+        layer: str,
+        level: int,
+        line: str,
+        body: bytes,
+        artifacts: int = 0,
+        members: int = 0,
+    ) -> None:
+        """One publication or growth, with the batch id the commit log records it under."""
+        index = self._artifact_pages.get(layer, 0)
+        self._artifact_pages[layer] = index + 1
+        self.pages.append(
+            Page(
+                kind=kind,
+                name=layer,
+                level=level,
+                line=line,
+                body=body,
+                batch=batch_id(layer, index, body),
+                artifacts=artifacts,
+                members=members,
+            )
+        )
 
     def _grow_pages(
         self,
@@ -554,31 +660,28 @@ class Planner:
         rank: int | None,
         members: Sequence[int],
         grow_limits: dict,
-    ) -> None:
+    ) -> list[Page]:
+        """The pages that join one set, in order. The caller marks the last of them."""
         if not members:
-            return
+            return []
         cap = int(grow_limits.get("max_body_bytes", 64 << 20))
         most = int(grow_limits.get("max_members_per_request", 5_000_000))
         per_page = max(1, min((cap - 512) // 16, most))
+        appended: list[Page] = []
         for start in range(0, len(members), per_page):
             slice_ = list(members[start : start + per_page])
-            row: dict[str, Any] = {"key": key, "members": [addressed(e) for e in slice_]}
-            if rank is not None:
-                row["rank"] = rank
-            body = json.dumps(
-                {"level": level, "addressing": "external", "artifacts": [row]}
-            ).encode()
+            body = patch_body(level, key, joining=slice_, rank=rank)
             what = "members" if rank is None else f"the generating set at rank {rank}"
-            self.pages.append(
-                Page(
-                    kind="grow",
-                    name=layer,
-                    level=level,
-                    line=f"join {len(slice_)} {what} of '{key}' in '{layer}'",
-                    body=body,
-                    members=len(slice_),
-                )
+            self._artifact_page(
+                "grow",
+                layer,
+                level,
+                f"join {len(slice_)} {what} of '{key}' in '{layer}'",
+                body,
+                members=len(slice_),
             )
+            appended.append(self.pages[-1])
+        return appended
 
     # ------------------------------------------------------------------ the column check
 
@@ -838,6 +941,29 @@ def _batched(rows: list[dict], cap: int, most: int):
         yield batch, carried, members
 
 
+def patch_body(
+    level: int,
+    key: str,
+    joining: Sequence[int] = (),
+    leaving: Sequence[int] = (),
+    rank: int | None = None,
+) -> bytes:
+    """One `PATCH` row: the set this page moves, and the members joining or leaving it.
+
+    `rank` absent names the membership and present names the generating set of the content at that
+    rank (ingest §1.1). Only a generating set may shrink, so `leaving` without a rank is a refusal
+    the route makes and this function does not pre-empt.
+    """
+    row: dict[str, Any] = {"key": key}
+    if rank is not None:
+        row["rank"] = rank
+    if joining:
+        row["members"] = [addressed(i) for i in joining]
+    if leaving:
+        row["leaving"] = [addressed(i) for i in leaving]
+    return json.dumps({"level": level, "addressing": "external", "artifacts": [row]}).encode()
+
+
 def _publish_body(level: int, blocks: list[bytes]) -> bytes:
     return (
         b'{"level":'
@@ -914,31 +1040,45 @@ def _artifact_rows(artifacts, members, block: dict) -> list[dict]:
 
 
 def run(database, control: Control, pages: Sequence[Page], report) -> None:
-    """Send the plan, in order, and fold every answer into the report."""
+    """Send the plan, in order, and fold every answer into the report.
+
+    The log and the id map are written after every page rather than at the end. A page is durable
+    at its acknowledgement, and a commit interrupted after one would otherwise send it again at the
+    next: within the WAL retention window that is a replay, and past it a page of duplicates.
+    """
     log = database.commit_log
+    #: The publication as it stood before the page in flight was sent. The flush wait compares
+    #: against this and not against a reading taken afterwards: a period tick landing between the
+    #: last page and the request would otherwise have already moved every counter, and the wait
+    #: would run to its ceiling.
     published = control.publication()
     accepted = 0
     rows = 0
-    for page in pages:
-        if page.kind == "flush":
-            # A commit that wrote nothing has nothing to make visible, and a tick over an empty
-            # buffer publishes nothing and moves no counter, so the wait would run to its ceiling
-            # and report a flush that never happened.
-            if accepted:
-                report.flush_wait = _flush(control, published, report, rows > 0)
-            continue
-        if page.batch is not None and log.holds(page.batch):
-            report.already_present += 1
-            report.skipped.append(page.batch)
-            continue
-        answer = _send(control, page)
-        _fold(database, report, page, answer)
-        if answer.ok:
-            accepted += 1
-            if page.kind in ("points", "values"):
-                rows += 1
+    try:
+        for page in pages:
+            if page.kind == "flush":
+                # A commit that wrote nothing has nothing to make visible, and a tick over an empty
+                # buffer publishes nothing and moves no counter, so the wait would run to its
+                # ceiling and report a flush that never happened.
+                if accepted:
+                    report.flush_wait = _flush(control, published, report, rows > 0)
+                continue
+            if page.batch is not None and log.holds(page.batch):
+                report.already_present += 1
+                report.skipped.append(page.batch)
+                continue
             published = control.publication()
-    log.save()
+            answer = _send(control, page)
+            _fold(database, report, page, answer)
+            log.save()
+            database.id_map.save()
+            if answer.ok:
+                accepted += 1
+                if page.kind in ("points", "values"):
+                    rows += 1
+    finally:
+        log.save()
+        database.id_map.save()
 
 
 def _send(control: Control, page: Page) -> Answer:
@@ -958,6 +1098,11 @@ def _send(control: Control, page: Page) -> Answer:
 def _fold(database, report, page: Page, answer: Answer) -> None:
     log = database.commit_log
     if not answer.ok:
+        if page.kind == "points" and answer.status == 409:
+            # A duplicate external id is the database saying it holds the row already. The page is
+            # not acknowledged, since none of it was applied, but the ids it named are held, and
+            # marking them so is what stops the next commit offering them again.
+            database.id_map.acknowledge_ids(page.entities)
         report.refusals.append(
             {
                 "what": page.line,
@@ -969,6 +1114,8 @@ def _fold(database, report, page: Page, answer: Answer) -> None:
         return
     if page.batch is not None:
         log.acknowledge(page.batch, page.kind, answer)
+    for layer, key, rank, digest in page.completes:
+        log.record_set(layer, key, rank, digest)
     body = answer.body
     if page.kind == "layer":
         log.declare([page.name])
@@ -993,7 +1140,17 @@ def _fold(database, report, page: Page, answer: Answer) -> None:
         report.memberships_joined += int(body.get("joined", 0))
         report.without_content += int(body.get("without_content", 0))
         sent = json.loads(page.body.decode())["artifacts"]
-        log.publish(page.name, [(one["key"], bool(one.get("content"))) for one in sent])
+        log.publish(
+            page.name,
+            [
+                (
+                    one["key"],
+                    content_digest([c["values"] for c in one.get("content", [])]),
+                    parts_digest(one.get("parent"), one.get("attached_to")),
+                )
+                for one in sent
+            ],
+        )
         minted = report.artifact_ids.setdefault(page.name, {})
         for one in body.get("artifacts", []):
             minted[one["key"]] = str(one["tessera_id"])
@@ -1053,13 +1210,4 @@ def changes(control: Control, source_ids: Iterable[int], op: str, limits: dict) 
 def leave(control: Control, layer: str, key: str, source_ids: Sequence[int], rank: int,
           level: int = 0) -> Answer:
     """`PATCH` a generating set at a rank, the one set that may shrink (decision 0135, §6.5)."""
-    body = json.dumps(
-        {
-            "level": level,
-            "addressing": "external",
-            "artifacts": [
-                {"key": key, "rank": rank, "leaving": [addressed(i) for i in source_ids]}
-            ],
-        }
-    ).encode()
-    return control.grow(layer, body)
+    return control.grow(layer, patch_body(level, key, leaving=source_ids, rank=rank))

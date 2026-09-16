@@ -12,9 +12,9 @@ Beside the declaration the SDK writes, it keeps its own copy of the blocks as JS
 `.tessera/`, written at every staging and every declaration, so `open()` reads them back without
 parsing TOML and a database saved before its first commit reopens where it was left.
 
-After the first commit `stage` binds a delta, `commit` pages it through the control plane
-(`_commit`), and the verbs that are not stages — `remove`, `suppress`, `unsuppress` and `leave` —
-address rows by the external ids the build minted.
+After the first commit `stage` binds a delta and `commit` pages it through the control plane
+(`_commit`). The verbs that are not stages, `remove`, `suppress`, `unsuppress` and `leave`, address
+rows by the external ids the build minted.
 """
 
 from __future__ import annotations
@@ -52,6 +52,9 @@ from ._toml import Inline, dumps
 #: A temporary database goes here when the platform has a RAM-backed filesystem (§2).
 RAM_BACKED = Path("/dev/shm")
 
+#: How near expiry a held token may come before the next call mints another, in seconds.
+TOKEN_MARGIN = 60.0
+
 #: Where a delta's parquet goes. A delta is rows to add to what a source already holds, so it is
 #: not the source's own file: `tessera check` reads `sources/` and would otherwise read a delta as
 #: the whole corpus.
@@ -87,6 +90,7 @@ class Database:
         self.listening: _instance.Listening | None = None
         self._loaded_text: str | None = None
         self._inference = Inference()
+        self._token = None
 
     # ------------------------------------------------------------------ sources
 
@@ -628,7 +632,9 @@ class Database:
             render_columns=render_columns_of(document.get("attribute", [])),
             notes=self._notes(),
             output=check.stdout + build.stdout + build.stderr,
-            entities=len(self.id_map),
+            # Zero under identity mode: the points file's own ids are the source
+            # ids, so the map assigned none and records them to carry their state.
+            entities=0 if self.id_map.identity else len(self.id_map),
         )
         if build.returncode != 0:
             raise Refusal("commit: the build failed\n" + report.output)
@@ -728,9 +734,21 @@ class Database:
         chosen = list(terms) if terms is not None else list(self.commit_log.terms)
         return authorise(self.session_url, self.session_credential, chosen)
 
+    def _local_token(self):
+        """One token for this process, minted again when the one it holds is near expiry.
+
+        Minting is a round trip to the session plane and a plugin call, and the pre-flight reads
+        `/v1/meta` on every `check()`. The token is the local principal's, so there is one to hold.
+        """
+        held = self._token
+        if held is not None and (held.seconds_left is None or held.seconds_left > TOKEN_MARGIN):
+            return held
+        self._token = self.token()
+        return self._token
+
     def meta(self) -> dict:
         """`/v1/meta` as this database's own principal reads it: the frames and the schema."""
-        token = self.token()
+        token = self._local_token()
         request = urllib.request.Request(
             self.viewer_url + "/v1/meta", headers={"authorization": f"Bearer {token.token}"}
         )
@@ -782,17 +800,25 @@ class Database:
         """Lift a suppression (§6.5)."""
         return self._changes(ids, "unsuppress")
 
-    def _changes(self, ids: Iterable[Hashable], op: str) -> ChangeReport:
-        self._refuse_before_the_first_commit(op)
-        wanted = list(ids)
-        source_ids = []
-        unknown = []
-        for user_id in wanted:
+    def _mapped(self, ids: Iterable[Hashable]) -> tuple[list[int], list[Hashable]]:
+        """The source id of each user id, and the ids this map has never seen.
+
+        An id the map does not hold addresses nothing: every route here names a row by the external
+        id minted from its source id, so an unmapped id is reported rather than sent.
+        """
+        source_ids: list[int] = []
+        unknown: list[Hashable] = []
+        for user_id in ids:
             source_id = self.id_map.source_id_of(user_id)
             if source_id is None:
                 unknown.append(user_id)
             else:
                 source_ids.append(source_id)
+        return source_ids, unknown
+
+    def _changes(self, ids: Iterable[Hashable], op: str) -> ChangeReport:
+        self._refuse_before_the_first_commit(op)
+        source_ids, unknown = self._mapped(ids)
         report = ChangeReport(op=op, requested=len(source_ids), unknown=unknown)
         control = self.control
         for answer in C.changes(control, source_ids, op, control.limits()):
@@ -814,14 +840,7 @@ class Database:
         supplies it again rather than refilling the set.
         """
         self._refuse_before_the_first_commit("leave")
-        source_ids = []
-        unknown = []
-        for user_id in ids:
-            source_id = self.id_map.source_id_of(user_id)
-            if source_id is None:
-                unknown.append(user_id)
-            else:
-                source_ids.append(source_id)
+        source_ids, unknown = self._mapped(ids)
         report = ChangeReport(op=f"leave {layer}/{key} rank {rank}", requested=len(source_ids),
                               unknown=unknown)
         answer = C.leave(self.control, layer, key, source_ids, rank, level)

@@ -86,6 +86,13 @@ class IdMap:
         return out
 
     def _identity_ids(self, values: list[Hashable], source: str) -> list[int]:
+        """The ids as they are, recording each so that it carries a state like any other.
+
+        Identity mode assigns nothing, but a state is what the pre-flight reads to tell a delta's
+        new rows from its held ones. Without an entry here a row staged under an in-place corpus
+        would read as new at every commit, so the page would be sent again and, past the WAL
+        retention window, refused as a duplicate.
+        """
         out = []
         for user_id in values:
             if isinstance(user_id, bool) or not isinstance(user_id, int) or user_id < 0:
@@ -95,6 +102,10 @@ class IdMap:
                     f"what the build reads and every source beside it names entities by those "
                     f"ids. Stage {self.identity_source!r} as a frame to map both alike"
                 )
+            key = self._key(user_id)
+            if key not in self._ids:
+                self._ids[key] = user_id
+                self._states[user_id] = ASSIGNED
             out.append(user_id)
         return out
 
@@ -134,12 +145,22 @@ class IdMap:
         return added
 
     def acknowledge_ids(self, source_ids: Iterable[int]) -> int:
-        """Move source ids to `acknowledged`: what a commit that carried their rows gives them."""
+        """Move source ids to `acknowledged`: what a commit that carried their rows gives them.
+
+        An id this map has no entry for is recorded as acknowledged rather than dropped. A delta
+        staged as a file read in place goes to the wire without passing through the map at all, and
+        an id the commit carried is held whether or not the map watched it arrive.
+        """
         moved = 0
         for source_id in source_ids:
-            if self._states.get(source_id) == ASSIGNED:
-                self._states[source_id] = ACKNOWLEDGED
-                moved += 1
+            source_id = int(source_id)
+            state = self._states.get(source_id)
+            if state == ACKNOWLEDGED:
+                continue
+            if state is None:
+                self._ids.setdefault(self._key(source_id), source_id)
+            self._states[source_id] = ACKNOWLEDGED
+            moved += 1
         return moved
 
     def acknowledge(self, user_ids: Iterable[Hashable]) -> int:

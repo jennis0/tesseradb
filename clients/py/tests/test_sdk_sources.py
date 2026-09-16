@@ -229,7 +229,10 @@ def test_a_points_file_read_in_place_makes_the_map_the_identity(tmp_path):
         "members", pd.DataFrame({"key": ["a", "a"], "entity": [7, 8]})
     )
     assert pq.read_table(members.path)["entity"].to_pylist() == [7, 8]
-    assert len(db.id_map) == 0
+    # Nothing was assigned: the ids pass through as they are. They are recorded all the same, so
+    # that each carries a state and a delta's held rows can be told from its new ones.
+    assert db.id_map.source_id_of(7) == 7
+    assert db.id_map.state_of(7) == ASSIGNED
     # A members file beside it is read where it lies, on the same ground.
     path = tmp_path / "members.parquet"
     pq.write_table(pa.table({"key": ["a"], "entity": pa.array([7], type=pa.uint64())}), path)

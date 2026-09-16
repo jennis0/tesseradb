@@ -12,7 +12,14 @@ import http.server
 import json
 import threading
 
-from tesseradb._control import CommitLog, Control, addressed, batch_id, external_id
+from tesseradb._control import (
+    CommitLog,
+    Control,
+    addressed,
+    batch_id,
+    content_digest,
+    external_id,
+)
 
 
 class _Backpressure(http.server.BaseHTTPRequestHandler):
@@ -85,12 +92,21 @@ def test_the_commit_log_holds_what_was_acknowledged_and_reopens_with_it(tmp_path
     assert not log.holds("points-0-abc")
     log.acknowledge("points-0-abc", "points", type("A", (), {"status": 200})())
     log.declare(["clusters", "topics"])
-    log.publish("clusters", [("c0", False), ("c0", True)])
+    log.publish("clusters", [("c0", None, None), ("c0", content_digest([["a label"]]), None)])
     log.add_terms(["public", "public", "cs.LG"])
     log.save()
 
     reopened = CommitLog(path)
     assert reopened.holds("points-0-abc")
     assert reopened.declared("clusters") and not reopened.declared("other")
-    assert reopened.published("clusters") == {"c0": {"content": True}}
+    assert reopened.published("clusters") == {
+        "c0": {"content": content_digest([["a label"]]), "parts": None}
+    }
     assert reopened.terms == ["public", "cs.LG"]
+
+
+def test_a_content_digest_is_stable_and_absent_where_there_is_no_content():
+    assert content_digest([]) is None
+    assert content_digest(None) is None
+    assert content_digest([["a label"]]) == content_digest([["a label"]])
+    assert content_digest([["a label"]]) != content_digest([["another label"]])
