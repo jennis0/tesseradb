@@ -40,20 +40,60 @@ verb to block is checked by the binary rather than mirrored in Python. The direc
 the binary reads, so `db.save("~/somewhere")` and `tessera serve --deployment
 ~/somewhere/tessera.toml` on another machine serve the same database.
 
-What is built is the first commit: `create`, `open`, `stage` with the id map, `declare` and the
-typed verbs for plain views, vocabularies, attributes, enumerated layers of every kind and labels,
-inference, `check()`, and the build and the server the commit starts.
+What is built is the first commit and every commit after it: `create`, `open`, `stage` with the id
+map, `declare` and the typed verbs for plain views, vocabularies, attributes, enumerated layers of
+every kind and labels, inference, `check()`, the build and the server the first commit starts, and
+the paged commit below.
 
 Not built yet, and what each does instead:
 
 - **`map()` and `viewer(terms)`.** `tesseradb.Map(db.viewer_url, token=...)` is the widget, and
   `tesseradb.authorise(db.session_url, db.session_credential, terms)` is the token for it.
-- **A commit into a built database.** A delta pages through the control plane, and only the first
-  commit builds. `stage()` accepts a delta; `commit()`, `check()`, `remove()` and the declare
-  verbs on a built database say so.
+- **An attribute, a vocabulary, a view or a view group declared after the first commit.**
+  `tessera check --payloads` emits the runtime declaration body for a layer and for nothing else,
+  so those four verbs refuse on a built database and name a rebuild. A layer and a label set are
+  declarable at any commit.
 - **A view group, a spatial or attribute membership, a shape and an inline artifacts table.** The
   typed verbs refuse each, saying it is not built; `declare(kind, block)` writes any block it is
   given, so the declaration surface is reachable in full.
+
+## The commit after the first
+
+The first commit builds. Every commit after it pages the staged deltas through the control plane
+of the server the database is already running, and then waits for the publication that makes them
+visible.
+
+```python
+db.stage("points", new_papers)                 # a delta: rows to add to what the source holds
+db.stage("kmeans", clusters)                   # its artifacts table
+db.stage("kmeans_members", members)            # (level, key, rank, entity)
+print(db.check())                              # the plan and the pre-flight, with nothing sent
+print(db.commit())                             # the report
+```
+
+`stage(name, data)` binds a delta on a source the declaration already knows. `check()` returns the
+plan and the pre-flight and sends nothing; `commit()` runs the same plan and returns the report:
+rows accepted per view, artifacts minted, memberships joined, parts already present, refusals by
+row and part, and how long the flush took.
+
+The order is fixed: declarations, then points per view with the allocation view first, then values
+on entities that already exist, then artifacts per layer in dependency order, then a flush. A row
+is addressed by its external id, which is the source id in eight little-endian bytes at both doors,
+and the first commit passes `--mint-external-ids` so that every built row is addressable.
+
+A page's batch id is derived from the source name, the page index and a hash of the bytes, and the
+commit log under `.tessera/` records each acknowledgement. Re-running a cell therefore sends
+nothing: the same frame produces the same pages, and the log already holds them. A value that
+changed is a `409` on that part, reported and not retried, because an edit is a delete and a
+re-ingest. A `429` is backpressure and is retried after its `Retry-After` with identical bytes.
+
+The pre-flight runs before a byte is sent. Rows outside a view's frame are dropped and listed with
+the frame, rows whose id this database already holds are listed and not sent, and a column no block
+declares is refused by name.
+
+`remove(ids)`, `suppress(ids)` and `unsuppress(ids)` take the user's own ids and map them; a
+removed id staged again goes as a point row. `leave(layer, key, ids, rank)` shrinks a content's
+generating set, which is the one set that may shrink.
 
 The binary is `TESSERA_BIN` when set, else the first `tessera` on `PATH`, else a checkout's target
 directory, release before debug; `create()` names the one it found. The database directory keeps

@@ -17,40 +17,11 @@ from pathlib import Path
 
 import pytest
 
-from tesseradb import _instance
+from conftest import binary, notebook_corpus
 from tesseradb._auth import authorise
 from tesseradb._database import create
 
 pytest.importorskip("pyarrow")
-
-
-def binary() -> str:
-    try:
-        return _instance.find_binary()[0]
-    except Exception as why:  # noqa: BLE001, the skip message is the whole point
-        pytest.skip(f"no tessera binary: {why}")
-
-
-def notebook_corpus() -> Path:
-    """`data/notebook/`, which is gitignored and shared by every worktree of this checkout."""
-    named = os.environ.get("TESSERA_NOTEBOOK_DATA")
-    if named:
-        return Path(named)
-    here = Path(__file__).resolve()
-    common = subprocess.run(
-        ["git", "rev-parse", "--git-common-dir"],
-        cwd=here.parent,
-        capture_output=True,
-        text=True,
-    )
-    roots = []
-    if common.returncode == 0:
-        roots.append(Path(common.stdout.strip()).resolve().parent)
-    roots.append(here.parents[3])
-    for root in roots:
-        if (root / "data" / "notebook" / "schema.toml").exists():
-            return root / "data" / "notebook"
-    pytest.skip("data/notebook/ is not in this checkout; set TESSERA_NOTEBOOK_DATA")
 
 
 def declare_notebook(db, corpus: Path) -> None:

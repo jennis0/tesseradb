@@ -14,9 +14,7 @@ attaches every cluster to the wrong rows and reports nothing.
 Each id carries a state. `assigned` is what staging gives it, `acknowledged` is what a commit
 gives it, and `removed` is what `remove()` gives it. The pre-flight reads `acknowledged` alone, so
 a page refused at one commit is sent at the next, and a removed id staged again goes as a point
-row (decision 0047). Not built yet: the commit that reads those states is the paged one, which
-sends deltas through the control plane, so `acknowledge`, `remove` and `acknowledged` are written
-here and exercised by tests alone until it lands.
+row (decision 0047).
 
 The map is a JSON document under `.tessera/`, written whole at each save. It holds one entry per
 entity, so a corpus of 10^8 entities is a file of that order. The shape that would replace it is a
@@ -103,6 +101,46 @@ class IdMap:
     def state_of(self, user_id: Hashable) -> str | None:
         source_id = self._ids.get(self._key(user_id))
         return None if source_id is None else self._states[source_id]
+
+    def source_id_of(self, user_id: Hashable) -> int | None:
+        """The source id a user id names, or `None` where this map has never seen it.
+
+        Under identity mode the map holds no entries, the points file's own integer ids being the
+        source ids, so an integer passes through and anything else names nothing.
+        """
+        if self.identity:
+            if isinstance(user_id, bool) or not isinstance(user_id, int) or user_id < 0:
+                return None
+            return user_id
+        return self._ids.get(self._key(user_id))
+
+    def record_identity(self, source_ids: Iterable[int]) -> int:
+        """Record ids a build read under identity mode, acknowledged (§3).
+
+        Under identity mode the points file's own integer ids are the source ids and nothing is
+        assigned, so the map would hold no entry and every id would read as new. The pre-flight
+        reads acknowledged ids to tell a delta's new rows from its held ones, so the ids the first
+        commit read are written here at that commit. One entry per entity: the same file the
+        mapped case writes.
+        """
+        added = 0
+        for source_id in source_ids:
+            key = self._key(int(source_id))
+            if key in self._ids:
+                continue
+            self._ids[key] = int(source_id)
+            self._states[int(source_id)] = ACKNOWLEDGED
+            added += 1
+        return added
+
+    def acknowledge_ids(self, source_ids: Iterable[int]) -> int:
+        """Move source ids to `acknowledged`: what a commit that carried their rows gives them."""
+        moved = 0
+        for source_id in source_ids:
+            if self._states.get(source_id) == ASSIGNED:
+                self._states[source_id] = ACKNOWLEDGED
+                moved += 1
+        return moved
 
     def acknowledge(self, user_ids: Iterable[Hashable]) -> int:
         return self._set_state(user_ids, ACKNOWLEDGED)
