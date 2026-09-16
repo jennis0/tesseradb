@@ -61,14 +61,13 @@ TOKEN_MARGIN = 60.0
 #: the whole corpus.
 DELTA_FOLDER = ".tessera/deltas"
 
-#: What a declaration verb that has no runtime route says. The emitter behind `PUT /control/layers`
-#: covers layers, so a layer and a label set are declarable at any commit and the other four blocks
-#: are not (§6.2 step 1, §11.2 C).
+#: What a declaration verb that the paged commit does not yet send says. `tessera check
+#: --payloads` emits a body for every block kind; the planner sends layers and label sets and not
+#: yet the other four (§6.2 step 1).
 NO_RUNTIME_DECLARATION = (
-    "not built yet, {verb} after the first commit. `tessera check --payloads` emits the runtime "
-    "body for a layer and for nothing else, so an attribute, a vocabulary, a view or a view group "
-    "declared now has no route to the running service. Declare it before the first commit, or "
-    "rebuild the database with create(path, replace=True)"
+    "not built yet, {verb} after the first commit. The paged commit sends a layer or a label set "
+    "to the running service and not yet an attribute, a vocabulary, a view or a view group. "
+    "Declare it before the first commit, or rebuild the database with create(path, replace=True)"
 )
 
 
@@ -711,7 +710,10 @@ class Database:
         return Control(f"http://{listening.control}", credential.strip())
 
     def _payloads(self) -> list[dict]:
-        """`tessera check --payloads` over this declaration: one `PUT /control/layers` body a layer.
+        """`tessera check --payloads` over this declaration: the `PUT /control/layers` bodies.
+
+        The emitter writes one object with a key per block kind; the paged commit sends the
+        layers and, not yet, the other four kinds.
 
         The declaration minus its acquisition keys *is* the payload (configuration.md §2), so this
         is the binary serialising what it parsed rather than a second emitter in Python.
@@ -726,7 +728,7 @@ class Database:
                 + result.stdout
                 + result.stderr
             )
-        return json.loads(result.stdout)
+        return json.loads(result.stdout)["layers"]
 
     def token(self, terms: Sequence[str] | None = None):
         """A viewer token for this database, minted from its own session credential (§8).
