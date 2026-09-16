@@ -29,6 +29,15 @@ ANCHOR = "__anchor__"
 
 HIERARCHY_KINDS = ("flat", "nested", "dag", "stacked", "tiered")
 LEVELLED = ("stacked", "tiered")
+SHAPE_KINDS = ("bbox", "circle", "ellipse", "polygon")
+LAYOUTS = ("rows", "column", "list")
+SPACES = ("view", "wgs84")
+
+#: What a layer's engine derives per viewer when the caller names nothing, and what a spatial layer
+#: derives instead: an artifact has one drawn geometry, so a hull beside a membership shape is
+#: refused at the build (python-sdk.md §4.6).
+DERIVED = ("centroid", "box", "hull")
+SPATIAL_DERIVED = ("centroid", "box")
 
 
 class Declaration:
@@ -195,6 +204,11 @@ def vocabulary_block(
             f"vocabulary {name!r}: a closed value set reads its values from a source or carries "
             f"them inline. Give source= or values="
         )
+    if visibility not in ("public", "derived"):
+        raise Refusal(
+            f"vocabulary {name!r}: visibility is 'public' or 'derived'. The slot takes no access "
+            f"label (decision 0090), and {visibility!r} is neither word"
+        )
     block: dict[str, Any] = {"name": name}
     if title is not None:
         block["title"] = title
@@ -206,9 +220,10 @@ def vocabulary_block(
     if fields is not None:
         block["fields"] = Inline(fields)
     if values is not None:
-        block["values"] = list(values) if not isinstance(values, dict) else Inline(values)
+        # A list of keys, or a `key = code` table pinning each code so a rebuild preserves it.
+        block["values"] = Inline(values) if isinstance(values, dict) else list(values)
     if reserved:
-        block["reserved"] = list(reserved)
+        block["reserved"] = [int(code) for code in reserved]
     return block
 
 
@@ -277,65 +292,91 @@ def layer_block(
     require_member_visibility: Any = "none",
     withdraw_on_member_deletion: bool = False,
     depends_on: Sequence[str] | None = None,
-    computed: Sequence[str] = ("centroid", "box", "hull"),
+    computed: Sequence[str] = DERIVED,
     supplied: Sequence[Any] | None = None,
     scope: Any = "entity",
     fields: dict | None = None,
     entity_field: str | None = None,
     title: str | None = None,
 ) -> dict:
-    _refuse_later_stages(name, membership, shape, artifacts, layout, scope)
     if kind not in HIERARCHY_KINDS:
         raise Refusal(f"layer {name!r}: {kind!r} is not a hierarchy kind: {HIERARCHY_KINDS}")
+    membership_value, how = _membership(name, membership)
+    group = _scope(name, scope, fields)
+    if withdraw_on_member_deletion:
+        raise Refusal(
+            f"layer {name!r}: withdraw_on_member_deletion is specified and not built "
+            f"(annotation-write-cycle.md §6.1). The fold has no artifact-withdrawal path, so a "
+            f"deleted member shrinks the membership and the artifact stands. Drop the parameter"
+        )
     if kind in LEVELLED and not levels:
         raise Refusal(f"layer {name!r}: a {kind} layer declares its levels. Give levels=")
     if levels and kind in ("nested", "dag"):
         raise Refusal(
-            f"layer {name!r}: a {kind} layer's structure is its edges, so levels are refused"
+            f"layer {name!r}: a {kind} layer's structure is its edges, so levels are refused. "
+            f"Drop levels=, or declare the layer as tiered"
         )
-    routes = [r for r in (from_column, members, source) if r is not None]
-    if not routes:
+    if layout is not None and layout not in LAYOUTS:
+        raise Refusal(f"layer {name!r}: the serving-layout pin is one of {LAYOUTS}, not {layout!r}")
+
+    shape_block = _shape(name, shape, how)
+    if how == "spatial":
+        computed = SPATIAL_DERIVED if computed is DERIVED else computed
+        if "hull" in computed:
+            raise Refusal(
+                f"layer {name!r}: an artifact has one drawn geometry, served through one shape "
+                f"column pair, so a derived hull beside a membership shape is refused at the "
+                f'build. Drop "hull" from computed='
+            )
+    if how != "spatial" and default_space != "view":
         raise Refusal(
-            f"layer {name!r}: an enumerated layer's membership comes from a column "
-            f"(from_column=) or from tables (source= and members=)"
+            f"layer {name!r}: default_space= is the space a shape is written in, and this layer "
+            f'declares no shape. Give membership="spatial" with shape=, or drop default_space='
         )
-    if from_column is not None and (source is not None or members is not None):
-        raise Refusal(
-            f"layer {name!r}: from_column= is the membership, so it takes no source= or members="
-        )
-    if from_column is not None and points_source is None:
-        raise Refusal(
-            f"layer {name!r}: from_column= reads the points source, and none is staged as the "
-            f"default or named by a view"
-        )
+    if how == "attribute":
+        _refuse_beside_an_attribute_membership(name, kind, levels, supplied, depends_on, layout,
+                                               artifact_visibility, members, from_column)
+    rows = _artifact_rows(name, artifacts, how)
+    _refuse_a_route_clash(name, how, source, members, from_column, rows, points_source)
 
     block: dict[str, Any] = {"name": name}
     if title is not None:
         block["title"] = title
     if source is not None:
         block["source"] = source
+    if group is not None:
+        block["scope"] = Inline({"group": group})
     block["views"] = list(views) if views is not None else VIEWS_ALL
-    block["membership"] = membership
+    block["membership"] = membership_value
+    if how == "spatial":
+        block["default_space"] = default_space
     block["hierarchy"] = Inline({"kind": kind, "prune_children": prune_children})
     # Written whenever the SDK chose it, since under `open` a mistyped key is a permanent artifact.
-    block["value_set"] = value_set or ("closed" if source is not None else "open")
+    block["value_set"] = value_set or _value_set(how, source, rows)
+    if layout is not None:
+        block["layout"] = layout
     block["visibility"] = visibility
     block["artifact_visibility"] = _artifact_visibility(artifact_visibility)
     block["require_member_visibility"] = _requirement(require_member_visibility)
-    if withdraw_on_member_deletion:
-        block["withdraw_on_member_deletion"] = True
     if depends_on:
         block["depends_on"] = list(depends_on)
     if fields is not None:
         block["fields"] = Inline(fields)
-    content: dict[str, Any] = {"computed": list(computed)}
-    if supplied:
-        content["supplied"] = [_supplied(name, entry) for entry in supplied]
-        block["content"] = content
-    else:
-        block["content"] = Inline(content)
+    if how != "attribute":
+        # A predicate layer's artifacts are the column's distinct values, so it declares no
+        # content: the surface refuses one, there being nothing to carry it.
+        content: dict[str, Any] = {"computed": list(computed)}
+        if supplied:
+            content["supplied"] = [_supplied(name, entry) for entry in supplied]
+            block["content"] = content
+        else:
+            block["content"] = Inline(content)
     if levels:
         block["levels"] = [_level(entry) for entry in levels]
+    if shape_block is not None:
+        block["shape"] = shape_block
+    if rows is not None:
+        block["artifacts"] = rows
     if from_column is not None:
         # At the first commit a from-column layer compiles to `[layer.members]` reading the points
         # source with the column as `key` (§4.6).
@@ -348,23 +389,222 @@ def layer_block(
     return block
 
 
-def _refuse_later_stages(name, membership, shape, artifacts, layout, scope) -> None:
-    if membership != "enumerated":
+def _membership(name: str, membership: Any) -> tuple[Any, str]:
+    """`enumerated`, `spatial`, or the predicate `{ attribute = <field> }`."""
+    if isinstance(membership, dict):
+        if set(membership) != {"attribute"}:
+            raise Refusal(
+                f"layer {name!r}: an attribute membership is {{'attribute': field}} and names "
+                f"nothing else, not {sorted(membership)!r}"
+            )
+        return Inline({"attribute": membership["attribute"]}), "attribute"
+    if membership not in ("enumerated", "spatial"):
         raise Refusal(
-            f"layer {name!r}: not built yet, spatial and attribute membership. "
-            f"declare('layer', block) writes the block as given"
+            f"layer {name!r}: membership is 'enumerated', 'spatial' or {{'attribute': field}}, "
+            f"not {membership!r}"
         )
-    for value, what in ((shape, "shape="), (artifacts, "inline artifacts"), (layout, "layout=")):
+    return membership, membership
+
+
+def _scope(name: str, scope: Any, fields: dict | None) -> str | None:
+    """`entity`, or the view group a group-scoped layer keeps one artifact set per view of."""
+    if scope == "entity" or scope is None:
+        return None
+    if isinstance(scope, dict) and set(scope) != {"group"}:
+        raise Refusal(
+            f"layer {name!r}: a scoped layer names one view group, as {{'group': name}}, not "
+            f"{sorted(scope)!r}"
+        )
+    group = scope["group"] if isinstance(scope, dict) else scope
+    if not fields or "view" not in dict(fields):
+        raise Refusal(
+            f"layer {name!r}: a layer scoped to group {group!r} keys its artifacts per view, so "
+            f"its rows carry the view. Give fields={{'view': column}}"
+        )
+    return group
+
+
+def _shape(name: str, shape: Any, how: str) -> dict | None:
+    if shape is None:
+        return None
+    if how != "spatial":
+        raise Refusal(
+            f"layer {name!r}: a shape is the membership of a spatial layer, and nothing evaluates "
+            f'one elsewhere. Give membership="spatial", or drop shape='
+        )
+    if isinstance(shape, dict) and set(shape) != {"kind"}:
+        raise Refusal(
+            f"layer {name!r}: a shape declares its kind and nothing else, every kind being exact "
+            f"(polygon-membership.md §6.1). It names {sorted(shape)!r}"
+        )
+    kind = shape["kind"] if isinstance(shape, dict) else shape
+    if kind not in SHAPE_KINDS:
+        raise Refusal(f"layer {name!r}: a shape kind is one of {SHAPE_KINDS}, not {kind!r}")
+    return {"kind": kind}
+
+
+def _refuse_beside_an_attribute_membership(
+    name, kind, levels, supplied, depends_on, layout, artifact_visibility, members, from_column
+) -> None:
+    """A predicate layer's artifacts are a column's distinct values, so most keys have no subject.
+
+    Each of these would register a layer that is reachable and serves nothing
+    (configuration.md §1, `[[layer]]`'s `membership` row).
+    """
+    if kind != "flat":
+        raise Refusal(
+            f"layer {name!r}: an attribute membership has no edges to carry a hierarchy, so its "
+            f'kind is "flat", not {kind!r}'
+        )
+    for value, what, instead in (
+        (levels, "levels=", "declare the layer as tiered over a members table"),
+        (supplied, "supplied=", "supply the content on an enumerated layer"),
+        (depends_on, "depends_on=", "declare the dependency on an enumerated layer"),
+        (layout, "layout=", "drop it: the column is the membership, so there is no second form"),
+        (members, "members=", "drop it: the column is the membership"),
+        (from_column, "from_column=", "drop it: the column is the membership"),
+    ):
         if value:
             raise Refusal(
-                f"layer {name!r}: not built yet, {what}. declare('layer', block) writes the block "
-                f"as given"
+                f"layer {name!r}: an attribute membership derives its artifacts from the column, "
+                f"so {what} names nothing it carries. Instead, {instead}"
             )
-    if scope != "entity":
+    if isinstance(artifact_visibility, dict) and artifact_visibility.get("field"):
         raise Refusal(
-            f"layer {name!r}: not built yet, a group-scoped layer. declare('layer', block) writes "
-            f"the block as given"
+            f"layer {name!r}: an attribute membership publishes no artifact rows, so there is no "
+            f"column for artifact_visibility to read. Give a label or 'inherited'"
         )
+
+
+def _refuse_a_route_clash(name, how, source, members, from_column, rows, points_source) -> None:
+    if source is not None and rows is not None:
+        raise Refusal(
+            f"layer {name!r}: artifacts= is the roster, so it takes no source=. Drop one of them"
+        )
+    if from_column is not None and (source is not None or members is not None):
+        raise Refusal(
+            f"layer {name!r}: from_column= is the membership, so it takes no source= or members="
+        )
+    if from_column is not None and points_source is None:
+        raise Refusal(
+            f"layer {name!r}: from_column= reads the points source, and none is staged as the "
+            f"default or named by a view"
+        )
+    if how == "spatial" and (members is not None or from_column is not None):
+        raise Refusal(
+            f"layer {name!r}: a spatial artifact's shape is its whole membership, resolved per "
+            f"request, so there is no stored member set. Drop members= and from_column=, or "
+            f'declare the layer membership="enumerated"'
+        )
+    if how == "attribute":
+        return
+    if any(route is not None for route in (from_column, members, source, rows)):
+        return
+    if how == "spatial":
+        raise Refusal(
+            f"layer {name!r}: a spatial layer's artifacts each carry a shape, so it names the "
+            f"table they are in or carries them inline. Give source= or artifacts="
+        )
+    raise Refusal(
+        f"layer {name!r}: an enumerated layer's membership comes from a column (from_column=) or "
+        f"from tables (source= and members=)"
+    )
+
+
+def _value_set(how: str, source: str | None, rows: Any) -> str:
+    # A predicate layer's artifacts are the column's values, which the vocabulary already bounds.
+    if how == "attribute":
+        return "closed"
+    return "closed" if (source is not None or rows is not None) else "open"
+
+
+#: The artifact table's own columns, which an inline row spells canonically (configuration.md §1).
+ARTIFACT_KEYS = (
+    "key", "level", "members", "excluding", "bbox", "circle", "ellipse", "wkt", "space",
+    "contents", "parent", "attached_layer", "attached_level", "attached_key",
+)
+
+
+def _artifact_rows(layer: str, artifacts: Any, how: str) -> list[dict] | None:
+    """Inline `artifacts=`: a list of dicts, or a frame carrying the artifact table's columns."""
+    if artifacts is None:
+        return None
+    if not isinstance(artifacts, (list, tuple)):
+        artifacts = rows_of(artifacts)
+    rows = [_artifact_row(layer, row, how) for row in artifacts]
+    if not rows:
+        raise Refusal(
+            f"layer {layer!r}: artifacts= carries no row. Leave it out to declare an empty layer"
+        )
+    return rows
+
+
+def rows_of(frame: Any) -> list[dict]:
+    """A pyarrow table, or anything `pa.table` takes, as one dict per row without its nulls.
+
+    A null is a row not naming that key rather than a value: the declaration has no spelling for
+    one, and a publication record carries the keys the row wrote.
+    """
+    import pyarrow as pa
+
+    table = frame if isinstance(frame, pa.Table) else pa.table(frame)
+    columns = {name: table[name].to_pylist() for name in table.column_names}
+    return [
+        {name: values[i] for name, values in columns.items() if values[i] is not None}
+        for i in range(table.num_rows)
+    ]
+
+
+SHAPE_FIELDS = ("bbox", "circle", "ellipse", "wkt")
+
+
+ATTACHMENT_KEYS = ("layer", "key", "level")
+
+
+def _artifact_row(layer: str, row: Any, how: str) -> dict:
+    row = {key: value for key, value in dict(row).items() if value is not None}
+    attached = row.pop("attached_to", None)
+    if attached is not None:
+        named = set(attached)
+        if not {"layer", "key"} <= named or not named <= set(ATTACHMENT_KEYS):
+            raise Refusal(
+                f"layer {layer!r}: an attachment names the layer and the key it hangs from, and "
+                f"the level where the target is not at level 0. It names {sorted(named)!r}"
+            )
+        row["attached_layer"] = attached["layer"]
+        row["attached_key"] = attached["key"]
+        if attached.get("level") is not None:
+            row["attached_level"] = int(attached["level"])
+    unknown = [key for key in row if key not in ARTIFACT_KEYS]
+    if unknown:
+        raise Refusal(
+            f"layer {layer!r}: an inline artifact is spelled with the artifact table's own keys, "
+            f"so {sorted(unknown)!r} names nothing. The keys are {list(ARTIFACT_KEYS)}"
+        )
+    if "key" not in row:
+        raise Refusal(f"layer {layer!r}: an inline artifact names itself. Give key=")
+    if "members" in row and "excluding" in row:
+        raise Refusal(
+            f"layer {layer!r}, artifact {row['key']!r}: a membership is spelled by inclusion or "
+            f"by exclusion, and both on one row name two sets. Drop members= or excluding="
+        )
+    carried = [field for field in SHAPE_FIELDS if field in row]
+    if carried and how != "spatial":
+        raise Refusal(
+            f"layer {layer!r}, artifact {row['key']!r}: {carried[0]} is a shape, and this layer "
+            f'evaluates none. Give membership="spatial" with shape=, or drop it'
+        )
+    if len(carried) > 1:
+        raise Refusal(
+            f"layer {layer!r}, artifact {row['key']!r}: an artifact carries its shape in its "
+            f"layer's kind's field and no other, so {sorted(carried)!r} is two shapes"
+        )
+    if "space" in row and row["space"] not in SPACES:
+        raise Refusal(
+            f"layer {layer!r}, artifact {row['key']!r}: a shape is written in {SPACES[0]!r} or "
+            f"{SPACES[1]!r}, not {row['space']!r}"
+        )
+    return {key: row[key] for key in ARTIFACT_KEYS if key in row}
 
 
 def labels_block(

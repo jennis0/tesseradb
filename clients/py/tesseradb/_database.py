@@ -19,6 +19,7 @@ rows by the external ids the build minted.
 
 from __future__ import annotations
 
+import datetime
 import json
 import os
 import shutil
@@ -652,6 +653,10 @@ class Database:
         # only what was added after this one. The names are the emitter's, a label set expanding to
         # a layer of its own.
         self.commit_log.declare(payload["name"] for payload in self._payloads())
+        # The inline roster the build compiled: recorded as published so the next commit does not
+        # offer the same keys to the control plane (§6.4).
+        for layer, keys in C.inline_publications(document):
+            self.commit_log.publish(layer, keys)
         self.commit_log.add_terms(self._staged_terms(document))
         self.commit_log.save()
         self.serve()
@@ -1086,6 +1091,10 @@ def _load(database: Database, state: dict) -> None:
 #: reading one back as the other would move `extent` out of its view's table.
 INLINE = "__inline__"
 
+#: How a TOML offset date-time is marked in the same copy: a view group's metadata carries them,
+#: and JSON has no spelling for one.
+MOMENT = "__moment__"
+
 
 def _tagged(value: Any) -> Any:
     if isinstance(value, Inline):
@@ -1094,6 +1103,8 @@ def _tagged(value: Any) -> Any:
         return {k: _tagged(v) for k, v in value.items()}
     if isinstance(value, (list, tuple)):
         return [_tagged(v) for v in value]
+    if isinstance(value, datetime.datetime):
+        return {MOMENT: value.isoformat()}
     return value
 
 
@@ -1101,6 +1112,8 @@ def _untagged(value: Any) -> Any:
     if isinstance(value, dict):
         if set(value) == {INLINE}:
             return Inline({k: _untagged(v) for k, v in value[INLINE].items()})
+        if set(value) == {MOMENT}:
+            return datetime.datetime.fromisoformat(value[MOMENT])
         return {k: _untagged(v) for k, v in value.items()}
     if isinstance(value, list):
         return [_untagged(v) for v in value]

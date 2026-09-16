@@ -41,9 +41,13 @@ the binary reads, so `db.save("~/somewhere")` and `tessera serve --deployment
 ~/somewhere/tessera.toml` on another machine serve the same database.
 
 What is built is the first commit and every commit after it: `create`, `open`, `stage` with the id
-map, `declare` and the typed verbs for plain views, vocabularies, attributes, enumerated layers of
-every kind and labels, inference, `check()`, the build and the server the first commit starts, and
-the paged commit below.
+map, `declare` and the typed verbs for plain views, vocabularies, attributes, layers of every kind
+and membership and labels, inference, `check()`, the build and the server the first commit starts,
+and the paged commit below. `declare_layer` carries the whole layer surface: spatial and attribute
+membership, shapes and spaces, per-level zoom, pruning, the serving-layout pin, attached and
+dependent layers, and artifacts inline or in a table. A membership may be spelled by exclusion,
+and such an artifact is published once: the complement is taken over the entities that exist at
+that moment, so a key the database already holds takes no second exclusion.
 
 Not built yet, and what each does instead:
 
@@ -53,9 +57,10 @@ Not built yet, and what each does instead:
   `tessera check --payloads` emits the runtime declaration body for a layer and for nothing else,
   so those four verbs refuse on a built database and name a rebuild. A layer and a label set are
   declarable at any commit.
-- **A view group, a spatial or attribute membership, a shape and an inline artifacts table.** The
-  typed verbs refuse each, saying it is not built; `declare(kind, block)` writes any block it is
-  given, so the declaration surface is reachable in full.
+- **A view group, and an attribute scoped to one.** `declare_view_group` and `declare_attribute`
+  refuse each, saying it is not built; `declare(kind, block)` writes any block it is given, so the
+  declaration surface is reachable in full. A layer scoped to a group is declarable: it takes
+  `scope={"group": name}` and `fields={"view": column}`.
 
 ## The commit after the first
 

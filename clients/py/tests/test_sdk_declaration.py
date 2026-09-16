@@ -197,8 +197,6 @@ def test_what_is_not_built_yet_says_so_and_names_what_writes_it(db):
     db.declare_view("s0")
     for call in (
         lambda: db.declare_view_group("g"),
-        lambda: db.declare_layer("s", kind="flat", members="members", membership="spatial"),
-        lambda: db.declare_layer("s", kind="flat", members="members", layout="column"),
         lambda: db.declare_attribute("a", type="u8", scope={"group": "g"}),
     ):
         with pytest.raises(Refusal, match="not built yet"):
