@@ -273,6 +273,9 @@ warning is not repeated per column. Issue #83 is open on serving `derived` visib
 which a value exists for a viewer only if they can see a point carrying it; when it serves,
 `derived` becomes the inferred default.
 
+Not built yet: `scope` on an attribute; a group-scoped attribute goes through the generic
+form until the view-group verb lands, and the README says so.
+
 `render` is decided here because it cannot be added later: a render column lives in the hot row
 and a running service refuses to declare one (decision 0136's amendment). The commit report
 lists the render columns it froze.
@@ -292,7 +295,10 @@ db.declare_layer(name, kind, views=None, source=None, members=None, from_column=
 `kind` is `flat`, `nested`, `stacked` or `tiered` (annotations.md), or `dag`
 (dag-hierarchies.md); `levels` is a list of `(level, title, zoom?)` for the kinds that take
 them. `views` defaults to every view. `membership` is `enumerated`, `spatial` (with `shape`
-naming the kind and `default_space` the space) or `{"attribute": field}`.
+naming the kind and `default_space` the space) or `{"attribute": field}`. On a spatial layer
+`computed` defaults to `("centroid", "box")` and `hull` is refused at the call: an artifact has
+one drawn geometry, and a membership shape is it (polygon-membership.md §7.1). A group-scoped
+layer takes `scope={"group": name}` with `fields={"view": column}`.
 
 An enumerated layer's membership comes one of two ways, and the declaration fixes which:
 
