@@ -33,11 +33,9 @@ SHAPE_KINDS = ("bbox", "circle", "ellipse", "polygon")
 LAYOUTS = ("rows", "column", "list")
 SPACES = ("view", "wgs84")
 
-#: What a layer's engine derives per viewer when the caller names nothing (§4.6). A spatial layer
-#: takes this list without `hull`: an artifact has one drawn geometry, served through one
-#: `shape_x`/`shape_y` column pair, so a derived hull beside a membership shape is refused at the
-#: build. ⊘ python-sdk.md §4.6 states one default for every membership; the binary refuses it on a
-#: spatial layer, and this is the narrowing rather than a refusal at the call.
+#: What a layer's engine derives per viewer when the caller names nothing, and what a spatial layer
+#: derives instead: an artifact has one drawn geometry, so a hull beside a membership shape is
+#: refused at the build (python-sdk.md §4.6).
 DERIVED = ("centroid", "box", "hull")
 SPATIAL_DERIVED = ("centroid", "box")
 
@@ -208,8 +206,8 @@ def vocabulary_block(
         )
     if visibility not in ("public", "derived"):
         raise Refusal(
-            f"vocabulary {name!r}: visibility is 'public' or 'derived' — one axis, two settings, "
-            f"and the slot takes no label (decision 0090). Not {visibility!r}"
+            f"vocabulary {name!r}: visibility is 'public' or 'derived'. The slot takes no access "
+            f"label (decision 0090), and {visibility!r} is neither word"
         )
     block: dict[str, Any] = {"name": name}
     if title is not None:
@@ -412,12 +410,12 @@ def _scope(name: str, scope: Any, fields: dict | None) -> str | None:
     """`entity`, or the view group a group-scoped layer keeps one artifact set per view of."""
     if scope == "entity" or scope is None:
         return None
-    group = scope["group"] if isinstance(scope, dict) else scope
     if isinstance(scope, dict) and set(scope) != {"group"}:
         raise Refusal(
             f"layer {name!r}: a scoped layer names one view group, as {{'group': name}}, not "
             f"{sorted(scope)!r}"
         )
+    group = scope["group"] if isinstance(scope, dict) else scope
     if not fields or "view" not in dict(fields):
         raise Refusal(
             f"layer {name!r}: a layer scoped to group {group!r} keys its artifacts per view, so "
@@ -434,12 +432,12 @@ def _shape(name: str, shape: Any, how: str) -> dict | None:
             f"layer {name!r}: a shape is the membership of a spatial layer, and nothing evaluates "
             f'one elsewhere. Give membership="spatial", or drop shape='
         )
-    kind = shape["kind"] if isinstance(shape, dict) else shape
     if isinstance(shape, dict) and set(shape) != {"kind"}:
         raise Refusal(
             f"layer {name!r}: a shape declares its kind and nothing else, every kind being exact "
-            f"(polygon-membership.md §6.1). Drop {sorted(set(shape) - {'kind'})!r}"
+            f"(polygon-membership.md §6.1). It names {sorted(shape)!r}"
         )
+    kind = shape["kind"] if isinstance(shape, dict) else shape
     if kind not in SHAPE_KINDS:
         raise Refusal(f"layer {name!r}: a shape kind is one of {SHAPE_KINDS}, not {kind!r}")
     return {"kind": kind}
@@ -532,7 +530,7 @@ def _artifact_rows(layer: str, artifacts: Any, how: str) -> list[dict] | None:
     if artifacts is None:
         return None
     if not isinstance(artifacts, (list, tuple)):
-        artifacts = _frame_rows(artifacts)
+        artifacts = rows_of(artifacts)
     rows = [_artifact_row(layer, row, how) for row in artifacts]
     if not rows:
         raise Refusal(
@@ -541,8 +539,12 @@ def _artifact_rows(layer: str, artifacts: Any, how: str) -> list[dict] | None:
     return rows
 
 
-def _frame_rows(frame: Any) -> list[dict]:
-    """A pyarrow table, or anything `pa.table` takes, as one dict per row without its nulls."""
+def rows_of(frame: Any) -> list[dict]:
+    """A pyarrow table, or anything `pa.table` takes, as one dict per row without its nulls.
+
+    A null is a row not naming that key rather than a value: the declaration has no spelling for
+    one, and a publication record carries the keys the row wrote.
+    """
     import pyarrow as pa
 
     table = frame if isinstance(frame, pa.Table) else pa.table(frame)
@@ -556,10 +558,19 @@ def _frame_rows(frame: Any) -> list[dict]:
 SHAPE_FIELDS = ("bbox", "circle", "ellipse", "wkt")
 
 
+ATTACHMENT_KEYS = ("layer", "key", "level")
+
+
 def _artifact_row(layer: str, row: Any, how: str) -> dict:
-    row = dict(row)
+    row = {key: value for key, value in dict(row).items() if value is not None}
     attached = row.pop("attached_to", None)
     if attached is not None:
+        named = set(attached)
+        if not {"layer", "key"} <= named or not named <= set(ATTACHMENT_KEYS):
+            raise Refusal(
+                f"layer {layer!r}: an attachment names the layer and the key it hangs from, and "
+                f"the level where the target is not at level 0. It names {sorted(named)!r}"
+            )
         row["attached_layer"] = attached["layer"]
         row["attached_key"] = attached["key"]
         if attached.get("level") is not None:

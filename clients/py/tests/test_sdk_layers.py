@@ -197,8 +197,8 @@ def test_a_derived_vocabulary_and_an_open_one_naming_a_source_for_titles(db):
     assert open_set["fields"] == Inline({"key": "key", "title": "title"})
 
 
-def test_a_vocabulary_gate_is_one_axis_with_two_settings(db):
-    with pytest.raises(Refusal, match="one axis, two settings"):
+def test_a_vocabulary_gate_takes_no_access_label(db):
+    with pytest.raises(Refusal, match="takes no access label"):
         db.declare_vocabulary("country", closed=True, values=["fr"], visibility="ir:analyst")
 
 

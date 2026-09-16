@@ -37,6 +37,7 @@ from ._control import (
     members_digest,
     parts_digest,
 )
+from ._declaration import SHAPE_FIELDS, rows_of
 from ._refusal import Refusal
 
 #: How long `commit()` waits for the publication after its last acknowledgement, in seconds. The
@@ -399,7 +400,14 @@ class Planner:
         artifacts = self.db.deltas.get(block.get("source"))
         members_source = (block.get("members") or {}).get("source")
         members = self.db.deltas.get(members_source)
-        inline = block.get("artifacts")
+        # The inline roster stays in the declaration, so it would be read as rows to send at every
+        # commit. The build compiled it and recorded it as published (§6.4), and a key already
+        # published is not offered again: a second `excluding` on a held key is a `409`, the
+        # complement being taken over the entities that exist now (ingest §2.3).
+        held_keys = self.log.published(layer)
+        inline = [
+            row for row in (block.get("artifacts") or []) if str(row.get("key")) not in held_keys
+        ]
         if artifacts is None and members is None and not inline:
             return
         if parent is not None and not self._clustering_is_reachable(parent):
@@ -932,6 +940,10 @@ def _artifact_block(row: dict, budget: int) -> tuple[bytes, list, int]:
         # set (ingest §2.3). The route's count bound is checked before the plan is built.
         record["excluding"] = [addressed(e) for e in row["excluding"]]
     else:
+        # A record carrying neither `members` nor `excluding` is a `422`, and the route makes no
+        # exception for a shape: "an artifact whose membership holds nobody is published with an
+        # empty `members` list" (contracts §3.4). So a spatial record carries the empty list
+        # beside its shape, which the shape's own resolution then supersedes.
         record["members"] = [addressed(e) for e in members]
     body = json.dumps(record).encode()
     while len(body) > budget and "members" in record and (members or any(sets)):
@@ -1008,10 +1020,6 @@ def _publish_body(level: int, blocks: list[bytes]) -> bytes:
     )
 
 
-#: An artifact row's shape, in its layer's kind's field and no other (configuration.md §1).
-SHAPE_FIELDS = ("bbox", "circle", "ellipse", "wkt")
-
-
 def _blank(key: str, level: int) -> dict:
     return {"key": key, "level": level, "members": [], "sets": [], "content": [], "parent": [],
             "attached": None, "excluding": None, "space": None}
@@ -1023,8 +1031,8 @@ def _artifact_rows(artifacts, members, block: dict, inline=None) -> list[dict]:
     A member table's grain is `(key, entity, rank)`: a null rank is the membership and rank *k* is
     content *k*'s generating set (annotation-write-cycle §6.1). An artifacts table's `contents` is
     one value list per rank, positional over the kinds the layer declares. A shape column, `space`
-    and `excluding` ride the artifact row and reach the publication as they are written
-    (contracts §3.4).
+    and `excluding` are columns of the artifact row, and the publication record carries each as
+    the row wrote it (contracts §3.4).
     """
     rows: dict[tuple[int, str], dict] = {}
     for record in _declared_artifacts(artifacts, inline):
@@ -1075,19 +1083,31 @@ def _artifact_rows(artifacts, members, block: dict, inline=None) -> list[dict]:
     return list(rows.values())
 
 
+def inline_publications(document: dict):
+    """The inline roster each layer declares, as the commit log records a publication (§6.4).
+
+    The build compiles `artifacts = [{ … }]` into the bundle, and nothing in the exchange with the
+    control plane says so. Recording the keys here is what stops the next commit offering them a
+    second time.
+    """
+    for block in document.get("layer", []):
+        rows = block.get("artifacts")
+        if not rows:
+            continue
+        yield block["name"], [
+            (
+                row["key"],
+                content_digest(row["content"]),
+                parts_digest(row["parent"], row["attached"]),
+            )
+            for row in _artifact_rows(None, None, block, rows)
+        ]
+
+
 def _declared_artifacts(artifacts, inline) -> list[dict]:
     """The layer's own artifact rows: a staged table's, then any the declaration carries inline."""
-    records: list[dict] = []
-    if artifacts is not None:
-        table = pq.read_table(artifacts.path)
-        fields = table.column_names
-        columns = {name: table[name].to_pylist() for name in fields}
-        records += [
-            {name: values[i] for name, values in columns.items() if values[i] is not None}
-            for i in range(table.num_rows)
-        ]
-    records += [dict(row) for row in (inline or [])]
-    return records
+    records = rows_of(pq.read_table(artifacts.path)) if artifacts is not None else []
+    return records + [dict(row) for row in (inline or [])]
 
 
 # ---------------------------------------------------------------------------- the run

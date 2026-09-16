@@ -653,6 +653,10 @@ class Database:
         # only what was added after this one. The names are the emitter's, a label set expanding to
         # a layer of its own.
         self.commit_log.declare(payload["name"] for payload in self._payloads())
+        # The inline roster the build compiled: recorded as published so the next commit does not
+        # offer the same keys to the control plane (§6.4).
+        for layer, keys in C.inline_publications(document):
+            self.commit_log.publish(layer, keys)
         self.commit_log.add_terms(self._staged_terms(document))
         self.commit_log.save()
         self.serve()

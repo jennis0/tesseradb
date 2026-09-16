@@ -12,23 +12,31 @@ and its access column. That is what the SDK reads to settle the id map and to de
 no other column is staged, so nothing is inferred and every block compared is one a call below
 wrote.
 
-**The normalisations**, applied to both documents and to nothing else:
+**The normalisations.** Four of them fill the committed document in with what §4.8 requires the
+SDK to write, so the test fails if the SDK stops writing one; the rest are applied to both
+documents and to nothing else.
 
-1. `[sources]` is compared by its key set. The committed file names the corpus's own parquets and
+Filled into the committed document alone:
+
+1. `[defaults].allocation_view` where one view is declared and the file names none.
+2. `visibility = "public"` on a view that declares none.
+3. `source` on a view or an attribute that names none, which is `[defaults].source`. Not on a
+   layer: `[defaults].source` does not reach one.
+4. A layer's `value_set` where the file names none, which is `closed`.
+
+Applied to both:
+
+5. `[sources]` is compared by its key set. The committed file names the corpus's own parquets and
    this test names placeholders in a temporary directory.
-2. `[defaults].entity_id_field` where it is `entity_id`, the surface's own default.
-3. `[defaults].allocation_view` where one view is declared. With one view it is that view and
-   naming it is noise; the SDK writes it whatever the count.
-4. A view's `fields` where each column carries its canonical name.
-5. A view's `extent`: `"auto"` and `{ auto = true, margin = m }` both name a frame fitted at the
-   first commit.
-6. `visibility = "public"` on a view, which the SDK writes always (§4.8).
-7. `source` on a view or an attribute where it is `[defaults].source`, which the SDK writes out.
+6. `[defaults].entity_id_field` where it is `entity_id`, the surface's own default.
+7. A view's `fields` where each column carries its canonical name.
 8. `hierarchy.prune_children` where it is false, the surface's default.
-9. A layer's `value_set` where it is `closed`, the surface's default.
-10. A layer's `default_space` where it is `view`, the surface's default.
-11. A layer's `[layer.content]` where it carries no computed property and no supplied kind, which
+9. A layer's `default_space` where it is `view`, the surface's default.
+10. A layer's `[layer.content]` where it carries no computed property and no supplied kind, which
     is the block being absent.
+
+An `extent` is compared as written: `"auto"` and a box are different frames, and so are `"auto"`
+and a fitted frame widened by a margin.
 
 A corpus whose committed file carries a `<marker>` a run fills in names that marker's own
 normalisation in its own test.
@@ -96,49 +104,50 @@ def generated(db) -> dict:
     return _toml.loads(db.declaration)
 
 
-def normalised(document: dict) -> dict:
+def normalised(document: dict, filling: bool = False) -> dict:
+    """One document ready to compare. `filling` adds what §4.8 requires the SDK to write."""
     out = dict(document)
     out["sources"] = sorted(document.get("sources", {}))
     defaults = dict(document.get("defaults", {}))
     if defaults.get("entity_id_field") == "entity_id":
         defaults.pop("entity_id_field")
-    if len(document.get("view", [])) == 1:
-        defaults.pop("allocation_view", None)
+    views = document.get("view", [])
+    if filling and len(views) == 1:
+        defaults.setdefault("allocation_view", views[0]["name"])
     out["defaults"] = defaults
-    out["view"] = [_view(block, defaults) for block in document.get("view", [])]
-    out["attribute"] = [_sourced(block, defaults) for block in document.get("attribute", [])]
-    out["layer"] = [_layer(block) for block in document.get("layer", [])]
+    out["view"] = [_view(block, defaults, filling) for block in views]
+    out["attribute"] = [
+        _sourced(block, defaults, filling) for block in document.get("attribute", [])
+    ]
+    out["layer"] = [_layer(block, filling) for block in document.get("layer", [])]
     return {key: value for key, value in out.items() if value not in ({}, [])}
 
 
-def _sourced(block: dict, defaults: dict) -> dict:
+def _sourced(block: dict, defaults: dict, filling: bool) -> dict:
     block = dict(block)
-    if block.get("source") == defaults.get("source"):
-        block.pop("source")
+    if filling and "source" not in block and defaults.get("source"):
+        block["source"] = defaults["source"]
     return block
 
 
-def _view(block: dict, defaults: dict) -> dict:
-    block = _sourced(block, defaults)
+def _view(block: dict, defaults: dict, filling: bool) -> dict:
+    block = _sourced(block, defaults, filling)
     fields = block.get("fields")
     if fields and all(name == column for name, column in fields.items()):
         block.pop("fields")
-    extent = block.get("extent")
-    if extent == "auto" or (isinstance(extent, dict) and extent.get("auto")):
-        block["extent"] = "auto"
-    if block.get("visibility") == "public":
-        block.pop("visibility")
+    if filling:
+        block.setdefault("visibility", "public")
     return block
 
 
-def _layer(block: dict) -> dict:
+def _layer(block: dict, filling: bool) -> dict:
     block = dict(block)
     hierarchy = dict(block.get("hierarchy", {}))
     if hierarchy.get("prune_children") is False:
         hierarchy.pop("prune_children")
     block["hierarchy"] = hierarchy
-    if block.get("value_set") == "closed":
-        block.pop("value_set")
+    if filling:
+        block.setdefault("value_set", "closed")
     if block.get("default_space") == "view":
         block.pop("default_space")
     content = block.get("content")
@@ -149,7 +158,7 @@ def _layer(block: dict) -> dict:
 
 def same(written: dict, holds: dict) -> None:
     """Block by block, key by key, so a failure names the block and the key that differ."""
-    left, right = normalised(written), normalised(holds)
+    left, right = normalised(written), normalised(holds, filling=True)
     assert sorted(left) == sorted(right), "the kinds of block declared"
     for kind in sorted(left):
         one, other = left[kind], right[kind]
@@ -375,8 +384,8 @@ def test_overture(tmp_path):
 
 def test_paperseek(tmp_path):
     """Three markers the run fills: the access vocabulary, the topics layer, and `point_visibility`
-    on the view, which the SDK cannot leave out — a view names a label for every point — so it is
-    declared here and dropped before the comparison.
+    on the view. The SDK cannot leave the third out, a view naming a label for every point, so it
+    is declared here and dropped before the comparison.
     """
     db = database(tmp_path, {"points": ("entity_id", "x", "y", "licence")},
                   ["licence", "type", "kmeans", "kmeans_members", "topics", "topics_members"])

@@ -70,9 +70,43 @@ def test_a_spatial_layer_published_after_the_first_commit_carries_its_wkt_and_it
     assert not any(line.startswith("grow") for line in plan.plan), plan.plan
 
     report = db.commit()
-    assert report.ok, report.output
+    assert report.ok, report
     assert report.artifacts_minted == 1
 
     rows = browse(db, "s0", "regions")["artifacts"]
     assert [row["key"] for row in rows] == ["lower_left"]
     assert 0 < rows[0]["masked_count"] < 50_000
+
+
+def test_an_inline_roster_built_at_the_first_commit_is_not_offered_again(served, corpus):
+    """An `excluding` row is the case that shows it (ingest §2.3).
+
+    The build compiles the inline roster into the bundle. Offered again at the next commit it
+    would be a `409`: the complement is taken over the entities that exist then, so the same list
+    is a different set. The first commit records the keys as published, and the plan that follows
+    carries no publication for the layer.
+    """
+
+    def declare(db):
+        declare_notebook(db, corpus)
+        db.declare_layer(
+            "cohorts",
+            kind="flat",
+            artifacts=[{"key": "all_but_three", "excluding": [0, 1, 2]}],
+            require_member_visibility={"count": 1},
+            title="Cohorts",
+        )
+
+    db = served(declare)
+    rows = browse(db, "s0", "cohorts")["artifacts"]
+    assert [row["key"] for row in rows] == ["all_but_three"]
+    assert rows[0]["masked_count"] == 49_997
+
+    plan = db.check()
+    assert plan.ok, plan
+    assert not any("cohorts" in line for line in plan.plan), plan.plan
+    report = db.commit()
+    assert report.ok, report
+
+    rows = browse(db, "s0", "cohorts")["artifacts"]
+    assert rows[0]["masked_count"] == 49_997

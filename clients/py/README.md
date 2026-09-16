@@ -45,7 +45,9 @@ map, `declare` and the typed verbs for plain views, vocabularies, attributes, la
 and membership and labels, inference, `check()`, the build and the server the first commit starts,
 and the paged commit below. `declare_layer` carries the whole layer surface: spatial and attribute
 membership, shapes and spaces, per-level zoom, pruning, the serving-layout pin, attached and
-dependent layers, artifacts inline or in a table, and membership spelled by exclusion.
+dependent layers, and artifacts inline or in a table. A membership may be spelled by exclusion,
+and such an artifact is published once: the complement is taken over the entities that exist at
+that moment, so a key the database already holds takes no second exclusion.
 
 Not built yet, and what each does instead:
 
