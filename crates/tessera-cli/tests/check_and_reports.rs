@@ -317,7 +317,10 @@ fn check_reports_every_finding_rather_than_the_first() {
     assert!(text.contains("field `members`"), "{text}");
     assert!(text.contains("2 finding(s)"), "{text}");
     // And it says what it could not have seen, so a green check is not read as a green build.
-    assert!(text.contains("a clean check is not a clean build"), "{text}");
+    assert!(
+        text.contains("a clean check is not a clean build"),
+        "{text}"
+    );
 }
 
 /// A source the declaration names and the filesystem does not carry is a finding rather than a
@@ -395,12 +398,85 @@ require_member_visibility = "any"
     .unwrap();
     let output = run(tmp.path(), &["check", "--payloads"]);
     assert!(output.status.success(), "{}", stderr(&output));
-    assert!(stderr(&output).contains("declared and empty"), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("declared and empty"),
+        "{}",
+        stderr(&output)
+    );
     let payloads: serde_json::Value = serde_json::from_str(&stdout(&output)).unwrap();
     let bodies: Vec<tessera_types::layer::LayerDeclaration> =
         serde_json::from_value(payloads["layers"].clone()).unwrap();
     assert_eq!(bodies.len(), 1);
     assert_eq!(bodies[0].visibility.as_deref(), Some("ir:analyst"));
+}
+
+/// **An attribute that names no file is declared and empty**, not a finding (`configuration.md`
+/// §2, python-sdk §6.2): the values arrive through `PUT /control/attributes` and the batches after
+/// it, so there is no file for the check to disagree with. The payload is emitted, which is what
+/// the deployment posts to declare the column.
+#[test]
+fn an_attribute_naming_no_source_is_a_note_and_a_payload() {
+    let tmp = tempfile::tempdir().unwrap();
+    project(tmp.path());
+    std::fs::write(
+        tmp.path().join("schema.toml"),
+        r#"
+[[view]]
+name             = "s0"
+extent           = { min = -25.0, max = 25.0 }
+point_visibility = { default = "public" }
+
+[[attribute]]
+name  = "sentiment"
+type  = "f32"
+"#,
+    )
+    .unwrap();
+    let output = run(tmp.path(), &["check", "--payloads"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let said = stderr(&output);
+    assert!(said.contains("attribute 'sentiment'"), "{said}");
+    assert!(said.contains("declared and empty"), "{said}");
+    let payloads: serde_json::Value = serde_json::from_str(&stdout(&output)).unwrap();
+    let attributes = payloads["attributes"].as_array().unwrap();
+    assert_eq!(attributes.len(), 1);
+    assert_eq!(attributes[0]["name"], "sentiment");
+}
+
+/// **A view group that names no points file and no roster is declared and empty** on the same
+/// rule. `tessera build` refuses it — the points would have to come from somewhere — and the
+/// refusal names the two roster forms.
+#[test]
+fn a_view_group_naming_no_source_is_a_note_at_check_and_a_refusal_at_build() {
+    let tmp = tempfile::tempdir().unwrap();
+    project(tmp.path());
+    std::fs::write(
+        tmp.path().join("schema.toml"),
+        r#"
+[[view_group]]
+name             = "quarters"
+extent           = { min = -25.0, max = 25.0 }
+point_visibility = { default = "public" }
+"#,
+    )
+    .unwrap();
+    let output = run(tmp.path(), &["check", "--payloads"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let said = stderr(&output);
+    assert!(said.contains("view group 'quarters'"), "{said}");
+    assert!(said.contains("declared and empty"), "{said}");
+    let payloads: serde_json::Value = serde_json::from_str(&stdout(&output)).unwrap();
+    let groups = payloads["view_groups"].as_array().unwrap();
+    assert_eq!(groups.len(), 1);
+    assert_eq!(groups[0]["name"], "quarters");
+
+    let built = run(tmp.path(), &["build"]);
+    assert!(!built.status.success(), "{}", stderr(&built));
+    assert!(
+        stderr(&built).contains("no `source` and no `[[view_group.view]]` roster"),
+        "{}",
+        stderr(&built)
+    );
 }
 
 /// **Never a payload out of a declaration that failed its check.** The stream is what a CI job
@@ -483,7 +559,10 @@ fn the_disclosure_report_carries_every_decision() {
     assert_eq!(topics["visibility"], "ir:analyst");
     assert_eq!(topics["require_member_visibility"], "all");
     assert_eq!(topics["depends_on"][0], "clusters/a");
-    assert_eq!(topics["content"]["supplied"][0]["require_member_visibility"], "all");
+    assert_eq!(
+        topics["content"]["supplied"][0]["require_member_visibility"],
+        "all"
+    );
 }
 
 /// **`tessera check` computes the same document**, which is the whole reason it lives on the
@@ -497,7 +576,10 @@ fn a_moved_gate_moves_exactly_one_line_of_the_report() {
 
     std::fs::write(
         tmp.path().join("schema.toml"),
-        DECLARATION.replace("visibility                = \"ir:analyst\"", "visibility                = \"public\""),
+        DECLARATION.replace(
+            "visibility                = \"ir:analyst\"",
+            "visibility                = \"public\"",
+        ),
     )
     .unwrap();
     let after = build_out(tmp.path(), "after");
@@ -509,7 +591,10 @@ fn a_moved_gate_moves_exactly_one_line_of_the_report() {
         .collect();
     assert_eq!(
         changed,
-        vec![("      \"visibility\": \"ir:analyst\",", "      \"visibility\": \"public\",")],
+        vec![(
+            "      \"visibility\": \"ir:analyst\",",
+            "      \"visibility\": \"public\","
+        )],
         "a gate moving must move one line and nothing else"
     );
 }
