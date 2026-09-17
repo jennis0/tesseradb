@@ -26,8 +26,29 @@ def _():
 
     import tesseradb as td
 
-    # `data/notebook/`: 50,000 arXiv papers, three clusterings over them and the topics over two.
-    DATA = pathlib.Path(os.environ.get("TESSERA_NOTEBOOK_DATA", "../../../data/notebook"))
+    def corpus_directory():
+        """`data/notebook/`: 50,000 arXiv papers, three clusterings and the topics over two.
+
+        Neither front end promises a working directory, so the corpus is looked for above this
+        file and above the working directory, and `TESSERA_NOTEBOOK_DATA` names it anywhere else.
+        """
+        named = os.environ.get("TESSERA_NOTEBOOK_DATA")
+        if named:
+            return pathlib.Path(named).expanduser()
+        starts = [pathlib.Path.cwd().resolve()]
+        here = globals().get("__file__")
+        if here:
+            starts.append(pathlib.Path(here).resolve().parent)
+        for start in starts:
+            for directory in [start, *start.parents]:
+                if (directory / "data" / "notebook" / "schema.toml").exists():
+                    return directory / "data" / "notebook"
+        raise FileNotFoundError(
+            "data/notebook/ is above neither this file nor the working directory. "
+            "Set TESSERA_NOTEBOOK_DATA to the corpus directory"
+        )
+
+    DATA = corpus_directory()
 
     def counts(table):
         """A served table's `visible`, `matched` and `served`, which its schema metadata carries.
@@ -52,8 +73,8 @@ def _(mo):
         under two projections; and the whole thing is saved, reopened and handed to `tessera
         serve`.
 
-        Every map here is computed inside the viewer's own mask. `viewer(terms)` is the map of
-        another principal, not this one's map filtered down.
+        Every map here is computed inside the viewer's own mask. `viewer(terms)` is another
+        principal's map, computed inside that principal's mask.
         """
     )
     return
@@ -71,6 +92,11 @@ def _(mo):
 
         The cluster keys here come from the corpus's k-means membership file, joined onto the
         points so the frame carries one column of keys.
+
+        Each cluster gets a line of text, gated on the papers it was written from
+        (`content_requires="all"`): a viewer reads the line only where they may read every paper
+        in its generating set. This database has one principal, who holds everything, so every
+        line is served. Section 2 is where that gate starts refusing.
         """
     )
     return
@@ -92,8 +118,9 @@ def _(DATA, pa, pd, pq):
 
 @app.cell
 def _(DATA, mo, pa, pq):
-    # One line of text per cluster, as the `(key, contents)` table a label set reads. `attached_key`
-    # is the cluster the label hangs from: a label is served only where that cluster is served.
+    # One line of text per cluster, as the `(key, contents)` table a label set reads.
+    # `attached_key` is the cluster the label hangs from: a label is served only where that
+    # cluster is served.
     _topics = pq.read_table(DATA / "topics-kmeans.parquet").to_pandas()
     _named = {row.attached_key: row.contents[0][0] for row in _topics.itertuples()}
 
@@ -107,18 +134,35 @@ def _(DATA, mo, pa, pq):
             "attached_key": pa.array(list(_named), pa.string()),
         }
     )
+
+    # The generating set: the papers each line was written from. A null rank is the membership
+    # and rank 0 is the set content 0 came from, so each pair goes in twice.
+    _members = pq.read_table(DATA / "clusters-kmeans-members.parquet",
+                             columns=["key", "entity"])
+    _keys = [f"{key}-label" for key in _members.column("key").to_pylist()]
+    _entities = _members.column("entity").to_pylist()
+    topic_members = pa.table(
+        {
+            "level": pa.array([0] * (2 * len(_keys)), pa.uint32()),
+            "key": pa.array(_keys + _keys, pa.string()),
+            "rank": pa.array([None] * len(_keys) + [0] * len(_keys), pa.uint32()),
+            "entity": pa.array(_entities + _entities, pa.uint64()),
+        }
+    )
     mo.md(f"{topic_text.num_rows} labels, one per cluster: {list(_named.values())[:3]}")
-    return (topic_text,)
+    return topic_members, topic_text
 
 
 @app.cell
-def _(frame, td, topic_text):
+def _(frame, td, topic_members, topic_text):
     simple = td.create()  # a temporary directory, on /dev/shm where the platform has one
     simple.stage("points", frame, default=True)
     simple.stage("topics", topic_text)
+    simple.stage("topic_members", topic_members)
     simple.declare_view("map", source="points")
     simple.declare_layer("clusters", kind="flat", from_column="cluster")
-    simple.declare_labels("topics", of="clusters", source="topics")
+    simple.declare_labels("topics", of="clusters", source="topics", members="topic_members",
+                          content_requires="all")
     print(simple.commit())  # tessera check, tessera build, tessera serve
     return (simple,)
 
@@ -128,8 +172,8 @@ def _(mo):
     mo.md(
         """
         The report above is the build's own: what each declaration read, what the frame did to the
-        coordinates, and the three addresses the server bound. No column was declared: `title` and
-        `submitted_at` were inferred from the frame, and the report says what was inferred and how.
+        coordinates, and the three addresses the server bound. No column was declared: `title`
+        was inferred from the frame as text, and the report says what was inferred and how.
 
         **Try**: hover a point, then drag a box (shift-drag) or a lasso over one cluster and read
         the next cell.
@@ -172,9 +216,9 @@ def _(mo):
         The same corpus as `data/notebook/schema.toml`, declared as calls. The files carry
         `entity_id`, so they are staged as paths and read where they lie rather than copied.
 
-        `access="categories"` makes each paper's arXiv categories its access terms. A viewer holding
-        `math.AG` sees the papers filed under `math.AG` and nothing else. Every count, every cluster
-        and every topic line is computed inside that mask.
+        `access="categories"` makes each paper's arXiv categories its access terms. A viewer
+        holding `astro-ph` sees the papers filed under `astro-ph` and nothing else. Every count,
+        every cluster and every topic line is computed inside that mask.
         """
     )
     return
@@ -218,9 +262,9 @@ def _(db):
     db.declare_attribute("abstract", type="text", index=True)
     db.declare_attribute("arxiv_id", type="keyword", index=True, title="arXiv ID")
 
-    # Three clusterings: flat, nested and tiered. Each states the two disclosure controls that have
-    # no default: who may know the layer exists, and how much of a cluster a viewer must already
-    # see before that cluster is served to them.
+    # Three clusterings: flat, nested and tiered. Each states its `require_member_visibility`:
+    # how much of a cluster a viewer must already see before that cluster is served to them, as a
+    # floor on the count or a share of the cluster's own size.
     db.declare_layer("clusters/kmeans", kind="flat", source="kmeans", members="kmeans_members",
                      require_member_visibility={"count": 50}, title="k-means clusters")
     db.declare_labels("topics/kmeans", of="clusters/kmeans", source="kmeans_topics",
@@ -264,10 +308,16 @@ def _(db):
 def _(mo):
     mo.md(
         """
-        Three maps follow: the database's own principal, who holds every term the SDK staged, and
-        two arXiv categories. `math.AG` is 1,077 papers in one region of the projection; `cs.LG`
-        with `stat.ML` is about four times that, somewhere else, and is drawn over the HDBSCAN
-        clustering rather than all three layers.
+        Three maps follow: the database's own principal, who holds every term the SDK staged,
+        and two arXiv categories. `astro-ph` is 2,105 papers in one region of the projection, and
+        14 of the 64 k-means clusters clear its member requirement. `cs.LG` with `stat.ML` is
+        about twice as many papers, somewhere else, drawn over the HDBSCAN clustering rather than
+        all three layers.
+
+        Neither category principal is served a topic line, where the first map's principal is
+        served every one. A topic line is generated from the papers of its cluster, those papers
+        span categories, and the line is read only by a viewer who may read every one of them. So
+        the cluster is drawn and keyed, and the sentence written about it is not served.
 
         **Try**: read the cluster counts on the second and third maps. They are smaller than the
         first map's, and they are counted over each principal's own rows rather than taken from
@@ -286,7 +336,7 @@ def _(db, mo):
 
 @app.cell
 def _(db, mo):
-    mo.ui.anywidget(db.viewer(["math.AG"]).map(colour_by="cluster:clusters/kmeans", height=380))
+    mo.ui.anywidget(db.viewer(["astro-ph"]).map(colour_by="cluster:clusters/kmeans", height=380))
     return
 
 
@@ -302,7 +352,7 @@ def _(db, mo):
 def _(counts, db):
     # What each of the three was served, as numbers: the union, one term, two terms.
     whole_counts = counts(db.viewport())
-    one_term_counts = counts(db.viewer(["math.AG"]).viewport())
+    one_term_counts = counts(db.viewer(["astro-ph"]).viewport())
     two_term_counts = counts(db.viewer(["cs.LG", "stat.ML"]).viewport())
     (whole_counts["visible"], one_term_counts["visible"], two_term_counts["visible"])
     return one_term_counts, two_term_counts, whole_counts
@@ -320,12 +370,9 @@ def _(mo):
 
         Sixty papers, one new cluster, one topic line over it and the generating set that line
         was written from. Sixty because `clusters/kmeans` requires 50 visible members, so a
-        smaller cluster would exist for nobody.
-
-        Not built yet: a label whose content is gated `all` fails containment for every principal
-        when its generating set is rows that arrived by ingest (issue #150). The line below is
-        published and addressable, and no principal is served its text. The cluster it hangs from
-        is served, and so are the papers.
+        smaller cluster would exist for nobody. They land in a patch a few hundred units across
+        at the middle of the frame, about a thousandth of its width, so the map below needs
+        zooming in to see them apart.
         """
     )
     return
@@ -339,12 +386,16 @@ def _(counts, db, pa):
     _x = (_quantisation["x_min"] + _quantisation["x_max"]) / 2.0
     _y = (_quantisation["y_min"] + _quantisation["y_max"]) / 2.0
     new_ids = list(range(900_001, 900_061))
+    # An eight-wide grid at 80 units a step: a patch about 560 units across, rather than the
+    # sixty points on top of each other that a 0.001 step would give.
+    _at = [(_x + 80.0 * (i % 8) - 280.0, _y + 80.0 * (i // 8) - 260.0)
+           for i in range(len(new_ids))]
 
     new_papers = pa.table(
         {
             "entity_id": pa.array(new_ids, pa.uint64()),
-            "x": pa.array([_x + i * 0.001 for i in range(len(new_ids))], pa.float64()),
-            "y": pa.array([_y + i * 0.001 for i in range(len(new_ids))], pa.float64()),
+            "x": pa.array([x for x, _ in _at], pa.float64()),
+            "y": pa.array([y for _, y in _at], pa.float64()),
             "categories": pa.array([["cs.LG"] for _ in new_ids], pa.list_(pa.string())),
             "arxiv_id": pa.array([f"2609.{i:05d}" for i in new_ids], pa.string()),
             "archive": pa.array(["cs"] * len(new_ids), pa.string()),
@@ -417,6 +468,29 @@ def _(counts, db):
 def _(mo):
     mo.md(
         """
+        The new papers carry `cs.LG`, so the map below is that principal's: the cluster `km-audio`
+        is drawn among the clusters they already held.
+
+        Not built yet: a label whose content is gated `all` fails containment for every principal
+        when its generating set is rows that arrived by ingest (issue #150). The line written
+        about this cluster is published and addressable, and no principal is served its text. The
+        cluster is drawn, and so are the papers.
+        """
+    )
+    return
+
+
+@app.cell
+def _(after_delta, db, mo):
+    _ = after_delta  # the delta is visible before this map asks for it
+    mo.ui.anywidget(db.viewer(["cs.LG"]).map(colour_by="cluster:clusters/kmeans", height=440))
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md(
+        """
         ## 4. A second clustering over rows the database already holds
 
         `from_column=` reads its keys from the rows being ingested, and these rows arrived at the
@@ -460,7 +534,7 @@ def _(DATA, db, pa, pc, pq):
 
 @app.cell
 def _(db, era_report, mo):
-    era_report  # the layer is declared and its three artifacts published before this map is drawn
+    _ = era_report  # the layer and its three artifacts exist before this map asks for them
     mo.ui.anywidget(db.map(colour_by="cluster:clusters/era", height=440))
     return
 
@@ -558,6 +632,10 @@ def _(mo):
         ```
         tessera serve --deployment <path>/tessera.toml
         ```
+
+        The cell below saves to `~/tessera/arxiv`, in your own home directory, and opens that
+        rather than saving over it where a database is already there. `TESSERA_DEMO_HOME` names
+        somewhere else.
         """
     )
     return
