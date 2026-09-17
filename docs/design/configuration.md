@@ -1343,6 +1343,10 @@ refused, and so is a duplicate. Every view of one build spells identity at one t
 sharing one entity space. `--limit` keeps the rows whose identity is below it, which needs an
 integer; over a string or binary column it is refused.
 
+Every field read as a string is read at either Arrow offset width: `utf8` and `large_utf8` carry
+the same bytes and the width is the writer's choice, so both are read where they lie and neither
+is converted. A pandas frame written to Parquet spells every string column `large_utf8`.
+
 A points file may carry no identity column at all. The caller then supplied no external id, the
 bundle writes no extent and no locator, and a row is addressable by its `tessera_id` alone. A row
 is then named by its position in that file, so the route is admitted only where every reader
