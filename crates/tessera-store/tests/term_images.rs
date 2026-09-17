@@ -399,6 +399,95 @@ fn a_window_holding_no_kept_image_writes_the_same_bytes_at_every_width() {
     );
 }
 
+/// A run of terms too small to be projected, longer than the derivation's buffer of table rows,
+/// between the postings a window holds.
+///
+/// A window holds the postings that are projected, so a term settled as it is read has its row
+/// written between two windows' rows, and a run longer than the buffer is written by several
+/// positioned writes. The bytes must not depend on where those writes fall.
+#[test]
+fn a_run_of_small_terms_between_projected_ones_writes_the_same_bytes_at_every_width() {
+    const BOUND: u64 = 3 << 16;
+    // Longer than the derivation's table-row buffer of 4,096 rows.
+    const RUN: usize = 5_000;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut rng = StdRng::seed_from_u64(61);
+    let entities = row_order(BOUND, 0.9, Some(1), &mut rng);
+    let space = space_of(dir.path(), &entities, BOUND);
+
+    // Three projected terms, a run of small ones, two projected, a second run, three projected.
+    // Every eleventh term of a run holds no entities, so an empty posting sits inside a run too.
+    let mut postings: Vec<Bitmap> = Vec::new();
+    let mut large: Vec<u32> = Vec::new();
+    for block in [3usize, 2, 3] {
+        for _ in 0..block {
+            let mut posting = Bitmap::new();
+            // Inside the first permutation page, which the fixture keeps whole, so every entity of
+            // the block holds a row and the image is dense enough to keep.
+            let start = rng.gen_range(0..40_000u32);
+            posting.add_range(start..start + 8_000);
+            large.push(postings.len() as u32);
+            postings.push(posting);
+        }
+        if large.len() < 8 {
+            for term in 0..RUN {
+                let mut posting = Bitmap::new();
+                if !term.is_multiple_of(11) {
+                    for _ in 0..4 {
+                        posting.add(rng.gen_range(0..BOUND) as u32);
+                    }
+                }
+                postings.push(posting);
+            }
+        }
+    }
+
+    let mut reference: Option<Vec<u8>> = None;
+    for threads in [1usize, 3, 12] {
+        let out = dir.path().join(format!("run-{threads}.timg"));
+        derive(&space, &postings, &out, threads).expect("derive");
+        let bytes = std::fs::read(&out).expect("read");
+        match &reference {
+            None => reference = Some(bytes),
+            Some(first) => assert_eq!(
+                first, &bytes,
+                "{threads} threads must write the bytes one thread writes across a long run of \
+                 small terms"
+            ),
+        }
+    }
+
+    let out = dir.path().join("run-1.timg");
+    let images = TermImages::open(&out, &stamp_of(&space), postings.len() as u32).expect("opens");
+    for (term, posting) in postings.iter().enumerate() {
+        let entry = images
+            .entry(TermId::new(term as u32))
+            .expect("a row per term");
+        assert_eq!(
+            u64::from(entry.entities),
+            posting.cardinality(),
+            "term {term}'s row records its posting's cardinality"
+        );
+        if large.contains(&(term as u32)) {
+            assert!(
+                entry.kept(),
+                "term {term} is projected and dense enough to keep"
+            );
+        } else {
+            assert!(!entry.kept(), "term {term} is too small to be projected");
+            assert_eq!(entry.containers, 0, "term {term} was not projected");
+        }
+    }
+    assert_eq!(
+        images.union(&large.iter().map(|t| TermId::new(*t)).collect::<Vec<_>>()),
+        large.iter().fold(Bitmap::new(), |mut rows, term| {
+            rows.or_inplace(&space.project_base(&postings[*term as usize]));
+            rows
+        }),
+        "the images either side of the runs union to the projection of their postings"
+    );
+}
+
 /// The exactness the split route rests on: for any kept subset K and any S between the residual and
 /// the whole fragment, the union of K's images with the projection of S is the projection of the
 /// fragment.
