@@ -56,17 +56,21 @@ stages 1 to 5.
 
 ## What the controller decided, building stages 1–5
 
-- **The derivation holds one window of `threads` postings and images at a time and writes the
-  table through as each window completes**, so nothing in `derive_term_images` scales with the
-  dictionary beyond the table itself (`tessera_store::term_images::derive_term_images`). A wider
-  window buys nothing once workers are saturated at one term each, and this bounds transient memory
-  to the window rather than to the whole file.
-- **The build derives at most four workers wide and the fold one wide.** The build competes with
-  nothing else on the host and rayon's own width is already capped elsewhere; the fold runs on its
-  one dedicated thread (decision 0043) and stays sequential so its memory is bounded to one image
-  and one scratch. The 64-part rung measured twelve build workers at 6.6 s against the fold's single
-  thread at 1.5 s for byte-identical output: the terms are small enough there that the mutex over
-  the scratch pool and the window's serial read dominate over the width bought.
+- **A window is the postings that will be projected, not the terms read.** A term the posting walk
+  carries no record of, and a posting at or below the keep rule's 30 entities, is settled on the
+  calling thread as it is read and never enters the parallel work; its table row is buffered and
+  written positionally, in term order, with the rest. The window is `threads` postings that will
+  actually be projected, so a dictionary whose terms are mostly too small to project dispatches the
+  pool once per `threads` projections rather than once per `threads` terms
+  (`tessera_store::term_images::derive_term_images`). Nothing here scales with the dictionary beyond
+  the table itself, and the file is byte-identical at every width.
+- **The fold derives on its one dedicated thread** (decision 0043), so its memory is one posting,
+  one image, one frozen buffer and one scratch at a time. **The build derives at most four workers
+  wide**, because the residency forecast charges that width against the same four terms: at rung 6,
+  twelve workers forecast 25 GB against the 24 GB budget the build runs under, four forecast about
+  20 GB (modelled). Measured on a 200,000-term fixture with 3% of it projected, one release-build
+  thread took 1.33 s, four took 1.10 s and twelve took 0.92 s (2026-09-17). The fold's own wall per
+  view at rung 6 is what stage 6 measures.
 - **The complement route is valid wherever `dense_rows` is recorded**, and adds the extents above
   it exactly as the walk's own route does, so a view carrying extents is not withheld from the
   route: `RowSpace::project_complement_base` returns the base's contribution alone and the caller
