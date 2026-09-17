@@ -386,6 +386,7 @@ pub fn prepare(config_path: &Path) -> Result<Prepared, BoxError> {
         operator_credential,
         dev_cors_origins: config.dev_cors_origins.clone(),
         cors_origins: config.cors_origins.clone(),
+        cors_loopback: config.cors_loopback,
         #[cfg(feature = "fault-injection")]
         faults,
     });
@@ -404,6 +405,19 @@ pub fn prepare(config_path: &Path) -> Result<Prepared, BoxError> {
             "serve.dev_cors_origins is set: these browser origins may present session tokens and \
              the session credential to this process. This is a DEVELOPMENT affordance — do not \
              enable it in a deployment."
+        );
+    }
+
+    // At `info`, and once. `serve.cors_loopback` is a disclosure control and an operator reading
+    // the log should see which one is on, but it is not `dev_cors_origins`: what a loopback page
+    // may present is a token — per-principal, already scoped, already expiring — and never the
+    // credential that mints tokens. A `warn` here would put the two at the same level and teach a
+    // reader to pass both by (decision 0102).
+    if config.cors_loopback {
+        tracing::info!(
+            "serve.cors_loopback is set: a page served from localhost, 127.0.0.1 or [::1], on any \
+             port, may present a token to the viewer plane. The session and control planes are \
+             unaffected."
         );
     }
 

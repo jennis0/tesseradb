@@ -231,7 +231,10 @@ async fn a_public_column_is_suggested_as_authored() {
     assert_eq!(values[0]["match"]["field"], "key");
     assert_eq!(values[0]["match"]["start"], 0);
     assert_eq!(values[0]["match"]["len"], 1);
-    assert!(values[0].get("count").is_none(), "counts were not asked for: {body}");
+    assert!(
+        values[0].get("count").is_none(),
+        "counts were not asked for: {body}"
+    );
 }
 
 /// **The gate is `/v1/categories`' own, unchanged.** A `derived` column is filtered per
@@ -265,12 +268,26 @@ async fn a_derived_column_is_filtered_per_principal_exactly_as_the_enumeration_i
 
     // The full principal, paged past the server's `max_suggestions = 4` in one call via a limit
     // above the ceiling — clamped, not refused, exactly as `/v1/categories` clamps.
-    let (status, body) = get(&server, &full, "/v1/categories/department/suggest?q=d&limit=100").await;
+    let (status, body) = get(
+        &server,
+        &full,
+        "/v1/categories/department/suggest?q=d&limit=100",
+    )
+    .await;
     assert_eq!(status, 200, "{body}");
-    assert_eq!(keys_of(&body).len(), 4, "clamped to max_suggestions: {body}");
+    assert_eq!(
+        keys_of(&body).len(),
+        4,
+        "clamped to max_suggestions: {body}"
+    );
     assert_eq!(body["more"], true, "11 values sit under the prefix: {body}");
 
-    let (status, body) = get(&server, &narrow, "/v1/categories/department/suggest?q=d&limit=100").await;
+    let (status, body) = get(
+        &server,
+        &narrow,
+        "/v1/categories/department/suggest?q=d&limit=100",
+    )
+    .await;
     assert_eq!(status, 200, "{body}");
     let seen = keys_of(&body);
     assert_eq!(
@@ -370,7 +387,12 @@ async fn counts_are_present_iff_asked_and_are_exact() {
         assert!(value.get("count").is_none(), "{body}");
     }
 
-    let (status, body) = get(&server, &token, "/v1/categories/archive/suggest?q=a&counts=true").await;
+    let (status, body) = get(
+        &server,
+        &token,
+        "/v1/categories/archive/suggest?q=a&counts=true",
+    )
+    .await;
     assert_eq!(status, 200, "{body}");
     let values = body["values"].as_array().unwrap();
     assert!(!values.is_empty(), "{body}");
@@ -444,6 +466,7 @@ async fn a_spent_walk_budget_reports_more_even_on_a_short_page() {
         operator_credential: OPERATOR_CREDENTIAL.to_string(),
         dev_cors_origins: Vec::new(),
         cors_origins: Vec::new(),
+        cors_loopback: false,
         faults: Arc::new(tessera_lifecycle::faults::FaultSwitchboard::new()),
     });
 
@@ -520,7 +543,12 @@ async fn the_suggest_specific_refusals() {
     .await;
     assert_eq!(status, 422, "{body}");
 
-    let (status, body) = get(&server, &token, "/v1/categories/archive/suggest?q=a&limit=0").await;
+    let (status, body) = get(
+        &server,
+        &token,
+        "/v1/categories/archive/suggest?q=a&limit=0",
+    )
+    .await;
     assert_eq!(status, 422, "{body}");
 
     let (status, body) = get(

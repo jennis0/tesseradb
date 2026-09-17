@@ -964,6 +964,16 @@ struct RawServe {
     /// statement. Unlike `dev_cors_origins` this is silent at startup. See [`crate::cors`].
     #[serde(default)]
     cors_origins: Option<Vec<String>>,
+    /// Admit any page served from a loopback address on the **viewer plane**.
+    ///
+    /// The origin of a notebook front end is a port the kernel chose, so no operator can
+    /// enumerate it (`python-sdk.md` §7) and `cors_origins` cannot state it. This key states the
+    /// set instead: `http` or `https` on `localhost`, `127.0.0.1` or `[::1]`, any port. It is a
+    /// disclosure control and absent by default; what it admits is a page that may present a
+    /// **token**, on decision 0102's argument, and never one that may present the session
+    /// credential. See [`crate::cors`].
+    #[serde(default)]
+    cors_loopback: Option<bool>,
 }
 
 /// The control plane's listen target: a real unix socket, or (tests, and the documented Windows
@@ -1076,6 +1086,10 @@ pub struct Config {
     /// Empty is the default and mounts nothing. Both lists may be set; a duplicate origin across
     /// the two is not an error. See [`crate::cors`].
     pub cors_origins: Vec<String>,
+    /// `serve.cors_loopback` — viewer plane only, `false` by default. A page served from
+    /// `localhost`, `127.0.0.1` or `[::1]` on any port is admitted as a listed origin is. See
+    /// [`crate::cors`].
+    pub cors_loopback: bool,
     /// **Where** the session bearer secret comes from, not what it is. Read at
     /// [`crate::prepare`], never at parse: `tessera build` reads this same file and has no
     /// business requiring a serving secret to be exported before it will write a bundle. What
@@ -2293,6 +2307,7 @@ fn parse(text: &str) -> Result<Config> {
     // with a *working* server and no CORS, which is a worse answer than a refusal naming the key.
     let dev_cors_origins = raw.serve.dev_cors_origins.unwrap_or_default();
     let cors_origins = raw.serve.cors_origins.unwrap_or_default();
+    let cors_loopback = raw.serve.cors_loopback.unwrap_or(false);
     for (key, origins) in [
         ("dev_cors_origins", &dev_cors_origins),
         ("cors_origins", &cors_origins),
@@ -2834,6 +2849,7 @@ fn parse(text: &str) -> Result<Config> {
         stage_timing: raw.serve.stage_timing.unwrap_or(false),
         dev_cors_origins,
         cors_origins,
+        cors_loopback,
         session_credential,
         operator_credential,
         compute_threads,
@@ -3748,6 +3764,23 @@ compaction_after_deletions = 9000
             config.cors_origins.is_empty(),
             "the dev key must not populate the production list — they are two postures, not one \
              list with two spellings"
+        );
+    }
+
+    /// `serve.cors_loopback` is absent by default, on `cors_origins`' reasoning: a disclosure
+    /// control a deployment has not written down is one it has not decided.
+    #[test]
+    fn cors_loopback_defaults_to_false_and_round_trips() {
+        std::env::set_var("TESSERA_TEST_SESSION_CRED", "s");
+        std::env::set_var("TESSERA_TEST_OPERATOR_CRED", "o");
+        let config = parse(&valid_toml("")).expect("a config naming no CORS keys must load");
+        assert!(!config.cors_loopback);
+
+        let config = parse(&valid_toml("cors_loopback = true")).expect("the key must load");
+        assert!(config.cors_loopback);
+        assert!(
+            config.cors_origins.is_empty() && config.dev_cors_origins.is_empty(),
+            "the rule is not a list and must populate neither"
         );
     }
 

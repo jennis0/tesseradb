@@ -295,7 +295,10 @@ pub fn router(state: Arc<AppState>) -> Router {
             "/control/view_groups/{name}",
             axum::routing::put(create_view_group),
         )
-        .route("/control/views/{name}", axum::routing::put(create_plain_view))
+        .route(
+            "/control/views/{name}",
+            axum::routing::put(create_plain_view),
+        )
         .route(
             "/control/layers/{name}/artifacts",
             // **Not the inherited 2 MiB default**: `ingest.publish_max_body_bytes`, a pagination
@@ -1693,8 +1696,8 @@ fn parse_values_batch(
                     })
                 }))
             }
-            BodyEncoding::Json => Box::new(std::iter::once(
-                crate::ingest_json::values_record_batch(
+            BodyEncoding::Json => {
+                Box::new(std::iter::once(crate::ingest_json::values_record_batch(
                     body,
                     &crate::ingest_json::JsonColumns {
                         // A values row carries no coordinates, so the axis names name nothing it
@@ -1706,8 +1709,8 @@ fn parse_values_batch(
                         scoped,
                         layer_of,
                     },
-                ),
-            )),
+                )))
+            }
         };
 
     let mut rows: Vec<ParsedValuesRow> = Vec::new();
@@ -1899,7 +1902,9 @@ fn parse_values_batch(
                     .column_by_name(&d.name)
                     .expect("the column was found above");
                 values.push(match d.vocabulary.as_deref() {
-                    Some(vocabulary) => category_code(col.as_ref(), i, d, vocabulary, vocabularies)?,
+                    Some(vocabulary) => {
+                        category_code(col.as_ref(), i, d, vocabulary, vocabularies)?
+                    }
                     None if col.is_null(i) => WalScalar::Null,
                     None => scalar_at(col.as_ref(), i, d.wire_type())
                         .expect("every declared column's type was checked above"),
@@ -3293,9 +3298,27 @@ async fn changes(
 ///
 /// Idempotent: two requests before one tick are satisfied by that tick together, because what is
 /// recorded is a flag and not a count.
-async fn flush(State(state): State<Arc<AppState>>) -> StatusCode {
-    state.engine.request_flush();
-    StatusCode::ACCEPTED
+///
+/// **The body carries `publication`: the number the cycle honouring this request will carry when
+/// it completes** (contracts §3.4). A client reads `GET /control/status` until its `publication`
+/// has reached it, and is then promised that a cycle which saw this request's buffered work has
+/// published. That covers the two cases `partitions[].segments_version` does not: a cycle that
+/// only filled values and one that only published artifact records write no segment and move no
+/// version. Two requests before one cycle are answered with the same number, which is the flag
+/// above read as a number.
+///
+/// **The number cannot name a cycle that skipped the request's work.** It is computed under the
+/// lock the flag is set beneath, so it is `completed + 1` only where no cycle was under way, and
+/// `completed + 2` where one was and may have planned first; and the counter moves at the
+/// publication rather than at the tick, so reaching it and the work being visible are one event.
+/// `Engine::request_flush_publication` and `ExecutorHealth::request_flush` carry the argument in
+/// full.
+async fn flush(State(state): State<Arc<AppState>>) -> (StatusCode, Json<serde_json::Value>) {
+    let publication = state.engine.request_flush_publication();
+    (
+        StatusCode::ACCEPTED,
+        Json(serde_json::json!({ "publication": publication })),
+    )
 }
 
 /// `POST /control/compact` (contracts §3.4): **accepted at any time, and then minutes to hours.**
@@ -5520,6 +5543,12 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::V
     let segments: Vec<tessera_engine::ViewSegments> = state.engine.live_segment_counts();
     Ok(Json(serde_json::json!({
         "entity_id_high_water": state.engine.allocator_high_water(),
+        // **The publication counter** (contracts §3.4): cycles completed since the executor
+        // started, moving once per cycle whatever the cycle published. It is at the top level
+        // beside `partitions` rather than inside `write_executor` because it is what a client
+        // waits on, not a counter an operator watches: `POST /control/flush` answers with the
+        // number its cycle will carry and this is where that number is read back.
+        "publication": state.engine.publication(),
         // Contracts §3.4's per-partition block, and the write path's stage barrier
         // (correctness-suite §12.3): the version bump is how a harness knows a flush, merge or
         // fold *published* rather than was accepted, and the watermark is which entities the

@@ -708,6 +708,11 @@ pub struct AppState {
     /// hold, and [`crate::cors::session_layer`] is what makes that structural rather than
     /// remembered.
     pub cors_origins: Vec<String>,
+    /// `serve.cors_loopback` — whether a page served from a loopback address is admitted on the
+    /// **viewer plane**, as a listed origin is. Read by [`crate::cors::viewer_layer`] and by
+    /// nothing else, on `cors_origins`' rule: the session plane's bearer is the credential that
+    /// mints tokens, and a loopback page is still a browser page.
+    pub cors_loopback: bool,
     /// The write executor's fault switchboard — the faults build only (decision 0071), absent
     /// from the struct in a default build rather than present and inert. The same `Arc` the
     /// executor consults, so `/control/faults/*` arms the thread that actually pauses. Bearer
@@ -810,9 +815,8 @@ mod session_registry_tests {
     /// leave a dead session's entries resident under an id nothing can present again.
     #[test]
     fn the_sweep_returns_the_ids_it_dropped_and_keeps_the_rest() {
-        let mut index: FxHashMap<u64, String> = (1..=4)
-            .map(|id| (id, format!("token-{id}")))
-            .collect();
+        let mut index: FxHashMap<u64, String> =
+            (1..=4).map(|id| (id, format!("token-{id}"))).collect();
         let live = ["token-2", "token-4"];
 
         let mut dropped = prune_index(&mut index, |token| live.contains(&token));
