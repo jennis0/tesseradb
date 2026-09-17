@@ -129,6 +129,93 @@ pub fn build_fragment_with_deltas(
     Ok(fragment)
 }
 
+/// **S for the split route** (`architecture.md` §6.3): the
+/// entities `fragment` holds that the `kept` terms' base postings do not cover, as a superset that
+/// is still inside the fragment.
+///
+/// A session whose row projection is built from term images unions the images of the terms in
+/// `kept` and walks whatever those images cannot have covered. The images are projections of base
+/// postings alone, so what is left is the `unkept` terms in full plus every kept term's *delta*
+/// postings, which no image carries. That is a superset of what is strictly missing, which is all
+/// the union needs: the projection of a superset inside the fragment adds no row the fragment does
+/// not grant.
+///
+/// **The intersection with `fragment` is not an optimisation.** `deltas` is the live generation's
+/// tier list and can be newer than the tiers the fragment was unioned from, so without it the
+/// result could carry an entity outside the fragment, and projecting that entity would serve a row
+/// the principal was never granted (I2). Intersecting makes `S ⊆ F` hold for any tier list the
+/// caller passes, rather than for the one the fragment was unioned from alone.
+///
+/// `RowId` does not appear here: both arguments and the result are entity-space, and the caller
+/// projects.
+pub fn residual_fragment(
+    unkept: &[TermId],
+    kept: &[TermId],
+    postings: &PostingsReader,
+    deltas: &[Arc<DeltaTier>],
+    fragment: &Bitmap,
+) -> io::Result<Bitmap> {
+    let mut residual = build_fragment_with_deltas(unkept, postings, deltas)?;
+    or_delta_postings(&mut residual, kept, deltas)?;
+    residual.and_inplace(fragment);
+    residual.run_optimize();
+    Ok(residual)
+}
+
+/// The sum of `terms`' delta-posting cardinalities across every live tier: the route chooser's
+/// residual overcount, in entities.
+///
+/// It is a sum rather than the cardinality of a union, so an entity carried by two tiers is
+/// counted twice. The chooser prices the residual walk with it, and an overcount biases the choice
+/// toward the walk, which is the route whose cost is measured over the widest set of principals.
+pub fn delta_entities(terms: &[TermId], deltas: &[Arc<DeltaTier>]) -> io::Result<u64> {
+    let mut entities = 0u64;
+    for term in terms.iter().copied() {
+        for tier in deltas {
+            match tier.posting(term)? {
+                Some(PostingRef::Roaring(view)) => entities += view.cardinality(),
+                Some(PostingRef::Array(bytes)) => entities += (bytes.len() / 4) as u64,
+                None => {}
+            }
+        }
+    }
+    Ok(entities)
+}
+
+/// Union `terms`' postings **in the delta tiers only** into `into`, leaving the base unread.
+///
+/// The union is over `terms` and never over a tier's whole term set, for
+/// [`build_fragment_with_deltas`]' reason: a tier carries the postings of every term its flushed
+/// items held, including terms this session was never granted.
+fn or_delta_postings(
+    into: &mut Bitmap,
+    terms: &[TermId],
+    deltas: &[Arc<DeltaTier>],
+) -> io::Result<()> {
+    let mut small: Vec<u32> = Vec::new();
+    for term in terms.iter().copied() {
+        for tier in deltas {
+            match tier.posting(term)? {
+                Some(PostingRef::Roaring(view)) => into.or_inplace(&view),
+                Some(PostingRef::Array(bytes)) => {
+                    debug_assert!(
+                        bytes.len() % 4 == 0,
+                        "tag-0 posting payload length must be a multiple of 4 (validated at \
+                         DeltaTier::open)"
+                    );
+                    for chunk in bytes.chunks_exact(4) {
+                        small.push(u32::from_le_bytes(chunk.try_into().unwrap()));
+                    }
+                }
+                None => {}
+            }
+        }
+    }
+    small.sort_unstable();
+    into.add_many(&small);
+    Ok(())
+}
+
 /// Compute the canonical cache key: SHA-256 over
 /// `bundle_identity ‖ auth_plugin_hash ‖ sorted term_id u32 LEs` (deduplicated). Term IDs are
 /// bundle-relative ordinals, so a persistent cache directory reused across bundle rebuilds — or
@@ -926,6 +1013,167 @@ impl FragmentCache {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// One term's entity list in one delta tier, as the tier writer takes it.
+    type TierEntry = (u32, Vec<u32>);
+
+    /// A corpus for the two cases below: a base entity list per term, and the tiers.
+    struct Corpus {
+        base: Vec<Vec<u32>>,
+        tiers: Vec<Vec<TierEntry>>,
+    }
+
+    /// A reproducible random corpus: per-term base entity lists, and two sparse tiers each
+    /// carrying a subset of the terms with entities drawn from a higher range, as a flush's tier
+    /// does.
+    fn random_corpus(seed: u64) -> Corpus {
+        use rand::rngs::StdRng;
+        use rand::{Rng, SeedableRng};
+        let mut rng = StdRng::seed_from_u64(seed);
+        let terms = 24usize;
+        let base: Vec<Vec<u32>> = (0..terms)
+            .map(|_| {
+                let mut entities: Vec<u32> = (0..2_000u32).filter(|_| rng.gen_bool(0.05)).collect();
+                entities.dedup();
+                entities
+            })
+            .collect();
+        let mut tiers: Vec<Vec<(u32, Vec<u32>)>> = Vec::new();
+        for tier in 0..2u32 {
+            let lo = 2_000 + tier * 1_000;
+            let mut entries: Vec<(u32, Vec<u32>)> = Vec::new();
+            for term in 0..terms as u32 {
+                if !rng.gen_bool(0.4) {
+                    continue;
+                }
+                let entities: Vec<u32> = (lo..lo + 1_000).filter(|_| rng.gen_bool(0.05)).collect();
+                entries.push((term, entities));
+            }
+            tiers.push(entries);
+        }
+        Corpus { base, tiers }
+    }
+
+    /// Write `base` and `tiers` through the real writers and open them through the real readers,
+    /// so what the assertions below compare is what a bundle holds.
+    fn readers(
+        dir: &Path,
+        base: &[Vec<u32>],
+        tiers: &[Vec<TierEntry>],
+    ) -> (PostingsReader, Vec<Arc<DeltaTier>>) {
+        let postings_path = dir.join("postings.arrow");
+        crate::postings::write_postings(&postings_path, base, 32).unwrap();
+        let reader = PostingsReader::open(&postings_path, false).unwrap();
+        let opened = tiers
+            .iter()
+            .enumerate()
+            .map(|(n, entries)| {
+                let path = dir.join(format!("tier-{n}.arrow"));
+                crate::tier::write_delta_tier_at(&path, entries, 32).unwrap();
+                Arc::new(DeltaTier::open(&path).unwrap())
+            })
+            .collect();
+        (reader, opened)
+    }
+
+    /// The expected fragment, assembled from the **source lists** rather than from the readers:
+    /// the pointwise union, over `terms`, of each term's base entities and its entities in every
+    /// tier that carries it.
+    fn expected_union(terms: &[TermId], base: &[Vec<u32>], tiers: &[Vec<TierEntry>]) -> Bitmap {
+        let mut expected = Bitmap::new();
+        for term in terms.iter().copied() {
+            let raw = term.raw();
+            if let Some(entities) = base.get(raw as usize) {
+                expected.add_many(entities);
+            }
+            for tier in tiers {
+                for (carried, entities) in tier {
+                    if *carried == raw {
+                        expected.add_many(entities);
+                    }
+                }
+            }
+        }
+        expected
+    }
+
+    /// **The union shape the split route's exactness rests on** (handover memo §3.1).
+    ///
+    /// A fragment must be the pointwise union, over the terms a session satisfies, of each term's
+    /// base posting and its posting in every live tier. The split route unions images of base
+    /// postings and walks only the residual, which is sound exactly because each satisfied term's
+    /// base posting lies wholly inside the fragment. A plugin or a future composition that
+    /// combined terms any other way — an intersection, a precedence, a term that removes entities
+    /// — would leave the route serving a set the walk does not, and this is the test that would
+    /// say so.
+    #[test]
+    fn a_fragment_is_the_pointwise_union_of_its_terms_base_and_delta_postings() {
+        let temp = tempfile::TempDir::new().unwrap();
+        for seed in 0..8u64 {
+            let dir = temp.path().join(format!("seed-{seed}"));
+            std::fs::create_dir_all(&dir).unwrap();
+            let Corpus { base, tiers } = random_corpus(seed);
+            let (reader, opened) = readers(&dir, &base, &tiers);
+
+            // A grant of roughly half the terms, so the union is over a subset and a term outside
+            // it contributing would show.
+            let terms: Vec<TermId> = (0..base.len() as u32)
+                .filter(|t| t % 3 != 0)
+                .map(TermId::new)
+                .collect();
+            let built = build_fragment_with_deltas(&terms, &reader, &opened).unwrap();
+            let expected = expected_union(&terms, &base, &tiers);
+            assert_eq!(
+                built.to_vec(),
+                expected.to_vec(),
+                "seed {seed}: the fragment is not the pointwise union of its terms' postings"
+            );
+        }
+    }
+
+    /// The residual is inside the fragment and covers everything the kept terms' base postings do
+    /// not — the two bounds the split route's union needs, over the same random corpora.
+    ///
+    /// The upper bound is checked against a fragment built from **fewer tiers** than the residual
+    /// is given, which is the arrangement that makes the intersection necessary: a live generation
+    /// can hold a tier the session's fragment was never unioned from.
+    #[test]
+    fn the_residual_lies_inside_the_fragment_and_covers_what_the_kept_terms_do_not() {
+        let temp = tempfile::TempDir::new().unwrap();
+        for seed in 0..8u64 {
+            let dir = temp.path().join(format!("seed-{seed}"));
+            std::fs::create_dir_all(&dir).unwrap();
+            let Corpus { base, tiers } = random_corpus(seed);
+            let (reader, opened) = readers(&dir, &base, &tiers);
+
+            let terms: Vec<TermId> = (0..base.len() as u32).map(TermId::new).collect();
+            let (kept, unkept): (Vec<TermId>, Vec<TermId>) =
+                terms.iter().partition(|t| t.raw() % 2 == 0);
+
+            // The fragment sees only the first tier; the residual is given both.
+            let fragment = build_fragment_with_deltas(&terms, &reader, &opened[..1]).unwrap();
+            let residual = residual_fragment(&unkept, &kept, &reader, &opened, &fragment).unwrap();
+
+            assert!(
+                residual.and(&fragment) == residual,
+                "seed {seed}: the residual reaches outside the fragment, which is an I2 \
+                 disclosure once it is projected"
+            );
+
+            let mut covered = Bitmap::new();
+            for term in kept.iter().copied() {
+                if let Some(entities) = base.get(term.raw() as usize) {
+                    covered.add_many(entities);
+                }
+            }
+            let missing = fragment.andnot(&covered);
+            assert!(
+                missing.andnot(&residual).is_empty(),
+                "seed {seed}: the residual misses entities no kept term's base posting covers, \
+                 so the split route would serve fewer rows than the walk"
+            );
+        }
+    }
 
     /// **The `key_memo` bound, closed against its attacker.** `key_memo` is keyed by
     /// `SHA-256(auth_data)`, so a caller holding the session credential grows it by one entry per

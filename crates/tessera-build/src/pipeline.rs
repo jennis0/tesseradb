@@ -1240,8 +1240,7 @@ fn build_bundle(
     // **A mapped file**, on the same argument as the geometry beside it: 4 B an item is 13.3 GiB
     // at the GBIF rung, held from here to the end of the batch loop, and as anonymous memory it
     // was the largest term of that loop's residency that no model named.
-    let mut appearances =
-        spill::MappedU32::zeroed(tmp.path(), "appearances.u32", n as usize)?;
+    let mut appearances = spill::MappedU32::zeroed(tmp.path(), "appearances.u32", n as usize)?;
     for (index, view) in args.views.iter().enumerate() {
         let mut x_map =
             spill::MappedU32::zeroed(tmp.path(), &format!("x-of-ordinal-{index}.u32"), n as usize)?;
@@ -1999,9 +1998,8 @@ fn build_bundle(
     // dictionary pass's alone, so they go back to the disk here rather than standing through the
     // record blob, which is the phase the measured peak falls on.
     let mut open_extents = open_extents;
-    open_extents.retain(|extents| {
-        blob_resident(&args.schema, &args.schema.attributes[extents.column])
-    });
+    open_extents
+        .retain(|extents| blob_resident(&args.schema, &args.schema.attributes[extents.column]));
     for column in spilled.iter_mut() {
         if !blob_resident(&args.schema, &args.schema.attributes[column.column]) {
             column.remove();
@@ -2071,6 +2069,12 @@ fn build_bundle(
     // names files from this, so the second view's files cannot be named after the first's — see
     // `tessera_store::derived::DerivedIndex`.
     let mut derived_index = tessera_store::derived::DerivedIndex::default();
+    // **Opened once for the build, not once per view.** The postings are entity space and every
+    // view projects the same ones through its own permutation (`crate::term_images_pass`).
+    let postings = tessera_authz::postings::PostingsReader::open(&postings_path, true)
+        .map_err(|e| BuildError::io(&postings_path, e))?;
+    let mut term_images: Vec<Option<crate::term_images_pass::ViewTermImages>> =
+        Vec::with_capacity(args.views.len());
     for (index, view) in args.views.iter().enumerate() {
         let view_dir = tessera_store::view_path(&partition_dir, &view.view_id);
         let segment_dir = view_dir.join("segments").join(SEG_ID);
@@ -2217,6 +2221,24 @@ fn build_bundle(
                 + artifact_pass.shape_held_extents.len()) as u64,
         );
 
+        // ---- 10c. this view's term images (`crate::term_images_pass`) ----------------------
+        //
+        // Beside the artifact pass and after it, for the reason it sits here: the images are the
+        // view's permutation applied to every term's posting, and this view's row space did not
+        // exist until that permutation was written.
+        let images = crate::term_images_pass::run(
+            &postings,
+            &args.out.join(crate::PREFIX),
+            crate::PHASH,
+            &view.view_id,
+            rows_in_view,
+            &mut derived_index,
+        )?;
+        artifact_paths.extend(images.iter().map(|images| images.path.clone()));
+        let kept = images.as_ref().map_or(0, |images| images.report.kept);
+        term_images.push(images);
+        timer.end(BuildStage::TermImages, u64::from(kept));
+
         view_files.push(permutation_path);
         view_files.push(row_entity_path);
         view_files.push(columns_path);
@@ -2233,7 +2255,10 @@ fn build_bundle(
             entity_hi: n,
         });
     }
-    // ---- 10c. the containment partitions, once for the prefix ----------------------------
+    // Every view has been through the term images, so the postings mapping is unbusy.
+    drop(postings);
+
+    // ---- 10d. the containment partitions, once for the prefix ----------------------------
     //
     // **Outside the view loop**, because a partition is a function of the level's records and the
     // prefix's postings and carries no view. Composing it inside the pass would write one identical
@@ -2293,6 +2318,7 @@ fn build_bundle(
         &published_layers,
         &segments,
         &occupancies,
+        &term_images,
     )?;
     // Reported in bytes, not rows: this stage re-reads and SHA-256s every byte the build wrote,
     // so it scales with bundle size rather than with item count.
@@ -2437,7 +2463,9 @@ fn read_attributes_by_entity(
             for record in store.load(k)?.chunks_exact(record_width) {
                 let entity =
                     u32::from_le_bytes(record[..4].try_into().expect("a record carries its key"));
-                let at = (entity as u64).checked_sub(lo as u64).filter(|&at| at < span as u64);
+                let at = (entity as u64)
+                    .checked_sub(lo as u64)
+                    .filter(|&at| at < span as u64);
                 let Some(at) = at.map(|at| at as usize) else {
                     return Err(BuildError::Invalid(format!(
                         "attribute '{name}': bucket {k} of its value partition holds entity \
@@ -4170,11 +4198,9 @@ impl KeywordValues<'_> {
     fn rows_hint(&self) -> usize {
         match self {
             KeywordValues::Column(values) => values.len(),
-            KeywordValues::Extents(extents) => extents
-                .blobs
-                .iter()
-                .map(|blob| blob.rows() as usize)
-                .sum(),
+            KeywordValues::Extents(extents) => {
+                extents.blobs.iter().map(|blob| blob.rows() as usize).sum()
+            }
         }
     }
 }
@@ -5918,13 +5944,10 @@ impl IdPresence {
     fn ids(&self) -> impl Iterator<Item = u64> + '_ {
         self.words.iter().enumerate().flat_map(|(index, &word)| {
             let base = self.base + index as u64 * 64;
-            std::iter::successors(
-                (word != 0).then_some(word),
-                |w| {
-                    let rest = *w & (*w - 1);
-                    (rest != 0).then_some(rest)
-                },
-            )
+            std::iter::successors((word != 0).then_some(word), |w| {
+                let rest = *w & (*w - 1);
+                (rest != 0).then_some(rest)
+            })
             .map(move |w| base + w.trailing_zeros() as u64)
         })
     }
@@ -6906,13 +6929,22 @@ mod tests {
             })
             .collect();
         prose_source.push((prose_source[3].0, "the later value, adjacent".to_string()));
-        prose_source.insert(2, (prose_source[9].0, "the earlier value, far apart".to_string()));
+        prose_source.insert(
+            2,
+            (
+                prose_source[9].0,
+                "the earlier value, far apart".to_string(),
+            ),
+        );
         let mut note_source: Vec<(u32, String)> = (0..N)
             .filter(|entity| entity % 4 != 3)
             .map(|entity| ((entity * 11 % N) as u32, format!("note-{entity}")))
             .collect();
         note_source.push((note_source[7].0, "the later note, adjacent".to_string()));
-        note_source.insert(1, (note_source[19].0, "the earlier note, far apart".to_string()));
+        note_source.insert(
+            1,
+            (note_source[19].0, "the earlier note, far apart".to_string()),
+        );
 
         let blob_of = |dir: &Path, chunk: usize| -> Vec<PathBuf> {
             let extent_dir = dir.join("extents");
@@ -7321,9 +7353,7 @@ mod tests {
         // The source rows, in an order that is not entity order, with two entities written twice.
         let mut source: Vec<(u32, String)> = (0..N_KEYWORD)
             .filter_map(|entity| match keyword_fixture_key(entity) {
-                ScalarValue::Utf8(key) => {
-                    Some(((entity * 37 % N_KEYWORD) as u32, key))
-                }
+                ScalarValue::Utf8(key) => Some(((entity * 37 % N_KEYWORD) as u32, key)),
                 _ => None,
             })
             .collect();
@@ -7373,8 +7403,11 @@ mod tests {
             std::fs::create_dir_all(&extent_dir).expect("extent dir");
             let spilled = spilled_column(&extent_dir, 0, "key", &source, chunk);
             let open = spilled.open().expect("the extents open");
-            let from_extents =
-                files_of(&dir.path().join(format!("spilled-{chunk}")), &empty, Some(&open));
+            let from_extents = files_of(
+                &dir.path().join(format!("spilled-{chunk}")),
+                &empty,
+                Some(&open),
+            );
             assert_eq!(
                 from_extents, from_arena,
                 "extents in chunks of {chunk} wrote different files"
@@ -7709,10 +7742,14 @@ mod tests {
             (u64::MAX, 16), // absent, past the last source id
         ];
         let mut seen: Vec<(Option<u32>, u64, u32)> = Vec::new();
-        join_chunk(&mut chunk, Ids::Sparse(&source_ids), |ordinal, id, payload| {
-            seen.push((ordinal, id, payload));
-            Ok(())
-        })
+        join_chunk(
+            &mut chunk,
+            Ids::Sparse(&source_ids),
+            |ordinal, id, payload| {
+                seen.push((ordinal, id, payload));
+                Ok(())
+            },
+        )
         .unwrap();
         assert!(chunk.is_empty(), "the chunk must be drained");
         seen.sort_unstable_by_key(|&(_, _, p)| p);
@@ -7735,14 +7772,15 @@ mod tests {
     fn join_chunk_propagates_the_callbacks_error() {
         let source_ids: Vec<u64> = vec![1, 2];
         let mut chunk: Vec<(u64, ())> = vec![(1, ()), (3, ())];
-        let result = join_chunk(
-            &mut chunk,
-            Ids::Sparse(&source_ids),
-            |ordinal, id, ()| match ordinal {
-                Some(_) => Ok(()),
-                None => Err(input_changed(&format!("entity {id} missing"))),
-            },
-        );
+        let result =
+            join_chunk(
+                &mut chunk,
+                Ids::Sparse(&source_ids),
+                |ordinal, id, ()| match ordinal {
+                    Some(_) => Ok(()),
+                    None => Err(input_changed(&format!("entity {id} missing"))),
+                },
+            );
         assert!(result.is_err());
     }
 
@@ -7834,7 +7872,10 @@ mod tests {
         assert_eq!(other.set(163), Some(false));
         bits.union_with(&other);
         assert_eq!(bits.count(), 5);
-        assert_eq!(bits.ids().collect::<Vec<_>>(), vec![100, 101, 163, 164, 299]);
+        assert_eq!(
+            bits.ids().collect::<Vec<_>>(),
+            vec![100, 101, 163, 164, 299]
+        );
     }
 
     /// **A span ending at `u64::MAX` has padding bits in its last word**, and naming one of them
@@ -7870,5 +7911,4 @@ mod tests {
         assert!(!range(&[0, 2]));
         assert!(!range(&[0, 1, 2, 63]));
     }
-
 }

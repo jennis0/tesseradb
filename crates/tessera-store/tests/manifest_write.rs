@@ -135,6 +135,7 @@ fn build_fixture(root: &Path, n: u64, created_at: &str) -> (Manifest, std::path:
         row_column_extents: Vec::new(),
         shape_rows_extents: Vec::new(),
         shape_held_extents: Vec::new(),
+        term_image_extents: Vec::new(),
         artifact_record_extents: Vec::new(),
         segments: vec![SegmentDescriptor {
             incarnation: 0,
@@ -352,6 +353,7 @@ fn manifest_fixture() -> SegmentsManifest {
         row_column_extents: Vec::new(),
         shape_rows_extents: Vec::new(),
         shape_held_extents: Vec::new(),
+        term_image_extents: Vec::new(),
         artifact_record_extents: Vec::new(),
         segments: Vec::new(),
         deltas: Vec::new(),
@@ -397,7 +399,10 @@ fn a_side_manifest_is_never_replaced() {
     let refused = write_segments_manifest(prefix_dir, "default", 4, &second)
         .expect_err("the second write at the same n must be refused");
     assert!(
-        matches!(refused, tessera_store::StoreError::SideManifestExists { .. }),
+        matches!(
+            refused,
+            tessera_store::StoreError::SideManifestExists { .. }
+        ),
         "a collision is its own error, not a filesystem fault: {refused}"
     );
     assert!(

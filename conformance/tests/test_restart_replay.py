@@ -513,7 +513,14 @@ def test_deny_ops_and_ingest_survive_a_sigkill_restart(catalogue_bundle_root: Pa
             # --- idempotent replay of the SAME batch id + body ------------------------------
             resp2 = srv2.ingest(batch_body, BATCH_ID)
             assert resp2.status_code == 200, resp2.text
-            assert resp2.json()["accepted"] == 3
+            replay_body = resp2.json()
+            # A replay takes no rows, and says so (contracts §3.4). `accepted` is the effect this
+            # submission had, so a client summing it over its pages is not made to double-count a
+            # page it retried; the identifiers come back in full either way, which is what the
+            # caller correlates its rows by, and they are the ones the first acceptance minted.
+            assert replay_body["accepted"] == 0, replay_body
+            assert replay_body["replayed"] is True, replay_body
+            assert replay_body["tessera_ids"] == ingest_body["tessera_ids"], replay_body
 
             status_after_replay_ingest = srv2.status()
             assert (

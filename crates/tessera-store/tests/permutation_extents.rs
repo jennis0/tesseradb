@@ -63,6 +63,43 @@ fn projecting_the_whole_equals_the_union_of_the_parts() {
     assert_eq!(space.project(&mask), expected);
 }
 
+/// **The complement route answers the base's part and the extents are the same term above it.**
+///
+/// `RowSpace::project` is the base's contribution unioned with every extent's own. The complement
+/// route replaces the first of those two and nothing else, so a projection built that way must be
+/// the projection the walk builds. Over a mask reaching into both parts, over the whole of both,
+/// and over a narrow one.
+#[test]
+fn the_complement_route_under_the_extents_projects_what_the_walk_projects() {
+    let space = base_of(&[2, 0, 1, 4, 3])
+        .with_extent(extent(5, 7, "s1", 5, &[0, 1, 2]))
+        .unwrap();
+    space
+        .base()
+        .validate_rows(5)
+        .expect("the base is a bijection onto [0, 5)");
+
+    for (mask, what) in [
+        (croaring::Bitmap::of(&[0, 1, 2, 3, 5, 6, 7]), "all but one"),
+        (
+            croaring::Bitmap::of(&[0, 1, 2, 3, 4, 5, 6, 7]),
+            "everything",
+        ),
+        (croaring::Bitmap::of(&[1, 6]), "one entity in each part"),
+        (croaring::Bitmap::of(&[6, 7]), "the extent alone"),
+    ] {
+        let mut rows = space
+            .project_complement_base(&mask)
+            .expect("the base records the row count it is a bijection onto");
+        rows.or_inplace(&space.project_extents_from(&mask, 0));
+        assert_eq!(
+            rows,
+            space.project(&mask),
+            "{what}: the complement route under the extents lost or gained a row"
+        );
+    }
+}
+
 /// Merge is row-count preserving, so collapsing adjacent extents moves no later `row_base`.
 #[test]
 fn collapsing_adjacent_extents_preserves_every_row_id() {

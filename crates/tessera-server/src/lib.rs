@@ -387,6 +387,7 @@ pub fn prepare(config_path: &Path) -> Result<Prepared, BoxError> {
         dev_cors_origins: config.dev_cors_origins.clone(),
         cors_origins: config.cors_origins.clone(),
         cors_loopback: config.cors_loopback,
+        visible_wait_max_secs: config.visible_wait_max_secs,
         #[cfg(feature = "fault-injection")]
         faults,
     });

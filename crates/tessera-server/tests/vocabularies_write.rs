@@ -437,14 +437,14 @@ async fn the_route_declares_answers_redeclarations_and_refuses_what_the_schema_r
     let (status, body) = declare(&served, "severity", severity()).await;
     assert_eq!(status, 201, "{body}");
     assert_eq!(
-        body,
+        without_publication(body),
         json!({ "name": "severity", "existing": false, "added": 2, "titles": 0 })
     );
 
     let (status, body) = declare(&served, "severity", severity()).await;
     assert_eq!(status, 200, "identical: the vocabulary that exists: {body}");
     assert_eq!(
-        body,
+        without_publication(body),
         json!({ "name": "severity", "existing": true, "added": 0, "titles": 0 }),
         "a repeated value is a no-op"
     );
@@ -985,4 +985,19 @@ async fn a_declaration_and_its_values_survive_a_restart_and_a_fold() {
         1,
         "the column still answers over the folded vocabulary"
     );
+}
+
+/// A declaration's answer with `publication` taken out, so a whole-object comparison stays a
+/// whole-object comparison. The number is a running count and a test cannot name it, but its
+/// absence would be a route that stopped telling a caller when its declaration becomes visible
+/// (contracts §3.4), so this asserts it was there.
+fn without_publication(mut body: Value) -> Value {
+    assert!(
+        body.as_object_mut()
+            .expect("the answer is an object")
+            .remove("publication")
+            .is_some(),
+        "every write acknowledgement carries a publication number: {body}"
+    );
+    body
 }

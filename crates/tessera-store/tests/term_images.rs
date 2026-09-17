@@ -20,7 +20,8 @@ use rand::{Rng, SeedableRng};
 use tessera_store::derived::PostingSlice;
 use tessera_store::permutation::Permutation;
 use tessera_store::term_images::{
-    derive_term_images, DeriveOptions, TermImageStamp, TermImages, KEEP_ROWS_PER_CONTAINER,
+    chooser_inputs, derive_term_images, DeriveOptions, TermImageStamp, TermImages,
+    KEEP_ROWS_PER_CONTAINER,
 };
 use tessera_store::write::write_permutation;
 use tessera_store::RowSpace;
@@ -157,12 +158,26 @@ fn a_derived_file_carries_what_an_independent_projection_produces() {
     assert_eq!(images.stamp(), &stamp_of(&space));
 
     let mut kept = Vec::new();
+    let mut fewer_rows_than_entities = 0;
     for (term, posting) in postings.iter().enumerate() {
         let term = TermId::new(term as u32);
         let entry = images.entry(term).expect("within the dictionary");
         let mut expected = space.project_base(posting);
         expected.run_optimize();
         let stats = expected.statistics();
+
+        assert_eq!(
+            u64::from(entry.entities),
+            posting.cardinality(),
+            "term {term:?} entities is the posting's own cardinality"
+        );
+        assert!(
+            entry.rows <= u64::from(entry.entities),
+            "term {term:?} cannot hold more rows than its posting has entities"
+        );
+        if entry.rows < u64::from(entry.entities) {
+            fewer_rows_than_entities += 1;
+        }
 
         if posting.cardinality() <= KEEP_ROWS_PER_CONTAINER {
             assert_eq!(
@@ -209,6 +224,11 @@ fn a_derived_file_carries_what_an_independent_projection_produces() {
     }
 
     assert!(kept.len() >= 8, "the fixture must keep several images");
+    assert!(
+        fewer_rows_than_entities > 0,
+        "the fixture's permutation must leave some entities without a row, so that the two \
+         columns are distinguishable"
+    );
     let unioned = images.union(&kept);
     let projections: Vec<Bitmap> = kept
         .iter()
@@ -227,6 +247,72 @@ fn a_derived_file_carries_what_an_independent_projection_produces() {
     assert!(images.view(above).is_none());
     assert!(images.union(&[above]).is_empty());
     assert!(images.union(&[]).is_empty());
+}
+
+/// The chooser's residual is the unkept terms' **entities**, not their rows.
+///
+/// The walk reads one permutation slot per entity whether or not the slot holds a row, so a
+/// permutation that gives some entities no row makes the two columns differ and the sum must
+/// follow the larger one.
+#[test]
+fn the_chooser_prices_the_residual_in_entities() {
+    const BOUND: u64 = 3 << 16;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut rng = StdRng::seed_from_u64(11);
+    let entities = row_order(BOUND, 0.9, Some(1), &mut rng);
+    let space = space_of(dir.path(), &entities, BOUND);
+    let postings = mixed_postings(40, BOUND, &mut rng);
+
+    let out = dir.path().join("chooser.timg");
+    derive(&space, &postings, &out, 1).expect("derive");
+    let images = TermImages::open(&out, &stamp_of(&space), postings.len() as u32).expect("opens");
+
+    let satisfied: Vec<TermId> = (0..postings.len() as u32).map(TermId::new).collect();
+    let inputs = chooser_inputs(&images, &satisfied, 1_000, BOUND, false, 0);
+
+    let mut unkept_entities = 0u64;
+    let mut unkept_rows = 0u64;
+    for term in satisfied.iter().copied() {
+        let entry = images.entry(term).expect("within the dictionary");
+        if !entry.kept() {
+            unkept_entities += u64::from(entry.entities);
+            unkept_rows += entry.rows;
+        }
+    }
+    assert!(
+        unkept_rows < unkept_entities,
+        "the fixture must hold an unkept term whose posting has entities with no row"
+    );
+    assert_eq!(inputs.residual_entities, unkept_entities);
+}
+
+/// **A path that already holds a file is refused, and the file standing there is left alone.**
+///
+/// One term-image file per (prefix, view) is written once, by the publication that creates the
+/// prefix. A second derivation onto a live path would put a mapped reader on bytes that no longer
+/// describe its row space, and the reader has no way to notice: the stamp it checked still matches.
+#[test]
+fn a_second_derivation_onto_the_same_path_is_refused() {
+    const BOUND: u64 = 3 << 16;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut rng = StdRng::seed_from_u64(97);
+    let entities = row_order(BOUND, 0.9, Some(1), &mut rng);
+    let space = space_of(dir.path(), &entities, BOUND);
+    let postings = mixed_postings(24, BOUND, &mut rng);
+
+    let out = dir.path().join("once.timg");
+    derive(&space, &postings, &out, 1).expect("derive");
+    let first = std::fs::read(&out).expect("read");
+
+    let error = derive(&space, &postings, &out, 1).expect_err("the second derivation is refused");
+    assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists, "{error}");
+    assert_eq!(
+        std::fs::read(&out).expect("read"),
+        first,
+        "the refusal leaves the file that was there"
+    );
+    TermImages::open(&out, &stamp_of(&space), postings.len() as u32)
+        .expect("which still opens as it did");
 }
 
 /// The file does not depend on how many threads derived it.
@@ -271,8 +357,8 @@ fn a_window_holding_no_kept_image_writes_the_same_bytes_at_every_width() {
     let entities = row_order(BOUND, 0.9, Some(1), &mut rng);
     let space = space_of(dir.path(), &entities, BOUND);
 
-    // Thirty-six terms, three windows of twelve at three threads. The middle twelve are postings
-    // of thirty entities, which the derivation skips, so that window contributes no payload.
+    // Thirty-six terms, one window per thread in flight. The middle twelve are postings of thirty
+    // entities, which the derivation skips, so every window they fall in contributes no payload.
     let mut postings = mixed_postings(36, BOUND, &mut rng);
     for posting in postings.iter_mut().take(24).skip(12) {
         *posting = Bitmap::new();
@@ -310,6 +396,95 @@ fn a_window_holding_no_kept_image_writes_the_same_bytes_at_every_width() {
     assert!(
         (24..36u32).any(|term| images.kept(TermId::new(term))),
         "the last window must keep an image"
+    );
+}
+
+/// A run of terms too small to be projected, longer than the derivation's buffer of table rows,
+/// between the postings a window holds.
+///
+/// A window holds the postings that are projected, so a term settled as it is read has its row
+/// written between two windows' rows, and a run longer than the buffer is written by several
+/// positioned writes. The bytes must not depend on where those writes fall.
+#[test]
+fn a_run_of_small_terms_between_projected_ones_writes_the_same_bytes_at_every_width() {
+    const BOUND: u64 = 3 << 16;
+    // Longer than the derivation's table-row buffer of 4,096 rows.
+    const RUN: usize = 5_000;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut rng = StdRng::seed_from_u64(61);
+    let entities = row_order(BOUND, 0.9, Some(1), &mut rng);
+    let space = space_of(dir.path(), &entities, BOUND);
+
+    // Three projected terms, a run of small ones, two projected, a second run, three projected.
+    // Every eleventh term of a run holds no entities, so an empty posting sits inside a run too.
+    let mut postings: Vec<Bitmap> = Vec::new();
+    let mut large: Vec<u32> = Vec::new();
+    for block in [3usize, 2, 3] {
+        for _ in 0..block {
+            let mut posting = Bitmap::new();
+            // Inside the first permutation page, which the fixture keeps whole, so every entity of
+            // the block holds a row and the image is dense enough to keep.
+            let start = rng.gen_range(0..40_000u32);
+            posting.add_range(start..start + 8_000);
+            large.push(postings.len() as u32);
+            postings.push(posting);
+        }
+        if large.len() < 8 {
+            for term in 0..RUN {
+                let mut posting = Bitmap::new();
+                if !term.is_multiple_of(11) {
+                    for _ in 0..4 {
+                        posting.add(rng.gen_range(0..BOUND) as u32);
+                    }
+                }
+                postings.push(posting);
+            }
+        }
+    }
+
+    let mut reference: Option<Vec<u8>> = None;
+    for threads in [1usize, 3, 12] {
+        let out = dir.path().join(format!("run-{threads}.timg"));
+        derive(&space, &postings, &out, threads).expect("derive");
+        let bytes = std::fs::read(&out).expect("read");
+        match &reference {
+            None => reference = Some(bytes),
+            Some(first) => assert_eq!(
+                first, &bytes,
+                "{threads} threads must write the bytes one thread writes across a long run of \
+                 small terms"
+            ),
+        }
+    }
+
+    let out = dir.path().join("run-1.timg");
+    let images = TermImages::open(&out, &stamp_of(&space), postings.len() as u32).expect("opens");
+    for (term, posting) in postings.iter().enumerate() {
+        let entry = images
+            .entry(TermId::new(term as u32))
+            .expect("a row per term");
+        assert_eq!(
+            u64::from(entry.entities),
+            posting.cardinality(),
+            "term {term}'s row records its posting's cardinality"
+        );
+        if large.contains(&(term as u32)) {
+            assert!(
+                entry.kept(),
+                "term {term} is projected and dense enough to keep"
+            );
+        } else {
+            assert!(!entry.kept(), "term {term} is too small to be projected");
+            assert_eq!(entry.containers, 0, "term {term} was not projected");
+        }
+    }
+    assert_eq!(
+        images.union(&large.iter().map(|t| TermId::new(*t)).collect::<Vec<_>>()),
+        large.iter().fold(Bitmap::new(), |mut rows, term| {
+            rows.or_inplace(&space.project_base(&postings[*term as usize]));
+            rows
+        }),
+        "the images either side of the runs union to the projection of their postings"
     );
 }
 

@@ -26,8 +26,8 @@
 //! cardinality is at most its posting's; a non-empty image occupies at least one container. Such a
 //! posting therefore cannot exceed 30 rows per container and cannot be kept, whatever the
 //! permutation does. The skip is exact rather than an estimate. The table still records the
-//! posting's cardinality, which is an upper bound on the image's rows and so a conservative
-//! residual for the chooser.
+//! posting's cardinality, in `entities`, which is what the chooser prices the residual walk from
+//! and what an image's rows are checked against at open.
 //!
 //! # Exactness
 //!
@@ -67,6 +67,7 @@
 
 use std::fs::File;
 use std::io::{self, Seek, SeekFrom, Write};
+use std::os::unix::fs::FileExt;
 use std::path::Path;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -93,7 +94,7 @@ pub const KEEP_ROWS_PER_CONTAINER: u64 = 30;
 pub const MAGIC: [u8; 8] = *b"TSMIMG01";
 
 /// The header layout this module writes and reads.
-pub const HEADER_VERSION: u32 = 1;
+pub const HEADER_VERSION: u32 = 2;
 
 /// The fixed header, ahead of the table.
 pub const HEADER_BYTES: usize = 128;
@@ -127,6 +128,7 @@ const ENTRY_CONTAINERS: usize = 20;
 const ENTRY_ARRAYS: usize = 24;
 const ENTRY_RUNS: usize = 28;
 const ENTRY_BITSETS: usize = 32;
+const ENTRY_ENTITIES: usize = 36;
 
 /// Which row space a file's images belong to.
 ///
@@ -169,11 +171,12 @@ impl TermImageStamp {
 
 /// One term's row in the table.
 ///
-/// `rows` means three different things, told apart by the other fields. For a term that was
-/// projected it is the image's cardinality, kept or not, and the container counts describe that
-/// image. For a term whose posting was too small to pass the keep rule it is the posting's
-/// cardinality, an upper bound on the image's rows, and the container counts are zero. For a term
-/// the posting walk carries no record of, every field is zero.
+/// `entities` is the base posting's cardinality for every term the posting walk carried, whether
+/// its image was kept, derived and dropped, or never built. `rows` means two different things,
+/// told apart by the container counts. For a term that was projected it is the image's
+/// cardinality, kept or not, and the container counts describe that image. For a term whose
+/// posting was too small to pass the keep rule it is the posting's cardinality and the container
+/// counts are zero. For a term the posting walk carries no record of, every field is zero.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct TermImageEntry {
     /// Absolute file offset of the frozen image, or zero where none was kept.
@@ -190,6 +193,9 @@ pub struct TermImageEntry {
     pub runs: u32,
     /// Bitset containers in the image.
     pub bitsets: u32,
+    /// The base posting's cardinality, which is what the residual walk reads one permutation slot
+    /// for. Zero where the walk carried no posting for the term.
+    pub entities: u32,
 }
 
 impl TermImageEntry {
@@ -208,6 +214,7 @@ impl TermImageEntry {
         bytes[ENTRY_ARRAYS..ENTRY_ARRAYS + 4].copy_from_slice(&self.arrays.to_le_bytes());
         bytes[ENTRY_RUNS..ENTRY_RUNS + 4].copy_from_slice(&self.runs.to_le_bytes());
         bytes[ENTRY_BITSETS..ENTRY_BITSETS + 4].copy_from_slice(&self.bitsets.to_le_bytes());
+        bytes[ENTRY_ENTITIES..ENTRY_ENTITIES + 4].copy_from_slice(&self.entities.to_le_bytes());
         bytes
     }
 
@@ -220,6 +227,7 @@ impl TermImageEntry {
             arrays: le_u32(bytes, ENTRY_ARRAYS),
             runs: le_u32(bytes, ENTRY_RUNS),
             bitsets: le_u32(bytes, ENTRY_BITSETS),
+            entities: le_u32(bytes, ENTRY_ENTITIES),
         }
     }
 
@@ -286,7 +294,7 @@ pub struct TermImageSummary {
     pub wall: Duration,
 }
 
-/// One term's posting as the derivation holds it while the window is projected.
+/// One term's posting as the walk read it.
 enum Posting {
     /// The walk carried no record of the term.
     Absent,
@@ -299,32 +307,52 @@ enum Posting {
 /// One term's result, before it is placed in the file.
 #[derive(Default)]
 struct Outcome {
+    entities: u64,
     rows: u64,
     containers: u32,
     arrays: u32,
     runs: u32,
     bitsets: u32,
-    derived: bool,
-    skipped_small: bool,
     /// The frozen bytes and where they start inside the buffer the serialiser aligned them in.
     image: Option<(Vec<u8>, usize)>,
 }
 
+/// A posting waiting for its window to fill: which term it is, where its table row is reserved in
+/// the buffer of rows awaiting their positioned write, and the entities to project.
+struct Pending {
+    term: u32,
+    row_at: usize,
+    entities: Bitmap,
+}
+
+/// Table rows the derivation buffers before a positioned write. A window that fills first writes
+/// its rows sooner; this is what bounds the buffer where a long run of terms that are not
+/// projected separates two windows.
+const TABLE_ROW_BUFFER: usize = 4096;
+
 /// Derive every term's image for one view and write them to `out`.
 ///
 /// `posting` is called once per term id below `dict_len`, in ascending order, on the calling
-/// thread: the walk reads a file and is not required to be callable from a worker. Each window of
-/// `threads × 4` consecutive terms is read, then projected across the workers, then appended in
-/// term order before the next window is read, so the bytes written do not depend on `threads`.
+/// thread: the walk reads a file and is not required to be callable from a worker. A term the walk
+/// carries no posting for, and a posting the skip rule above leaves unprojected, is settled as it
+/// is read and contributes a table row only. A posting that is projected joins a window of
+/// `threads` such postings; the workers project the window and its images are appended in term
+/// order before reading goes on, so the bytes written do not depend on `threads`. A window counted
+/// in terms would dispatch the workers once per `threads` terms for work that is mostly a table
+/// row, most terms holding too few entities to be projected.
 ///
-/// What this holds at once is one window's postings, each read into an owned bitmap before it is
-/// projected, plus one window's kept images, plus one [`ProjectScratch`] per worker. The table is
-/// held whole: 40 bytes per term id. Nothing else scales with the dictionary.
+/// **Nothing here scales with the dictionary.** What this holds at once is one window of `threads`
+/// postings, each read into an owned bitmap before it is projected, that window's kept images, one
+/// [`ProjectScratch`] per worker, and at most [`TABLE_ROW_BUFFER`] table rows. The rows are written
+/// into the table region as the buffer empties, at `table_offset + term × TABLE_ENTRY_BYTES`, which
+/// the `set_len` below has already created. Holding the whole table instead costs 40 bytes per term
+/// id, which is 4.7 GB at a dictionary of 1.17×10⁸.
 ///
-/// The header is written after the payload and the table, and the file is synced between the two
-/// writes, so a file interrupted part way carries a zero header and is refused at open rather than
-/// read short. On any error the partial file is removed, so a failed derivation leaves no path for
-/// a later caller to pick up.
+/// The header is written after the payload and the table, and the file is synced between the two,
+/// so a file interrupted part way carries a zero header and is refused at open rather than read
+/// short. On any error the partial file is removed, so a failed derivation leaves no path for a
+/// later caller to pick up. A path that already exists is refused and left alone: one file per
+/// (prefix, view) is written once, by the publication that creates the prefix.
 ///
 /// The caller names the file and syncs the directory it was placed in.
 pub fn derive_term_images(
@@ -355,10 +383,13 @@ pub fn derive_term_images(
     }
 
     let mut summary = write_term_images(space, dict_len, posting, stamp, out, options)
-        .inspect_err(|_| {
+        .inspect_err(|e| {
             // Best effort: a file that cannot be removed is one open refuses anyway, because the
-            // header was never written.
-            let _ = std::fs::remove_file(out);
+            // header was never written. A path that was already there is not this call's to
+            // remove, and it is the one error raised before anything was created.
+            if e.kind() != io::ErrorKind::AlreadyExists {
+                let _ = std::fs::remove_file(out);
+            }
         })?;
     summary.wall = started.elapsed();
     Ok(summary)
@@ -374,7 +405,11 @@ fn write_term_images(
     options: DeriveOptions,
 ) -> io::Result<TermImageSummary> {
     let threads = options.threads.max(1);
-    let window = threads * 4;
+    // One projection per worker in flight. A wider window holds that many more owned postings and
+    // kept images for no gain: the workers are saturated at one posting each, and the window is
+    // what this pass holds in memory.
+    let window = threads;
+    let table_buffer_bytes = TABLE_ROW_BUFFER.max(window) * TABLE_ENTRY_BYTES;
     let table_bytes = u64::from(dict_len) * TABLE_ENTRY_BYTES as u64;
     let table_offset = HEADER_BYTES as u64;
     let payload_offset = align_up(table_offset + table_bytes);
@@ -391,12 +426,14 @@ fn write_term_images(
     };
     let scratches: Mutex<Vec<ProjectScratch>> = Mutex::new(Vec::new());
 
-    let mut file = File::create(out)?;
+    // **Refused rather than truncated where the path exists.** A term-image file is written once,
+    // by the publication that creates the prefix it sits in, and a second derivation onto a live
+    // path would leave a mapped reader on bytes that no longer describe its row space.
+    let mut file = File::create_new(out)?;
     file.set_len(payload_offset)?;
     file.seek(SeekFrom::Start(payload_offset))?;
     let mut writer = io::BufWriter::new(file);
 
-    let mut table = vec![TermImageEntry::default(); dict_len as usize];
     let mut summary = TermImageSummary {
         terms: dict_len,
         table_bytes,
@@ -404,82 +441,103 @@ fn write_term_images(
     };
     let zeros = [0u8; PAYLOAD_ALIGN];
     let mut at = payload_offset;
-    let mut window_postings: Vec<Posting> = Vec::with_capacity(window);
+    let mut pending: Vec<Pending> = Vec::with_capacity(window);
+    let mut table: Vec<u8> = Vec::with_capacity(table_buffer_bytes);
+    // The term whose row starts `table`.
+    let mut table_first = 0u32;
 
-    let mut first = 0u32;
-    while first < dict_len {
-        let last = ((u64::from(first) + window as u64).min(u64::from(dict_len))) as u32;
-        window_postings.clear();
-        for term in first..last {
-            window_postings.push(read_posting(posting, term)?);
-        }
-
-        let outcomes: Vec<Outcome> = match &pool {
-            Some(pool) => pool.install(|| {
-                window_postings
-                    .par_iter()
-                    .map(|p| derive_one(space, p, &scratches))
-                    .collect()
-            }),
-            None => window_postings
-                .iter()
-                .map(|p| derive_one(space, p, &scratches))
-                .collect(),
-        };
-
-        for (step, outcome) in outcomes.into_iter().enumerate() {
-            let term = first + step as u32;
-            let mut entry = TermImageEntry {
-                offset: 0,
-                len: 0,
-                rows: outcome.rows,
-                containers: outcome.containers,
-                arrays: outcome.arrays,
-                runs: outcome.runs,
-                bitsets: outcome.bitsets,
-            };
-            if outcome.derived {
-                summary.derived += 1;
-            }
-            if outcome.skipped_small {
-                summary.skipped_small += 1;
-            }
-            if let Some((buffer, start)) = outcome.image {
-                let bytes = &buffer[start..];
-                let aligned = align_up(at);
-                if aligned > at {
-                    writer.write_all(&zeros[..(aligned - at) as usize])?;
-                    at = aligned;
+    let mut term = 0u32;
+    while term < dict_len || !pending.is_empty() || !table.is_empty() {
+        // Read until the window is full, the row buffer is full, or the dictionary ends.
+        while term < dict_len && pending.len() < window && table.len() < table_buffer_bytes {
+            match read_posting(posting, term)? {
+                Posting::Absent => {
+                    table.extend_from_slice(&encode_row(term, &Outcome::default(), 0, 0)?);
                 }
-                let len = u32::try_from(bytes.len()).map_err(|_| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!("term images: term {term}'s image is {} bytes", bytes.len()),
-                    )
-                })?;
-                writer.write_all(bytes)?;
-                entry.offset = at;
-                entry.len = len;
-                at += u64::from(len);
-                summary.kept += 1;
-                summary.largest_image_bytes = summary.largest_image_bytes.max(u64::from(len));
+                Posting::Small(entities) => {
+                    summary.skipped_small += 1;
+                    let outcome = Outcome {
+                        entities,
+                        rows: entities,
+                        ..Outcome::default()
+                    };
+                    table.extend_from_slice(&encode_row(term, &outcome, 0, 0)?);
+                }
+                Posting::Large(entities) => {
+                    // The row is reserved here and filled once the window is projected, so the
+                    // rows either side of it keep their term order.
+                    pending.push(Pending {
+                        term,
+                        row_at: table.len(),
+                        entities,
+                    });
+                    table.resize(table.len() + TABLE_ENTRY_BYTES, 0);
+                }
             }
-            table[term as usize] = entry;
+            term += 1;
         }
-        first = last;
+
+        if !pending.is_empty() {
+            let outcomes: Vec<Outcome> = match &pool {
+                Some(pool) => pool.install(|| {
+                    pending
+                        .par_iter()
+                        .map(|p| project_one(space, &p.entities, &scratches))
+                        .collect()
+                }),
+                None => pending
+                    .iter()
+                    .map(|p| project_one(space, &p.entities, &scratches))
+                    .collect(),
+            };
+            summary.derived += pending.len() as u32;
+            for (held, mut outcome) in pending.drain(..).zip(outcomes) {
+                let mut offset = 0u64;
+                let mut len = 0u32;
+                if let Some((buffer, start)) = outcome.image.take() {
+                    let bytes = &buffer[start..];
+                    let aligned = align_up(at);
+                    if aligned > at {
+                        writer.write_all(&zeros[..(aligned - at) as usize])?;
+                        at = aligned;
+                    }
+                    len = u32::try_from(bytes.len()).map_err(|_| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            format!(
+                                "term images: term {}'s image is {} bytes",
+                                held.term,
+                                bytes.len()
+                            ),
+                        )
+                    })?;
+                    writer.write_all(bytes)?;
+                    offset = at;
+                    at += u64::from(len);
+                    summary.kept += 1;
+                    summary.largest_image_bytes = summary.largest_image_bytes.max(u64::from(len));
+                }
+                let row = encode_row(held.term, &outcome, offset, len)?;
+                table[held.row_at..held.row_at + TABLE_ENTRY_BYTES].copy_from_slice(&row);
+            }
+        }
+
+        // The rows read so far, into the region `set_len` created. `write_all_at` is a positioned
+        // write, so it leaves the payload writer's cursor where the next image goes.
+        if !table.is_empty() {
+            writer.get_ref().write_all_at(
+                &table,
+                table_offset + u64::from(table_first) * TABLE_ENTRY_BYTES as u64,
+            )?;
+            table_first += (table.len() / TABLE_ENTRY_BYTES) as u32;
+            table.clear();
+        }
     }
 
     summary.payload_bytes = at - payload_offset;
 
+    // The payload, and with it every positioned table write above.
     let mut file = writer.into_inner().map_err(|e| e.into_error())?;
-    file.seek(SeekFrom::Start(table_offset))?;
-    {
-        let mut table_writer = io::BufWriter::new(&mut file);
-        for entry in &table {
-            table_writer.write_all(&entry.encode())?;
-        }
-        table_writer.flush()?;
-    }
     file.sync_all()?;
 
     let mut header = [0u8; HEADER_BYTES];
@@ -539,52 +597,74 @@ fn read_posting(posting: PostingWalk<'_>, term: u32) -> io::Result<Posting> {
     })
 }
 
-/// Project one posting and decide whether its image is kept.
-fn derive_one(
+/// Project one posting and decide whether its image is kept. Runs on a worker.
+fn project_one(
     space: &RowSpace,
-    posting: &Posting,
+    entities: &Bitmap,
     scratches: &Mutex<Vec<ProjectScratch>>,
 ) -> Outcome {
-    match posting {
-        Posting::Absent => Outcome::default(),
-        Posting::Small(rows) => Outcome {
-            rows: *rows,
-            skipped_small: true,
-            ..Outcome::default()
-        },
-        Posting::Large(entities) => {
-            let mut scratch = scratches
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .pop()
-                .unwrap_or_default();
-            let mut image = space.project_base_with(entities, &mut scratch);
-            scratches
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .push(scratch);
+    let held = entities.cardinality();
+    let mut scratch = scratches
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .pop()
+        .unwrap_or_default();
+    let mut image = space.project_base_with(entities, &mut scratch);
+    scratches
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .push(scratch);
 
-            image.run_optimize();
-            let stats = image.statistics();
-            let keep = stats.cardinality > KEEP_ROWS_PER_CONTAINER * u64::from(stats.n_containers);
-            let bytes = keep.then(|| {
-                let mut buffer = Vec::new();
-                let len = image.serialize_into_vec::<Frozen>(&mut buffer).len();
-                let start = buffer.len() - len;
-                (buffer, start)
-            });
-            Outcome {
-                rows: stats.cardinality,
-                containers: stats.n_containers,
-                arrays: stats.n_array_containers,
-                runs: stats.n_run_containers,
-                bitsets: stats.n_bitset_containers,
-                derived: true,
-                skipped_small: false,
-                image: bytes,
-            }
-        }
+    image.run_optimize();
+    let stats = image.statistics();
+    let keep = stats.cardinality > KEEP_ROWS_PER_CONTAINER * u64::from(stats.n_containers);
+    let bytes = keep.then(|| {
+        let mut buffer = Vec::new();
+        let len = image.serialize_into_vec::<Frozen>(&mut buffer).len();
+        let start = buffer.len() - len;
+        (buffer, start)
+    });
+    Outcome {
+        entities: held,
+        rows: stats.cardinality,
+        containers: stats.n_containers,
+        arrays: stats.n_array_containers,
+        runs: stats.n_run_containers,
+        bitsets: stats.n_bitset_containers,
+        image: bytes,
     }
+}
+
+/// One term's table row, once the term's image has been placed in the payload.
+fn encode_row(
+    term: u32,
+    outcome: &Outcome,
+    offset: u64,
+    len: u32,
+) -> io::Result<[u8; TABLE_ENTRY_BYTES]> {
+    // The entity ceiling is `u32::MAX` (I9), so a posting cannot hold more entities than the field
+    // admits. Raised rather than clamped: a clamp would record a cardinality below the term's own
+    // rows, which open refuses.
+    let entities = u32::try_from(outcome.entities).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "term images: term {term}'s posting holds {} entities",
+                outcome.entities
+            ),
+        )
+    })?;
+    Ok(TermImageEntry {
+        offset,
+        len,
+        rows: outcome.rows,
+        containers: outcome.containers,
+        arrays: outcome.arrays,
+        runs: outcome.runs,
+        bitsets: outcome.bitsets,
+        entities,
+    }
+    .encode())
 }
 
 // -------------------------------------------------------------------------------------------
@@ -623,6 +703,8 @@ pub enum TermImageRefusal {
     EntryTooShort { term: u32 },
     /// An entry's container counts do not sum, or an entry with no image carries a length.
     EntryMalformed { term: u32 },
+    /// An entry records more rows than its posting has entities.
+    EntryRowsExceedEntities { term: u32 },
     /// The header's stamp digest is not the caller's.
     StampDigest,
     /// The header's view incarnation is not the caller's.
@@ -686,6 +768,10 @@ impl std::fmt::Display for TermImageRefusal {
             TermImageRefusal::EntryMalformed { term } => {
                 write!(f, "term images: term {term}'s table entry is inconsistent")
             }
+            TermImageRefusal::EntryRowsExceedEntities { term } => write!(
+                f,
+                "term images: term {term}'s image holds more rows than its posting has entities"
+            ),
             TermImageRefusal::StampDigest => {
                 write!(
                     f,
@@ -821,6 +907,12 @@ impl TermImages {
             if u64::from(entry.containers) != parts {
                 return Err(TermImageRefusal::EntryMalformed { term });
             }
+            // Projection maps each entity to at most one row, so an image cannot hold more rows
+            // than its posting holds entities. A term the walk carried no posting for has both at
+            // zero, so the comparison covers every entry.
+            if entry.rows > u64::from(entry.entities) {
+                return Err(TermImageRefusal::EntryRowsExceedEntities { term });
+            }
             if !entry.kept() {
                 if entry.len != 0 {
                     return Err(TermImageRefusal::EntryMalformed { term });
@@ -948,8 +1040,8 @@ pub struct RouteCosts {
     pub split_ns_per_array_or_run: f64,
     /// Per bitset container unioned, for the split.
     pub split_ns_per_bitset: f64,
-    /// Per residual row walked, for the split.
-    pub residual_ns_per_row: f64,
+    /// Per residual entity walked, for the split.
+    pub residual_ns_per_entity: f64,
     /// Per entity outside the grant, for the complement.
     pub complement_ns_per_entity: f64,
 }
@@ -961,7 +1053,7 @@ pub const ROUTE_COSTS: RouteCosts = RouteCosts {
     walk_ns_per_entity: 6.5,
     split_ns_per_array_or_run: 350.0,
     split_ns_per_bitset: 1000.0,
-    residual_ns_per_row: 11.0,
+    residual_ns_per_entity: 11.0,
     complement_ns_per_entity: 11.0,
 };
 
@@ -980,8 +1072,8 @@ pub struct ChooserInputs {
     pub kept_bitsets: u64,
     /// How many of the session's terms have an image.
     pub kept_terms: u32,
-    /// An upper bound on the rows the residual walk would produce.
-    pub residual_rows: u64,
+    /// An upper bound on the entities the residual walk would read a permutation slot for.
+    pub residual_entities: u64,
 }
 
 /// How a session builds its row projection.
@@ -1012,7 +1104,7 @@ pub fn choose(inputs: &ChooserInputs, costs: &RouteCosts) -> Route {
     if inputs.kept_terms > 0 {
         let split = costs.split_ns_per_array_or_run * inputs.kept_arrays_and_runs as f64
             + costs.split_ns_per_bitset * inputs.kept_bitsets as f64
-            + costs.residual_ns_per_row * inputs.residual_rows as f64;
+            + costs.residual_ns_per_entity * inputs.residual_entities as f64;
         if split < cheapest {
             route = Route::Split;
             cheapest = split;
@@ -1030,16 +1122,22 @@ pub fn choose(inputs: &ChooserInputs, costs: &RouteCosts) -> Route {
 
 /// Sum the table over a session's satisfied terms into [`ChooserInputs`].
 ///
-/// `satisfied` is ascending and deduplicated; `delta_rows` is the caller's sum of the same terms'
-/// delta-posting cardinalities, which no image covers. Terms at or above the table's length have no
-/// base posting and contribute nothing here; their rows arrive in `delta_rows`.
+/// `satisfied` is ascending and deduplicated; `delta_entities` is the caller's sum of the same
+/// terms' delta-posting cardinalities, which no image covers. Terms at or above the table's length
+/// have no base posting and contribute nothing here; their entities arrive in `delta_entities`.
+///
+/// **The residual is summed in entities and not in rows.** The residual walk reads one permutation
+/// slot per entity of the residual fragment, so its cost follows the entity count whatever the
+/// walk produces. In a `group:key` view a slot holds no row for an entity the key does not cover,
+/// so the rows are fewer than the entities, and pricing the walk by rows would price the work at
+/// less than it costs and take the split where the walk is cheaper.
 pub fn chooser_inputs(
     images: &TermImages,
     satisfied: &[TermId],
     held: u64,
     bound: u64,
     complement_valid: bool,
-    delta_rows: u64,
+    delta_entities: u64,
 ) -> ChooserInputs {
     debug_assert!(
         satisfied.windows(2).all(|pair| pair[0] < pair[1]),
@@ -1060,10 +1158,10 @@ pub fn chooser_inputs(
             inputs.kept_arrays_and_runs += u64::from(entry.arrays) + u64::from(entry.runs);
             inputs.kept_bitsets += u64::from(entry.bitsets);
         } else {
-            inputs.residual_rows += entry.rows;
+            inputs.residual_entities += u64::from(entry.entities);
         }
     }
-    inputs.residual_rows += delta_rows;
+    inputs.residual_entities += delta_entities;
     inputs
 }
 
@@ -1141,10 +1239,12 @@ mod tests {
         let images = TermImages::open(&out, &stamp_of(&space), 2).expect("a derived file opens");
         let at_cut = images.entry(TermId::new(0)).expect("term 0");
         assert_eq!(at_cut.rows, 2 * u64::from(per));
+        assert_eq!(at_cut.entities, 2 * per, "the posting's own cardinality");
         assert_eq!(at_cut.containers, 2);
         assert!(!at_cut.kept(), "exactly 30 rows per container is not kept");
         let above_cut = images.entry(TermId::new(1)).expect("term 1");
         assert_eq!(above_cut.rows, 2 * u64::from(per) + 1);
+        assert_eq!(above_cut.entities, 2 * per + 1);
         assert_eq!(above_cut.containers, 2);
         assert!(above_cut.kept(), "one row above the cut is kept");
     }
@@ -1168,6 +1268,10 @@ mod tests {
         let images = TermImages::open(&out, &stamp_of(&space), 1).expect("opens");
         let entry = images.entry(TermId::new(0)).expect("term 0");
         assert_eq!(entry.rows, KEEP_ROWS_PER_CONTAINER);
+        assert_eq!(
+            entry.entities, KEEP_ROWS_PER_CONTAINER as u32,
+            "a skipped posting records its cardinality in both fields"
+        );
         assert_eq!(entry.containers, 0);
         assert!(!entry.kept());
     }
@@ -1444,6 +1548,19 @@ mod tests {
                 b[at + ENTRY_RUNS..at + ENTRY_RUNS + 4].copy_from_slice(&7u32.to_le_bytes());
             }
         );
+        // One entity fewer than the image has rows. Projection maps entities to rows one for one,
+        // so a table saying otherwise describes an image that cannot have come from this posting.
+        case!(
+            "rows-above-entities.timg",
+            TermImageRefusal::EntryRowsExceedEntities { .. },
+            |b: &mut Vec<u8>| {
+                let at = first_kept_entry_at(b);
+                let rows = le_u64(b, at + ENTRY_ROWS);
+                let fewer = (rows - 1) as u32;
+                b[at + ENTRY_ENTITIES..at + ENTRY_ENTITIES + 4]
+                    .copy_from_slice(&fewer.to_le_bytes());
+            }
+        );
         case!(
             "unkept-with-length.timg",
             TermImageRefusal::EntryMalformed { .. },
@@ -1557,7 +1674,7 @@ mod tests {
             kept_arrays_and_runs: 1_000,
             kept_bitsets: 1_000,
             kept_terms: 4,
-            residual_rows: 1_000_000,
+            residual_entities: 1_000_000,
         };
         assert_eq!(choose(&walk, &ROUTE_COSTS), Route::Walk);
 
@@ -1568,7 +1685,7 @@ mod tests {
             kept_arrays_and_runs: 1_000,
             kept_bitsets: 100,
             kept_terms: 4,
-            residual_rows: 10_000,
+            residual_entities: 10_000,
         };
         assert_eq!(choose(&split, &ROUTE_COSTS), Route::Split);
 
@@ -1579,7 +1696,7 @@ mod tests {
             kept_arrays_and_runs: 10_000_000,
             kept_bitsets: 10_000_000,
             kept_terms: 4,
-            residual_rows: 10_000_000_000,
+            residual_entities: 10_000_000_000,
         };
         assert_eq!(choose(&complement, &ROUTE_COSTS), Route::Complement);
     }
@@ -1593,7 +1710,7 @@ mod tests {
             kept_arrays_and_runs: 0,
             kept_bitsets: 0,
             kept_terms: 0,
-            residual_rows: 0,
+            residual_entities: 0,
         };
         assert_eq!(
             choose(&no_images, &ROUTE_COSTS),
@@ -1608,9 +1725,60 @@ mod tests {
             kept_arrays_and_runs: 10_000_000,
             kept_bitsets: 10_000_000,
             kept_terms: 4,
-            residual_rows: 10_000_000_000,
+            residual_entities: 10_000_000_000,
         };
         assert_eq!(choose(&would_be_complement, &ROUTE_COSTS), Route::Walk);
+
+        // The same grant with a split worth taking. The split prices 350 × 100 + 1 000 × 10 +
+        // 11 × 1 000 = 56 000 against the walk's 6.5 × 10⁹, and the complement would price
+        // 11 × 1 000 = 11 000 and win. The second assertion pins that, so the first is a case the
+        // complement lost for want of a row space it can answer over and not for want of cost.
+        let split_instead = ChooserInputs {
+            held: 1_000_000_000,
+            bound: 1_000_001_000,
+            complement_valid: false,
+            kept_arrays_and_runs: 100,
+            kept_bitsets: 10,
+            kept_terms: 2,
+            residual_entities: 1_000,
+        };
+        assert_eq!(choose(&split_instead, &ROUTE_COSTS), Route::Split);
+        assert_eq!(
+            choose(
+                &ChooserInputs {
+                    complement_valid: true,
+                    ..split_instead
+                },
+                &ROUTE_COSTS
+            ),
+            Route::Complement,
+            "the same inputs with a row space the complement can answer over"
+        );
+    }
+
+    /// A session with no image to union is still priced. The split is not on offer, and what is
+    /// left is the walk against the complement, which turns on the grant and the row space alone.
+    #[test]
+    fn the_complement_is_offered_with_no_kept_term() {
+        // walk = 6.5 x 10^9; complement = 11 x 1 000 = 11 000.
+        let no_kept_term = ChooserInputs {
+            held: 1_000_000_000,
+            bound: 1_000_001_000,
+            complement_valid: true,
+            kept_arrays_and_runs: 0,
+            kept_bitsets: 0,
+            kept_terms: 0,
+            residual_entities: 0,
+        };
+        assert_eq!(choose(&no_kept_term, &ROUTE_COSTS), Route::Complement);
+
+        // The same session over a grant of a thousand entities in a domain of 10^9, where the
+        // walk is the cheaper of the two.
+        let narrow = ChooserInputs {
+            held: 1_000,
+            ..no_kept_term
+        };
+        assert_eq!(choose(&narrow, &ROUTE_COSTS), Route::Walk);
     }
 
     #[test]
@@ -1620,7 +1788,7 @@ mod tests {
             walk_ns_per_entity: 1.0,
             split_ns_per_array_or_run: 1.0,
             split_ns_per_bitset: 1.0,
-            residual_ns_per_row: 1.0,
+            residual_ns_per_entity: 1.0,
             complement_ns_per_entity: 1.0,
         };
         let tied = ChooserInputs {
@@ -1630,7 +1798,7 @@ mod tests {
             kept_arrays_and_runs: 100,
             kept_bitsets: 0,
             kept_terms: 1,
-            residual_rows: 0,
+            residual_entities: 0,
         };
         assert_eq!(
             choose(&tied, &costs),
@@ -1645,7 +1813,7 @@ mod tests {
             kept_arrays_and_runs: 50,
             kept_bitsets: 0,
             kept_terms: 1,
-            residual_rows: 0,
+            residual_entities: 0,
         };
         assert_eq!(
             choose(&split_then_complement, &costs),
@@ -1684,9 +1852,9 @@ mod tests {
         assert_eq!(inputs.kept_arrays_and_runs, arrays_and_runs);
         assert_eq!(inputs.kept_bitsets, bitsets);
         assert_eq!(
-            inputs.residual_rows,
-            skipped.rows + 25,
-            "the unkept term's rows plus the caller's delta rows, and nothing for term 4"
+            inputs.residual_entities,
+            u64::from(skipped.entities) + 25,
+            "the unkept term's entities plus the caller's delta entities, and nothing for term 4"
         );
         assert_eq!(inputs.held, 7_000);
         assert_eq!(inputs.bound, space.base().bound());

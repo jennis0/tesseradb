@@ -259,15 +259,130 @@ impl IdSpace {
     }
 }
 
-/// The positional route, and the shapes it refuses.
+/// What in a declaration names a row by its identity, where a view's points file carries no
+/// identity column.
 ///
-/// **A row is named by its position, so every reader must walk the same file whole and in the same
-/// order.** Nothing else can be joined to it. A second file's rows are its own, a `--limit` prunes
-/// row groups before they are counted, a view's selection keeps some rows and not others, and a
-/// membership written beside an artifact names rows of a file it does not index. Each is refused
-/// here rather than resolved to a position that means something else: a join under the wrong
+/// **A row is then named by its position, so every reader must walk the same file whole and in the
+/// same order.** Nothing else can be joined to it. A second file's rows are its own, a `--limit`
+/// prunes row groups before they are counted, a view's selection keeps some rows and not others,
+/// and a membership written beside an artifact names rows of a file it does not index. Each is
+/// named here rather than resolved to a position that means something else: a join under the wrong
 /// identity puts one row's attributes, and one row's access terms, under another row's
 /// `tessera_id`, with no error anywhere.
+///
+/// **The build and `tessera check` ask this one question.** A build refuses what
+/// [`Addressing::needs_identity`] names and takes [`IdSpace::Positional`] where it names nothing;
+/// a check reports the same sentence as a finding against the view, and a declaration it leaves
+/// clean is one the build accepts (`check.rs`).
+pub struct Addressing<'a> {
+    /// The view's points file. An attribute source is that same file or is a second one.
+    pub points: &'a Path,
+    /// Whether the build materialises more than one view.
+    pub several_views: bool,
+    /// Whether the view keeps a selection of its file's rows rather than the whole file.
+    pub selection: bool,
+    /// Whether a `--limit` prunes the corpus.
+    pub limit: bool,
+    /// The exploded `(entity_id, term_id)` relation the view reads its points' access terms from,
+    /// where it declares one.
+    pub visibility_source: Option<&'a Path>,
+    /// The attribute sources, grouped one per file.
+    pub attribute_sources: &'a [crate::config::AttributeSource],
+    /// The layer declarations, for the membership each one is written under.
+    pub layers: &'a [tessera_types::layer::LayerDeclaration],
+    /// Where each layer's artifacts and members come from.
+    pub layer_inputs: &'a [crate::config::LayerSources],
+}
+
+impl Addressing<'_> {
+    /// The first thing in the declaration that names a row by its identity, as a sentence saying
+    /// what to declare instead, or `None` where a position is an identity.
+    pub fn needs_identity(&self) -> Result<Option<String>> {
+        if self.several_views || self.selection {
+            return Ok(Some(
+                "This build materialises several views, whose rows are several files' or a \
+                 selection of one file's. Positions name rows of one whole file. Declare an \
+                 identity column"
+                    .to_string(),
+            ));
+        }
+        if self.limit {
+            return Ok(Some(
+                "`--limit` keeps the rows whose identity is below it, and a position is not an \
+                 identity the caller wrote. Build the whole corpus"
+                    .to_string(),
+            ));
+        }
+        if let Some(path) = self.visibility_source {
+            return Ok(Some(format!(
+                "The access relation {} names each point's terms by its entity id, and there is \
+                 none to name. Read the labels from a column of the points file, or declare an \
+                 identity column",
+                path.display()
+            )));
+        }
+        for group in self.attribute_sources {
+            if group.path != self.points {
+                return Ok(Some(format!(
+                    "Attribute source {} is a second file, whose rows are joined by the identity \
+                     they name. Read the columns from the points file, or declare an identity \
+                     column",
+                    group.path.display()
+                )));
+            }
+        }
+        for input in self.layer_inputs {
+            if let Some(members) = &input.members {
+                return Ok(Some(format!(
+                    "Layer '{}' reads its members from {}, one row per (artifact, entity), and \
+                     there is no entity to name. Declare an identity column",
+                    input.name,
+                    members.path.display()
+                )));
+            }
+            // **The membership written beside an artifact names rows too**, as a list per artifact
+            // rather than a row per member (`configuration.md` §8's two shapes). Read against
+            // positions it would publish whichever rows the file happened to be ordered by.
+            let enumerated = self.layers.iter().any(|d| {
+                d.name == input.name
+                    && d.membership == tessera_types::layer::MembershipSource::Enumerated
+            });
+            if !enumerated {
+                continue;
+            }
+            match &input.artifacts {
+                None => {}
+                Some(crate::config::ArtifactSource::Inline(rows)) => {
+                    if rows
+                        .iter()
+                        .any(|row| row.members.is_some() || row.excluding.is_some())
+                    {
+                        return Ok(Some(format!(
+                            "Layer '{}' writes its artifacts' memberships inline, and a \
+                             membership names entities. Declare an identity column",
+                            input.name
+                        )));
+                    }
+                }
+                Some(crate::config::ArtifactSource::File { path, fields, .. }) => {
+                    let named = [fields.of("members"), fields.of("excluding")];
+                    if let Some(column) = crate::input::first_column_present(path, &named)? {
+                        return Ok(Some(format!(
+                            "Layer '{}' reads its artifacts from {}, which carries a '{column}' \
+                             column, and a membership names entities. Declare an identity column",
+                            input.name,
+                            path.display()
+                        )));
+                    }
+                }
+            }
+        }
+        Ok(None)
+    }
+}
+
+/// The positional route: [`Addressing`]'s question over this build's arguments, refused where it
+/// names something.
 fn positional(args: &crate::BuildArgs, view: &crate::ViewArgs) -> Result<IdSpace> {
     let refuse = |detail: String| -> Result<IdSpace> {
         Err(BuildError::Invalid(format!(
@@ -277,6 +392,8 @@ fn positional(args: &crate::BuildArgs, view: &crate::ViewArgs) -> Result<IdSpace
             view.point_fields.of(ENTITY_ID)
         )))
     };
+    // **Which view carries one is worth naming**, and only a build knows: a check reads the same
+    // several-views sentence out of [`Addressing`].
     for other in &args.views {
         if !crate::input::has_id_column(&other.points, &other.point_fields)? {
             continue;
@@ -287,84 +404,23 @@ fn positional(args: &crate::BuildArgs, view: &crate::ViewArgs) -> Result<IdSpace
             other.view_id
         ));
     }
-    if args.views.len() > 1 || view.select.is_some() {
-        return refuse(
-            "This build materialises several views, whose rows are several files' or a selection \
-             of one file's. Positions name rows of one whole file. Declare an identity column"
-                .to_string(),
-        );
+    let addressing = Addressing {
+        points: &view.points,
+        several_views: args.views.len() > 1,
+        selection: view.select.is_some(),
+        limit: args.limit.is_some(),
+        visibility_source: match &view.access.source {
+            crate::config::AccessSource::Relation(path) => Some(path),
+            _ => None,
+        },
+        attribute_sources: &args.attribute_sources,
+        layers: &args.layers,
+        layer_inputs: &args.layer_inputs,
+    };
+    match addressing.needs_identity()? {
+        Some(detail) => refuse(detail),
+        None => Ok(IdSpace::Positional),
     }
-    if args.limit.is_some() {
-        return refuse(
-            "`--limit` keeps the rows whose identity is below it, and a position is not an \
-             identity the caller wrote. Build the whole corpus"
-                .to_string(),
-        );
-    }
-    if let crate::config::AccessSource::Relation(path) = &view.access.source {
-        return refuse(format!(
-            "The access relation {} names each point's terms by its entity id, and there is none \
-             to name. Read the labels from a column of the points file, or declare an identity \
-             column",
-            path.display()
-        ));
-    }
-    for group in &args.attribute_sources {
-        if group.path != view.points {
-            return refuse(format!(
-                "Attribute source {} is a second file, whose rows are joined by the identity they \
-                 name. Read the columns from the points file, or declare an identity column",
-                group.path.display()
-            ));
-        }
-    }
-    for input in &args.layer_inputs {
-        if let Some(members) = &input.members {
-            return refuse(format!(
-                "Layer '{}' reads its members from {}, one row per (artifact, entity), and there \
-                 is no entity to name. Declare an identity column",
-                input.name,
-                members.path.display()
-            ));
-        }
-        // **The membership written beside an artifact names rows too**, as a list per artifact
-        // rather than a row per member (`configuration.md` §8's two shapes). Read against
-        // positions it would publish whichever rows the file happened to be ordered by.
-        let enumerated = args.layers.iter().any(|d| {
-            d.name == input.name
-                && d.membership == tessera_types::layer::MembershipSource::Enumerated
-        });
-        if !enumerated {
-            continue;
-        }
-        match &input.artifacts {
-            None => {}
-            Some(crate::config::ArtifactSource::Inline(rows)) => {
-                if rows
-                    .iter()
-                    .any(|row| row.members.is_some() || row.excluding.is_some())
-                {
-                    return refuse(format!(
-                        "Layer '{}' writes its artifacts' memberships inline, and a membership \
-                         names entities. Declare an identity column",
-                        input.name
-                    ));
-                }
-            }
-            Some(crate::config::ArtifactSource::File { path, fields, .. }) => {
-                let named = [fields.of("members"), fields.of("excluding")];
-                if let Some(column) = crate::input::first_column_present(path, &named)? {
-                    return refuse(format!(
-                        "Layer '{}' reads its artifacts from {}, which carries a '{column}' \
-                         column, and a membership names entities. Declare an identity column",
-                        input.name,
-                        path.display()
-                    ));
-                }
-            }
-        }
-    }
-    Ok(IdSpace::Positional)
 }
 
 fn mixed(

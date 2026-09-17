@@ -138,6 +138,7 @@ fn build_bundle(root: &Path, n: u64) -> (Vec<TilerItem>, Vec<u32>) {
         row_column_extents: Vec::new(),
         shape_rows_extents: Vec::new(),
         shape_held_extents: Vec::new(),
+        term_image_extents: Vec::new(),
         artifact_record_extents: Vec::new(),
         segments: vec![SegmentDescriptor {
             incarnation: 0,
@@ -729,7 +730,10 @@ fn a_bundle_at_the_previous_number_is_refused_on_the_number_alone() {
         StoreError::UnsupportedBundleFormat { found, supported } => {
             assert_eq!(
                 (found, supported),
-                (tessera_types::BUNDLE_FORMAT - 1, tessera_types::BUNDLE_FORMAT)
+                (
+                    tessera_types::BUNDLE_FORMAT - 1,
+                    tessera_types::BUNDLE_FORMAT
+                )
             );
         }
         other => panic!("refused for the wrong reason: {other}"),

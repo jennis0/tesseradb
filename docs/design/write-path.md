@@ -714,6 +714,10 @@ the records that carried allocations can never let a restart reissue an entity i
   "modelled seconds" this document carried was wrong, and P2 refuted it). The patch is the clone
   and nothing else, because the cached value is immutable (lifecycle §7) so a patch must copy
   before it unions — which is why no inline arrangement reaches the 0.2 ms budget.
+- **A flush writes no term images.** The rows it appends are an extent, and extents get no images
+  ([decision 0143](../decisions/0143-term-images-live-in-the-bundle-and-a-session-projection-is-built-by-the-cheapest-route.md));
+  a session builds its projection from them by the walk, as it always did, and the side-manifest's
+  `term_image_extents` list carries forward unchanged.
 - **`x-tessera-stale` flips to 1** on the next response of any session that presented a
   pre-flush stamp — broadcast, advisory, never a refusal, never a `410` (decision 0041). The
   stamp never selects geometry: the request is answered from live geometry regardless, and a
@@ -1147,7 +1151,9 @@ tiers, external-id runs with their locator extents, dictionary extents, **attrib
 **record-blob extents**, **text extents** and the **entity→term transpose's extents** — each on
 its own axis, selected the same way `MergePolicy::select` selects segments: the first
 window of `width` (`coalesce_width`, default 8) consecutive entries in one power-of-two size
-class, within an input cap. Size tiering
+class, within an input cap. **Term images are not among them**: they are a row-space structure the
+fold alone writes, and a coalesce, which never touches row space, has nothing of theirs to merge.
+Size tiering
 is not decoration on any of them: without it the pass re-reads what it produced last round for
 ever, where one size class makes a byte move only as its artefact doubles. It publishes as a
 manifest edit over `deltas`, `external_id_runs`, `locator_extents`, `dict_extents`,
@@ -1249,7 +1255,10 @@ Compaction is the **invariant-bearing** half flush and merge are defined by cont
 folds — snapshot-covered delta tiers into base postings, tombstoned rows out of row space **and
 their entities' postings out of the term index** (architecture §11.3, ruled r33: both halves, because
 a post-fold fragment that still contained the entity would make Rule F's retirement re-expose it)
-— and **the fold is the retirement event** (Rule F):
+— and **each view's term images**, derived afresh from that new row space and that new term index
+([decision 0143](../decisions/0143-term-images-live-in-the-bundle-and-a-session-projection-is-built-by-the-cheapest-route.md)),
+so a folded-away entity leaves no image behind it by the same route it leaves no posting, and
+**the fold is the retirement event** (Rule F):
 executed entries leave `deleted` in the fold's own publication, `suppressed` is
 copied forward verbatim, and everything accepted after the snapshot — segments, deltas,
 tombstones, unfolded entries — is **carried forward verbatim** (three of the four carried

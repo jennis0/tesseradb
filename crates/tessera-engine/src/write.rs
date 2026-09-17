@@ -214,9 +214,13 @@ pub struct ExecutorHealth {
     pub(crate) flush_requested: AtomicBool,
     /// **The publication counter a client waits on** (contracts §3.4's `publication`).
     ///
-    /// A cycle is one tick plus the flush it dispatched, and `completed` moves once per cycle,
-    /// whatever the cycle published: a segment, a values-only substitution, artifact row forms, or
-    /// nothing at all. `segments_version` moves only where a segment was written, so a tick that
+    /// A cycle is one tick plus the flush it dispatched, and `completed` moves when that cycle
+    /// **published**: a segment, a values-only substitution, artifact row forms, or, on a tick
+    /// with nothing to publish, the empty publication that leaves nothing behind. It does not
+    /// move for a cycle whose gates were shut, whose flush failed on the pool, or whose
+    /// publication was discarded at its final check. Such a cycle stays open and its request
+    /// stays armed, so the number is reached by the retry that succeeds and never by the attempt
+    /// that did not. `segments_version` moves only where a segment was written, so a tick that
     /// only filled values or only published artifacts is invisible on it; this is what a caller
     /// that wrote either of those waits on instead.
     ///
@@ -233,6 +237,16 @@ pub struct ExecutorHealth {
     /// work, so a cycle that closed here would release the caller with a view still buffered.
     /// Set before the spawn, cleared by the tick that dispatches with nothing left over.
     pub(crate) deferred_plans: AtomicBool,
+    /// When the last cycle failed to publish, as an offset from [`Self::base`] plus one; `0`
+    /// where none has since the last success.
+    ///
+    /// A failed cycle re-arms its request, and `wait_for_work` polls while one is armed, so
+    /// without a floor a node whose gate is shut would re-plan fifty times a second. The floor is
+    /// [`FAILED_CYCLE_RETRY`]; a period or a row trip is never held back by it.
+    failed_cycle_nanos: AtomicU64,
+    /// The last publication refusal that was logged, on the same footing, so a held-open cycle's
+    /// retry does not turn one operator condition into a line a second.
+    refusal_logged_nanos: AtomicU64,
     /// Whether a flush is executing on the pool. A tick arriving while it is set is skipped, never
     /// queued: two concurrent flushes would double-consume the buffer range (§1.1). Set by the
     /// executor before the spawn, cleared by the pool after its sends, and read by
@@ -1018,6 +1032,8 @@ impl ExecutorHealth {
             flush_requested: AtomicBool::new(false),
             publication: Mutex::new(PublicationCycle::default()),
             deferred_plans: AtomicBool::new(false),
+            failed_cycle_nanos: AtomicU64::new(0),
+            refusal_logged_nanos: AtomicU64::new(0),
             flush_in_flight: AtomicBool::new(false),
             flush_completed_pending: AtomicBool::new(false),
             overlay_diverged: AtomicBool::new(false),
@@ -1150,12 +1166,23 @@ impl ExecutorHealth {
     /// publishes its row forms into the cycle the running flush belongs to and returns, so no
     /// number is spent on a tick that skipped this request's work. The count moves at the
     /// publication and not at the tick, which is what makes "the number is reached" and "the work
-    /// is visible" one event, and a cycle that deferred a second view's plan stays open until a
-    /// tick dispatches with nothing left over ([`Self::deferred_plans`]).
+    /// is visible" one event; a cycle that deferred a second view's plan stays open until a tick
+    /// dispatches with nothing left over ([`Self::deferred_plans`]); and a cycle that failed
+    /// stays open until one succeeds ([`Self::fail_publication_cycle`]).
     pub(crate) fn request_flush(&self) -> u64 {
         let cycle = lock_recover(&self.publication);
         self.flush_requested.store(true, Ordering::SeqCst);
-        cycle.completed + if cycle.open { 2 } else { 1 }
+        cycle.target()
+    }
+
+    /// The number of the cycle work buffered by now becomes visible in, asking for no tick.
+    ///
+    /// The same two answers [`Self::request_flush`] gives, on the same argument, for a write
+    /// acknowledgement that names the number without pulling the cadence forward: the work is
+    /// durable and buffered before this is read, so the next cycle to open carries it, and a
+    /// cycle already open may have planned first.
+    pub(crate) fn publication_target(&self) -> u64 {
+        lock_recover(&self.publication).target()
     }
 
     /// Open a cycle and consume the flush request it honours, under one lock.
@@ -1173,22 +1200,14 @@ impl ExecutorHealth {
         cycle.open = true;
     }
 
-    /// Close the open cycle if everything it dispatched has been applied.
+    /// Close the open cycle: a publication swapped and its work is being served.
     ///
-    /// A no-op while a flush is on the pool or a completed one is undrained, which is what holds
-    /// the cycle open across the iterations between the tick and the publication. It is called
-    /// after the drains at the top of the loop and at the end of a tick that dispatched nothing,
-    /// so an idle node closes its cycle at the tick rather than at the next one.
-    ///
-    /// A flush that fails sends nothing and clears `flush_in_flight`, so the cycle closes on the
-    /// next pass. The counter states a publication cadence, so a caller that waits on it after a
-    /// failed flush is told the cycle ended. What it was promised is that the cycle saw its work,
-    /// and the retry is the next cycle's.
-    pub(crate) fn close_publication_cycle_if_applied(&self) {
-        if self.flush_in_flight.load(Ordering::SeqCst)
-            || self.flush_completed_pending.load(Ordering::SeqCst)
-            || self.deferred_plans.load(Ordering::SeqCst)
-        {
+    /// Called from the publication itself, where the generation the work is in becomes the live
+    /// one, so reaching the number and reading the work are one event. A cycle that deferred a
+    /// second view's plan is not closed here: its caller asked for its buffered rows to be
+    /// published and one of its views still holds some ([`Self::deferred_plans`]).
+    pub(crate) fn close_publication_cycle(&self) {
+        if self.deferred_plans.load(Ordering::SeqCst) {
             return;
         }
         let mut cycle = lock_recover(&self.publication);
@@ -1196,6 +1215,51 @@ impl ExecutorHealth {
             cycle.completed += 1;
             cycle.open = false;
         }
+        self.failed_cycle_nanos.store(0, Ordering::Relaxed);
+        self.refusal_logged_nanos.store(0, Ordering::Relaxed);
+    }
+
+    /// The cycle published nothing it was asked to publish: hold it open and re-arm the request.
+    ///
+    /// The three ways this happens are a node whose gates are shut (a poisoned WAL, an overlay
+    /// diverged from it), a flush that failed on the pool, and a publication discarded at its
+    /// final check. Each leaves the inputs standing and the files orphaned, so the work is still
+    /// unpublished, and the number a caller is waiting on must not be reached. Re-arming is what
+    /// makes the next tick retry rather than the next period; [`Executor::tick_if_due`] floors
+    /// how fast that retry can come round.
+    pub(crate) fn fail_publication_cycle(&self) {
+        self.set_marker(&self.failed_cycle_nanos, std::time::Instant::now());
+        self.flush_requested.store(true, Ordering::SeqCst);
+    }
+
+    /// How long a re-armed retry must still wait, or `None` where nothing is owed one.
+    pub(crate) fn failed_cycle_backoff(&self) -> Option<std::time::Duration> {
+        if self.failed_cycle_nanos.load(Ordering::Relaxed) == 0 {
+            return None;
+        }
+        FAILED_CYCLE_RETRY
+            .checked_sub(std::time::Duration::from_nanos(
+                self.elapsed_since_marker(&self.failed_cycle_nanos),
+            ))
+            .filter(|remaining| !remaining.is_zero())
+    }
+
+    /// Whether a publication refusal is due to be logged, at most one per tick period.
+    ///
+    /// Every condition this throttles stands until an operator acts: a poisoned WAL, a diverged
+    /// overlay, an analyser this binary does not carry, a view the manifest does not declare, a
+    /// row space at the `u32` ceiling. A failed cycle re-arms its request and retries at [`FAILED_CYCLE_RETRY`], so
+    /// logging each one where it is found would turn one condition into a line a second. The
+    /// counters beside them (`flush_failures`) move every time, which is what an operator alarms
+    /// on; the line is what says which condition it is.
+    pub(crate) fn refusal_log_due(&self) -> bool {
+        let period = self.flush_period_nanos.load(Ordering::Relaxed);
+        let marker = self.refusal_logged_nanos.load(Ordering::Relaxed);
+        if marker != 0 && self.elapsed_since_marker(&self.refusal_logged_nanos) < period {
+            return false;
+        }
+        self.set_marker(&self.refusal_logged_nanos, std::time::Instant::now());
+        true
     }
 
     /// Times an undurable WAL region was discarded and the executor returned to service.
@@ -1864,6 +1928,16 @@ impl crate::session::Engine {
         self.write.wake();
         publication
     }
+
+    /// The number of the cycle work acknowledged by now becomes visible in, asking for no tick.
+    ///
+    /// Every write acknowledgement carries this (contracts §3.4). It is read after the route's
+    /// own call returned, so the work it names is already buffered, and it is computed under the
+    /// lock [`Engine::request_flush_publication`] uses, so the two cannot disagree about which
+    /// cycle is open.
+    pub fn publication_target(&self) -> u64 {
+        self.write.health().publication_target()
+    }
 }
 
 /// The publication counter and whether a cycle is open ([`ExecutorHealth::publication`]).
@@ -1877,6 +1951,14 @@ pub(crate) struct PublicationCycle {
     pub(crate) completed: u64,
     /// A tick is executing, or a flush it dispatched has not been applied.
     pub(crate) open: bool,
+}
+
+impl PublicationCycle {
+    /// The cycle that carries work buffered as of this read: the next one to open, or the one
+    /// after an open one, which may have planned before that work arrived.
+    fn target(&self) -> u64 {
+        self.completed + if self.open { 2 } else { 1 }
+    }
 }
 
 /// Take a lock, recovering rather than panicking if a previous holder panicked.
@@ -4953,6 +5035,16 @@ const OVERLAY_PUBLICATION_MAX_WINDOWS: u64 = 64;
 /// an idle node, and the ack→visibility bound at one tick rather than two.
 const FLUSH_COMPLETION_POLL: std::time::Duration = std::time::Duration::from_millis(20);
 
+/// How long after a cycle failed to publish the next retry may come.
+///
+/// A failed cycle stays open and re-arms its request (`ExecutorHealth::fail_publication_cycle`),
+/// and an armed request puts [`Executor::wait_for_work`] on the completion poll, so the retry
+/// would otherwise come fifty times a second for as long as an operator condition stands. One
+/// second keeps a `wait=visible` caller's bounded wait worth making while leaving a shut gate
+/// costing one plan and one log line a second at most. A period tick and a row trip are not held
+/// back by it.
+const FAILED_CYCLE_RETRY: std::time::Duration = std::time::Duration::from_secs(1);
+
 /// How often the executor looks for a **completed fold** while one is running.
 ///
 /// Coarser than [`FLUSH_COMPLETION_POLL`] purely because a fold's duration is minutes to hours
@@ -5613,6 +5705,7 @@ mod vocabulary_extensions_tests {
             row_column_extents: Vec::new(),
             shape_rows_extents: Vec::new(),
             shape_held_extents: Vec::new(),
+            term_image_extents: Vec::new(),
             artifact_record_extents: Vec::new(),
             segments: Vec::new(),
             deltas: Vec::new(),
@@ -6733,11 +6826,6 @@ impl Executor {
                 | self.publish_completed_merges()
                 | self.publish_completed_folds()
                 | self.publish_completed_suggests();
-            // **A publication cycle closes here, once what its tick dispatched has been applied**
-            // (`ExecutorHealth::publication`). Above the tick, so the cycle a `POST /control/flush`
-            // was promised is closed before the next one opens and the count never runs ahead of
-            // what a reader can see.
-            self.health.close_publication_cycle_if_applied();
             self.tick_if_due();
             while self.run_deny_pass() {}
             // **At drain close**: one write covers a burst of consecutive windows rather than one
@@ -6782,9 +6870,14 @@ impl Executor {
         // `POST /control/flush` sets the flag and rings the doorbell, and the tick fires here, on
         // this one path, at the next loop iteration — so everything a tick guarantees (one flush
         // in flight, plan gates, rebase, retention) holds for an operator-triggered flush exactly
-        // as for a scheduled one. The publish-on-trip hazard that killed `flush_max_items`
-        // (a publication period proportional to ingest rate) does not apply: this trigger is an
-        // operator action, rate-decoupled from ingest by construction.
+        // as for a scheduled one. **What keeps the publish-on-trip hazard that killed
+        // `flush_max_items` away is now the caller.** An operator's `POST /control/flush` has a
+        // rate of its own, unrelated to ingest. A write sent with `wait=visible` (contracts §3.4)
+        // requests a tick too, so a loader that set the parameter on every page would publish
+        // once per page, which is the publication period proportional to ingest rate that
+        // decision 0045 removed, and would rotate every session's projection key at its own send
+        // rate. The parameter is for a single writer reading back what it just wrote; a loader
+        // sends its pages without it and one flush at the end.
         // **The occupancy the executor itself maintains**, not a count derived from a generation
         // this thread would have to load: `apply_window` and every flush publication store it, so
         // the trigger reads the same figure `/control/ingest`'s 429 is checked against.
@@ -6800,12 +6893,21 @@ impl Executor {
         if !due && !requested && !fold_requested {
             return;
         }
-        // **At most one flush in flight**, read once here and not again at the gate below,
-        // because the publication cycle turns on it: a tick that will skip publishes into the
-        // cycle the running flush already opened, and a tick that will go on to dispatch opens
-        // one of its own before it publishes anything. Two reads could disagree. The value goes
-        // stale only in the direction of a flush having landed, which costs the skipped tick
-        // nothing it did not already risk.
+        // **A re-armed retry is floored** ([`FAILED_CYCLE_RETRY`]). The request an unpublished
+        // cycle re-armed is the same flag a caller sets, so a tick fired by one while a failure
+        // is outstanding is a retry, and retrying at the completion poll's rate would re-plan the
+        // buffer fifty times a second for as long as the condition stands. A period tick and a
+        // row trip come through regardless, which is what stops the floor from delaying ordinary
+        // publication.
+        if !due && self.health.failed_cycle_backoff().is_some() {
+            return;
+        }
+        // **At most one flush in flight**, read once here and not again below, because the
+        // publication cycle turns on it: a tick that will skip publishes into the cycle the
+        // running flush already opened, and a tick that will go on to dispatch opens one of its
+        // own before it publishes anything. Two reads could disagree. The value goes stale only
+        // in the direction of a flush having landed, which costs the skipped tick nothing it did
+        // not already risk.
         let flush_in_flight = self.health.flush_in_flight.load(Ordering::SeqCst);
         if !flush_in_flight {
             // **The cycle opens before anything is published**, and consumes the flush request it
@@ -6905,6 +7007,7 @@ impl Executor {
         // this tick, which stays at zero on a gated node and grows on one whose flush is failing.
         let mark = StageMark::now();
         let mut flushable = 0usize;
+        let mut gated = false;
         let mut plans: Vec<(String, crate::flush::FlushPlan)> = Vec::new();
         for view in views_of(&generation) {
             match crate::flush::plan_flush(
@@ -6918,14 +7021,18 @@ impl Executor {
                     plans.push((view, plan));
                 }
                 Err(crate::flush::NoFlush::NothingToFlush) => {}
-                Err(gate) => {
-                    // Per tick, and deliberately: a gated node is gated until an operator acts, and
-                    // the tick is the interval at which that is worth repeating.
-                    tracing::warn!(
-                        view = %view,
-                        gate = ?gate,
-                        "flush skipped: this node publishes no geometry in this state"
-                    );
+                Err(refusal) => {
+                    gated = true;
+                    // Once per period. The refusal stands until an operator acts, and the cycle
+                    // it holds open re-arms its request, so the tick comes round at the retry
+                    // floor.
+                    if self.health.refusal_log_due() {
+                        tracing::warn!(
+                            view = %view,
+                            gate = ?refusal,
+                            "flush skipped: this node publishes no geometry in this state"
+                        );
+                    }
                 }
             }
         }
@@ -6942,8 +7049,21 @@ impl Executor {
             // Nothing to flush, so no publication is coming to rotate the log — the deny-only
             // regime. See `rotate_if_grown`.
             self.rotate_if_grown();
-        } else {
-            self.dispatch_flushes(&generation, plans);
+            if gated {
+                // **A refused plan leaves an unpublished cycle.** The rows are still buffered and
+                // the overlay still holds what a publication would have carried, so the counter
+                // must not move past them: the cycle stays open and the request stays armed until
+                // the refusal clears (`ExecutorHealth::fail_publication_cycle`).
+                self.note_publication_failure();
+            } else {
+                // Every view answered "nothing buffered", so this cycle's publication is the
+                // empty one and everything it was asked to publish is served.
+                self.health.close_publication_cycle();
+            }
+        } else if !self.dispatch_flushes(&generation, plans) {
+            // Every plan was dropped before it reached the pool, so this cycle published nothing
+            // it was asked to: it stays open and its request stays armed.
+            self.note_publication_failure();
         }
         // **The fold is dispatched before the two it suspends**, so a tick that starts one does not
         // also start a merge that the flip would orphan (compaction §1).
@@ -6955,10 +7075,14 @@ impl Executor {
         self.dispatch_coalesce(&generation);
         self.dispatch_merge(&generation);
         drop(generation);
-        // A tick that dispatched no flush has published everything it is going to, so its cycle
-        // closes here. Left to the next loop iteration it would wait a tick period on an idle
-        // node.
-        self.health.close_publication_cycle_if_applied();
+    }
+
+    /// Record that this cycle published nothing it was asked to publish.
+    ///
+    /// A thin wrapper so every site that drops a plan reads the same, and so the one rule stays
+    /// in one place: the cycle stays open, the request is re-armed, and the retry is floored.
+    fn note_publication_failure(&self) {
+        self.health.fail_publication_cycle();
     }
 
     /// Whether a fold is **outstanding**: running, or completed and not yet published.
@@ -8442,9 +8566,12 @@ impl Executor {
                 .with_artifacts(|store| store.levels_moved_by(&executed)),
             retired: executed.clone(),
         };
-        // **One counter for the whole publication.** Every derived file this fold writes is named
-        // from it, so no two of these calls can name the same file — see
-        // `tessera_store::derived::DerivedIndex`.
+        // **One counter for the whole publication.** Every derived file the executor writes below
+        // is named from it, so no two of these calls can name the same file — see
+        // `tessera_store::derived::DerivedIndex`. Pass 2b's term images are named from a second
+        // counter, on the fold thread, from the number a build uses: the two counters cover
+        // disjoint kinds, and `compact::TERM_IMAGE_MANIFEST_N` carries why that pass cannot use
+        // this one.
         let mut derived_index = tessera_store::derived::DerivedIndex::default();
         let containment = self.write_containment_partitions(
             &to_prefix_dir,
@@ -8687,6 +8814,16 @@ impl Executor {
             row_column_extents: Vec::new(),
             shape_rows_extents: Vec::new(),
             shape_held_extents: Vec::new(),
+            // **Pass 2b's own output, not the live list.** The paths are prefix-relative and the
+            // fold publishes a new prefix, so what the fold thread wrote is the only list naming
+            // files this prefix contains. The images cover the new base alone, which is what a
+            // projection of the base is: a flush landing during the flight is carried forward as
+            // an extent, and an extent's rows are walked.
+            term_image_extents: completed
+                .term_images
+                .iter()
+                .map(|images| images.extent.clone())
+                .collect(),
             artifact_record_extents: self.artifact_record_extents.clone(),
             segments,
             deltas: carried_tiers.clone(),
@@ -9317,6 +9454,24 @@ impl Executor {
             .last_fold_attr_written
             .store(completed.attr_bytes_written, Ordering::Relaxed);
         *lock_recover(&self.health.last_fold_passes) = cost;
+        // **One line per view, beside the summary rather than inside it** (ruling G, decision
+        // 0143): a group's keys are separate
+        // views over one dictionary, each paying its own table and its own payload, and a total
+        // says nothing about which of them is expensive. The build reports the same four figures
+        // per view, so the two routes' reports read alike.
+        for images in &completed.term_images {
+            let summary = &images.summary;
+            tracing::info!(
+                prefix = %completed.prefix,
+                view = %images.extent.view,
+                kept = summary.kept,
+                terms = summary.terms,
+                payload_bytes = summary.payload_bytes,
+                table_bytes = summary.table_bytes,
+                wall_s = summary.wall.as_secs_f64(),
+                "a fold wrote a view's term images"
+            );
+        }
         tracing::info!(
             prefix = %completed.prefix,
             segments_version,
@@ -9880,15 +10035,18 @@ impl Executor {
     ///
     /// Every input is taken here, on this thread, against the live generation and then moved: the
     /// pool holds no reference to live state, which is what makes "over immutable inputs" true.
+    ///
+    /// Answers whether a unit reached the pool. Every other way out of here drops the plan and
+    /// leaves the buffer standing, which is an unpublished cycle, and the caller holds it open.
     fn dispatch_flushes(
         &mut self,
         generation: &Arc<Generation>,
         plans: Vec<(String, crate::flush::FlushPlan)>,
-    ) {
+    ) -> bool {
         let mark = StageMark::now();
         let submit = self.flush_submit.clone();
         let Some((partition, partition_data)) = generation.bundle.partitions.iter().next() else {
-            return;
+            return false;
         };
         let manifest = &generation.bundle.manifest;
         let scalar_schema = scalar_schema_of(manifest);
@@ -9902,12 +10060,16 @@ impl Executor {
             Ok(schema) => schema,
             Err(e) => {
                 self.health.flush_failures.fetch_add(1, Ordering::Relaxed);
-                tracing::error!(
-                    error = %e.0,
-                    "ALARM: a text column's analyser is not one this binary carries; no flush is \
-                     dispatched, and the buffer is retained"
-                );
-                return;
+                // Once per period: the condition stands until the binary changes, and a failed
+                // cycle retries at `FAILED_CYCLE_RETRY` (`ExecutorHealth::refusal_log_due`).
+                if self.health.refusal_log_due() {
+                    tracing::error!(
+                        error = %e.0,
+                        "ALARM: a text column's analyser is not one this binary carries; no flush \
+                         is dispatched, and the buffer is retained"
+                    );
+                }
+                return false;
             }
         };
         let render_indices: Vec<usize> = manifest.render_indices().collect();
@@ -9941,13 +10103,13 @@ impl Executor {
         self.health.deferred_plans.store(false, Ordering::SeqCst);
         let deferred = plans.len().saturating_sub(1);
         let Some((view, plan)) = plan_to_dispatch(plans) else {
-            return;
+            return false;
         };
 
         let mut contexts = Vec::with_capacity(1);
         {
             let Some(view_data) = partition_data.views.get(&view) else {
-                return;
+                return false;
             };
             // **This view's frame** (decision 0040): the flush quantises against the extent the
             // view's own positions were placed in, and a bundle-wide one would put a second
@@ -9960,32 +10122,38 @@ impl Executor {
             // scoped column this flush writes, and on every extent — which is what stops a key
             // created again from adopting them.
             let Some(incarnation) = manifest.incarnation_of(&view) else {
-                tracing::error!(
-                    view = %view,
-                    "a flush plan names a view this bundle's manifest does not declare, so its \
-                     incarnation cannot be resolved; the plan is dropped and the buffer is \
-                     retained"
-                );
-                return;
+                if self.health.refusal_log_due() {
+                    tracing::error!(
+                        view = %view,
+                        "a flush plan names a view this bundle's manifest does not declare, so \
+                         its incarnation cannot be resolved; the plan is dropped and the buffer \
+                         is retained"
+                    );
+                }
+                return false;
             };
             let Some(quantisation) = manifest.quantisation_of(&view) else {
-                tracing::error!(
-                    view = %view,
-                    "a flush plan names a view this bundle's manifest does not declare, so \
-                     there is no frame to quantise its rows against; the plan is dropped \
-                     and the buffer is retained"
-                );
-                return;
+                if self.health.refusal_log_due() {
+                    tracing::error!(
+                        view = %view,
+                        "a flush plan names a view this bundle's manifest does not declare, so \
+                         there is no frame to quantise its rows against; the plan is dropped \
+                         and the buffer is retained"
+                    );
+                }
+                return false;
             };
             let Ok(row_base) = u32::try_from(view_data.row_space.total_rows()) else {
                 // Row ids are `u32` (bundle_format 1). A view that has crossed 2^32 rows cannot
                 // take another segment, and saying so is better than wrapping into row 0.
-                tracing::error!(
-                    view = %view,
-                    "ALARM: this view's row space has reached the u32 ceiling; no further flush \
-                     can address it. The deployment must be compacted or re-sharded"
-                );
-                return;
+                if self.health.refusal_log_due() {
+                    tracing::error!(
+                        view = %view,
+                        "ALARM: this view's row space has reached the u32 ceiling; no further \
+                         flush can address it. The deployment must be compacted or re-sharded"
+                    );
+                }
+                return false;
             };
 
             // **The descriptor bytes behind this plan's extension term ids** (§3.2), and the whole
@@ -10024,11 +10192,13 @@ impl Executor {
                 // Fail closed (decision 0115): an owner view the manifest cannot place is a
                 // bundle whose halves disagree, and flushing under a guessed incarnation is how
                 // a dropped view's predecessor adopts rows.
-                tracing::error!(
-                    view = %scoped_view,
-                    "ALARM: no incarnation for the owner view; no flush is planned this tick"
-                );
-                return;
+                if self.health.refusal_log_due() {
+                    tracing::error!(
+                        view = %scoped_view,
+                        "ALARM: no incarnation for the owner view; no flush is planned this tick"
+                    );
+                }
+                return false;
             };
             let scoped_schema: Vec<crate::flush::ScopedColumnSpec> = match families
                 .iter()
@@ -10060,12 +10230,14 @@ impl Executor {
                     // indexed prose with a pipeline the base was not built by leaves one column
                     // whose two layers disagree about what a word is.
                     self.health.flush_failures.fetch_add(1, Ordering::Relaxed);
-                    tracing::error!(
-                        error = %e,
-                        "ALARM: a group-scoped text family's analyser is not one this binary \
-                         carries; no flush is dispatched, and the buffer is retained"
-                    );
-                    return;
+                    if self.health.refusal_log_due() {
+                        tracing::error!(
+                            error = %e,
+                            "ALARM: a group-scoped text family's analyser is not one this binary \
+                             carries; no flush is dispatched, and the buffer is retained"
+                        );
+                    }
+                    return false;
                 }
             };
             // **The lanes this view's rows carry.** Two cases, and the split is which side of the
@@ -10155,7 +10327,7 @@ impl Executor {
             ));
         }
         if contexts.is_empty() {
-            return;
+            return false;
         }
         self.health
             .flush_lap(crate::flush::FlushStage::Dispatch, mark);
@@ -10196,6 +10368,10 @@ impl Executor {
                         // only commit point, so a failure before it leaves orphan files nothing
                         // references and the buffer intact.
                         health.flush_failures.fetch_add(1, Ordering::Relaxed);
+                        // Nothing was published, so the cycle stays open and its request is
+                        // re-armed: a caller waiting on the number waits for the retry that
+                        // succeeds (`ExecutorHealth::fail_publication_cycle`).
+                        health.fail_publication_cycle();
                         tracing::error!(
                             error = %e,
                             "ALARM: a flush failed; the buffer is retained and it will be retried \
@@ -10208,6 +10384,7 @@ impl Executor {
             }
             health.flush_in_flight.store(false, Ordering::SeqCst);
         });
+        true
     }
 
     /// If the WAL is degraded and the degradation is one a discard can end, end it.
@@ -10299,6 +10476,10 @@ impl Executor {
             .saturating_sub(self.last_tick.elapsed());
         let wait = if self.wal.is_poisoned() {
             until_tick.min(WAL_RECOVERY_POLL_INTERVAL)
+        } else if let Some(backoff) = self.health.failed_cycle_backoff() {
+            // A cycle is open and unpublished, its request is armed, and the retry is not due
+            // yet. Waiting out the floor costs one wake instead of fifty a second.
+            until_tick.min(backoff)
         } else if self.health.flush_requested.load(Ordering::SeqCst)
             || self.health.flush_in_flight.load(Ordering::SeqCst)
             || self.health.flush_completed_pending.load(Ordering::SeqCst)
@@ -16659,7 +16840,15 @@ impl Executor {
     /// next tick re-plans.
     fn publish_flush(&mut self, completed: crate::flush::CompletedFlush) {
         let mut mark = StageMark::now();
-        if !self.publish_flush_stages(completed, &mut mark) {
+        if self.publish_flush_stages(completed, &mut mark) {
+            // **The publication cycle closes at the swap** (`ExecutorHealth::publication`): the
+            // generation carrying this unit's rows, fills and extents is the live one from here,
+            // so the number being reached and the work being served are one event.
+            self.health.close_publication_cycle();
+        } else {
+            // A discard leaves the unit's files orphaned and its inputs standing, so the cycle is
+            // unpublished: it stays open, its request stays armed, and the next tick re-plans.
+            self.health.fail_publication_cycle();
             // A discarded flush's time since its last lap, so `PublishWall` stays partitioned
             // whichever way the publication ends.
             self.health

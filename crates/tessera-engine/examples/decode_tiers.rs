@@ -354,7 +354,7 @@ fn mask_over(visible_rows: &[u32], row_count: u32) -> (TempDir, EffectiveMask) {
         bound as u32,
     );
 
-    let base = Arc::new(RowProjection::new(&fragment, &perm));
+    let base = Arc::new(RowProjection::walk(&fragment, &perm));
     let satisfied: FxHashSet<TermId> = [TermId::new(0)].into_iter().collect();
     let mask = compose(
         &satisfied,

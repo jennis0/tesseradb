@@ -393,9 +393,10 @@ the order is fixed:
    fill rule: a members delta is a `PATCH` join, and content gated `inherited` is filled by
    `PATCH`. Not built yet: filling `all`-gated content onto an artifact published without it has
    no route; the plan refuses that case and names the artifact.
-5. **Flush** (`POST /control/flush`), which is accepted and runs at the next executor tick.
-   `commit()` then reads `/control/status` until the publication after its last acknowledgement,
-   so the next cell sees the rows; the report's flush time is that wait.
+5. **Flush** (`POST /control/flush?wait=visible`): the pages went unwaited, and one flush carrying
+   the wait returns once the publication its number names has happened (decision 0144), so the
+   next cell sees the rows; the report's flush time is that wait, and `visible: false` past the
+   server's bound is a finding.
 
 The commit returns a report: rows accepted per view, artifacts minted, memberships joined, parts
 refusals by row and part, and the flush time.
@@ -442,12 +443,9 @@ which the SDK writes with:
 - A session credential and an identity key, generated per database and stored in the directory
   with owner-only permissions, named by the `_file` and `env` keys the deployment file takes.
 - `[disclosure] token_max_lifetime`, required, at one hour.
-- The viewer plane's origin list. The notebook page's origin is the front end's, unknown at
-  start and not enumerable for a webview. Not built yet: a `serve.cors_loopback = true` rule
-  admitting any page served from a loopback address, which is a bounded statement about which
-  pages may present a token and a ruling under configuration.md's closure argument (§11.2 B).
-  Until it exists the SDK writes `cors_origins` from `TESSERA_NOTEBOOK_ORIGIN`, and a widget
-  from an unlisted origin is refused by the browser.
+- `serve.cors_loopback = true` (configuration.md): the notebook page's origin is a port the
+  front end chose, which no list can name, and the rule admits any page served from a loopback
+  address to present a token on the viewer plane.
 
 The binary is `TESSERA_BIN` when set, else the first `tessera` on `PATH`, else a checkout's
 target directory, release before debug; the create report names the one used. At release a
@@ -606,8 +604,6 @@ db = td.open("~/tessera/arxiv")
 
 Owner rulings on the first review's findings, 2026-09-16:
 
-- The SDK assigns entity ids and mints external ids at the first commit; the user's id is an
-  indexed keyword attribute (§3).
 - `create(path)` refuses a non-empty directory; `replace=True` and `open()` are the two ways in
   (§2).
 - A label's content gate is `all` or `inherited`; `none` at that grain would mean `inherited`
@@ -633,10 +629,8 @@ Rulings of 2026-09-17, on the first stages' review findings:
 - A second view's frame carries the access column or is refused (§4.2).
 - `serve.cors_loopback` is granted (§7); `tessera check` accepts a declaration whose attribute
   or view group names no source, as a note (§6.2 step 1).
-- A general client needs a signal that a flush has published: a monotonic publication counter
-  on `/control/status` that moves at every tick whatever it published, and a flush response
-  naming the publication its tick will carry. Through the design process as a contracts
-  amendment.
+- A write is visible at a numbered publication, every acknowledgement names it, and a client may
+  wait for it (decision 0144).
 
 ### 11.2 Needed
 

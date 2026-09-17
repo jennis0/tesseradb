@@ -425,7 +425,7 @@ fn main() {
         let universe = segment.row_count as u64;
         let view = session1.fragment.view();
         let ent: &Bitmap = &view;
-        let proj = RowProjection::new(&session1.fragment, &view_data.row_space);
+        let proj = RowProjection::walk(&session1.fragment, &view_data.row_space);
         let rows = proj.bitmap();
         let ent_card = ent.cardinality();
         let row_card = rows.cardinality();

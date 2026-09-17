@@ -355,11 +355,17 @@ async fn the_route_declares_answers_redeclarations_and_refuses_what_the_schema_r
 
     let (status, body) = declare(&served, sentiment()).await;
     assert_eq!(status, 201, "{body}");
-    assert_eq!(body, json!({ "name": "sentiment", "existing": false }));
+    assert_eq!(
+        without_publication(body),
+        json!({ "name": "sentiment", "existing": false })
+    );
 
     let (status, body) = declare(&served, sentiment()).await;
     assert_eq!(status, 200, "identical: the column that exists: {body}");
-    assert_eq!(body, json!({ "name": "sentiment", "existing": true }));
+    assert_eq!(
+        without_publication(body),
+        json!({ "name": "sentiment", "existing": true })
+    );
 
     let (status, body) = declare(
         &served,
@@ -627,4 +633,19 @@ async fn a_declaration_survives_a_restart_before_and_after_a_publication() {
         filtered(&served, json!({ "sentiment": { "range": { "gte": 0.5 } } })).await,
         BTreeSet::from([carrying[0]])
     );
+}
+
+/// A declaration's answer with `publication` taken out, so a whole-object comparison stays a
+/// whole-object comparison. The number is a running count and a test cannot name it, but its
+/// absence would be a route that stopped telling a caller when its declaration becomes visible
+/// (contracts §3.4), so this asserts it was there.
+fn without_publication(mut body: Value) -> Value {
+    assert!(
+        body.as_object_mut()
+            .expect("the answer is an object")
+            .remove("publication")
+            .is_some(),
+        "every write acknowledgement carries a publication number: {body}"
+    );
+    body
 }

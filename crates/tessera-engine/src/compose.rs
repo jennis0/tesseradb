@@ -27,18 +27,160 @@
 //! representations are licensed by the differential obligation that they agree for every entity
 //! with a row (`tests/deny_mask.rs`).
 
+use std::io;
 use std::ops::Range;
+use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
 
 use croaring::Bitmap;
 use rustc_hash::FxHashSet;
 
-use tessera_authz::FrozenFragment;
+use tessera_authz::{DeltaTier, FrozenFragment, PostingsReader};
 use tessera_lifecycle::{IngestBuffer, Overlay};
+use tessera_store::term_images::{
+    choose, chooser_inputs, ChooserInputs, Route, TermImages, ROUTE_COSTS,
+};
 use tessera_store::{Bundle, RowSpace};
 use tessera_types::{EntityId, TermId};
 
 use crate::DenyMask;
+
+/// What a row projection is built from, beside the row space it is built into.
+///
+/// The fragment alone decided this once. The other four fields are what the split route needs:
+/// which terms the session satisfies, where their base and delta postings are, and the bundle's
+/// images of those postings if the view has any. They travel together because the route is chosen
+/// from all of them at once, before any of them is read.
+pub struct ProjectionInputs<'a> {
+    /// The session's mask fragment, in entity space.
+    pub fragment: &'a FrozenFragment,
+    /// The terms the session satisfies, ascending and deduplicated. This is the `T` of the
+    /// exactness argument in `tessera_store::term_images`.
+    pub satisfied: &'a [TermId],
+    /// The generation's base postings.
+    pub postings: &'a PostingsReader,
+    /// The generation's live delta tiers.
+    pub deltas: &'a [Arc<DeltaTier>],
+    /// This view's term images, where the bundle carries them and they opened.
+    pub images: Option<&'a TermImages>,
+    /// A route to take instead of the chosen one. `None` in every shipped path: only
+    /// `Engine::force_projection_route_for_test` ever sets it, and only under `fault-injection`.
+    pub force: Option<ProjectionRoute>,
+}
+
+/// How a row projection was built. Every route returns the identical projection; what differs is
+/// the work done to reach it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProjectionRoute {
+    /// The grant covers the whole entity domain and the mapping is a bijection onto its rows, so
+    /// the base's contribution is the row range and no page is read.
+    WholeDomain,
+    /// Every held entity is walked through the mapping.
+    Walk,
+    /// The images of the terms the session holds are unioned, and only the residual is walked.
+    Split,
+    /// The entities outside the grant are walked and subtracted from the row range.
+    Complement,
+}
+
+impl ProjectionRoute {
+    /// Every route, in the order [`ProjectionRoute::index`] numbers them, which is the order the
+    /// engine's per-route counters and `/control/status` publish.
+    pub const ALL: [ProjectionRoute; 4] = [
+        ProjectionRoute::WholeDomain,
+        ProjectionRoute::Walk,
+        ProjectionRoute::Split,
+        ProjectionRoute::Complement,
+    ];
+
+    /// This route's position in [`ProjectionRoute::ALL`].
+    pub fn index(self) -> usize {
+        match self {
+            ProjectionRoute::WholeDomain => 0,
+            ProjectionRoute::Walk => 1,
+            ProjectionRoute::Split => 2,
+            ProjectionRoute::Complement => 3,
+        }
+    }
+
+    /// The name this route is published under.
+    pub fn name(self) -> &'static str {
+        match self {
+            ProjectionRoute::WholeDomain => "whole_domain",
+            ProjectionRoute::Walk => "walk",
+            ProjectionRoute::Split => "split",
+            ProjectionRoute::Complement => "complement",
+        }
+    }
+}
+
+/// The per-route build counters, the forced route a test may fix, and the one place a projection
+/// build is counted.
+///
+/// **One value shared by the two sites that build a full projection**, the request path's
+/// `Engine::session_geometry` and the background refresh's rung 3. A forced route therefore reaches
+/// both, and neither can count into a gauge the other does not.
+#[derive(Debug, Default)]
+pub struct ProjectionRoutes {
+    counts: [AtomicU64; 4],
+    /// The forced route as `ProjectionRoute::index() + 1`, or zero for the chosen route. Zero in
+    /// every shipped build: `Engine::force_projection_route_for_test` is the only writer and
+    /// exists only under `fault-injection`.
+    forced: AtomicU8,
+}
+
+impl ProjectionRoutes {
+    /// Builds so far, in [`ProjectionRoute::ALL`]'s order.
+    pub fn counts(&self) -> [u64; 4] {
+        std::array::from_fn(|index| self.counts[index].load(Ordering::Relaxed))
+    }
+
+    /// The route every build must take, where one has been fixed.
+    pub fn forced(&self) -> Option<ProjectionRoute> {
+        self.forced
+            .load(Ordering::Relaxed)
+            .checked_sub(1)
+            .and_then(|index| ProjectionRoute::ALL.get(index as usize).copied())
+    }
+
+    /// Fix the route every build takes, or return to the chosen one on `None`.
+    pub fn force(&self, route: Option<ProjectionRoute>) {
+        // One line, with the ordering on it: `check-layers.sh`'s sole-publisher rule tells an
+        // atomic store from an `ArcSwap` publication by the `Ordering::` argument beside it.
+        let encoded = route.map_or(0, |route| route.index() as u8 + 1);
+        self.forced.store(encoded, Ordering::Relaxed);
+    }
+
+    /// Build a projection by [`RowProjection::new`] and count the route it took.
+    ///
+    /// **Postings the split route cannot read leave it walking instead**, warned and counted as a
+    /// walk. The two reads are the chooser's sum over the satisfied terms' delta postings and the
+    /// residual itself, both over the postings and tiers the session's fragment was unioned from
+    /// moments earlier, so a failure here is a host condition rather than a state the request can
+    /// reach. What matters is that the fallback is the reference computation and not a narrower
+    /// one. The
+    /// walk crosses the whole fragment and returns the identical rows, so a session served this
+    /// way is served the same set more slowly. Refusing instead would cost a session its map for a
+    /// fault that costs it nothing, and the two call sites cannot carry an error out in any case:
+    /// the single-flight slot has no way to hold one and caching it would be I13a.
+    pub fn build(&self, inputs: &ProjectionInputs<'_>, rows: &RowSpace) -> RowProjection {
+        match RowProjection::new(inputs, rows) {
+            Ok((projection, route)) => {
+                self.counts[route.index()].fetch_add(1, Ordering::Relaxed);
+                projection
+            }
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    "the postings the split route prices and walks could not be read; this \
+                     projection was built by the walk, which produces the same rows"
+                );
+                self.counts[ProjectionRoute::Walk.index()].fetch_add(1, Ordering::Relaxed);
+                RowProjection::walk(inputs.fragment, rows)
+            }
+        }
+    }
+}
 
 /// A cached row-space projection of one frozen fragment, for one `(token, view, pin)`.
 ///
@@ -83,9 +225,151 @@ pub struct RowProjection {
 }
 
 impl RowProjection {
-    /// Project `fragment`'s entity-space bitmap into this view's row space. Do not call this on
-    /// the per-viewport path — see this struct's doc.
-    pub fn new(fragment: &FrozenFragment, rows: &RowSpace) -> Self {
+    /// Project `inputs.fragment` into this view's row space, by whichever route costs least, and
+    /// say which route that was. Do not call this on the per-viewport path — see this struct's doc.
+    ///
+    /// **Every route returns the identical projection.** The walk crosses the whole fragment. The
+    /// split unions the bundle's images of the terms the session holds — each image is the base
+    /// projection of that term's posting, and every satisfied term's posting lies inside the
+    /// fragment — then walks the residual and the extents. The complement walks the entities the
+    /// grant does not hold and subtracts their rows from the base's row range, which is exact
+    /// where the base's slots are a bijection onto that range. It adds the extents above that, as
+    /// the walk's own route does. The whole-domain answer is the row range.
+    /// `tessera_store::term_images`' module doc carries the algebra;
+    /// `tests/term_images_route.rs` checks the routes against each other over a built corpus.
+    ///
+    /// **The route is chosen before any route runs, from the principal's own grant**: the
+    /// fragment's cardinality below the bound, the image table's sizes for the terms the principal
+    /// holds, and an overcount of the residual. Nothing about another principal, and nothing about
+    /// the overlay, enters it. Appendix C's **C19** records the timing residual.
+    ///
+    /// **Pre-overlay, as this type has always been.** Deny, suppression and buffer composition are
+    /// untouched: a suppressed entity stays in its term's posting and in its image exactly as it
+    /// stays in the fragment, and `EffectiveMask` composes the overlay on every request.
+    ///
+    /// The error is the residual's: it reads postings, and a caller propagates it as it propagates
+    /// a fragment build's.
+    pub fn new(
+        inputs: &ProjectionInputs<'_>,
+        rows: &RowSpace,
+    ) -> io::Result<(Self, ProjectionRoute)> {
+        let fragment = inputs.fragment.view();
+        let whole_domain = rows.base().whole_domain_rows(&fragment).is_some();
+        let wanted = match inputs.force {
+            Some(forced) => forced,
+            None if whole_domain => ProjectionRoute::WholeDomain,
+            None => Self::price(inputs, rows, &fragment)?,
+        };
+
+        let walked = |route| Ok((Self::over(rows.project(&fragment), rows), route));
+        match wanted {
+            // A forced whole-domain route over a grant that does not cover the domain has no
+            // answer of its own. It walks, and the gauge says so rather than reporting a route
+            // that did not run.
+            ProjectionRoute::WholeDomain if whole_domain => walked(ProjectionRoute::WholeDomain),
+            ProjectionRoute::Split => {
+                let Some(images) = inputs.images else {
+                    return walked(ProjectionRoute::Walk);
+                };
+                let (kept, unkept): (Vec<TermId>, Vec<TermId>) = inputs
+                    .satisfied
+                    .iter()
+                    .copied()
+                    .partition(|term| images.kept(*term));
+                if kept.is_empty() {
+                    return walked(ProjectionRoute::Walk);
+                }
+                // The views live inside `union` and are dropped when it returns: a session reads
+                // the mapped bytes once and nothing caches a header across sessions.
+                let mut union = images.union(&kept);
+                let residual = tessera_authz::residual_fragment(
+                    &unkept,
+                    &kept,
+                    inputs.postings,
+                    inputs.deltas,
+                    &fragment,
+                )?;
+                union.or_inplace(&rows.project_base(&residual));
+                union.or_inplace(&rows.project_extents_from(&fragment, 0));
+                Ok((Self::over(union, rows), ProjectionRoute::Split))
+            }
+            ProjectionRoute::Complement => match rows.project_complement_base(&fragment) {
+                Some(mut base) => {
+                    base.or_inplace(&rows.project_extents_from(&fragment, 0));
+                    Ok((Self::over(base, rows), ProjectionRoute::Complement))
+                }
+                // The base's row count is not recorded, which is the whole of the route's
+                // validity and is what the chooser is given, so this is a forced complement over
+                // a row space that has no complement answer. The walk answers it.
+                None => {
+                    debug_assert!(
+                        inputs.force.is_some(),
+                        "the chooser is offered the complement only where the base records the \
+                         row count it is a bijection onto, so a chosen complement with none is a \
+                         chooser bug"
+                    );
+                    walked(ProjectionRoute::Walk)
+                }
+            },
+            _ => walked(ProjectionRoute::Walk),
+        }
+    }
+
+    /// Price the routes over `fragment` and return the cheapest, or [`ProjectionRoute::Walk`]
+    /// where there is nothing to price against.
+    ///
+    /// The complement is offered where the base records the row count its slots are a bijection
+    /// onto, which is what `RowSpace::project_complement_base` needs and all it needs.
+    ///
+    /// **A view with no image table is priced too.** Images are written by the build and by each
+    /// fold, so a view can be served without them, and a session can hold no term that has one.
+    /// Either way there is no split to take, and what is left is the walk against the complement,
+    /// which is a choice about the principal's grant and the row space rather than about any
+    /// image. The residual is not priced in that case and the delta postings are not read: the
+    /// split is not on offer for the residual estimate to change.
+    fn price(
+        inputs: &ProjectionInputs<'_>,
+        rows: &RowSpace,
+        fragment: &croaring::Bitmap,
+    ) -> io::Result<ProjectionRoute> {
+        let bound = rows.base().bound();
+        // A bound of zero holds no entity, and one above the `u32` entity ceiling (I9) names
+        // entities no mask can hold. Neither has a route to price against the walk.
+        let Some(hi) = bound.checked_sub(1).and_then(|hi| u32::try_from(hi).ok()) else {
+            return Ok(ProjectionRoute::Walk);
+        };
+        let held = fragment.range_cardinality(0..=hi);
+        let complement_valid = rows.base().dense_rows().is_some();
+        let unionable = inputs
+            .images
+            .filter(|images| inputs.satisfied.iter().any(|term| images.kept(*term)));
+        let chooser = match unionable {
+            Some(images) => chooser_inputs(
+                images,
+                inputs.satisfied,
+                held,
+                bound,
+                complement_valid,
+                tessera_authz::delta_entities(inputs.satisfied, inputs.deltas)?,
+            ),
+            None => ChooserInputs {
+                held,
+                bound,
+                complement_valid,
+                ..ChooserInputs::default()
+            },
+        };
+        Ok(match choose(&chooser, &ROUTE_COSTS) {
+            Route::Walk => ProjectionRoute::Walk,
+            Route::Split => ProjectionRoute::Split,
+            Route::Complement => ProjectionRoute::Complement,
+        })
+    }
+
+    /// The walk, for a caller that holds a fragment and a row space and nothing else — a bench
+    /// arm, an example, a fixture that builds a projection directly. Identical to what
+    /// [`Self::new`] returns on [`ProjectionRoute::Walk`].
+    pub fn walk(fragment: &FrozenFragment, rows: &RowSpace) -> Self {
         Self::over(rows.project(&fragment.view()), rows)
     }
 
@@ -182,8 +466,8 @@ impl RowProjection {
         // **Run containers, because a projection is held for a session and read for its life.**
         // The rows a grant projects to are a contiguous range wherever the grant covers a run of
         // row space, and a bitmap container spends 8 KiB stating what a run container states in
-        // four bytes plus a count. A whole-corpus grant at 3.5×10⁹ rows is 53 342 containers: 437 MB
-        // of bitmap containers, or 53 342 run containers of one run each, on the order of a
+        // four bytes plus a count. A whole-corpus grant at 3.5×10⁹ rows is 53 407 containers:
+        // 437 MB of bitmap containers, or 53 407 run containers of one run each, on the order of a
         // megabyte. Run form is per container and never global — the count does not fall, only what
         // each container costs — and `run_optimize` converts one only where the run form is
         // smaller, so a projection that runs badly keeps the representation it had.

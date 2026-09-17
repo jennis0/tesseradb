@@ -517,6 +517,19 @@ const ROARING_CONTAINER_SPAN: u64 = 1 << 16;
 const ROARING_CONTAINER_HEADER: u64 = 8;
 const ROARING_BITSET_BYTES: u64 = 8 << 10;
 
+/// The three bitmaps one worker of the term-image pass holds while it projects one term, in bytes:
+/// the posting over entity space, the image over row space, and the buffer the image is frozen
+/// into. The projection scratch is charged beside them.
+///
+/// ⊘ **Modelled**, and a ceiling: each is charged at a bitset container per 65,536 values, which is
+/// a byte per eight and is what a term held by every entity or every row would cost. `n` stands for
+/// both spaces, a build's entity ids being `[0, n)` and no view holding more rows than that.
+fn term_image_bitmap_bytes(n: u64) -> u64 {
+    // Values a byte of bitset container covers: 65,536 over 8 KiB is eight.
+    let values_per_byte = ROARING_CONTAINER_SPAN / ROARING_BITSET_BYTES;
+    n.div_ceil(values_per_byte).saturating_mul(3)
+}
+
 /// What `terms/postings.arrow` comes to for a relation whose terms have these pre-dedup row
 /// counts, over an entity space of `n`.
 ///
@@ -535,7 +548,9 @@ const ROARING_BITSET_BYTES: u64 = 8 << 10;
 fn postings_bytes(term_rows: &[u64], n: u64) -> u64 {
     let mut total = 8u64.saturating_mul(term_rows.len() as u64 + 1);
     for &rows in term_rows {
-        total = total.saturating_add(1).saturating_add(term_postings_bytes(rows, n));
+        total = total
+            .saturating_add(1)
+            .saturating_add(term_postings_bytes(rows, n));
     }
     total
 }
@@ -744,8 +759,7 @@ pub(crate) fn entity_order_residency(
     layer_entries: u64,
     memory_budget: u64,
 ) -> Residency {
-    let batch_entries =
-        level_entries.min(crate::layers::publication_batch_entries(memory_budget));
+    let batch_entries = level_entries.min(crate::layers::publication_batch_entries(memory_budget));
     let publication_bytes = batch_entries.saturating_mul(BYTES_PER_MEMBER_ENTRY);
     let mut terms = vec![
         // **A file under `.build-tmp/` where there is one at all**, and so charged to the disk
@@ -801,14 +815,10 @@ pub(crate) fn entity_order_residency(
             8u64.saturating_mul(n)
                 .saturating_add(presence)
                 .saturating_add(arena_capacity(
-                    column
-                        .payload_bytes
-                        .saturating_add((width - 8) * n),
+                    column.payload_bytes.saturating_add((width - 8) * n),
                 ))
         } else {
-            width
-                .saturating_mul(n)
-                .saturating_add(presence)
+            width.saturating_mul(n).saturating_add(presence)
         };
         let ty = column.ty.arrow_type_name();
         terms.push(Term {
@@ -975,7 +985,7 @@ pub(crate) fn entity_order_residency(
     // so what a partition costs is a constant: its writer buffers while it is open, and one loaded
     // bucket and one window at the replay. Charging the ceiling over-charges a small corpus by up
     // to the bucket count, which is the price of a model whose terms do not move with `n` — the
-    // whole of what `the_anonymous_total_grows_only_by_the_three_terms_this_names` asserts, and
+    // whole of what `the_anonymous_total_grows_only_by_the_four_terms_this_names` asserts, and
     // the reason the design names 2 GiB as the budget floor (§3).
     //
     // **How many are open at the worst phase.** The attribute join opens one per column it fills
@@ -1000,17 +1010,17 @@ pub(crate) fn entity_order_residency(
     // The same arithmetic the partition itself sizes its writers by, so what the pre-flight
     // charges is what the pass allocates.
     let buffers = |buckets: u64, width: u64| {
-        buckets.saturating_mul(crate::spill::partition_buffer_bytes(n, width as usize, buckets)
-            as u64)
+        buckets
+            .saturating_mul(crate::spill::partition_buffer_bytes(n, width as usize, buckets) as u64)
     };
     // **The corpus where it is smaller than the type's bound, the bound where it is not.** A
     // bucket holds at most `n / 128` records and never more than 2³²/128 whatever `n` is, so the
     // term rises with the corpus until the key type binds and is flat above it — which is the
     // sense in which a partition's memory is a constant, and what
-    // `the_anonymous_total_grows_only_by_the_three_terms_this_names` asserts by evaluating the
+    // `the_anonymous_total_grows_only_by_the_four_terms_this_names` asserts by evaluating the
     // model on both sides of that bound.
-    let records =
-        (n / crate::spill::PARTITION_BUCKETS as u64).clamp(1, crate::spill::PARTITION_BUCKET_RECORDS);
+    let records = (n / crate::spill::PARTITION_BUCKETS as u64)
+        .clamp(1, crate::spill::PARTITION_BUCKET_RECORDS);
     let bucket = |width: u64| records.saturating_mul(width);
     if join_partitions > 0 {
         terms.push(Term {
@@ -1030,7 +1040,10 @@ pub(crate) fn entity_order_residency(
         });
     }
     // The keyword dictionary's `(row, ordinal)` partition, where a column is indexed at all.
-    if columns.iter().any(|column| matches!(column.ty, ScalarType::Keyword)) {
+    if columns
+        .iter()
+        .any(|column| matches!(column.ty, ScalarType::Keyword))
+    {
         terms.push(Term {
             what: "the keyword dictionary's (row, ordinal) partition: writer buffers, one loaded \
                    bucket at 8 B a record and the u32 window it is scattered into"
@@ -1087,9 +1100,8 @@ pub(crate) fn entity_order_residency(
     // **A group-scoped render family opens a lane of its own** in the row space of every view its
     // scope reaches (`views.md` §5), so `scoped_render` carries the types of the view that opens
     // the most. One view's row space is assembled at a time, and that view is the peak.
-    let render_lanes = (columns.iter().filter(|column| column.render).count()
-        + scoped_render.len())
-    .max(1) as u64;
+    let render_lanes =
+        (columns.iter().filter(|column| column.render).count() + scoped_render.len()).max(1) as u64;
     terms.push(Term {
         what: format!(
             "the assembly's (entity, row) and {render_lanes} (row, value) partition(s): writer \
@@ -1137,6 +1149,52 @@ pub(crate) fn entity_order_residency(
             .saturating_add(bucket(4)),
         mapped: false,
         phases: Phases::ASSEMBLE,
+        constant: true,
+    });
+    // **The term images** (`crate::term_images_pass`, pipeline step 10c). The pass holds one term
+    // per worker in flight: that term's posting as an owned bitmap over entity space, its image
+    // over row space, the buffer the image is serialised into, and one projection scratch. A
+    // Roaring container covers 65 536 values and costs at most 8 KiB, at which point it is a bitset
+    // over every value in its range, so a term held by every entity is the widest posting
+    // expressible and one held by every row the widest image. The frozen buffer is charged at the
+    // image's width: it is the containers' payloads with five bytes of key, count and typecode
+    // each, which is under the resident form for every shape but an image of full bitsets. The
+    // scratch is `tessera_store`'s own bound over this corpus's entity space, so a small build pays
+    // its own rows rather than the ceiling a 10⁹ one reaches. Nothing in the pass scales with the
+    // dictionary: the table is written into the file as the pass's row buffer fills, and that
+    // buffer is a constant 160 KiB.
+    //
+    // **The worker count is the pass's own** (`crate::term_images_pass::derive_threads`), which is
+    // capped rather than the machine's width, and capped for this term: three bitmaps a worker is
+    // about 1.3 GB at rung 6, so an uncapped width forecasts past the budget such a build runs
+    // under.
+    //
+    // ⊘ **Modelled**, and a ceiling rather than an expectation: a term over a third of the corpus
+    // in run-friendly order is kilobytes (assumed). The fold's memory estimate charges the same
+    // window over its own one thread, at a flat ceiling for the scratch rather than this bound.
+    let image_workers = crate::term_images_pass::derive_threads() as u64;
+    let scratch = tessera_store::permutation::project_scratch_bound(n, n);
+    terms.push(Term {
+        what: format!(
+            "the term images, over {image_workers} worker(s): one term's posting, its image and \
+             the buffer it is frozen into, each at a bitset container per 65,536 values"
+        ),
+        bytes: image_workers.saturating_mul(term_image_bitmap_bytes(n)),
+        mapped: false,
+        phases: Phases::ASSEMBLE,
+        constant: false,
+    });
+    terms.push(Term {
+        what: format!(
+            "the term images' projection scratch, {} MiB over {image_workers} worker(s)",
+            scratch.total() >> 20
+        ),
+        bytes: image_workers.saturating_mul(scratch.total()),
+        mapped: false,
+        phases: Phases::ASSEMBLE,
+        // The pool never exceeds one window of row ids and a chunk a bucket, and the stamp and its
+        // marks are the same size whatever the corpus. The term rises to that bound and is flat
+        // above it, which is the shape the partitions' buckets have.
         constant: true,
     });
     // **Arrow's all-ones validity bitmaps, during the `columns.arrow` layout pass.** Every column
@@ -1344,12 +1402,9 @@ pub(crate) fn routes_for(
     let forced = match route {
         crate::ExtentRoute::Derived => return plan_routes(args, n, ids, payloads, free),
         crate::ExtentRoute::Arena => crate::pipeline::ColumnRoutes::forced_only(&args.schema),
-        crate::ExtentRoute::Extents => {
-            crate::pipeline::ColumnRoutes::every_available(&args.schema)
-        }
+        crate::ExtentRoute::Extents => crate::pipeline::ColumnRoutes::every_available(&args.schema),
     };
-    let (columns, entries, level_entries, layer_entries) =
-        model_inputs(args, n, payloads, &forced);
+    let (columns, entries, level_entries, layer_entries) = model_inputs(args, n, payloads, &forced);
     let budget = args
         .memory_budget
         .unwrap_or_else(crate::pipeline::detect_memory_budget);
@@ -1399,12 +1454,7 @@ fn scoped_render_types(args: &crate::BuildArgs) -> Vec<ScalarType> {
                 .map(|family| family.attribute.ty)
                 .collect::<Vec<ScalarType>>()
         })
-        .max_by_key(|types| {
-            types
-                .iter()
-                .map(|&ty| 4 + fixed_width(ty))
-                .sum::<u64>()
-        })
+        .max_by_key(|types| types.iter().map(|&ty| 4 + fixed_width(ty)).sum::<u64>())
         .unwrap_or_default()
 }
 
@@ -1591,9 +1641,7 @@ pub(crate) fn disk(
     // Read in ordinal space once per view and released at that view's permutation, so every
     // view's is on the disk together from the geometry pass to the first row space.
     push(
-        format!(
-            "each view's geometry by ordinal, 8 B/item over {views} view(s), in .build-tmp/"
-        ),
+        format!("each view's geometry by ordinal, 8 B/item over {views} view(s), in .build-tmp/"),
         8 * n * views,
         Phases::SPILL.onwards(),
     );
@@ -2756,7 +2804,10 @@ mod tests {
             ];
             let (routes, _) =
                 choose_routes(&schema, n, IdShape::dense(n), columns, 0, 0, Some(free));
-            assert!(routes.takes_extents(0), "text spills with {free} bytes free");
+            assert!(
+                routes.takes_extents(0),
+                "text spills with {free} bytes free"
+            );
             assert_eq!(
                 routes.takes_extents(1),
                 free < 1 << 40,
@@ -2812,6 +2863,79 @@ mod tests {
         assert!(
             routes.takes_extents(1),
             "the second is charged against the window the first left"
+        );
+    }
+
+    /// **The rung-6 forecast fits the budget that build runs under.**
+    ///
+    /// 3.5×10⁹ rows and entities over the GBIF declaration's four columns and three member rows an
+    /// item, priced against the 24 GiB budget the rung is built under. The pre-flight refuses a
+    /// build whose anonymous total exceeds the budget (`crate::pipeline`), so this is that refusal
+    /// read at the model: under the bound is a build that starts.
+    ///
+    /// The term this test exists for is the term images'. It is the worker count times three
+    /// bitmaps of a bitset container per 65,536 values, so at the machine's own width on a
+    /// twelve-core box it came to 15,002 MiB by itself and put the forecast over the budget.
+    /// `crate::term_images_pass::derive_threads` caps the width, and this asserts the consequence
+    /// rather than the cap.
+    #[test]
+    fn the_rung_six_forecast_fits_the_twenty_four_gibibyte_budget() {
+        const BUDGET: u64 = 24 << 30;
+        const N: u64 = 3_495_729_729;
+        // The declaration's columns at the characters an item the corpus measures, as
+        // `the_gbif_rung_spills_where_the_slice_that_fits_does_not` states them.
+        let columns = vec![
+            column(ScalarType::U8, 0),
+            column(ScalarType::Keyword, (6.60 * N as f64) as u64),
+            column(ScalarType::U16, 0),
+            spilled(ScalarType::Keyword, (31.22 * N as f64) as u64),
+        ];
+        let schema = route_schema(&[
+            (ScalarType::U8, false),
+            (ScalarType::Keyword, true),
+            (ScalarType::U16, false),
+            (ScalarType::Keyword, false),
+        ]);
+        // 459 GB of disk, which is what the box the rung was attempted on has.
+        let (_routes, residency) = super::choose_routes(
+            &schema,
+            N,
+            IdShape::dense(N),
+            columns,
+            &[],
+            3 * N,
+            3 * N,
+            3 * N,
+            Some(459_000_000_000),
+            BUDGET,
+        );
+        let total = residency.total();
+        assert!(
+            total <= BUDGET,
+            "the rung-6 forecast is {} MiB against a {} MiB budget, so the build is refused              before it starts:{}",
+            total >> 20,
+            BUDGET >> 20,
+            residency.describe()
+        );
+        // The term images are a real share of it and not a term that rounded to nothing: a model
+        // charging them at zero would pass the bound above for the wrong reason.
+        let images: u64 = residency
+            .terms
+            .iter()
+            .filter(|term| term.what.starts_with("the term images"))
+            .map(|term| term.bytes)
+            .sum();
+        assert_eq!(
+            images,
+            crate::term_images_pass::derive_threads() as u64
+                * (term_image_bitmap_bytes(N)
+                    + tessera_store::permutation::project_scratch_bound(N, N).total()),
+            "the two term-image terms must be the pass's own width times what one worker holds"
+        );
+        assert!(
+            images > 1 << 30,
+            "the term images are {} MiB, which is too small for this bound to be about them",
+            images >> 20
         );
     }
 
@@ -2977,7 +3101,10 @@ mod tests {
 
         let index_only = 8 * n + n.div_ceil(8) + arena_capacity(40 * n);
         let render = 4 * n + n.div_ceil(8);
-        assert_eq!(with.at(Phase::Index) - bare.at(Phase::Index), index_only + render);
+        assert_eq!(
+            with.at(Phase::Index) - bare.at(Phase::Index),
+            index_only + render
+        );
         assert_eq!(
             with.at(Phase::Blob) - bare.at(Phase::Blob),
             render,
@@ -3078,7 +3205,9 @@ mod tests {
         // And the blob row the same column keeps, which is a different term over the same
         // characters.
         assert!(
-            disk.terms.iter().any(|t| t.what.contains("the record blob")),
+            disk.terms
+                .iter()
+                .any(|t| t.what.contains("the record blob")),
             "a text column is blob-resident whether or not it is indexed"
         );
     }
@@ -3153,7 +3282,11 @@ mod tests {
         let (mut args, _temp) = fixture(2_000);
         let n = 2_000;
         let entries = member_entries_by_layer(&args);
-        assert_eq!(entries, vec![n], "the fixture's member file names every item");
+        assert_eq!(
+            entries,
+            vec![n],
+            "the fixture's member file names every item"
+        );
 
         // One entry an entity over one level: every level can be a label lane.
         assert_eq!(
@@ -3602,13 +3735,8 @@ require_member_visibility = "none"
 
         let (args, _temp) = fixture(N);
         let free = crate::pipeline::available_disk(&args.out);
-        let (_routes, model) = plan_routes(
-            &args,
-            N,
-            IdShape::dense(N),
-            &payloads_per_item(&args),
-            free,
-        );
+        let (_routes, model) =
+            plan_routes(&args, N, IdShape::dense(N), &payloads_per_item(&args), free);
         println!("model: {} MiB{}", model.total() >> 20, model.describe());
         crate::build_observed(&args, &Trace).unwrap();
         println!(
@@ -3618,10 +3746,10 @@ require_member_visibility = "none"
     }
 
     /// **The headline of the entity-order model: what anonymous memory grows with the corpus is
-    /// named, and it is three terms.**
+    /// named, and it is four terms.**
     ///
     /// Every term the model charges against the machine is a constant or one publication batch — a
-    /// share of the budget — with three exceptions, and this test subtracts them rather than
+    /// share of the budget — with four exceptions, and this test subtracts them rather than
     /// pretending they are not there:
     ///
     /// - arrow's all-ones validity bitmaps during the `columns.arrow` layout pass, `n / 8` bytes a
@@ -3631,13 +3759,16 @@ require_member_visibility = "none"
     /// - the artifact pass's partition bucket, which holds one record per **member entry** in its
     ///   row range and so is bounded by the largest layer's entries over 128 rather than by the
     ///   `u32` row key. Every other partition pushes one record per key and is flat above the key
-    ///   type's bound; this one is not, and a layer of many ordinals a row is where it shows.
+    ///   type's bound; this one is not, and a layer of many ordinals a row is where it shows;
+    /// - the term images, one worker's posting, image and frozen buffer each at a bitset container
+    ///   per 65,536 values. The projection scratch beside them is bounded by one window of row ids
+    ///   and is one of the constants.
     ///
-    /// Naming them is the point: the assertions are equalities against exactly these three, so a
+    /// Naming them is the point: the assertions are equalities against exactly these four, so a
     /// term that starts rising with the corpus fails here whether or not anyone remembered to look.
     /// What grows properly is the disk the same model reports beside it.
     #[test]
-    fn the_anonymous_total_grows_only_by_the_three_terms_this_names() {
+    fn the_anonymous_total_grows_only_by_the_four_terms_this_names() {
         // The floor a partition's own constant needs, and the budget both row counts here carry
         // more member entries than one publication batch of.
         const BUDGET: u64 = 2 << 30;
@@ -3672,15 +3803,28 @@ require_member_visibility = "none"
         // such column has no such term, which is why the assertions below name it separately
         // rather than folding it into the rate.
         let duplicates = |n: u64| 4 * n.div_ceil(8);
+        // **And the term images' three bitmaps**: a posting, an image and a frozen buffer a
+        // worker. The projection scratch beside them is bounded by one window and is one of the
+        // constants, so it appears in the second assertion and not the first.
+        let workers = crate::term_images_pass::derive_threads() as u64;
+        let images = |n: u64| workers * term_image_bitmap_bytes(n);
+        let image_scratch =
+            |n: u64| workers * tessera_store::permutation::project_scratch_bound(n, n).total();
         let small = residency(10_000_000);
         let large = residency(100_000_000);
         // **The rate terms are equal net of the bitmaps**: one publication batch, whatever the
         // level behind it.
         assert_eq!(
-            scaling_total(&small) - bitmaps(10_000_000) - duplicates(10_000_000),
-            scaling_total(&large) - bitmaps(100_000_000) - duplicates(100_000_000),
-            "the anonymous rate is one publication batch, arrow's validity bitmaps and the \
-             spilled column's duplicate map:\nat 10⁷{}\nat 10⁸{}",
+            scaling_total(&small)
+                - bitmaps(10_000_000)
+                - duplicates(10_000_000)
+                - images(10_000_000),
+            scaling_total(&large)
+                - bitmaps(100_000_000)
+                - duplicates(100_000_000)
+                - images(100_000_000),
+            "the anonymous rate is one publication batch, arrow's validity bitmaps, the spilled \
+             column's duplicate map and the term images' window:\nat 10⁷{}\nat 10⁸{}",
             small.describe(),
             large.describe()
         );
@@ -3697,10 +3841,12 @@ require_member_visibility = "none"
             beyond.total() - at_bound.total(),
             (bitmaps(1u64 << 34) - bitmaps(1u64 << 32))
                 + (duplicates(1u64 << 34) - duplicates(1u64 << 32))
-                + (pass_bucket(1u64 << 34) - pass_bucket(1u64 << 32)),
+                + (pass_bucket(1u64 << 34) - pass_bucket(1u64 << 32))
+                + (images(1u64 << 34) - images(1u64 << 32))
+                + (image_scratch(1u64 << 34) - image_scratch(1u64 << 32)),
             "above the key type's bound the anonymous total moves by the validity bitmaps, the \
-             spilled column's duplicate map and the artifact pass's bucket, and nothing \
-             else:\nat 2³²{}\nat 2³⁴{}",
+             spilled column's duplicate map, the artifact pass's bucket and the term images' \
+             bitmaps and scratch, and nothing else:\nat 2³²{}\nat 2³⁴{}",
             at_bound.describe(),
             beyond.describe()
         );
