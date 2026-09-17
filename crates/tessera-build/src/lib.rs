@@ -1966,6 +1966,7 @@ fn write_manifests(
         row_column_extents: published_layers.row_column_extents.clone(),
         shape_rows_extents: published_layers.shape_rows_extents.clone(),
         shape_held_extents: published_layers.shape_held_extents.clone(),
+        term_image_extents: Vec::new(),
         artifact_record_extents: published_layers.artifact_record_extents.clone(),
         // One per view the build materialised (`views.md` §7), in registry order. `entity_hi`
         // is inclusive, and an empty build has no entity range at all — hence the saturating

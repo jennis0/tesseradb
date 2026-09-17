@@ -529,9 +529,8 @@ pub fn project_row_column_pairs(
                 let Some(entries) = list_form_entries(entries) else {
                     return Ok(false);
                 };
-                let mut file = crate::membership::ListColumnFile::create(
-                    &path, ordinals, row_count, entries,
-                )?;
+                let mut file =
+                    crate::membership::ListColumnFile::create(&path, ordinals, row_count, entries)?;
                 let mut at: u64 = 0;
                 file.offset(at as u32)?;
                 for k in 0..buckets.len() {
@@ -1028,6 +1027,43 @@ pub struct DerivedIndex {
     containment: usize,
     shape_rows: usize,
     shape_held: usize,
+    term_images: usize,
+}
+
+/// Where one derived file is written and what the manifest calls it.
+pub struct DerivedFile {
+    /// The file to write.
+    pub path: std::path::PathBuf,
+    /// The directory holding it, to fsync once the file is durable.
+    pub dir: std::path::PathBuf,
+    /// The file's prefix-relative name, for the manifest entry and for `files`.
+    pub rel: String,
+}
+
+/// Make the directory one view's term images go in and name the file
+/// (`crate::term_images` for what it holds).
+///
+/// The counter is advanced before the caller writes anything, on [`file_all`]'s rule: an index
+/// handed out again after a failure would name a later call's file after one this call's manifest
+/// entry already names. A build files one per view and a fold one per view, so the counter runs
+/// across the calls of a single publication.
+pub fn term_image_file(
+    prefix_dir: &Path,
+    partition: &str,
+    n: u64,
+    index: &mut DerivedIndex,
+) -> std::io::Result<DerivedFile> {
+    const KIND: &str = "term-images";
+    let position = index.term_images;
+    index.term_images += 1;
+    let dir = prefix_dir.join("partitions").join(partition).join(KIND);
+    std::fs::create_dir_all(&dir)?;
+    let name = derived_name(KIND, n, position, "timg");
+    Ok(DerivedFile {
+        path: dir.join(&name),
+        dir,
+        rel: format!("partitions/{partition}/{KIND}/{name}"),
+    })
 }
 
 /// The naming rule every derived file follows: a layer name and a view id are caller-shaped and
@@ -2310,9 +2346,10 @@ mod derived_tests {
     fn a_view_of_no_rows_composes_an_empty_column_and_leaves_nothing_behind() {
         let dir = tempfile::tempdir().expect("a temporary directory");
         for layout in [ServingLayout::RowMajorLabel, ServingLayout::RowMajorList] {
-            let path = project_row_column(2, 0, layout, dir.path(), &walk_of(&[vec![0, 1], vec![2]]))
-                .expect("a column over no rows")
-                .expect("a column, not a refusal");
+            let path =
+                project_row_column(2, 0, layout, dir.path(), &walk_of(&[vec![0, 1], vec![2]]))
+                    .expect("a column over no rows")
+                    .expect("a column, not a refusal");
             match layout {
                 ServingLayout::RowMajorLabel => {
                     let pack =
@@ -2348,7 +2385,10 @@ mod derived_tests {
     #[test]
     fn a_level_of_more_entries_than_the_list_forms_offsets_count_has_no_list_form() {
         assert_eq!(super::list_form_entries(0), Some(0));
-        assert_eq!(super::list_form_entries(u64::from(u32::MAX)), Some(u32::MAX));
+        assert_eq!(
+            super::list_form_entries(u64::from(u32::MAX)),
+            Some(u32::MAX)
+        );
         assert_eq!(super::list_form_entries(u64::from(u32::MAX) + 1), None);
         // A layer of 47 entries a row over the rung-6 corpus, which is the case that reaches it.
         assert_eq!(super::list_form_entries(47 * 3_495_729_729), None);

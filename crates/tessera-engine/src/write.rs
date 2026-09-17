@@ -3557,8 +3557,8 @@ impl WritePath {
         // WAL moves into the executor's closure and cannot be handed back, and a caller that meets
         // a locked bundle must be able to answer the same `AlreadyStarted`/`BundleLocked` question
         // again rather than a stale one.
-        let bundle_lock =
-            crate::bundle_lock::BundleWriteLock::acquire(&flush.bundle_root).map_err(|e| {
+        let bundle_lock = crate::bundle_lock::BundleWriteLock::acquire(&flush.bundle_root)
+            .map_err(|e| {
                 tracing::error!(
                     error = %e,
                     "ALARM: refusing to start a write executor over a bundle root another writer \
@@ -5471,6 +5471,7 @@ mod vocabulary_extensions_tests {
             row_column_extents: Vec::new(),
             shape_rows_extents: Vec::new(),
             shape_held_extents: Vec::new(),
+            term_image_extents: Vec::new(),
             artifact_record_extents: Vec::new(),
             segments: Vec::new(),
             deltas: Vec::new(),
@@ -8519,6 +8520,11 @@ impl Executor {
             row_column_extents: Vec::new(),
             shape_rows_extents: Vec::new(),
             shape_held_extents: Vec::new(),
+            // **Empty**, because the paths are prefix-relative and the fold publishes a new
+            // prefix, so the live list names files this prefix does not contain. Not built yet:
+            // the fold derives no images of its own, and every session on a folded prefix builds
+            // its row projection by walking the permutation.
+            term_image_extents: Vec::new(),
             artifact_record_extents: self.artifact_record_extents.clone(),
             segments,
             deltas: carried_tiers.clone(),
@@ -15946,14 +15952,9 @@ impl Executor {
                         )
                     };
                     match composed {
-                        Ok(Some(path)) => out.push((
-                            view.clone(),
-                            layer.clone(),
-                            *level,
-                            version,
-                            *layout,
-                            path,
-                        )),
+                        Ok(Some(path)) => {
+                            out.push((view.clone(), layer.clone(), *level, version, *layout, path))
+                        }
                         Ok(None) => tracing::warn!(
                             layer = %layer,
                             level,
