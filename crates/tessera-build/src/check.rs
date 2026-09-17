@@ -704,11 +704,10 @@ fn check_group_labels(
         ),
         Some((_, found)) => {
             let ok = match found.data_type() {
-                DataType::Utf8 => true,
                 DataType::List(inner) | DataType::LargeList(inner) => {
-                    matches!(inner.data_type(), DataType::Utf8)
+                    crate::utf8::is_utf8(inner.data_type())
                 }
-                _ => false,
+                other => crate::utf8::is_utf8(other),
             };
             if !ok {
                 report.note(
@@ -746,11 +745,10 @@ fn check_point_visibility(
                 ),
                 Some((_, found)) => {
                     let ok = match found.data_type() {
-                        DataType::Utf8 => true,
                         DataType::List(inner) | DataType::LargeList(inner) => {
-                            matches!(inner.data_type(), DataType::Utf8)
+                            crate::utf8::is_utf8(inner.data_type())
                         }
-                        _ => false,
+                        other => crate::utf8::is_utf8(other),
                     };
                     if !ok {
                         report.note(
