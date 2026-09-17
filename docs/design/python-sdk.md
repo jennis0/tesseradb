@@ -1,9 +1,11 @@
 # The Python SDK: a Tessera database in a notebook
 
 **Status:** Provisional — under review. Reviewed once under the user-experience and capability
-lenses and re-reviewed on §3, §4, §6 and §12 after the rulings of §11.1. Before this becomes
-normative: the owner's rulings on §11.2, and the examples in §10 run against the arXiv corpus. Nothing in this document is built except the
-widget `Map` (client-components §7), which it uses unchanged.
+lenses, re-reviewed on §3, §4, §6 and §12 after the rulings of §11.1, and built through every
+stage of §12 by 2026-09-17, each stage refereed before merge; the examples of §10 run as the
+demo notebooks under `clients/py/examples/` and a headless test asserts what each serves. Before
+this becomes normative: the rulings still open in §11.2, and a pass to make the text describe
+the package as built where it still describes the plan.
 
 **Owns:** the `tesseradb` package's verbs for creating, filling and reading a Tessera database,
 and the shape of a local instance. It does not own the wire (contracts §3), the ingest model
@@ -653,11 +655,13 @@ Rulings of 2026-09-17, on the first stages' review findings:
 
 ### 11.2 Needed
 
-- **D. The demo.** A marimo notebook and a Jupyter twin over the arXiv 50k corpus running
-  §10.1 to §10.5 and §10.7, in `clients/py/examples/`. A headless test in `clients/py/check.sh`
-  that creates, commits and queries a database with no browser.
 - **E. The binary at release.** Platform wheels carrying it. Until then `PATH`, `TESSERA_BIN`
   or the checkout.
+- **H. A label with no membership draws nothing.** `declare_labels(source=mapping)` without
+  `members=` publishes labels attached to their clusters with no member rows, so they are placed
+  in no tile and served to nobody. (a) The engine: an attached artifact with no members takes its
+  target's membership, a declaration key on the label set; (b) the SDK derives a members table
+  from the clustering; (c) `members=` required. Recommended: (a), with (c) as the interim refusal.
 - **F. The values route and layer columns.** Whether `POST /control/values` reads a layer
   column and mints artifacts as the ingest route does (decision 0128), so a new clustering
   over held rows can be staged as a column after the first commit. Until ruled, refused (§6.2).
