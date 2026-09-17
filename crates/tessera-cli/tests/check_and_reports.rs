@@ -403,6 +403,75 @@ require_member_visibility = "any"
     assert_eq!(bodies[0].visibility.as_deref(), Some("ir:analyst"));
 }
 
+/// **An attribute that names no file is declared and empty**, not a finding (`configuration.md`
+/// §2, python-sdk §6.2): the values arrive through `PUT /control/attributes` and the batches after
+/// it, so there is no file for the check to disagree with. The payload is emitted, which is what
+/// the deployment posts to declare the column.
+#[test]
+fn an_attribute_naming_no_source_is_a_note_and_a_payload() {
+    let tmp = tempfile::tempdir().unwrap();
+    project(tmp.path());
+    std::fs::write(
+        tmp.path().join("schema.toml"),
+        r#"
+[[view]]
+name             = "s0"
+extent           = { min = -25.0, max = 25.0 }
+point_visibility = { default = "public" }
+
+[[attribute]]
+name  = "sentiment"
+type  = "f32"
+"#,
+    )
+    .unwrap();
+    let output = run(tmp.path(), &["check", "--payloads"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let said = stderr(&output);
+    assert!(said.contains("attribute 'sentiment'"), "{said}");
+    assert!(said.contains("declared and empty"), "{said}");
+    let payloads: serde_json::Value = serde_json::from_str(&stdout(&output)).unwrap();
+    let attributes = payloads["attributes"].as_array().unwrap();
+    assert_eq!(attributes.len(), 1);
+    assert_eq!(attributes[0]["name"], "sentiment");
+}
+
+/// **A view group that names no points file and no roster is declared and empty** on the same
+/// rule. `tessera build` refuses it, the points having to come from somewhere, and the refusal
+/// names the two roster forms.
+#[test]
+fn a_view_group_naming_no_source_is_a_note_at_check_and_a_refusal_at_build() {
+    let tmp = tempfile::tempdir().unwrap();
+    project(tmp.path());
+    std::fs::write(
+        tmp.path().join("schema.toml"),
+        r#"
+[[view_group]]
+name             = "quarters"
+extent           = { min = -25.0, max = 25.0 }
+point_visibility = { default = "public" }
+"#,
+    )
+    .unwrap();
+    let output = run(tmp.path(), &["check", "--payloads"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let said = stderr(&output);
+    assert!(said.contains("view group 'quarters'"), "{said}");
+    assert!(said.contains("declared and empty"), "{said}");
+    let payloads: serde_json::Value = serde_json::from_str(&stdout(&output)).unwrap();
+    let groups = payloads["view_groups"].as_array().unwrap();
+    assert_eq!(groups.len(), 1);
+    assert_eq!(groups[0]["name"], "quarters");
+
+    let built = run(tmp.path(), &["build"]);
+    assert!(!built.status.success(), "{}", stderr(&built));
+    assert!(
+        stderr(&built).contains("no `source` and no `[[view_group.view]]` roster"),
+        "{}",
+        stderr(&built)
+    );
+}
+
 /// **Never a payload out of a declaration that failed its check.** The stream is what a CI job
 /// pipes at a control plane, and a body emitted beside a finding is one somebody posts.
 #[test]

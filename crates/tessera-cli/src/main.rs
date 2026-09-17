@@ -852,6 +852,7 @@ fn resolve_declaration(
     deployment: Option<&Path>,
     config: Option<PathBuf>,
     file: Vec<(String, PathBuf)>,
+    strictness: tessera_build::config::Strictness,
 ) -> Result<Declaration, String> {
     // **The deployment file first, because everything else is read through it**: where the
     // declaration is, where the bundle goes, and which environment variable carries the key. A
@@ -860,8 +861,15 @@ fn resolve_declaration(
     let (deployment_path, deployment) = load_deployment(deployment)?;
     let schema_path = config.unwrap_or_else(|| deployment.schema_path.clone());
     let bindings = collect_bindings(file)?;
-    let config =
-        tessera_build::config::Config::parse(&schema_path, &bindings).map_err(|e| e.to_string())?;
+    let config = match strictness {
+        tessera_build::config::Strictness::Build => {
+            tessera_build::config::Config::parse(&schema_path, &bindings)
+        }
+        tessera_build::config::Strictness::Declared => {
+            tessera_build::config::Config::parse_declared(&schema_path, &bindings)
+        }
+    }
+    .map_err(|e| e.to_string())?;
     Ok(Declaration {
         deployment_path,
         deployment,
@@ -1463,7 +1471,12 @@ fn main() -> ExitCode {
                 deployment_path,
                 deployment,
                 config,
-            } = match resolve_declaration(deployment.as_deref(), config, file) {
+            } = match resolve_declaration(
+                deployment.as_deref(),
+                config,
+                file,
+                tessera_build::config::Strictness::Build,
+            ) {
                 Ok(resolved) => resolved,
                 Err(detail) => {
                     eprintln!("build refused: {detail}");
@@ -1970,7 +1983,12 @@ fn main() -> ExitCode {
             file,
             payloads,
         } => {
-            let declaration = match resolve_declaration(deployment.as_deref(), config, file) {
+            let declaration = match resolve_declaration(
+                deployment.as_deref(),
+                config,
+                file,
+                tessera_build::config::Strictness::Declared,
+            ) {
                 Ok(resolved) => resolved,
                 Err(detail) => {
                     eprintln!("check FAILED: {detail}");

@@ -1475,6 +1475,31 @@ pub(crate) fn stage_scratch(residency: &Residency) -> u64 {
     residency.peak().1
 }
 
+/// The supplied keys' arena, as a term of the entity-order residency (`crate::ids`).
+///
+/// **Anonymous memory with no spill route**, so it is charged rather than reported: the keys are
+/// interned before pass one and read by every pass after it. A key costs its `Box<[u8]>` in the
+/// interned vector, 16 bytes, plus its own heap allocation, which glibc rounds to a 16-byte chunk
+/// with an 8-byte header and a 32-byte floor. Modelled from the mean key length, so a corpus of
+/// widely varying key lengths is charged its mean rather than its distribution.
+pub(crate) fn supplied_key_arena(id_space: &crate::ids::IdSpace) -> Option<Term> {
+    let keys = id_space.supplied()?;
+    let mean = keys.mean_key_len();
+    let chunk = (mean + 8).next_multiple_of(16).max(32);
+    Some(Term {
+        what: format!(
+            "the supplied identity keys, at {} B/item: a 16 B boxed slice and a {chunk} B \
+             allocator chunk over a {mean} B mean key. Interned before pass one and read by every \
+             pass after it, with no spill route",
+            16 + chunk
+        ),
+        bytes: (16 + chunk) * keys.len() as u64,
+        mapped: false,
+        phases: Phases::SPILL.onwards(),
+        constant: false,
+    })
+}
+
 /// **What the whole build asks the disk for**, phase by phase, so the pre-flight warns on the
 /// largest window rather than on a total nothing ever holds.
 ///
@@ -1501,6 +1526,7 @@ pub(crate) fn disk(
     corpus: Corpus<'_>,
     payloads: &[f64],
     tail: &Residency,
+    id_space: &crate::ids::IdSpace,
 ) -> Residency {
     let Corpus {
         n,
@@ -1703,7 +1729,7 @@ pub(crate) fn disk(
             Phases::BANDS.onwards(),
         );
     }
-    if args.mint_external_ids {
+    if crate::ids::writes_external_ids(args, id_space) {
         // The sidecar is an Arrow `binary` column beside a `u32` entity — a 4 B offset a row and
         // one more at the end, an 8 B `external_id` payload and the entity — and the locator
         // beside it (`ext-locator.u32`) is a `u32` an item. That is 20 B/item of buffer, and the
@@ -1711,12 +1737,23 @@ pub(crate) fn disk(
         // (`docs/evidence/memos/2026-09-10-disk-bundle-payload.md` §1), so the quarter byte an
         // item the Arrow framing adds is charged with them. ⊘ What is left out is about a
         // kilobyte of schema and footer a file, which is a constant and not a rate.
+        //
+        // A supplied key's payload is the key's own bytes rather than eight, charged at the mean
+        // over the keys this build interned (`crate::ids`). Modelled from the corpus rather than
+        // measured, and exact where the keys are a fixed width.
+        let payload = match id_space.supplied() {
+            None => 8,
+            Some(keys) => keys.mean_key_len(),
+        };
         push(
-            "the external-id sidecar and its locator, at a measured 20.25 B/item: a 4 B Arrow \
-             offset, an 8 B id and a 4 B entity in the sidecar, a 4 B locator, and a quarter byte \
-             an item of Arrow framing"
-                .into(),
-            4 * (n + 1) + 16 * n + n.div_ceil(4),
+            format!(
+                "the external-id sidecar and its locator, at {} B/item: a 4 B Arrow offset, a {} \
+                 B id and a 4 B entity in the sidecar, a 4 B locator, and a quarter byte an item \
+                 of Arrow framing",
+                12 + payload,
+                payload
+            ),
+            4 * (n + 1) + (8 + payload) * n + n.div_ceil(4),
             Phases::BANDS.onwards(),
         );
     }
@@ -2368,9 +2405,14 @@ mod tests {
             .find(|t| t.what.contains("the sorted source ids"))
             .expect("the ids are a term of their own");
         assert_eq!(ids.bytes, 8 * n);
-        assert!(ids.mapped, "the ids are a file, not memory the machine must have");
         assert!(
-            with_layer.describe().contains("MiB (mapped)  the sorted source ids"),
+            ids.mapped,
+            "the ids are a file, not memory the machine must have"
+        );
+        assert!(
+            with_layer
+                .describe()
+                .contains("MiB (mapped)  the sorted source ids"),
             "a refusal has to show the disk the build wants: {}",
             with_layer.describe()
         );
@@ -2964,6 +3006,7 @@ mod tests {
             },
             &payloads,
             &tail,
+            &crate::ids::IdSpace::Integer,
         )
     }
 

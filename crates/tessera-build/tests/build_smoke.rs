@@ -22,6 +22,9 @@ use tessera_spatial::Bounds;
 use tessera_store::read::open_bundle;
 use tessera_types::{IdentityKey, TermId};
 
+/// This file's fixtures name their rows by an integer `entity_id` column (`tessera_build::ids`).
+static INTEGER_IDS: tessera_build::ids::IdSpace = tessera_build::ids::IdSpace::Integer;
+
 /// A fixed, non-degenerate test key shared by every fixture in this file.
 const TEST_KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f";
 
@@ -1030,13 +1033,11 @@ fn morton_plus_residual_recovers_sub_cell_position() {
     w.write(&batch).unwrap();
     w.close().unwrap();
 
+    let fields = Default::default();
     let mut rows = read_points(
-        &points,
-        &Default::default(),
+        tessera_build::input::Source::new(&points, &fields, &INTEGER_IDS),
         tessera_spatial::Projection::None,
         &IDENTITY_EXTENT,
-        None,
-            None,
     )
     .unwrap();
     rows.sort_by_key(|r| r.source_id);
@@ -1068,13 +1069,11 @@ fn bare_morton_widens_with_a_zero_residual() {
     let points = tmp.path().join("points.parquet");
     write_morton_points(&points);
 
+    let fields = Default::default();
     let rows = read_points(
-        &points,
-        &Default::default(),
+        tessera_build::input::Source::new(&points, &fields, &INTEGER_IDS),
         tessera_spatial::Projection::None,
         &IDENTITY_EXTENT,
-        None,
-            None,
     )
     .unwrap();
     assert!(!rows.is_empty());

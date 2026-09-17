@@ -262,9 +262,10 @@ pub fn check(config: &Config) -> CheckReport {
 /// named it — and a column reported missing is reported against the file that was supposed to hold
 /// it rather than against a single corpus that no longer exists.
 fn check_attribute_sources(config: &Config, report: &mut CheckReport) {
-    // A column with no file to read it from — legal to declare, and nothing a build could do
-    // (`configuration.md` §2). Reported here rather than refused, exactly as the build refuses it
-    // only when it comes to read.
+    // A column with no file to read it from. Legal to declare (`configuration.md` §2), and the
+    // normal state for a deployment that writes its values through the service. It is one of the
+    // sources this check looked at and found nothing to open, beside a group that names no points
+    // file, rather than a finding: there is no file, so there is no schema to disagree with.
     let mut carried: Vec<usize> = config
         .attribute_sources
         .iter()
@@ -276,12 +277,10 @@ fn check_attribute_sources(config: &Config, report: &mut CheckReport) {
     // (`views.md` §5).
     for (index, attribute) in config.schema.attributes.iter().enumerate() {
         if carried.binary_search(&index).is_err() {
-            report.note(
-                format!("attribute '{}'", attribute.name),
-                "names no `source` and `[defaults]` declares none, so there is no file for the \
-                 attribute pass to read this column from"
-                    .to_string(),
-            );
+            report.sources.push(SourceChecked {
+                object: format!("attribute '{}'", attribute.name),
+                path: None,
+            });
         }
     }
     for group in &config.attribute_sources {

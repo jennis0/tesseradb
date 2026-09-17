@@ -2212,6 +2212,20 @@ impl Vocabulary {
     }
 }
 
+/// Which of the two readers a parse is answering for.
+///
+/// A declaration that names no files is legal (`configuration.md` §2), and the two readers part
+/// company over it. `tessera check` reads the document and the schemas of the files it names, so a
+/// block with nothing to read is a block it has nothing to say about; `tessera build` has to open a
+/// file for every block that carries data, so the same block is a refusal there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Strictness {
+    /// Every block that carries data names a file. `tessera build`.
+    Build,
+    /// A block that names no file is declared and empty. `tessera check`.
+    Declared,
+}
+
 impl Config {
     /// Parse `path`. Every path `[sources]` writes resolves **relative to `path`'s own
     /// directory**, and `overrides` — the `--file NAME=PATH` pairs, keyed by the source's own
@@ -2221,6 +2235,22 @@ impl Config {
     /// the names that exist, an override naming no key is a refusal too, and an override never
     /// *creates* a source — so a closed vocabulary cannot be opened from the command line.
     pub fn parse(path: &Path, overrides: &HashMap<String, PathBuf>) -> Result<Config> {
+        Config::parse_as(path, overrides, Strictness::Build)
+    }
+
+    /// Parse `path` for `tessera check`: a block that names no file compiles as declared and
+    /// empty rather than being refused (`configuration.md` §2). Every other rule is [`parse`]'s.
+    ///
+    /// [`parse`]: Config::parse
+    pub fn parse_declared(path: &Path, overrides: &HashMap<String, PathBuf>) -> Result<Config> {
+        Config::parse_as(path, overrides, Strictness::Declared)
+    }
+
+    fn parse_as(
+        path: &Path,
+        overrides: &HashMap<String, PathBuf>,
+        strictness: Strictness,
+    ) -> Result<Config> {
         let text = std::fs::read_to_string(path).map_err(|e| BuildError::io(path, e))?;
         let file: ConfigFile = toml::from_str(&text)
             .map_err(|e| declaration_error(format!("{}: {e}", path.display())))?;
@@ -2234,8 +2264,14 @@ impl Config {
         let vocabularies = compile_vocabularies(&file.vocabulary, &sources)?;
         // Groups after the vocabularies a category's metadata draws on, and after the views whose
         // names a group may not share; before the attributes and layers whose `scope` names one.
-        let view_groups =
-            compile_view_groups(&file.view_group, &views, &vocabularies, &sources, &defaults)?;
+        let view_groups = compile_view_groups(
+            &file.view_group,
+            &views,
+            &vocabularies,
+            &sources,
+            &defaults,
+            strictness,
+        )?;
         // The scopes first: which attributes are entity space and which are a family is what
         // decides the schema itself (`views.md` §5).
         let attribute_scopes = compile_attribute_scopes(&file.attribute, &view_groups)?;
@@ -3392,6 +3428,7 @@ fn compile_view_groups(
     vocabularies: &HashMap<String, Vocabulary>,
     sources: &Sources,
     defaults: &Defaults,
+    strictness: Strictness,
 ) -> Result<Vec<ViewGroup>> {
     let mut seen: HashSet<&str> = HashSet::new();
     for block in blocks {
@@ -3425,6 +3462,7 @@ fn compile_view_groups(
             vocabularies,
             sources,
             defaults,
+            strictness,
         )?);
     }
     Ok(compiled)
@@ -3436,6 +3474,7 @@ fn compile_view_group(
     vocabularies: &HashMap<String, Vocabulary>,
     sources: &Sources,
     defaults: &Defaults,
+    strictness: Strictness,
 ) -> Result<ViewGroup> {
     let object = format!("view group '{}'", block.name);
     let form_a = !block.view.is_empty();
@@ -3531,7 +3570,7 @@ fn compile_view_group(
              group declares no `source` at all"
         )));
     }
-    if !form_a && block.source.is_none() {
+    if !form_a && block.source.is_none() && strictness == Strictness::Build {
         return Err(declaration_error(format!(
             "{object}: no `source` and no `[[view_group.view]]` roster, so this group's points \
              come from nowhere. Either name a file per view under `[[view_group.view]]`, or name \
@@ -6325,7 +6364,14 @@ impl Config {
                 // its own discriminator, read here for the reason the table is: the registry is
                 // what pass two iterates, and a minted key is a coordinate system this build
                 // materialises (`views.md` §3.1, §7).
-                Roster::Discriminator => mint_roster(owner, &mut scanned)?,
+                Roster::Discriminator => match owner.source {
+                    Some(_) => mint_roster(owner, &mut scanned)?,
+                    // A group that names no points file and no roster is declared and empty
+                    // (`configuration.md` §2): there is no discriminator column to mint keys
+                    // from, so the group has no views. `tessera build` refuses that declaration
+                    // at parse; `tessera check` compiles it and reads it back.
+                    None => Vec::new(),
+                },
             };
             let discriminator_field = group.fields.of("view").to_string();
             // Sorted once per group, not once per view: it is the same roster each of its views

@@ -28,6 +28,7 @@ pub mod deep;
 pub mod disclosure;
 pub mod error;
 mod extents;
+pub mod ids;
 pub mod input;
 pub mod layers;
 pub mod observer;
@@ -708,8 +709,19 @@ fn access_route(args: &BuildArgs) -> Result<AccessRoute<'_>> {
     }
 }
 
+/// One view's points file, as a reader of it needs it (`input::Source`).
+pub(crate) fn view_source<'a>(
+    view: &'a ViewArgs,
+    args: &BuildArgs,
+    ids: &'a crate::ids::IdSpace,
+) -> input::Source<'a> {
+    input::Source::new(&view.points, &view.point_fields, ids)
+        .limited(args.limit)
+        .selecting(view.select.as_ref())
+}
+
 /// Read whatever a build must know before assigning term ids (see [`AccessPlan`]).
-pub(crate) fn plan_access(args: &BuildArgs) -> Result<AccessPlan> {
+pub(crate) fn plan_access(args: &BuildArgs, ids: &crate::ids::IdSpace) -> Result<AccessPlan> {
     use crate::config::AccessSource;
     if let AccessRoute::SharedRelation(_) = access_route(args)? {
         // The relation supplies its own integer term ids and needs no vocabulary pass.
@@ -728,12 +740,9 @@ pub(crate) fn plan_access(args: &BuildArgs) -> Result<AccessPlan> {
             _ => None,
         };
         let (terms, unlabelled) = input::read_access_vocabulary(
-            &view.points,
-            &view.point_fields,
+            view_source(view, args, ids),
             field,
             view.access.default.as_deref(),
-            args.limit,
-            view.select.as_ref(),
         )?;
         // **A null or empty label is refused where the view declares no default** (decision
         // 0133), here, before a term id exists or a byte is written, naming the count and the
@@ -778,15 +787,16 @@ pub(crate) fn plan_access(args: &BuildArgs) -> Result<AccessPlan> {
 pub(crate) fn scan_access<F: FnMut(usize, u64, u64) -> std::ops::ControlFlow<()>>(
     args: &BuildArgs,
     plan: &AccessPlan,
+    ids: &crate::ids::IdSpace,
     mut visit: F,
 ) -> Result<input::AccessFill> {
     use crate::config::AccessSource;
     if let AccessRoute::SharedRelation(path) = access_route(args)? {
         // Scanned **once**, not once per view: its rows are entity space, and a second pass over
         // them would double every posting.
-        input::scan_pairs(path, &access_fields(args), args.limit, |id, term| {
-            visit(0, id, term)
-        })?;
+        let fields = access_fields(args);
+        let relation = input::Source::new(path, &fields, ids).limited(args.limit);
+        input::scan_pairs(relation, |id, term| visit(0, id, term))?;
         return Ok(input::AccessFill::default());
     }
     let input::TermDescriptors::Vocabulary(vocabulary) = &plan.descriptors else {
@@ -795,16 +805,13 @@ pub(crate) fn scan_access<F: FnMut(usize, u64, u64) -> std::ops::ControlFlow<()>
     let mut fill = input::AccessFill::default();
     for (index, view) in args.views.iter().enumerate() {
         let one = input::scan_access_field(
-            &view.points,
-            &view.point_fields,
+            view_source(view, args, ids),
             match &view.access.source {
                 AccessSource::Field(field) => Some(field.as_str()),
                 _ => None,
             },
             vocabulary,
             plan.default_term[index],
-            args.limit,
-            view.select.as_ref(),
             |id, term| visit(index, id, term),
         )?;
         fill.carried += one.carried;
@@ -1113,6 +1120,10 @@ pub fn build_observed(
 /// is permanent (I9) and every digest in the bundle depends on it.
 pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
     validate_args(args)?;
+    // **How this declaration names a row, decided before the first pass** (`crate::ids`): the
+    // identity column's type says whether a source id is the integer the file holds or the rank
+    // of a supplied key, and the supplied keys are interned here.
+    let id_space = crate::ids::IdSpace::prepare(args)?;
     // **The oracle materialises one view.** It exists to be the byte-equality reference for the
     // streaming pipeline's entity-id assignment, and a second implementation of pass one's union
     // would be a second thing to keep in step rather than a check on the first. A multi-view
@@ -1146,12 +1157,9 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
 
     // ---- 1. read inputs --------------------------------------------------------------
     let mut points = input::read_points(
-        &view.points,
-        &view.point_fields,
+        view_source(view, args, &id_space),
         view.projection,
         &view.extent,
-        args.limit,
-        view.select.as_ref(),
     )?;
     // **No refusal for an empty points file** (decision 0091): the oracle writes the same
     // zero-item bundle the streaming pipeline does, which is what keeps `build_equivalence`'s
@@ -1168,9 +1176,9 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
     }
     // What every source term will be called, before any term id exists — a field-sourced view's
     // sorted vocabulary, or the relation's own integers (`AccessPlan`).
-    let access = plan_access(args)?;
+    let access = plan_access(args, &id_space)?;
     let mut pairs_by_source: HashMap<u64, Vec<u64>> = HashMap::new();
-    let fill = scan_access(args, &access, |_view, source_id, source_term| {
+    let fill = scan_access(args, &access, &id_space, |_view, source_id, source_term| {
         pairs_by_source
             .entry(source_id)
             .or_default()
@@ -1345,11 +1353,12 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
         other_paths.push(path);
     }
 
-    // Minting is opt-in (see `BuildArgs::mint_external_ids`): with it off, no extent and no
-    // locator exist, which the reader treats as "no item has an external ID" — the ordinary
-    // case, not a degraded one.
-    let external_ids_paths = if args.mint_external_ids {
-        let (extent_paths, ext_locator_path) = write_external_ids(&entities_dir, &staged, n)?;
+    // **Written where the declaration supplied the ids, and on the flag where it did not**
+    // (`crate::ids::writes_external_ids`). With neither, no extent and no locator exist, which
+    // the reader treats as "no item has an external ID", which is the ordinary case.
+    let external_ids_paths = if crate::ids::writes_external_ids(args, &id_space) {
+        let (extent_paths, ext_locator_path) =
+            write_external_ids(&entities_dir, &staged, n, &id_space)?;
         other_paths.push(ext_locator_path);
         extent_paths
     } else {
@@ -1419,14 +1428,11 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
             let mut matched_rows = 0u64;
             let mut unknown_rows = 0u64;
             let mut present = vec![0u64; group.attributes.len()];
+            // An attribute source is entity space and has no view to select (`views.md` §5).
             input::scan_attributes(
-                &group.path,
-                &group.fields,
+                input::Source::new(&group.path, &group.fields, &id_space).limited(args.limit),
                 &columns,
                 &mut minters,
-                args.limit,
-                // An attribute source is entity space and has no view to select (`views.md` §5).
-                None,
                 |batch| {
                     // **Serial, row by row, on purpose.** This is the reference build: the
                     // streaming pipeline splits a batch across its columns for the speed
@@ -1689,6 +1695,7 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
             let mut plan = crate::layers::read(
                 &args.layers,
                 &args.layer_inputs,
+                &id_space,
                 &args.scoped_layers,
                 // The oracle build materialises exactly one view, so its one frame is the whole
                 // of decision 0111's per-view slice.
@@ -2711,14 +2718,15 @@ fn write_external_ids(
     dir: &Path,
     staged: &[StagedItem],
     entity_id_high_water: u64,
+    ids: &crate::ids::IdSpace,
 ) -> Result<(Vec<PathBuf>, PathBuf)> {
     let mut rows: Vec<ExternalIdRow> = staged
         .iter()
         .enumerate()
         .map(|(position, item)| ExternalIdRow::new(item.source_id, position as u32))
         .collect();
-    rows.sort_unstable_by_key(ExternalIdRow::sort_key);
-    let extent_paths = write_external_id_runs(dir, &rows, EXTERNAL_ID_ROWS_PER_EXTENT)?;
+    rows.sort_unstable_by_key(external_id_order(ids));
+    let extent_paths = write_external_id_runs(dir, &rows, EXTERNAL_ID_ROWS_PER_EXTENT, ids)?;
     let locator_path = write_ext_locator(dir, &rows, entity_id_high_water)?;
     Ok((extent_paths, locator_path))
 }
@@ -2803,11 +2811,13 @@ impl ExternalIdRow {
         }
     }
 
-    pub(crate) fn sort_key(&self) -> (u32, u32) {
-        (self.key_hi, self.key_lo)
+    /// The byte-swapped key as one integer, so that a plain comparison over it is a comparison
+    /// over the little-endian bytes this row's external id goes on disk as.
+    pub(crate) fn sort_key(&self) -> u64 {
+        ((self.key_hi as u64) << 32) | self.key_lo as u64
     }
 
-    fn source_id(&self) -> u64 {
+    pub(crate) fn source_id(&self) -> u64 {
         (((self.key_hi as u64) << 32) | self.key_lo as u64).swap_bytes()
     }
 }
@@ -2823,6 +2833,20 @@ impl ExternalIdRow {
 /// what earlier builds wrote.
 pub(crate) const EXTERNAL_ID_ROWS_PER_EXTENT: usize = 100_000_000;
 
+/// The key that puts a row into ascending external-id **byte** order on this build's route.
+///
+/// A supplied key's source id is its rank among the keys, which are bytewise ascending
+/// (`crate::ids`), so rank order is byte order. An integer id's bytes are its eight little-endian
+/// ones, whose order is not the integer's, which is what [`ExternalIdRow`]'s byte-swapped key
+/// makes a plain comparison. One function decides which; each caller applies the sort it wants,
+/// the streaming build's being parallel.
+pub(crate) fn external_id_order(ids: &crate::ids::IdSpace) -> fn(&ExternalIdRow) -> u64 {
+    match ids.supplied() {
+        Some(_) => ExternalIdRow::source_id,
+        None => ExternalIdRow::sort_key,
+    }
+}
+
 /// Write `rows` — already in ascending external-id **byte** order — as one or more extents in
 /// `dir`, at most `rows_per_extent` rows each, returning their paths in order. The extents
 /// partition the global order into consecutive ranges, so each is individually sorted too.
@@ -2834,24 +2858,29 @@ fn write_external_id_runs(
     dir: &Path,
     rows: &[ExternalIdRow],
     rows_per_extent: usize,
+    ids: &crate::ids::IdSpace,
 ) -> Result<Vec<PathBuf>> {
     assert!(rows_per_extent > 0, "rows_per_extent must be positive");
     let mut paths = Vec::new();
     for chunk in rows.chunks(rows_per_extent) {
         let path = dir.join(format!("external-ids-{}.arrow", paths.len()));
-        write_external_id_run(&path, chunk)?;
+        write_external_id_run(&path, chunk, ids)?;
         paths.push(path);
     }
     // `chunks` yields nothing for an empty input, but a bundle always names at least one extent.
     if paths.is_empty() {
         let path = dir.join("external-ids-0.arrow");
-        write_external_id_run(&path, &[])?;
+        write_external_id_run(&path, &[], ids)?;
         paths.push(path);
     }
     Ok(paths)
 }
 
-fn write_external_id_run(path: &Path, rows: &[ExternalIdRow]) -> Result<()> {
+fn write_external_id_run(
+    path: &Path,
+    rows: &[ExternalIdRow],
+    ids: &crate::ids::IdSpace,
+) -> Result<()> {
     let schema = std::sync::Arc::new(Schema::new(vec![
         Field::new("external_id", DataType::Binary, false),
         Field::new("entity_id", DataType::UInt32, false), // r6, D8: was UInt64
@@ -2859,7 +2888,7 @@ fn write_external_id_run(path: &Path, rows: &[ExternalIdRow]) -> Result<()> {
     // Built straight from `rows`: an intermediate `Vec` of keys or of widened rows would be a
     // gigabyte-scale copy of data that is already laid out correctly.
     let external: ArrayRef = std::sync::Arc::new(BinaryArray::from_iter_values(
-        rows.iter().map(|row| row.source_id().to_le_bytes()),
+        rows.iter().map(|row| ids.external_id(row.source_id())),
     ));
     let entity: ArrayRef = std::sync::Arc::new(UInt32Array::from_iter_values(
         rows.iter().map(|row| row.entity_id),
@@ -3197,7 +3226,9 @@ mod tests {
         for rows_per_extent in [1usize, 2, 3, 6, 7, 8, 100] {
             let dir = temp.path().join(format!("split-{rows_per_extent}"));
             fs::create_dir_all(&dir).unwrap();
-            let paths = write_external_id_runs(&dir, &rows, rows_per_extent).unwrap();
+            let paths =
+                write_external_id_runs(&dir, &rows, rows_per_extent, &crate::ids::IdSpace::Integer)
+                    .unwrap();
             assert_eq!(
                 paths.len(),
                 rows.len().div_ceil(rows_per_extent),
@@ -3249,7 +3280,8 @@ mod tests {
     #[test]
     fn an_empty_external_id_relation_still_names_one_extent() {
         let temp = tempfile::TempDir::new().unwrap();
-        let paths = write_external_id_runs(temp.path(), &[], 4).unwrap();
+        let paths =
+            write_external_id_runs(temp.path(), &[], 4, &crate::ids::IdSpace::Integer).unwrap();
         assert_eq!(paths.len(), 1);
         assert!(paths[0].exists());
     }

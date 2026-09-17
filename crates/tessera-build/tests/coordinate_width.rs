@@ -30,6 +30,9 @@ use tessera_spatial::{
     Bounds,
 };
 
+/// This file's fixtures name their rows by an integer `entity_id` column (`tessera_build::ids`).
+static INTEGER_IDS: tessera_build::ids::IdSpace = tessera_build::ids::IdSpace::Integer;
+
 /// A frame 16 units wide out of a 65,536-unit coordinate range — 1/4096 of it, zoom offset 12 —
 /// placed at the far end of the range, where an `f32`'s exponent is largest and its step coarsest.
 ///
@@ -82,14 +85,13 @@ fn write_points(path: &Path, xs: &[f64], ys: &[f64], width: &DataType) {
 
 /// The quantised positions a points file reads to, by source id.
 fn positions(path: &Path, extent: &Bounds) -> Vec<(u32, u32)> {
+    let fields = Default::default();
     let mut rows = read_points(
-        path,
-        &Default::default(),
+        tessera_build::input::Source::new(path, &fields, &INTEGER_IDS),
         tessera_spatial::Projection::None,
         extent,
-        None,
-            None,
-    ).expect("the points read");
+    )
+    .expect("the points read");
     rows.sort_by_key(|r| r.source_id);
     rows.iter().map(|r| (r.qx, r.qy)).collect()
 }
