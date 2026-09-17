@@ -459,6 +459,11 @@ pub(crate) struct FoldViewPlan {
     /// space, the floor is exactly what every post-snapshot publication had to clear to become live
     /// in the first place.
     pub(crate) permutation_bound: u64,
+    /// The rows this view holds at the snapshot, base and extents together. This is an upper
+    /// bound on the new base's, since every row pass 1 drops is a deletion, and it is what
+    /// [`memory_estimate`] charges pass 2b's image against. Nothing else reads it. The exact
+    /// figure is not available until pass 1 has run.
+    pub(crate) rows: u64,
 }
 
 /// One fold's immutable plan: the files it consumes, and `D₀`.
@@ -634,6 +639,37 @@ pub(crate) struct FoldResources {
 /// says nothing about this one.
 const FOLD_MEMORY_SAFETY_FACTOR: u64 = 2;
 
+/// Workers the fold's term-image derivation runs across.
+///
+/// **One**, because [`execute`] runs on one dedicated thread. A fold's input is the corpus, and
+/// occupying request-serving workers for the length of one is the maintenance schedule reaching
+/// the request path (decision 0043). Sequential also bounds the pass's memory to the one image and
+/// the one scratch [`memory_estimate`] charges. The build passes `rayon::current_num_threads()`
+/// instead. The bytes are identical either way: the derivation reads and appends a window at a
+/// time in term order, so the width is a choice about the host and not about the file.
+///
+/// **What one thread costs, modelled.** The probe derived 1.4×10⁶ terms at rung 6 in 184 s across
+/// the box's cores (measured, `docs/evidence/memos/2026-09-17-term-images-handover.md` §3.4).
+/// Projection is per term and the workers share only a mutex over the scratch pool, so one thread
+/// is of the order of the core count times that: tens of minutes for one view at rung 6, against a
+/// fold already measured in hours. Stage 6 measures the pass on a fold of `gbif-64p` and models
+/// rung 6 from it.
+const TERM_IMAGE_THREADS: usize = 1;
+
+/// The publication number the fold's term-image files are named after
+/// (`tessera_store::derived::term_image_file`).
+///
+/// **Zero, and the fold cannot do better.** A derived file is named after the publication that
+/// introduces it, and a fold's side-manifest number is allocated on the executor at publication,
+/// hours after this pass writes the file. It has to be: a number taken at dispatch would sit below
+/// every flush that published during the flight, and the fold's `SEGMENTS-<n>.json` would then lose
+/// to theirs at the next open. What the number is for is uniqueness within a prefix, and that holds
+/// here without it. A fold writes into a prefix it has just created, images are written once per
+/// prefix by whichever publication creates it, and no flush, merge or coalesce writes this kind at
+/// all (ruling 5, `docs/evidence/memos/2026-09-17-term-images-handover.md`). The build names its
+/// own files from the same zero, being publication zero.
+const TERM_IMAGE_MANIFEST_N: u64 = 0;
+
 /// The fold's peak **un-reclaimable** memory in bytes, from quantities the plan already knows.
 ///
 /// **Un-reclaimable is the whole of what this estimates, and it is not what a fold's RSS reads.**
@@ -650,9 +686,23 @@ const FOLD_MEMORY_SAFETY_FACTOR: u64 = 2;
 /// | 4 B × entity bound | `ext-locator.u32`, same (§3 pass 3) |
 /// | 8 B × dictionary length | `PostingsSpool`'s offsets buffer (§3's table: ~0.94 GB at 1.17×10⁸) |
 /// | 90 B × membership containers | the artifact pass's row forms, held while it rebuilds them |
+/// | threads × (posting + image + scratch) | pass 2b's window and its projection, modelled |
 ///
 /// The permutation term is the **maximum** across views rather than their sum: pass 1 folds one
-/// view at a time and drops each view's writer before the next, so the peak is one of them.
+/// view at a time and drops each view's writer before the next, so the peak is one of them. The
+/// image term takes its rows the same way, and for the same reason: pass 2b derives one view at a
+/// time and drops each row space before the next.
+///
+/// **The pass 2b term is [`term_image_estimate`], modelled, and a ceiling rather than an
+/// expectation.** The pass holds one term per worker in flight: that term's posting as an owned
+/// bitmap over entity space, its image over row space, and one [`PROJECT_SCRATCH_BYTES`] scratch.
+/// A Roaring container covers 65 536 values and costs at most 8 KiB, at which point it is a bitset
+/// over every value in its range, so a term held by every entity is the widest posting expressible
+/// and one held by every row the widest image. Nothing in the pass scales with the dictionary: the
+/// table is written into the file as each window completes. The realistic figure is far below the
+/// ceiling, a term over a third of the corpus in run-friendly order being kilobytes (assumed; the
+/// probe reports whole-file sizes, not per term). ~437 MB of image at 3.5×10⁹ rows, against ~82 MiB
+/// of scratch (`docs/evidence/memos/2026-09-17-term-images-handover.md` §3.4).
 ///
 /// *(§3's first draft called the two mapped arrays free — page cache rather than RSS. r1 corrected
 /// it: a dirty shared file mapping is resident and cgroup-charged until writeback. They are charged
@@ -662,13 +712,51 @@ pub(crate) fn memory_estimate(
     entity_bound: u64,
     dict_len: u64,
     membership_containers: u64,
+    base_rows: u64,
 ) -> u64 {
     let terms = 4u64
         .saturating_mul(permutation_bound)
         .saturating_add(4u64.saturating_mul(entity_bound))
         .saturating_add(8u64.saturating_mul(dict_len))
-        .saturating_add(ARTIFACT_BYTES_PER_CONTAINER.saturating_mul(membership_containers));
+        .saturating_add(ARTIFACT_BYTES_PER_CONTAINER.saturating_mul(membership_containers))
+        .saturating_add(term_image_estimate(dict_len, permutation_bound, base_rows));
     terms.saturating_mul(FOLD_MEMORY_SAFETY_FACTOR)
+}
+
+/// What [`ProjectScratch`](tessera_store::permutation::ProjectScratch) holds at its widest, in
+/// bytes.
+///
+/// **Arithmetic from two constants, and a bound rather than a typical figure**: the projection
+/// emits and clears its buckets every 64 MiB of row ids whatever the mask, so what it holds is one
+/// window plus a partly filled chunk per bucket, at most 82 MiB at the 1,025 buckets of the `u32`
+/// entity ceiling. `permutation.rs` states it beside the window it follows from, and the anonymous
+/// peaks it produces are measured there.
+const PROJECT_SCRATCH_BYTES: u64 = 82 * 1024 * 1024;
+
+/// The widest a Roaring container can be once built, in bytes: a bitset over its 65 536 values.
+const BYTES_PER_BITSET_CONTAINER: u64 = 8 * 1024;
+
+/// Values one Roaring container covers, rows or entities.
+const VALUES_PER_CONTAINER: u64 = 1 << 16;
+
+/// [`memory_estimate`]'s pass 2b term: per worker, the widest posting it can hold, the widest image
+/// it can build from one, and the scratch it projects through.
+///
+/// **Zero where the pass does not run**, which is a view with no row and a dictionary with no term:
+/// pass 2b skips both, so charging a scratch for them would refuse folds for work nothing does.
+fn term_image_estimate(dict_len: u64, permutation_bound: u64, base_rows: u64) -> u64 {
+    if dict_len == 0 || base_rows == 0 {
+        return 0;
+    }
+    let widest = |values: u64| {
+        values
+            .div_ceil(VALUES_PER_CONTAINER)
+            .saturating_mul(BYTES_PER_BITSET_CONTAINER)
+    };
+    let held = widest(permutation_bound)
+        .saturating_add(widest(base_rows))
+        .saturating_add(PROJECT_SCRATCH_BYTES);
+    (TERM_IMAGE_THREADS as u64).saturating_mul(held)
 }
 
 /// What one Roaring container costs resident, in bytes — the artifact pass's whole price model.
@@ -772,6 +860,7 @@ pub(crate) fn plan_fold(
                 })
                 .collect(),
             permutation_bound,
+            rows: row_space.total_rows(),
         });
     }
     if views.is_empty() {
@@ -808,6 +897,9 @@ pub(crate) fn plan_fold(
             entity_bound,
             u64::from(dict_len),
             resources.membership_containers,
+            // The widest view's rows, on the permutation term's rule: pass 2b derives one view at
+            // a time.
+            views.iter().map(|view| view.rows).max().unwrap_or(0),
         );
         if need > available {
             return Err(NoFold::InsufficientMemory { need, available });
@@ -1087,6 +1179,16 @@ impl Staircase {
     }
 }
 
+/// One view's term images as pass 2b wrote them: what the new side-manifest must name, and what
+/// the publication logs about them.
+///
+/// The summary rides along rather than being recomputed from the file, because the wall clock and
+/// the counts are the pass's own and nothing in the file records them.
+pub(crate) struct FoldedTermImages {
+    pub(crate) extent: tessera_store::manifest::TermImageExtent,
+    pub(crate) summary: tessera_store::term_images::TermImageSummary,
+}
+
 /// A fold whose files are durable under a prefix nothing yet names.
 pub(crate) struct CompletedFold {
     pub(crate) plan: FoldPlan,
@@ -1099,6 +1201,10 @@ pub(crate) struct CompletedFold {
     /// The new run 0's prefix-relative path — `None` when the deployment holds no external ids at
     /// all, in which case pass 3 wrote nothing and the new manifest lists no runs.
     pub(crate) external_id_run: Option<String>,
+    /// One entry per view pass 2b wrote images for, in the plan's view order. The extents go into
+    /// the new `SEGMENTS-<n>.json` unchanged: the images are the fold's own files under the fold's
+    /// own prefix, so there is nothing for the publication to rebase.
+    pub(crate) term_images: Vec<FoldedTermImages>,
     /// The largest new base segment's `columns.arrow + morton.u32 + cuts.u32` bytes — compaction
     /// §4 step 3's operand, computed here because these are the files that were just written.
     /// The same three files the server sums at startup for the merge-size relation
@@ -1317,9 +1423,121 @@ pub(crate) fn execute(plan: FoldPlan, ctx: FoldContext) -> Result<CompletedFold,
         outcome?;
         pairs.finish().map_err(|e| failed("pass 2 (pairs)", &e))?;
     }
-    written.push((postings_rel, postings_path));
+    written.push((postings_rel, postings_path.clone()));
     written.push((pairs_rel, pairs_path));
     stairs.record("2 postings");
+
+    // ---- pass 2b: the term images -------------------------------------------------------------
+    //
+    // One file per view, each term's new base posting projected into the view's new row space
+    // (`tessera_store::term_images`). Here rather than at publication because the derivation is
+    // minutes of work at corpus scale and the executor must stay free to reach a queued deny; and
+    // after pass 2 rather than beside pass 1 because the postings it reads are the ones pass 2 has
+    // just written, from which every folded deletion is already gone. A deleted entity is in no
+    // posting, so it is in no image, and that is the whole of the deletion rule reaching this
+    // artefact. There is no second removal route (write-path §5.4).
+    //
+    // **The new base only.** Rows a later flush appends are an extent, and an extent gets no
+    // images: a session unions the images of the terms it holds and walks the rest, and the rows
+    // it arrives at are the same either way.
+    let mut term_images: Vec<FoldedTermImages> = Vec::new();
+    {
+        let postings = PostingsReader::open(&postings_path, true)
+            .map_err(|e| failed("pass 2b (term images: the new postings)", &e))?;
+        let dict_len = postings.term_count();
+        // The counter that names the files, as a publication's own does
+        // (`tessera_store::derived::DerivedIndex`). This one belongs to the fold thread: the
+        // publication's counter is created hours later and numbers the structures the executor
+        // writes. The two cannot collide, because the kinds are different and this prefix is one
+        // no other publication has ever written a term image into.
+        let mut index = tessera_store::derived::DerivedIndex::default();
+        // **Over the descriptors pass 1 pushed.** Each carries the view, its incarnation and the
+        // rows the new base holds: the three fields the opener matches an entry on, and the two
+        // the stamp must agree with. Reading them from the plan instead would be a second
+        // statement of what pass 1 wrote.
+        for segment in &segments {
+            // Neither has an image to hold: projection maps entities to rows, and a view with no
+            // row projects every posting to the empty set. The build's pass skips both for the
+            // same reason, and a view with no entry is one the opener leaves walking.
+            if segment.row_count == 0 || dict_len == 0 {
+                continue;
+            }
+            let permutation_path = ctx.to_prefix_dir.join(format!(
+                "partitions/{}/{}/permutation.bin",
+                plan.partition,
+                tessera_store::view_rel(&segment.view)
+            ));
+            // Reloaded from the file pass 1 wrote rather than kept from that pass, so the images
+            // are a function of the published permutation. The build's pass loads it for the same
+            // reason.
+            let permutation = tessera_store::Permutation::load(&permutation_path)
+                .map_err(|e| failed("pass 2b (term images: the new permutation)", &e))?;
+            let space = tessera_store::RowSpace::new(Arc::new(permutation), segment.row_count);
+            let stamp = tessera_store::term_images::TermImageStamp {
+                prefix: ctx.to_prefix.clone(),
+                view: segment.view.clone(),
+                base_seg_id: segment.seg_id.clone(),
+                incarnation: segment.incarnation,
+                base_rows: segment.row_count,
+                bound: space.base().bound(),
+            };
+            let file = tessera_store::derived::term_image_file(
+                &ctx.to_prefix_dir,
+                &plan.partition,
+                TERM_IMAGE_MANIFEST_N,
+                &mut index,
+            )
+            .map_err(|e| failed("pass 2b (term images: naming the file)", &e))?;
+
+            // The one adapter between the postings format and the derivation: `tessera-store` does
+            // not depend on `tessera-authz`, so the shape is handed across. `term_images_pass::run`
+            // in `tessera-build` holds the identical six lines, and `containment` here holds them
+            // for its own derivation.
+            let walk = |term: u32,
+                        visit: &mut dyn FnMut(tessera_store::derived::PostingSlice<'_>)|
+             -> std::io::Result<()> {
+                if let Some(posting) = postings.posting_at(term)? {
+                    match posting {
+                        tessera_authz::PostingRef::Array(bytes) => {
+                            visit(tessera_store::derived::PostingSlice::Array(bytes))
+                        }
+                        tessera_authz::PostingRef::Roaring(bitmap) => {
+                            visit(tessera_store::derived::PostingSlice::Roaring(&bitmap))
+                        }
+                    }
+                }
+                Ok(())
+            };
+            let summary = tessera_store::term_images::derive_term_images(
+                &space,
+                dict_len,
+                &walk,
+                &stamp,
+                &file.path,
+                tessera_store::term_images::DeriveOptions {
+                    threads: TERM_IMAGE_THREADS,
+                },
+            )
+            .map_err(|e| failed("pass 2b (term images: the derivation)", &e))?;
+
+            // Pass 5 digests and syncs what `written` names, the file's directory entry included
+            // (`tessera_store::fsync_written`), so this pass syncs nothing of its own. The build's
+            // does, because its digest pass has no such list.
+            written.push((file.rel.clone(), file.path));
+            term_images.push(FoldedTermImages {
+                extent: tessera_store::manifest::TermImageExtent {
+                    path: file.rel,
+                    view: segment.view.clone(),
+                    incarnation: segment.incarnation,
+                    dict_len,
+                    keep_rows_per_container: tessera_store::term_images::KEEP_ROWS_PER_CONTAINER
+                        as u32,
+                },
+                summary,
+            });
+        }
+    }
+    stairs.record("2b term images");
 
     // ---- pass 3 — external ids ----------------------------------------------------------------
     //
@@ -1818,6 +2036,7 @@ pub(crate) fn execute(plan: FoldPlan, ctx: FoldContext) -> Result<CompletedFold,
         segments,
         files,
         external_id_run,
+        term_images,
         base_segment_bytes,
         cost: stairs.into_cost(),
         finished,
@@ -2762,7 +2981,7 @@ mod tests {
     /// assertion fails low, which is r4's original error (`permutation.bin` omitted) reintroduced.
     #[test]
     fn the_memory_estimate_is_section_3s_budget_at_ten_to_the_nine() {
-        let need = memory_estimate(1_000_000_000, 1_000_000_000, 117_000_000, 0);
+        let need = memory_estimate(1_000_000_000, 1_000_000_000, 117_000_000, 0, 1_000_000_000);
         let gb = need as f64 / 1e9;
         assert!(
             (17.0..=19.0).contains(&gb),
@@ -2779,11 +2998,57 @@ mod tests {
     fn the_estimate_charges_one_permutation_and_one_locator() {
         // 4 B + 4 B per entity, doubled by the safety factor, and no dictionary term.
         assert_eq!(
-            memory_estimate(1_000, 1_000, 0, 0),
-            (4 * 1_000 + 4 * 1_000) * 2
+            memory_estimate(1_000, 1_000, 0, 0, 1_000),
+            (4 * 1_000 + 4 * 1_000) * 2,
+            "a dictionary of no terms has no images either, whatever the rows"
         );
         // The dictionary term is 8 B per ordinal and independent of entity space.
-        assert_eq!(memory_estimate(0, 0, 1_000, 0), 8 * 1_000 * 2);
+        assert_eq!(memory_estimate(0, 0, 1_000, 0, 0), 8 * 1_000 * 2);
+    }
+
+    /// **Pass 2b is charged one posting, one image and one scratch, and only where it runs.** The
+    /// posting and the image are ceilings of a bitset container per 65 536 entities and per 65 536
+    /// rows, so the term moves with entity space and with the view's rows and not with the
+    /// dictionary. The scratch is flat.
+    ///
+    /// Kills the mutation that charges the scratch to a fold with nothing to project, which would
+    /// refuse folds on a small host for work the pass skips, and the one that drops either
+    /// bitmap.
+    #[test]
+    fn the_estimate_charges_one_posting_one_image_and_one_scratch() {
+        assert_eq!(
+            memory_estimate(0, 0, 0, 0, 1_000_000),
+            0,
+            "a dictionary with no term gets no images"
+        );
+        assert_eq!(
+            memory_estimate(0, 0, 1, 0, 0),
+            8 * 2,
+            "a view with no row gets none either, so only the dictionary term is charged"
+        );
+        // One container of rows and no entity space: one 8 KiB image and the scratch.
+        assert_eq!(
+            memory_estimate(0, 0, 1, 0, VALUES_PER_CONTAINER),
+            (8 + BYTES_PER_BITSET_CONTAINER + PROJECT_SCRATCH_BYTES) * FOLD_MEMORY_SAFETY_FACTOR
+        );
+        // One row past it takes a second container, and nothing else moves.
+        assert_eq!(
+            memory_estimate(0, 0, 1, 0, VALUES_PER_CONTAINER + 1),
+            (8 + 2 * BYTES_PER_BITSET_CONTAINER + PROJECT_SCRATCH_BYTES)
+                * FOLD_MEMORY_SAFETY_FACTOR
+        );
+        // The posting rides on the permutation bound, above the 4 B/entity the mapped array costs.
+        assert_eq!(
+            memory_estimate(VALUES_PER_CONTAINER, 0, 1, 0, VALUES_PER_CONTAINER),
+            (4 * VALUES_PER_CONTAINER + 8 + 2 * BYTES_PER_BITSET_CONTAINER + PROJECT_SCRATCH_BYTES)
+                * FOLD_MEMORY_SAFETY_FACTOR
+        );
+        // The memo's figure at rung 6: ~437 MB of image at 3.5×10⁹ rows.
+        let image = term_image_estimate(1, 0, 3_500_000_000) - PROJECT_SCRATCH_BYTES;
+        assert!(
+            (430_000_000..=445_000_000).contains(&image),
+            "the widest image at 3.5×10⁹ rows is {image} B, against the memo's ~437 MB"
+        );
     }
 
     /// **The artifact pass is charged, and charged per container.** A deployment holding no
@@ -2796,11 +3061,11 @@ mod tests {
     #[test]
     fn the_estimate_charges_the_artifact_pass_per_container() {
         assert_eq!(
-            memory_estimate(0, 0, 0, 0),
+            memory_estimate(0, 0, 0, 0, 0),
             0,
             "a deployment with no artifacts is charged nothing for the pass"
         );
-        let need = memory_estimate(0, 0, 0, 40_000_000);
+        let need = memory_estimate(0, 0, 0, 40_000_000, 0);
         let gb = need as f64 / 1e9 / FOLD_MEMORY_SAFETY_FACTOR as f64;
         assert!(
             (3.2..=3.9).contains(&gb),
@@ -2842,9 +3107,15 @@ mod tests {
             ("wal_poisoned", None, None),
             "a condition with no figures publishes its name and two nulls"
         );
-        assert_eq!(NoFold::OverlayDiverged.gauge(), ("overlay_diverged", None, None));
+        assert_eq!(
+            NoFold::OverlayDiverged.gauge(),
+            ("overlay_diverged", None, None)
+        );
         assert_eq!(NoFold::SteppedDown.gauge(), ("stepped_down", None, None));
-        assert_eq!(NoFold::NothingToFold.gauge(), ("nothing_to_fold", None, None));
+        assert_eq!(
+            NoFold::NothingToFold.gauge(),
+            ("nothing_to_fold", None, None)
+        );
         assert_eq!(
             NoFold::InsufficientMemory {
                 need: 9,

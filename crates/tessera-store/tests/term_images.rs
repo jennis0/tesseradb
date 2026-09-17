@@ -229,6 +229,35 @@ fn a_derived_file_carries_what_an_independent_projection_produces() {
     assert!(images.union(&[]).is_empty());
 }
 
+/// **A path that already holds a file is refused, and the file standing there is left alone.**
+///
+/// One term-image file per (prefix, view) is written once, by the publication that creates the
+/// prefix. A second derivation onto a live path would put a mapped reader on bytes that no longer
+/// describe its row space, and the reader has no way to notice: the stamp it checked still matches.
+#[test]
+fn a_second_derivation_onto_the_same_path_is_refused() {
+    const BOUND: u64 = 3 << 16;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut rng = StdRng::seed_from_u64(97);
+    let entities = row_order(BOUND, 0.9, Some(1), &mut rng);
+    let space = space_of(dir.path(), &entities, BOUND);
+    let postings = mixed_postings(24, BOUND, &mut rng);
+
+    let out = dir.path().join("once.timg");
+    derive(&space, &postings, &out, 1).expect("derive");
+    let first = std::fs::read(&out).expect("read");
+
+    let error = derive(&space, &postings, &out, 1).expect_err("the second derivation is refused");
+    assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists, "{error}");
+    assert_eq!(
+        std::fs::read(&out).expect("read"),
+        first,
+        "the refusal leaves the file that was there"
+    );
+    TermImages::open(&out, &stamp_of(&space), postings.len() as u32)
+        .expect("which still opens as it did");
+}
+
 /// The file does not depend on how many threads derived it.
 #[test]
 fn every_parallel_width_writes_the_same_bytes() {
@@ -271,8 +300,8 @@ fn a_window_holding_no_kept_image_writes_the_same_bytes_at_every_width() {
     let entities = row_order(BOUND, 0.9, Some(1), &mut rng);
     let space = space_of(dir.path(), &entities, BOUND);
 
-    // Thirty-six terms, three windows of twelve at three threads. The middle twelve are postings
-    // of thirty entities, which the derivation skips, so that window contributes no payload.
+    // Thirty-six terms, one window per thread in flight. The middle twelve are postings of thirty
+    // entities, which the derivation skips, so every window they fall in contributes no payload.
     let mut postings = mixed_postings(36, BOUND, &mut rng);
     for posting in postings.iter_mut().take(24).skip(12) {
         *posting = Bitmap::new();

@@ -67,6 +67,7 @@
 
 use std::fs::File;
 use std::io::{self, Seek, SeekFrom, Write};
+use std::os::unix::fs::FileExt;
 use std::path::Path;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -314,17 +315,21 @@ struct Outcome {
 ///
 /// `posting` is called once per term id below `dict_len`, in ascending order, on the calling
 /// thread: the walk reads a file and is not required to be callable from a worker. Each window of
-/// `threads × 4` consecutive terms is read, then projected across the workers, then appended in
-/// term order before the next window is read, so the bytes written do not depend on `threads`.
+/// `threads` consecutive terms is read, then projected across the workers, then appended in term
+/// order before the next window is read, so the bytes written do not depend on `threads`.
 ///
-/// What this holds at once is one window's postings, each read into an owned bitmap before it is
-/// projected, plus one window's kept images, plus one [`ProjectScratch`] per worker. The table is
-/// held whole: 40 bytes per term id. Nothing else scales with the dictionary.
+/// **Nothing here scales with the dictionary.** What this holds at once is one window's postings,
+/// each read into an owned bitmap before it is projected, one window's kept images, and one
+/// [`ProjectScratch`] per worker. Each window's table entries are written into the table region as
+/// the window completes, at `table_offset + term × TABLE_ENTRY_BYTES`, which the `set_len` below
+/// has already created. Holding the table instead costs 40 bytes per term id, which is 4.7 GB at a
+/// dictionary of 1.17×10⁸.
 ///
-/// The header is written after the payload and the table, and the file is synced between the two
-/// writes, so a file interrupted part way carries a zero header and is refused at open rather than
-/// read short. On any error the partial file is removed, so a failed derivation leaves no path for
-/// a later caller to pick up.
+/// The header is written after the payload and the table, and the file is synced between the two,
+/// so a file interrupted part way carries a zero header and is refused at open rather than read
+/// short. On any error the partial file is removed, so a failed derivation leaves no path for a
+/// later caller to pick up. A path that already exists is refused and left alone: one file per
+/// (prefix, view) is written once, by the publication that creates the prefix.
 ///
 /// The caller names the file and syncs the directory it was placed in.
 pub fn derive_term_images(
@@ -355,10 +360,13 @@ pub fn derive_term_images(
     }
 
     let mut summary = write_term_images(space, dict_len, posting, stamp, out, options)
-        .inspect_err(|_| {
+        .inspect_err(|e| {
             // Best effort: a file that cannot be removed is one open refuses anyway, because the
-            // header was never written.
-            let _ = std::fs::remove_file(out);
+            // header was never written. A path that was already there is not this call's to
+            // remove, and it is the one error raised before anything was created.
+            if e.kind() != io::ErrorKind::AlreadyExists {
+                let _ = std::fs::remove_file(out);
+            }
         })?;
     summary.wall = started.elapsed();
     Ok(summary)
@@ -374,7 +382,10 @@ fn write_term_images(
     options: DeriveOptions,
 ) -> io::Result<TermImageSummary> {
     let threads = options.threads.max(1);
-    let window = threads * 4;
+    // One term per worker in flight. A wider window holds that many more owned postings and kept
+    // images for no gain: the workers are saturated at one term each, and the window is the term
+    // this pass holds in memory.
+    let window = threads;
     let table_bytes = u64::from(dict_len) * TABLE_ENTRY_BYTES as u64;
     let table_offset = HEADER_BYTES as u64;
     let payload_offset = align_up(table_offset + table_bytes);
@@ -391,12 +402,14 @@ fn write_term_images(
     };
     let scratches: Mutex<Vec<ProjectScratch>> = Mutex::new(Vec::new());
 
-    let mut file = File::create(out)?;
+    // **Refused rather than truncated where the path exists.** A term-image file is written once,
+    // by the publication that creates the prefix it sits in, and a second derivation onto a live
+    // path would leave a mapped reader on bytes that no longer describe its row space.
+    let mut file = File::create_new(out)?;
     file.set_len(payload_offset)?;
     file.seek(SeekFrom::Start(payload_offset))?;
     let mut writer = io::BufWriter::new(file);
 
-    let mut table = vec![TermImageEntry::default(); dict_len as usize];
     let mut summary = TermImageSummary {
         terms: dict_len,
         table_bytes,
@@ -405,11 +418,13 @@ fn write_term_images(
     let zeros = [0u8; PAYLOAD_ALIGN];
     let mut at = payload_offset;
     let mut window_postings: Vec<Posting> = Vec::with_capacity(window);
+    let mut entries: Vec<u8> = Vec::with_capacity(window * TABLE_ENTRY_BYTES);
 
     let mut first = 0u32;
     while first < dict_len {
         let last = ((u64::from(first) + window as u64).min(u64::from(dict_len))) as u32;
         window_postings.clear();
+        entries.clear();
         for term in first..last {
             window_postings.push(read_posting(posting, term)?);
         }
@@ -464,22 +479,21 @@ fn write_term_images(
                 summary.kept += 1;
                 summary.largest_image_bytes = summary.largest_image_bytes.max(u64::from(len));
             }
-            table[term as usize] = entry;
+            entries.extend_from_slice(&entry.encode());
         }
+        // The window's rows, into the region `set_len` created. `write_all_at` is a positioned
+        // write, so it leaves the payload writer's cursor where the next image goes.
+        writer.get_ref().write_all_at(
+            &entries,
+            table_offset + u64::from(first) * TABLE_ENTRY_BYTES as u64,
+        )?;
         first = last;
     }
 
     summary.payload_bytes = at - payload_offset;
 
+    // The payload, and with it every positioned table write above.
     let mut file = writer.into_inner().map_err(|e| e.into_error())?;
-    file.seek(SeekFrom::Start(table_offset))?;
-    {
-        let mut table_writer = io::BufWriter::new(&mut file);
-        for entry in &table {
-            table_writer.write_all(&entry.encode())?;
-        }
-        table_writer.flush()?;
-    }
     file.sync_all()?;
 
     let mut header = [0u8; HEADER_BYTES];
