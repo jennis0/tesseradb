@@ -3446,21 +3446,29 @@ async fn publication_ack(state: &AppState, wait: &WaitQuery) -> Result<Publicati
             visible: None,
         });
     }
-    let publication = state.engine.request_flush_publication();
+    Ok(await_publication(state, state.engine.request_flush_publication()).await)
+}
+
+/// Hold until the counter has reached `publication`, or until `serve.visible_wait_max_secs`.
+///
+/// Split out of [`publication_ack`] because [`flush`] arms its own cycle and then waits on the
+/// number that armed it: the request must be made once, not once by the route and again by the
+/// wait.
+async fn await_publication(state: &AppState, publication: u64) -> PublicationAck {
     let deadline =
         std::time::Instant::now() + std::time::Duration::from_secs(state.visible_wait_max_secs);
     loop {
         if state.engine.publication() >= publication {
-            return Ok(PublicationAck {
+            return PublicationAck {
                 publication,
                 visible: Some(true),
-            });
+            };
         }
         if std::time::Instant::now() >= deadline {
-            return Ok(PublicationAck {
+            return PublicationAck {
                 publication,
                 visible: Some(false),
-            });
+            };
         }
         tokio::time::sleep(VISIBLE_WAIT_POLL).await;
     }
@@ -3495,12 +3503,31 @@ async fn publication_ack(state: &AppState, wait: &WaitQuery) -> Result<Publicati
 /// publication rather than at the tick, so reaching it and the work being visible are one event.
 /// `Engine::request_flush_publication` and `ExecutorHealth::request_flush` carry the argument in
 /// full.
-async fn flush(State(state): State<Arc<AppState>>) -> (StatusCode, Json<serde_json::Value>) {
+/// **`?wait=visible` holds the 202 until that number is reached** (decision 0144), bounded by
+/// `serve.visible_wait_max_secs` and answering `visible: true` or `false` as every write route
+/// does. This is the end of a bulk load: the pages go unwaited, because a waited page is a tick
+/// per page, and one flush at the end waits for all of them together. The status stays 202 with
+/// the parameter, because what the wait adds is that the cycle has completed, not that the route
+/// now means something else.
+async fn flush(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(wait): axum::extract::Query<WaitQuery>,
+) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
+    // The parameter is read before the flush is armed, so an unknown value is a 422 and not a
+    // tick nobody asked for.
+    let asked = wait.asked()?;
     let publication = state.engine.request_flush_publication();
-    (
-        StatusCode::ACCEPTED,
-        Json(serde_json::json!({ "publication": publication })),
-    )
+    let ack = if asked {
+        await_publication(&state, publication).await
+    } else {
+        PublicationAck {
+            publication,
+            visible: None,
+        }
+    };
+    let mut body = serde_json::json!({});
+    ack.merge(&mut body);
+    Ok((StatusCode::ACCEPTED, Json(body)))
 }
 
 /// `POST /control/compact` (contracts §3.4): **accepted at any time, and then minutes to hours.**

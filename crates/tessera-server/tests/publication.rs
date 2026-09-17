@@ -974,6 +974,119 @@ async fn an_unknown_wait_value_is_refused() {
     assert_eq!(resp.status().as_u16(), 422);
 }
 
+/// `POST /control/flush?wait=visible`, the answer held until its cycle has published.
+async fn request_flush_waiting(server: &TestServer) -> Value {
+    let resp = server
+        .client
+        .post(server.control_url("/control/flush?wait=visible"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .send()
+        .await
+        .unwrap();
+    let status = resp.status().as_u16();
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(status, 202, "the flush is accepted: {body}");
+    body
+}
+
+/// **The shape decision 0144 gives a bulk loader**: pages unwaited, one waited flush at the end.
+/// The flush's own 202 is what the loader keys on, and after it the rows are served with no wait
+/// of the reader's own — which is the whole of what the SDK's `commit()` does.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn wait_visible_holds_a_flush_until_the_unwaited_pages_are_served() {
+    let tmp = TempDir::new().unwrap();
+    let server = serve(&tmp).await;
+
+    let mut waiting = Vec::new();
+    for i in 1..=3 {
+        let body = ingest_one(
+            &server,
+            &format!("unwaited-{i}"),
+            &external_id_of(N_ITEMS + i),
+        )
+        .await;
+        waiting.push(
+            body["tessera_ids"][0]
+                .as_u64()
+                .or_else(|| body["tessera_ids"][0].as_str().and_then(|s| s.parse().ok()))
+                .unwrap_or_else(|| panic!("the acknowledgement names the row it took: {body}")),
+        );
+    }
+    assert!(
+        server.state.engine.buffered_items() > 0,
+        "an unwaited page is acknowledged with its rows still buffered"
+    );
+
+    let body = request_flush_waiting(&server).await;
+    assert_eq!(body["visible"], json!(true), "{body}");
+    let n = body["publication"]
+        .as_u64()
+        .unwrap_or_else(|| panic!("the 202 carries the publication number: {body}"));
+    assert!(
+        publication(&server).await >= n,
+        "the answer came back after the counter reached its number: {body}"
+    );
+    assert_eq!(
+        server.state.engine.buffered_items(),
+        0,
+        "and every row buffered when the flush was sent has been published"
+    );
+
+    // Read back by identifier rather than by a count: the fixture's own rows would fill the k
+    // budget whatever these pages did.
+    let served = points_near(&server, 10.0, 10.0).await;
+    for id in waiting {
+        assert!(
+            served.contains(&id),
+            "the row a page took before the flush is in the viewport with no further wait"
+        );
+    }
+}
+
+/// **The flush's wait is bounded like every other.** At `visible_wait_max_secs = 0` the 202 is
+/// the one the route would have sent without the parameter, saying `visible: false`; the flush
+/// was still requested, so the number stands and the caller reaches it by reading status.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_flush_wait_is_bounded_and_says_so() {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+    let server = spawn_server_with_visible_wait(
+        &bundle_root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+        0,
+    )
+    .await;
+
+    ingest_one(&server, "bounded-flush", &external_id_of(N_ITEMS + 1)).await;
+
+    let body = request_flush_waiting(&server).await;
+    assert_eq!(body["visible"], json!(false), "{body}");
+    await_publication(&server, body["publication"].as_u64().unwrap()).await;
+}
+
+/// An unknown `wait` value on the flush is refused as it is on the write routes, and before the
+/// tick is armed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_unknown_wait_value_on_the_flush_is_refused() {
+    let tmp = TempDir::new().unwrap();
+    let server = serve(&tmp).await;
+
+    let resp = server
+        .client
+        .post(server.control_url("/control/flush?wait=true"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 422);
+}
+
 // ---- The replay answer ---------------------------------------------------------------------------
 
 /// **A replayed page accepts nothing and says so** (write-path §2.4). `accepted` is the effect
