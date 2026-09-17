@@ -165,20 +165,20 @@ class Control:
         return self._limits
 
     def ingest(
-        self, body: bytes, batch: str, view: str | None = None, wait: bool = False
+        self, body: bytes, batch: str, view: str | None = None
     ) -> Answer:
         headers = {"content-type": ARROW, "x-tessera-batch-id": batch}
         if view is not None:
             headers["x-tessera-view"] = view
-        return self._send("POST", "/control/ingest" + _wait(wait), body, headers)
+        return self._send("POST", "/control/ingest", body, headers)
 
     def values(
-        self, body: bytes, batch: str, view: str | None = None, wait: bool = False
+        self, body: bytes, batch: str, view: str | None = None
     ) -> Answer:
         headers = {"content-type": ARROW, "x-tessera-batch-id": batch}
         if view is not None:
             headers["x-tessera-view"] = view
-        return self._send("POST", "/control/values" + _wait(wait), body, headers)
+        return self._send("POST", "/control/values", body, headers)
 
     def declare_layer(self, payload: dict) -> Answer:
         return self._send(
@@ -204,27 +204,33 @@ class Control:
             {"content-type": JSON},
         )
 
-    def publish(self, layer: str, body: bytes, wait: bool = False) -> Answer:
-        return self._send("PUT", _artifacts(layer) + _wait(wait), body, {"content-type": JSON})
+    def publish(self, layer: str, body: bytes) -> Answer:
+        return self._send("PUT", _artifacts(layer), body, {"content-type": JSON})
 
-    def grow(self, layer: str, body: bytes, wait: bool = False) -> Answer:
-        return self._send("PATCH", _artifacts(layer) + _wait(wait), body, {"content-type": JSON})
+    def grow(self, layer: str, body: bytes) -> Answer:
+        return self._send("PATCH", _artifacts(layer), body, {"content-type": JSON})
 
     def changes(self, items: list[dict]) -> Answer:
         return self._send(
             "POST", "/control/changes", json.dumps(items).encode(), {"content-type": JSON}
         )
 
-    def flush(self) -> Answer:
-        return self._send("POST", "/control/flush", b"")
+    def flush(self, wait: bool = False) -> Answer:
+        """Arm a publication cycle, and with `wait` hold until it has completed.
+
+        The flush's own `?wait=visible` waits on the number the cycle it arms will carry, so it
+        covers every page sent before it: this is the commit's one wait (decision 0144).
+        """
+        return self._send("POST", "/control/flush" + _wait(wait), b"")
 
 
 def _wait(wait: bool) -> str:
     """`?wait=visible` (contracts §3.4, decision 0144), where the caller asked for it.
 
     The route holds its answer until the publication its acknowledgement names has happened, and
-    pulls the tick forward to get there. One page of a commit carries it, the last: a waited page
-    asks for a tick of its own, so a commit that waited on every page would publish per page.
+    pulls the tick forward to get there. One request of a commit carries it, the closing flush: a
+    waited request asks for a tick of its own, so a commit that waited on every page would publish
+    per page.
     """
     return "?wait=visible" if wait else ""
 

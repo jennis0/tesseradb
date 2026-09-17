@@ -32,7 +32,6 @@ import os
 import shutil
 import subprocess
 import tempfile
-import urllib.request
 from pathlib import Path
 from typing import Any, Hashable, Iterable, Sequence
 
@@ -47,13 +46,11 @@ from ._control import Control, addressed
 from ._refusal import Refusal
 from ._reports import ChangeReport, CommitReport, Inference, PagedReport, Report, render_columns_of
 from ._sources import StagedSource, is_integer_type, stage_frame, stage_path
+from ._viewer import Viewer
 from ._toml import Inline, dumps
 
 #: A temporary database goes here when the platform has a RAM-backed filesystem (§2).
 RAM_BACKED = Path("/dev/shm")
-
-#: How near expiry a held token may come before the next call mints another, in seconds.
-TOKEN_MARGIN = 60.0
 
 #: Where a delta's parquet goes. A delta is rows to add to what a source already holds, so it is
 #: not the source's own file: `tessera check` reads `sources/` and would otherwise read a delta as
@@ -89,7 +86,8 @@ class Database:
         self.listening: _instance.Listening | None = None
         self._loaded_text: str | None = None
         self._inference = Inference()
-        self._token = None
+        #: The all-terms viewer this database reads itself through, made on first use (§8).
+        self._viewer: Viewer | None = None
 
     # ------------------------------------------------------------------ sources
 
@@ -582,7 +580,7 @@ class Database:
         things happen there and at no later commit, and the report says each: the frame is fixed,
         the column types and render flags are fixed, and the allocation is signature-sorted over
         the whole staged corpus (§6.1). Every commit after it pages the deltas through the control
-        plane in §6.2's order and waits for the publication the flush answered with.
+        plane in §6.2's order, flushes once and waits for the publication that flush arms.
         """
         if self.built:
             return self._paged(sent=True)
@@ -651,7 +649,10 @@ class Database:
         pages, findings = planner.plan()
         report = PagedReport(
             sent=sent,
-            plan=[page.line for page in pages],
+            # The closing flush is a request of the plan and is printed as one: it is where the
+            # commit blocks, and a plan that did not name it would understate what `commit()` does.
+            plan=[page.line for page in pages]
+            + (["flush, and wait for the publication it arms"] if pages else []),
             findings=findings,
         )
         if not sent or not report.ok:
@@ -702,26 +703,122 @@ class Database:
         chosen = list(terms) if terms is not None else list(self.terms)
         return authorise(self.session_url, self.session_credential, chosen)
 
-    def _local_token(self):
-        """One token for this process, minted again when the one it holds is near expiry.
+    def viewer(self, terms: Sequence[str] | None = None) -> Viewer:
+        """A `Viewer` on this database as the principal whose visibility is `terms` (§8).
 
-        Minting is a round trip to the session plane and a plugin call, and the pre-flight reads
-        `/v1/meta` on every `check()`. The token is the local principal's, so there is one to hold.
+        The map of any principal is one call: `db.viewer(["public"]).map()` is what a viewer
+        holding that one term sees, computed inside their mask and not filtered down from the
+        operator's. With no terms it is the union the SDK recorded, which is this database's own
+        principal.
+
+        A term the union does not hold is refused and named. The SDK knows every label it staged,
+        so a typo would otherwise mint a principal who sees nothing and draw an empty map with no
+        error anywhere.
+
+        An empty term list is refused too. A principal holding no term sees nothing, which is the
+        blank map this refusal exists to prevent, and `viewer()` with no argument is how the
+        database's own principal is asked for.
+
+        The credential stays here: what the viewer holds is a source that calls `token()`, and
+        what the source hands out is the minted token.
         """
-        held = self._token
-        if held is not None and (held.seconds_left is None or held.seconds_left > TOKEN_MARGIN):
-            return held
-        self._token = self.token()
-        return self._token
+        self._refuse_before_the_first_commit("viewer")
+        if terms is not None:
+            if not list(terms):
+                raise Refusal(
+                    "viewer: a principal holding no term sees nothing, and a map of nothing is "
+                    "what this refuses. viewer() with no terms is this database's own principal"
+                )
+            unknown = [term for term in terms if term not in self.terms]
+            if unknown:
+                raise Refusal(
+                    f"viewer: this database has staged no access label named "
+                    f"{', '.join(repr(term) for term in unknown)}. It has staged "
+                    f"{', '.join(repr(term) for term in self.terms) or 'none'}"
+                )
+            chosen = list(terms)
+        else:
+            chosen = list(self.terms)
+        self.serve()
+        return Viewer(self.viewer_url, lambda: self.token(chosen), terms=chosen)
+
+    def _all_terms(self) -> Viewer:
+        """The viewer this database reads itself through: every term the SDK has staged.
+
+        Held for the life of the database so one token serves many reads, and dropped whenever a
+        commit records a term it did not have — a held token grants what it was minted with, and
+        a stale one would read the new rows as a principal who cannot see them.
+        """
+        if self._viewer is None:
+            self._viewer = self.viewer()
+        return self._viewer
+
+    def map(
+        self,
+        view: str | None = None,
+        layers: Sequence[str] | None = None,
+        colour_by: str | None = None,
+        filters: dict | None = None,
+        height: int = 480,
+        **kwargs,
+    ):
+        """The explorer in this cell, over this database as its own principal (§8).
+
+        `db.viewer(terms).map(...)` is the same widget as any other principal. The token is minted
+        here and handed to the page as a custom message; the session credential never leaves the
+        kernel and no traitlet carries either.
+        """
+        self._refuse_before_the_first_commit("map")
+        return self._all_terms().map(
+            view=view,
+            layers=layers,
+            colour_by=colour_by,
+            filters=filters,
+            height=height,
+            **kwargs,
+        )
 
     def meta(self) -> dict:
         """`/v1/meta` as this database's own principal reads it: the frames and the schema."""
-        token = self._local_token()
-        request = urllib.request.Request(
-            self.viewer_url + "/v1/meta", headers={"authorization": f"Bearer {token.token}"}
-        )
-        with urllib.request.urlopen(request, timeout=60) as response:
-            return json.loads(response.read())
+        self._refuse_before_the_first_commit("meta")
+        return self._all_terms().meta()
+
+    def item(self, tessera_id, idset: int | None = None) -> dict:
+        """The drill-down record for one item, as this database's own principal (§8).
+
+        `external_id` comes back as the staged id column's own type: an integer column's eight
+        little-endian bytes as an integer, a string column's as text, anything else as the bytes
+        themselves. The wire says bytes and the SDK knows which column those bytes came from, so
+        the id a cell prints here is the id the user staged and can look up in their own frame.
+        """
+        self._refuse_before_the_first_commit("item")
+        record = self._all_terms().item(tessera_id, idset)
+        if record.get("external_id") is not None:
+            record["external_id"] = self._staged_id(record["external_id"])
+        return record
+
+    def _staged_id(self, raw: bytes):
+        """External-id bytes read as the type the id column staged (`_control.external_id`)."""
+        staged = self.sources.get(self._identity_source())
+        dtype = None if staged is None else staged.id_type
+        if is_integer_type(dtype):
+            # `_control.external_id` writes eight little-endian bytes, signed where the value was.
+            return int.from_bytes(raw, "little", signed=str(dtype).startswith("int"))
+        if dtype is not None and (pa.types.is_string(dtype) or pa.types.is_large_string(dtype)):
+            return raw.decode()
+        return raw
+
+    def viewport(
+        self,
+        bbox: Sequence[float] | None = None,
+        view: str | None = None,
+        filters: dict | None = None,
+        k: int | None = None,
+        zoom: int = 0,
+    ):
+        """The points served for a box, as a pyarrow table (§8). `Viewer.viewport` is the verb."""
+        self._refuse_before_the_first_commit("viewport")
+        return self._all_terms().viewport(bbox, view, filters, k, zoom)
 
     def _id_arguments(self) -> list[str]:
         """`--mint-external-ids`, where the identity column is an integer (configuration.md §8).
@@ -764,6 +861,8 @@ class Database:
         for term in self._staged_terms(document):
             if term not in self.terms:
                 self.terms.append(term)
+                # A held token grants the terms it was minted with, so a new label needs a new one.
+                self._viewer = None
         self._save_state()
 
     def _staged_terms(self, document: dict) -> list[str]:
@@ -852,8 +951,8 @@ class Database:
     def _refuse_before_the_first_commit(self, verb: str) -> None:
         if not self.built:
             raise Refusal(
-                f"{verb}: this database has not been committed, so there are no rows to address. "
-                f"commit() builds it first"
+                f"{verb}: this database has not been committed, so there is nothing serving it "
+                f"and no rows to address. commit() builds it first"
             )
 
     def serve(self) -> _instance.Listening:
@@ -913,11 +1012,17 @@ class Database:
         return target
 
     def close(self) -> None:
-        """Stop the child and, for a temporary database, remove the directory."""
+        """Stop the child and, for a temporary database, remove the directory.
+
+        Nothing is invalidated server-side: a token this database minted is good until its
+        lifetime runs out (`[disclosure] token_max_lifetime`, one hour), and there is no route
+        that withdraws one. What `close()` stops is the process that would answer it.
+        """
         if self._child is not None:
             _instance.stop(self._child)
             self._child = None
             self.listening = None
+            self._viewer = None
         if self.temporary and self.path.exists():
             shutil.rmtree(self.path, ignore_errors=True)
 
