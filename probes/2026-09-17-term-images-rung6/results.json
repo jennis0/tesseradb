@@ -266,7 +266,7 @@
     "bundle_format": 13,
     "image_header_version": 2,
     "bundle": "/home/joe/code/tessera/data/ladder/gbif-64p-terms/bundle",
-    "commit": "a625a98faaf3091474f3130848471169a3d9f5cf",
+    "commit": "3993133aa6b611527311c8745537ab1ae8c91fc0",
     "seed": 20260917,
     "rows": 25846007,
     "dictionary_terms": 186179,
@@ -293,8 +293,8 @@
         "chooser_route_offline": "split",
         "arms": {
           "walk": {
-            "cold_s": 0.002360961,
-            "warm_s": 0.002397648,
+            "cold_s": 0.002290473,
+            "warm_s": 0.002091356,
             "route_taken": "walk",
             "equal_to_walk": true,
             "cardinality": 258459,
@@ -304,8 +304,8 @@
             "cold_majflt": 0
           },
           "chooser": {
-            "cold_s": 0.010201808,
-            "warm_s": 0.000279445,
+            "cold_s": 0.00971314,
+            "warm_s": 0.000322979,
             "route_taken": "split",
             "equal_to_walk": true,
             "cardinality": 258459,
@@ -315,8 +315,8 @@
             "cold_majflt": 2
           },
           "split": {
-            "cold_s": 0.000291072,
-            "warm_s": 0.000268979,
+            "cold_s": 0.000258885,
+            "warm_s": 0.000265377,
             "route_taken": "split",
             "equal_to_walk": true,
             "cardinality": 258459,
@@ -326,8 +326,8 @@
             "cold_majflt": 0
           },
           "complement": {
-            "cold_s": 0.150475005,
-            "warm_s": 0.183578087,
+            "cold_s": 0.146233554,
+            "warm_s": 0.131088382,
             "route_taken": "complement",
             "equal_to_walk": true,
             "cardinality": 258459,
@@ -358,8 +358,8 @@
         "chooser_route_offline": "split",
         "arms": {
           "walk": {
-            "cold_s": 0.008250285,
-            "warm_s": 0.007689634,
+            "cold_s": 0.006942486,
+            "warm_s": 0.006752013,
             "route_taken": "walk",
             "equal_to_walk": true,
             "cardinality": 1292304,
@@ -369,8 +369,8 @@
             "cold_majflt": 0
           },
           "chooser": {
-            "cold_s": 0.01203204,
-            "warm_s": 0.000298974,
+            "cold_s": 0.009414662,
+            "warm_s": 0.00031375,
             "route_taken": "split",
             "equal_to_walk": true,
             "cardinality": 1292304,
@@ -380,8 +380,8 @@
             "cold_majflt": 2
           },
           "split": {
-            "cold_s": 0.000330757,
-            "warm_s": 0.000309293,
+            "cold_s": 0.000289478,
+            "warm_s": 0.000313808,
             "route_taken": "split",
             "equal_to_walk": true,
             "cardinality": 1292304,
@@ -391,8 +391,8 @@
             "cold_majflt": 0
           },
           "complement": {
-            "cold_s": 0.161997795,
-            "warm_s": 0.136312222,
+            "cold_s": 0.136266649,
+            "warm_s": 0.122764441,
             "route_taken": "complement",
             "equal_to_walk": true,
             "cardinality": 1292304,
@@ -423,8 +423,8 @@
         "chooser_route_offline": "split",
         "arms": {
           "walk": {
-            "cold_s": 0.015526549,
-            "warm_s": 0.014852012,
+            "cold_s": 0.014724557,
+            "warm_s": 0.014556853,
             "route_taken": "walk",
             "equal_to_walk": true,
             "cardinality": 2584596,
@@ -434,8 +434,8 @@
             "cold_majflt": 0
           },
           "chooser": {
-            "cold_s": 0.004712408,
-            "warm_s": 0.000388791,
+            "cold_s": 0.003667021,
+            "warm_s": 0.000368073,
             "route_taken": "split",
             "equal_to_walk": true,
             "cardinality": 2584596,
@@ -445,8 +445,8 @@
             "cold_majflt": 1
           },
           "split": {
-            "cold_s": 0.000424348,
-            "warm_s": 0.000356772,
+            "cold_s": 0.000375376,
+            "warm_s": 0.000406284,
             "route_taken": "split",
             "equal_to_walk": true,
             "cardinality": 2584596,
@@ -456,8 +456,8 @@
             "cold_majflt": 0
           },
           "complement": {
-            "cold_s": 0.132262066,
-            "warm_s": 0.130312293,
+            "cold_s": 0.122395547,
+            "warm_s": 0.125359609,
             "route_taken": "complement",
             "equal_to_walk": true,
             "cardinality": 2584596,
@@ -488,8 +488,8 @@
         "chooser_route_offline": "split",
         "arms": {
           "walk": {
-            "cold_s": 0.040715138,
-            "warm_s": 0.039193506,
+            "cold_s": 0.037087942,
+            "warm_s": 0.035428403,
             "route_taken": "walk",
             "equal_to_walk": true,
             "cardinality": 6461499,
@@ -499,8 +499,8 @@
             "cold_majflt": 0
           },
           "chooser": {
-            "cold_s": 0.015517379,
-            "warm_s": 0.000353558,
+            "cold_s": 0.01308478,
+            "warm_s": 0.000409,
             "route_taken": "split",
             "equal_to_walk": true,
             "cardinality": 6461499,
@@ -510,8 +510,8 @@
             "cold_majflt": 3
           },
           "split": {
-            "cold_s": 0.000357449,
-            "warm_s": 0.000352152,
+            "cold_s": 0.000327002,
+            "warm_s": 0.00033993,
             "route_taken": "split",
             "equal_to_walk": true,
             "cardinality": 6461499,
@@ -521,8 +521,8 @@
             "cold_majflt": 0
           },
           "complement": {
-            "cold_s": 0.115067679,
-            "warm_s": 0.108779646,
+            "cold_s": 0.102848423,
+            "warm_s": 0.105692924,
             "route_taken": "complement",
             "equal_to_walk": true,
             "cardinality": 6461499,
@@ -553,19 +553,19 @@
         "chooser_route_offline": "split",
         "arms": {
           "walk": {
-            "cold_s": 0.080567022,
-            "warm_s": 0.079749304,
+            "cold_s": 0.069821571,
+            "warm_s": 0.075354381,
             "route_taken": "walk",
             "equal_to_walk": true,
             "cardinality": 12923003,
             "portable_bytes": 7107,
-            "anon_rise_bytes": 56090624,
+            "anon_rise_bytes": 56705024,
             "cold_read_bytes": 0,
             "cold_majflt": 0
           },
           "chooser": {
-            "cold_s": 0.014381715,
-            "warm_s": 0.000861735,
+            "cold_s": 0.011817526,
+            "warm_s": 0.000618205,
             "route_taken": "split",
             "equal_to_walk": true,
             "cardinality": 12923003,
@@ -575,8 +575,8 @@
             "cold_majflt": 3
           },
           "split": {
-            "cold_s": 0.000708982,
-            "warm_s": 0.00066055,
+            "cold_s": 0.000615984,
+            "warm_s": 0.000574991,
             "route_taken": "split",
             "equal_to_walk": true,
             "cardinality": 12923003,
@@ -586,13 +586,13 @@
             "cold_majflt": 0
           },
           "complement": {
-            "cold_s": 0.099966797,
-            "warm_s": 0.096188094,
+            "cold_s": 0.072357774,
+            "warm_s": 0.072498203,
             "route_taken": "complement",
             "equal_to_walk": true,
             "cardinality": 12923003,
             "portable_bytes": 7107,
-            "anon_rise_bytes": 56983552,
+            "anon_rise_bytes": 56987648,
             "cold_read_bytes": 0,
             "cold_majflt": 0
           }
@@ -618,8 +618,8 @@
         "chooser_route_offline": "complement",
         "arms": {
           "walk": {
-            "cold_s": 0.00019646,
-            "warm_s": 0.00014229,
+            "cold_s": 0.000135796,
+            "warm_s": 0.000118636,
             "route_taken": "walk",
             "equal_to_walk": true,
             "cardinality": 25846007,
@@ -629,8 +629,8 @@
             "cold_majflt": 0
           },
           "chooser": {
-            "cold_s": 0.000136934,
-            "warm_s": 0.00012534,
+            "cold_s": 0.000105194,
+            "warm_s": 0.000103935,
             "route_taken": "whole_domain",
             "equal_to_walk": true,
             "cardinality": 25846007,
@@ -640,8 +640,8 @@
             "cold_majflt": 0
           },
           "split": {
-            "cold_s": 0.037248013,
-            "warm_s": 0.002348812,
+            "cold_s": 0.02978627,
+            "warm_s": 0.001972786,
             "route_taken": "split",
             "equal_to_walk": true,
             "cardinality": 25846007,
@@ -651,8 +651,8 @@
             "cold_majflt": 9
           },
           "complement": {
-            "cold_s": 0.000713766,
-            "warm_s": 0.000529658,
+            "cold_s": 0.000510524,
+            "warm_s": 0.000424435,
             "route_taken": "complement",
             "equal_to_walk": true,
             "cardinality": 25846007,
@@ -683,19 +683,19 @@
         "chooser_route_offline": "split",
         "arms": {
           "walk": {
-            "cold_s": 0.081212946,
-            "warm_s": 0.072898696,
+            "cold_s": 0.068419151,
+            "warm_s": 0.068337459,
             "route_taken": "walk",
             "equal_to_walk": true,
             "cardinality": 12186941,
             "portable_bytes": 3223234,
-            "anon_rise_bytes": 54939648,
+            "anon_rise_bytes": 55377920,
             "cold_read_bytes": 0,
             "cold_majflt": 0
           },
           "chooser": {
-            "cold_s": 0.038226059,
-            "warm_s": 0.013522422,
+            "cold_s": 0.034237142,
+            "warm_s": 0.012419516,
             "route_taken": "split",
             "equal_to_walk": true,
             "cardinality": 12186941,
@@ -705,8 +705,8 @@
             "cold_majflt": 6
           },
           "split": {
-            "cold_s": 0.012914313,
-            "warm_s": 0.012774551,
+            "cold_s": 0.012557818,
+            "warm_s": 0.012979843,
             "route_taken": "split",
             "equal_to_walk": true,
             "cardinality": 12186941,
@@ -716,13 +716,13 @@
             "cold_majflt": 0
           },
           "complement": {
-            "cold_s": 0.082450867,
-            "warm_s": 0.078170086,
+            "cold_s": 0.086549412,
+            "warm_s": 0.076489128,
             "route_taken": "complement",
             "equal_to_walk": true,
             "cardinality": 12186941,
             "portable_bytes": 3223234,
-            "anon_rise_bytes": 61550592,
+            "anon_rise_bytes": 61542400,
             "cold_read_bytes": 0,
             "cold_majflt": 0
           }
@@ -748,19 +748,19 @@
         "chooser_route_offline": "split",
         "arms": {
           "walk": {
-            "cold_s": 0.078918019,
-            "warm_s": 0.079429636,
+            "cold_s": 0.075959754,
+            "warm_s": 0.075236159,
             "route_taken": "walk",
             "equal_to_walk": true,
             "cardinality": 13355838,
             "portable_bytes": 3209838,
-            "anon_rise_bytes": 59715584,
+            "anon_rise_bytes": 59494400,
             "cold_read_bytes": 0,
             "cold_majflt": 0
           },
           "chooser": {
-            "cold_s": 0.046981504,
-            "warm_s": 0.024460671,
+            "cold_s": 0.043478643,
+            "warm_s": 0.023643519,
             "route_taken": "split",
             "equal_to_walk": true,
             "cardinality": 13355838,
@@ -770,24 +770,24 @@
             "cold_majflt": 9
           },
           "split": {
-            "cold_s": 0.025810136,
-            "warm_s": 0.025224205,
+            "cold_s": 0.024347642,
+            "warm_s": 0.025524153,
             "route_taken": "split",
             "equal_to_walk": true,
             "cardinality": 13355838,
             "portable_bytes": 3209838,
-            "anon_rise_bytes": 8388608,
+            "anon_rise_bytes": 8794112,
             "cold_read_bytes": 0,
             "cold_majflt": 0
           },
           "complement": {
-            "cold_s": 0.084108897,
-            "warm_s": 0.08065321,
+            "cold_s": 0.087698677,
+            "warm_s": 0.075764128,
             "route_taken": "complement",
             "equal_to_walk": true,
             "cardinality": 13355838,
             "portable_bytes": 3209838,
-            "anon_rise_bytes": 58122240,
+            "anon_rise_bytes": 58478592,
             "cold_read_bytes": 0,
             "cold_majflt": 0
           }
@@ -813,46 +813,46 @@
         "chooser_route_offline": "complement",
         "arms": {
           "walk": {
-            "cold_s": 0.138518716,
-            "warm_s": 0.137744862,
+            "cold_s": 0.115257634,
+            "warm_s": 0.114435999,
             "route_taken": "walk",
             "equal_to_walk": true,
             "cardinality": 21017298,
             "portable_bytes": 2985346,
-            "anon_rise_bytes": 75767808,
+            "anon_rise_bytes": 77524992,
             "cold_read_bytes": 0,
             "cold_majflt": 0
           },
           "chooser": {
-            "cold_s": 0.045817454,
-            "warm_s": 0.03928633,
+            "cold_s": 0.040261945,
+            "warm_s": 0.039102419,
             "route_taken": "complement",
             "equal_to_walk": true,
             "cardinality": 21017298,
             "portable_bytes": 2985346,
-            "anon_rise_bytes": 26779648,
+            "anon_rise_bytes": 28241920,
             "cold_read_bytes": 0,
             "cold_majflt": 0
           },
           "split": {
-            "cold_s": 0.072940356,
-            "warm_s": 0.070301325,
+            "cold_s": 0.076035557,
+            "warm_s": 0.071666722,
             "route_taken": "split",
             "equal_to_walk": true,
             "cardinality": 21017298,
             "portable_bytes": 2985346,
-            "anon_rise_bytes": 25751552,
+            "anon_rise_bytes": 25620480,
             "cold_read_bytes": 12603392,
             "cold_majflt": 10
           },
           "complement": {
-            "cold_s": 0.042434324,
-            "warm_s": 0.043592409,
+            "cold_s": 0.039012689,
+            "warm_s": 0.037910397,
             "route_taken": "complement",
             "equal_to_walk": true,
             "cardinality": 21017298,
             "portable_bytes": 2985346,
-            "anon_rise_bytes": 28471296,
+            "anon_rise_bytes": 28569600,
             "cold_read_bytes": 0,
             "cold_majflt": 0
           }
@@ -878,46 +878,46 @@
         "chooser_route_offline": "complement",
         "arms": {
           "walk": {
-            "cold_s": 0.126832849,
-            "warm_s": 0.132848008,
+            "cold_s": 0.12274689,
+            "warm_s": 0.119715743,
             "route_taken": "walk",
             "equal_to_walk": true,
             "cardinality": 23786088,
             "portable_bytes": 1986568,
-            "anon_rise_bytes": 77455360,
+            "anon_rise_bytes": 76779520,
             "cold_read_bytes": 0,
             "cold_majflt": 0
           },
           "chooser": {
-            "cold_s": 0.025454045,
-            "warm_s": 0.022952499,
+            "cold_s": 0.023550727,
+            "warm_s": 0.025497421,
             "route_taken": "complement",
             "equal_to_walk": true,
             "cardinality": 23786088,
             "portable_bytes": 1986568,
-            "anon_rise_bytes": 16629760,
+            "anon_rise_bytes": 16400384,
             "cold_read_bytes": 0,
             "cold_majflt": 0
           },
           "split": {
-            "cold_s": 0.122260269,
-            "warm_s": 0.121152463,
+            "cold_s": 0.116220477,
+            "warm_s": 0.11404114,
             "route_taken": "split",
             "equal_to_walk": true,
             "cardinality": 23786088,
             "portable_bytes": 1986568,
-            "anon_rise_bytes": 51920896,
+            "anon_rise_bytes": 51904512,
             "cold_read_bytes": 3072000,
             "cold_majflt": 1
           },
           "complement": {
-            "cold_s": 0.02509078,
-            "warm_s": 0.024479568,
+            "cold_s": 0.020887747,
+            "warm_s": 0.027093489,
             "route_taken": "complement",
             "equal_to_walk": true,
             "cardinality": 23786088,
             "portable_bytes": 1986568,
-            "anon_rise_bytes": 16732160,
+            "anon_rise_bytes": 16719872,
             "cold_read_bytes": 0,
             "cold_majflt": 0
           }
@@ -934,9 +934,8 @@
     },
     "note": "cold arms show read_bytes 0 and majflt 0: DONTNEED does not reach a page this process holds mapped",
     "residual_note": "residual_entities equals the format 12 residual_rows for every principal: the base permutation is a bijection onto its rows at this rung, so the change is a no-op here",
-    "superseded": {
-      "format_12_run": "see git history for the format 12 table"
-    }
+    "window_fix": true,
+    "routes_unchanged_by_window_fix": true
   },
   "fold_64p": {
     "measured": true,
@@ -976,25 +975,17 @@
       "derivation_s": 1.303601561
     },
     "equals_the_build": "same kept count, payload, table and .timg size as the build wrote",
-    "rung6_pass_2b_modelled_s": 186.2
+    "rung6_pass_2b_modelled_s": 186.2,
+    "note": "the fold's pass 2b is unchanged by the window fix: it derives the same images and writes the same bytes"
   },
-  "format_13_rebuild": {
+  "build_term_images_stage_s": {
     "measured": true,
-    "build_term_images_stage_s": {
-      "format_12_twelve_workers": 6.63,
-      "format_13_four_workers": 12.0,
-      "ratio": 1.81,
-      "finding": "capping the build's derivation at four workers made the stage 1.8x slower at this rung; TERM_IMAGE_BUILD_THREADS' comment reasons that width buys little, which this measurement does not support"
-    },
-    "fold_pass_2b_s": {
-      "format_12": 1.484,
-      "format_13": 1.377
-    },
-    "whole_fold_s": {
-      "format_12": 51,
-      "format_13": 54
-    },
-    "images_identical": true,
-    "routes_identical": true
+    "format_12_twelve_workers": 6.63,
+    "format_13_four_workers": 12.0,
+    "format_13_four_workers_window_fix": 3.65,
+    "superseded": "the first two were taken before the derivation window fix",
+    "finding": "a window is now the postings that will be projected, so a term too small to be kept never enters the parallel work; 180,663 of 186,179 terms are in that class at this rung, and the stage was paying dispatch for them. Bytes identical.",
+    "against_the_fold_pass_2b_s": 1.377,
+    "ratio_build_to_fold": 2.65
   }
 }

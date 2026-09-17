@@ -6,7 +6,7 @@
     "kernel": "6.18.33.2-microsoft-standard-WSL2"
   },
   "bundle": "/home/joe/code/tessera/data/ladder/gbif-64p-terms/bundle",
-  "commit": "a625a98faaf3091474f3130848471169a3d9f5cf",
+  "commit": "3993133aa6b611527311c8745537ab1ae8c91fc0",
   "dense_rows": 25846007,
   "dictionary_terms": 186179,
   "draws": [
@@ -121,11 +121,11 @@
   "extent_count": 0,
   "image_file_bytes": 84052461,
   "opened": {
-    "cpu_s": 1.076631871,
+    "cpu_s": 1.855398911,
     "majflt": 0,
-    "minflt": 6995,
-    "read_bytes": 0,
-    "wall_s": 0.357764228
+    "minflt": 7614,
+    "read_bytes": 1056149504,
+    "wall_s": 0.520336751
   },
   "postings_terms": 186179,
   "principals": [
@@ -134,17 +134,17 @@
         {
           "arm": "walk",
           "cold": {
-            "anon_base_bytes": 37027840,
-            "anon_peak_bytes": 39333888,
-            "anon_rise_bytes": 2306048,
+            "anon_base_bytes": 35987456,
+            "anon_peak_bytes": 38289408,
+            "anon_rise_bytes": 2301952,
             "cardinality": 258459,
             "cold": true,
             "counters": {
-              "cpu_s": 0.002605899999999828,
+              "cpu_s": 0.0025842790000001337,
               "majflt": 0,
-              "minflt": 560,
+              "minflt": 559,
               "read_bytes": 0,
-              "wall_s": 0.002360961
+              "wall_s": 0.002290473
             },
             "evicted": [
               {
@@ -163,7 +163,7 @@
                 "rc": 0
               }
             ],
-            "peak_rss_bytes": 294117376,
+            "peak_rss_bytes": 293142528,
             "portable_bytes": 3949,
             "route_taken": "walk",
             "statistics": {
@@ -183,20 +183,20 @@
           "equal_to_walk": null,
           "forced": "walk",
           "warm": {
-            "anon_base_bytes": 37081088,
-            "anon_peak_bytes": 39333888,
+            "anon_base_bytes": 36036608,
+            "anon_peak_bytes": 38289408,
             "anon_rise_bytes": 2252800,
             "cardinality": 258459,
             "cold": false,
             "counters": {
-              "cpu_s": 0.002604298999999699,
+              "cpu_s": 0.0023043910000000167,
               "majflt": 0,
               "minflt": 549,
               "read_bytes": 0,
-              "wall_s": 0.002397648
+              "wall_s": 0.002091356
             },
             "evicted": null,
-            "peak_rss_bytes": 294117376,
+            "peak_rss_bytes": 293142528,
             "portable_bytes": 3949,
             "route_taken": "walk",
             "statistics": {
@@ -211,17 +211,17 @@
         {
           "arm": "chooser",
           "cold": {
-            "anon_base_bytes": 37097472,
-            "anon_peak_bytes": 37646336,
+            "anon_base_bytes": 36052992,
+            "anon_peak_bytes": 36601856,
             "anon_rise_bytes": 548864,
             "cardinality": 258459,
             "cold": true,
             "counters": {
-              "cpu_s": 0.003806717000000015,
+              "cpu_s": 0.0038454269999999013,
               "majflt": 2,
               "minflt": 134,
               "read_bytes": 14651392,
-              "wall_s": 0.010201808
+              "wall_s": 0.00971314
             },
             "evicted": [
               {
@@ -240,7 +240,7 @@
                 "rc": 0
               }
             ],
-            "peak_rss_bytes": 292560896,
+            "peak_rss_bytes": 291586048,
             "portable_bytes": 3949,
             "route_taken": "split",
             "statistics": {
@@ -265,20 +265,20 @@
           },
           "forced": null,
           "warm": {
-            "anon_base_bytes": 37101568,
-            "anon_peak_bytes": 37646336,
+            "anon_base_bytes": 36057088,
+            "anon_peak_bytes": 36601856,
             "anon_rise_bytes": 544768,
             "cardinality": 258459,
             "cold": false,
             "counters": {
-              "cpu_s": 0.00033936499999986935,
+              "cpu_s": 0.00041662500000017033,
               "majflt": 0,
               "minflt": 133,
               "read_bytes": 0,
-              "wall_s": 0.000279445
+              "wall_s": 0.000322979
             },
             "evicted": null,
-            "peak_rss_bytes": 292560896,
+            "peak_rss_bytes": 291586048,
             "portable_bytes": 3949,
             "route_taken": "split",
             "statistics": {
@@ -293,17 +293,17 @@
         {
           "arm": "split",
           "cold": {
-            "anon_base_bytes": 37101568,
-            "anon_peak_bytes": 37650432,
+            "anon_base_bytes": 36057088,
+            "anon_peak_bytes": 36605952,
             "anon_rise_bytes": 548864,
             "cardinality": 258459,
             "cold": true,
             "counters": {
-              "cpu_s": 0.0003545459999998446,
+              "cpu_s": 0.00034612500000008595,
               "majflt": 0,
               "minflt": 134,
               "read_bytes": 0,
-              "wall_s": 0.000291072
+              "wall_s": 0.000258885
             },
             "evicted": [
               {
@@ -322,7 +322,7 @@
                 "rc": 0
               }
             ],
-            "peak_rss_bytes": 292564992,
+            "peak_rss_bytes": 291590144,
             "portable_bytes": 3949,
             "route_taken": "split",
             "statistics": {
@@ -347,20 +347,20 @@
           },
           "forced": "split",
           "warm": {
-            "anon_base_bytes": 37101568,
-            "anon_peak_bytes": 37654528,
+            "anon_base_bytes": 36057088,
+            "anon_peak_bytes": 36610048,
             "anon_rise_bytes": 552960,
             "cardinality": 258459,
             "cold": false,
             "counters": {
-              "cpu_s": 0.00035481599999998004,
+              "cpu_s": 0.00032751499999994493,
               "majflt": 0,
               "minflt": 135,
               "read_bytes": 0,
-              "wall_s": 0.000268979
+              "wall_s": 0.000265377
             },
             "evicted": null,
-            "peak_rss_bytes": 292569088,
+            "peak_rss_bytes": 291594240,
             "portable_bytes": 3949,
             "route_taken": "split",
             "statistics": {
@@ -375,17 +375,17 @@
         {
           "arm": "complement",
           "cold": {
-            "anon_base_bytes": 37113856,
-            "anon_peak_bytes": 114319360,
+            "anon_base_bytes": 36069376,
+            "anon_peak_bytes": 113274880,
             "anon_rise_bytes": 77205504,
             "cardinality": 258459,
             "cold": true,
             "counters": {
-              "cpu_s": 0.15765063,
+              "cpu_s": 0.1560683629999997,
               "majflt": 0,
               "minflt": 18849,
               "read_bytes": 0,
-              "wall_s": 0.150475005
+              "wall_s": 0.146233554
             },
             "evicted": [
               {
@@ -404,7 +404,7 @@
                 "rc": 0
               }
             ],
-            "peak_rss_bytes": 368766976,
+            "peak_rss_bytes": 367800320,
             "portable_bytes": 3949,
             "route_taken": "complement",
             "statistics": {
@@ -429,20 +429,20 @@
           },
           "forced": "complement",
           "warm": {
-            "anon_base_bytes": 37134336,
-            "anon_peak_bytes": 114335744,
+            "anon_base_bytes": 36089856,
+            "anon_peak_bytes": 113291264,
             "anon_rise_bytes": 77201408,
             "cardinality": 258459,
             "cold": false,
             "counters": {
-              "cpu_s": 0.18561467200000026,
+              "cpu_s": 0.14236594400000024,
               "majflt": 0,
               "minflt": 18848,
               "read_bytes": 0,
-              "wall_s": 0.183578087
+              "wall_s": 0.131088382
             },
             "evicted": null,
-            "peak_rss_bytes": 368787456,
+            "peak_rss_bytes": 367837184,
             "portable_bytes": 3949,
             "route_taken": "complement",
             "statistics": {
@@ -487,17 +487,17 @@
         {
           "arm": "walk",
           "cold": {
-            "anon_base_bytes": 37195776,
-            "anon_peak_bytes": 43859968,
+            "anon_base_bytes": 36151296,
+            "anon_peak_bytes": 42815488,
             "anon_rise_bytes": 6664192,
             "cardinality": 1292304,
             "cold": true,
             "counters": {
-              "cpu_s": 0.008716882999999953,
+              "cpu_s": 0.007613311000000067,
               "majflt": 0,
               "minflt": 1626,
               "read_bytes": 0,
-              "wall_s": 0.008250285
+              "wall_s": 0.006942486
             },
             "evicted": [
               {
@@ -516,7 +516,7 @@
                 "rc": 0
               }
             ],
-            "peak_rss_bytes": 298844160,
+            "peak_rss_bytes": 297869312,
             "portable_bytes": 2881,
             "route_taken": "walk",
             "statistics": {
@@ -536,20 +536,20 @@
           "equal_to_walk": null,
           "forced": "walk",
           "warm": {
-            "anon_base_bytes": 37191680,
-            "anon_peak_bytes": 43859968,
+            "anon_base_bytes": 36147200,
+            "anon_peak_bytes": 42815488,
             "anon_rise_bytes": 6668288,
             "cardinality": 1292304,
             "cold": false,
             "counters": {
-              "cpu_s": 0.008090499999999778,
+              "cpu_s": 0.007412811000000019,
               "majflt": 0,
               "minflt": 1628,
               "read_bytes": 0,
-              "wall_s": 0.007689634
+              "wall_s": 0.006752013
             },
             "evicted": null,
-            "peak_rss_bytes": 298844160,
+            "peak_rss_bytes": 297869312,
             "portable_bytes": 2881,
             "route_taken": "walk",
             "statistics": {
@@ -564,17 +564,17 @@
         {
           "arm": "chooser",
           "cold": {
-            "anon_base_bytes": 37199872,
-            "anon_peak_bytes": 37732352,
+            "anon_base_bytes": 36155392,
+            "anon_peak_bytes": 36687872,
             "anon_rise_bytes": 532480,
             "cardinality": 1292304,
             "cold": true,
             "counters": {
-              "cpu_s": 0.005195327000000027,
+              "cpu_s": 0.004020500999999843,
               "majflt": 2,
               "minflt": 132,
               "read_bytes": 16711680,
-              "wall_s": 0.01203204
+              "wall_s": 0.009414662
             },
             "evicted": [
               {
@@ -593,7 +593,7 @@
                 "rc": 0
               }
             ],
-            "peak_rss_bytes": 292978688,
+            "peak_rss_bytes": 292003840,
             "portable_bytes": 2881,
             "route_taken": "split",
             "statistics": {
@@ -618,20 +618,20 @@
           },
           "forced": null,
           "warm": {
-            "anon_base_bytes": 37195776,
-            "anon_peak_bytes": 37728256,
+            "anon_base_bytes": 36151296,
+            "anon_peak_bytes": 36683776,
             "anon_rise_bytes": 532480,
             "cardinality": 1292304,
             "cold": false,
             "counters": {
-              "cpu_s": 0.0004199940000000346,
+              "cpu_s": 0.000413023999999762,
               "majflt": 0,
               "minflt": 130,
               "read_bytes": 0,
-              "wall_s": 0.000298974
+              "wall_s": 0.00031375
             },
             "evicted": null,
-            "peak_rss_bytes": 292974592,
+            "peak_rss_bytes": 291999744,
             "portable_bytes": 2881,
             "route_taken": "split",
             "statistics": {
@@ -646,17 +646,17 @@
         {
           "arm": "split",
           "cold": {
-            "anon_base_bytes": 37187584,
-            "anon_peak_bytes": 37732352,
+            "anon_base_bytes": 36143104,
+            "anon_peak_bytes": 36687872,
             "anon_rise_bytes": 544768,
             "cardinality": 1292304,
             "cold": true,
             "counters": {
-              "cpu_s": 0.0004344050000000266,
+              "cpu_s": 0.00038076500000006064,
               "majflt": 0,
               "minflt": 132,
               "read_bytes": 0,
-              "wall_s": 0.000330757
+              "wall_s": 0.000289478
             },
             "evicted": [
               {
@@ -675,7 +675,7 @@
                 "rc": 0
               }
             ],
-            "peak_rss_bytes": 292978688,
+            "peak_rss_bytes": 292003840,
             "portable_bytes": 2881,
             "route_taken": "split",
             "statistics": {
@@ -700,20 +700,20 @@
           },
           "forced": "split",
           "warm": {
-            "anon_base_bytes": 37183488,
-            "anon_peak_bytes": 37724160,
+            "anon_base_bytes": 36139008,
+            "anon_peak_bytes": 36679680,
             "anon_rise_bytes": 540672,
             "cardinality": 1292304,
             "cold": false,
             "counters": {
-              "cpu_s": 0.00041325599999986196,
+              "cpu_s": 0.00039928500000030454,
               "majflt": 0,
               "minflt": 132,
               "read_bytes": 0,
-              "wall_s": 0.000309293
+              "wall_s": 0.000313808
             },
             "evicted": null,
-            "peak_rss_bytes": 292970496,
+            "peak_rss_bytes": 291995648,
             "portable_bytes": 2881,
             "route_taken": "split",
             "statistics": {
@@ -728,17 +728,17 @@
         {
           "arm": "complement",
           "cold": {
-            "anon_base_bytes": 37183488,
-            "anon_peak_bytes": 113651712,
+            "anon_base_bytes": 36139008,
+            "anon_peak_bytes": 112607232,
             "anon_rise_bytes": 76468224,
             "cardinality": 1292304,
             "cold": true,
             "counters": {
-              "cpu_s": 0.16916695999999964,
+              "cpu_s": 0.14787924799999974,
               "majflt": 0,
               "minflt": 18669,
               "read_bytes": 0,
-              "wall_s": 0.161997795
+              "wall_s": 0.136266649
             },
             "evicted": [
               {
@@ -757,7 +757,7 @@
                 "rc": 0
               }
             ],
-            "peak_rss_bytes": 368238592,
+            "peak_rss_bytes": 367362048,
             "portable_bytes": 2881,
             "route_taken": "complement",
             "statistics": {
@@ -782,20 +782,20 @@
           },
           "forced": "complement",
           "warm": {
-            "anon_base_bytes": 37244928,
-            "anon_peak_bytes": 113668096,
+            "anon_base_bytes": 36200448,
+            "anon_peak_bytes": 112623616,
             "anon_rise_bytes": 76423168,
             "cardinality": 1292304,
             "cold": false,
             "counters": {
-              "cpu_s": 0.144265635,
+              "cpu_s": 0.13338317200000027,
               "majflt": 0,
               "minflt": 18657,
               "read_bytes": 0,
-              "wall_s": 0.136312222
+              "wall_s": 0.122764441
             },
             "evicted": null,
-            "peak_rss_bytes": 368246784,
+            "peak_rss_bytes": 367423488,
             "portable_bytes": 2881,
             "route_taken": "complement",
             "statistics": {
@@ -842,17 +842,17 @@
         {
           "arm": "walk",
           "cold": {
-            "anon_base_bytes": 37273600,
-            "anon_peak_bytes": 49344512,
-            "anon_rise_bytes": 12070912,
+            "anon_base_bytes": 36229120,
+            "anon_peak_bytes": 48787456,
+            "anon_rise_bytes": 12558336,
             "cardinality": 2584596,
             "cold": true,
             "counters": {
-              "cpu_s": 0.016449938000000053,
+              "cpu_s": 0.016041212999999832,
               "majflt": 0,
               "minflt": 3068,
               "read_bytes": 0,
-              "wall_s": 0.015526549
+              "wall_s": 0.014724557
             },
             "evicted": [
               {
@@ -871,7 +871,7 @@
                 "rc": 0
               }
             ],
-            "peak_rss_bytes": 304394240,
+            "peak_rss_bytes": 303489024,
             "portable_bytes": 4157,
             "route_taken": "walk",
             "statistics": {
@@ -891,20 +891,20 @@
           "equal_to_walk": null,
           "forced": "walk",
           "warm": {
-            "anon_base_bytes": 37269504,
-            "anon_peak_bytes": 49815552,
+            "anon_base_bytes": 36225024,
+            "anon_peak_bytes": 48771072,
             "anon_rise_bytes": 12546048,
             "cardinality": 2584596,
             "cold": false,
             "counters": {
-              "cpu_s": 0.015711209000000004,
+              "cpu_s": 0.01579977500000007,
               "majflt": 0,
               "minflt": 3066,
               "read_bytes": 0,
-              "wall_s": 0.014852012
+              "wall_s": 0.014556853
             },
             "evicted": null,
-            "peak_rss_bytes": 305074176,
+            "peak_rss_bytes": 304099328,
             "portable_bytes": 4157,
             "route_taken": "walk",
             "statistics": {
@@ -919,17 +919,17 @@
         {
           "arm": "chooser",
           "cold": {
-            "anon_base_bytes": 37273600,
-            "anon_peak_bytes": 37822464,
+            "anon_base_bytes": 36229120,
+            "anon_peak_bytes": 36777984,
             "anon_rise_bytes": 548864,
             "cardinality": 2584596,
             "cold": true,
             "counters": {
-              "cpu_s": 0.002395270999999699,
+              "cpu_s": 0.0021174849999998635,
               "majflt": 1,
               "minflt": 134,
               "read_bytes": 8192000,
-              "wall_s": 0.004712408
+              "wall_s": 0.003667021
             },
             "evicted": [
               {
@@ -948,7 +948,7 @@
                 "rc": 0
               }
             ],
-            "peak_rss_bytes": 293146624,
+            "peak_rss_bytes": 292171776,
             "portable_bytes": 4157,
             "route_taken": "split",
             "statistics": {
@@ -973,20 +973,20 @@
           },
           "forced": null,
           "warm": {
-            "anon_base_bytes": 37257216,
-            "anon_peak_bytes": 37810176,
+            "anon_base_bytes": 36212736,
+            "anon_peak_bytes": 36765696,
             "anon_rise_bytes": 552960,
             "cardinality": 2584596,
             "cold": false,
             "counters": {
-              "cpu_s": 0.00047191599999951706,
+              "cpu_s": 0.0004584439999999468,
               "majflt": 0,
               "minflt": 135,
               "read_bytes": 0,
-              "wall_s": 0.000388791
+              "wall_s": 0.000368073
             },
             "evicted": null,
-            "peak_rss_bytes": 293134336,
+            "peak_rss_bytes": 292159488,
             "portable_bytes": 4157,
             "route_taken": "split",
             "statistics": {
@@ -1001,17 +1001,17 @@
         {
           "arm": "split",
           "cold": {
-            "anon_base_bytes": 37253120,
-            "anon_peak_bytes": 37810176,
+            "anon_base_bytes": 36208640,
+            "anon_peak_bytes": 36765696,
             "anon_rise_bytes": 557056,
             "cardinality": 2584596,
             "cold": true,
             "counters": {
-              "cpu_s": 0.0004857249999998814,
+              "cpu_s": 0.0004858720000000538,
               "majflt": 0,
               "minflt": 135,
               "read_bytes": 0,
-              "wall_s": 0.000424348
+              "wall_s": 0.000375376
             },
             "evicted": [
               {
@@ -1030,7 +1030,7 @@
                 "rc": 0
               }
             ],
-            "peak_rss_bytes": 293134336,
+            "peak_rss_bytes": 292159488,
             "portable_bytes": 4157,
             "route_taken": "split",
             "statistics": {
@@ -1055,20 +1055,20 @@
           },
           "forced": "split",
           "warm": {
-            "anon_base_bytes": 37253120,
-            "anon_peak_bytes": 37810176,
+            "anon_base_bytes": 36208640,
+            "anon_peak_bytes": 36765696,
             "anon_rise_bytes": 557056,
             "cardinality": 2584596,
             "cold": false,
             "counters": {
-              "cpu_s": 0.0004375840000001574,
+              "cpu_s": 0.0004970440000002796,
               "majflt": 0,
               "minflt": 135,
               "read_bytes": 0,
-              "wall_s": 0.000356772
+              "wall_s": 0.000406284
             },
             "evicted": null,
-            "peak_rss_bytes": 293134336,
+            "peak_rss_bytes": 292159488,
             "portable_bytes": 4157,
             "route_taken": "split",
             "statistics": {
@@ -1083,17 +1083,17 @@
         {
           "arm": "complement",
           "cold": {
-            "anon_base_bytes": 37261312,
-            "anon_peak_bytes": 113819648,
+            "anon_base_bytes": 36216832,
+            "anon_peak_bytes": 112775168,
             "anon_rise_bytes": 76558336,
             "cardinality": 2584596,
             "cold": true,
             "counters": {
-              "cpu_s": 0.1395442619999998,
+              "cpu_s": 0.1333925279999999,
               "majflt": 0,
               "minflt": 18691,
               "read_bytes": 0,
-              "wall_s": 0.132262066
+              "wall_s": 0.122395547
             },
             "evicted": [
               {
@@ -1112,7 +1112,7 @@
                 "rc": 0
               }
             ],
-            "peak_rss_bytes": 368472064,
+            "peak_rss_bytes": 367542272,
             "portable_bytes": 4157,
             "route_taken": "complement",
             "statistics": {
@@ -1137,20 +1137,20 @@
           },
           "forced": "complement",
           "warm": {
-            "anon_base_bytes": 37298176,
-            "anon_peak_bytes": 113815552,
+            "anon_base_bytes": 36253696,
+            "anon_peak_bytes": 112771072,
             "anon_rise_bytes": 76517376,
             "cardinality": 2584596,
             "cold": false,
             "counters": {
-              "cpu_s": 0.13753167699999969,
+              "cpu_s": 0.13661512899999995,
               "majflt": 0,
               "minflt": 18681,
               "read_bytes": 0,
-              "wall_s": 0.130312293
+              "wall_s": 0.125359609
             },
             "evicted": null,
-            "peak_rss_bytes": 368377856,
+            "peak_rss_bytes": 367448064,
             "portable_bytes": 4157,
             "route_taken": "complement",
             "statistics": {
@@ -1196,17 +1196,17 @@
         {
           "arm": "walk",
           "cold": {
-            "anon_base_bytes": 37326848,
-            "anon_peak_bytes": 66904064,
-            "anon_rise_bytes": 29577216,
+            "anon_base_bytes": 36282368,
+            "anon_peak_bytes": 65724416,
+            "anon_rise_bytes": 29442048,
             "cardinality": 6461499,
             "cold": true,
             "counters": {
-              "cpu_s": 0.04305056599999979,
+              "cpu_s": 0.040538524000000464,
               "majflt": 0,
               "minflt": 7339,
               "read_bytes": 0,
-              "wall_s": 0.040715138
+              "wall_s": 0.037087942
             },
             "evicted": [
               {
@@ -1225,7 +1225,7 @@
                 "rc": 0
               }
             ],
-            "peak_rss_bytes": 321921024,
+            "peak_rss_bytes": 321191936,
             "portable_bytes": 7183,
             "route_taken": "walk",
             "statistics": {
@@ -1245,20 +1245,20 @@
           "equal_to_walk": null,
           "forced": "walk",
           "warm": {
-            "anon_base_bytes": 37339136,
-            "anon_peak_bytes": 67387392,
+            "anon_base_bytes": 36294656,
+            "anon_peak_bytes": 66342912,
             "anon_rise_bytes": 30048256,
             "cardinality": 6461499,
             "cold": false,
             "counters": {
-              "cpu_s": 0.041493153999999866,
+              "cpu_s": 0.03857210199999983,
               "majflt": 0,
               "minflt": 7336,
               "read_bytes": 0,
-              "wall_s": 0.039193506
+              "wall_s": 0.035428403
             },
             "evicted": null,
-            "peak_rss_bytes": 322793472,
+            "peak_rss_bytes": 321818624,
             "portable_bytes": 7183,
             "route_taken": "walk",
             "statistics": {
@@ -1273,17 +1273,17 @@
         {
           "arm": "chooser",
           "cold": {
-            "anon_base_bytes": 37355520,
-            "anon_peak_bytes": 37945344,
+            "anon_base_bytes": 36311040,
+            "anon_peak_bytes": 36900864,
             "anon_rise_bytes": 589824,
             "cardinality": 6461499,
             "cold": true,
             "counters": {
-              "cpu_s": 0.006191032000000263,
+              "cpu_s": 0.0055842930000000734,
               "majflt": 3,
               "minflt": 145,
               "read_bytes": 24076288,
-              "wall_s": 0.015517379
+              "wall_s": 0.01308478
             },
             "evicted": [
               {
@@ -1302,7 +1302,7 @@
                 "rc": 0
               }
             ],
-            "peak_rss_bytes": 293613568,
+            "peak_rss_bytes": 292638720,
             "portable_bytes": 7183,
             "route_taken": "split",
             "statistics": {
@@ -1327,20 +1327,20 @@
           },
           "forced": null,
           "warm": {
-            "anon_base_bytes": 37367808,
-            "anon_peak_bytes": 37961728,
+            "anon_base_bytes": 36323328,
+            "anon_peak_bytes": 36917248,
             "anon_rise_bytes": 593920,
             "cardinality": 6461499,
             "cold": false,
             "counters": {
-              "cpu_s": 0.00048171499999982714,
+              "cpu_s": 0.0005124529999998018,
               "majflt": 0,
               "minflt": 145,
               "read_bytes": 0,
-              "wall_s": 0.000353558
+              "wall_s": 0.000409
             },
             "evicted": null,
-            "peak_rss_bytes": 293629952,
+            "peak_rss_bytes": 292655104,
             "portable_bytes": 7183,
             "route_taken": "split",
             "statistics": {
@@ -1355,17 +1355,17 @@
         {
           "arm": "split",
           "cold": {
-            "anon_base_bytes": 37343232,
-            "anon_peak_bytes": 37941248,
+            "anon_base_bytes": 36298752,
+            "anon_peak_bytes": 36896768,
             "anon_rise_bytes": 598016,
             "cardinality": 6461499,
             "cold": true,
             "counters": {
-              "cpu_s": 0.00043885500000007127,
+              "cpu_s": 0.00043766300000003255,
               "majflt": 0,
               "minflt": 146,
               "read_bytes": 0,
-              "wall_s": 0.000357449
+              "wall_s": 0.000327002
             },
             "evicted": [
               {
@@ -1384,7 +1384,7 @@
                 "rc": 0
               }
             ],
-            "peak_rss_bytes": 293609472,
+            "peak_rss_bytes": 292634624,
             "portable_bytes": 7183,
             "route_taken": "split",
             "statistics": {
@@ -1409,20 +1409,20 @@
           },
           "forced": "split",
           "warm": {
-            "anon_base_bytes": 37355520,
-            "anon_peak_bytes": 37953536,
+            "anon_base_bytes": 36311040,
+            "anon_peak_bytes": 36909056,
             "anon_rise_bytes": 598016,
             "cardinality": 6461499,
             "cold": false,
             "counters": {
-              "cpu_s": 0.0004346250000000218,
+              "cpu_s": 0.00042878399999990435,
               "majflt": 0,
               "minflt": 146,
               "read_bytes": 0,
-              "wall_s": 0.000352152
+              "wall_s": 0.00033993
             },
             "evicted": null,
-            "peak_rss_bytes": 293621760,
+            "peak_rss_bytes": 292646912,
             "portable_bytes": 7183,
             "route_taken": "split",
             "statistics": {
@@ -1437,17 +1437,17 @@
         {
           "arm": "complement",
           "cold": {
-            "anon_base_bytes": 37343232,
-            "anon_peak_bytes": 111792128,
-            "anon_rise_bytes": 74448896,
+            "anon_base_bytes": 36298752,
+            "anon_peak_bytes": 110804992,
+            "anon_rise_bytes": 74506240,
             "cardinality": 6461499,
             "cold": true,
             "counters": {
-              "cpu_s": 0.12136522299999974,
+              "cpu_s": 0.11202866899999986,
               "majflt": 0,
               "minflt": 18194,
               "read_bytes": 0,
-              "wall_s": 0.115067679
+              "wall_s": 0.102848423
             },
             "evicted": [
               {
@@ -1466,7 +1466,7 @@
                 "rc": 0
               }
             ],
-            "peak_rss_bytes": 366665728,
+            "peak_rss_bytes": 366067712,
             "portable_bytes": 7183,
             "route_taken": "complement",
             "statistics": {
@@ -1491,20 +1491,20 @@
           },
           "forced": "complement",
           "warm": {
-            "anon_base_bytes": 37355520,
-            "anon_peak_bytes": 111857664,
+            "anon_base_bytes": 36311040,
+            "anon_peak_bytes": 110813184,
             "anon_rise_bytes": 74502144,
             "cardinality": 6461499,
             "cold": false,
             "counters": {
-              "cpu_s": 0.11491634900000003,
+              "cpu_s": 0.11478259599999951,
               "majflt": 0,
               "minflt": 18193,
               "read_bytes": 0,
-              "wall_s": 0.108779646
+              "wall_s": 0.105692924
             },
             "evicted": null,
-            "peak_rss_bytes": 366678016,
+            "peak_rss_bytes": 366055424,
             "portable_bytes": 7183,
             "route_taken": "complement",
             "statistics": {
@@ -1552,17 +1552,17 @@
         {
           "arm": "walk",
           "cold": {
-            "anon_base_bytes": 37380096,
-            "anon_peak_bytes": 94625792,
-            "anon_rise_bytes": 57245696,
+            "anon_base_bytes": 36335616,
+            "anon_peak_bytes": 93622272,
+            "anon_rise_bytes": 57286656,
             "cardinality": 12923003,
             "cold": true,
             "counters": {
-              "cpu_s": 0.08525219599999989,
+              "cpu_s": 0.07578443000000012,
               "majflt": 0,
               "minflt": 13986,
               "read_bytes": 0,
-              "wall_s": 0.080567022
+              "wall_s": 0.069821571
             },
             "evicted": [
               {
@@ -1581,7 +1581,7 @@
                 "rc": 0
               }
             ],
-            "peak_rss_bytes": 349536256,
+            "peak_rss_bytes": 348909568,
             "portable_bytes": 7107,
             "route_taken": "walk",
             "statistics": {
@@ -1601,20 +1601,20 @@
           "equal_to_walk": null,
           "forced": "walk",
           "warm": {
-            "anon_base_bytes": 37376000,
-            "anon_peak_bytes": 93466624,
-            "anon_rise_bytes": 56090624,
+            "anon_base_bytes": 36331520,
+            "anon_peak_bytes": 93036544,
+            "anon_rise_bytes": 56705024,
             "cardinality": 12923003,
             "cold": false,
             "counters": {
-              "cpu_s": 0.08435069200000012,
+              "cpu_s": 0.08014232200000038,
               "majflt": 0,
               "minflt": 13946,
               "read_bytes": 0,
-              "wall_s": 0.079749304
+              "wall_s": 0.075354381
             },
             "evicted": null,
-            "peak_rss_bytes": 349270016,
+            "peak_rss_bytes": 348643328,
             "portable_bytes": 7107,
             "route_taken": "walk",
             "statistics": {
@@ -1629,17 +1629,17 @@
         {
           "arm": "chooser",
           "cold": {
-            "anon_base_bytes": 37376000,
-            "anon_peak_bytes": 38301696,
+            "anon_base_bytes": 36331520,
+            "anon_peak_bytes": 37257216,
             "anon_rise_bytes": 925696,
             "cardinality": 12923003,
             "cold": true,
             "counters": {
-              "cpu_s": 0.006320324000000266,
+              "cpu_s": 0.006112984000000488,
               "majflt": 3,
               "minflt": 226,
               "read_bytes": 24969216,
-              "wall_s": 0.014381715
+              "wall_s": 0.011817526
             },
             "evicted": [
               {
@@ -1658,7 +1658,7 @@
                 "rc": 0
               }
             ],
-            "peak_rss_bytes": 294187008,
+            "peak_rss_bytes": 293212160,
             "portable_bytes": 7107,
             "route_taken": "split",
             "statistics": {
@@ -1683,20 +1683,20 @@
           },
           "forced": null,
           "warm": {
-            "anon_base_bytes": 37404672,
-            "anon_peak_bytes": 38313984,
+            "anon_base_bytes": 36360192,
+            "anon_peak_bytes": 37269504,
             "anon_rise_bytes": 909312,
             "cardinality": 12923003,
             "cold": false,
             "counters": {
-              "cpu_s": 0.000965614000000059,
+              "cpu_s": 0.0007273310000002198,
               "majflt": 0,
               "minflt": 222,
               "read_bytes": 0,
-              "wall_s": 0.000861735
+              "wall_s": 0.000618205
             },
             "evicted": null,
-            "peak_rss_bytes": 294199296,
+            "peak_rss_bytes": 293224448,
             "portable_bytes": 7107,
             "route_taken": "split",
             "statistics": {
@@ -1711,17 +1711,17 @@
         {
           "arm": "split",
           "cold": {
-            "anon_base_bytes": 37392384,
-            "anon_peak_bytes": 38313984,
+            "anon_base_bytes": 36347904,
+            "anon_peak_bytes": 37269504,
             "anon_rise_bytes": 921600,
             "cardinality": 12923003,
             "cold": true,
             "counters": {
-              "cpu_s": 0.0007914920000002823,
+              "cpu_s": 0.0007261009999997015,
               "majflt": 0,
               "minflt": 225,
               "read_bytes": 0,
-              "wall_s": 0.000708982
+              "wall_s": 0.000615984
             },
             "evicted": [
               {
@@ -1740,7 +1740,7 @@
                 "rc": 0
               }
             ],
-            "peak_rss_bytes": 294199296,
+            "peak_rss_bytes": 293224448,
             "portable_bytes": 7107,
             "route_taken": "split",
             "statistics": {
@@ -1765,20 +1765,20 @@
           },
           "forced": "split",
           "warm": {
-            "anon_base_bytes": 37408768,
-            "anon_peak_bytes": 38305792,
+            "anon_base_bytes": 36364288,
+            "anon_peak_bytes": 37261312,
             "anon_rise_bytes": 897024,
             "cardinality": 12923003,
             "cold": false,
             "counters": {
-              "cpu_s": 0.0007906409999995923,
+              "cpu_s": 0.0006822120000000709,
               "majflt": 0,
               "minflt": 218,
               "read_bytes": 0,
-              "wall_s": 0.00066055
+              "wall_s": 0.000574991
             },
             "evicted": null,
-            "peak_rss_bytes": 294191104,
+            "peak_rss_bytes": 293216256,
             "portable_bytes": 7107,
             "route_taken": "split",
             "statistics": {
@@ -1793,17 +1793,17 @@
         {
           "arm": "complement",
           "cold": {
-            "anon_base_bytes": 37396480,
-            "anon_peak_bytes": 94388224,
-            "anon_rise_bytes": 56991744,
+            "anon_base_bytes": 36352000,
+            "anon_peak_bytes": 92835840,
+            "anon_rise_bytes": 56483840,
             "cardinality": 12923003,
             "cold": true,
             "counters": {
-              "cpu_s": 0.10392595900000012,
+              "cpu_s": 0.07864048300000004,
               "majflt": 0,
               "minflt": 13915,
               "read_bytes": 0,
-              "wall_s": 0.099966797
+              "wall_s": 0.072357774
             },
             "evicted": [
               {
@@ -1822,7 +1822,7 @@
                 "rc": 0
               }
             ],
-            "peak_rss_bytes": 349556736,
+            "peak_rss_bytes": 348598272,
             "portable_bytes": 7107,
             "route_taken": "complement",
             "statistics": {
@@ -1847,20 +1847,20 @@
           },
           "forced": "complement",
           "warm": {
-            "anon_base_bytes": 37400576,
-            "anon_peak_bytes": 94384128,
-            "anon_rise_bytes": 56983552,
+            "anon_base_bytes": 36356096,
+            "anon_peak_bytes": 93343744,
+            "anon_rise_bytes": 56987648,
             "cardinality": 12923003,
             "cold": false,
             "counters": {
-              "cpu_s": 0.09805840300000002,
+              "cpu_s": 0.0788162149999998,
               "majflt": 0,
               "minflt": 13914,
               "read_bytes": 0,
-              "wall_s": 0.096188094
+              "wall_s": 0.072498203
             },
             "evicted": null,
-            "peak_rss_bytes": 349560832,
+            "peak_rss_bytes": 348602368,
             "portable_bytes": 7107,
             "route_taken": "complement",
             "statistics": {
@@ -1908,17 +1908,17 @@
         {
           "arm": "walk",
           "cold": {
-            "anon_base_bytes": 37425152,
-            "anon_peak_bytes": 37445632,
+            "anon_base_bytes": 36380672,
+            "anon_peak_bytes": 36401152,
             "anon_rise_bytes": 20480,
             "cardinality": 25846007,
             "cold": true,
             "counters": {
-              "cpu_s": 0.0002964860000003178,
+              "cpu_s": 0.00024532599999993465,
               "majflt": 0,
               "minflt": 4,
               "read_bytes": 0,
-              "wall_s": 0.00019646
+              "wall_s": 0.000135796
             },
             "evicted": [
               {
@@ -1937,7 +1937,7 @@
                 "rc": 0
               }
             ],
-            "peak_rss_bytes": 293335040,
+            "peak_rss_bytes": 292360192,
             "portable_bytes": 5584,
             "route_taken": "walk",
             "statistics": {
@@ -1957,20 +1957,20 @@
           "equal_to_walk": null,
           "forced": "walk",
           "warm": {
-            "anon_base_bytes": 37421056,
-            "anon_peak_bytes": 37437440,
+            "anon_base_bytes": 36376576,
+            "anon_peak_bytes": 36392960,
             "anon_rise_bytes": 16384,
             "cardinality": 25846007,
             "cold": false,
             "counters": {
-              "cpu_s": 0.00023278699999984553,
+              "cpu_s": 0.00019751700000014694,
               "majflt": 0,
               "minflt": 4,
               "read_bytes": 0,
-              "wall_s": 0.00014229
+              "wall_s": 0.000118636
             },
             "evicted": null,
-            "peak_rss_bytes": 293330944,
+            "peak_rss_bytes": 292356096,
             "portable_bytes": 5584,
             "route_taken": "walk",
             "statistics": {
@@ -1985,17 +1985,17 @@
         {
           "arm": "chooser",
           "cold": {
-            "anon_base_bytes": 37429248,
-            "anon_peak_bytes": 37445632,
+            "anon_base_bytes": 36384768,
+            "anon_peak_bytes": 36401152,
             "anon_rise_bytes": 16384,
             "cardinality": 25846007,
             "cold": true,
             "counters": {
-              "cpu_s": 0.0002455470000000126,
+              "cpu_s": 0.00018557799999996405,
               "majflt": 0,
               "minflt": 3,
               "read_bytes": 0,
-              "wall_s": 0.000136934
+              "wall_s": 0.000105194
             },
             "evicted": [
               {
@@ -2014,7 +2014,7 @@
                 "rc": 0
               }
             ],
-            "peak_rss_bytes": 293335040,
+            "peak_rss_bytes": 292360192,
             "portable_bytes": 5584,
             "route_taken": "whole_domain",
             "statistics": {
@@ -2039,20 +2039,20 @@
           },
           "forced": null,
           "warm": {
-            "anon_base_bytes": 37425152,
-            "anon_peak_bytes": 37437440,
+            "anon_base_bytes": 36380672,
+            "anon_peak_bytes": 36392960,
             "anon_rise_bytes": 12288,
             "cardinality": 25846007,
             "cold": false,
             "counters": {
-              "cpu_s": 0.00022398700000003657,
+              "cpu_s": 0.00018232700000009316,
               "majflt": 0,
               "minflt": 3,
               "read_bytes": 0,
-              "wall_s": 0.00012534
+              "wall_s": 0.000103935
             },
             "evicted": null,
-            "peak_rss_bytes": 293326848,
+            "peak_rss_bytes": 292352000,
             "portable_bytes": 5584,
             "route_taken": "whole_domain",
             "statistics": {
@@ -2067,17 +2067,17 @@
         {
           "arm": "split",
           "cold": {
-            "anon_base_bytes": 37425152,
-            "anon_peak_bytes": 39698432,
+            "anon_base_bytes": 36380672,
+            "anon_peak_bytes": 38653952,
             "anon_rise_bytes": 2273280,
             "cardinality": 25846007,
             "cold": true,
             "counters": {
-              "cpu_s": 0.016289615999999896,
+              "cpu_s": 0.015379486999999692,
               "majflt": 9,
               "minflt": 637,
               "read_bytes": 52064256,
-              "wall_s": 0.037248013
+              "wall_s": 0.02978627
             },
             "evicted": [
               {
@@ -2096,7 +2096,7 @@
                 "rc": 0
               }
             ],
-            "peak_rss_bytes": 301510656,
+            "peak_rss_bytes": 300535808,
             "portable_bytes": 5584,
             "route_taken": "split",
             "statistics": {
@@ -2121,20 +2121,20 @@
           },
           "forced": "split",
           "warm": {
-            "anon_base_bytes": 37449728,
-            "anon_peak_bytes": 39718912,
+            "anon_base_bytes": 36405248,
+            "anon_peak_bytes": 38674432,
             "anon_rise_bytes": 2269184,
             "cardinality": 25846007,
             "cold": false,
             "counters": {
-              "cpu_s": 0.0025876180000001803,
+              "cpu_s": 0.002205192999999994,
               "majflt": 0,
               "minflt": 554,
               "read_bytes": 0,
-              "wall_s": 0.002348812
+              "wall_s": 0.001972786
             },
             "evicted": null,
-            "peak_rss_bytes": 301531136,
+            "peak_rss_bytes": 300556288,
             "portable_bytes": 5584,
             "route_taken": "split",
             "statistics": {
@@ -2149,17 +2149,17 @@
         {
           "arm": "complement",
           "cold": {
-            "anon_base_bytes": 37457920,
-            "anon_peak_bytes": 38006784,
+            "anon_base_bytes": 36413440,
+            "anon_peak_bytes": 36962304,
             "anon_rise_bytes": 548864,
             "cardinality": 25846007,
             "cold": true,
             "counters": {
-              "cpu_s": 0.0008081999999998146,
+              "cpu_s": 0.0006136010000004077,
               "majflt": 0,
               "minflt": 133,
               "read_bytes": 0,
-              "wall_s": 0.000713766
+              "wall_s": 0.000510524
             },
             "evicted": [
               {
@@ -2178,7 +2178,7 @@
                 "rc": 0
               }
             ],
-            "peak_rss_bytes": 299819008,
+            "peak_rss_bytes": 298844160,
             "portable_bytes": 5584,
             "route_taken": "complement",
             "statistics": {
@@ -2203,20 +2203,20 @@
           },
           "forced": "complement",
           "warm": {
-            "anon_base_bytes": 37449728,
-            "anon_peak_bytes": 37994496,
+            "anon_base_bytes": 36405248,
+            "anon_peak_bytes": 36950016,
             "anon_rise_bytes": 544768,
             "cardinality": 25846007,
             "cold": false,
             "counters": {
-              "cpu_s": 0.0006169869999999023,
+              "cpu_s": 0.00048534400000033173,
               "majflt": 0,
               "minflt": 133,
               "read_bytes": 0,
-              "wall_s": 0.000529658
+              "wall_s": 0.000424435
             },
             "evicted": null,
-            "peak_rss_bytes": 299810816,
+            "peak_rss_bytes": 298835968,
             "portable_bytes": 5584,
             "route_taken": "complement",
             "statistics": {
@@ -2509,17 +2509,17 @@
         {
           "arm": "walk",
           "cold": {
-            "anon_base_bytes": 37470208,
-            "anon_peak_bytes": 93028352,
-            "anon_rise_bytes": 55558144,
+            "anon_base_bytes": 36425728,
+            "anon_peak_bytes": 91557888,
+            "anon_rise_bytes": 55132160,
             "cardinality": 12186941,
             "cold": true,
             "counters": {
-              "cpu_s": 0.08577634300000003,
+              "cpu_s": 0.07438900699999973,
               "majflt": 0,
               "minflt": 13572,
               "read_bytes": 0,
-              "wall_s": 0.081212946
+              "wall_s": 0.068419151
             },
             "evicted": [
               {
@@ -2538,7 +2538,7 @@
                 "rc": 0
               }
             ],
-            "peak_rss_bytes": 353951744,
+            "peak_rss_bytes": 353202176,
             "portable_bytes": 3223234,
             "route_taken": "walk",
             "statistics": {
@@ -2558,20 +2558,20 @@
           "equal_to_walk": null,
           "forced": "walk",
           "warm": {
-            "anon_base_bytes": 40730624,
-            "anon_peak_bytes": 95670272,
-            "anon_rise_bytes": 54939648,
+            "anon_base_bytes": 39686144,
+            "anon_peak_bytes": 95064064,
+            "anon_rise_bytes": 55377920,
             "cardinality": 12186941,
             "cold": false,
             "counters": {
-              "cpu_s": 0.07697691400000028,
+              "cpu_s": 0.07423400700000027,
               "majflt": 0,
               "minflt": 13567,
               "read_bytes": 0,
-              "wall_s": 0.072898696
+              "wall_s": 0.068337459
             },
             "evicted": null,
-            "peak_rss_bytes": 357240832,
+            "peak_rss_bytes": 356491264,
             "portable_bytes": 3223234,
             "route_taken": "walk",
             "statistics": {
@@ -2586,17 +2586,17 @@
         {
           "arm": "chooser",
           "cold": {
-            "anon_base_bytes": 40759296,
-            "anon_peak_bytes": 45371392,
+            "anon_base_bytes": 39714816,
+            "anon_peak_bytes": 44326912,
             "anon_rise_bytes": 4612096,
             "cardinality": 12186941,
             "cold": true,
             "counters": {
-              "cpu_s": 0.025739353000000076,
+              "cpu_s": 0.02455877399999995,
               "majflt": 6,
               "minflt": 1451,
               "read_bytes": 38330368,
-              "wall_s": 0.038226059
+              "wall_s": 0.034237142
             },
             "evicted": [
               {
@@ -2615,7 +2615,7 @@
                 "rc": 0
               }
             ],
-            "peak_rss_bytes": 330510336,
+            "peak_rss_bytes": 329535488,
             "portable_bytes": 3223234,
             "route_taken": "split",
             "statistics": {
@@ -2640,20 +2640,20 @@
           },
           "forced": null,
           "warm": {
-            "anon_base_bytes": 43995136,
-            "anon_peak_bytes": 48603136,
+            "anon_base_bytes": 42950656,
+            "anon_peak_bytes": 47558656,
             "anon_rise_bytes": 4608000,
             "cardinality": 12186941,
             "cold": false,
             "counters": {
-              "cpu_s": 0.014356414000000317,
+              "cpu_s": 0.013506279000000454,
               "majflt": 0,
               "minflt": 1125,
               "read_bytes": 0,
-              "wall_s": 0.013522422
+              "wall_s": 0.012419516
             },
             "evicted": null,
-            "peak_rss_bytes": 333774848,
+            "peak_rss_bytes": 332800000,
             "portable_bytes": 3223234,
             "route_taken": "split",
             "statistics": {
@@ -2668,17 +2668,17 @@
         {
           "arm": "split",
           "cold": {
-            "anon_base_bytes": 40787968,
-            "anon_peak_bytes": 45404160,
+            "anon_base_bytes": 39743488,
+            "anon_peak_bytes": 44359680,
             "anon_rise_bytes": 4616192,
             "cardinality": 12186941,
             "cold": true,
             "counters": {
-              "cpu_s": 0.013610474000000039,
+              "cpu_s": 0.013591498000000257,
               "majflt": 0,
               "minflt": 1127,
               "read_bytes": 0,
-              "wall_s": 0.012914313
+              "wall_s": 0.012557818
             },
             "evicted": [
               {
@@ -2697,7 +2697,7 @@
                 "rc": 0
               }
             ],
-            "peak_rss_bytes": 330530816,
+            "peak_rss_bytes": 329555968,
             "portable_bytes": 3223234,
             "route_taken": "split",
             "statistics": {
@@ -2722,20 +2722,20 @@
           },
           "forced": "split",
           "warm": {
-            "anon_base_bytes": 44023808,
-            "anon_peak_bytes": 48635904,
+            "anon_base_bytes": 42979328,
+            "anon_peak_bytes": 47591424,
             "anon_rise_bytes": 4612096,
             "cardinality": 12186941,
             "cold": false,
             "counters": {
-              "cpu_s": 0.013538175999999957,
+              "cpu_s": 0.01419862599999977,
               "majflt": 0,
               "minflt": 1126,
               "read_bytes": 0,
-              "wall_s": 0.012774551
+              "wall_s": 0.012979843
             },
             "evicted": null,
-            "peak_rss_bytes": 333774848,
+            "peak_rss_bytes": 332800000,
             "portable_bytes": 3223234,
             "route_taken": "split",
             "statistics": {
@@ -2750,17 +2750,17 @@
         {
           "arm": "complement",
           "cold": {
-            "anon_base_bytes": 40783872,
-            "anon_peak_bytes": 102322176,
-            "anon_rise_bytes": 61538304,
+            "anon_base_bytes": 39739392,
+            "anon_peak_bytes": 101937152,
+            "anon_rise_bytes": 62197760,
             "cardinality": 12186941,
             "cold": true,
             "counters": {
-              "cpu_s": 0.08701150899999988,
+              "cpu_s": 0.0940776750000003,
               "majflt": 0,
               "minflt": 15192,
               "read_bytes": 0,
-              "wall_s": 0.082450867
+              "wall_s": 0.086549412
             },
             "evicted": [
               {
@@ -2779,7 +2779,7 @@
                 "rc": 0
               }
             ],
-            "peak_rss_bytes": 385396736,
+            "peak_rss_bytes": 384671744,
             "portable_bytes": 3223234,
             "route_taken": "complement",
             "statistics": {
@@ -2804,20 +2804,20 @@
           },
           "forced": "complement",
           "warm": {
-            "anon_base_bytes": 44023808,
-            "anon_peak_bytes": 105574400,
-            "anon_rise_bytes": 61550592,
+            "anon_base_bytes": 42979328,
+            "anon_peak_bytes": 104521728,
+            "anon_rise_bytes": 61542400,
             "cardinality": 12186941,
             "cold": false,
             "counters": {
-              "cpu_s": 0.08253129800000014,
+              "cpu_s": 0.08320410700000025,
               "majflt": 0,
               "minflt": 15068,
               "read_bytes": 0,
-              "wall_s": 0.078170086
+              "wall_s": 0.076489128
             },
             "evicted": null,
-            "peak_rss_bytes": 388112384,
+            "peak_rss_bytes": 387387392,
             "portable_bytes": 3223234,
             "route_taken": "complement",
             "statistics": {
@@ -3158,17 +3158,17 @@
         {
           "arm": "walk",
           "cold": {
-            "anon_base_bytes": 37634048,
-            "anon_peak_bytes": 97374208,
+            "anon_base_bytes": 36589568,
+            "anon_peak_bytes": 96329728,
             "anon_rise_bytes": 59740160,
             "cardinality": 13355838,
             "cold": true,
             "counters": {
-              "cpu_s": 0.08322941700000008,
+              "cpu_s": 0.08274701800000006,
               "majflt": 0,
               "minflt": 14793,
               "read_bytes": 0,
-              "wall_s": 0.078918019
+              "wall_s": 0.075959754
             },
             "evicted": [
               {
@@ -3187,7 +3187,7 @@
                 "rc": 0
               }
             ],
-            "peak_rss_bytes": 381198336,
+            "peak_rss_bytes": 380473344,
             "portable_bytes": 3209838,
             "route_taken": "walk",
             "statistics": {
@@ -3207,20 +3207,20 @@
           "equal_to_walk": null,
           "forced": "walk",
           "warm": {
-            "anon_base_bytes": 40878080,
-            "anon_peak_bytes": 100593664,
-            "anon_rise_bytes": 59715584,
+            "anon_base_bytes": 39833600,
+            "anon_peak_bytes": 99328000,
+            "anon_rise_bytes": 59494400,
             "cardinality": 13355838,
             "cold": false,
             "counters": {
-              "cpu_s": 0.08386536099999997,
+              "cpu_s": 0.08190431999999959,
               "majflt": 0,
               "minflt": 14682,
               "read_bytes": 0,
-              "wall_s": 0.079429636
+              "wall_s": 0.075236159
             },
             "evicted": null,
-            "peak_rss_bytes": 383918080,
+            "peak_rss_bytes": 383193088,
             "portable_bytes": 3209838,
             "route_taken": "walk",
             "statistics": {
@@ -3235,17 +3235,17 @@
         {
           "arm": "chooser",
           "cold": {
-            "anon_base_bytes": 40886272,
-            "anon_peak_bytes": 49643520,
+            "anon_base_bytes": 39841792,
+            "anon_peak_bytes": 48599040,
             "anon_rise_bytes": 8757248,
             "cardinality": 13355838,
             "cold": true,
             "counters": {
-              "cpu_s": 0.03873129999999936,
+              "cpu_s": 0.037217202999999976,
               "majflt": 9,
               "minflt": 2602,
               "read_bytes": 33468416,
-              "wall_s": 0.046981504
+              "wall_s": 0.043478643
             },
             "evicted": [
               {
@@ -3264,7 +3264,7 @@
                 "rc": 0
               }
             ],
-            "peak_rss_bytes": 364015616,
+            "peak_rss_bytes": 363040768,
             "portable_bytes": 3209838,
             "route_taken": "split",
             "statistics": {
@@ -3289,20 +3289,20 @@
           },
           "forced": null,
           "warm": {
-            "anon_base_bytes": 44265472,
-            "anon_peak_bytes": 52948992,
+            "anon_base_bytes": 43220992,
+            "anon_peak_bytes": 51904512,
             "anon_rise_bytes": 8683520,
             "cardinality": 13355838,
             "cold": false,
             "counters": {
-              "cpu_s": 0.02586524700000048,
+              "cpu_s": 0.025737456999999964,
               "majflt": 0,
               "minflt": 2120,
               "read_bytes": 0,
-              "wall_s": 0.024460671
+              "wall_s": 0.023643519
             },
             "evicted": null,
-            "peak_rss_bytes": 367321088,
+            "peak_rss_bytes": 366346240,
             "portable_bytes": 3209838,
             "route_taken": "split",
             "statistics": {
@@ -3317,17 +3317,17 @@
         {
           "arm": "split",
           "cold": {
-            "anon_base_bytes": 41132032,
-            "anon_peak_bytes": 50491392,
-            "anon_rise_bytes": 9359360,
+            "anon_base_bytes": 40083456,
+            "anon_peak_bytes": 49098752,
+            "anon_rise_bytes": 9015296,
             "cardinality": 13355838,
             "cold": true,
             "counters": {
-              "cpu_s": 0.027288507999999823,
+              "cpu_s": 0.026479075999999324,
               "majflt": 0,
-              "minflt": 2284,
+              "minflt": 2200,
               "read_bytes": 0,
-              "wall_s": 0.025810136
+              "wall_s": 0.024347642
             },
             "evicted": [
               {
@@ -3346,7 +3346,7 @@
                 "rc": 0
               }
             ],
-            "peak_rss_bytes": 365002752,
+            "peak_rss_bytes": 363814912,
             "portable_bytes": 3209838,
             "route_taken": "split",
             "statistics": {
@@ -3371,20 +3371,20 @@
           },
           "forced": "split",
           "warm": {
-            "anon_base_bytes": 44347392,
-            "anon_peak_bytes": 52736000,
-            "anon_rise_bytes": 8388608,
+            "anon_base_bytes": 43331584,
+            "anon_peak_bytes": 52125696,
+            "anon_rise_bytes": 8794112,
             "cardinality": 13355838,
             "cold": false,
             "counters": {
-              "cpu_s": 0.026637598999999845,
+              "cpu_s": 0.027864190999999927,
               "majflt": 0,
-              "minflt": 2048,
+              "minflt": 2153,
               "read_bytes": 0,
-              "wall_s": 0.025224205
+              "wall_s": 0.025524153
             },
             "evicted": null,
-            "peak_rss_bytes": 367108096,
+            "peak_rss_bytes": 366567424,
             "portable_bytes": 3209838,
             "route_taken": "split",
             "statistics": {
@@ -3399,17 +3399,17 @@
         {
           "arm": "complement",
           "cold": {
-            "anon_base_bytes": 41193472,
-            "anon_peak_bytes": 99565568,
-            "anon_rise_bytes": 58372096,
+            "anon_base_bytes": 40153088,
+            "anon_peak_bytes": 98697216,
+            "anon_rise_bytes": 58544128,
             "cardinality": 13355838,
             "cold": true,
             "counters": {
-              "cpu_s": 0.08898799000000057,
+              "cpu_s": 0.09531212999999994,
               "majflt": 0,
-              "minflt": 14567,
+              "minflt": 14562,
               "read_bytes": 0,
-              "wall_s": 0.084108897
+              "wall_s": 0.087698677
             },
             "evicted": [
               {
@@ -3428,7 +3428,7 @@
                 "rc": 0
               }
             ],
-            "peak_rss_bytes": 414359552,
+            "peak_rss_bytes": 413638656,
             "portable_bytes": 3209838,
             "route_taken": "complement",
             "statistics": {
@@ -3453,20 +3453,20 @@
           },
           "forced": "complement",
           "warm": {
-            "anon_base_bytes": 44351488,
-            "anon_peak_bytes": 102473728,
-            "anon_rise_bytes": 58122240,
+            "anon_base_bytes": 43343872,
+            "anon_peak_bytes": 101822464,
+            "anon_rise_bytes": 58478592,
             "cardinality": 13355838,
             "cold": false,
             "counters": {
-              "cpu_s": 0.08515869100000018,
+              "cpu_s": 0.0824294090000004,
               "majflt": 0,
-              "minflt": 14213,
+              "minflt": 14382,
               "read_bytes": 0,
-              "wall_s": 0.08065321
+              "wall_s": 0.075764128
             },
             "evicted": null,
-            "peak_rss_bytes": 416075776,
+            "peak_rss_bytes": 416043008,
             "portable_bytes": 3209838,
             "route_taken": "complement",
             "statistics": {
@@ -4507,17 +4507,17 @@
         {
           "arm": "walk",
           "cold": {
-            "anon_base_bytes": 38014976,
-            "anon_peak_bytes": 113909760,
-            "anon_rise_bytes": 75894784,
+            "anon_base_bytes": 36941824,
+            "anon_peak_bytes": 114401280,
+            "anon_rise_bytes": 77459456,
             "cardinality": 21017298,
             "cold": true,
             "counters": {
-              "cpu_s": 0.14446737699999979,
+              "cpu_s": 0.12467636500000001,
               "majflt": 0,
-              "minflt": 18574,
+              "minflt": 18929,
               "read_bytes": 0,
-              "wall_s": 0.138518716
+              "wall_s": 0.115257634
             },
             "evicted": [
               {
@@ -4536,7 +4536,7 @@
                 "rc": 0
               }
             ],
-            "peak_rss_bytes": 428675072,
+            "peak_rss_bytes": 429367296,
             "portable_bytes": 2985346,
             "route_taken": "walk",
             "statistics": {
@@ -4556,20 +4556,20 @@
           "equal_to_walk": null,
           "forced": "walk",
           "warm": {
-            "anon_base_bytes": 41009152,
-            "anon_peak_bytes": 116776960,
-            "anon_rise_bytes": 75767808,
+            "anon_base_bytes": 39936000,
+            "anon_peak_bytes": 117460992,
+            "anon_rise_bytes": 77524992,
             "cardinality": 21017298,
             "cold": false,
             "counters": {
-              "cpu_s": 0.14462111499999963,
+              "cpu_s": 0.12434337199999934,
               "majflt": 0,
-              "minflt": 18542,
+              "minflt": 18970,
               "read_bytes": 0,
-              "wall_s": 0.137744862
+              "wall_s": 0.114435999
             },
             "evicted": null,
-            "peak_rss_bytes": 431538176,
+            "peak_rss_bytes": 432463872,
             "portable_bytes": 2985346,
             "route_taken": "walk",
             "statistics": {
@@ -4584,17 +4584,17 @@
         {
           "arm": "chooser",
           "cold": {
-            "anon_base_bytes": 41062400,
-            "anon_peak_bytes": 68804608,
-            "anon_rise_bytes": 27742208,
+            "anon_base_bytes": 40017920,
+            "anon_peak_bytes": 69357568,
+            "anon_rise_bytes": 29339648,
             "cardinality": 21017298,
             "cold": true,
             "counters": {
-              "cpu_s": 0.04840642899999992,
+              "cpu_s": 0.04361040000000038,
               "majflt": 0,
-              "minflt": 6773,
+              "minflt": 7163,
               "read_bytes": 0,
-              "wall_s": 0.045817454
+              "wall_s": 0.040261945
             },
             "evicted": [
               {
@@ -4613,7 +4613,7 @@
                 "rc": 0
               }
             ],
-            "peak_rss_bytes": 384286720,
+            "peak_rss_bytes": 384905216,
             "portable_bytes": 2985346,
             "route_taken": "complement",
             "statistics": {
@@ -4638,20 +4638,20 @@
           },
           "forced": null,
           "warm": {
-            "anon_base_bytes": 44052480,
-            "anon_peak_bytes": 70832128,
-            "anon_rise_bytes": 26779648,
+            "anon_base_bytes": 42983424,
+            "anon_peak_bytes": 71225344,
+            "anon_rise_bytes": 28241920,
             "cardinality": 21017298,
             "cold": false,
             "counters": {
-              "cpu_s": 0.04171215300000064,
+              "cpu_s": 0.04260532499999936,
               "majflt": 0,
-              "minflt": 6537,
+              "minflt": 6895,
               "read_bytes": 0,
-              "wall_s": 0.03928633
+              "wall_s": 0.039102419
             },
             "evicted": null,
-            "peak_rss_bytes": 386310144,
+            "peak_rss_bytes": 386772992,
             "portable_bytes": 2985346,
             "route_taken": "complement",
             "statistics": {
@@ -4666,17 +4666,17 @@
         {
           "arm": "split",
           "cold": {
-            "anon_base_bytes": 41078784,
-            "anon_peak_bytes": 66732032,
-            "anon_rise_bytes": 25653248,
+            "anon_base_bytes": 40030208,
+            "anon_peak_bytes": 65720320,
+            "anon_rise_bytes": 25690112,
             "cardinality": 21017298,
             "cold": true,
             "counters": {
-              "cpu_s": 0.0743560040000002,
+              "cpu_s": 0.0796374800000006,
               "majflt": 10,
-              "minflt": 6280,
+              "minflt": 6288,
               "read_bytes": 12603392,
-              "wall_s": 0.072940356
+              "wall_s": 0.076035557
             },
             "evicted": [
               {
@@ -4695,7 +4695,7 @@
                 "rc": 0
               }
             ],
-            "peak_rss_bytes": 383660032,
+            "peak_rss_bytes": 382717952,
             "portable_bytes": 2985346,
             "route_taken": "split",
             "statistics": {
@@ -4720,20 +4720,20 @@
           },
           "forced": "split",
           "warm": {
-            "anon_base_bytes": 43974656,
-            "anon_peak_bytes": 69726208,
-            "anon_rise_bytes": 25751552,
+            "anon_base_bytes": 43003904,
+            "anon_peak_bytes": 68624384,
+            "anon_rise_bytes": 25620480,
             "cardinality": 21017298,
             "cold": false,
             "counters": {
-              "cpu_s": 0.0740368870000001,
+              "cpu_s": 0.07637306200000005,
               "majflt": 0,
-              "minflt": 6287,
+              "minflt": 6254,
               "read_bytes": 0,
-              "wall_s": 0.070301325
+              "wall_s": 0.071666722
             },
             "evicted": null,
-            "peak_rss_bytes": 386654208,
+            "peak_rss_bytes": 385622016,
             "portable_bytes": 2985346,
             "route_taken": "split",
             "statistics": {
@@ -4748,17 +4748,17 @@
         {
           "arm": "complement",
           "cold": {
-            "anon_base_bytes": 41226240,
-            "anon_peak_bytes": 69971968,
-            "anon_rise_bytes": 28745728,
+            "anon_base_bytes": 40259584,
+            "anon_peak_bytes": 69021696,
+            "anon_rise_bytes": 28762112,
             "cardinality": 21017298,
             "cold": true,
             "counters": {
-              "cpu_s": 0.044789351000000366,
+              "cpu_s": 0.04236667400000016,
               "majflt": 0,
-              "minflt": 7017,
+              "minflt": 7022,
               "read_bytes": 0,
-              "wall_s": 0.042434324
+              "wall_s": 0.039012689
             },
             "evicted": [
               {
@@ -4777,7 +4777,7 @@
                 "rc": 0
               }
             ],
-            "peak_rss_bytes": 387039232,
+            "peak_rss_bytes": 386023424,
             "portable_bytes": 2985346,
             "route_taken": "complement",
             "statistics": {
@@ -4802,20 +4802,20 @@
           },
           "forced": "complement",
           "warm": {
-            "anon_base_bytes": 44191744,
-            "anon_peak_bytes": 72663040,
-            "anon_rise_bytes": 28471296,
+            "anon_base_bytes": 43163648,
+            "anon_peak_bytes": 71733248,
+            "anon_rise_bytes": 28569600,
             "cardinality": 21017298,
             "cold": false,
             "counters": {
-              "cpu_s": 0.04534004500000055,
+              "cpu_s": 0.04147271799999963,
               "majflt": 0,
-              "minflt": 6951,
+              "minflt": 6975,
               "read_bytes": 0,
-              "wall_s": 0.043592409
+              "wall_s": 0.037910397
             },
             "evicted": null,
-            "peak_rss_bytes": 389595136,
+            "peak_rss_bytes": 388870144,
             "portable_bytes": 2985346,
             "route_taken": "complement",
             "statistics": {
@@ -14856,17 +14856,17 @@
         {
           "arm": "walk",
           "cold": {
-            "anon_base_bytes": 38477824,
-            "anon_peak_bytes": 116203520,
-            "anon_rise_bytes": 77725696,
+            "anon_base_bytes": 37519360,
+            "anon_peak_bytes": 114532352,
+            "anon_rise_bytes": 77012992,
             "cardinality": 23786088,
             "cold": true,
             "counters": {
-              "cpu_s": 0.13407532100000008,
+              "cpu_s": 0.13344843199999978,
               "majflt": 0,
-              "minflt": 18995,
+              "minflt": 19009,
               "read_bytes": 0,
-              "wall_s": 0.126832849
+              "wall_s": 0.12274689
             },
             "evicted": [
               {
@@ -14885,7 +14885,7 @@
                 "rc": 0
               }
             ],
-            "peak_rss_bytes": 432685056,
+            "peak_rss_bytes": 431955968,
             "portable_bytes": 1986568,
             "route_taken": "walk",
             "statistics": {
@@ -14905,20 +14905,20 @@
           "equal_to_walk": null,
           "forced": "walk",
           "warm": {
-            "anon_base_bytes": 40517632,
-            "anon_peak_bytes": 117972992,
-            "anon_rise_bytes": 77455360,
+            "anon_base_bytes": 39559168,
+            "anon_peak_bytes": 116338688,
+            "anon_rise_bytes": 76779520,
             "cardinality": 23786088,
             "cold": false,
             "counters": {
-              "cpu_s": 0.14055676100000003,
+              "cpu_s": 0.1301979710000003,
               "majflt": 0,
-              "minflt": 18930,
+              "minflt": 18931,
               "read_bytes": 0,
-              "wall_s": 0.132848008
+              "wall_s": 0.119715743
             },
             "evicted": null,
-            "peak_rss_bytes": 434331648,
+            "peak_rss_bytes": 433606656,
             "portable_bytes": 1986568,
             "route_taken": "walk",
             "statistics": {
@@ -14933,17 +14933,17 @@
         {
           "arm": "chooser",
           "cold": {
-            "anon_base_bytes": 40587264,
-            "anon_peak_bytes": 57425920,
-            "anon_rise_bytes": 16838656,
+            "anon_base_bytes": 39632896,
+            "anon_peak_bytes": 56426496,
+            "anon_rise_bytes": 16793600,
             "cardinality": 23786088,
             "cold": true,
             "counters": {
-              "cpu_s": 0.0262347329999999,
+              "cpu_s": 0.02565579500000048,
               "majflt": 0,
-              "minflt": 4135,
+              "minflt": 4124,
               "read_bytes": 0,
-              "wall_s": 0.025454045
+              "wall_s": 0.023550727
             },
             "evicted": [
               {
@@ -14962,7 +14962,7 @@
                 "rc": 0
               }
             ],
-            "peak_rss_bytes": 374743040,
+            "peak_rss_bytes": 373817344,
             "portable_bytes": 1986568,
             "route_taken": "complement",
             "statistics": {
@@ -14987,20 +14987,20 @@
           },
           "forced": null,
           "warm": {
-            "anon_base_bytes": 42553344,
-            "anon_peak_bytes": 59183104,
-            "anon_rise_bytes": 16629760,
+            "anon_base_bytes": 41570304,
+            "anon_peak_bytes": 57970688,
+            "anon_rise_bytes": 16400384,
             "cardinality": 23786088,
             "cold": false,
             "counters": {
-              "cpu_s": 0.024339863999999878,
+              "cpu_s": 0.02666247999999971,
               "majflt": 0,
-              "minflt": 4083,
+              "minflt": 4027,
               "read_bytes": 0,
-              "wall_s": 0.022952499
+              "wall_s": 0.025497421
             },
             "evicted": null,
-            "peak_rss_bytes": 376500224,
+            "peak_rss_bytes": 375357440,
             "portable_bytes": 1986568,
             "route_taken": "complement",
             "statistics": {
@@ -15015,17 +15015,17 @@
         {
           "arm": "split",
           "cold": {
-            "anon_base_bytes": 40620032,
-            "anon_peak_bytes": 92479488,
-            "anon_rise_bytes": 51859456,
+            "anon_base_bytes": 39645184,
+            "anon_peak_bytes": 92372992,
+            "anon_rise_bytes": 52727808,
             "cardinality": 23786088,
             "cold": true,
             "counters": {
-              "cpu_s": 0.12832771600000026,
+              "cpu_s": 0.12563407599999987,
               "majflt": 1,
-              "minflt": 12663,
+              "minflt": 12875,
               "read_bytes": 3072000,
-              "wall_s": 0.122260269
+              "wall_s": 0.116220477
             },
             "evicted": [
               {
@@ -15044,7 +15044,7 @@
                 "rc": 0
               }
             ],
-            "peak_rss_bytes": 409993216,
+            "peak_rss_bytes": 409956352,
             "portable_bytes": 1986568,
             "route_taken": "split",
             "statistics": {
@@ -15069,20 +15069,20 @@
           },
           "forced": "split",
           "warm": {
-            "anon_base_bytes": 42532864,
-            "anon_peak_bytes": 94453760,
-            "anon_rise_bytes": 51920896,
+            "anon_base_bytes": 41512960,
+            "anon_peak_bytes": 93417472,
+            "anon_rise_bytes": 51904512,
             "cardinality": 23786088,
             "cold": false,
             "counters": {
-              "cpu_s": 0.12770372299999977,
+              "cpu_s": 0.12400811599999972,
               "majflt": 0,
-              "minflt": 12675,
+              "minflt": 12672,
               "read_bytes": 0,
-              "wall_s": 0.121152463
+              "wall_s": 0.11404114
             },
             "evicted": null,
-            "peak_rss_bytes": 411967488,
+            "peak_rss_bytes": 411000832,
             "portable_bytes": 1986568,
             "route_taken": "split",
             "statistics": {
@@ -15097,17 +15097,17 @@
         {
           "arm": "complement",
           "cold": {
-            "anon_base_bytes": 40849408,
-            "anon_peak_bytes": 57503744,
-            "anon_rise_bytes": 16654336,
+            "anon_base_bytes": 39817216,
+            "anon_peak_bytes": 56500224,
+            "anon_rise_bytes": 16683008,
             "cardinality": 23786088,
             "cold": true,
             "counters": {
-              "cpu_s": 0.026219960999999792,
+              "cpu_s": 0.02269012399999948,
               "majflt": 0,
-              "minflt": 4091,
+              "minflt": 4097,
               "read_bytes": 0,
-              "wall_s": 0.02509078
+              "wall_s": 0.020887747
             },
             "evicted": [
               {
@@ -15126,7 +15126,7 @@
                 "rc": 0
               }
             ],
-            "peak_rss_bytes": 375021568,
+            "peak_rss_bytes": 374083584,
             "portable_bytes": 1986568,
             "route_taken": "complement",
             "statistics": {
@@ -15151,20 +15151,20 @@
           },
           "forced": "complement",
           "warm": {
-            "anon_base_bytes": 42786816,
-            "anon_peak_bytes": 59518976,
-            "anon_rise_bytes": 16732160,
+            "anon_base_bytes": 41721856,
+            "anon_peak_bytes": 58441728,
+            "anon_rise_bytes": 16719872,
             "cardinality": 23786088,
             "cold": false,
             "counters": {
-              "cpu_s": 0.025913828000000194,
+              "cpu_s": 0.029526344999999843,
               "majflt": 0,
-              "minflt": 4110,
+              "minflt": 4106,
               "read_bytes": 0,
-              "wall_s": 0.024479568
+              "wall_s": 0.027093489
             },
             "evicted": null,
-            "peak_rss_bytes": 377032704,
+            "peak_rss_bytes": 376025088,
             "portable_bytes": 1986568,
             "route_taken": "complement",
             "statistics": {

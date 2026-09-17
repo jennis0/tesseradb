@@ -239,7 +239,8 @@ measurement and the chooser's constants, follow the build.
 ## Part B at the 64-part rung: the four routes
 
 Status: measured 2026-09-17 on `data/ladder/gbif-64p-terms/bundle` at **bundle format 13**,
-commit `a625a98f`, which is this branch after main's whole-piece review fixes merged.
+commit `3993133a`, which is this branch after main's whole-piece review fixes and the
+derivation window fix merged.
 25,846,007 rows, one segment, no extents, 186,179 dictionary terms, an 84,052,461-byte image file
 at header version 2. The rung was rebuilt from scratch for this: the earlier bundle was format 12
 and is refused. Uncapped — the bundle holds 1.6 GiB and the cap exists for the whole-corpus one,
@@ -370,40 +371,49 @@ The staircase, seconds: `1 row space` 4.68, `2 postings` 1.53, **`2b term images
 `8 derived` 10.10, `12 retire` 0.26, `13 open` 0.09, `14 adopt` 0.19, `15 warm` 1.92,
 `17 reclaim` 0.14. `4c entity terms` is 48% of the fold and pass 2b is 2.5% of it.
 
-### What the format 13 rebuild changed
+### What the format 13 rebuild changed, and what the window fix changed after it
 
-| | format 12, 2026-09-17 | format 13, the review's fixes | |
+Three readings of the build's `term_images` stage over the same corpus on this box, at four
+workers throughout except the first. All measured.
+
+| | build stage | note |
+|---|---|---|
+| format 12, twelve workers | 6.63 s | before the worker cap |
+| format 13, four workers | 12.00 s | the cap alone: **1.8× slower than twelve** |
+| format 13, four workers, window fix | **3.65 s** | **3.3× faster than the cap alone, 1.8× faster than twelve** |
+
+⊘ The first two were taken before the derivation window fix and are superseded by the third. They
+are kept because the middle one is what showed the cap was costing rather than saving, and the
+fix is what that reading led to.
+
+The fix makes a window the `threads` postings that **will be projected**, so a term too small to
+be kept never enters the parallel work. At this rung 180,663 of the 186,179 terms are in that
+class, which is why the stage was spending its time dispatching work that did nothing: at four
+workers the cap had made the dispatch four windows deep instead of twelve, and the dispatch was
+the cost. The bytes are identical.
+
+Against the rest of the piece, unchanged by either:
+
+| | format 12 | format 13, window fix | |
 |---|---|---|---|
-| build `term_images` stage | 6.63 s at twelve workers | **12.00 s at four** | **1.8× slower** |
+| build `term_images` stage | 6.63 s | **3.65 s** | −45% |
 | fold pass 2b | 1.484 s | 1.377 s | −7% |
-| the fold's own derivation | 1.413 s | 1.304 s | −8% |
 | whole fold | 51.4 s | 54.1 s | +5% |
 | kept / payload / table / `.timg` | 5,516 / 76,605,165 / 7,447,160 / 84,052,461 | identical | — |
 | routes chosen, all ten principals | split, complement, whole_domain | identical | — |
 
-**Capping the build's derivation at four workers made the stage slower, not faster.** The cap was
-taken to bound the pass's memory — four workers hold four bitmaps rather than twelve, which is what
-keeps a rung 6 build inside its budget — and `TERM_IMAGE_BUILD_THREADS`' comment reasons that width
-buys little because each projection is short beside the mutex over the scratch pool. At twelve
-workers the stage was 6.63 s; at four it is 12.00 s. Width was buying something here, and the
-explanation in that comment does not fit the measurement.
-
-Two things that follow, neither of them a reason to change the cap on this evidence. The cap's
-purpose is the memory forecast rather than the wall, and 5.4 s at the 64-part rung is not what
-decides a rung 6 build. And the fold, which derives the same images single-threaded in 1.3 s, is
-faster than either — so whatever the build's derivation is spending, it is not the projection
-itself. Stage 6's rung 6 build measures the stage where the terms are large enough for the balance
-to be the one that matters; this figure says only that the 64-part rung does not support the
-comment's reasoning.
+The build's stage is now 2.7× the fold's pass 2b rather than 8.7×, which is the ratio a
+four-worker build against a single-threaded fold should be near when neither is paying for
+dispatch it does not need. The fold's pass was never affected: it derives the same images and
+writes the same bytes, and its 1.38 s is the same before and after.
 
 ### Rung 6, modelled
 
 Scaling pass 2b by rows (135.25×) gives **186 s**. The Part A pre-flight modelled the build's
 `term_images` stage at 160 to 270 s from the projection-build probe's own rung 6 derivation, by a
 different route, and the two agree — which is the cross-check that scaling was worth making, not a
-second measurement. Both are modelled; neither has been run at rung 6. ⊘ The build's stage is now
-measured at 1.8× the fold's pass at this rung, so the build's rung 6 stage may be above that
-bracket; the pre-flight's figure is not re-stated here on the strength of one 64-part reading.
+second measurement. Both are modelled; neither has been run at rung 6. The build's stage is 2.7× the fold's pass at this rung, which is inside the
+bracket's own spread; the reading that put it at 8.7× was the dispatch the window fix removed.
 
 Scaling the whole fold by rows gives 2.0 h, which is **not** reported as a rung 6 fold estimate:
 `4c entity terms` and `8 derived` are two thirds of the fold here and neither is linear in rows.
