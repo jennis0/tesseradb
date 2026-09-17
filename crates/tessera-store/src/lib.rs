@@ -23,6 +23,7 @@ pub mod render_presence;
 pub mod row_entity;
 mod segment_cursor;
 mod sidecar;
+pub mod term_images;
 mod view_path;
 pub mod vocabulary;
 pub mod write;
