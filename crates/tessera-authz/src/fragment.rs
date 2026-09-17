@@ -143,8 +143,8 @@ pub fn build_fragment_with_deltas(
 /// **The intersection with `fragment` is not an optimisation.** `deltas` is the live generation's
 /// tier list and can be newer than the tiers the fragment was unioned from, so without it the
 /// result could carry an entity outside the fragment, and projecting that entity would serve a row
-/// the principal was never granted (I2). Intersecting makes `S ⊆ F` by construction rather than by
-/// an argument about which tiers the caller happened to pass.
+/// the principal was never granted (I2). Intersecting makes `S ⊆ F` hold for any tier list the
+/// caller passes, rather than for the one the fragment was unioned from alone.
 ///
 /// `RowId` does not appear here: both arguments and the result are entity-space, and the caller
 /// projects.
@@ -162,7 +162,7 @@ pub fn residual_fragment(
     Ok(residual)
 }
 
-/// The sum of `terms`' delta-posting cardinalities across every live tier — the route chooser's
+/// The sum of `terms`' delta-posting cardinalities across every live tier: the route chooser's
 /// residual overcount, in entities.
 ///
 /// It is a sum rather than the cardinality of a union, so an entity carried by two tiers is

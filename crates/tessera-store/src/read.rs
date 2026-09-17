@@ -919,7 +919,7 @@ fn ensure_verified(
 /// images would have saved and changes no answer: the session walks its permutation instead, and
 /// the rows it arrives at are the same ones.
 ///
-/// Two refusals are the bundle's rather than the file's, and both fail closed. A side-manifest
+/// Two refusals are the bundle's rather than the file's, and both refuse the bundle. A side-manifest
 /// naming two files for one incarnation of one view describes a state no publication produces, and
 /// there is no rule for choosing between them. A file no `files` map digests is one the loader
 /// would map without its bytes having been covered, which is the check every derived file passes.

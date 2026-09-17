@@ -641,14 +641,14 @@ const FOLD_MEMORY_SAFETY_FACTOR: u64 = 2;
 
 /// Workers the fold's term-image derivation runs across.
 ///
-/// **One**, because [`execute`] runs on one dedicated thread. A fold's input is the corpus, and
+/// One, because [`execute`] runs on one dedicated thread. A fold's input is the corpus, and
 /// occupying request-serving workers for the length of one is the maintenance schedule reaching
 /// the request path (decision 0043). Sequential also bounds the pass's memory to the one image and
 /// the one scratch [`memory_estimate`] charges. The build passes `rayon::current_num_threads()`
 /// instead. The bytes are identical either way: the derivation reads and appends a window at a
 /// time in term order, so the width is a choice about the host and not about the file.
 ///
-/// **What one thread costs, modelled.** The probe derived 1.4×10⁶ terms at rung 6 in 184 s across
+/// What one thread costs is modelled. The probe derived 1.4×10⁶ terms at rung 6 in 184 s across
 /// the box's cores (measured, `docs/evidence/memos/2026-09-17-term-images-handover.md` §3.4).
 /// Projection is per term and the workers share only a mutex over the scratch pool, so one thread
 /// is of the order of the core count times that: tens of minutes for one view at rung 6, against a
@@ -659,7 +659,7 @@ const TERM_IMAGE_THREADS: usize = 1;
 /// The publication number the fold's term-image files are named after
 /// (`tessera_store::derived::term_image_file`).
 ///
-/// **Zero, and the fold cannot do better.** A derived file is named after the publication that
+/// Zero, and the fold cannot do better. A derived file is named after the publication that
 /// introduces it, and a fold's side-manifest number is allocated on the executor at publication,
 /// hours after this pass writes the file. It has to be: a number taken at dispatch would sit below
 /// every flush that published during the flight, and the fold's `SEGMENTS-<n>.json` would then lose
@@ -693,8 +693,8 @@ const TERM_IMAGE_MANIFEST_N: u64 = 0;
 /// image term takes its rows the same way, and for the same reason: pass 2b derives one view at a
 /// time and drops each row space before the next.
 ///
-/// **The pass 2b term is [`term_image_estimate`], modelled, and a ceiling rather than an
-/// expectation.** The pass holds one term per worker in flight: that term's posting as an owned
+/// The pass 2b term is [`term_image_estimate`], modelled, and a ceiling rather than an
+/// expectation. The pass holds one term per worker in flight: that term's posting as an owned
 /// bitmap over entity space, its image over row space, the buffer the image is serialised into,
 /// and one [`PROJECT_SCRATCH_BYTES`] scratch.
 /// A Roaring container covers 65 536 values and costs at most 8 KiB, at which point it is a bitset
@@ -728,7 +728,7 @@ pub(crate) fn memory_estimate(
 /// What [`ProjectScratch`](tessera_store::permutation::ProjectScratch) holds at its widest, in
 /// bytes.
 ///
-/// **Arithmetic from two constants, and a bound rather than a typical figure**: the projection
+/// Arithmetic from two constants, and a bound rather than a typical figure: the projection
 /// emits and clears its buckets every 64 MiB of row ids whatever the mask, so what it holds is one
 /// window plus a partly filled chunk per bucket, at most 82 MiB at the 1,025 buckets of the `u32`
 /// entity ceiling. `permutation.rs` states it beside the window it follows from, and the anonymous
@@ -752,7 +752,7 @@ const VALUES_PER_CONTAINER: u64 = 1 << 16;
 /// buffer while the image is still held, and the image is dropped only when the window it belongs
 /// to has been appended.
 ///
-/// **Zero where the pass does not run**, which is a view with no row and a dictionary with no term:
+/// Zero where the pass does not run, which is a view with no row and a dictionary with no term:
 /// pass 2b skips both, so charging a scratch for them would refuse folds for work nothing does.
 fn term_image_estimate(dict_len: u64, permutation_bound: u64, base_rows: u64) -> u64 {
     if dict_len == 0 || base_rows == 0 {
@@ -1194,8 +1194,8 @@ impl Staircase {
 /// One view's term images as pass 2b wrote them: what the new side-manifest must name, and what
 /// the publication logs about them.
 ///
-/// The summary rides along rather than being recomputed from the file, because the wall clock and
-/// the counts are the pass's own and nothing in the file records them.
+/// The summary is carried rather than recomputed from the file, because the wall clock and the
+/// counts are the pass's own and nothing in the file records them.
 pub(crate) struct FoldedTermImages {
     pub(crate) extent: tessera_store::manifest::TermImageExtent,
     pub(crate) summary: tessera_store::term_images::TermImageSummary,

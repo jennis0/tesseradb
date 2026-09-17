@@ -236,9 +236,9 @@ pub struct ProjectScratch {
 /// [`PROJECT_WINDOW_ROWS`] quotes. A mask under one window costs its own rows instead, which is
 /// what a small corpus pays.
 ///
-/// Here so that a caller estimating a pass that projects — the build's residency model — prices
-/// the scratch from the arithmetic that sizes it rather than from a figure copied into another
-/// crate.
+/// Here so that a caller estimating a pass that projects, such as the build's residency model,
+/// prices the scratch from the arithmetic that sizes it rather than from a figure copied into
+/// another crate.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ProjectScratchBound {
     /// The stamp and its mark array, the same size whatever the corpus.
@@ -836,7 +836,7 @@ impl Permutation {
     /// The checks below establish injectivity; counting the claims is what turns that into
     /// surjectivity, since `row_count` distinct claims below `row_count` are all of them. Only the
     /// surjective case is recorded, and only a recorded one enables [`Self::project_with`]'s
-    /// whole-domain answer and [`Self::project_complement_with`] at all — a file claiming fewer
+    /// whole-domain answer and [`Self::project_complement_with`] at all. A file claiming fewer
     /// rows than the descriptor declares takes the general path, where the image is read rather
     /// than assumed.
     pub fn validate_rows(&self, row_count: u32) -> Result<()> {
@@ -907,8 +907,8 @@ impl Permutation {
     }
 
     /// `Some(rows)` where `mask` holds every entity in `[0, bound)` **and** this mapping is known
-    /// to be a bijection onto `[0, rows)` — the two premises under [`Self::project_with`]'s
-    /// whole-domain answer, together.
+    /// to be a bijection onto `[0, rows)`, which are the two premises under
+    /// [`Self::project_with`]'s whole-domain answer.
     ///
     /// A caller that has to know *which* route a projection took asks here first and reads the
     /// answer rather than inferring it from a cardinality: the two premises are exactly what
