@@ -105,17 +105,23 @@ print(db.commit())                             # the report
 `stage(name, data)` binds a delta on a source the declaration already knows. `check()` returns the
 plan and the pre-flight and sends nothing; `commit()` runs the same plan and returns the report:
 rows accepted per view, artifacts minted, memberships joined, parts already present, refusals by
-row and part, and how long the flush took.
+row and part, and how long the wait for its publication took.
 
 The order is fixed: declarations, then points per view with the allocation view first, then values
-on entities that already exist, then artifacts per layer in dependency order, then a flush. Which
-declarations are new is read from `/v1/meta`, so the database is what says what it holds. A delta
-carrying a view's coordinate columns is a page of points; one that carries none of them fills
-values on entities that are already there.
+on entities that already exist, then artifacts per layer in dependency order. Which declarations
+are new is read from `/v1/meta`, so the database is what says what it holds. A delta carrying a
+view's coordinate columns is a page of points; one that carries none of them fills values on
+entities that are already there.
 
-The flush answers with the publication its cycle will carry, and `commit()` reads
-`/control/status` until the counter reaches it, so the next cell sees the rows. The wait is
-bounded; a wait that runs out is a finding, and everything the commit sent is durable either way.
+Every acknowledgement names the publication its work becomes visible in, and the last page of the
+commit carries `?wait=visible`, which holds its answer until that publication has happened. So the
+commit blocks once, not once per page, and the next cell sees the rows. Past the server's
+`serve.visible_wait_max_secs` the answer says `visible: false`, which is a finding; the write is
+durable and reaches the served forms at the next cycle either way.
+
+A page the server answers as a replay — the same bytes under the batch id they were first sent
+under — says so, and the report prints "replayed, nothing landed" for it rather than counting rows
+it did not land.
 
 A page's batch id is derived from the source name, the page index and a hash of the bytes, which is
 what the `429` retry and the resend of a lost acknowledgement carry. A `429` is backpressure and is

@@ -164,26 +164,21 @@ class Control:
             self._limits = self.status().get("limits", {})
         return self._limits
 
-    def publication(self) -> int:
-        """`/control/status`'s publication counter: what the last completed cycle carried.
-
-        It moves at every publication whatever that publication wrote, so a commit whose only work
-        was filling cells or publishing artifacts is as visible in it as one that wrote rows
-        (contracts §3.4).
-        """
-        return int(self.status().get("publication", 0))
-
-    def ingest(self, body: bytes, batch: str, view: str | None = None) -> Answer:
+    def ingest(
+        self, body: bytes, batch: str, view: str | None = None, wait: bool = False
+    ) -> Answer:
         headers = {"content-type": ARROW, "x-tessera-batch-id": batch}
         if view is not None:
             headers["x-tessera-view"] = view
-        return self._send("POST", "/control/ingest", body, headers)
+        return self._send("POST", "/control/ingest" + _wait(wait), body, headers)
 
-    def values(self, body: bytes, batch: str, view: str | None = None) -> Answer:
+    def values(
+        self, body: bytes, batch: str, view: str | None = None, wait: bool = False
+    ) -> Answer:
         headers = {"content-type": ARROW, "x-tessera-batch-id": batch}
         if view is not None:
             headers["x-tessera-view"] = view
-        return self._send("POST", "/control/values", body, headers)
+        return self._send("POST", "/control/values" + _wait(wait), body, headers)
 
     def declare_layer(self, payload: dict) -> Answer:
         return self._send(
@@ -209,11 +204,11 @@ class Control:
             {"content-type": JSON},
         )
 
-    def publish(self, layer: str, body: bytes) -> Answer:
-        return self._send("PUT", _artifacts(layer), body, {"content-type": JSON})
+    def publish(self, layer: str, body: bytes, wait: bool = False) -> Answer:
+        return self._send("PUT", _artifacts(layer) + _wait(wait), body, {"content-type": JSON})
 
-    def grow(self, layer: str, body: bytes) -> Answer:
-        return self._send("PATCH", _artifacts(layer), body, {"content-type": JSON})
+    def grow(self, layer: str, body: bytes, wait: bool = False) -> Answer:
+        return self._send("PATCH", _artifacts(layer) + _wait(wait), body, {"content-type": JSON})
 
     def changes(self, items: list[dict]) -> Answer:
         return self._send(
@@ -222,6 +217,16 @@ class Control:
 
     def flush(self) -> Answer:
         return self._send("POST", "/control/flush", b"")
+
+
+def _wait(wait: bool) -> str:
+    """`?wait=visible` (contracts §3.4, decision 0144), where the caller asked for it.
+
+    The route holds its answer until the publication its acknowledgement names has happened, and
+    pulls the tick forward to get there. One page of a commit carries it, the last: a waited page
+    asks for a tick of its own, so a commit that waited on every page would publish per page.
+    """
+    return "?wait=visible" if wait else ""
 
 
 def _json(body: dict) -> bytes:

@@ -134,6 +134,10 @@ class PagedReport:
     refusals: list = field(default_factory=list)
     #: The identities the ingest route answered with, one per accepted row.
     tessera_ids: list = field(default_factory=list)
+    #: The pages the server answered as a replay of one it had already applied (decision 0144).
+    replayed: list = field(default_factory=list)
+    #: The publication this commit's work is visible at, from its last acknowledgement.
+    publication: int | None = None
     #: The identity each published artifact was given, by layer and key. A layer's own
     #: `tessera_id` is the only address by which it can later be addressed (I10).
     artifact_ids: dict = field(default_factory=dict)
@@ -175,9 +179,12 @@ class PagedReport:
             out.append(f"  artifacts published without their declared content: {self.without_content}")
         if self.clipped:
             out.append(f"  rows clipped onto the frame's edge by the projection: {self.clipped}")
+        for line in self.replayed:
+            out.append(f"  replayed, nothing landed: {line}")
         if self.flush_wait is not None:
             reached = "" if self.flush_reached else ", not reached within the wait"
-            out.append(f"  flush: {self.flush_wait:.2f} s to the publication{reached}")
+            at = "" if self.publication is None else f" {self.publication}"
+            out.append(f"  waited {self.flush_wait:.2f} s for publication{at}{reached}")
         for refusal in self.refusals:
             out.append(
                 f"  refused {refusal['status']} on {refusal['what']}: {refusal['detail']}"

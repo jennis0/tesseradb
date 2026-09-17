@@ -122,13 +122,6 @@ def unnamed(db) -> None:
     db.declare_view("map", source="points", access="labels", extent={"x": [-5, 40], "y": [-5, 40]})
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="`tessera check` requires a view's `entity_id` column unconditionally "
-    "(tessera-build check.rs, the `require(ENTITY_ID)` at the view), while the build accepts a "
-    "points file that carries none and takes the positional route (configuration.md §8). The SDK "
-    "runs check before build, so the Tessera-id route cannot be committed through it",
-)
 def test_an_unnamed_index_is_the_tessera_id_route_and_remove_addresses_by_it(served, corpus):
     """§3: no external id is written, and a row is addressed by the id the server hands back."""
     pytest.importorskip("pandas")

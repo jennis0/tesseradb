@@ -131,7 +131,8 @@ def test_a_delta_of_new_papers_with_a_cluster_and_a_label_is_served(served, corp
     # its labels.
     kinds = [line.split()[0] for line in plan.plan]
     assert kinds[0] == "points"
-    assert plan.plan[-1].startswith("flush")
+    # The last page of the plan is the one that waits for the publication (decision 0144).
+    assert plan.plan[-1].endswith("wait for the publication it lands in")
     assert plan.plan.index(next(p for p in plan.plan if "clusters/kmeans" in p)) < plan.plan.index(
         next(p for p in plan.plan if "topics/kmeans" in p)
     )
@@ -204,9 +205,11 @@ def test_a_re_staged_frame_is_sent_again_and_the_database_answers_for_it(served,
 
     db.stage("points", delta)
     plan = db.check()
-    assert len(plan.plan) == 2 and plan.plan[0].startswith("points"), plan
+    assert len(plan.plan) == 1 and plan.plan[0].startswith("points"), plan
     replayed = db.commit()
     assert replayed.ok, replayed
+    # The server says it applied nothing rather than the SDK inferring it from a count.
+    assert len(replayed.replayed) == 1 and replayed.rows_accepted == {}
     assert viewport(db, "s0", whole_frame(db))["counts"]["visible"] == after
 
     # The same rows moved a little: different bytes, so a batch the server has not seen, and
@@ -363,8 +366,8 @@ def test_a_values_cell_re_run_is_sent_again_and_lands_on_the_cells_it_landed_on(
 
 
 def test_a_values_only_commit_returns_with_its_effect_visible(served, corpus):
-    """§6.2 step 5: the flush answers with the publication its cycle carries, and `commit()` waits
-    for `/control/status` to reach it. A commit that wrote no row moves that counter too."""
+    """§6.2 step 5: the last page waits for the publication its acknowledgement names, and a
+    commit whose only work was filling cells reaches it like any other (decision 0144)."""
     db = served(small)
     db.stage(
         "scores",
@@ -378,6 +381,9 @@ def test_a_values_only_commit_returns_with_its_effect_visible(served, corpus):
     assert report.ok, report
     assert not any(line.startswith("points") for line in report.plan)
     assert report.flush_wait is not None and report.flush_reached
+    # The acknowledgement named the publication its work is visible at, and the report prints it.
+    assert report.publication is not None
+    assert f"for publication {report.publication}" in str(report)
     # The cell after the commit sees the values, with no wait of its own.
     answer = viewport(db, "map", [-5.0, -5.0, 40.0, 40.0],
                       filters={"score": {"range": {"gte": 8.0}}})

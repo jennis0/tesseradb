@@ -24,13 +24,19 @@ did carry.
 **Nothing is dropped or rewritten.** Every column of a delta is sent or the commit is refused
 naming what could not be, and a finding stops the plan rather than trimming it (§6.3). The user
 corrects the data or the declaration and commits again.
+
+**One page of the commit waits.** Every acknowledgement names the publication its work becomes
+visible in, and `?wait=visible` holds a route's answer until the counter has reached that number
+(decision 0144). The last page of the plan carries it and every page before it goes unwaited, so
+the commit blocks once rather than once per page and the SDK reads no counter of its own. A page
+past the server's `visible_wait_max_secs` answers `visible: false`, which is a finding: the write
+happened and is durable, and what it wrote reaches the served forms at the next cycle.
 """
 
 from __future__ import annotations
 
 import datetime
 import json
-import time
 from dataclasses import dataclass
 from typing import Any, Sequence
 
@@ -41,15 +47,6 @@ from . import _control
 from ._control import Answer, Control, addressed, arrow_body, batch_id
 from ._declaration import SHAPE_FIELDS, rows_of, view_entries
 from ._refusal import Refusal
-
-#: How long `commit()` waits for the publication the flush named, in seconds. The flush request
-#: pulls the tick's deadline forward, so the wait is one executor loop on an idle server; the
-#: figure is a ceiling on a busy one, not an expectation.
-FLUSH_TIMEOUT = 60.0
-
-#: How often the flush wait reads `/control/status`, in seconds.
-FLUSH_INTERVAL = 0.2
-
 
 @dataclass
 class Finding:
@@ -85,6 +82,8 @@ class Page:
     artifacts: int = 0
     members: int = 0
     level: int = 0
+    #: This page carries `?wait=visible`: the last of the plan, and the only one that waits.
+    wait: bool = False
 
 
 def _scoped_to(block: dict) -> str | None:
@@ -196,7 +195,12 @@ class Planner:
         self._values(document)
         self._artifacts(document)
         if self.pages:
-            self.pages.append(Page(kind="flush", name="", line="flush, then wait for the tick"))
+            # The last page waits for the publication its own acknowledgement names, which is the
+            # commit's whole wait: a publication number is not passed while any of that cycle's
+            # work is outstanding, so every page before it has published too.
+            last = self.pages[-1]
+            last.wait = True
+            last.line += ", and wait for the publication it lands in"
         return self.pages, self.findings
 
     # ------------------------------------------------------------------ 1. declarations
@@ -1202,19 +1206,23 @@ def _declared_artifacts(artifacts, inline) -> list[dict]:
 
 
 def run(control: Control, pages: Sequence[Page], report) -> None:
-    """Send the plan, in order, and fold every answer into the report."""
+    """Send the plan, in order, and fold every answer into the report.
+
+    The last page carries the wait. Where it was refused there is nothing to wait on, and the
+    pages before it are made visible by a flush: the tick they would otherwise sit for is the
+    executor's own period, and a commit that reported a refusal should not also leave its
+    accepted pages unpublished.
+    """
     accepted = 0
     for page in pages:
-        if page.kind == "flush":
-            # A commit that wrote nothing has nothing to make visible, and a tick over an empty
-            # buffer publishes nothing, so the wait would report a flush that never happened.
-            if accepted:
-                report.flush_wait = _flush(control, report)
-            continue
         answer = _send(control, page)
         _fold(report, page, answer)
         if answer.ok:
             accepted += 1
+            if page.wait:
+                _waited(report, answer)
+        elif page.wait and accepted:
+            control.flush()
 
 
 def _send(control: Control, page: Page) -> Answer:
@@ -1228,17 +1236,24 @@ def _send(control: Control, page: Page) -> Answer:
         group, _, key = page.name.partition(":")
         return control.create_view(group, key, page.body)
     if page.kind == "points":
-        return control.ingest(page.body, page.batch, page.view)
+        return control.ingest(page.body, page.batch, page.view, page.wait)
     if page.kind == "values":
-        return control.values(page.body, page.batch, page.view)
+        return control.values(page.body, page.batch, page.view, page.wait)
     if page.kind == "publish":
-        return control.publish(page.name, page.body)
+        return control.publish(page.name, page.body, page.wait)
     if page.kind == "grow":
-        return control.grow(page.name, page.body)
+        return control.grow(page.name, page.body, page.wait)
     raise Refusal(f"commit: no route for a page of kind {page.kind!r}")
 
 
 def _fold(report, page: Page, answer: Answer) -> None:
+    if answer.ok:
+        # Every write acknowledgement names the cycle its work is published in (decision 0144).
+        # The report prints the last of them: the numbers do not decrease, so it is the one every
+        # page of this commit is visible at.
+        held = answer.body.get("publication")
+        if held is not None:
+            report.publication = int(held)
     if not answer.ok:
         report.refusals.append(
             {
@@ -1250,6 +1265,11 @@ def _fold(report, page: Page, answer: Answer) -> None:
         )
         return
     body = answer.body
+    if body.get("replayed"):
+        # The same bytes under the same batch id: the server answered the first attempt's receipt
+        # and applied nothing (contracts §3.4). Acceptance is an effect and a replay has none.
+        report.replayed.append(page.line)
+        return
     if page.kind == "points":
         view = page.view or ""
         report.rows_accepted[view] = report.rows_accepted.get(view, 0) + int(
@@ -1283,43 +1303,26 @@ def _detail(answer: Answer) -> str:
     return answer.detail.strip()[:1000]
 
 
-def _flush(control: Control, report, timeout: float = FLUSH_TIMEOUT) -> float:
-    """`POST /control/flush`, then the wait for the publication it named (§6.2 step 5).
+def _waited(report, answer: Answer) -> None:
+    """What the waited page's answer says about the commit's visibility (§6.2 step 5).
 
-    The flush pulls the tick's deadline forward and the 202 means accepted rather than done, so the
-    wait is on `/control/status`: the 202 carries the publication the honouring cycle will complete
-    with, and `publication` there reaching it means this commit's work is visible. The wait is
-    bounded; a wait that runs out is a finding, the commit being durable at its acknowledgements
-    and visible at the tick either way.
+    `visible: true` is the wait: the publication the acknowledgement names has happened, so the
+    next cell reads what this commit wrote. `visible: false` is the server's bound reached, which
+    is a finding rather than a refusal — the write is durable and publishes at the next cycle.
     """
-    answer = control.flush()
-    started = time.monotonic()
-    if not answer.ok:
-        report.refusals.append(
-            {
-                "what": "flush",
-                "layer_or_view": "",
-                "status": answer.status,
-                "detail": _detail(answer),
-            }
-        )
-        return 0.0
-    wanted = int(answer.body.get("publication", 0))
-    deadline = started + timeout
-    while time.monotonic() < deadline:
-        if control.publication() >= wanted:
-            return time.monotonic() - started
-        time.sleep(FLUSH_INTERVAL)
+    report.flush_wait = answer.seconds
+    if answer.body.get("visible"):
+        return
     report.flush_reached = False
     report.findings.append(
         Finding(
-            "the publication did not arrive within the wait",
-            f"publication {wanted} had not completed after {timeout:g}s. Every page this commit "
-            f"sent was acknowledged and is durable; what it wrote reaches the served forms at the "
+            "the publication did not arrive within the server's wait",
+            f"publication {answer.body.get('publication')} had not completed when the route's "
+            f"wait ran out (serve.visible_wait_max_secs). Every page this commit sent was "
+            f"acknowledged and is durable; what it wrote reaches the served forms at the "
             f"executor's next cycle",
         )
     )
-    return time.monotonic() - started
 
 
 def changes(control: Control, items: Sequence[dict], op: str, limits: dict) -> list[Answer]:
