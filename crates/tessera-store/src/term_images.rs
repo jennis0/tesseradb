@@ -1625,6 +1625,32 @@ mod tests {
             residual_rows: 10_000_000_000,
         };
         assert_eq!(choose(&would_be_complement, &ROUTE_COSTS), Route::Walk);
+
+        // The same grant with a split worth taking. The split prices 350 × 100 + 1 000 × 10 +
+        // 11 × 1 000 = 56 000 against the walk's 6.5 × 10⁹, and the complement would price
+        // 11 × 1 000 = 11 000 and win — which is what the second assertion pins, so that the
+        // first is a case the complement lost by being invalid rather than by being dear.
+        let split_instead = ChooserInputs {
+            held: 1_000_000_000,
+            bound: 1_000_001_000,
+            complement_valid: false,
+            kept_arrays_and_runs: 100,
+            kept_bitsets: 10,
+            kept_terms: 2,
+            residual_rows: 1_000,
+        };
+        assert_eq!(choose(&split_instead, &ROUTE_COSTS), Route::Split);
+        assert_eq!(
+            choose(
+                &ChooserInputs {
+                    complement_valid: true,
+                    ..split_instead
+                },
+                &ROUTE_COSTS
+            ),
+            Route::Complement,
+            "the same inputs with a row space the complement can answer over"
+        );
     }
 
     #[test]
