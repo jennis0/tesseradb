@@ -14,10 +14,13 @@
 //! Nothing here modifies a cached value — lifecycle §7 requires entries to be immutable and
 //! "invalidation is key rotation, never mutation", and both eviction and pruning only ever
 //! *remove*. That is what makes a rebuilt projection identical to the evicted one: the miss path
-//! builds `RowProjection::new(&session.fragment, &view_data.permutation)` from the session's own
-//! frozen fragment and the *pinned* generation's permutation, both of which the key names or the
-//! request pins. **There is no route by which a miss composes against a different mask than a
-//! hit**, which is the property `eviction_never_widens_a_mask` exists to keep true.
+//! builds `RowProjection::new` over `ProjectionInputs` carrying the session's own frozen fragment,
+//! its satisfied terms and the *pinned* generation's postings, tiers, images and row space — all of
+//! which the key names or the request pins. The route that build takes is priced from those same
+//! inputs and every route returns the identical rows (`crate::compose::RowProjection::new`), so a
+//! miss that prices differently from the build before it still produces what was evicted.
+//! **There is no route by which a miss composes against a different mask than a hit**, which is the
+//! property `eviction_never_widens_a_mask` exists to keep true.
 
 use std::sync::Arc;
 

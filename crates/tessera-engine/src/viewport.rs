@@ -67,7 +67,7 @@ use tessera_types::{EntityId, GenerationStamp, RowId, TermId, TesseraId, API_VER
 
 use crate::cache::{CacheWaitEnded, Peek, RowProjectionKey, SessionGeometry};
 use crate::cancel::CancelToken;
-use crate::compose::{compose, visible_to, EffectiveMask, FilterRows, RowProjection};
+use crate::compose::{compose, visible_to, EffectiveMask, FilterRows};
 use crate::filter::{Endpoint, Family, FilterOperand, Scalar};
 use crate::membership_column::{ServedLayer, ServedLevel};
 use crate::select::{SelectParams, Selection, SelectionPart, SelectionParts, Threshold};
@@ -2734,7 +2734,21 @@ impl Engine {
                 // per-request pool).
                 probe.mark_projection_built();
                 self.full_projection_builds.fetch_add(1, Ordering::Relaxed);
-                let projection = self.pool.install(|| RowProjection::new(&fragment, space));
+                // **The route is chosen here, from this principal's own grant, before any route
+                // runs**, and every route returns the identical projection
+                // (`crate::compose::RowProjection::new`). The images are the bundle's, mapped;
+                // nothing is cached across sessions.
+                let inputs = crate::compose::ProjectionInputs {
+                    fragment: &fragment,
+                    satisfied: &session.satisfied_sorted,
+                    postings: &generation.postings,
+                    deltas: &generation.delta_postings,
+                    images: view_data.term_images.as_deref(),
+                    force: self.projection_routes.forced(),
+                };
+                let projection = self
+                    .pool
+                    .install(|| self.projection_routes.build(&inputs, space));
                 SessionGeometry {
                     fragment: Arc::clone(&fragment),
                     projection: Arc::new(projection),

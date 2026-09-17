@@ -840,6 +840,28 @@ impl Permutation {
         let _ = self.dense_rows.set(row_count);
     }
 
+    /// The row count this mapping is known to be a bijection onto, or `None` where nothing has
+    /// established it.
+    ///
+    /// `Some` says the slots are onto `[0, rows)`, which is what [`Self::project_with`]'s
+    /// whole-domain answer rests on; it says nothing about any particular mask.
+    pub fn dense_rows(&self) -> Option<u32> {
+        self.dense_rows.get().copied()
+    }
+
+    /// `Some(rows)` where `mask` holds every entity in `[0, bound)` **and** this mapping is known
+    /// to be a bijection onto `[0, rows)` — the two premises under [`Self::project_with`]'s
+    /// whole-domain answer, together.
+    ///
+    /// A caller that has to know *which* route a projection took asks here first and reads the
+    /// answer rather than inferring it from a cardinality: the two premises are exactly what
+    /// `project_with` checks, so a caller that agrees with this agrees with it.
+    /// `O(containers)` over entity space, the cost of [`Self::covers_domain`].
+    pub fn whole_domain_rows(&self, mask: &croaring::Bitmap) -> Option<u32> {
+        let rows = self.dense_rows()?;
+        self.covers_domain(mask).then_some(rows)
+    }
+
     /// Every entity that holds a row here, ascending, with the row it holds.
     ///
     /// **The route across a whole permutation**, where [`Self::row_of`] is the route to one

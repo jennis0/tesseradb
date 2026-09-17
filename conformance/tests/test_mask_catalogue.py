@@ -215,3 +215,41 @@ def test_fx_key_is_served_in_the_points_batch(catalogue_bundle: Bundle, catalogu
             f"{source}) is not the planted key {planted[source]} — the join the whole catalogue "
             "depends on is wrong"
         )
+
+
+def test_the_catalogues_principals_reach_the_split_route(catalogue_server):
+    """**A session whose terms have images is served through them**, not merely offered them.
+
+    A row projection is built by one of three routes, chosen from the principal's own grant
+    (`architecture.md` Appendix C, C19; `tessera_engine::compose::RowProjection::new`): the walk
+    over the fragment, the row range where the grant covers the whole entity domain, or the split —
+    the union of the bundle's images of the terms the session holds plus a walk over the residual.
+    Every route returns the identical served set, which is exactly why no differential in this
+    suite can tell which one ran. The I1 and I2 differentials therefore assert the split's
+    correctness without establishing that they ever exercised it: a bundle whose images failed to
+    open, or a chooser that priced every principal onto the walk, would leave every one of those
+    comparisons passing against one route run twice.
+
+    The route counter on `/control/status` is the only observable that separates the two, and this
+    is the test that reads it. It drives the catalogue's own cases — the principals the
+    differentials are driven over — and requires the split to have run for at least one of them.
+
+    The catalogue supplies a principal with a kept term without needing one added: its blocks run
+    to tens of thousands of entities over three Roaring containers of row space, far above the keep
+    rule's thirty rows per container.
+    """
+    before = catalogue_server.status()["projection_builds_by_route"]
+    for case in cat.catalogue():
+        token = catalogue_server.authorise(list(case.grants))["token"]
+        catalogue_server.viewport(token, cat.VIEW_ID, 4, cat.FULL_VIEWPORT, k=30)
+    after = catalogue_server.status()["projection_builds_by_route"]
+
+    assert sum(after.values()) > sum(before.values()), (
+        "no projection was built at all across the whole catalogue, so this test asserted "
+        f"nothing: {before} -> {after}"
+    )
+    assert after["split"] > before["split"], (
+        "no principal in the catalogue was served through the split route, so every differential "
+        "in this suite compared the walk with itself: this is a bundle whose term images did not "
+        f"open, or a chooser that prices every principal onto the walk. {before} -> {after}"
+    )
