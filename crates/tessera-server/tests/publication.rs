@@ -9,18 +9,22 @@
 //! counter did: a `publication` that only tracked segments would pass on the count and fail on
 //! the pair.
 //!
-//! The executor's own counters — `write_executor.flush.ticks` and `.flushes` — are a different
-//! question and stay where they are: they count what the executor did, and this counts what a
-//! caller may now read.
+//! The executor's own counters, `write_executor.flush.ticks` and `.flushes`, answer a different
+//! question and stay where they are. They count what the executor did; this counts what a caller
+//! may now read.
 
 mod common;
 
 use std::collections::BTreeSet;
+use std::sync::Arc;
 
 use base64::Engine as _;
 use common::*;
 use serde_json::{json, Value};
 use tempfile::TempDir;
+use tessera_engine::Engine;
+use tessera_lifecycle::faults::FaultSwitchboard;
+use tessera_plugin::Passthrough;
 
 /// Long enough for a slow machine and short enough to fail rather than hang.
 const DEADLINE: std::time::Duration = std::time::Duration::from_secs(60);
@@ -80,7 +84,8 @@ async fn request_flush(server: &TestServer) -> u64 {
         .unwrap_or_else(|| panic!("the 202 carries the publication number: {body}"))
 }
 
-/// Read `/control/status` until its counter has reached `n` — the whole of what a client does.
+/// Read `/control/status` until its counter has reached `n`, which is the whole of what a
+/// client does.
 async fn await_publication(server: &TestServer, n: u64) {
     let deadline = std::time::Instant::now() + DEADLINE;
     loop {
@@ -130,6 +135,27 @@ async fn filtered(server: &TestServer, filters: Value) -> BTreeSet<u64> {
         .json(&json!({
             "view": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 200,
             "filters": filters
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 200);
+    let (_, points) = decode_viewport(&resp.bytes().await.unwrap());
+    points.into_iter().map(|(id, _)| id).collect()
+}
+
+/// The `tessera_id`s one view serves, from a fresh session.
+async fn points_in(server: &TestServer, view: &str) -> BTreeSet<u64> {
+    let token = authorise(server, &["0", "1"][..]).await["token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let resp = server
+        .client
+        .post(server.viewer_url("/v1/viewport"))
+        .bearer_auth(&token)
+        .json(&json!({
+            "view": view, "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 200
         }))
         .send()
         .await
@@ -335,5 +361,186 @@ async fn a_flush_requested_while_a_cycle_is_open_is_answered_two_ahead() {
         server.state.engine.buffered_items(),
         0,
         "the cycle the second request was promised published every buffered row"
+    );
+}
+
+/// **A request whose rows span two views is not released until both are published.** One plan is
+/// dispatched per tick, so a cycle that closed at the first would hand the caller a number while
+/// the second view's rows were still buffered.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn rows_buffered_into_two_views_are_both_served_at_the_number() {
+    let tmp = TempDir::new().unwrap();
+    let server = serve(&tmp).await;
+
+    let resp = server
+        .client
+        .put(server.control_url("/control/views/second"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .json(&json!({
+            "extent": { "x": [0.0, 1000.0], "y": [0.0, 1000.0] },
+            "point_visibility": { "default": "public" }
+        }))
+        .send()
+        .await
+        .unwrap();
+    let status = resp.status().as_u16();
+    let answer: Value = resp.json().await.unwrap_or(Value::Null);
+    assert_eq!(status, 201, "the second view is created: {answer}");
+
+    for (batch_id, view, base) in [
+        ("into-s0", "s0", 5_000u64),
+        ("into-second", "second", 6_000),
+    ] {
+        let ids: Vec<Vec<u8>> = (0..3).map(|i| external_id_of(base + i)).collect();
+        let rows: Vec<(Option<&[u8]>, f32, f32, &str)> = ids
+            .iter()
+            .enumerate()
+            .map(|(i, id)| (Some(&id[..]), 100.0 + i as f32, 100.0 + i as f32, "0"))
+            .collect();
+        let resp = server
+            .client
+            .post(server.control_url("/control/ingest"))
+            .bearer_auth(OPERATOR_CREDENTIAL)
+            .header("x-tessera-batch-id", batch_id)
+            .header("x-tessera-view", view)
+            .header("content-type", "application/vnd.apache.arrow.stream")
+            .body(build_ingest_batch_optional(&rows))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status().as_u16(),
+            200,
+            "the batch into {view} is accepted"
+        );
+    }
+
+    let n = request_flush(&server).await;
+    await_publication(&server, n).await;
+
+    assert_eq!(
+        server.state.engine.buffered_items(),
+        0,
+        "a view whose plan was deferred holds the cycle open, so the number is not reached with \
+         rows still buffered"
+    );
+    assert_eq!(
+        points_in(&server, "second").await.len(),
+        3,
+        "the second view serves its rows at the number the one request was answered with"
+    );
+    assert!(
+        points_in(&server, "s0").await.len() >= 3,
+        "and the first view serves its own"
+    );
+}
+
+/// **A request that arrives while a cycle is open is honoured by the next cycle, not by the next
+/// period.** The executor is parked inside the open cycle's publication, so the request cannot be
+/// consumed by it; what proves the flag survived is that the number is reached in seconds against
+/// a 90 s tick.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_request_made_during_an_open_cycle_is_honoured_at_its_completion() {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+    let config = default_engine_config();
+    let max_k = config.max_k;
+    let mut engine = Engine::open(
+        &bundle_root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+        Passthrough::new(),
+        config,
+    )
+    .expect("engine should open against a freshly built bundle");
+    let faults = Arc::new(FaultSwitchboard::new());
+    engine
+        .start_write_executor_with_faults(1024, Arc::clone(&faults))
+        .expect("the write executor starts once per engine");
+    let server = mount_server_with_faults(engine, max_k, generous_test_gate(), faults).await;
+
+    let resp = server
+        .client
+        .post(server.control_url("/control/faults/arm"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .json(&json!({ "site": "before_manifest_publish" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 200);
+
+    let ext = external_id_of(N_ITEMS + 1);
+    let resp = server
+        .client
+        .post(server.control_url("/control/ingest"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .header("x-tessera-batch-id", "parked-1")
+        .header("content-type", "application/vnd.apache.arrow.stream")
+        .body(build_ingest_batch_optional(&[(
+            Some(&ext[..]),
+            10.0,
+            10.0,
+            "0",
+        )]))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 200);
+
+    let first = request_flush(&server).await;
+
+    // The executor is parked inside the publication of the cycle `first` names.
+    let deadline = std::time::Instant::now() + DEADLINE;
+    loop {
+        let resp = server
+            .client
+            .get(server.control_url("/control/faults/arrivals?site=before_manifest_publish"))
+            .bearer_auth(OPERATOR_CREDENTIAL)
+            .send()
+            .await
+            .unwrap();
+        let body: Value = resp.json().await.unwrap();
+        if body["arrivals"].as_u64().unwrap() >= 1 {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the executor never reached the publication seam"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(
+        publication(&server).await < first,
+        "the parked cycle has published nothing, so its number cannot have been reached"
+    );
+
+    let second = request_flush(&server).await;
+    assert_eq!(
+        second,
+        first + 1,
+        "a request made during an open cycle names the cycle after it"
+    );
+
+    let resp = server
+        .client
+        .post(server.control_url("/control/faults/release"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 200);
+
+    let started = std::time::Instant::now();
+    await_publication(&server, second).await;
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(30),
+        "the request was honoured at the open cycle's completion rather than at the 90 s period, \
+         which took {:?}",
+        started.elapsed()
     );
 }

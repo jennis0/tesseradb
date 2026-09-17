@@ -1086,7 +1086,7 @@ pub struct Config {
     /// Empty is the default and mounts nothing. Both lists may be set; a duplicate origin across
     /// the two is not an error. See [`crate::cors`].
     pub cors_origins: Vec<String>,
-    /// `serve.cors_loopback` — viewer plane only, `false` by default. A page served from
+    /// `serve.cors_loopback`, viewer plane only and `false` by default. A page served from
     /// `localhost`, `127.0.0.1` or `[::1]` on any port is admitted as a listed origin is. See
     /// [`crate::cors`].
     pub cors_loopback: bool,

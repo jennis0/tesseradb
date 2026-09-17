@@ -490,7 +490,7 @@ pub struct CorsOrigins {
     pub dev: Vec<String>,
     /// `serve.cors_origins` — viewer plane only.
     pub production: Vec<String>,
-    /// `serve.cors_loopback` — viewer plane only, and a rule rather than a list.
+    /// `serve.cors_loopback`: viewer plane only, and a rule instead of a list.
     pub loopback: bool,
 }
 

@@ -408,11 +408,11 @@ pub fn prepare(config_path: &Path) -> Result<Prepared, BoxError> {
         );
     }
 
-    // At `info`, and once. `serve.cors_loopback` is a disclosure control and an operator reading
-    // the log should see which one is on, but it is not `dev_cors_origins`: what a loopback page
-    // may present is a token — per-principal, already scoped, already expiring — and never the
-    // credential that mints tokens. A `warn` here would put the two at the same level and teach a
-    // reader to pass both by (decision 0102).
+    // At `info`, and once. `serve.cors_loopback` is a disclosure control, so an operator reading
+    // the log should see that it is on. It sits below `dev_cors_origins` because what a loopback
+    // page may present is a token, which is per-principal, already scoped and already expiring,
+    // and never the credential that mints tokens. A `warn` would put the two at one level and
+    // teach a reader to pass both by (decision 0102).
     if config.cors_loopback {
         tracing::info!(
             "serve.cors_loopback is set: a page served from localhost, 127.0.0.1 or [::1], on any \

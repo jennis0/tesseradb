@@ -11,8 +11,8 @@
 //!   expires, so a named origin presenting one creates no authority that did not exist; the
 //!   session credential is a different thing entirely and no browser may hold it.
 //!
-//! - **`serve.cors_loopback`** admits any page served from a loopback address — `localhost`,
-//!   `127.0.0.1` or `[::1]`, on any port — on the **viewer plane only**, as if that origin had
+//! - **`serve.cors_loopback`** admits any page served from a loopback address (`localhost`,
+//!   `127.0.0.1` or `[::1]`, on any port) on the **viewer plane only**, as if that origin had
 //!   been listed in `serve.cors_origins`. It exists because a notebook front end's origin is a
 //!   port the kernel chose, so no operator can enumerate it (`python-sdk.md` §7). It is a
 //!   statement about which pages may present a token, on decision 0102's argument, and it is
@@ -107,7 +107,7 @@ fn layer(origins: &[String], loopback: bool) -> Option<CorsLayer> {
     // `serve.cors_loopback` widens the match from equality against a list to equality against a
     // list *or* the loopback rule, and nothing else about the layer moves: the same methods, the
     // same request headers, the same exposed set. A wildcard is as unreachable here as it is
-    // above — [`is_loopback_origin`] matches a host exactly, so the predicate refuses every
+    // above. [`is_loopback_origin`] matches a host exactly, so the predicate refuses every
     // origin the list would have refused but for a loopback one.
     let allow = if loopback {
         AllowOrigin::predicate(move |origin, _| {
@@ -136,8 +136,8 @@ fn layer(origins: &[String], loopback: bool) -> Option<CorsLayer> {
 ///
 /// The rule is `http` or `https`, a host of exactly `localhost`, `127.0.0.1` or `[::1]`, and any
 /// port or none. **The host is matched whole**, so `localhost.evil.example` and
-/// `127.0.0.1.evil.example` — names an attacker can register and serve from anywhere — are
-/// refused, as is any origin carrying a path, a query or userinfo, which no browser sends and
+/// `127.0.0.1.evil.example`, names an attacker can register and serve from anywhere, are
+/// refused. So is any origin carrying a path, a query or userinfo, which no browser sends and
 /// which would otherwise let a suffix ride in ahead of the host. The comparison is byte-exact:
 /// browsers serialise an origin lowercased, so an upper-case scheme or host is not a form this
 /// header arrives in and is not one this admits.
@@ -156,8 +156,8 @@ fn is_loopback_origin(origin: &HeaderValue) -> bool {
         return false;
     };
     // The host and the port, split without a URL parser: an `Origin` is a scheme, a host and an
-    // optional port and nothing else, so anything a split leaves over — a path, a query, userinfo
-    // — is what makes this not an origin, and is refused rather than trimmed away.
+    // optional port and nothing else. Anything a split leaves over, such as a path, a query or
+    // userinfo, is refused whole instead of being trimmed away.
     let (host, port) = if let Some(rest) = authority.strip_prefix('[') {
         let Some((inside, tail)) = rest.split_once(']') else {
             return false;
@@ -269,12 +269,21 @@ mod tests {
             "http://127.0.0.2",
             "http://0.0.0.0:5173",
             "http://[::2]",
+            // Userinfo, a port that is not a number, a scheme-cased host, a trailing dot, a
+            // second colon, and a bracketed host with a tail: each one an authority that is not
+            // an origin, and each refused on the whole-host rule rather than trimmed into one.
+            "http://localhost@evil",
+            "http://[::1]:x",
+            "http://LOCALHOST",
+            "http://127.0.0.1.",
+            "http://localhost:5173:1",
+            "http://[::1]x",
         ] {
             assert!(!loopback(origin), "{origin} must be refused");
         }
     }
 
-    /// With no list at all, `cors_loopback` still mounts a layer — it is the notebook's whole
+    /// With no list at all, `cors_loopback` still mounts a layer. That is the notebook's whole
     /// case, where no origin can be enumerated in advance.
     #[test]
     fn cors_loopback_mounts_a_layer_with_no_list_and_off_mounts_none() {

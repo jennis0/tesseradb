@@ -708,9 +708,9 @@ pub struct AppState {
     /// hold, and [`crate::cors::session_layer`] is what makes that structural rather than
     /// remembered.
     pub cors_origins: Vec<String>,
-    /// `serve.cors_loopback` — whether a page served from a loopback address is admitted on the
+    /// `serve.cors_loopback`: whether a page served from a loopback address is admitted on the
     /// **viewer plane**, as a listed origin is. Read by [`crate::cors::viewer_layer`] and by
-    /// nothing else, on `cors_origins`' rule: the session plane's bearer is the credential that
+    /// nothing else, on `cors_origins`' rule. The session plane's bearer is the credential that
     /// mints tokens, and a loopback page is still a browser page.
     pub cors_loopback: bool,
     /// The write executor's fault switchboard — the faults build only (decision 0071), absent

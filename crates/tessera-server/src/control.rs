@@ -5545,9 +5545,9 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::V
         "entity_id_high_water": state.engine.allocator_high_water(),
         // **The publication counter** (contracts §3.4): cycles completed since the executor
         // started, moving once per cycle whatever the cycle published. It is at the top level
-        // beside `partitions` rather than inside `write_executor` because it is what a client
-        // waits on, not a counter an operator watches: `POST /control/flush` answers with the
-        // number its cycle will carry and this is where that number is read back.
+        // beside `partitions` and outside `write_executor`, whose counters an operator watches.
+        // This one a client waits on: `POST /control/flush` answers with the number its cycle
+        // will carry, and this is where that number is read back.
         "publication": state.engine.publication(),
         // Contracts §3.4's per-partition block, and the write path's stage barrier
         // (correctness-suite §12.3): the version bump is how a harness knows a flush, merge or

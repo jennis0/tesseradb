@@ -220,11 +220,19 @@ pub struct ExecutorHealth {
     /// only filled values or only published artifacts is invisible on it; this is what a caller
     /// that wrote either of those waits on instead.
     ///
-    /// **The counter moves when the cycle's work is visible, not when its tick ends.** A fill and
-    /// a row's geometry are both published by the flush unit, which executes on the pool and is
-    /// applied at a later loop iteration, so a counter incremented inside the tick would name work
-    /// that is still being written.
+    /// **The counter moves when the cycle's work is visible.** A fill and a row's geometry are
+    /// both published by the flush unit, which executes on the pool and is applied at a later
+    /// loop iteration. A counter incremented inside the tick would therefore name work that is
+    /// still being written.
     pub(crate) publication: Mutex<PublicationCycle>,
+    /// A tick dispatched one view's plan and left another view's rows buffered (§4.1's one plan
+    /// per dispatch).
+    ///
+    /// The cycle stays open over it. A client waiting on the publication number asked for its
+    /// buffered work to be published, and rows in a view whose plan was deferred are part of that
+    /// work, so a cycle that closed here would release the caller with a view still buffered.
+    /// Set before the spawn, cleared by the tick that dispatches with nothing left over.
+    pub(crate) deferred_plans: AtomicBool,
     /// Whether a flush is executing on the pool. A tick arriving while it is set is skipped, never
     /// queued: two concurrent flushes would double-consume the buffer range (§1.1). Set by the
     /// executor before the spawn, cleared by the pool after its sends, and read by
@@ -1009,6 +1017,7 @@ impl ExecutorHealth {
             ticks: AtomicU64::new(0),
             flush_requested: AtomicBool::new(false),
             publication: Mutex::new(PublicationCycle::default()),
+            deferred_plans: AtomicBool::new(false),
             flush_in_flight: AtomicBool::new(false),
             flush_completed_pending: AtomicBool::new(false),
             overlay_diverged: AtomicBool::new(false),
@@ -1115,7 +1124,7 @@ impl ExecutorHealth {
         }
     }
 
-    /// Publication cycles completed since the executor started — contracts §3.4's `publication`.
+    /// Publication cycles completed since the executor started (contracts §3.4's `publication`).
     pub fn publication(&self) -> u64 {
         lock_recover(&self.publication).completed
     }
@@ -1126,10 +1135,10 @@ impl ExecutorHealth {
     /// # Why the answer is exact
     ///
     /// The request's rows, fills and artifact records are durable and buffered before this is
-    /// called — the route that wrote them answered first — so what has to be ruled out is a cycle
-    /// that publishes without having seen them. A cycle takes its plan from the buffer after it
-    /// opens, so the question is only whether a cycle was already open when the flag went up, and
-    /// the flag goes up under the lock that answers it:
+    /// called, the route that wrote them having answered first. What has to be ruled out is a
+    /// cycle that publishes without having seen them. A cycle takes its plan from the buffer
+    /// after it opens, so the question is only whether a cycle was already open when the flag
+    /// went up, and the flag goes up under the lock that answers it:
     ///
     /// - **No cycle open.** The next cycle opens after this call, so it plans over a buffer that
     ///   already holds this request's work and publishes it. That cycle is `completed + 1`.
@@ -1137,19 +1146,31 @@ impl ExecutorHealth {
     ///   not promised anything; the cycle after it opens after this call and is `completed + 2`.
     ///   The open cycle closes first, so nothing skips over the number.
     ///
-    /// A cycle that finds a flush already on the pool publishes its row forms and returns without
-    /// counting itself, and the flag it did not read stays up, so no number is spent on a tick
-    /// that skipped this request's work. The count moves at the publication rather than at the
-    /// tick, which is what makes "the number is reached" and "the work is visible" one event.
+    /// A tick that finds a flush already on the pool opens no cycle and consumes no flag: it
+    /// publishes its row forms into the cycle the running flush belongs to and returns, so no
+    /// number is spent on a tick that skipped this request's work. The count moves at the
+    /// publication and not at the tick, which is what makes "the number is reached" and "the work
+    /// is visible" one event, and a cycle that deferred a second view's plan stays open until a
+    /// tick dispatches with nothing left over ([`Self::deferred_plans`]).
     pub(crate) fn request_flush(&self) -> u64 {
         let cycle = lock_recover(&self.publication);
         self.flush_requested.store(true, Ordering::SeqCst);
         cycle.completed + if cycle.open { 2 } else { 1 }
     }
 
-    /// Open a cycle: a tick has begun work.
+    /// Open a cycle and consume the flush request it honours, under one lock.
+    ///
+    /// Taking both together is what makes [`Self::request_flush`]'s two answers exhaustive. A
+    /// request either takes the lock first, in which case it reads a closed cycle, is answered
+    /// `completed + 1`, and is consumed by the cycle this opens, whose plan is taken afterwards;
+    /// or it takes the lock second, in which case it reads an open cycle, is answered
+    /// `completed + 2`, and its flag survives for the cycle after. There is no third order in
+    /// which a request is both answered against a cycle that will not carry it and stripped of
+    /// the flag that would have brought the next one forward.
     pub(crate) fn open_publication_cycle(&self) {
-        lock_recover(&self.publication).open = true;
+        let mut cycle = lock_recover(&self.publication);
+        self.flush_requested.store(false, Ordering::SeqCst);
+        cycle.open = true;
     }
 
     /// Close the open cycle if everything it dispatched has been applied.
@@ -1160,12 +1181,13 @@ impl ExecutorHealth {
     /// so an idle node closes its cycle at the tick rather than at the next one.
     ///
     /// A flush that fails sends nothing and clears `flush_in_flight`, so the cycle closes on the
-    /// next pass: the counter is a publication cadence, not a success claim, and a caller that
-    /// waits on it after a failed flush is told the cycle ended. What it was promised is that the
-    /// cycle saw its work, and the retry is the next cycle's.
+    /// next pass. The counter states a publication cadence, so a caller that waits on it after a
+    /// failed flush is told the cycle ended. What it was promised is that the cycle saw its work,
+    /// and the retry is the next cycle's.
     pub(crate) fn close_publication_cycle_if_applied(&self) {
         if self.flush_in_flight.load(Ordering::SeqCst)
             || self.flush_completed_pending.load(Ordering::SeqCst)
+            || self.deferred_plans.load(Ordering::SeqCst)
         {
             return;
         }
@@ -1815,27 +1837,14 @@ use ack::{Published, Responder};
 // Live state
 // =================================================================================================
 
-/// Take a lock, recovering rather than panicking if a previous holder panicked.
-///
-/// **Why not `.unwrap()`.** The only writer of these maps is the executor thread. If it panics
-/// mid-apply, `unwrap()` would poison every one of them, and the *next* `/v1/items` drill-down —
-/// an unrelated read on an unrelated request — would panic inside `spawn_blocking` and become a
-/// 500. One writer fault would silently become a total read-plane outage.
-///
-/// Recovering is safe here and is not a shrug: the executor's death is **already** reported
-/// fail-closed by [`ExecutorPosture::Dead`], so the node stops being routed traffic through the
-/// front door rather than through a panic storm; each map insert is individually complete, so the
-/// recovered state is a prefix of a batch rather than a torn value; and buffered items have no row
-/// geometry at all — that is what being buffered means — so a partial prefix contributes to no
-/// viewport, count or density. The WAL, not these maps, is the durable record either way.
 /// The publication counter's surface on the engine (contracts §3.4).
 ///
-/// Here rather than beside the rest of [`Engine`]'s methods because both read the write
+/// Both live here, away from the rest of [`Engine`]'s methods, because both read the write
 /// executor's state and the argument for their exactness is this module's.
 impl crate::session::Engine {
-    /// Publication cycles completed since this engine's executor started — what `GET
-    /// /control/status` publishes as `publication`, and what a client compares against the number
-    /// its flush request was answered with.
+    /// Publication cycles completed since this engine's executor started. `GET /control/status`
+    /// publishes it as `publication`, and a client compares it against the number its flush
+    /// request was answered with.
     pub fn publication(&self) -> u64 {
         self.write.health().publication()
     }
@@ -1844,15 +1853,12 @@ impl crate::session::Engine {
     /// cycle honouring it will carry.
     ///
     /// A caller reads `/control/status` until its `publication` has reached that number, and is
-    /// then promised that a cycle which saw this request's buffered work has published —
-    /// including a values-only or artifacts-only cycle, which writes no point rows and moves no
+    /// then promised that a cycle which saw this request's buffered work has published. That
+    /// covers a values-only or artifacts-only cycle, which writes no point rows and moves no
     /// `segments_version`. [`ExecutorHealth::request_flush`] argues why the number is exact and
     /// cannot name a cycle that skipped the work.
     ///
-    /// [`Engine::request_flush`] is the same request without the answer, and is what the engine's
-    /// own tests take. It sets the flag outside the lock, which costs nothing: the lock exists so
-    /// that a *number* and the flag it describes cannot straddle a cycle, and a caller that asks
-    /// for no number is describing nothing.
+    /// [`Engine::request_flush`] calls this and drops the number.
     pub fn request_flush_publication(&self) -> u64 {
         let publication = self.write.health().request_flush();
         self.write.wake();
@@ -1873,6 +1879,19 @@ pub(crate) struct PublicationCycle {
     pub(crate) open: bool,
 }
 
+/// Take a lock, recovering rather than panicking if a previous holder panicked.
+///
+/// **Why not `.unwrap()`.** The only writer of these maps is the executor thread. If it panics
+/// mid-apply, `unwrap()` would poison every one of them, and the *next* `/v1/items` drill-down —
+/// an unrelated read on an unrelated request — would panic inside `spawn_blocking` and become a
+/// 500. One writer fault would silently become a total read-plane outage.
+///
+/// Recovering is safe here and is not a shrug: the executor's death is **already** reported
+/// fail-closed by [`ExecutorPosture::Dead`], so the node stops being routed traffic through the
+/// front door rather than through a panic storm; each map insert is individually complete, so the
+/// recovered state is a prefix of a batch rather than a torn value; and buffered items have no row
+/// geometry at all — that is what being buffered means — so a partial prefix contributes to no
+/// viewport, count or density. The WAL, not these maps, is the durable record either way.
 fn lock_recover<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
@@ -6781,11 +6800,20 @@ impl Executor {
         if !due && !requested && !fold_requested {
             return;
         }
-        // **The cycle opens here, before anything is published** — see
-        // `ExecutorHealth::publication`. Everything below it, including a flush that lands on the
-        // pool, belongs to this cycle, and the number it carries is not reached until the last of
-        // it is applied.
-        self.health.open_publication_cycle();
+        // **At most one flush in flight**, read once here and not again at the gate below,
+        // because the publication cycle turns on it: a tick that will skip publishes into the
+        // cycle the running flush already opened, and a tick that will go on to dispatch opens
+        // one of its own before it publishes anything. Two reads could disagree. The value goes
+        // stale only in the direction of a flush having landed, which costs the skipped tick
+        // nothing it did not already risk.
+        let flush_in_flight = self.health.flush_in_flight.load(Ordering::SeqCst);
+        if !flush_in_flight {
+            // **The cycle opens before anything is published**, and consumes the flush request it
+            // honours in the same lock (`ExecutorHealth::open_publication_cycle`). Everything
+            // below, the row forms and a flush that lands on the pool alike, belongs to this
+            // cycle, and its number is not reached until the last of it is applied.
+            self.health.open_publication_cycle();
+        }
         // **The WAL's size and its rotation bound, sampled here because nothing off this thread
         // can read them.** The log is owned by the executor and a status request has no route to
         // it, so the gauge is taken at the tick and published as of that tick. Before this tick's
@@ -6828,7 +6856,7 @@ impl Executor {
         // first iteration after the in-flight flush lands — which `FLUSH_COMPLETION_POLL` bounds
         // to within ~20 ms of its publication. Consuming it here would silently drop an
         // operator's "drain now" whenever it raced a scheduled flush.
-        if self.health.flush_in_flight.load(Ordering::SeqCst) {
+        if flush_in_flight {
             if due {
                 self.last_tick = std::time::Instant::now();
                 self.health.mark_tick(self.last_tick);
@@ -6865,17 +6893,9 @@ impl Executor {
         self.last_tick = std::time::Instant::now();
         self.health.mark_tick(self.last_tick);
         self.health.ticks.fetch_add(1, Ordering::Relaxed);
-        // Requested flushes are consumed by the tick whether or not there is anything to flush: a
-        // `POST /control/flush` against an empty buffer is satisfied by the tick it triggered, not
-        // held until something arrives.
-        //
-        // **Only the flag this tick read is cleared.** A request that arrived after the read above
-        // is one this tick's plan may have been taken before, so consuming it would spend a
-        // publication number on a cycle that never saw its work and leave the caller waiting for
-        // the next period (`ExecutorHealth::request_flush`).
-        if requested {
-            self.health.flush_requested.store(false, Ordering::SeqCst);
-        }
+        // A requested flush was consumed at the open above, whether or not there is anything to
+        // flush: a `POST /control/flush` against an empty buffer is satisfied by the tick it
+        // triggered rather than held until something arrives.
 
         // **Planned on this thread, executed on the pool.** The plan — which buffered items
         // acquire geometry and what the three dispositions do to them (§3.5) — is the
@@ -6915,6 +6935,10 @@ impl Executor {
             .store(flushable, Ordering::SeqCst);
 
         if plans.is_empty() {
+            // Nothing to flush, so nothing is left over either: a view whose rows stopped being
+            // flushable takes its plan out of the running, and a flag left standing would hold
+            // the cycle open with nothing coming to close it.
+            self.health.deferred_plans.store(false, Ordering::SeqCst);
             // Nothing to flush, so no publication is coming to rotate the log — the deny-only
             // regime. See `rotate_if_grown`.
             self.rotate_if_grown();
@@ -6932,8 +6956,8 @@ impl Executor {
         self.dispatch_merge(&generation);
         drop(generation);
         // A tick that dispatched no flush has published everything it is going to, so its cycle
-        // closes here rather than at the next loop iteration — which on an idle node is a tick
-        // period away.
+        // closes here. Left to the next loop iteration it would wait a tick period on an idle
+        // node.
         self.health.close_publication_cycle_if_applied();
     }
 
@@ -9908,20 +9932,17 @@ impl Executor {
         // `items.first()` is an age key needing no cursor state — which turns starvation into a
         // bound: with `s` views, ack→visibility is at most `s × flush_max_age_secs`.
         //
-        // **Unreachable today**: `tessera build` emits one view, and a plan naming a view this
-        // bundle does not carry is dropped just below.
+        // **A deferred plan holds the publication cycle open** (`ExecutorHealth::deferred_plans`).
+        // A caller waiting on a publication number asked for its buffered rows to be published,
+        // and rows in a view whose plan was deferred are still buffered, so the number is not
+        // reached until a tick dispatches with nothing left over. The flag is cleared on every
+        // path out of this function that dispatches nothing, so a cycle cannot be held open by a
+        // plan that was never taken.
+        self.health.deferred_plans.store(false, Ordering::SeqCst);
         let deferred = plans.len().saturating_sub(1);
         let Some((view, plan)) = plan_to_dispatch(plans) else {
             return;
         };
-        if deferred > 0 {
-            tracing::warn!(
-                deferred,
-                dispatched = %view,
-                "a flush unit is per view and a second unit in flight would be discarded at its \
-                 rebase, so one view publishes per tick; the rest re-plan at the next one"
-            );
-        }
 
         let mut contexts = Vec::with_capacity(1);
         {
@@ -10139,6 +10160,20 @@ impl Executor {
         self.health
             .flush_lap(crate::flush::FlushStage::Dispatch, mark);
 
+        if deferred > 0 {
+            // Re-armed, so `wait_for_work` polls at `FLUSH_COMPLETION_POLL` and the tick that
+            // takes the next view comes at the completion of this flush rather than at the next
+            // period. Set before the flag below, since a reader that saw the dispatch first and
+            // this second could close the cycle in between.
+            self.health.deferred_plans.store(true, Ordering::SeqCst);
+            self.health.flush_requested.store(true, Ordering::SeqCst);
+            tracing::warn!(
+                deferred,
+                dispatched = %view,
+                "a flush unit is per view and a second unit in flight would be discarded at its \
+                 rebase, so one view publishes per tick; the rest re-plan at the next one"
+            );
+        }
         self.health.flush_in_flight.store(true, Ordering::SeqCst);
         self.health.mark_flush_started(std::time::Instant::now());
         let health = Arc::clone(&self.health);
@@ -10277,7 +10312,7 @@ impl Executor {
             || self.health.fold_completed_pending.load(Ordering::SeqCst)
         {
             // A flush or a coalesce is executing on the pool, or its completed unit is waiting in
-            // the corresponding channel, or a `POST /control/flush` is still unconsumed — a
+            // the corresponding channel, or a `POST /control/flush` is still unconsumed. A
             // request that arrived during a tick keeps its flag, and the doorbell token it rang
             // may have been spent waking the loop for the tick that did not read it.
             // The pool cannot ring the doorbell (see `flush_submit`),
