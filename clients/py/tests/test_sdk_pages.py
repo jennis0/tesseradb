@@ -9,6 +9,7 @@ reading of the contract.
 from __future__ import annotations
 
 import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 
 from conftest import browse, item, viewport
@@ -797,3 +798,67 @@ def test_a_label_set_declared_after_the_first_commit_is_declared_and_served(serv
     assert "topics" in {layer["name"] for layer in db.meta()["layers"]}
 
     assert ("topics", "l0", ["A generated label"], 20) in artifact_rows_of(db)
+
+
+def test_a_label_set_from_a_mapping_builds_and_is_served_with_its_text(served, corpus):
+    """§4.7's mapping form, through the build and out of the viewport.
+
+    `source={key: text}` is an artifacts table the SDK writes, and each row carries the attachment
+    as well as the text: a label set expands to a layer that depends on its clustering, so every
+    artifact it publishes attaches to one and a row naming none is refused at the build. The key
+    the mapping gives is the cluster's, which is what the label hangs from and what names the
+    label's own artifact.
+    """
+    held = list(range(1, 200))
+    keys = ["c2-a"] * 100 + ["c2-b"] * (len(held) - 100)
+
+    def declare(db):
+        declare_notebook(db, corpus)
+        db.stage(
+            "second",
+            pa.table({"level": pa.array([0, 0], pa.uint32()),
+                      "key": pa.array(["c2-a", "c2-b"], pa.string())}),
+        )
+        db.stage(
+            "second_members",
+            pa.table(
+                {
+                    "level": pa.array([0] * len(held), pa.uint32()),
+                    "key": pa.array(keys, pa.string()),
+                    "entity": pa.array(held, pa.uint64()),
+                }
+            ),
+        )
+        db.declare_layer(
+            "clusters/second", kind="flat", source="second", members="second_members"
+        )
+        # Both grains, as any label's member table carries them: a null rank is the membership the
+        # label is drawn over, and rank 0 is content 0's generating set.
+        db.stage(
+            "topic_members",
+            pa.table(
+                {
+                    "level": pa.array([0] * (2 * len(held)), pa.uint32()),
+                    "key": pa.array(keys + keys, pa.string()),
+                    "rank": pa.array([None] * len(held) + [0] * len(held), pa.uint32()),
+                    "entity": pa.array(held + held, pa.uint64()),
+                }
+            ),
+        )
+        db.declare_labels(
+            "topics/second",
+            of="clusters/second",
+            source={"c2-a": "Audio diffusion", "c2-b": "Graph learning"},
+            members="topic_members",
+        )
+
+    db = served(declare)
+    # The table the mapping was written to: the text, and where each row attaches.
+    table = pq.read_table(db.sources["topics_second"].path)
+    assert table.column_names == ["level", "key", "contents", "attached_layer", "attached_key"]
+    assert table["attached_layer"].to_pylist() == ["clusters/second"] * 2
+    assert table["attached_key"].to_pylist() == ["c2-a", "c2-b"]
+
+    rows = artifact_rows_of(db, view="s0", frame=whole_frame(db))
+    served_text = {key: content for layer, key, content, _ in rows if layer == "topics/second"}
+    assert served_text == {"c2-a": ["Audio diffusion"], "c2-b": ["Graph learning"]}

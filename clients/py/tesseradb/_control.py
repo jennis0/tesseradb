@@ -190,6 +190,24 @@ class Control:
         return self._send("PUT", f"/control/view_groups/{_segment(name)}", _json(body),
                           {"content-type": JSON})
 
+    def declare_attribute(self, body: dict) -> Answer:
+        """`PUT /control/attributes`: one column, named in the body rather than in the path."""
+        return self._send("PUT", "/control/attributes", _json(body), {"content-type": JSON})
+
+    def declare_vocabulary(self, name: str, body: dict) -> Answer:
+        """`PUT /control/vocabularies/{name}`: the value set, with a closed set's values on it."""
+        return self._send("PUT", f"/control/vocabularies/{_segment(name)}", _json(body),
+                          {"content-type": JSON})
+
+    def vocabulary_values(self, name: str, body: dict) -> Answer:
+        """`PATCH /control/vocabularies/{name}/values`: one page of `{key, title?}` rows."""
+        return self._send(
+            "PATCH",
+            f"/control/vocabularies/{_segment(name)}/values",
+            _json(body),
+            {"content-type": JSON},
+        )
+
     def declare_view(self, name: str, body: dict) -> Answer:
         """`PUT /control/views/{name}`: one plain view while the service runs."""
         return self._send("PUT", f"/control/views/{_segment(name)}", _json(body),

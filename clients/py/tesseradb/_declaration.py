@@ -27,6 +27,11 @@ VIEWS_ALL = "__views_all__"
 #: `allocation_view` instead.
 ANCHOR = "__anchor__"
 
+#: An attribute declared at a running service, kept beside the block and never written. Such a
+#: column has no acquisition half: it is filled by `POST /control/values` rather than read from a
+#: file, so the block names no source and the default source is not written onto it (§6.2 step 1).
+FILLED = "__filled__"
+
 HIERARCHY_KINDS = ("flat", "nested", "dag", "stacked", "tiered")
 LEVELLED = ("stacked", "tiered")
 SHAPE_KINDS = ("bbox", "circle", "ellipse", "polygon")
@@ -110,16 +115,21 @@ class Declaration:
     def document(
         self,
         sources: dict[str, str],
-        default_source: str | None,
         inferred_attributes: Sequence[dict] = (),
         inferred_vocabularies: Sequence[dict] = (),
     ) -> dict[str, Any]:
+        """The declaration as TOML's own shape (§4.8).
+
+        **`[defaults].source` is never written.** `default=True` is the SDK's own convenience: the
+        source it names is filled onto every block that names none, which §4.8 asks for anyway, so
+        the file each object reads is on the object. A default in the document would additionally
+        bind an attribute declared at a running service, whose column is filled rather than read,
+        to the file the first commit built from.
+        """
         document: dict[str, Any] = {}
         if sources:
             document["sources"] = dict(sources)
         defaults: dict[str, Any] = {}
-        if default_source is not None:
-            defaults["source"] = default_source
         allocation_view = self.allocation_view()
         if allocation_view is not None:
             defaults["allocation_view"] = allocation_view
