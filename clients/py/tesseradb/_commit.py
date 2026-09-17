@@ -86,10 +86,15 @@ class Page:
     level: int = 0
 
 
-#: How many `{key, title?}` rows one `PATCH /control/vocabularies/{name}/values` carries.
-#: `/control/status` publishes no bound for that route, so the SDK pages at a figure of its own
-#: rather than sending a value set of any size as one body.
+#: How many `{key, title?}` rows one `PATCH /control/vocabularies/{name}/values` carries. The
+#: route publishes a body cap (`limits.declarations.max_body_bytes`, 2 MiB) and no row cap, so the
+#: bytes are what bound a page and this is the SDK's own figure for how many rows to measure at a
+#: time: long titles make a page over the cap, which is halved and measured again.
 VALUES_PER_PAGE = 10_000
+
+#: Room left under the body cap for a vocabulary declaration's own fields — its width, value set,
+#: visibility, title and reserved codes — when the first page of values travels on it.
+DECLARATION_HEADROOM = 4096
 
 
 def _scoped_to(block: dict) -> str | None:
@@ -317,19 +322,30 @@ class Planner:
         body = dict(entry["body"])
         values = list((entry.get("values") or {}).get("values", []))
         if entry.get("values_source") is not None:
-            values = self._values_of_table(document, name, entry["values_source"])
-        if body.get("value_set") == "closed" and values:
-            body["values"] = values[:VALUES_PER_PAGE]
+            read = self._values_of_table(document, name, entry["values_source"])
+            if read is None:
+                # The table cannot be read as a value set. The finding refuses the commit, and
+                # planning the declaration as well would print a request that will not be made.
+                return
+            values = read
+        cap = int(self.limits.get("declarations", {}).get("max_body_bytes", 2 << 20))
+        pages = _value_pages(values, cap - DECLARATION_HEADROOM)
+        carried = 0
+        if body.get("value_set") == "closed" and pages:
+            # A closed set with no values is refused at the route, so the declaration carries the
+            # first page and the pages that follow are the rest of the set.
+            body["values"] = pages[0]
+            carried = 1
         self.pages.append(
             Page(
                 kind="vocabulary",
                 name=name,
                 line=f"declare vocabulary '{name}' ({body.get('value_set')})",
                 body=body,
+                rows=len(body.get("values", [])),
             )
         )
-        for start in range(0, len(values), VALUES_PER_PAGE):
-            page = values[start : start + VALUES_PER_PAGE]
+        for page in pages[carried:]:
             self.pages.append(
                 Page(
                     kind="vocabulary_values",
@@ -340,12 +356,15 @@ class Planner:
                 )
             )
 
-    def _values_of_table(self, document: dict, vocabulary: str, source: str) -> list[dict]:
-        """A sourced value set's `(key, title?)` rows, as the vocabulary routes take them.
+    def _values_of_table(
+        self, document: dict, vocabulary: str, source: str
+    ) -> list[dict] | None:
+        """A sourced value set's `(key, title?)` rows, or `None` where the table is not one.
 
         No code travels: codes are the server's to assign (per-point-attributes §3.1) and both
         routes refuse a body that names one, so a table carrying the column the build reads codes
-        from is a finding rather than a page whose codes were dropped.
+        from is a finding rather than a page whose codes were dropped. A finding refuses the
+        commit, and `None` is what keeps the declaration out of the plan with it.
         """
         block = next(
             (one for one in document.get("vocabulary", []) if one["name"] == vocabulary), {}
@@ -360,7 +379,7 @@ class Planner:
                     f"this database has not staged. Stage the (key, title?) rows under that name",
                 )
             )
-            return []
+            return None
         table = pq.read_table(staged.path)
         code = fields.get("code", "code")
         if code in table.column_names:
@@ -373,7 +392,7 @@ class Planner:
                     f"the codes back from the values verb",
                 )
             )
-            return []
+            return None
         key = fields.get("key", "key")
         if key not in table.column_names:
             self.findings.append(
@@ -384,7 +403,7 @@ class Planner:
                     f"the column with fields = {{key = ...}} or calls it 'key'",
                 )
             )
-            return []
+            return None
         title = fields.get("title", "title")
         titles = (
             table[title].to_pylist() if title in table.column_names else [None] * table.num_rows
@@ -1083,6 +1102,27 @@ def _bodies(table: pa.Table, start: int, cap: int):
         yield first, body, piece.num_rows
 
 
+def _value_pages(values: list[dict], cap: int) -> list[list[dict]]:
+    """A value set sliced into pages under both of the route's units (§6.2 step 1).
+
+    The row figure sizes a slice and the byte cap decides it: a slice whose encoded body is over
+    the cap is halved and each half encoded again, so the body that is measured is the body that
+    is sent. A single value over the cap is sent as it is and the route's refusal is what says so.
+    """
+    pages: list[list[dict]] = []
+    for start in range(0, len(values), VALUES_PER_PAGE):
+        pending = [values[start : start + VALUES_PER_PAGE]]
+        while pending:
+            piece = pending.pop()
+            if len(json.dumps({"values": piece}).encode()) > cap and len(piece) > 1:
+                half = len(piece) // 2
+                pending.append(piece[half:])
+                pending.append(piece[:half])
+                continue
+            pages.append(piece)
+    return pages
+
+
 def _in_dependency_order(layers: Sequence[dict]) -> list[dict]:
     """Declaration order, with a layer after everything it depends on (§6.2 step 4)."""
     by_name = {block["name"]: block for block in layers}
@@ -1429,6 +1469,17 @@ def _fold(report, page: Page, answer: Answer) -> None:
         minted = report.artifact_ids.setdefault(page.name, {})
         for one in body.get("artifacts", []):
             minted[one["key"]] = str(one["tessera_id"])
+    elif page.kind in ("attribute", "vocabulary"):
+        # `existing: true` is the held-part arm of the fill rule: the name is there under this
+        # identity and the request applied nothing but its values (contracts §3.4).
+        report.already_present += 1 if body.get("existing") else 0
+        report.values_bound += int(body.get("added", 0))
+        report.titles_set += int(body.get("titles", 0))
+    elif page.kind == "vocabulary_values":
+        # Here `existing` is a count: the keys of this page the value set already bound.
+        report.already_present += int(body.get("existing", 0))
+        report.values_bound += int(body.get("added", 0))
+        report.titles_set += int(body.get("titles", 0))
     elif page.kind == "grow":
         for one in body.get("artifacts", []):
             report.memberships_joined += int(one.get("joined", 0))

@@ -182,10 +182,11 @@ class Database:
         """One block of the declaration, spelled with configuration.md's own keys (§4.1).
 
         Every block is expressible this way; the typed verbs below build the dict and call here,
-        and this is the way to write a key whose verb is not built yet.
+        and this is the way to write a key no typed verb has a parameter for.
         """
         if kind == "attribute":
             self._refuse_a_render_column(block.get("name"), block.get("render"))
+            self._mark_a_filled_column(block)
         return self._declared(self.blocks.add(kind, block))
 
     def declare_view(self, name: str, source: str | None = None, **kwargs) -> dict:
@@ -286,7 +287,19 @@ class Database:
         block = D.attribute_block(name, type, **kwargs)
         self._refuse_a_render_column(name, block.get("render"))
         self._refuse_an_undeclared_group("attribute", name, block)
+        self._mark_a_filled_column(block)
         return self._declared(self.blocks.add("attribute", block))
+
+    def _mark_a_filled_column(self, block: dict) -> None:
+        """An attribute declared at a running service is filled, not read (§6.2 step 1).
+
+        The mark is kept beside the block and never written: what it decides is that the written
+        declaration names no source for this column, since the file the first commit built from has
+        never carried it. `tessera check` takes such a block as a note and emits its payload, which
+        is what the next commit declares.
+        """
+        if self.built and "source" not in block and not block.get("scope"):
+            block[D.FILLED] = True
 
     def _refuse_a_render_column(self, name: Any, render: Any) -> None:
         """A render column belongs to the first commit (decision 0136's amendment, §4.5).
@@ -373,7 +386,7 @@ class Database:
                 f"own; write it through declare_layer"
             )
         if isinstance(source, dict):
-            source = self._stage_label_text(name, source)
+            source = self._stage_label_text(name, of, source)
         parent["labels"] = D.labels_block(name, source, members=members, **kwargs)
         self._save_state()
         return parent["labels"]
@@ -382,8 +395,15 @@ class Database:
         self._save_state()
         return block
 
-    def _stage_label_text(self, name: str, mapping: dict) -> str:
-        """A mapping from cluster key to text, as the `(key, contents)` table the block reads."""
+    def _stage_label_text(self, name: str, of: str, mapping: dict) -> str:
+        """A mapping from cluster key to text, as the artifacts table the block reads (§4.7).
+
+        Each row carries the attachment as well as the text: a label set expands to a layer that
+        depends on its clustering, and every artifact such a layer publishes attaches to one, so a
+        row naming no `attached_layer` and `attached_key` is refused at the build. The key the
+        mapping gives is the cluster's, which is what the label attaches to and what names the
+        label's own artifact in its own layer.
+        """
         source_name = name.replace("/", "_")
         if source_name in self.sources:
             raise Refusal(
@@ -398,6 +418,8 @@ class Database:
                     [[[v]] if isinstance(v, str) else [list(v)] for v in mapping.values()],
                     type=pa.list_(pa.list_(pa.string())),
                 ),
+                "attached_layer": pa.array([of] * len(mapping), type=pa.string()),
+                "attached_key": pa.array([str(k) for k in mapping], type=pa.string()),
             }
         )
         path = self.path / "sources" / f"{source_name}.parquet"
@@ -445,22 +467,19 @@ class Database:
         paths = {name: staged.declared_path for name, staged in self.sources.items()}
         for name, staged in self.deltas.items():
             paths.setdefault(name, staged.declared_path)
-        document = self.blocks.document(
-            paths,
-            self.default_source,
-            inferred_attributes,
-            inferred_vocabularies,
-        )
-        # Every source named on every block (§4.8): a view or an attribute that named none reads
-        # `[defaults].source`, and writing it out is what lets a reader of `schema.toml` see the
-        # whole declaration. A group-scoped attribute with no source is the exception, and the one
-        # the rule would break: its values are read from each of its group's views' own points
-        # files, and `[defaults].source` does not reach it (configuration.md §1).
+        document = self.blocks.document(paths, inferred_attributes, inferred_vocabularies)
+        # Every source named on every block (§4.8). `default=True` is the SDK's own convenience and
+        # is written here rather than under `[defaults]`: the file an object reads is on the
+        # object, which is what lets a reader of `schema.toml` see the whole declaration. A
+        # group-scoped attribute is the exception, and the one the rule would break: its values are
+        # read from each of its group's views' own points files (configuration.md §1).
         for kind in ("view", "attribute"):
             for block in document.get(kind, []):
-                if "source" in block or block.get("scope"):
+                if block.pop(D.FILLED, False):
+                    # An attribute declared at a running service names no source: its column is
+                    # filled through `POST /control/values` and read from no file (§6.2 step 1).
                     continue
-                if kind == "attribute" and self._fills_through_the_values_route(block):
+                if "source" in block or block.get("scope"):
                     continue
                 if self.default_source is None:
                     raise Refusal(
@@ -468,48 +487,11 @@ class Database:
                         f"staged with default=True"
                     )
                 block["source"] = self.default_source
-        self._drop_the_default_source(document)
         # Where identity is, block by block: the SDK rewrites no file, so a column staged under
         # the user's own name is named here rather than copied into a canonical one (§3).
         D.name_identity(document, self._id_column_of)
         self._refuse_a_view_without_its_labels(document)
         return document
-
-    def _drop_the_default_source(self, document: dict) -> None:
-        """`[defaults].source` goes where a column is filled rather than read (§6.2 step 1).
-
-        An attribute declared at a running service names no source, and the default is what such a
-        block would otherwise take: the file the first commit built from, which has never carried
-        the column. Every view and every other attribute names its source above, so nothing else
-        reads the default and dropping it binds nothing.
-        """
-        filled = [
-            block
-            for block in document.get("attribute", [])
-            if "source" not in block and not block.get("scope")
-        ]
-        if not filled:
-            return
-        defaults = document.get("defaults", {})
-        defaults.pop("source", None)
-        if not defaults:
-            document.pop("defaults", None)
-
-    def _fills_through_the_values_route(self, block: dict) -> bool:
-        """Whether an attribute that names no source is filled rather than read (§6.2 step 1).
-
-        An attribute declared at a running service has no acquisition half: its column reads absent
-        on every entity that predates it and is filled by `POST /control/values` from a delta.
-        `[defaults].source` names the file the first commit built from, and that file has never
-        carried the column, so naming it here would point `tessera check` at a column nobody wrote.
-        `tessera check` takes a block that names no source as a note (§11.1) and emits its payload,
-        which is what the next commit declares.
-        """
-        if not self.built:
-            return False
-        staged = self.sources.get(self.default_source) or self.deltas.get(self.default_source)
-        column = block.get("field") or block["name"]
-        return staged is None or column not in staged.columns
 
     def _refuse_a_view_without_its_labels(self, document: dict) -> None:
         """A view whose points file does not carry the access column it names (§4.2).
@@ -729,7 +711,9 @@ class Database:
 
         The emitter writes one object with a key per block kind: `layers` and `attributes` as
         bare bodies, and `views`, `view_groups` and `vocabularies` as `{name, body}`, each
-        addressed by a path segment. The paged commit sends the layers, views and view groups.
+        addressed by a path segment. The paged commit sends every kind: the view groups and their
+        roster views, the plain views, the vocabularies with the pages of their values, the
+        attributes and the layers.
 
         The declaration minus its acquisition keys *is* the payload (configuration.md §2), so this
         is the binary serialising what it parsed rather than a second emitter in Python.

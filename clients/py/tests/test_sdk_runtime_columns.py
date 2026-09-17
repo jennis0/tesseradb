@@ -112,14 +112,17 @@ def test_a_category_over_an_inline_closed_vocabulary_is_declared_filled_and_list
 
     plan = db.check()
     assert plan.ok, plan
-    # The vocabulary goes before the attribute that names it, and both before the values page.
+    # The vocabulary goes before the attribute that names it, and both before the values page. A
+    # closed set is refused at the route with no values, so its three travel on the declaration
+    # and no page follows them.
     assert plan.plan[0] == "declare vocabulary 'venue' (closed)"
-    assert plan.plan[1] == "page 3 value(s) into vocabulary 'venue'"
-    assert plan.plan[2] == "declare attribute 'venue' (category)"
+    assert plan.plan[1] == "declare attribute 'venue' (category)"
+    assert not [line for line in plan.plan if line.startswith("page ")]
 
     report = db.commit()
     assert report.ok, report
     assert report.values_filled == len(HELD)
+    assert report.values_bound == 3
 
     # `/v1/meta` names the vocabulary the category reads and carries none of its values.
     assert declared(db, "venue")["category"]["vocabulary"] == "venue"
@@ -158,12 +161,12 @@ def test_a_category_over_a_sourced_closed_vocabulary_pages_the_tables_rows(serve
 
     report = db.commit()
     assert report.ok, report
-    assert report.plan[:3] == [
+    assert report.plan[:2] == [
         "declare vocabulary 'venue' (closed)",
-        "page 3 value(s) into vocabulary 'venue'",
         "declare attribute 'venue' (category)",
     ]
     assert report.values_filled == len(HELD)
+    assert report.values_bound == 3
 
     # The titles came from the table's own column, which is what a sourced set is for.
     listed = {one["key"]: one.get("title") for one in categories(db, "venue")["values"]}
@@ -187,3 +190,96 @@ def test_a_declaration_the_database_already_holds_is_not_sent_again(served, corp
     fill(db, "citations", pa.array([2] * len(HELD), pa.uint32()))
     plan = db.check()
     assert [line for line in plan.plan if line.startswith("declare")] == []
+
+
+def test_an_open_vocabulary_declared_after_the_first_commit_pages_its_titles(served, corpus):
+    """An open set is declared with no values and its titles are the page (§4.4).
+
+    An open value set mints a code for each key that arrives, so nothing has to travel with the
+    declaration. The titles do: a key bound by an ingest has no title, and `PATCH
+    /control/vocabularies/{name}/values` is where one is given.
+    """
+    db = notebook(served, corpus)
+    db.declare_vocabulary("venue", source="venues", width="u8", title="Venue")
+    db.stage(
+        "venues",
+        pa.table(
+            {
+                "key": pa.array(["neurips", "icml"], pa.string()),
+                "title": pa.array(["NeurIPS", "ICML"], pa.string()),
+            }
+        ),
+    )
+    db.declare_attribute("venue", type="category", vocabulary="venue", index=True)
+    fill(db, "venue", pa.array(["neurips"] * len(HELD), pa.string()))
+
+    plan = db.check()
+    assert plan.plan[:3] == [
+        "declare vocabulary 'venue' (open)",
+        "page 2 value(s) into vocabulary 'venue'",
+        "declare attribute 'venue' (category)",
+    ]
+    report = db.commit()
+    assert report.ok, report
+    assert report.values_bound == 2
+    assert {one["key"]: one.get("title") for one in categories(db, "venue")["values"]} == {
+        "neurips": "NeurIPS",
+        "icml": "ICML",
+    }
+
+
+def test_a_value_set_over_the_bodys_cap_is_paged_by_bytes(served, corpus):
+    """The route's unit is bytes, so long titles decide the page (§6.2 step 1).
+
+    `limits.declarations.max_body_bytes` is 2 MiB and the row figure is 10,000, so 600 values with
+    a 6 KB title each are one row page and several body pages. What is measured is what is sent.
+    """
+    db = notebook(served, corpus)
+    keys = [f"v{i:04d}" for i in range(600)]
+    db.declare_vocabulary("venue", source="venues", width="u16", title="Venue")
+    db.stage(
+        "venues",
+        pa.table(
+            {
+                "key": pa.array(keys, pa.string()),
+                "title": pa.array([f"{key} " + "long " * 1200 for key in keys], pa.string()),
+            }
+        ),
+    )
+    db.declare_attribute("venue", type="category", vocabulary="venue", index=True)
+    fill(db, "venue", pa.array([keys[i % len(keys)] for i in range(len(HELD))], pa.string()))
+
+    pages = [line for line in db.check().plan if line.startswith("page ")]
+    assert len(pages) > 1, pages
+    assert sum(int(line.split()[1]) for line in pages) == len(keys)
+
+    report = db.commit()
+    assert report.ok, report
+    assert report.values_bound == len(keys)
+    listed = categories(db, "venue", limit=1000)["values"]
+    assert len(listed) == len(keys)
+
+
+def test_a_vocabulary_no_column_names_is_redeclared_and_answered_as_held(served, corpus):
+    """`/v1/meta` publishes a value set through the column that reads it (§6.2 step 1).
+
+    A vocabulary no attribute names yet is not on that document, so the next commit declares it
+    again. The route answers an identical redeclaration as held and applies nothing, which the
+    report counts under the parts already present rather than as a value bound.
+    """
+    db = notebook(served, corpus)
+    db.declare_vocabulary("venue", values=["neurips", "icml"], closed=True, width="u8")
+    first = db.commit()
+    assert first.ok, first
+    assert first.values_bound == 2 and first.already_present == 0
+
+    again = db.commit()
+    assert again.ok, again
+    assert again.plan[0] == "declare vocabulary 'venue' (closed)"
+    assert again.values_bound == 0
+    assert again.already_present == 1
+
+    # Named by a column, it is held: the declaration is not sent a third time.
+    db.declare_attribute("venue", type="category", vocabulary="venue", index=True)
+    assert db.commit().ok
+    assert [line for line in db.check().plan if "vocabulary" in line] == []

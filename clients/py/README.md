@@ -90,6 +90,11 @@ group. Three of them are narrower after the first commit than before it:
   ingest route, so a clustering over rows the database already holds is published through
   `source=` and `members=`.
 
+Which declarations are new is read from `/v1/meta`, and a vocabulary reaches it through the column
+that names it. A vocabulary no attribute names yet is therefore declared again at each commit; the
+route answers an identical redeclaration as held, applies its values as a page and changes nothing,
+and the report counts it under the parts already present.
+
 ## The commit after the first
 
 The first commit builds. Every commit after it pages the staged deltas through the control plane
