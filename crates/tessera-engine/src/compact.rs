@@ -647,6 +647,13 @@ const FOLD_MEMORY_SAFETY_FACTOR: u64 = 2;
 /// the one scratch [`memory_estimate`] charges. The build passes `rayon::current_num_threads()`
 /// instead. The bytes are identical either way: the derivation reads and appends a window at a
 /// time in term order, so the width is a choice about the host and not about the file.
+///
+/// **What one thread costs, modelled.** The probe derived 1.4×10⁶ terms at rung 6 in 184 s across
+/// the box's cores (measured, `docs/evidence/memos/2026-09-17-term-images-handover.md` §3.4).
+/// Projection is per term and the workers share only a mutex over the scratch pool, so one thread
+/// is of the order of the core count times that: tens of minutes for one view at rung 6, against a
+/// fold already measured in hours. Stage 6 measures the pass on a fold of `gbif-64p` and models
+/// rung 6 from it.
 const TERM_IMAGE_THREADS: usize = 1;
 
 /// The publication number the fold's term-image files are named after
@@ -679,20 +686,23 @@ const TERM_IMAGE_MANIFEST_N: u64 = 0;
 /// | 4 B × entity bound | `ext-locator.u32`, same (§3 pass 3) |
 /// | 8 B × dictionary length | `PostingsSpool`'s offsets buffer (§3's table: ~0.94 GB at 1.17×10⁸) |
 /// | 90 B × membership containers | the artifact pass's row forms, held while it rebuilds them |
-/// | threads × (8 KiB × containers + scratch) | pass 2b's widest image and its scratch, modelled |
+/// | threads × (posting + image + scratch) | pass 2b's window and its projection, modelled |
 ///
 /// The permutation term is the **maximum** across views rather than their sum: pass 1 folds one
 /// view at a time and drops each view's writer before the next, so the peak is one of them. The
 /// image term takes its rows the same way, and for the same reason: pass 2b derives one view at a
 /// time and drops each row space before the next.
 ///
-/// **The image term is [`term_image_estimate`], modelled, and a ceiling rather than an
-/// expectation.** [`TERM_IMAGE_THREADS`] of them, each with a [`PROJECT_SCRATCH_BYTES`] scratch.
-/// A Roaring container covers 65 536 rows and costs at most 8 KiB, at which point it is a bitset
-/// covering every row in its range, so a term held by every row of the view is the widest image
-/// expressible and no posting can produce a larger one. The realistic figure is far below it:
-/// a term over a third of the corpus in run-friendly order is kilobytes. ~437 MB at 3.5×10⁹ rows,
-/// against ~82 MiB of scratch (`docs/evidence/memos/2026-09-17-term-images-handover.md` §3.4).
+/// **The pass 2b term is [`term_image_estimate`], modelled, and a ceiling rather than an
+/// expectation.** The pass holds one term per worker in flight: that term's posting as an owned
+/// bitmap over entity space, its image over row space, and one [`PROJECT_SCRATCH_BYTES`] scratch.
+/// A Roaring container covers 65 536 values and costs at most 8 KiB, at which point it is a bitset
+/// over every value in its range, so a term held by every entity is the widest posting expressible
+/// and one held by every row the widest image. Nothing in the pass scales with the dictionary: the
+/// table is written into the file as each window completes. The realistic figure is far below the
+/// ceiling, a term over a third of the corpus in run-friendly order being kilobytes (assumed; the
+/// probe reports whole-file sizes, not per term). ~437 MB of image at 3.5×10⁹ rows, against ~82 MiB
+/// of scratch (`docs/evidence/memos/2026-09-17-term-images-handover.md` §3.4).
 ///
 /// *(§3's first draft called the two mapped arrays free — page cache rather than RSS. r1 corrected
 /// it: a dirty shared file mapping is resident and cgroup-charged until writeback. They are charged
@@ -709,7 +719,7 @@ pub(crate) fn memory_estimate(
         .saturating_add(4u64.saturating_mul(entity_bound))
         .saturating_add(8u64.saturating_mul(dict_len))
         .saturating_add(ARTIFACT_BYTES_PER_CONTAINER.saturating_mul(membership_containers))
-        .saturating_add(term_image_estimate(dict_len, base_rows));
+        .saturating_add(term_image_estimate(dict_len, permutation_bound, base_rows));
     terms.saturating_mul(FOLD_MEMORY_SAFETY_FACTOR)
 }
 
@@ -724,24 +734,29 @@ pub(crate) fn memory_estimate(
 const PROJECT_SCRATCH_BYTES: u64 = 82 * 1024 * 1024;
 
 /// The widest a Roaring container can be once built, in bytes: a bitset over its 65 536 values.
-const IMAGE_BYTES_PER_CONTAINER: u64 = 8 * 1024;
+const BYTES_PER_BITSET_CONTAINER: u64 = 8 * 1024;
 
-/// Rows one Roaring container covers.
-const ROWS_PER_CONTAINER: u64 = 1 << 16;
+/// Values one Roaring container covers, rows or entities.
+const VALUES_PER_CONTAINER: u64 = 1 << 16;
 
-/// [`memory_estimate`]'s pass 2b term: one worker's largest possible image and its scratch, per
-/// worker.
+/// [`memory_estimate`]'s pass 2b term: per worker, the widest posting it can hold, the widest image
+/// it can build from one, and the scratch it projects through.
 ///
 /// **Zero where the pass does not run**, which is a view with no row and a dictionary with no term:
 /// pass 2b skips both, so charging a scratch for them would refuse folds for work nothing does.
-fn term_image_estimate(dict_len: u64, base_rows: u64) -> u64 {
+fn term_image_estimate(dict_len: u64, permutation_bound: u64, base_rows: u64) -> u64 {
     if dict_len == 0 || base_rows == 0 {
         return 0;
     }
-    let image = base_rows
-        .div_ceil(ROWS_PER_CONTAINER)
-        .saturating_mul(IMAGE_BYTES_PER_CONTAINER);
-    (TERM_IMAGE_THREADS as u64).saturating_mul(image.saturating_add(PROJECT_SCRATCH_BYTES))
+    let widest = |values: u64| {
+        values
+            .div_ceil(VALUES_PER_CONTAINER)
+            .saturating_mul(BYTES_PER_BITSET_CONTAINER)
+    };
+    let held = widest(permutation_bound)
+        .saturating_add(widest(base_rows))
+        .saturating_add(PROJECT_SCRATCH_BYTES);
+    (TERM_IMAGE_THREADS as u64).saturating_mul(held)
 }
 
 /// What one Roaring container costs resident, in bytes — the artifact pass's whole price model.
@@ -2991,14 +3006,16 @@ mod tests {
         assert_eq!(memory_estimate(0, 0, 1_000, 0, 0), 8 * 1_000 * 2);
     }
 
-    /// **Pass 2b is charged one image and one scratch, and only where it runs.** The image is a
-    /// ceiling of a bitset container per 65 536 rows, so the term moves with the rows and not with
-    /// the terms. The scratch is flat.
+    /// **Pass 2b is charged one posting, one image and one scratch, and only where it runs.** The
+    /// posting and the image are ceilings of a bitset container per 65 536 entities and per 65 536
+    /// rows, so the term moves with entity space and with the view's rows and not with the
+    /// dictionary. The scratch is flat.
     ///
     /// Kills the mutation that charges the scratch to a fold with nothing to project, which would
-    /// refuse folds on a small host for work the pass skips.
+    /// refuse folds on a small host for work the pass skips, and the one that drops either
+    /// bitmap.
     #[test]
-    fn the_estimate_charges_one_term_image_and_one_scratch() {
+    fn the_estimate_charges_one_posting_one_image_and_one_scratch() {
         assert_eq!(
             memory_estimate(0, 0, 0, 0, 1_000_000),
             0,
@@ -3009,18 +3026,25 @@ mod tests {
             8 * 2,
             "a view with no row gets none either, so only the dictionary term is charged"
         );
-        // One container's rows, one term: one 8 KiB image and the scratch.
+        // One container of rows and no entity space: one 8 KiB image and the scratch.
         assert_eq!(
-            memory_estimate(0, 0, 1, 0, ROWS_PER_CONTAINER),
-            (8 + IMAGE_BYTES_PER_CONTAINER + PROJECT_SCRATCH_BYTES) * FOLD_MEMORY_SAFETY_FACTOR
+            memory_estimate(0, 0, 1, 0, VALUES_PER_CONTAINER),
+            (8 + BYTES_PER_BITSET_CONTAINER + PROJECT_SCRATCH_BYTES) * FOLD_MEMORY_SAFETY_FACTOR
         );
         // One row past it takes a second container, and nothing else moves.
         assert_eq!(
-            memory_estimate(0, 0, 1, 0, ROWS_PER_CONTAINER + 1),
-            (8 + 2 * IMAGE_BYTES_PER_CONTAINER + PROJECT_SCRATCH_BYTES) * FOLD_MEMORY_SAFETY_FACTOR
+            memory_estimate(0, 0, 1, 0, VALUES_PER_CONTAINER + 1),
+            (8 + 2 * BYTES_PER_BITSET_CONTAINER + PROJECT_SCRATCH_BYTES)
+                * FOLD_MEMORY_SAFETY_FACTOR
+        );
+        // The posting rides on the permutation bound, above the 4 B/entity the mapped array costs.
+        assert_eq!(
+            memory_estimate(VALUES_PER_CONTAINER, 0, 1, 0, VALUES_PER_CONTAINER),
+            (4 * VALUES_PER_CONTAINER + 8 + 2 * BYTES_PER_BITSET_CONTAINER + PROJECT_SCRATCH_BYTES)
+                * FOLD_MEMORY_SAFETY_FACTOR
         );
         // The memo's figure at rung 6: ~437 MB of image at 3.5×10⁹ rows.
-        let image = term_image_estimate(1, 3_500_000_000) - PROJECT_SCRATCH_BYTES;
+        let image = term_image_estimate(1, 0, 3_500_000_000) - PROJECT_SCRATCH_BYTES;
         assert!(
             (430_000_000..=445_000_000).contains(&image),
             "the widest image at 3.5×10⁹ rows is {image} B, against the memo's ~437 MB"

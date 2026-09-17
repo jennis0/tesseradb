@@ -8275,9 +8275,12 @@ impl Executor {
                 .with_artifacts(|store| store.levels_moved_by(&executed)),
             retired: executed.clone(),
         };
-        // **One counter for the whole publication.** Every derived file this fold writes is named
-        // from it, so no two of these calls can name the same file — see
-        // `tessera_store::derived::DerivedIndex`.
+        // **One counter for the whole publication.** Every derived file the executor writes below
+        // is named from it, so no two of these calls can name the same file — see
+        // `tessera_store::derived::DerivedIndex`. Pass 2b's term images are named from a second
+        // counter, on the fold thread, from the number a build uses: the two counters cover
+        // disjoint kinds, and `compact::TERM_IMAGE_MANIFEST_N` carries why that pass cannot use
+        // this one.
         let mut derived_index = tessera_store::derived::DerivedIndex::default();
         let containment = self.write_containment_partitions(
             &to_prefix_dir,
