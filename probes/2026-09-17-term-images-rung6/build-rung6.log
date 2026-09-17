@@ -1,0 +1,70 @@
+Running scope as unit: run-r6d03d0b46370421fab72e9391acf74f1.scope
+view 'geo': web_mercator, quantising against x [0, 1], y [0, 1]
+        asked for lon [-180, 180], lat [-85.0511287798066, 85.0511287798066] — snapped outward to the square at z0 (0, 0), lon [-180, 180], lat [-85.05112877980659, 85.0511287798066]
+        the data spans x [0, 1], y [0, 1] — 65536 x 65536 of the 65536 x 65536 cells
+        3495729729 point(s) placed, none clamped onto the frame's edge
+        66037 of 3495729729 point(s) (0.0%) CLIPPED at web_mercator's ±85.0511287798066° domain — stored on the frame's edge, not where they were written. Built anyway at any proportion: the domain is the projection's own boundary and no frame moves it, so a real tail beyond it is the wrong projection for this corpus rather than the wrong frame
+schema: 4 column(s), 1.00 B/row against the 12 B fixed row (+8%)
+        0.93 GiB per 10^9 items — unalterable without rewriting the corpus
+        every column materialises in EVERY view — including ones whose items carry no value for it (§3.9). Per-view columns need contracts §2.6's per-view enumeration
+tessera build: commit c21c9b4856a5ecaf770e2771ca0950b893d33547
+stage       source_ids     84.11s  rows=3495729729   peak=   624 MiB
+stage       dictionary   1481.44s  rows=1399206      peak=  1343 MiB
+columns: 2 of 2 string column(s) spill their characters as record-blob extents, the entity-order stages modelling 191360 MiB of scratch against 347610 MiB free: specieskey (no room for its arena), scientificname (no room for its arena)
+warning: this build's entity-order stages need at least 20094 MiB against a 24576 MiB budget, and that figure is a lower bound — it counts what the stages hold, not the readers and allocator around them (measured at roughly half the real peak). These stages do not batch. Where the bytes are:
+       6144 MiB  268435456 member entr(ies) in one publication batch at 24 B — the publication's own Roaring, while the batch it is publishing is in flight (the largest level holds 3495729729)
+       5000 MiB  the term images, over 4 worker(s): one term's posting, its image and the buffer it is frozen into, each at a bitset container per 65,536 values
+       1666 MiB  arrow's all-ones validity bitmaps over 4 column(s) at n/8 bytes each, alive together              while the columns.arrow layout is learnt
+       1482 MiB  the artifact pass's (row, ordinal) partition: 128 MiB of writer buffers, one loaded bucket of 81931165 member entries at 8 B each and the 8 B keys it is sorted into, and the u32 window the list form counts its rows in
+       1322 MiB  the segment assembly: a 128 MiB Morton histogram, the row partition's 257 MiB of writer buffers, and one bucket of 27310388 records held as the 12 B it was written at and the 24 B it is sorted as
+        833 MiB  declared column 1 (keyword): the duplicate map over its extents, two whole-column Roaring bitmaps at 416 MiB apiece
+        833 MiB  declared column 3 (keyword): the duplicate map over its extents, two whole-column Roaring bitmaps at 416 MiB apiece
+        833 MiB  the two further whole-column Roaring bitmaps held while one spilled column's duplicate map is built, at 416 MiB apiece
+        698 MiB  the assembly's (entity, row) and 1 (row, value) partition(s): writer buffers, the loaded pairs bucket at 8 B a record, and one lane's bucket at up to 6 B a record, the window it is placed in and a byte a row saying which rows it filled
+        464 MiB  the attribute join's 2 value partition(s): 128 MiB of writer buffers each, and one loaded bucket and window at the widest column's 6 B a record over the 27310388 records a bucket holds
+        440 MiB  the keyword dictionary's (row, ordinal) partition: writer buffers, one loaded bucket at 8 B a record and the u32 window it is scattered into
+        310 MiB  the term images' projection scratch, 77 MiB over 4 worker(s)
+         64 MiB  slack for decode buffers, stage scratch and the allocator
+      69730 MiB (mapped)  declared column 3 (keyword): 69730 MiB of extents in .build-tmp/, modelled at half the source's 106123 MiB of characters and their row framing
+      40005 MiB (mapped)  the member spill's runs and the table they merge into, at an estimate of 4 B a member entry, in .build-tmp/
+      30004 MiB (mapped)  the published memberships the store reads back through the packed extent, at an estimate of 3 B a member entry
+      27450 MiB (mapped)  declared column 1 (keyword): 27450 MiB of extents in .build-tmp/, modelled at half the source's 21562 MiB of characters and their row framing
+      13335 MiB (mapped)  the ordinal→entity map, 4 B/item, in .build-tmp/
+       7084 MiB (mapped)  declared column 2 (u16): 2 B/item, in .build-tmp/
+       3750 MiB (mapped)  declared column 0 (u8): 1 B/item, in .build-tmp/
+disk: ~570133 MiB at peak, in the assembly phase (spill 121108 MiB) (band 185889 MiB) (join 330030 MiB) (index 360831 MiB) (blob 338573 MiB) (assembly 570133 MiB)
+warning: this build is forecast to need ~597828352791 bytes at peak, in the assembly phase (n = 3495729729, pairs = 10124084726, batches = 15), against 364495876096 available at the output path. The forecast is a model, not a measurement — each term below says whether it is an exact width, a ceiling or an estimate — so the build goes on. If it does run out, the error names the file it could not reserve and the partial bundle is swept. Where that phase's bytes are:
+      97930 MiB  each view's segment, permutation and row→entity files, over 1 view(s)
+      80010 MiB  the artifact pass's (row, ordinal) partition buckets, at 8 B a member entry of the largest layer, in .build-tmp/
+      69730 MiB  the record blob: its blocks modelled at half the 106123 MiB of characters its columns carry and the 33337 MiB of row framing around them
+      51955 MiB  the entity→term transpose, 4 B/item of offsets and a ceiling of 4 B/pair of terms
+      40005 MiB  the assembly's row partition, 12 B/row — (morton, residual, entity) in .build-tmp/, one view at a time
+      40005 MiB  the artifact pass's row-column lanes, at a ceiling of 4 B an ordinal over the levels and the views each layer draws on
+      30004 MiB  the published memberships the store reads back through the packed extent, at an estimate of 3 B a member entry
+      29897 MiB  attribute 'specieskey': dict.bin, at a ceiling of the column's 21562 MiB of characters and 2.5 B a key over one key a row
+      26670 MiB  each view's geometry by ordinal, 8 B/item over 1 view(s), in .build-tmp/
+      26670 MiB  the assembly's (entity, row) partition, 8 B/row, in .build-tmp/ — the permutation's and every render column's input
+      22662 MiB  postings.arrow, one record over each of 1399206 term(s) at its own row count — 8 B of Arrow offset and a tag each, then 4 B an entity below 32 of them and a ceiling of Roaring above
+      16668 MiB  the assembly's 1 render (row, value) partition(s), 5 B/row in all, in .build-tmp/ — every lane filled by the one pass over the pairs
+      13751 MiB  attribute 'specieskey': its value column at 4 B/item and its presence bitmap
+      13335 MiB  the ordinal→entity map, 4 B/item, in .build-tmp/
+       7084 MiB  attribute 'year': its value column at 2 B/item and its presence bitmap
+       3750 MiB  declared column 0 (u8): 1 B/item, in .build-tmp/
+batching: 15 batches of <= 234881024 items (signature order is per-batch — §11.1 r23; recorded in provenance; a rebuild preserving this identity must replay it)
+stage    geometry_read   1359.36s  rows=3495729729   peak= 10228 MiB
+stage       pairs_pack      0.87s  rows=10124084726  peak= 10228 MiB
+stage   signature_sort     30.62s  rows=234881024    peak= 16703 MiB
+stage       assignment     86.72s  rows=234881024    peak= 16928 MiB
+stage   signature_sort     24.17s  rows=234881024    peak= 17728 MiB
+stage       assignment     72.06s  rows=234881024    peak= 17728 MiB
+stage   signature_sort     27.97s  rows=234881024    peak= 17728 MiB
+stage       assignment     58.71s  rows=234881024    peak= 17728 MiB
+stage   signature_sort     28.92s  rows=234881024    peak= 17728 MiB
+stage       assignment     70.04s  rows=234881024    peak= 17728 MiB
+stage   signature_sort     29.10s  rows=234881024    peak= 17785 MiB
+stage       assignment     86.78s  rows=234881024    peak= 17785 MiB
+stage   signature_sort     40.77s  rows=234881024    peak= 17939 MiB
+stage       assignment     97.31s  rows=234881024    peak= 17939 MiB
+stage   signature_sort     45.16s  rows=234881024    peak= 17939 MiB
+swept the partial bundle at /home/joe/code/tessera/data/ladder/gbif-terms/bundle/v00000: this build wrote no CURRENT, so nothing names it and a retry has the disk back
+build FAILED: invalid input: entity-terms transpose: invalid entity-terms transpose at /home/joe/code/tessera/data/ladder/gbif-terms/bundle/v00000/partitions/default/entities/terms/terms.u32: the layer's term count passes u32::MAX at entity 1531658054

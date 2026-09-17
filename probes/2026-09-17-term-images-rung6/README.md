@@ -417,3 +417,82 @@ bracket's own spread; the reading that put it at 8.7× was the dispatch the wind
 
 Scaling the whole fold by rows gives 2.0 h, which is **not** reported as a rung 6 fold estimate:
 `4c entity terms` and `8 derived` are two thirds of the fold here and neither is linear in rows.
+
+## The rung 6 build is refused by the entity-terms transpose, and the corpus cannot be built as ruled
+
+Status: measured 2026-09-17, commit `3993133a` (this branch after main's `b08413f1`). The build ran
+under `systemd-run --user --scope -p MemoryMax=24G -p MemorySwapMax=2G`, `nice -n 10`, and failed
+after **1 h 08 m 47 s** with:
+
+```
+build FAILED: invalid input: entity-terms transpose: invalid entity-terms transpose at
+.../entities/terms/terms.u32: the layer's term count passes u32::MAX at entity 1531658054
+```
+
+**This is a format ceiling, not a resource failure.** `entities/terms/offsets.u32` is one `u32`
+start offset per entity into `terms.u32` (`tessera_store::entity_terms`, contracts §2.4), so a
+partition's entity-terms layer holds at most **4,294,967,295 pairs**. Disk was never a constraint:
+340 GB was free when it stopped, the partial prefix was swept as designed, and the memory cap was
+never approached (the largest stage peak was 17.9 GiB of a 24 GiB cap).
+
+| | pairs | against the ceiling |
+|---|---|---|
+| rung 6 as built today, country only | 3,495,729,729 | 81.4% — fits |
+| **ruling D, country + year + species** | **10,124,084,726** | **2.36× — refused** |
+
+At 3,495,729,729 rows the ceiling allows **1.229 terms a row**. Ruling D asks for 2.896. Measured
+from the corpus census, any **two** of the three term classes also overflow:
+
+| access column | pairs | |
+|---|---|---|
+| country alone | 3,495,729,729 | fits |
+| year alone | 3,407,218,226 | fits |
+| species alone | 3,221,136,771 | fits |
+| country + year | 6,902,947,955 | refused |
+| country + species | 6,716,866,500 | refused |
+| year + species | 6,628,354,997 | refused |
+| country + year + species | 10,124,084,726 | refused |
+
+All three classes together fit up to **42.4% of the corpus, 1,483,002,688 rows**, which is where
+the failure landed: entity 1,531,658,054, 43.8% in.
+
+### What it cost, and what the stages said before it stopped
+
+The stages that ran are worth keeping: they are the first measurement of what the access column
+costs at this scale, and they correct the Part A pre-flight.
+
+| stage | rung 6, country only (§4d) | ruling D, measured | ratio | the pre-flight's model |
+|---|---|---|---|---|
+| `source_ids` | 81 s | 84.1 s | 1.04 | 149 s |
+| `dictionary` | 156 s | **1,481.4 s** | 9.50 | 1,760 to 2,470 s |
+| `geometry_read` | 354 s | **1,359.4 s** | 3.84 | 940 to 1,330 s |
+| `pairs_pack` | — | 0.9 s | — | — |
+| batch loop, 8 of 15 batches | — | sorts 226.7 s, assignments 471.6 s | — | sorts 260 to 400 s, assignments 1,490 s (15 batches) |
+
+The pre-flight **over**-forecast `dictionary` by 16 to 40% and **under**-forecast `geometry_read` by
+2 to 31%. Both were scaled from the 64-part rung's ratios, and both are within the spread that
+scaling deserves. The batch loop is 15 batches of 234,881,024 items rather than §4d's ten, because a
+batch is bounded by pairs and there are 2.9× more of them.
+
+⊘ The build's own disk forecast printed **597.8 GB at peak against 364.5 GB available** and went on,
+as it is designed to. It was never tested: the transpose refused first. §4d records the same
+forecast overstating by more than twice.
+
+### This needs an owner ruling
+
+Ruling D's corpus cannot be built at rung 6 as it stands. The options, with what each costs:
+
+- **a. Widen the transpose's offsets to `u64`.** A bundle format bump and a reader change in
+  `entity_terms`. `offsets.u64` at rung 6 is 28.0 GB against 14.0 GB, so the bundle grows about
+  14 GB beyond the Part A model's 248 GB. This is the only option that keeps ruling D's corpus.
+- **b. One term class a row instead of three.** Any single class fits. It abandons what ruling D
+  asked for: a principal shaped like a user's term set needs the species class beside the
+  compartment.
+- **c. Measure at 42% of the corpus**, 1.48×10⁹ rows, keeping all three classes and the whole
+  dictionary shape. A billion-row rung is still a billion-row rung, and this is the only option
+  that needs no code change. It is not rung 6.
+- **d. Leave the measurement at the 64-part rung**, which is built, measured and complete in this
+  directory. It says nothing about the disk-bound behaviour a 3.5×10⁹-row permutation has.
+
+The 64-part rung's Part B and pass 2b figures above stand: they were taken on a built bundle and
+nothing here changes them.
