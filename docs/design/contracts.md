@@ -717,7 +717,7 @@ Each is **complete** for its partition — full current state, not a diff — so
 
 | part | contents |
 |---|---|
-| header | magic, header version, `keep_rows_per_container` (30), `dict_len`, the table and payload offsets, and the stamp: the partition prefix and view hashed together, the base segment's `seg_id`, the view's incarnation, its row count and the permutation's bound |
+| header | magic, header version, `keep_rows_per_container` (30), `dict_len`, the table and payload offsets, and the stamp: a SHA-256 over the partition prefix, the view and the base segment's `seg_id` together, plus the view's incarnation, its base row count and the permutation's bound as plain fields |
 | table | one entry per term id, dense by id: the image's offset (zero where none was kept), its length, its row and container counts, and the base posting's own entity count |
 | payload | the kept images, in CRoaring frozen form, each 32-byte aligned, in term order |
 
