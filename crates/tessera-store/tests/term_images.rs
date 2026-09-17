@@ -262,6 +262,57 @@ fn every_parallel_width_writes_the_same_bytes() {
     );
 }
 
+/// A window that keeps nothing writes nothing, and the file is still the same at every width.
+#[test]
+fn a_window_holding_no_kept_image_writes_the_same_bytes_at_every_width() {
+    const BOUND: u64 = 3 << 16;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut rng = StdRng::seed_from_u64(43);
+    let entities = row_order(BOUND, 0.9, Some(1), &mut rng);
+    let space = space_of(dir.path(), &entities, BOUND);
+
+    // Thirty-six terms, three windows of twelve at three threads. The middle twelve are postings
+    // of thirty entities, which the derivation skips, so that window contributes no payload.
+    let mut postings = mixed_postings(36, BOUND, &mut rng);
+    for posting in postings.iter_mut().take(24).skip(12) {
+        *posting = Bitmap::new();
+        for _ in 0..KEEP_ROWS_PER_CONTAINER {
+            posting.add(rng.gen_range(0..BOUND) as u32);
+        }
+    }
+
+    let mut reference: Option<Vec<u8>> = None;
+    for threads in [1usize, 3] {
+        let out = dir.path().join(format!("gap-{threads}.timg"));
+        derive(&space, &postings, &out, threads).expect("derive");
+        let bytes = std::fs::read(&out).expect("read");
+        match &reference {
+            None => reference = Some(bytes),
+            Some(first) => assert_eq!(
+                first, &bytes,
+                "{threads} threads must write the bytes one thread writes across an empty window"
+            ),
+        }
+    }
+
+    let out = dir.path().join("gap-1.timg");
+    let images = TermImages::open(&out, &stamp_of(&space), 36).expect("opens");
+    for term in 12..24u32 {
+        assert!(
+            !images.kept(TermId::new(term)),
+            "term {term} is a skipped posting, so the middle window keeps nothing"
+        );
+    }
+    assert!(
+        (0..12u32).any(|term| images.kept(TermId::new(term))),
+        "the first window must keep an image"
+    );
+    assert!(
+        (24..36u32).any(|term| images.kept(TermId::new(term))),
+        "the last window must keep an image"
+    );
+}
+
 /// The exactness the split route rests on: for any kept subset K and any S between the residual and
 /// the whole fragment, the union of K's images with the projection of S is the projection of the
 /// fragment.
