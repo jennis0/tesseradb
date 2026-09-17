@@ -244,9 +244,9 @@ pub struct ExecutorHealth {
     /// without a floor a node whose gate is shut would re-plan fifty times a second. The floor is
     /// [`FAILED_CYCLE_RETRY`]; a period or a row trip is never held back by it.
     failed_cycle_nanos: AtomicU64,
-    /// The last gate refusal that was logged, on the same footing, so a held-open cycle's retry
-    /// does not turn one operator condition into a line a second.
-    gate_warned_nanos: AtomicU64,
+    /// The last publication refusal that was logged, on the same footing, so a held-open cycle's
+    /// retry does not turn one operator condition into a line a second.
+    refusal_logged_nanos: AtomicU64,
     /// Whether a flush is executing on the pool. A tick arriving while it is set is skipped, never
     /// queued: two concurrent flushes would double-consume the buffer range (§1.1). Set by the
     /// executor before the spawn, cleared by the pool after its sends, and read by
@@ -1033,7 +1033,7 @@ impl ExecutorHealth {
             publication: Mutex::new(PublicationCycle::default()),
             deferred_plans: AtomicBool::new(false),
             failed_cycle_nanos: AtomicU64::new(0),
-            gate_warned_nanos: AtomicU64::new(0),
+            refusal_logged_nanos: AtomicU64::new(0),
             flush_in_flight: AtomicBool::new(false),
             flush_completed_pending: AtomicBool::new(false),
             overlay_diverged: AtomicBool::new(false),
@@ -1216,7 +1216,7 @@ impl ExecutorHealth {
             cycle.open = false;
         }
         self.failed_cycle_nanos.store(0, Ordering::Relaxed);
-        self.gate_warned_nanos.store(0, Ordering::Relaxed);
+        self.refusal_logged_nanos.store(0, Ordering::Relaxed);
     }
 
     /// The cycle published nothing it was asked to publish: hold it open and re-arm the request.
@@ -1244,14 +1244,21 @@ impl ExecutorHealth {
             .filter(|remaining| !remaining.is_zero())
     }
 
-    /// Whether a gate refusal is due to be logged, at most one per tick period.
-    pub(crate) fn gate_warn_due(&self) -> bool {
+    /// Whether a publication refusal is due to be logged, at most one per tick period.
+    ///
+    /// Every condition this throttles stands until an operator acts: a poisoned WAL, a diverged
+    /// overlay, an analyser this binary does not carry, a view the manifest does not declare, a
+    /// row space at the `u32` ceiling. A failed cycle re-arms its request and retries at [`FAILED_CYCLE_RETRY`], so
+    /// logging each one where it is found would turn one condition into a line a second. The
+    /// counters beside them (`flush_failures`) move every time, which is what an operator alarms
+    /// on; the line is what says which condition it is.
+    pub(crate) fn refusal_log_due(&self) -> bool {
         let period = self.flush_period_nanos.load(Ordering::Relaxed);
-        let marker = self.gate_warned_nanos.load(Ordering::Relaxed);
-        if marker != 0 && self.elapsed_since_marker(&self.gate_warned_nanos) < period {
+        let marker = self.refusal_logged_nanos.load(Ordering::Relaxed);
+        if marker != 0 && self.elapsed_since_marker(&self.refusal_logged_nanos) < period {
             return false;
         }
-        self.set_marker(&self.gate_warned_nanos, std::time::Instant::now());
+        self.set_marker(&self.refusal_logged_nanos, std::time::Instant::now());
         true
     }
 
@@ -6863,9 +6870,14 @@ impl Executor {
         // `POST /control/flush` sets the flag and rings the doorbell, and the tick fires here, on
         // this one path, at the next loop iteration — so everything a tick guarantees (one flush
         // in flight, plan gates, rebase, retention) holds for an operator-triggered flush exactly
-        // as for a scheduled one. The publish-on-trip hazard that killed `flush_max_items`
-        // (a publication period proportional to ingest rate) does not apply: this trigger is an
-        // operator action, rate-decoupled from ingest by construction.
+        // as for a scheduled one. **What keeps the publish-on-trip hazard that killed
+        // `flush_max_items` away is now the caller.** An operator's `POST /control/flush` has a
+        // rate of its own, unrelated to ingest. A write sent with `wait=visible` (contracts §3.4)
+        // requests a tick too, so a loader that set the parameter on every page would publish
+        // once per page, which is the publication period proportional to ingest rate that
+        // decision 0045 removed, and would rotate every session's projection key at its own send
+        // rate. The parameter is for a single writer reading back what it just wrote; a loader
+        // sends its pages without it and one flush at the end.
         // **The occupancy the executor itself maintains**, not a count derived from a generation
         // this thread would have to load: `apply_window` and every flush publication store it, so
         // the trigger reads the same figure `/control/ingest`'s 429 is checked against.
@@ -6890,12 +6902,12 @@ impl Executor {
         if !due && self.health.failed_cycle_backoff().is_some() {
             return;
         }
-        // **At most one flush in flight**, read once here and not again at the gate below,
-        // because the publication cycle turns on it: a tick that will skip publishes into the
-        // cycle the running flush already opened, and a tick that will go on to dispatch opens
-        // one of its own before it publishes anything. Two reads could disagree. The value goes
-        // stale only in the direction of a flush having landed, which costs the skipped tick
-        // nothing it did not already risk.
+        // **At most one flush in flight**, read once here and not again below, because the
+        // publication cycle turns on it: a tick that will skip publishes into the cycle the
+        // running flush already opened, and a tick that will go on to dispatch opens one of its
+        // own before it publishes anything. Two reads could disagree. The value goes stale only
+        // in the direction of a flush having landed, which costs the skipped tick nothing it did
+        // not already risk.
         let flush_in_flight = self.health.flush_in_flight.load(Ordering::SeqCst);
         if !flush_in_flight {
             // **The cycle opens before anything is published**, and consumes the flush request it
@@ -7011,10 +7023,10 @@ impl Executor {
                 Err(crate::flush::NoFlush::NothingToFlush) => {}
                 Err(refusal) => {
                     gated = true;
-                    // Once per period, and deliberately: a gated node is gated until an operator
-                    // acts, and a cycle held open by the gate re-arms its request, so the tick
-                    // comes round at the retry floor rather than at the period.
-                    if self.health.gate_warn_due() {
+                    // Once per period. The refusal stands until an operator acts, and the cycle
+                    // it holds open re-arms its request, so the tick comes round at the retry
+                    // floor.
+                    if self.health.refusal_log_due() {
                         tracing::warn!(
                             view = %view,
                             gate = ?refusal,
@@ -7038,10 +7050,10 @@ impl Executor {
             // regime. See `rotate_if_grown`.
             self.rotate_if_grown();
             if gated {
-                // **A shut gate is an unpublished cycle, not an empty one.** The rows are still
-                // buffered and the overlay still holds what a publication would have carried, so
-                // the counter must not move past them; the cycle stays open and the request stays
-                // armed until the gate clears (`ExecutorHealth::fail_publication_cycle`).
+                // **A refused plan leaves an unpublished cycle.** The rows are still buffered and
+                // the overlay still holds what a publication would have carried, so the counter
+                // must not move past them: the cycle stays open and the request stays armed until
+                // the refusal clears (`ExecutorHealth::fail_publication_cycle`).
                 self.note_publication_failure();
             } else {
                 // Every view answered "nothing buffered", so this cycle's publication is the
@@ -10048,11 +10060,15 @@ impl Executor {
             Ok(schema) => schema,
             Err(e) => {
                 self.health.flush_failures.fetch_add(1, Ordering::Relaxed);
-                tracing::error!(
-                    error = %e.0,
-                    "ALARM: a text column's analyser is not one this binary carries; no flush is \
-                     dispatched, and the buffer is retained"
-                );
+                // Once per period: the condition stands until the binary changes, and a failed
+                // cycle retries at `FAILED_CYCLE_RETRY` (`ExecutorHealth::refusal_log_due`).
+                if self.health.refusal_log_due() {
+                    tracing::error!(
+                        error = %e.0,
+                        "ALARM: a text column's analyser is not one this binary carries; no flush \
+                         is dispatched, and the buffer is retained"
+                    );
+                }
                 return false;
             }
         };
@@ -10106,31 +10122,37 @@ impl Executor {
             // scoped column this flush writes, and on every extent — which is what stops a key
             // created again from adopting them.
             let Some(incarnation) = manifest.incarnation_of(&view) else {
-                tracing::error!(
-                    view = %view,
-                    "a flush plan names a view this bundle's manifest does not declare, so its \
-                     incarnation cannot be resolved; the plan is dropped and the buffer is \
-                     retained"
-                );
+                if self.health.refusal_log_due() {
+                    tracing::error!(
+                        view = %view,
+                        "a flush plan names a view this bundle's manifest does not declare, so \
+                         its incarnation cannot be resolved; the plan is dropped and the buffer \
+                         is retained"
+                    );
+                }
                 return false;
             };
             let Some(quantisation) = manifest.quantisation_of(&view) else {
-                tracing::error!(
-                    view = %view,
-                    "a flush plan names a view this bundle's manifest does not declare, so \
-                     there is no frame to quantise its rows against; the plan is dropped \
-                     and the buffer is retained"
-                );
+                if self.health.refusal_log_due() {
+                    tracing::error!(
+                        view = %view,
+                        "a flush plan names a view this bundle's manifest does not declare, so \
+                         there is no frame to quantise its rows against; the plan is dropped \
+                         and the buffer is retained"
+                    );
+                }
                 return false;
             };
             let Ok(row_base) = u32::try_from(view_data.row_space.total_rows()) else {
                 // Row ids are `u32` (bundle_format 1). A view that has crossed 2^32 rows cannot
                 // take another segment, and saying so is better than wrapping into row 0.
-                tracing::error!(
-                    view = %view,
-                    "ALARM: this view's row space has reached the u32 ceiling; no further flush \
-                     can address it. The deployment must be compacted or re-sharded"
-                );
+                if self.health.refusal_log_due() {
+                    tracing::error!(
+                        view = %view,
+                        "ALARM: this view's row space has reached the u32 ceiling; no further \
+                         flush can address it. The deployment must be compacted or re-sharded"
+                    );
+                }
                 return false;
             };
 
@@ -10170,10 +10192,12 @@ impl Executor {
                 // Fail closed (decision 0115): an owner view the manifest cannot place is a
                 // bundle whose halves disagree, and flushing under a guessed incarnation is how
                 // a dropped view's predecessor adopts rows.
-                tracing::error!(
-                    view = %scoped_view,
-                    "ALARM: no incarnation for the owner view; no flush is planned this tick"
-                );
+                if self.health.refusal_log_due() {
+                    tracing::error!(
+                        view = %scoped_view,
+                        "ALARM: no incarnation for the owner view; no flush is planned this tick"
+                    );
+                }
                 return false;
             };
             let scoped_schema: Vec<crate::flush::ScopedColumnSpec> = match families
@@ -10206,11 +10230,13 @@ impl Executor {
                     // indexed prose with a pipeline the base was not built by leaves one column
                     // whose two layers disagree about what a word is.
                     self.health.flush_failures.fetch_add(1, Ordering::Relaxed);
-                    tracing::error!(
-                        error = %e,
-                        "ALARM: a group-scoped text family's analyser is not one this binary \
-                         carries; no flush is dispatched, and the buffer is retained"
-                    );
+                    if self.health.refusal_log_due() {
+                        tracing::error!(
+                            error = %e,
+                            "ALARM: a group-scoped text family's analyser is not one this binary \
+                             carries; no flush is dispatched, and the buffer is retained"
+                        );
+                    }
                     return false;
                 }
             };

@@ -144,6 +144,31 @@ async fn filtered(server: &TestServer, filters: Value) -> BTreeSet<u64> {
     points.into_iter().map(|(id, _)| id).collect()
 }
 
+/// The `tessera_id`s `s0` serves from a small box around one point, from a fresh session. Small
+/// enough that the fixture's own rows, which sit on a grid across the frame, cannot fill the k
+/// budget and hide the row a test is asking about.
+async fn points_near(server: &TestServer, x: f64, y: f64) -> BTreeSet<u64> {
+    let token = authorise(server, &["0", "1"][..]).await["token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let resp = server
+        .client
+        .post(server.viewer_url("/v1/viewport"))
+        .bearer_auth(&token)
+        .json(&json!({
+            "view": "s0", "zoom": 12,
+            "bbox": [x - 2.0, y - 2.0, x + 2.0, y + 2.0],
+            "k": 200
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 200);
+    let (_, points) = decode_viewport(&resp.bytes().await.unwrap());
+    points.into_iter().map(|(id, _)| id).collect()
+}
+
 /// The `tessera_id`s one view serves, from a fresh session.
 async fn points_in(server: &TestServer, view: &str) -> BTreeSet<u64> {
     let token = authorise(server, &["0", "1"][..]).await["token"]
@@ -304,51 +329,26 @@ async fn an_artifacts_only_commit_is_served_once_the_counter_reaches_the_answer(
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_flush_requested_while_a_cycle_is_open_is_answered_two_ahead() {
     let tmp = TempDir::new().unwrap();
-    let server = serve(&tmp).await;
+    let (server, faults) = serve_with_faults(&tmp).await;
 
-    // Enough rows that the cycle's segment write is comfortably longer than the two calls below.
-    let rows: Vec<Value> = (0..5_000u64)
-        .map(|i| {
-            json!({
-                "external_id": b64(format!("p{i}").as_bytes()),
-                "x": (i % 1000) as f64,
-                "y": ((i * 7) % 1000) as f64,
-                "access": ["0"],
-            })
-        })
-        .collect();
-    let resp = server
-        .client
-        .post(server.control_url("/control/ingest"))
-        .bearer_auth(OPERATOR_CREDENTIAL)
-        .header("x-tessera-batch-id", "points-1")
-        .header("x-tessera-view", "s0")
-        .json(&Value::Array(rows))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status().as_u16(), 200);
+    // The cycle is held open at the publication seam, so the second request below is made against
+    // an open cycle as a fact rather than as a race against a segment write.
+    faults.arm_pause(
+        tessera_lifecycle::faults::PauseSite::BeforeManifestPublish,
+        tessera_lifecycle::faults::PauseAction::Stall,
+    );
 
+    ingest_one(&server, "two-ahead-1", &external_id_of(N_ITEMS + 1)).await;
     let first = request_flush(&server).await;
-
-    // Wait until the cycle has a flush on the pool, so the second request is made against an open
-    // one rather than against a quiet executor.
-    let deadline = std::time::Instant::now() + DEADLINE;
-    while !server.state.engine.write_executor_stats().flush_in_flight {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the flush never reached the pool"
-        );
-        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
-    }
+    await_seam(&faults).await;
 
     let completed = server.state.engine.publication();
     let second = request_flush(&server).await;
 
-    assert!(
-        second >= completed + 2,
-        "a request made while a cycle is open must name the cycle after it: completed \
-         {completed}, answered {second}"
+    assert_eq!(
+        second,
+        completed + 2,
+        "a request made while a cycle is open names the cycle after it"
     );
     assert_eq!(
         second,
@@ -356,6 +356,7 @@ async fn a_flush_requested_while_a_cycle_is_open_is_answered_two_ahead() {
         "and the two requests are one cycle apart, the first cycle being the one already under way"
     );
 
+    faults.release();
     await_publication(&server, second).await;
     assert_eq!(
         server.state.engine.buffered_items(),
@@ -481,8 +482,11 @@ async fn a_request_made_during_an_open_cycle_is_honoured_at_its_completion() {
     engine
         .start_write_executor_with_faults(1024, Arc::clone(&faults))
         .expect("the write executor starts once per engine");
-    let server = mount_server_with_faults(engine, max_k, generous_test_gate(), faults).await;
+    let server =
+        mount_server_with_faults(engine, max_k, generous_test_gate(), Arc::clone(&faults)).await;
 
+    // Armed over HTTP, deliberately: this test is also the one that proves the control plane's
+    // arming surface reaches the executor a request's answer depends on.
     let resp = server
         .client
         .post(server.control_url("/control/faults/arm"))
@@ -514,25 +518,7 @@ async fn a_request_made_during_an_open_cycle_is_honoured_at_its_completion() {
     let first = request_flush(&server).await;
 
     // The executor is parked inside the publication of the cycle `first` names.
-    let deadline = std::time::Instant::now() + DEADLINE;
-    loop {
-        let resp = server
-            .client
-            .get(server.control_url("/control/faults/arrivals?site=before_manifest_publish"))
-            .bearer_auth(OPERATOR_CREDENTIAL)
-            .send()
-            .await
-            .unwrap();
-        let body: Value = resp.json().await.unwrap();
-        if body["arrivals"].as_u64().unwrap() >= 1 {
-            break;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the executor never reached the publication seam"
-        );
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    }
+    await_seam(&faults).await;
     assert!(
         publication(&server).await < first,
         "the parked cycle has published nothing, so its number cannot have been reached"
@@ -590,6 +576,18 @@ async fn serve_with_faults(tmp: &TempDir) -> (TestServer, Arc<FaultSwitchboard>)
     let server =
         mount_server_with_faults(engine, max_k, generous_test_gate(), Arc::clone(&faults)).await;
     (server, faults)
+}
+
+/// Wait until the executor is parked at the publication seam, so a cycle is open as a fact.
+async fn await_seam(faults: &Arc<FaultSwitchboard>) {
+    let deadline = std::time::Instant::now() + DEADLINE;
+    while faults.arrivals(tessera_lifecycle::faults::PauseSite::BeforeManifestPublish) < 1 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the executor never reached the publication seam"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
 }
 
 /// One row into `s0`, accepted.
@@ -686,10 +684,10 @@ async fn post_values(server: &TestServer, batch_id: &str, body: &Value) -> Value
 
 // ---- The counter advances only on a publication ------------------------------------------------
 
-/// **A gated node holds its cycle open.** A poisoned WAL publishes no flush (write-path §4.2), so
-/// the rows are still buffered and the overlay still holds what a publication would have carried.
-/// The number the flush request was answered with must not be reached while that stands, and the
-/// operator plane must say why: the posture names the gate.
+/// **A node whose plan is refused holds its cycle open.** A poisoned WAL publishes no flush
+/// (write-path §4.2), so the rows are still buffered and the overlay still holds what a
+/// publication would have carried. The number the flush request was answered with must not be
+/// reached while that stands, and the operator plane must say why.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_gated_node_does_not_reach_the_number_and_the_posture_says_why() {
     let tmp = TempDir::new().unwrap();
@@ -729,12 +727,12 @@ async fn a_gated_node_does_not_reach_the_number_and_the_posture_says_why() {
 
     // **The operator plane says why**, which is what stops a stalled counter reading as a hung
     // server. The node recovered its WAL in process, so the posture is back to `running`; what
-    // survives the recovery is the incident counter, and the overlay it left behind is the gate
-    // that still stands (write-path §7.2).
+    // survives the recovery is the incident counter, and the overlay it left behind is what still
+    // refuses the plan (write-path §7.2).
     let executor = server.state.engine.write_executor_stats();
     assert!(
         executor.wal_recoveries > 0,
-        "the durability incident that shut the gate is on the operator plane: {executor:?}"
+        "the durability incident behind the refusal is on the operator plane: {executor:?}"
     );
     assert_eq!(
         executor.flushes, 0,
@@ -839,11 +837,16 @@ async fn wait_visible_holds_a_row_page_until_its_rows_are_served() {
         "and every row buffered when it was sent has been published"
     );
 
-    // The read that needs no wait of its own: both rows are served the moment the answer lands.
-    assert_eq!(
-        points_in(&server, "s0").await.len(),
-        200,
-        "the k budget bounds this, so what it proves is that the viewport answers at all"
+    // **The waited row itself is served**, read back by the identifier its acknowledgement
+    // returned. The whole-frame count would prove nothing: the fixture's own thousand rows fill
+    // the k budget whatever this page did.
+    let waited_id = body["tessera_ids"][0]
+        .as_u64()
+        .or_else(|| body["tessera_ids"][0].as_str().and_then(|s| s.parse().ok()))
+        .unwrap_or_else(|| panic!("the acknowledgement names the row it took: {body}"));
+    assert!(
+        points_near(&server, 10.0, 10.0).await.contains(&waited_id),
+        "the row the waited page took is in the viewport with no wait of the reader's own"
     );
 }
 

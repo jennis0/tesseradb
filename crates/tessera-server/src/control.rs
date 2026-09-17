@@ -2343,10 +2343,13 @@ struct IngestResp {
     /// what tells `0` here apart from `0` for an empty batch.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     replayed: bool,
-    /// The cycle this batch's rows become visible in (contracts §3.4). A replay carries the
-    /// cycle the *current* buffer state will publish in, which is the answer to "when can I read
-    /// what this batch id wrote": if its first acceptance has already published, the number is
-    /// one a reader has passed.
+    /// The cycle this batch's rows become visible in (contracts §3.4).
+    ///
+    /// **A replay's number is later than the cycle its rows were published in**, and a caller
+    /// that waits on it waits longer than it needs to. The target is always the next cycle to
+    /// open, so a replay names one that has not happened rather than the one that took the rows;
+    /// waiting on it is sound, because a counter that reaches a later number has passed the
+    /// earlier one, and `replayed` is what tells a caller it is waiting for nothing.
     publication: u64,
     /// `wait=visible` only: whether the counter reached `publication` inside
     /// `serve.visible_wait_max_secs`.
@@ -3346,10 +3349,14 @@ async fn changes(
         .await
         .map_err(map_join_error)??;
 
-    // **The deny is already in force at this point**, which is the whole of decision 0041: the
-    // overlay entry applies to every request from acceptance, and the number below names the
-    // cycle that writes it into the durable overlay state rather than the moment it takes effect.
-    // A caller waiting on it is waiting for a restart to carry the change, not for it to bite.
+    // **The deny is in force and durable when this answer is sent** (decision 0041, write-path
+    // §5.4): the overlay entry applies to every request from acceptance, and the append is fsynced
+    // before the 200. The overlay's own side-manifest is written at every drain close, on its own
+    // schedule, so no publication cycle stands between this answer and the change being both
+    // applied and recoverable. `publication` is carried because every write acknowledgement on
+    // this plane carries it and a client should not have to remember which ones mean something.
+    // No reader needs to wait on it, and `wait=visible` here waits for the next cycle rather than
+    // for this change.
     let mut body = serde_json::json!({});
     publication_ack(&state, &wait).await?.merge(&mut body);
     // R5: `/control/changes` is 200 after fsync, never 429.
@@ -3403,6 +3410,20 @@ impl PublicationAck {
             body["visible"] = serde_json::json!(visible);
         }
     }
+}
+
+/// [`publication_ack`] for a declaration route, where what the number adds is uniformity.
+///
+/// **A declaration is in force from its answer** (`ingest.md` §1.3). It is WAL-durable before the
+/// 201 and resolvable from it, so the next request may name the column, the vocabulary, the layer
+/// or the view, and `/v1/meta` lists it. What a publication adds is the manifest entry that
+/// carries the declaration without a WAL replay, and that lands with the next flush that writes a
+/// segment. **No reader waits on this number**; it is carried because every write acknowledgement
+/// on this plane carries one, and a client should not have to remember which ones mean something.
+/// `wait=visible` on one of these routes waits for the next cycle rather than for the
+/// declaration, which is already in force.
+async fn declaration_ack(state: &AppState, wait: &WaitQuery) -> Result<PublicationAck, ApiError> {
+    publication_ack(state, wait).await
 }
 
 /// The publication number a write acknowledgement carries, and `wait=visible`'s wait.
@@ -3553,7 +3574,7 @@ async fn register_layer(
         .map_err(crate::error::map_join_error)?
         .map_err(crate::error::map_accept_error)?;
     let mut body = serde_json::json!({ "name": name, "tessera_id": id.raw().to_string() });
-    publication_ack(&state, &wait).await?.merge(&mut body);
+    declaration_ack(&state, &wait).await?.merge(&mut body);
     Ok((StatusCode::CREATED, Json(body)))
 }
 
@@ -3570,12 +3591,18 @@ async fn register_layer(
 async fn drop_layer(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(name): axum::extract::Path<String>,
-) -> Result<StatusCode, ApiError> {
-    tokio::task::spawn_blocking(move || state.engine.drop_layer(name))
+    axum::extract::Query(wait): axum::extract::Query<WaitQuery>,
+) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
+    let engine = Arc::clone(&state);
+    tokio::task::spawn_blocking(move || engine.engine.drop_layer(name))
         .await
         .map_err(crate::error::map_join_error)?
         .map_err(crate::error::map_accept_error)?;
-    Ok(StatusCode::NO_CONTENT)
+    // **200 with a body rather than 204**, so every write acknowledgement on this plane carries
+    // its publication number and a client needs no table of which ones do.
+    let mut body = serde_json::json!({});
+    declaration_ack(&state, &wait).await?.merge(&mut body);
+    Ok((StatusCode::OK, Json(body)))
 }
 
 /// `PUT /control/attributes`' body: the `[[attribute]]` block minus its acquisition keys
@@ -3652,7 +3679,7 @@ async fn declare_attribute(
         StatusCode::CREATED
     };
     let mut body = serde_json::json!({ "name": name, "existing": existing });
-    publication_ack(&state, &wait).await?.merge(&mut body);
+    declaration_ack(&state, &wait).await?.merge(&mut body);
     Ok((status, Json(body)))
 }
 
@@ -3773,7 +3800,7 @@ async fn declare_vocabulary(
         "added": added,
         "titles": titles
     });
-    publication_ack(&state, &wait).await?.merge(&mut body);
+    declaration_ack(&state, &wait).await?.merge(&mut body);
     Ok((status, Json(body)))
 }
 
@@ -3820,7 +3847,7 @@ async fn mint_vocabulary_values(
         "existing": existing,
         "titles": titles
     });
-    publication_ack(&state, &wait).await?.merge(&mut body);
+    declaration_ack(&state, &wait).await?.merge(&mut body);
     Ok(Json(body))
 }
 
@@ -3979,7 +4006,7 @@ async fn create_view_group(
         StatusCode::CREATED
     };
     let mut body = serde_json::json!({ "group": name, "existing": existing });
-    publication_ack(&state, &wait).await?.merge(&mut body);
+    declaration_ack(&state, &wait).await?.merge(&mut body);
     Ok((status, Json(body)))
 }
 
@@ -4022,7 +4049,7 @@ async fn create_plain_view(
         StatusCode::CREATED
     };
     let mut body = serde_json::json!({ "view": name, "existing": existing });
-    publication_ack(&state, &wait).await?.merge(&mut body);
+    declaration_ack(&state, &wait).await?.merge(&mut body);
     Ok((status, Json(body)))
 }
 
@@ -4057,6 +4084,11 @@ struct DropViewQuery {
     /// deletes no entity.
     #[serde(default)]
     delete_dangling: bool,
+    /// `wait=visible` (contracts §3.4), carried here rather than in a second [`WaitQuery`]
+    /// extractor: two `Query` extractors each parse the whole string, and this one's
+    /// `deny_unknown_fields` would refuse the other's key.
+    #[serde(default)]
+    wait: Option<String>,
 }
 
 /// One supplied metadata value as the roster stores it.
@@ -4148,7 +4180,7 @@ async fn create_view(
         "group": group,
         "key": key,
     });
-    publication_ack(&state, &wait).await?.merge(&mut body);
+    declaration_ack(&state, &wait).await?.merge(&mut body);
     Ok((StatusCode::CREATED, Json(body)))
 }
 
@@ -4170,13 +4202,17 @@ async fn drop_view(
     axum::extract::Path((group, key)): axum::extract::Path<(String, String)>,
     axum::extract::Query(query): axum::extract::Query<DropViewQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    let wait = WaitQuery { wait: query.wait };
+    let engine = Arc::clone(&state);
     let deleted = tokio::task::spawn_blocking(move || {
-        state.engine.drop_view(group, key, query.delete_dangling)
+        engine.engine.drop_view(group, key, query.delete_dangling)
     })
     .await
     .map_err(crate::error::map_join_error)?
     .map_err(crate::error::map_accept_error)?;
-    Ok(Json(serde_json::json!({ "deleted": deleted })))
+    let mut body = serde_json::json!({ "deleted": deleted });
+    declaration_ack(&state, &wait).await?.merge(&mut body);
+    Ok(Json(body))
 }
 
 /// Turn a flat member offset back into `(artifact index, member index)`, so a refusal names the

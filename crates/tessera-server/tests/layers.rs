@@ -208,7 +208,14 @@ async fn a_dropped_name_is_gone_from_meta_and_refused_on_recreation() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status().as_u16(), 204);
+    // 200 with a body, not 204: every write acknowledgement on this plane carries its
+    // publication number (contracts §3.4).
+    assert_eq!(resp.status().as_u16(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert!(
+        body["publication"].as_u64().is_some(),
+        "the drop names the cycle it is published in: {body}"
+    );
     assert!(meta_layers(&server, &["0"]).await.is_empty());
 
     let (status, body) = register(&server, declaration("clusters/a", None)).await;
