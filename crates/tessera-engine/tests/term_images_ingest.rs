@@ -3,9 +3,8 @@
 //! One corpus reaches a bundle two ways. The first is a build over a points file and an access
 //! relation. The second is a build with no points at all, into which the same corpus arrives
 //! through `/control/ingest` with each row naming its own access descriptors, followed by a flush
-//! and a fold. The fold is where an ingest-only deployment gets its images (ruling 5,
-//! `docs/evidence/memos/2026-09-17-term-images-handover.md`), so until it runs the second bundle
-//! has none.
+//! and a fold. The fold is where an ingest-only deployment gets its images (ruling 5, decision
+//! 0143), so until it runs the second bundle has none.
 //!
 //! What is compared is what a principal is served, and which terms have an image. Both are
 //! compared against the corpus's own definition and not only between the two bundles, so two paths

@@ -1144,6 +1144,12 @@ flush, exactly as a view created under a group does (spec §3.2). The declaratio
 acknowledgement, in the WAL and then in the segments manifest, and a fold writes it into
 `MANIFEST.json`.
 
+**A view created while running has no term images until its first fold**
+([decision 0143](../decisions/0143-term-images-live-in-the-bundle-and-a-session-projection-is-built-by-the-cheapest-route.md)).
+Images are written by the build and by every fold, never by a flush, so a session over such a
+view walks its permutation, exactly as it does over any extent, until a fold gives the view its
+first images.
+
 This overturns the rule this section held until [decision 0136](../decisions/0136-the-ingest-design-rulings.md)
 (R9, owner ruling, 2026-09-07): *no plain view is added after the build*, on the argument that a
 view carries a frame and a gate and the design has one place where those are reviewed. The wider
@@ -1229,6 +1235,11 @@ choices below.
   visible at flush, never on the request path.
 - **A group-scoped attribute costs one entity-space column per view of the group**, each the size the
   attribute would cost alone.
+- **A group's views each carry their own term-image file**
+  ([decision 0143](../decisions/0143-term-images-live-in-the-bundle-and-a-session-projection-is-built-by-the-cheapest-route.md)):
+  one table plus payload per key's view over the one dictionary, since the images are a projection
+  of the postings into that view's own row space and two views of a group do not share row space.
+  The build report states bytes per view for this reason.
 - **Files**: views × columns × (segments + 1), plus the attribute families — thousands at the
   counts above, inside every limit that matters.
 
