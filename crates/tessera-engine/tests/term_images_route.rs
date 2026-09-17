@@ -2,8 +2,9 @@
 //! viewport response over it.
 //!
 //! A session's row projection is built by the walk over its whole fragment, by the row range where
-//! its grant covers the entity domain, or by the split route: the union of the bundle's images of
-//! the terms it holds, plus a walk over the residual, plus the extents
+//! its grant covers the entity domain, by the split route — the union of the bundle's images of
+//! the terms it holds, plus a walk over the residual, plus the extents — or by the complement
+//! route, a walk over the entities the grant does not hold subtracted from the base's row range
 //! (`tessera_engine::compose::RowProjection::new`). The chooser picks one from the principal's own
 //! grant before any of them runs. What that buys is first-viewport time; what it must never cost
 //! is a row.
@@ -11,9 +12,12 @@
 //! **The claim is an I2 claim, not a performance one.** An image is a term's base posting
 //! projected at build or at fold, so a split route that unioned an image of a term the session
 //! does not hold, or that walked a residual reaching outside the fragment, would serve rows the
-//! principal was never granted; one whose residual missed an entity would serve fewer. Neither is
-//! visible in a response read on its own, which is why every case here compares the routes against
-//! each other and against `RowSpace::project`, the crossing the whole system already rests on.
+//! principal was never granted; one whose residual missed an entity would serve fewer. The
+//! complement route reaches the same claim from the other side: it reads the slots of entities the
+//! principal does not hold, and a subtraction that took one row too few would serve a row the
+//! grant does not carry. Neither is visible in a response read on its own, which is why every case
+//! here compares the routes against each other and against `RowSpace::project`, the crossing the
+//! whole system already rests on.
 //!
 //! **The routes are compared under forcing, not as chosen.** The chooser is a function of the
 //! grant, so it picks the same route for the same principal every time, and a suite that compared
@@ -61,6 +65,9 @@ const ENTITIES: u64 = 200_000;
 // decimal spelling of the `term_id` column the pairs file carries.
 /// Half the corpus. Kept.
 const HALF: u32 = 11;
+/// Every entity but the two hundred `THOUSANDTH` names. Kept, and the term that makes a grant
+/// narrow enough outside for the complement to be the cheapest route.
+const ALMOST_ALL: u32 = 12;
 /// Almost all of it. Kept, and the broadest principal's term.
 const MOST: u32 = 13;
 /// A tenth. Kept.
@@ -86,6 +93,9 @@ fn terms_of(i: u64) -> Vec<u32> {
     let mut terms = Vec::new();
     if i.is_multiple_of(2) {
         terms.push(HALF);
+    }
+    if i % 1000 != 5 {
+        terms.push(ALMOST_ALL);
     }
     if !i.is_multiple_of(20) {
         terms.push(MOST);
@@ -314,6 +324,26 @@ impl Fixture {
     }
 }
 
+/// Authorise, waiting out a concurrent build of the same credential's fragment.
+///
+/// D-G (lifecycle §3.3) does not block a second caller on an in-flight fragment build: the cache
+/// answers `FragmentBuilding` at once and the caller retries. The background refresh rebuilds a
+/// resident session's fragment after a publication, and every case here authorises the same
+/// credential several times over while the executor runs, so that answer is one a case can be
+/// given. A client retries; so does this, and any other error is the failure it looks like.
+fn authorise(engine: &Engine, credential: &[u8]) -> tessera_engine::Session {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        match engine.authorise(credential) {
+            Ok(session) => return session,
+            Err(tessera_engine::EngineError::FragmentBuilding) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            Err(error) => panic!("the credential must authorise: {error}"),
+        }
+    }
+}
+
 fn wait_until(what: &str, mut ready: impl FnMut() -> bool) {
     let deadline = Instant::now() + Duration::from_secs(60);
     while !ready() {
@@ -361,11 +391,10 @@ fn routes_agree_for(engine: &Engine, principal: &Principal, at: &str) -> Project
         None,
         Some(ProjectionRoute::Walk),
         Some(ProjectionRoute::Split),
+        Some(ProjectionRoute::Complement),
     ] {
         engine.force_projection_route_for_test(force);
-        let session = engine
-            .authorise(&principal.credential)
-            .expect("the credential authorises");
+        let session = authorise(engine, &principal.credential);
         let before = engine.projection_builds_by_route();
         let rows = engine
             .session_projection_rows_for_test(&session, VIEW)
@@ -477,7 +506,7 @@ fn the_fixtures_terms_are_classified_as_every_other_case_assumes() {
             .kept()
     };
 
-    for term in [HALF, MOST, TENTH, HUNDREDTH, THOUSANDTH] {
+    for term in [HALF, ALMOST_ALL, MOST, TENTH, HUNDREDTH, THOUSANDTH] {
         assert!(
             kept(term),
             "term {term} must have an image, or the principals holding it never take the split"
@@ -514,6 +543,32 @@ fn every_route_builds_the_same_projection_over_a_built_bundle() {
             .any(|(_, route)| *route == ProjectionRoute::Split),
         "no principal here chose the split, so the chosen arm of every comparison above was the \
          walk and the chooser is untested: {chosen:?}"
+    );
+}
+
+/// **A principal holding almost the whole corpus is sent to the complement by the chooser**,
+/// unprompted, which is the case a deployment gets.
+///
+/// Every other case forces the route it compares; this one reads the gauge on the chosen arm. The
+/// grant is `ALMOST_ALL` and `SCATTERED`, which leaves under two hundred entities of the corpus
+/// outside it, so the complement walks those where the walk would cross two hundred thousand and
+/// the split would union an image covering almost every container of row space. It is not the
+/// whole domain — the entities `ALMOST_ALL` omits are not all recovered by `SCATTERED` — so the
+/// whole-domain answer does not take the case before the chooser sees it.
+#[test]
+fn a_principal_holding_almost_everything_is_sent_to_the_complement_by_the_chooser() {
+    let fixture = fixture();
+    let engine = fixture.reader("complement");
+    let principal = Principal {
+        name: "99.9%",
+        credential: credential(&[ALMOST_ALL, SCATTERED]),
+    };
+    let chosen = routes_agree_for(&engine, &principal, "a built bundle");
+    assert_eq!(
+        chosen,
+        ProjectionRoute::Complement,
+        "a grant with a couple of hundred entities outside it must price the complement below \
+         the walk and the split, or the route is live and unreachable"
     );
 }
 
@@ -605,11 +660,10 @@ fn every_route_agrees_across_a_delete_and_a_suppression() {
         None,
         Some(ProjectionRoute::Walk),
         Some(ProjectionRoute::Split),
+        Some(ProjectionRoute::Complement),
     ] {
         engine.force_projection_route_for_test(force);
-        let session = engine
-            .authorise(&credential(&[MOST, SCATTERED]))
-            .expect("the credential authorises");
+        let session = authorise(&engine, &credential(&[MOST, SCATTERED]));
         engine.viewport(&session, whole_extent()).expect("serves");
         for entity in [deleted, suppressed] {
             let id = engine
@@ -643,9 +697,7 @@ fn the_background_refresh_builds_by_a_chosen_route_and_equals_the_walk() {
     let sessions: Vec<_> = principals()
         .into_iter()
         .map(|principal| {
-            let session = engine
-                .authorise(&principal.credential)
-                .expect("the credential authorises");
+            let session = authorise(&engine, &principal.credential);
             engine.viewport(&session, whole_extent()).expect("serves");
             (principal, session)
         })
@@ -744,7 +796,7 @@ fn a_principal_holding_no_kept_term_walks_and_a_forced_split_falls_back_to_the_w
 
     for force in [None, Some(ProjectionRoute::Split)] {
         engine.force_projection_route_for_test(force);
-        let session = engine.authorise(&credential).expect("it authorises");
+        let session = authorise(&engine, &credential);
         let before = engine.projection_builds_by_route();
         let rows = engine
             .session_projection_rows_for_test(&session, VIEW)
@@ -832,9 +884,7 @@ fn a_view_created_while_running_has_no_images_and_is_served_by_the_walk() {
         "a view created while running has had no build and no fold, so it can carry no images"
     );
 
-    let session = engine
-        .authorise(&credential(&[MOST, SCATTERED]))
-        .expect("the credential authorises");
+    let session = authorise(&engine, &credential(&[MOST, SCATTERED]));
     let before = engine.projection_builds_by_route();
     let rows = engine
         .session_projection_rows_for_test(&session, runtime_view)
@@ -859,12 +909,7 @@ fn a_view_created_while_running_has_no_images_and_is_served_by_the_walk() {
 /// and by no other route. Both of the fold's readers are checked: the live generation, which the
 /// executor swaps in over the prefix it just wrote, and a cold `open_bundle` of the root, which is
 /// what a restart gets.
-///
-/// **Ignored until the fold writes images** (stage 3 of the term-images work). Until then the
-/// folded prefix carries no image file, every view falls back to the walk, and the case would pass
-/// without having compared two routes.
 #[test]
-#[ignore = "the fold does not write term images until stage 3 has merged"]
 fn every_route_agrees_after_a_fold_executes_a_delete() {
     let fixture = fixture();
     let engine = fixture.writer("fold");
@@ -919,10 +964,7 @@ fn every_route_agrees_after_a_fold_executes_a_delete() {
 /// **A view created while running gains images at its first fold**, and is then served by the
 /// split where it holds a kept term — the other half of
 /// [`a_view_created_while_running_has_no_images_and_is_served_by_the_walk`].
-///
-/// **Ignored until the fold writes images** (stage 3), for that case's reason.
 #[test]
-#[ignore = "the fold does not write term images until stage 3 has merged"]
 fn a_view_created_while_running_gains_images_at_its_first_fold() {
     let fixture = fixture();
     let engine = fixture.writer("runtime-view-fold");
@@ -1002,9 +1044,7 @@ fn a_view_created_while_running_gains_images_at_its_first_fold() {
         name: "the runtime view's principal",
         credential: credential(&[MOST]),
     };
-    let session = engine
-        .authorise(&principal.credential)
-        .expect("the credential authorises");
+    let session = authorise(&engine, &principal.credential);
     engine.force_projection_route_for_test(Some(ProjectionRoute::Split));
     let before_routes = engine.projection_builds_by_route();
     let rows = engine

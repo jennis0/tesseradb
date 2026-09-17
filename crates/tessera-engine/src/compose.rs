@@ -229,9 +229,12 @@ impl RowProjection {
     /// **Every route returns the identical projection.** The walk crosses the whole fragment. The
     /// split unions the bundle's images of the terms the session holds — each image is the base
     /// projection of that term's posting, and every satisfied term's posting lies inside the
-    /// fragment — then walks the residual and the extents. The whole-domain answer is the row
-    /// range. `tessera_store::term_images`' module doc carries the algebra; `tests/
-    /// term_images_route.rs` checks the three against each other over a built corpus.
+    /// fragment — then walks the residual and the extents. The complement walks the entities the
+    /// grant does not hold and subtracts their rows from the base's row range, which is exact
+    /// where the base's slots are a bijection onto that range, and adds the extents above it. The
+    /// whole-domain answer is the row range. `tessera_store::term_images`' module doc carries the
+    /// algebra; `tests/term_images_route.rs` checks the routes against each other over a built
+    /// corpus.
     ///
     /// **The route is chosen before any route runs, from the principal's own grant**: the
     /// fragment's cardinality below the bound, the image table's sizes for the terms the principal
@@ -259,9 +262,8 @@ impl RowProjection {
         let walked = |route| Ok((Self::over(rows.project(&fragment), rows), route));
         match wanted {
             // A forced whole-domain route over a grant that does not cover the domain has no
-            // answer of its own, and neither has a forced complement while the complement's
-            // arithmetic is unwritten. Both walk, and the gauge says so rather than reporting a
-            // route that did not run.
+            // answer of its own. It walks, and the gauge says so rather than reporting a route
+            // that did not run.
             ProjectionRoute::WholeDomain if whole_domain => walked(ProjectionRoute::WholeDomain),
             ProjectionRoute::Split => {
                 let Some(images) = inputs.images else {
@@ -289,14 +291,24 @@ impl RowProjection {
                 union.or_inplace(&rows.project_extents_from(&fragment, 0));
                 Ok((Self::over(union, rows), ProjectionRoute::Split))
             }
-            ProjectionRoute::Complement => {
-                debug_assert!(
-                    inputs.force.is_some(),
-                    "the chooser is called with complement_valid = false, so a chosen complement \
-                     route is a chooser bug"
-                );
-                walked(ProjectionRoute::Walk)
-            }
+            ProjectionRoute::Complement => match rows.project_complement_base(&fragment) {
+                Some(mut base) => {
+                    base.or_inplace(&rows.project_extents_from(&fragment, 0));
+                    Ok((Self::over(base, rows), ProjectionRoute::Complement))
+                }
+                // The base's row count is not recorded, which is the whole of the route's
+                // validity and is what the chooser is given, so this is a forced complement over
+                // a row space that has no complement answer. The walk answers it.
+                None => {
+                    debug_assert!(
+                        inputs.force.is_some(),
+                        "the chooser is offered the complement only where the base records the \
+                         row count it is a bijection onto, so a chosen complement with none is a \
+                         chooser bug"
+                    );
+                    walked(ProjectionRoute::Walk)
+                }
+            },
             _ => walked(ProjectionRoute::Walk),
         }
     }
@@ -304,8 +316,14 @@ impl RowProjection {
     /// Price the routes over `fragment` and return the cheapest, or [`ProjectionRoute::Walk`]
     /// where there is nothing to price against.
     ///
-    /// `complement_valid` is `false`: the complement's arithmetic is not written yet, so it is not
-    /// offered.
+    /// The complement is offered where the base records the row count its slots are a bijection
+    /// onto, which is what `RowSpace::project_complement_base` needs and all it needs.
+    ///
+    /// **A view with no image table is walked**, whatever the grant. The chooser is reached
+    /// through the table, so a session on such a view is not offered the complement either, even
+    /// where it would be the cheaper route. Nothing is served differently for it; what it costs is
+    /// first-viewport time for a broad principal on a view whose images have not been written or
+    /// did not open.
     fn price(
         inputs: &ProjectionInputs<'_>,
         rows: &RowSpace,
@@ -329,7 +347,7 @@ impl RowProjection {
             inputs.satisfied,
             held,
             bound,
-            false,
+            rows.base().dense_rows().is_some(),
             tessera_authz::delta_rows(inputs.satisfied, inputs.deltas)?,
         );
         Ok(match choose(&chooser, &ROUTE_COSTS) {
