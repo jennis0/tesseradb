@@ -558,7 +558,7 @@ The sidecar joined that list when `columns.arrow` stopped storing coordinates (Â
 - Digests: SHA-256, hex in JSON. All manifest paths are prefix-relative, forward slashes.
 - Every plane authenticates via `Authorization: Bearer <token-or-credential>`. Tokens and credentials never appear in URLs, query strings or logs.
 
-## 2. The bundle format (`bundle_format = 7`)
+## 2. The bundle format (`bundle_format = 12`)
 
 ### 2.1 Layout
 
@@ -622,6 +622,10 @@ bundle/
           blocks.bin            #   toward the block target; the coalesced triple replaces the
           hasrow.roaring        #   window in `record_extents`, in the window's own position
           directory.arrow
+      term-images/<file>.timg   # one file per view: a table over every term id and, for the
+                                # terms dense enough to be worth reading, that term's base
+                                # posting projected into the view's row space, frozen. Digested
+                                # like any other file and named by `term_image_extents` (2.3)
       views/<view_id>/
         permutation.bin
         row-entity.u32          #   its inverse, over the base segment's rows (2.6)
