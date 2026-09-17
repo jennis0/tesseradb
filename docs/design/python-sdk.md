@@ -273,9 +273,6 @@ warning is not repeated per column. Issue #83 is open on serving `derived` visib
 which a value exists for a viewer only if they can see a point carrying it; when it serves,
 `derived` becomes the inferred default.
 
-Not built yet: `scope` on an attribute; a group-scoped attribute goes through the generic
-form until the view-group verb lands, and the README says so.
-
 `render` is decided here because it cannot be added later: a render column lives in the hot row
 and a running service refuses to declare one (decision 0136's amendment). The commit report
 lists the render columns it froze.
@@ -390,10 +387,12 @@ A part supplied twice is accepted, a part supplied differently is a `409` on tha
 set grows by the delta (ingest.md §1.1). Ordering therefore matters only for existence, and
 the order is fixed:
 
-1. **Declarations** added since the last commit, as the runtime `PUT`s (ingest.md §1.3). The
-   layer bodies come from `tessera check --payloads`. Not built yet: that emitter covers layers
-   only; attributes, vocabularies, views and view groups need the same, and until then the SDK
-   cannot declare those after the first commit (§11.2 C).
+1. **Declarations** added since the last commit, as the runtime `PUT`s (ingest.md §1.3): view
+   groups, then a `members` group after the group it names, roster views, plain views, layers
+   and label sets, each body from `tessera check --payloads` (configuration.md §2) except the
+   roster record, which the SDK builds. Not built yet: an attribute or a vocabulary declared
+   after the first commit is refused naming the first commit as the place to declare it, because
+   `tessera check` refuses a declaration whose attribute names no source (§11.2 G4).
 2. **Points**, per view, the allocation view first, in pages under the limits `/control/status`
    publishes, with `x-tessera-view` on each. A from-column layer's key travels with a new row
    and mints its artifact at the window close. A delta on a second view's source carries ids,
@@ -651,9 +650,26 @@ Owner rulings on the first review's findings, 2026-09-16:
   it the SDK picks free ports and writes them, which races.
 - **B. `serve.cors_loopback`.** A disclosure control, so an owner ruling. The alternative is
   the proxy arm of client-components §7, which is more work and serves VS Code and Colab too.
-- **C. `check --payloads` for attributes, vocabularies, views and view groups.** One
-  implementation of declaration to payload (decision 0139) against four blocks mirrored in
-  Python. Recommended: the emitter.
+- **C. Settled: `check --payloads` emits every block kind** (configuration.md §2).
+- **G1. A second view after the first commit.** The id map holds one acknowledged state per id,
+  so a delta for a second plain view over held rows is dropped as already present. (a) Record
+  the views each id was acknowledged into and test per view; (b) second views before the first
+  commit only. Recommended: (a).
+- **G2. Edits on held rows.** A points delta's held rows are not sent, so a changed attribute in
+  a re-staged frame is neither applied nor reported. (a) Page a held row's non-render attribute
+  columns to `/control/values`, so an identical value is a no-op and a change is the `409` §3
+  promises; (b) keep the drop and say attributes on held rows come through an attribute source.
+  Recommended: (a).
+- **G3. The flush wait.** A tick that only fills cells or only publishes artifacts moves no
+  publication version, so `commit()` ends its wait on `write_executor.flush.flushes` and
+  `.ticks`, which contracts §3.4 marks as outside the contract. (a) Add the two counters to the
+  status row as fields a client may wait on; (b) a contract-level "the tick after this request"
+  signal. Recommended: (a).
+- **G4. A declaration with no sources cannot be checked.** `tessera check` fails an attribute
+  with no source and refuses a view group with no source at parse, so a database cannot get
+  payloads for an attribute or a vocabulary declared after the first commit. (a) Both become a
+  note in `check` when the declaration names no source for them, which is configuration.md §2's
+  rule; (b) the SDK writes a one-row placeholder source. Recommended: (a).
 - **D. The demo.** A marimo notebook and a Jupyter twin over the arXiv 50k corpus running
   §10.1 to §10.5 and §10.7, in `clients/py/examples/`. A headless test in `clients/py/check.sh`
   that creates, commits and queries a database with no browser.
@@ -674,8 +690,8 @@ prints. The stages order the building; the goal is all of them.
 | S2 reading | `map()`, `viewer(terms)`, the term union, `connect(url, token)` | the widget's tests | S1, B |
 | S3 pages | later commits: the plan, the pre-flight, batch ids and the commit log, the flush wait, the report, the from-column publish, layers and labels declared after the first commit (the emitter covers them); `remove`, `suppress`, `unsuppress`, `leave` | §10.3 and §10.4 against the served answers | S1 |
 | S4 the rest of the layer surface | spatial and attribute membership, shapes and spaces, per-level zoom, prune, attached and dependent layers, inline artifacts and values, exclusion | `overture`, `geonames`, `gbif`, `treeoflife`, `medcpt`, `paperseek` | S1 |
-| S5 groups | `declare_view_group`, scoped attributes and layers, `view` on the record | `multiview` | S1, S3 |
-| S6 runtime declarations | attributes, vocabularies, views and view groups declared after the first commit | | S3, C |
+| S5 groups | `declare_view_group`, `add_view`, scoped attributes and layers, `view` on the record; views and groups after the first commit | `multiview` | S1, S3 |
+| S6 runtime declarations | attributes and vocabularies declared after the first commit | | S3, G4 |
 | S7 demo | the two notebooks and the headless test | | S2, S3 |
 
 The Rust changes (A, B, C) are small and sit in the server and the CLI; the engine is untouched.
