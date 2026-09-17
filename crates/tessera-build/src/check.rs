@@ -25,7 +25,7 @@
 //! data actually sits inside its view's extent. The last is the build's clamp report
 //! (`crate::config::Frame`), and it needs the coordinate column read end to end.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use arrow::datatypes::{DataType, Schema as ArrowSchema};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
@@ -34,6 +34,7 @@ use tessera_spatial::tiler::ScalarType;
 use crate::config::{
     ArtifactSource, Config, Extent, Fields, PointVisibility, Roster, ViewGroup, ENTITY_ID,
 };
+use crate::ids::Addressing;
 use crate::input::{column_carries, TERM_ID};
 
 /// One thing wrong, named the way the reader that would have refused it names it.
@@ -236,10 +237,11 @@ fn open(report: &mut CheckReport, object: &str, path: &Path) -> Option<ArrowSche
 /// document alone.
 pub fn check(config: &Config) -> CheckReport {
     let mut report = CheckReport::default();
-    check_attribute_sources(config, &mut report);
+    let positional = positional_points(config);
+    check_attribute_sources(config, &positional, &mut report);
     check_scoped_attribute_sources(config, &mut report);
     for view in &config.views {
-        check_view(view, &mut report);
+        check_view(config, view, &mut report);
     }
     for group in &config.view_groups {
         check_view_group(config, group, &mut report);
@@ -261,7 +263,7 @@ pub fn check(config: &Config) -> CheckReport {
 /// takes `[defaults]`'s, so the columns a file must carry are the columns of the attributes that
 /// named it — and a column reported missing is reported against the file that was supposed to hold
 /// it rather than against a single corpus that no longer exists.
-fn check_attribute_sources(config: &Config, report: &mut CheckReport) {
+fn check_attribute_sources(config: &Config, positional: &[PathBuf], report: &mut CheckReport) {
     // A column with no file to read it from. Legal to declare (`configuration.md` §2), and the
     // normal state for a deployment that writes its values through the service. It is one of the
     // sources this check looked at and found nothing to open, beside a group that names no points
@@ -288,7 +290,12 @@ fn check_attribute_sources(config: &Config, report: &mut CheckReport) {
         let Some(schema) = open(report, &object, &group.path) else {
             continue;
         };
-        require(report, &object, &schema, &group.fields, ENTITY_ID);
+        // **A file whose rows are named by their position needs no identity column for its own
+        // attributes.** The group is the view's own points file, and the build joins the columns
+        // of that file by position (`ids::Addressing`).
+        if !positional.contains(&group.path) {
+            require(report, &object, &schema, &group.fields, ENTITY_ID);
+        }
         // **Every declared attribute against the field that must carry it.** Presence and family,
         // not fit: a `u8` column whose data carries 300 is a per-row refusal no schema can
         // anticipate.
@@ -408,7 +415,82 @@ fn check_scoped_attribute_sources(config: &Config, report: &mut CheckReport) {
     }
 }
 
-fn check_view(view: &crate::config::View, report: &mut CheckReport) {
+/// The plain views whose points file carries no identity column, by path.
+///
+/// A row of one of those files is named by its position in it (`configuration.md` §8), and so is
+/// that file's own attribute column, so [`check_attribute_sources`] does not require an identity
+/// column of it either. Whether the positional route is admissible at all is
+/// [`check_identity`]'s question, asked per view.
+fn positional_points(config: &Config) -> Vec<PathBuf> {
+    config
+        .views
+        .iter()
+        .filter_map(|view| {
+            let path = view.source.as_ref()?;
+            let schema = schema_of(path).ok()?;
+            column_type(&schema, &view.fields, ENTITY_ID)
+                .is_none()
+                .then(|| path.clone())
+        })
+        .collect()
+}
+
+/// A view's identity column, required only where something else in the declaration names a row by
+/// it.
+///
+/// **The list is the build's own** (`ids::Addressing`), so a declaration this leaves clean is one
+/// the build accepts. A points file carrying no identity column and nothing to name it for is a
+/// warning saying how its rows are addressed, and the check stays clean.
+fn check_identity(
+    config: &Config,
+    view: &crate::config::View,
+    schema: &ArrowSchema,
+    object: &str,
+    report: &mut CheckReport,
+) {
+    if column_type(schema, &view.fields, ENTITY_ID).is_some() {
+        return;
+    }
+    let Some(points) = &view.source else {
+        return;
+    };
+    let addressing = Addressing {
+        points,
+        several_views: config.views.len() > 1 || !config.view_groups.is_empty(),
+        // A plain view's rows are its file's, whole. A selection belongs to a group's view, which
+        // requires the identity column here whatever else the declaration says.
+        selection: false,
+        // `tessera check` takes no `--limit`. The build refuses one against this route.
+        limit: false,
+        visibility_source: view.point_visibility.source.as_deref(),
+        attribute_sources: &config.attribute_sources,
+        layers: &config.layers,
+        layer_inputs: &config.layer_sources,
+    };
+    // A source that could not be read is reported where it is opened. Here it leaves the question
+    // unanswered, which is a finding against the view like any other.
+    let needed = match addressing.needs_identity() {
+        Ok(needed) => needed,
+        Err(error) => Some(error.to_string()),
+    };
+    match needed {
+        None => report.warn(
+            object,
+            "no identity column: rows addressable by tessera_id only",
+        ),
+        Some(detail) => report.note(
+            object,
+            format!(
+                "field `{ENTITY_ID}` is read from a column named '{}', which the source does not \
+                 carry, so each row would be named by its position in it (contracts §2.4). \
+                 {detail}",
+                view.fields.of(ENTITY_ID)
+            ),
+        ),
+    }
+}
+
+fn check_view(config: &Config, view: &crate::config::View, report: &mut CheckReport) {
     let object = format!("view '{}'", view.name);
     // **The frame, before the file** — a projected view's square is a function of its declaration
     // alone, so it is answered here whether or not the source opens.
@@ -435,7 +517,7 @@ fn check_view(view: &crate::config::View, report: &mut CheckReport) {
     let Some(schema) = open(report, &object, path) else {
         return;
     };
-    require(report, &object, &schema, &view.fields, ENTITY_ID);
+    check_identity(config, view, &schema, &object, report);
 
     // Which geometry shape this file offers, on `crate::input::geometry_kind`'s rule: a `fields`
     // map naming one is the caller deciding, and presence decides only where the map is silent.
