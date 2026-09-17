@@ -72,7 +72,7 @@ use std::path::{Path, PathBuf};
 
 use arrow::array::{
     Array, FixedSizeListArray, Int16Array, Int32Array, Int64Array, Int8Array, ListArray,
-    StringArray, UInt16Array, UInt32Array, UInt64Array, UInt8Array,
+    UInt16Array, UInt32Array, UInt64Array, UInt8Array,
 };
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
@@ -902,7 +902,7 @@ fn read_artifacts(
         // **Which view each artifact belongs to**, on a layer scoped to a group (`views.md`
         // §3.5). Required where the scope is declared: a row that names no view belongs to no
         // artifact set, and every view's own selection would pass it over.
-        let view: Option<&StringArray> = match scoped {
+        let view: Option<crate::utf8::Utf8Column<'_>> = match scoped {
             None => None,
             Some(scope) => {
                 let array = batch.column_by_name(&scope.column).ok_or_else(|| {
@@ -916,7 +916,14 @@ fn read_artifacts(
                         column_names(&batch)
                     ))
                 })?;
-                Some(typed(path, array, &scope.column)?)
+                Some(crate::utf8::Utf8Column::new(array.as_ref()).ok_or_else(|| {
+                    BuildError::Invalid(format!(
+                        "{}: column {} is {:?}, which this reader cannot take",
+                        path.display(),
+                        scope.column,
+                        array.data_type()
+                    ))
+                })?)
             }
         };
         let shape_columns = match shapes.as_ref() {
@@ -976,8 +983,8 @@ fn read_artifacts(
             }
 
             let attachment = match (
-                target_layer.as_ref().and_then(|c| value_at(c, row)),
-                target_key.as_ref().and_then(|c| value_at(c, row)),
+                target_layer.and_then(|c| value_at(c, row)),
+                target_key.and_then(|c| value_at(c, row)),
             ) {
                 (Some(layer), Some(key)) => Some(IncomingAttachment {
                     layer,
@@ -1471,11 +1478,7 @@ fn record_lineage(
 /// column are two spellings of one edge, and an artifact holding a different parent in each is the
 /// same conflict as two points disagreeing. A duplicate edge is one edge whichever spelling stated
 /// it.
-fn apply_lineage(
-    plan: &mut LayerPlan,
-    lineage: Vec<Option<usize>>,
-    path: &Path,
-) -> Result<()> {
+fn apply_lineage(plan: &mut LayerPlan, lineage: Vec<Option<usize>>, path: &Path) -> Result<()> {
     // **Applied in address order, not arena order.** The conflict below is a refusal, and which of
     // several a corpus carries is reported must not depend on the order keys happened to be met —
     // it is the order they sort in, which is what it has always been. One sort of at most one entry
@@ -1903,7 +1906,13 @@ pub fn publish(
             },
         )
         .collect();
-    write_membership_extents(&mut store, prefix_dir, partition, &mut published, &mut streamed)?;
+    write_membership_extents(
+        &mut store,
+        prefix_dir,
+        partition,
+        &mut published,
+        &mut streamed,
+    )?;
     write_content_extent(&store, prefix_dir, partition, &mut published)?;
     published.store = store;
     Ok(published)
@@ -1940,8 +1949,11 @@ fn merge_member_runs(
     if receipts.is_empty() {
         return Ok(spill::MemberTable::empty(plan.bodies.len()));
     }
-    let receipts =
-        cascade_member_runs(receipts, &plan.members.dir, member_merge_fan_in(plan.memory_budget))?;
+    let receipts = cascade_member_runs(
+        receipts,
+        &plan.members.dir,
+        member_merge_fan_in(plan.memory_budget),
+    )?;
     let path = plan.members.dir.join("member-table.spill");
     let mut writer = spill::MemberTableWriter::create(&path, plan.bodies.len())?;
     let mut merge = MemberRunMerge::open(&receipts)?;
@@ -3389,10 +3401,21 @@ fn optional_utf8<'a>(
     batch: &'a arrow::record_batch::RecordBatch,
     fields: &Fields,
     canonical: &str,
-) -> Result<Option<&'a StringArray>> {
+) -> Result<Option<crate::utf8::Utf8Column<'a>>> {
     match optional(path, batch, fields, canonical)? {
         None => Ok(None),
-        Some(array) => typed(path, array, fields.of(canonical)).map(Some),
+        Some(array) => {
+            let name = fields.of(canonical);
+            crate::utf8::Utf8Column::new(array.as_ref())
+                .ok_or_else(|| {
+                    BuildError::Invalid(format!(
+                        "{}: column {name} is {:?}, which this reader cannot take",
+                        path.display(),
+                        array.data_type()
+                    ))
+                })
+                .map(Some)
+        }
     }
 }
 
@@ -3512,8 +3535,8 @@ fn optional_ranked_values<'a>(
     optional_list(path, batch, fields, canonical)
 }
 
-fn value_at(column: &StringArray, row: usize) -> Option<String> {
-    (!column.is_null(row)).then(|| column.value(row).to_string())
+fn value_at(column: crate::utf8::Utf8Column<'_>, row: usize) -> Option<String> {
+    column.at(row).map(str::to_string)
 }
 
 fn number_at(column: &UInt32Array, row: usize) -> u32 {
@@ -3658,16 +3681,13 @@ fn strings_at(path: &Path, column: &ListArray, row: usize, key: &str) -> Result<
         return Ok(Vec::new());
     }
     let values = column.value(row);
-    let strings = values
-        .as_any()
-        .downcast_ref::<StringArray>()
-        .ok_or_else(|| {
-            BuildError::Invalid(format!(
-                "{}: the values of {key} are a list of {:?}, and this reader takes a list of utf8",
-                path.display(),
-                values.data_type()
-            ))
-        })?;
+    let strings = crate::utf8::Utf8Column::new(values.as_ref()).ok_or_else(|| {
+        BuildError::Invalid(format!(
+            "{}: the values of {key} are a list of {:?}, and this reader takes a list of utf8",
+            path.display(),
+            values.data_type()
+        ))
+    })?;
     (0..strings.len())
         .map(|i| {
             if strings.is_null(i) {
@@ -3702,7 +3722,7 @@ fn strings_at(path: &Path, column: &ListArray, row: usize, key: &str) -> Result<
 /// cluster.
 #[derive(Clone, Copy)]
 pub(crate) enum KeyColumn<'a> {
-    Text(&'a StringArray),
+    Text(crate::utf8::Utf8Column<'a>),
     I8(&'a Int8Array),
     I16(&'a Int16Array),
     I32(&'a Int32Array),
@@ -3725,9 +3745,9 @@ enum KeyRead<'a> {
 }
 
 impl<'a> KeyColumn<'a> {
-    fn array(&self) -> &dyn Array {
+    fn is_null(&self, row: usize) -> bool {
         match self {
-            KeyColumn::Text(a) => *a as &dyn Array,
+            KeyColumn::Text(a) => return a.is_null(row),
             KeyColumn::I8(a) => *a as &dyn Array,
             KeyColumn::I16(a) => *a as &dyn Array,
             KeyColumn::I32(a) => *a as &dyn Array,
@@ -3737,6 +3757,7 @@ impl<'a> KeyColumn<'a> {
             KeyColumn::U32(a) => *a as &dyn Array,
             KeyColumn::U64(a) => *a as &dyn Array,
         }
+        .is_null(row)
     }
 
     fn integer_at(&self, row: usize) -> Option<i128> {
@@ -3755,7 +3776,7 @@ impl<'a> KeyColumn<'a> {
 
     /// The canonical key at `row` — **the allocating read, for one row per artifact.**
     fn key_at(&self, row: usize) -> Option<String> {
-        if self.array().is_null(row) {
+        if self.is_null(row) {
             return None;
         }
         Some(match self {
@@ -3769,7 +3790,7 @@ impl<'a> KeyColumn<'a> {
     /// The noise sentinel is [`tessera_types::layer::NOISE_KEY`]'s, not a literal here: the wire
     /// reads the same cell out of an Arrow batch and the two must agree about what `-1` means.
     fn read_at(&self, row: usize) -> KeyRead<'a> {
-        if self.array().is_null(row) {
+        if self.is_null(row) {
             return KeyRead::Unclustered;
         }
         match self {
@@ -3805,7 +3826,15 @@ fn scalar_key_column<'a>(
     what: &str,
 ) -> Result<KeyColumn<'a>> {
     Ok(match array.data_type() {
-        arrow::datatypes::DataType::Utf8 => KeyColumn::Text(typed(path, array, name)?),
+        arrow::datatypes::DataType::Utf8 | arrow::datatypes::DataType::LargeUtf8 => {
+            KeyColumn::Text(crate::utf8::Utf8Column::new(array.as_ref()).ok_or_else(|| {
+                BuildError::Invalid(format!(
+                    "{}: column {name} is {:?}, which this reader cannot take",
+                    path.display(),
+                    array.data_type()
+                ))
+            })?)
+        }
         arrow::datatypes::DataType::Int8 => KeyColumn::I8(typed(path, array, name)?),
         arrow::datatypes::DataType::Int16 => KeyColumn::I16(typed(path, array, name)?),
         arrow::datatypes::DataType::Int32 => KeyColumn::I32(typed(path, array, name)?),
@@ -4630,7 +4659,11 @@ mod tests {
 
         let temp = tempfile::tempdir().expect("a scratch directory");
         let path = temp.path().join("rows.parquet");
-        let schema = Arc::new(Schema::new(vec![Field::new("entity", DataType::UInt64, false)]));
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "entity",
+            DataType::UInt64,
+            false,
+        )]));
         let mut writer = parquet::arrow::ArrowWriter::try_new(
             File::create(&path).expect("create the file"),
             schema.clone(),
@@ -4752,12 +4785,20 @@ mod tests {
                 "attempt {attempt}: each child escapes its parent by one member"
             );
             assert_eq!(
-                coverage.iter().map(|c| c.parent.clone()).collect::<Vec<String>>(),
-                expected.iter().map(|(parent, _)| parent.clone()).collect::<Vec<String>>(),
+                coverage
+                    .iter()
+                    .map(|c| c.parent.clone())
+                    .collect::<Vec<String>>(),
+                expected
+                    .iter()
+                    .map(|(parent, _)| parent.clone())
+                    .collect::<Vec<String>>(),
                 "attempt {attempt}: the coverage is not in the parents' order"
             );
             assert!(
-                coverage.iter().all(|c| c.members == 1 && c.stray_members == 0),
+                coverage
+                    .iter()
+                    .all(|c| c.members == 1 && c.stray_members == 0),
                 "attempt {attempt}: each parent's one member is covered by its child"
             );
         }
@@ -4773,7 +4814,11 @@ mod tests {
 
         let temp = tempfile::tempdir().expect("a scratch directory");
         let path = temp.path().join("rows.parquet");
-        let schema = Arc::new(Schema::new(vec![Field::new("entity", DataType::UInt64, false)]));
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "entity",
+            DataType::UInt64,
+            false,
+        )]));
         let mut writer = parquet::arrow::ArrowWriter::try_new(
             File::create(&path).expect("create the file"),
             schema.clone(),
