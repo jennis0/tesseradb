@@ -317,10 +317,7 @@ fn check_reports_every_finding_rather_than_the_first() {
     assert!(text.contains("field `members`"), "{text}");
     assert!(text.contains("2 finding(s)"), "{text}");
     // And it says what it could not have seen, so a green check is not read as a green build.
-    assert!(
-        text.contains("a clean check is not a clean build"),
-        "{text}"
-    );
+    assert!(text.contains("a clean check is not a clean build"), "{text}");
 }
 
 /// A source the declaration names and the filesystem does not carry is a finding rather than a
@@ -398,11 +395,7 @@ require_member_visibility = "any"
     .unwrap();
     let output = run(tmp.path(), &["check", "--payloads"]);
     assert!(output.status.success(), "{}", stderr(&output));
-    assert!(
-        stderr(&output).contains("declared and empty"),
-        "{}",
-        stderr(&output)
-    );
+    assert!(stderr(&output).contains("declared and empty"), "{}", stderr(&output));
     let payloads: serde_json::Value = serde_json::from_str(&stdout(&output)).unwrap();
     let bodies: Vec<tessera_types::layer::LayerDeclaration> =
         serde_json::from_value(payloads["layers"].clone()).unwrap();
@@ -444,8 +437,8 @@ type  = "f32"
 }
 
 /// **A view group that names no points file and no roster is declared and empty** on the same
-/// rule. `tessera build` refuses it — the points would have to come from somewhere — and the
-/// refusal names the two roster forms.
+/// rule. `tessera build` refuses it, the points having to come from somewhere, and the refusal
+/// names the two roster forms.
 #[test]
 fn a_view_group_naming_no_source_is_a_note_at_check_and_a_refusal_at_build() {
     let tmp = tempfile::tempdir().unwrap();
@@ -559,10 +552,7 @@ fn the_disclosure_report_carries_every_decision() {
     assert_eq!(topics["visibility"], "ir:analyst");
     assert_eq!(topics["require_member_visibility"], "all");
     assert_eq!(topics["depends_on"][0], "clusters/a");
-    assert_eq!(
-        topics["content"]["supplied"][0]["require_member_visibility"],
-        "all"
-    );
+    assert_eq!(topics["content"]["supplied"][0]["require_member_visibility"], "all");
 }
 
 /// **`tessera check` computes the same document**, which is the whole reason it lives on the
@@ -576,10 +566,7 @@ fn a_moved_gate_moves_exactly_one_line_of_the_report() {
 
     std::fs::write(
         tmp.path().join("schema.toml"),
-        DECLARATION.replace(
-            "visibility                = \"ir:analyst\"",
-            "visibility                = \"public\"",
-        ),
+        DECLARATION.replace("visibility                = \"ir:analyst\"", "visibility                = \"public\""),
     )
     .unwrap();
     let after = build_out(tmp.path(), "after");
@@ -591,10 +578,7 @@ fn a_moved_gate_moves_exactly_one_line_of_the_report() {
         .collect();
     assert_eq!(
         changed,
-        vec![(
-            "      \"visibility\": \"ir:analyst\",",
-            "      \"visibility\": \"public\","
-        )],
+        vec![("      \"visibility\": \"ir:analyst\",", "      \"visibility\": \"public\",")],
         "a gate moving must move one line and nothing else"
     );
 }

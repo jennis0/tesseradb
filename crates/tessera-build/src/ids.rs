@@ -1,32 +1,41 @@
 //! How a declaration names a row, and what an external id is made of.
 //!
 //! A build joins every source it reads on one value per row: the column
-//! `[defaults].entity_id_field` names, or a view's `fields.entity_id`
-//! (`configuration.md` §1, §8). That column may hold an integer, a string or binary bytes, and the
-//! bytes it holds are the row's **external id** — contracts §2.4's caller-supplied namespace,
-//! taken as supplied and never manufactured.
+//! `[defaults].entity_id_field` names, or a view's `fields.entity_id` (`configuration.md` §1, §8).
+//! That column may hold an integer, a string or binary bytes. Whatever it holds is the row's
+//! **external id**, contracts §2.4's caller-supplied namespace, taken as supplied and never
+//! manufactured.
 //!
 //! **The ordinal space is the key's rank, so nothing below this module changes.** Every pass in
 //! the build joins on a `u64` source id, and pass one's cheapest arrangement is a contiguous range
 //! of them (`pipeline::SourceIds`). A supplied key is therefore interned once, before the first
 //! pass: the keys of every view's points file are collected, sorted bytewise and deduplicated, and
 //! a key's source id is its rank in that order. The ranks are `0..n`, so the union is contiguous
-//! by construction and every consumer — the entity-id assignment, the attribute join, the member
-//! join, the external-id write — reads the same `u64` it always did.
+//! and every consumer reads the same `u64` it always did: the entity-id assignment, the attribute
+//! join, the member join, the external-id write.
 //!
 //! **Sorting by bytes rather than by arrival is what makes the external-id index fall out.** The
 //! index is `(external_id, entity_id)` sorted by the id's bytes (contracts §2.4), and a rank walk
 //! is already in that order, so the supplied route writes it without a sort. The integer route
-//! keeps its own sort: eight little-endian bytes are not in numeric order, which is what
+//! keeps its own sort, eight little-endian bytes not being in the integer's order, which is what
 //! `ExternalIdRow`'s byte-swapped key is for.
 //!
 //! **An id a points file does not carry resolves to [`NO_SOURCE_ID`]**, which no rank can be. A
-//! member row naming one is the refusal it is for an unknown integer, and an attribute row naming
-//! one is a row the join did not match, counted and reported (`configuration.md` §8).
+//! member row naming one is a refusal naming the key, and an attribute row naming one is a row the
+//! join did not match, counted and reported (`configuration.md` §8).
 //!
-//! **The keys are held in memory for the length of the build.** A corpus of `n` supplied keys
-//! costs their bytes plus a pointer and a length each, which is the one structure this route adds
-//! over the integer one. The integer route allocates nothing here at all.
+//! ## What the supplied route costs
+//!
+//! **The keys are resident for the length of the build, and there is no spill route for them.**
+//! A key costs its `Box<[u8]>` in the interned vector, 16 bytes, plus its own heap allocation,
+//! which glibc rounds to a 16-byte chunk with an 8-byte header and a 32-byte floor. Modelled, not
+//! measured: at a 20-byte mean key that is 16 + 32 = 48 B/item, so 10⁸ keys are 4.5 GiB and 10⁹
+//! are 45. `residency::disk` charges it as a named term, so the pre-flight refuses a build that
+//! would not fit rather than the kernel killing it. The integer route allocates nothing here.
+//!
+//! The sidecar the same route writes is charged beside it, at `12 + mean` bytes an item: a 4-byte
+//! Arrow offset, the key's own bytes, a 4-byte entity, a 4-byte locator slot, and a quarter byte
+//! an item of Arrow framing.
 
 use std::path::Path;
 
@@ -38,8 +47,8 @@ use crate::error::{BuildError, Result};
 
 /// The source id of a row whose key no points file carries.
 ///
-/// `u64::MAX` is not a rank — the ranks are `0..n` and `n` is bounded by the entity-id space — so
-/// a consumer's existing "this id is in no view" arm is what answers for it.
+/// `u64::MAX` is not a rank: the ranks are `0..n` and `n` is bounded by the entity-id space, so a
+/// consumer's existing "this id is in no view" arm is what answers for it.
 pub const NO_SOURCE_ID: u64 = u64::MAX;
 
 /// How this build's declaration names a row.
@@ -54,15 +63,19 @@ pub enum IdSpace {
     /// **The points file carries no identity column.** The caller supplied no external id, so the
     /// bundle writes no extent and no locator and a row is addressable by its `tessera_id` alone
     /// (contracts §2.4). A row's join key is its position in the points file, which is why this
-    /// route is admitted only where every reader walks that one file whole and in order — see
-    /// [`IdSpace::prepare`]'s refusals.
+    /// route is admitted only where every reader walks that one file whole and in order. The
+    /// refusals that hold it to that are in [`IdSpace::prepare`].
     Positional,
 }
 
-/// Every key this build's points files carry, bytewise ascending and unique.
+/// Every key this build's points files carry, bytewise ascending and unique, and the Arrow type
+/// the declaration spells them at.
 #[derive(Debug)]
 pub struct SuppliedIds {
     keys: Vec<Box<[u8]>>,
+    /// The points file's own identity column type, for the refusal a second source earns when it
+    /// spells identity in the other family.
+    spelled: DataType,
 }
 
 impl SuppliedIds {
@@ -87,6 +100,64 @@ impl SuppliedIds {
     pub fn is_empty(&self) -> bool {
         self.keys.is_empty()
     }
+
+    /// The mean key length in bytes, which is what the pre-flight charges the arena and the
+    /// sidecar at (module doc). Zero over no keys.
+    pub fn mean_key_len(&self) -> u64 {
+        if self.keys.is_empty() {
+            return 0;
+        }
+        let total: usize = self.keys.iter().map(|key| key.len()).sum();
+        (total / self.keys.len()) as u64
+    }
+
+    /// **A second source must spell identity in the same family**, and the refusal is made once
+    /// against the column rather than once per row.
+    ///
+    /// An integer column read against interned keys resolves every row to an unknown key: a
+    /// members table would refuse row by row on the first one, and an attribute source would
+    /// report zero coverage over a join that was never going to match. Both are answers to the
+    /// wrong question. The declaration named one identity, and a column in the other family is a
+    /// producer that has not been rewritten yet.
+    pub fn require_same_family(
+        &self,
+        path: &Path,
+        object: &str,
+        column: &str,
+        found: &DataType,
+    ) -> Result<()> {
+        if IdKind::of(found) == Some(IdKind::Bytes) {
+            return Ok(());
+        }
+        Err(BuildError::Schema {
+            path: path.to_path_buf(),
+            detail: format!(
+                "{object}: the column '{column}' naming each row holds {found:?}, and this \
+                 declaration's points file spells identity at {:?}. One identity is one type \
+                 (configuration.md §8): a column in the other family names none of the rows this \
+                 build loaded",
+                self.spelled
+            ),
+        })
+    }
+}
+
+/// An item's external id, as it goes into the index (contracts §2.4).
+///
+/// An owning variant for the integer route so that route allocates nothing per row, and a borrow
+/// for the supplied one so its keys are written straight out of the arena.
+pub enum ExternalId<'a> {
+    Integer([u8; 8]),
+    Supplied(&'a [u8]),
+}
+
+impl AsRef<[u8]> for ExternalId<'_> {
+    fn as_ref(&self) -> &[u8] {
+        match self {
+            ExternalId::Integer(bytes) => bytes,
+            ExternalId::Supplied(key) => key,
+        }
+    }
 }
 
 impl IdSpace {
@@ -94,8 +165,8 @@ impl IdSpace {
     ///
     /// **Every view's points file must spell identity at the same type.** The views share one
     /// entity space (`views.md` §7), so a string in one and an integer in another would be two key
-    /// spaces wearing one column name — a row present in both views under the same identity would
-    /// be two entities, with no error anywhere.
+    /// spaces wearing one column name, and a row present in both views under the same identity
+    /// would be two entities with no error anywhere.
     pub fn prepare(args: &crate::BuildArgs) -> Result<IdSpace> {
         if let Some(view) = args.views.first() {
             if !crate::input::has_id_column(&view.points, &view.point_fields)? {
@@ -122,13 +193,13 @@ impl IdSpace {
                 _ => spelling = Some((view, found, kind)),
             }
         }
-        if !matches!(spelling, Some((_, _, IdKind::Bytes))) {
+        let Some((_, spelled, IdKind::Bytes)) = spelling else {
             return Ok(IdSpace::Integer);
-        }
+        };
         // **`--limit` selects on an integer id and there is no integer here.** It keeps the rows
-        // whose identity is below it, which a supplied key has no order for that a caller would
-        // recognise. Refused rather than reinterpreted as a rank, which would be a prefix of the
-        // corpus nobody asked for.
+        // whose identity is below it, and a supplied key has no order a caller would recognise it
+        // by. Refused rather than reinterpreted as a rank, which would be a prefix of the corpus
+        // nobody asked for.
         if args.limit.is_some() {
             return Err(BuildError::Invalid(
                 "`--limit` keeps the rows whose identity is below it, and this declaration's \
@@ -150,23 +221,10 @@ impl IdSpace {
         // deduplicated across views: a point has one identity in every view it appears in.
         keys.sort_unstable();
         keys.dedup();
-        Ok(IdSpace::Supplied(SuppliedIds { keys }))
+        Ok(IdSpace::Supplied(SuppliedIds { keys, spelled }))
     }
 
-    /// The source id `key` names, or [`NO_SOURCE_ID`] where no points file carries it. On the
-    /// integer route the eight little-endian bytes are read back as the integer they encode.
-    pub fn resolve(&self, key: &[u8]) -> u64 {
-        match self {
-            IdSpace::Positional => NO_SOURCE_ID,
-            IdSpace::Integer => match <[u8; 8]>::try_from(key) {
-                Ok(bytes) => u64::from_le_bytes(bytes),
-                Err(_) => NO_SOURCE_ID,
-            },
-            IdSpace::Supplied(keys) => keys.rank(key),
-        }
-    }
-
-    /// The supplied keys, or `None` on the integer route.
+    /// The supplied keys, or `None` on the integer and positional routes.
     pub fn supplied(&self) -> Option<&SuppliedIds> {
         match self {
             IdSpace::Integer | IdSpace::Positional => None,
@@ -181,12 +239,12 @@ impl IdSpace {
 
     /// The external id a source id carries: the supplied key's own bytes, or the integer's eight
     /// little-endian bytes.
-    pub fn external_id(&self, source_id: u64) -> std::borrow::Cow<'_, [u8]> {
-        match self {
-            IdSpace::Positional | IdSpace::Integer => {
-                std::borrow::Cow::Owned(source_id.to_le_bytes().to_vec())
-            }
-            IdSpace::Supplied(keys) => std::borrow::Cow::Borrowed(keys.key(source_id)),
+    ///
+    /// The positional route reaches this nowhere, [`writes_external_ids`] being false for it.
+    pub fn external_id(&self, source_id: u64) -> ExternalId<'_> {
+        match self.supplied() {
+            Some(keys) => ExternalId::Supplied(keys.key(source_id)),
+            None => ExternalId::Integer(source_id.to_le_bytes()),
         }
     }
 
@@ -201,14 +259,15 @@ impl IdSpace {
     }
 }
 
-/// The positional route, and the four shapes it refuses.
+/// The positional route, and the shapes it refuses.
 ///
 /// **A row is named by its position, so every reader must walk the same file whole and in the same
-/// order.** Nothing else can be joined to it: a second file's rows are its own, a `--limit` prunes
-/// row groups before they are counted, and a view's selection keeps some rows and not others. Each
-/// of those is refused here rather than resolved to a position that means something else — a join
-/// under the wrong identity puts one row's attributes, and one row's access terms, under another
-/// row's `tessera_id`, with no error anywhere.
+/// order.** Nothing else can be joined to it. A second file's rows are its own, a `--limit` prunes
+/// row groups before they are counted, a view's selection keeps some rows and not others, and a
+/// membership written beside an artifact names rows of a file it does not index. Each is refused
+/// here rather than resolved to a position that means something else: a join under the wrong
+/// identity puts one row's attributes, and one row's access terms, under another row's
+/// `tessera_id`, with no error anywhere.
 fn positional(args: &crate::BuildArgs, view: &crate::ViewArgs) -> Result<IdSpace> {
     let refuse = |detail: String| -> Result<IdSpace> {
         Err(BuildError::Invalid(format!(
@@ -267,6 +326,42 @@ fn positional(args: &crate::BuildArgs, view: &crate::ViewArgs) -> Result<IdSpace
                 input.name,
                 members.path.display()
             ));
+        }
+        // **The membership written beside an artifact names rows too**, as a list per artifact
+        // rather than a row per member (`configuration.md` §8's two shapes). Read against
+        // positions it would publish whichever rows the file happened to be ordered by.
+        let enumerated = args.layers.iter().any(|d| {
+            d.name == input.name
+                && d.membership == tessera_types::layer::MembershipSource::Enumerated
+        });
+        if !enumerated {
+            continue;
+        }
+        match &input.artifacts {
+            None => {}
+            Some(crate::config::ArtifactSource::Inline(rows)) => {
+                if rows
+                    .iter()
+                    .any(|row| row.members.is_some() || row.excluding.is_some())
+                {
+                    return refuse(format!(
+                        "Layer '{}' writes its artifacts' memberships inline, and a membership \
+                         names entities. Declare an identity column",
+                        input.name
+                    ));
+                }
+            }
+            Some(crate::config::ArtifactSource::File { path, fields, .. }) => {
+                let named = [fields.of("members"), fields.of("excluding")];
+                if let Some(column) = crate::input::first_column_present(path, &named)? {
+                    return refuse(format!(
+                        "Layer '{}' reads its artifacts from {}, which carries a '{column}' \
+                         column, and a membership names entities. Declare an identity column",
+                        input.name,
+                        path.display()
+                    ));
+                }
+            }
         }
     }
     Ok(IdSpace::Positional)

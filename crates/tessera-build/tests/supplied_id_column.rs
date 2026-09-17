@@ -6,7 +6,7 @@
 //!
 //! - a **string** id column, joined to a members table and an attribute source naming the same
 //!   strings, writing the external-id index from those strings and nothing else;
-//! - an **integer** id column, which keeps what it always wrote — eight little-endian bytes per
+//! - an **integer** id column, which keeps what it always wrote: eight little-endian bytes per
 //!   row, the runs sorted over those bytes, under `--mint-external-ids`;
 //! - **no id column at all**, contracts §2.4's caller who supplied no identity: no extent, no
 //!   locator, and rows addressable by `tessera_id` alone.
@@ -18,7 +18,8 @@ use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use arrow::array::{ArrayRef, Float64Array, Int64Array, StringArray, UInt64Array};
+use arrow::array::{ArrayRef, Float64Array, Int64Array, ListArray, StringArray, UInt64Array};
+use arrow::buffer::OffsetBuffer;
 use arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
@@ -30,9 +31,9 @@ use tessera_types::IdentityKey;
 const TEST_KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f";
 const N: usize = 24;
 
-/// The keys this corpus names its rows by, deliberately **not** in the order the file writes them:
-/// a build interns them bytewise, and a fixture whose file order already agreed could not tell the
-/// two apart.
+/// The keys this corpus names its rows by, **not** in the order the file writes them. A build
+/// interns them bytewise, and a fixture whose file order already agreed could not tell the two
+/// apart.
 fn keys() -> Vec<String> {
     (0..N).map(|i| format!("doc-{:02}", (i * 7) % N)).collect()
 }
@@ -58,7 +59,7 @@ fn coordinates() -> (Vec<f64>, Vec<f64>) {
 }
 
 /// The points file under an id column named `doc_id`, carrying its own access labels and one
-/// declared attribute — or, where `ids` is `None`, carrying no identity column at all.
+/// declared attribute, or, where `ids` is `None`, carrying no identity column at all.
 fn write_points(path: &Path, ids: Option<ArrayRef>) {
     let (xs, ys) = coordinates();
     let mut fields = Vec::new();
@@ -80,7 +81,7 @@ fn write_points(path: &Path, ids: Option<ArrayRef>) {
     write(path, fields, columns);
 }
 
-/// `(key, doc_id)` — one row per `(artifact, entity)`, naming entities the way the points file
+/// `(key, doc_id)`: one row per `(artifact, entity)`, naming entities the way the points file
 /// spells them.
 fn write_members(path: &Path, ids: ArrayRef) {
     let cluster: Vec<String> = (0..ids.len()).map(|i| format!("c{}", i % 3)).collect();
@@ -94,10 +95,36 @@ fn write_members(path: &Path, ids: ArrayRef) {
     );
 }
 
+/// One row per artifact, its membership a list of entities in the cell.
+fn write_artifacts(path: &Path) {
+    let members = ListArray::new(
+        Arc::new(Field::new("item", DataType::UInt64, true)),
+        OffsetBuffer::from_lengths([3usize, 2]),
+        Arc::new(UInt64Array::from(vec![0u64, 3, 5, 7, 9])) as ArrayRef,
+        None,
+    );
+    write(
+        path,
+        vec![
+            Field::new("key", DataType::Utf8, false),
+            Field::new(
+                "members",
+                DataType::List(Arc::new(Field::new("item", DataType::UInt64, true))),
+                true,
+            ),
+        ],
+        vec![
+            Arc::new(StringArray::from(vec!["c0", "c1"])),
+            Arc::new(members),
+        ],
+    );
+}
+
 const DECLARATION: &str = r#"
 [sources]
-points  = "points.parquet"
-members = "members.parquet"
+points   = "points.parquet"
+members  = "members.parquet"
+clusters = "clusters.parquet"
 
 [defaults]
 source          = "points"
@@ -130,21 +157,49 @@ require_member_visibility = "none"
   fields = { entity = "doc_id" }
 "#;
 
-/// The declaration, parsed against the files in `dir`.
-fn declaration(dir: &Path, with_members: bool) -> tessera_build::config::Config {
-    let mut text = DECLARATION.to_string();
-    if with_members {
-        text.push_str(LAYER);
-    }
+/// A layer whose artifacts file carries the membership as a list per artifact, the other of
+/// `configuration.md` §8's two shapes.
+const ARTIFACT_LAYER: &str = r#"
+[[layer]]
+name       = "clusters/a"
+views      = ["s0"]
+source     = "clusters"
+membership = "enumerated"
+hierarchy  = { kind = "flat" }
+value_set  = "open"
+
+visibility                = "public"
+artifact_visibility       = { default = "inherited" }
+require_member_visibility = "none"
+"#;
+
+/// The same layer with its artifacts, and their memberships, written in the document.
+const INLINE_LAYER: &str = r#"
+[[layer]]
+name       = "clusters/a"
+views      = ["s0"]
+membership = "enumerated"
+hierarchy  = { kind = "flat" }
+value_set  = "open"
+artifacts  = [{ key = "c0", members = [0, 3, 5] }, { key = "c1", members = [7, 9] }]
+
+visibility                = "public"
+artifact_visibility       = { default = "inherited" }
+require_member_visibility = "none"
+"#;
+
+/// The declaration, parsed against the files in `dir`, with `layer` appended where the case wants
+/// a layer.
+fn declaration(dir: &Path, layer: &str) -> tessera_build::config::Config {
     let path = dir.join("schema.toml");
-    std::fs::write(&path, text).unwrap();
+    std::fs::write(&path, format!("{DECLARATION}{layer}")).unwrap();
     tessera_build::config::Config::parse(&path, &Default::default())
         .expect("the declaration parses")
 }
 
 /// One build over that declaration, into `out`.
-fn args(dir: &Path, with_members: bool, mint: bool, out: &Path) -> BuildArgs {
-    let config = declaration(dir, with_members);
+fn args(dir: &Path, layer: &str, mint: bool, out: &Path) -> BuildArgs {
+    let config = declaration(dir, layer);
     let view = &config.views[0];
     BuildArgs {
         views: vec![tessera_build::ViewArgs {
@@ -236,7 +291,7 @@ fn a_string_id_column_is_the_external_id_and_the_join_key() {
     );
     let out = dir.join("bundle");
     // No `--mint-external-ids`: the caller named every row, so the index is written without a flag.
-    let report = build(&args(dir, true, false, &out)).expect("the build succeeds");
+    let report = build(&args(dir, LAYER, false, &out)).expect("the build succeeds");
     assert_eq!(report.items, N as u64);
 
     // Every key round-trips in both directions, which is the sidecar's whole contract.
@@ -291,11 +346,11 @@ fn an_integer_id_column_keeps_its_eight_little_endian_bytes() {
     // Without the flag an integer column mints nothing: a source-corpus number is not a namespace
     // the caller owns.
     let plain = dir.join("plain");
-    build(&args(dir, true, false, &plain)).expect("the build succeeds");
+    build(&args(dir, LAYER, false, &plain)).expect("the build succeeds");
     assert!(sidecar(&plain).is_none(), "no flag, no sidecar");
 
     let minted = dir.join("minted");
-    build(&args(dir, true, true, &minted)).expect("the minted build succeeds");
+    build(&args(dir, LAYER, true, &minted)).expect("the minted build succeeds");
     let held = bound(&minted, N);
     let mut expected: Vec<Vec<u8>> = ids.iter().map(|id| id.to_le_bytes().to_vec()).collect();
     let mut found = held.clone();
@@ -332,7 +387,7 @@ fn a_member_naming_an_unknown_key_is_refused() {
         &dir.join("members.parquet"),
         Arc::new(StringArray::from(named)),
     );
-    let said = build(&args(dir, true, false, &dir.join("bundle")))
+    let said = build(&args(dir, LAYER, false, &dir.join("bundle")))
         .expect_err("a member naming no entity is refused")
         .to_string();
     assert!(said.contains("doc-99"), "{said}");
@@ -342,15 +397,95 @@ fn a_member_naming_an_unknown_key_is_refused() {
     );
 }
 
-/// **A points file with no id column builds, with no external ids at all** — contracts §2.4's rule
-/// for a caller who supplied none. The rows are addressable by `tessera_id` and by nothing else.
+/// **A members table in the other type family is refused once, against the column.** Resolving it
+/// row by row would refuse on the first row as an unknown key, which is an answer to the wrong
+/// question: the declaration named one identity and this producer has not been rewritten.
+#[test]
+fn a_members_column_in_the_other_family_is_refused_naming_both_types() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    write_points(
+        &dir.join("points.parquet"),
+        Some(Arc::new(StringArray::from(keys()))),
+    );
+    write_members(
+        &dir.join("members.parquet"),
+        Arc::new(UInt64Array::from(integers())),
+    );
+    let said = build(&args(dir, LAYER, false, &dir.join("bundle")))
+        .expect_err("a members column in the other family is refused")
+        .to_string();
+    assert!(said.contains("UInt64"), "{said}");
+    assert!(said.contains("Utf8"), "{said}");
+    assert!(said.contains("One identity is one type"), "{said}");
+}
+
+/// **A membership written beside an artifact names rows too**, and on the positional route there
+/// are no rows for it to name. Both spellings of that shape are refused, naming the layer and,
+/// where there is one, the file.
+#[test]
+fn a_membership_beside_an_artifact_is_refused_with_no_id_column() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    write_points(&dir.join("points.parquet"), None);
+    write_artifacts(&dir.join("clusters.parquet"));
+    let said = build(&args(dir, ARTIFACT_LAYER, false, &dir.join("from-file")))
+        .expect_err("an artifacts file carrying a membership is refused")
+        .to_string();
+    assert!(said.contains("clusters/a"), "{said}");
+    assert!(said.contains("clusters.parquet"), "{said}");
+    assert!(said.contains("Declare an identity column"), "{said}");
+
+    let said = build(&args(dir, INLINE_LAYER, false, &dir.join("inline")))
+        .expect_err("an inline membership is refused")
+        .to_string();
+    assert!(said.contains("clusters/a"), "{said}");
+    assert!(said.contains("Declare an identity column"), "{said}");
+}
+
+/// **A points file that stores Morton codes and no identity column builds.** The positional route
+/// has no identity column to project, so it projects this file's own geometry, and a corpus
+/// holding codes carries no `x` at all.
+#[test]
+fn a_morton_points_file_with_no_id_column_builds() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    write(
+        &dir.join("points.parquet"),
+        vec![
+            Field::new("morton", DataType::UInt64, false),
+            Field::new("visibility", DataType::Utf8, false),
+            Field::new("flag", DataType::Int64, false),
+        ],
+        vec![
+            Arc::new(UInt64Array::from(
+                (0..N)
+                    .map(|i| (i as u64 * 131) % 65_536)
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(StringArray::from(vec!["public"; N])),
+            Arc::new(Int64Array::from(
+                (0..N).map(|i| (i % 3) as i64).collect::<Vec<_>>(),
+            )),
+        ],
+    );
+    let out = dir.join("bundle");
+    let mut args = args(dir, "", false, &out);
+    args.views[0].extent = tessera_build::input::IDENTITY_EXTENT;
+    let report = build(&args).expect("a Morton points file with no id builds");
+    assert_eq!(report.items, N as u64);
+    assert!(sidecar(&out).is_none(), "no id column, no external ids");
+}
+
+/// **A points file with no id column builds, with no external ids at all**, which is contracts
+/// §2.4's rule for a caller who supplied none. The rows are addressable by `tessera_id` and by nothing else.
 #[test]
 fn a_points_file_with_no_id_column_writes_no_external_ids() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path();
     write_points(&dir.join("points.parquet"), None);
     let out: PathBuf = dir.join("bundle");
-    let report = build(&args(dir, false, false, &out)).expect("a points file with no id builds");
+    let report = build(&args(dir, "", false, &out)).expect("a points file with no id builds");
     assert_eq!(report.items, N as u64);
     assert!(sidecar(&out).is_none(), "no id column, no external ids");
 }

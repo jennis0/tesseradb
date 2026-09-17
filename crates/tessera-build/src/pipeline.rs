@@ -676,6 +676,7 @@ fn plan_build(
     n: u64,
     route: crate::ExtentRoute,
     ids: crate::residency::IdShape,
+    id_space: &crate::ids::IdSpace,
     pair_rows: usize,
     row_counts: &[u64],
     histogram: &[u64],
@@ -704,7 +705,12 @@ fn plan_build(
     // is not affected by the choice: every column's storage is a mapped term and `total()` counts
     // the anonymous ones.
     let free = available_disk(&args.out);
-    let (routes, tail) = crate::residency::routes_for(args, n, ids, &payloads, free, route);
+    let (routes, mut tail) = crate::residency::routes_for(args, n, ids, &payloads, free, route);
+    // **The supplied keys' arena is anonymous and has no spill route** (`crate::ids`), so it
+    // stands beside the entity-order terms and the refusal below counts it.
+    if let Some(arena) = crate::residency::supplied_key_arena(id_space) {
+        tail.terms.push(arena);
+    }
     report_column_routes(args, &routes, &tail, free);
     if tail.total() > budget {
         return Err(BuildError::Invalid(format!(
@@ -887,7 +893,7 @@ fn plan_build(
         batches,
         bucket_in_ram,
     };
-    let disk = crate::residency::disk(args, corpus, &payloads, &tail);
+    let disk = crate::residency::disk(args, corpus, &payloads, &tail, id_space);
     let (phase, disk_need) = disk.peak();
     // **Printed whatever the free space is.** An operator sizing a corpus has no other way to ask
     // what a build will cost the disk, and the campaign's rung 6 died at hour three on a forecast
@@ -1111,6 +1117,7 @@ fn build_bundle(
         n,
         route,
         id_shape,
+        &id_space,
         pair_rows,
         &row_counts,
         &histogram,
@@ -1233,7 +1240,8 @@ fn build_bundle(
     // **A mapped file**, on the same argument as the geometry beside it: 4 B an item is 13.3 GiB
     // at the GBIF rung, held from here to the end of the batch loop, and as anonymous memory it
     // was the largest term of that loop's residency that no model named.
-    let mut appearances = spill::MappedU32::zeroed(tmp.path(), "appearances.u32", n as usize)?;
+    let mut appearances =
+        spill::MappedU32::zeroed(tmp.path(), "appearances.u32", n as usize)?;
     for (index, view) in args.views.iter().enumerate() {
         let mut x_map =
             spill::MappedU32::zeroed(tmp.path(), &format!("x-of-ordinal-{index}.u32"), n as usize)?;
@@ -1273,13 +1281,9 @@ fn build_bundle(
                 })
             };
             input::scan_points(
-                &view.points,
-                &view.point_fields,
+                crate::view_source(view, args, &id_space),
                 view.projection,
                 &view.extent,
-                args.limit,
-                view.select.as_ref(),
-                &id_space,
                 |point| {
                     chunk.push((point.source_id, (point.qx, point.qy)));
                     if chunk.len() == JOIN_CHUNK_ROWS {
@@ -1766,14 +1770,9 @@ fn build_bundle(
             })
             .collect();
         // Keys are the byte-swapped source ids on the integer route and the ranks themselves on
-        // the supplied one — dup-checked, hence unique: a total order, one output under the
-        // parallel unstable sort (`crate::sort_external_id_rows` states which and why).
-        match &id_space {
-            crate::ids::IdSpace::Supplied(_) => {
-                external.par_sort_unstable_by_key(ExternalIdRow::source_id)
-            }
-            _ => external.par_sort_unstable_by_key(ExternalIdRow::sort_key),
-        }
+        // the supplied one, dup-checked and hence unique: a total order, one output under the
+        // parallel unstable sort (`crate::external_id_order` states which and why).
+        external.par_sort_unstable_by_key(crate::external_id_order(&id_space));
         external_ids_paths = write_external_id_runs(
             &entities_dir,
             &external,
@@ -2000,8 +1999,9 @@ fn build_bundle(
     // dictionary pass's alone, so they go back to the disk here rather than standing through the
     // record blob, which is the phase the measured peak falls on.
     let mut open_extents = open_extents;
-    open_extents
-        .retain(|extents| blob_resident(&args.schema, &args.schema.attributes[extents.column]));
+    open_extents.retain(|extents| {
+        blob_resident(&args.schema, &args.schema.attributes[extents.column])
+    });
     for column in spilled.iter_mut() {
         if !blob_resident(&args.schema, &args.schema.attributes[column.column]) {
             column.remove();
@@ -2437,9 +2437,7 @@ fn read_attributes_by_entity(
             for record in store.load(k)?.chunks_exact(record_width) {
                 let entity =
                     u32::from_le_bytes(record[..4].try_into().expect("a record carries its key"));
-                let at = (entity as u64)
-                    .checked_sub(lo as u64)
-                    .filter(|&at| at < span as u64);
+                let at = (entity as u64).checked_sub(lo as u64).filter(|&at| at < span as u64);
                 let Some(at) = at.map(|at| at as usize) else {
                     return Err(BuildError::Invalid(format!(
                         "attribute '{name}': bucket {k} of its value partition holds entity \
@@ -2771,16 +2769,12 @@ fn read_one_attribute_source(
         Ok(())
     };
 
+    // An attribute source is entity space: one value per entity, in a file of its own, with no
+    // view to select (`views.md` §5).
     input::scan_attributes(
-        &group.path,
-        &group.fields,
+        input::Source::new(&group.path, &group.fields, id_space).limited(args.limit),
         attributes,
         minters,
-        args.limit,
-        // An attribute source is entity space: one value per entity, in a file of its own, with
-        // no view to select (`views.md` §5).
-        None,
-        id_space,
         |batch| {
             // Flushed **before** the batch rather than after a row count is reached, because a
             // batch is staged as a unit. Chunk boundaries are unobservable in the output — see
@@ -3257,13 +3251,11 @@ fn read_scoped_column(
         Ok(())
     };
     input::scan_attributes(
-        points,
-        point_fields,
+        input::Source::new(points, point_fields, id_space)
+            .limited(args.limit)
+            .selecting(select),
         &columns,
         minters,
-        args.limit,
-        select,
-        id_space,
         |batch| {
             if !chunk.is_empty() && chunk.len() + batch.rows.len() > staged_rows {
                 flush(&mut chunk, &mut staged, &mut values, &mut present)?;
@@ -4178,9 +4170,11 @@ impl KeywordValues<'_> {
     fn rows_hint(&self) -> usize {
         match self {
             KeywordValues::Column(values) => values.len(),
-            KeywordValues::Extents(extents) => {
-                extents.blobs.iter().map(|blob| blob.rows() as usize).sum()
-            }
+            KeywordValues::Extents(extents) => extents
+                .blobs
+                .iter()
+                .map(|blob| blob.rows() as usize)
+                .sum(),
         }
     }
 }
@@ -5644,13 +5638,9 @@ fn count_source_ids(
         _ => {
             let mut count = 0usize;
             input::scan_points(
-                &view.points,
-                &view.point_fields,
+                crate::view_source(view, args, id_space),
                 view.projection,
                 &view.extent,
-                args.limit,
-                view.select.as_ref(),
-                id_space,
                 |_| {
                     count += 1;
                     ControlFlow::Continue(())
@@ -5667,11 +5657,12 @@ fn count_source_ids(
 /// collapsed into one entity. Stated once here because both routes through pass one make it.
 fn duplicate_view_ids(view: &crate::ViewArgs) -> BuildError {
     BuildError::Invalid(format!(
-        "view '{}': {} contains duplicate entity_id values. A row is unique per (entity, view) — \
+        "view '{}': {} names a row twice in its '{}' column. A row is unique per (entity, view): \
          the same entity in several views is the ordinary case and is several files, never several \
          rows of one (views §4)",
         view.view_id,
-        view.points.display()
+        view.points.display(),
+        view.point_fields.of(crate::config::ENTITY_ID)
     ))
 }
 
@@ -5714,13 +5705,9 @@ fn read_source_ids_into(
     let mut mixed = 0u64;
     let mut overran = false;
     input::scan_points(
-        &view.points,
-        &view.point_fields,
+        crate::view_source(view, args, id_space),
         view.projection,
         &view.extent,
-        args.limit,
-        view.select.as_ref(),
-        id_space,
         |point| {
             let Some(cell) = slot.get_mut(written) else {
                 // Past the end of the slot: stop the scan rather than decode the rest of a file
@@ -5931,10 +5918,13 @@ impl IdPresence {
     fn ids(&self) -> impl Iterator<Item = u64> + '_ {
         self.words.iter().enumerate().flat_map(|(index, &word)| {
             let base = self.base + index as u64 * 64;
-            std::iter::successors((word != 0).then_some(word), |w| {
-                let rest = *w & (*w - 1);
-                (rest != 0).then_some(rest)
-            })
+            std::iter::successors(
+                (word != 0).then_some(word),
+                |w| {
+                    let rest = *w & (*w - 1);
+                    (rest != 0).then_some(rest)
+                },
+            )
             .map(move |w| base + w.trailing_zeros() as u64)
         })
     }
@@ -6034,13 +6024,9 @@ fn read_source_ids_present(
         let mut outside = false;
         let mut duplicate = false;
         input::scan_points(
-            &view.points,
-            &view.point_fields,
+            crate::view_source(view, args, id_space),
             view.projection,
             &view.extent,
-            args.limit,
-            view.select.as_ref(),
-            id_space,
             |point| {
                 let Some(bits) = bits.as_mut().filter(|_| written < count) else {
                     overran = true;
@@ -6920,22 +6906,13 @@ mod tests {
             })
             .collect();
         prose_source.push((prose_source[3].0, "the later value, adjacent".to_string()));
-        prose_source.insert(
-            2,
-            (
-                prose_source[9].0,
-                "the earlier value, far apart".to_string(),
-            ),
-        );
+        prose_source.insert(2, (prose_source[9].0, "the earlier value, far apart".to_string()));
         let mut note_source: Vec<(u32, String)> = (0..N)
             .filter(|entity| entity % 4 != 3)
             .map(|entity| ((entity * 11 % N) as u32, format!("note-{entity}")))
             .collect();
         note_source.push((note_source[7].0, "the later note, adjacent".to_string()));
-        note_source.insert(
-            1,
-            (note_source[19].0, "the earlier note, far apart".to_string()),
-        );
+        note_source.insert(1, (note_source[19].0, "the earlier note, far apart".to_string()));
 
         let blob_of = |dir: &Path, chunk: usize| -> Vec<PathBuf> {
             let extent_dir = dir.join("extents");
@@ -7344,7 +7321,9 @@ mod tests {
         // The source rows, in an order that is not entity order, with two entities written twice.
         let mut source: Vec<(u32, String)> = (0..N_KEYWORD)
             .filter_map(|entity| match keyword_fixture_key(entity) {
-                ScalarValue::Utf8(key) => Some(((entity * 37 % N_KEYWORD) as u32, key)),
+                ScalarValue::Utf8(key) => {
+                    Some(((entity * 37 % N_KEYWORD) as u32, key))
+                }
                 _ => None,
             })
             .collect();
@@ -7394,11 +7373,8 @@ mod tests {
             std::fs::create_dir_all(&extent_dir).expect("extent dir");
             let spilled = spilled_column(&extent_dir, 0, "key", &source, chunk);
             let open = spilled.open().expect("the extents open");
-            let from_extents = files_of(
-                &dir.path().join(format!("spilled-{chunk}")),
-                &empty,
-                Some(&open),
-            );
+            let from_extents =
+                files_of(&dir.path().join(format!("spilled-{chunk}")), &empty, Some(&open));
             assert_eq!(
                 from_extents, from_arena,
                 "extents in chunks of {chunk} wrote different files"
@@ -7733,14 +7709,10 @@ mod tests {
             (u64::MAX, 16), // absent, past the last source id
         ];
         let mut seen: Vec<(Option<u32>, u64, u32)> = Vec::new();
-        join_chunk(
-            &mut chunk,
-            Ids::Sparse(&source_ids),
-            |ordinal, id, payload| {
-                seen.push((ordinal, id, payload));
-                Ok(())
-            },
-        )
+        join_chunk(&mut chunk, Ids::Sparse(&source_ids), |ordinal, id, payload| {
+            seen.push((ordinal, id, payload));
+            Ok(())
+        })
         .unwrap();
         assert!(chunk.is_empty(), "the chunk must be drained");
         seen.sort_unstable_by_key(|&(_, _, p)| p);
@@ -7763,15 +7735,14 @@ mod tests {
     fn join_chunk_propagates_the_callbacks_error() {
         let source_ids: Vec<u64> = vec![1, 2];
         let mut chunk: Vec<(u64, ())> = vec![(1, ()), (3, ())];
-        let result =
-            join_chunk(
-                &mut chunk,
-                Ids::Sparse(&source_ids),
-                |ordinal, id, ()| match ordinal {
-                    Some(_) => Ok(()),
-                    None => Err(input_changed(&format!("entity {id} missing"))),
-                },
-            );
+        let result = join_chunk(
+            &mut chunk,
+            Ids::Sparse(&source_ids),
+            |ordinal, id, ()| match ordinal {
+                Some(_) => Ok(()),
+                None => Err(input_changed(&format!("entity {id} missing"))),
+            },
+        );
         assert!(result.is_err());
     }
 
@@ -7863,10 +7834,7 @@ mod tests {
         assert_eq!(other.set(163), Some(false));
         bits.union_with(&other);
         assert_eq!(bits.count(), 5);
-        assert_eq!(
-            bits.ids().collect::<Vec<_>>(),
-            vec![100, 101, 163, 164, 299]
-        );
+        assert_eq!(bits.ids().collect::<Vec<_>>(), vec![100, 101, 163, 164, 299]);
     }
 
     /// **A span ending at `u64::MAX` has padding bits in its last word**, and naming one of them
@@ -7902,4 +7870,5 @@ mod tests {
         assert!(!range(&[0, 2]));
         assert!(!range(&[0, 1, 2, 63]));
     }
+
 }

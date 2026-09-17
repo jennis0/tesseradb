@@ -1471,7 +1471,11 @@ fn record_lineage(
 /// column are two spellings of one edge, and an artifact holding a different parent in each is the
 /// same conflict as two points disagreeing. A duplicate edge is one edge whichever spelling stated
 /// it.
-fn apply_lineage(plan: &mut LayerPlan, lineage: Vec<Option<usize>>, path: &Path) -> Result<()> {
+fn apply_lineage(
+    plan: &mut LayerPlan,
+    lineage: Vec<Option<usize>>,
+    path: &Path,
+) -> Result<()> {
     // **Applied in address order, not arena order.** The conflict below is a refusal, and which of
     // several a corpus carries is reported must not depend on the order keys happened to be met —
     // it is the order they sort in, which is what it has always been. One sort of at most one entry
@@ -1899,13 +1903,7 @@ pub fn publish(
             },
         )
         .collect();
-    write_membership_extents(
-        &mut store,
-        prefix_dir,
-        partition,
-        &mut published,
-        &mut streamed,
-    )?;
+    write_membership_extents(&mut store, prefix_dir, partition, &mut published, &mut streamed)?;
     write_content_extent(&store, prefix_dir, partition, &mut published)?;
     published.store = store;
     Ok(published)
@@ -1942,11 +1940,8 @@ fn merge_member_runs(
     if receipts.is_empty() {
         return Ok(spill::MemberTable::empty(plan.bodies.len()));
     }
-    let receipts = cascade_member_runs(
-        receipts,
-        &plan.members.dir,
-        member_merge_fan_in(plan.memory_budget),
-    )?;
+    let receipts =
+        cascade_member_runs(receipts, &plan.members.dir, member_merge_fan_in(plan.memory_budget))?;
     let path = plan.members.dir.join("member-table.spill");
     let mut writer = spill::MemberTableWriter::create(&path, plan.bodies.len())?;
     let mut merge = MemberRunMerge::open(&receipts)?;
@@ -3435,12 +3430,18 @@ fn member_entities<'a>(
     ids: &crate::ids::IdSpace,
 ) -> Result<MemberEntities<'a>> {
     let column = required(path, batch, fields, "entity")?;
-    if ids.supplied().is_some() {
+    if let Some(keys) = ids.supplied() {
+        keys.require_same_family(
+            path,
+            "the member table",
+            fields.of("entity"),
+            column.data_type(),
+        )?;
         let mut rows = Vec::with_capacity(column.len());
         for row in 0..column.len() {
             rows.push(match crate::ids::key_at(column.as_ref(), row) {
                 None => None,
-                Some(key) => match ids.resolve(&key) {
+                Some(key) => match keys.rank(&key) {
                     crate::ids::NO_SOURCE_ID => return Err(unknown_member(path, &key)),
                     source_id => Some(source_id),
                 },
@@ -3546,12 +3547,13 @@ fn u64s_at(
     // **Named the way the declaration names a row** (`crate::ids`): the integer route takes the
     // list of uint64 it always did, and a supplied id column makes this a list of keys, each
     // resolved to the source id the build joins on.
-    if ids.supplied().is_some() {
+    if let Some(keys) = ids.supplied() {
+        keys.require_same_family(path, key, "members", values.data_type())?;
         return (0..values.len())
             .map(|i| {
                 let member =
                     crate::ids::key_at(values.as_ref(), i).ok_or_else(|| null_member(path, key))?;
-                match ids.resolve(&member) {
+                match keys.rank(&member) {
                     crate::ids::NO_SOURCE_ID => Err(unknown_member(path, &member)),
                     source_id => Ok(source_id),
                 }
@@ -4628,11 +4630,7 @@ mod tests {
 
         let temp = tempfile::tempdir().expect("a scratch directory");
         let path = temp.path().join("rows.parquet");
-        let schema = Arc::new(Schema::new(vec![Field::new(
-            "entity",
-            DataType::UInt64,
-            false,
-        )]));
+        let schema = Arc::new(Schema::new(vec![Field::new("entity", DataType::UInt64, false)]));
         let mut writer = parquet::arrow::ArrowWriter::try_new(
             File::create(&path).expect("create the file"),
             schema.clone(),
@@ -4754,20 +4752,12 @@ mod tests {
                 "attempt {attempt}: each child escapes its parent by one member"
             );
             assert_eq!(
-                coverage
-                    .iter()
-                    .map(|c| c.parent.clone())
-                    .collect::<Vec<String>>(),
-                expected
-                    .iter()
-                    .map(|(parent, _)| parent.clone())
-                    .collect::<Vec<String>>(),
+                coverage.iter().map(|c| c.parent.clone()).collect::<Vec<String>>(),
+                expected.iter().map(|(parent, _)| parent.clone()).collect::<Vec<String>>(),
                 "attempt {attempt}: the coverage is not in the parents' order"
             );
             assert!(
-                coverage
-                    .iter()
-                    .all(|c| c.members == 1 && c.stray_members == 0),
+                coverage.iter().all(|c| c.members == 1 && c.stray_members == 0),
                 "attempt {attempt}: each parent's one member is covered by its child"
             );
         }
@@ -4783,11 +4773,7 @@ mod tests {
 
         let temp = tempfile::tempdir().expect("a scratch directory");
         let path = temp.path().join("rows.parquet");
-        let schema = Arc::new(Schema::new(vec![Field::new(
-            "entity",
-            DataType::UInt64,
-            false,
-        )]));
+        let schema = Arc::new(Schema::new(vec![Field::new("entity", DataType::UInt64, false)]));
         let mut writer = parquet::arrow::ArrowWriter::try_new(
             File::create(&path).expect("create the file"),
             schema.clone(),

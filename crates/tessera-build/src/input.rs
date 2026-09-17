@@ -148,11 +148,7 @@ fn selected_rows(
         let Some(value) = value else {
             return Err(stray(None));
         };
-        if select
-            .keys
-            .binary_search_by(|k| k.as_str().cmp(value))
-            .is_err()
-        {
+        if select.keys.binary_search_by(|k| k.as_str().cmp(value)).is_err() {
             return Err(stray(Some(value)));
         }
         keep[i] = value == select.value;
@@ -182,6 +178,96 @@ fn selected_rows(
     })
 }
 
+/// One source and everything every reader of it needs to name a row in it.
+///
+/// **Five values that always travel together**: where the file is, how the declaration spells its
+/// fields, how it names a row (`crate::ids`), which prefix of it a `--limit` keeps, and which of
+/// its rows are this view's under a form B discriminator. Passing them as one value is what keeps
+/// the readers below to their own arguments, and it is where the three steps every one of them
+/// takes over an identity column live: which column it is, which row groups to decode, and what a
+/// batch's rows are called.
+#[derive(Clone, Copy)]
+pub struct Source<'a> {
+    path: &'a Path,
+    fields: &'a Fields,
+    ids: &'a crate::ids::IdSpace,
+    limit: Option<u64>,
+    select: Option<&'a ViewSelector>,
+}
+
+impl<'a> Source<'a> {
+    /// The whole file, every row.
+    pub fn new(path: &'a Path, fields: &'a Fields, ids: &'a crate::ids::IdSpace) -> Source<'a> {
+        Source {
+            path,
+            fields,
+            ids,
+            limit: None,
+            select: None,
+        }
+    }
+
+    /// Keep the rows whose identity is below `limit`.
+    pub fn limited(self, limit: Option<u64>) -> Source<'a> {
+        Source { limit, ..self }
+    }
+
+    /// Keep the rows a form B discriminator gives this view (`views.md` §3.1).
+    pub fn selecting(self, select: Option<&'a ViewSelector>) -> Source<'a> {
+        Source { select, ..self }
+    }
+
+    /// The column a row's identity is read from, or `None` on the positional route, where the file
+    /// carries no such column and a row is named by where it sits.
+    fn id_index(&self, schema: &arrow::datatypes::Schema) -> Result<Option<usize>> {
+        match self.ids.positional() {
+            true => Ok(None),
+            false => field_index(self.path, schema, self.fields, ENTITY_ID).map(Some),
+        }
+    }
+
+    /// Where the identity column landed in a reader's **projected** schema, given where it sits
+    /// in the file's. `None` on the positional route, which projects no such column.
+    fn projected_id_index(
+        &self,
+        projected: &arrow::datatypes::Schema,
+        in_file: Option<usize>,
+    ) -> Result<Option<usize>> {
+        match in_file {
+            Some(_) => column_index(self.path, projected, self.id_name()).map(Some),
+            None => Ok(None),
+        }
+    }
+
+    /// The row groups a reader decodes: the ones a `--limit` cannot rule out from the identity
+    /// column's own statistics, and every one where there is no such column to rule them out by.
+    fn row_groups(&self, meta: &ParquetMetaData, id_idx: Option<usize>) -> Vec<usize> {
+        match id_idx {
+            Some(idx) => prunable_row_groups(meta, idx, self.limit),
+            None => (0..meta.num_row_groups()).collect(),
+        }
+    }
+
+    /// One batch's rows, as the source ids every pass joins on. `cursor` is the reader's running
+    /// count over this file, which is what names a row on the positional route.
+    fn source_ids(
+        &self,
+        batch: &RecordBatch,
+        id_idx: Option<usize>,
+        cursor: &mut u64,
+    ) -> Result<Vec<u64>> {
+        match id_idx {
+            Some(idx) => read_id_column(self.path, batch, idx, self.id_name(), self.ids),
+            None => Ok(positional_ids(cursor, batch.num_rows())),
+        }
+    }
+
+    /// The column name a refusal should quote for the identity.
+    fn id_name(&self) -> &'a str {
+        self.fields.of(ENTITY_ID)
+    }
+}
+
 /// Read `points`, keeping rows with `source_id < limit` when `limit` is `Some`.
 ///
 /// Accepted schemas (checked in this order), all yielding [`PointRow`]'s 32-bit fixed point:
@@ -200,28 +286,15 @@ fn selected_rows(
 /// bundle whose geometry and whose declared quantisation disagree. A corpus with real coordinates
 /// ships `x`/`y` and takes branch 1.
 pub fn read_points(
-    path: &Path,
-    fields: &Fields,
+    src: Source<'_>,
     projection: Projection,
     extent: &Bounds,
-    limit: Option<u64>,
-    select: Option<&ViewSelector>,
-    ids: &crate::ids::IdSpace,
 ) -> Result<Vec<PointRow>> {
     let mut out = Vec::new();
-    scan_points(
-        path,
-        fields,
-        projection,
-        extent,
-        limit,
-        select,
-        ids,
-        |row| {
-            out.push(row);
-            ControlFlow::Continue(())
-        },
-    )?;
+    scan_points(src, projection, extent, |row| {
+        out.push(row);
+        ControlFlow::Continue(())
+    })?;
     Ok(out)
 }
 
@@ -254,17 +327,19 @@ fn decode_worker_count(row_groups: usize) -> usize {
 /// `Break(())` stops the scan promptly (remaining rows are skipped and the decode workers wind
 /// down) — the escape hatch for a caller whose own bookkeeping has already failed, so a fatal
 /// error does not decode the rest of a multi-gigabyte file first.
-#[allow(clippy::too_many_arguments)]
 pub fn scan_points<F: FnMut(PointRow) -> ControlFlow<()>>(
-    path: &Path,
-    fields: &Fields,
+    src: Source<'_>,
     projection: Projection,
     extent: &Bounds,
-    limit: Option<u64>,
-    select: Option<&ViewSelector>,
-    ids: &crate::ids::IdSpace,
     mut visit: F,
 ) -> Result<()> {
+    let Source {
+        path,
+        fields,
+        ids,
+        limit,
+        select,
+    } = src;
     let file = File::open(path).map_err(|e| BuildError::io(path, e))?;
     let builder =
         ParquetRecordBatchReaderBuilder::try_new(file).map_err(|e| BuildError::parquet(path, e))?;
@@ -273,7 +348,7 @@ pub fn scan_points<F: FnMut(PointRow) -> ControlFlow<()>>(
     // Statistics live against the *file's* column order; batches come back in the projected
     // order. Keep the two index spaces apart deliberately — conflating them would silently read
     // the wrong column.
-    let id_idx_in_file = id_index(path, &schema, fields, ids)?;
+    let id_idx_in_file = src.id_index(&schema)?;
     let geometry_kind = geometry_kind(path, &schema, fields)?;
     if geometry_kind != GeometryKind::Xy && *extent != IDENTITY_EXTENT {
         return Err(BuildError::Schema {
@@ -316,10 +391,7 @@ pub fn scan_points<F: FnMut(PointRow) -> ControlFlow<()>>(
         roots.push(discriminator_index(path, &schema, select)?);
     }
 
-    let keep = match id_idx_in_file {
-        Some(idx) => prunable_row_groups(builder.metadata(), idx, limit),
-        None => (0..builder.metadata().num_row_groups()).collect(),
-    };
+    let keep = src.row_groups(builder.metadata(), id_idx_in_file);
     drop(builder);
     // **One worker on the positional route**, because a row's name there is its position in the
     // file and the batches must therefore arrive in the file's order (`crate::ids`).
@@ -373,10 +445,7 @@ pub fn scan_points<F: FnMut(PointRow) -> ControlFlow<()>>(
                         .build()
                         .map_err(|e| BuildError::parquet(path, e))?;
                     let projected = arrow::array::RecordBatchReader::schema(&reader);
-                    let id_idx = match id_idx_in_file {
-                        Some(_) => Some(column_index(path, &projected, id_name)?),
-                        None => None,
-                    };
+                    let id_idx = src.projected_id_index(&projected, id_idx_in_file)?;
                     let geometry = match geometry_kind {
                         GeometryKind::Xy => Geometry::Xy(
                             column_index(path, &projected, x_name)?,
@@ -403,6 +472,7 @@ pub fn scan_points<F: FnMut(PointRow) -> ControlFlow<()>>(
                             Some(idx) => read_id_column(path, &batch, idx, id_name, ids)?,
                             None => Vec::new(),
                         };
+
                         let keep = match (select, select_idx) {
                             (Some(select), Some(idx)) => {
                                 Some(selected_rows(path, batch.column(idx), select)?)
@@ -553,14 +623,9 @@ pub fn scan_points<F: FnMut(PointRow) -> ControlFlow<()>>(
 /// Read `pairs` (`entity_id`, `term_id`), keeping rows with `entity_id < limit`, grouped into
 /// each source entity's term list. Lists are returned sorted and deduplicated: the label set is
 /// a *set*, and downstream (the signature key, the postings writer) depends on it being one.
-pub fn read_pairs(
-    path: &Path,
-    fields: &Fields,
-    limit: Option<u64>,
-    ids: &crate::ids::IdSpace,
-) -> Result<HashMap<u64, Vec<u64>>> {
+pub fn read_pairs(src: Source<'_>) -> Result<HashMap<u64, Vec<u64>>> {
     let mut grouped: HashMap<u64, Vec<u64>> = HashMap::new();
-    scan_pairs(path, fields, limit, ids, |source_id, term| {
+    scan_pairs(src, |source_id, term| {
         grouped.entry(source_id).or_default().push(term);
         ControlFlow::Continue(())
     })?;
@@ -579,12 +644,16 @@ pub fn read_pairs(
 /// [`decode_worker_count`]), and `visit`'s `Break` stops the scan promptly (see
 /// [`scan_points`]).
 pub fn scan_pairs<F: FnMut(u64, u64) -> ControlFlow<()>>(
-    path: &Path,
-    fields: &Fields,
-    limit: Option<u64>,
-    ids: &crate::ids::IdSpace,
+    src: Source<'_>,
     mut visit: F,
 ) -> Result<()> {
+    let Source {
+        path,
+        fields,
+        ids,
+        limit,
+        ..
+    } = src;
     let file = File::open(path).map_err(|e| BuildError::io(path, e))?;
     let builder =
         ParquetRecordBatchReaderBuilder::try_new(file).map_err(|e| BuildError::parquet(path, e))?;
@@ -717,15 +786,10 @@ impl TermDescriptors {
 /// and a fill must have a term to fill with. The unlabelled count is what the caller refuses on
 /// where no default is declared (decision 0133): it is counted here, before any term id exists
 /// and before anything is written, so the refusal names an exact number and costs no output.
-#[allow(clippy::too_many_arguments)]
 pub fn read_access_vocabulary(
-    points: &Path,
-    fields: &Fields,
+    src: Source<'_>,
     field: Option<&str>,
     default: Option<&str>,
-    limit: Option<u64>,
-    select: Option<&ViewSelector>,
-    ids: &crate::ids::IdSpace,
 ) -> Result<(Vec<String>, u64)> {
     let mut distinct: BTreeSet<String> = BTreeSet::new();
     if let Some(default) = default {
@@ -738,33 +802,25 @@ pub fn read_access_vocabulary(
         // selected row carries — a dictionary page holds the row group's values, not this
         // prefix's, and a `--limit` build must not mint a term no row it read carried.
         let mut used: Vec<bool> = Vec::new();
-        scan_access_column(
-            points,
-            fields,
-            field,
-            limit,
-            select,
-            ids,
-            |_, rows, batch| {
-                used.clear();
-                used.resize(batch.distinct.len(), false);
-                for &row in rows {
-                    let terms = batch.row(row as usize);
-                    if terms.is_empty() {
-                        unlabelled += 1;
-                    }
-                    for &term in terms {
-                        used[term as usize] = true;
-                    }
+        scan_access_column(src, field, |_, rows, batch| {
+            used.clear();
+            used.resize(batch.distinct.len(), false);
+            for &row in rows {
+                let terms = batch.row(row as usize);
+                if terms.is_empty() {
+                    unlabelled += 1;
                 }
-                for (term, &carried) in used.iter().enumerate() {
-                    if carried && !distinct.contains(batch.distinct[term]) {
-                        distinct.insert(batch.distinct[term].to_string());
-                    }
+                for &term in terms {
+                    used[term as usize] = true;
                 }
-                ControlFlow::Continue(())
-            },
-        )?;
+            }
+            for (term, &carried) in used.iter().enumerate() {
+                if carried && !distinct.contains(batch.distinct[term]) {
+                    distinct.insert(batch.distinct[term].to_string());
+                }
+            }
+            ControlFlow::Continue(())
+        })?;
     }
     Ok((distinct.into_iter().collect(), unlabelled))
 }
@@ -792,18 +848,14 @@ pub fn read_access_vocabulary(
 // The eighth argument is the view's selection, and it belongs beside the file it filters: every
 // pass over a form B source takes the same three (`path`, `fields`, `select`) and a struct around
 // them would be a second spelling of `ViewArgs`.
-#[allow(clippy::too_many_arguments)]
 pub fn scan_access_field<F: FnMut(u64, u64) -> ControlFlow<()>>(
-    points: &Path,
-    fields: &Fields,
+    src: Source<'_>,
     field: Option<&str>,
     vocabulary: &[String],
     default_term: Option<u64>,
-    limit: Option<u64>,
-    select: Option<&ViewSelector>,
-    ids: &crate::ids::IdSpace,
     mut visit: F,
 ) -> Result<AccessFill> {
+    let points = src.path;
     let mut fill = AccessFill::default();
     let Some(field) = field else {
         let Some(default_term) = default_term else {
@@ -815,7 +867,7 @@ pub fn scan_access_field<F: FnMut(u64, u64) -> ControlFlow<()>>(
         };
         // Every point takes the default: the corpus with no permission model. Read from the
         // identity column alone, so a view declaring only a default opens no access column at all.
-        scan_identity(points, fields, limit, select, ids, |source_id| {
+        scan_identity(src, |source_id| {
             fill.filled += 1;
             visit(source_id, default_term)
         })?;
@@ -829,66 +881,58 @@ pub fn scan_access_field<F: FnMut(u64, u64) -> ControlFlow<()>>(
     // batch has not needed yet, and a value no selected row carries is never looked up at all —
     // which is what lets a dictionary page hold values this prefix does not read.
     let mut positions: Vec<u64> = Vec::new();
-    scan_access_column(
-        points,
-        fields,
-        field,
-        limit,
-        select,
-        ids,
-        |source_ids, rows, batch| {
-            positions.clear();
-            positions.resize(batch.distinct.len(), u64::MAX);
-            for &row in rows {
-                let source_id = source_ids[row as usize];
-                let terms = batch.row(row as usize);
-                if terms.is_empty() {
-                    let Some(default_term) = default_term else {
-                        changed = Some(BuildError::Schema {
-                            path: points.to_path_buf(),
-                            detail: format!(
+    scan_access_column(src, field, |ids, rows, batch| {
+        positions.clear();
+        positions.resize(batch.distinct.len(), u64::MAX);
+        for &row in rows {
+            let source_id = ids[row as usize];
+            let terms = batch.row(row as usize);
+            if terms.is_empty() {
+                let Some(default_term) = default_term else {
+                    changed = Some(BuildError::Schema {
+                        path: points.to_path_buf(),
+                        detail: format!(
                             "the access column '{field}' now carries a null or empty label, which \
                              it did not when this build read its vocabulary, and the view declares \
                              no `point_visibility.default` to fill it with. The file changed \
                              underneath the build, and the two passes must see one relation"
                         ),
-                        });
-                        return ControlFlow::Break(());
-                    };
-                    fill.filled += 1;
-                    if visit(source_id, default_term).is_break() {
-                        return ControlFlow::Break(());
-                    }
-                    continue;
+                    });
+                    return ControlFlow::Break(());
+                };
+                fill.filled += 1;
+                if visit(source_id, default_term).is_break() {
+                    return ControlFlow::Break(());
                 }
-                fill.carried += 1;
-                for &term in terms {
-                    let mut position = positions[term as usize];
-                    if position == u64::MAX {
-                        let value = batch.distinct[term as usize];
-                        let Ok(at) = vocabulary.binary_search_by(|t| t.as_str().cmp(value)) else {
-                            changed = Some(BuildError::Schema {
-                                path: points.to_path_buf(),
-                                detail: format!(
-                                    "the access column '{field}' now carries the term '{value}', \
+                continue;
+            }
+            fill.carried += 1;
+            for &term in terms {
+                let mut position = positions[term as usize];
+                if position == u64::MAX {
+                    let value = batch.distinct[term as usize];
+                    let Ok(at) = vocabulary.binary_search_by(|t| t.as_str().cmp(value)) else {
+                        changed = Some(BuildError::Schema {
+                            path: points.to_path_buf(),
+                            detail: format!(
+                                "the access column '{field}' now carries the term '{value}', \
                                  which it did not when this build read its vocabulary. The file \
                                  changed underneath the build, and the two passes must see one \
                                  relation"
-                                ),
-                            });
-                            return ControlFlow::Break(());
-                        };
-                        position = at as u64;
-                        positions[term as usize] = position;
-                    }
-                    if visit(source_id, position).is_break() {
+                            ),
+                        });
                         return ControlFlow::Break(());
-                    }
+                    };
+                    position = at as u64;
+                    positions[term as usize] = position;
+                }
+                if visit(source_id, position).is_break() {
+                    return ControlFlow::Break(());
                 }
             }
-            ControlFlow::Continue(())
-        },
-    )?;
+        }
+        ControlFlow::Continue(())
+    })?;
     if let Some(error) = changed {
         return Err(error);
     }
@@ -905,31 +949,35 @@ pub struct AccessFill {
 }
 
 /// Walk the identity column alone, in file order.
-fn scan_identity<F: FnMut(u64) -> ControlFlow<()>>(
-    path: &Path,
-    fields: &Fields,
-    limit: Option<u64>,
-    select: Option<&ViewSelector>,
-    ids: &crate::ids::IdSpace,
-    mut visit: F,
-) -> Result<()> {
+fn scan_identity<F: FnMut(u64) -> ControlFlow<()>>(src: Source<'_>, mut visit: F) -> Result<()> {
+    let Source {
+        path,
+        fields,
+        limit,
+        select,
+        ..
+    } = src;
     let file = File::open(path).map_err(|e| BuildError::io(path, e))?;
     let builder =
         ParquetRecordBatchReaderBuilder::try_new(file).map_err(|e| BuildError::parquet(path, e))?;
     let schema = builder.schema().clone();
-    let id_root = id_index(path, &schema, fields, ids)?;
-    let keep = match id_root {
-        Some(idx) => prunable_row_groups(builder.metadata(), idx, limit),
-        None => (0..builder.metadata().num_row_groups()).collect(),
-    };
+    let id_root = src.id_index(&schema)?;
+    let keep = src.row_groups(builder.metadata(), id_root);
     let mut roots: Vec<usize> = id_root.into_iter().collect();
     if let Some(select) = select {
         roots.push(discriminator_index(path, &schema, select)?);
     }
-    // The positional route projects no column at all where the view declares only a default; the
-    // reader still yields one batch per row group, and the row counts are what name the rows.
+    // **The positional route has no identity column to project**, so it projects this file's own
+    // geometry instead: the row counts are what name the rows, and the reader needs one column to
+    // yield a batch per row group. The geometry kind is what says which columns those are, a
+    // points file holding Morton codes carrying no `x` at all.
     if roots.is_empty() {
-        roots.push(field_index(path, &schema, fields, "x")?);
+        for canonical in geometry_kind(path, &schema, fields)?.canonical_fields() {
+            if *canonical == ENTITY_ID {
+                continue;
+            }
+            roots.push(field_index(path, &schema, fields, canonical)?);
+        }
     }
     let projection = parquet::arrow::ProjectionMask::roots(builder.parquet_schema(), roots);
     let reader = builder
@@ -939,10 +987,7 @@ fn scan_identity<F: FnMut(u64) -> ControlFlow<()>>(
         .build()
         .map_err(|e| BuildError::parquet(path, e))?;
     let projected = arrow::array::RecordBatchReader::schema(&reader);
-    let id_idx = match id_root {
-        Some(_) => Some(column_index(path, &projected, fields.of(ENTITY_ID))?),
-        None => None,
-    };
+    let id_idx = src.projected_id_index(&projected, id_root)?;
     let select_idx = match select {
         Some(select) => Some(column_index(path, &projected, &select.column)?),
         None => None,
@@ -950,10 +995,7 @@ fn scan_identity<F: FnMut(u64) -> ControlFlow<()>>(
     let mut cursor = 0u64;
     for batch in reader {
         let batch = batch.map_err(|e| BuildError::arrow(path, e))?;
-        let source_ids = match id_idx {
-            Some(idx) => read_id_column(path, &batch, idx, fields.of(ENTITY_ID), ids)?,
-            None => positional_ids(&mut cursor, batch.num_rows()),
-        };
+        let source_ids = src.source_ids(&batch, id_idx, &mut cursor)?;
         let selected = match (select, select_idx) {
             (Some(select), Some(idx)) => Some(selected_rows(path, batch.column(idx), select)?),
             _ => None,
@@ -990,21 +1032,23 @@ fn scan_identity<F: FnMut(u64) -> ControlFlow<()>>(
 /// A column the reader will not hand over as a dictionary — a `list<string>`, or a file whose
 /// pages are plain — falls back to building the same shape with a hash per row, which is still
 /// one allocation a *value* rather than one a row.
-#[allow(clippy::too_many_arguments)]
 fn scan_access_column<F: FnMut(&[u64], &[u32], &AccessBatch<'_>) -> ControlFlow<()>>(
-    path: &Path,
-    fields: &Fields,
+    src: Source<'_>,
     field: &str,
-    limit: Option<u64>,
-    select: Option<&ViewSelector>,
-    ids: &crate::ids::IdSpace,
     mut visit: F,
 ) -> Result<()> {
+    let Source {
+        path,
+        fields,
+        limit,
+        select,
+        ..
+    } = src;
     let file = File::open(path).map_err(|e| BuildError::io(path, e))?;
     let builder =
         ParquetRecordBatchReaderBuilder::try_new(file).map_err(|e| BuildError::parquet(path, e))?;
     let schema = builder.schema().clone();
-    let id_root = id_index(path, &schema, fields, ids)?;
+    let id_root = src.id_index(&schema)?;
     // The access field is named directly by `point_visibility.field` rather than through the map:
     // it is the declaration, not a relocation of a canonical name. Absent is the same refusal a
     // moved name gets, and for the same reason — an unread access column is a corpus in no
@@ -1022,10 +1066,7 @@ fn scan_access_column<F: FnMut(&[u64], &[u32], &AccessBatch<'_>) -> ControlFlow<
                 column_names(&schema)
             ),
         })?;
-    let keep = match id_root {
-        Some(idx) => prunable_row_groups(builder.metadata(), idx, limit),
-        None => (0..builder.metadata().num_row_groups()).collect(),
-    };
+    let keep = src.row_groups(builder.metadata(), id_root);
     // The label is read for this view's rows alone where the file holds several views'
     // (`views.md` §3.1): a shared source's other rows carry another view's labels for entities
     // this view may not even hold.
@@ -1043,10 +1084,7 @@ fn scan_access_column<F: FnMut(&[u64], &[u32], &AccessBatch<'_>) -> ControlFlow<
     let reader = open_access_reader(path, &schema, field, &keep, &projection, true)
         .or_else(|_| open_access_reader(path, &schema, field, &keep, &projection, false))?;
     let projected = arrow::array::RecordBatchReader::schema(&reader);
-    let id_idx = match id_root {
-        Some(_) => Some(column_index(path, &projected, fields.of(ENTITY_ID))?),
-        None => None,
-    };
+    let id_idx = src.projected_id_index(&projected, id_root)?;
     let access_idx = column_index(path, &projected, field)?;
     let select_idx = match select {
         Some(select) => Some(column_index(path, &projected, &select.column)?),
@@ -1059,10 +1097,7 @@ fn scan_access_column<F: FnMut(&[u64], &[u32], &AccessBatch<'_>) -> ControlFlow<
     loop {
         let Some(batch) = reader.next() else { break };
         let batch = batch.map_err(|e| BuildError::arrow(path, e))?;
-        let source_ids = match id_idx {
-            Some(idx) => read_id_column(path, &batch, idx, fields.of(ENTITY_ID), ids)?,
-            None => positional_ids(&mut cursor, batch.num_rows()),
-        };
+        let source_ids = src.source_ids(&batch, id_idx, &mut cursor)?;
         let terms = read_access_column(path, batch.column(access_idx), field)?;
         let selected = match (select, select_idx) {
             (Some(select), Some(idx)) => Some(selected_rows(path, batch.column(idx), select)?),
@@ -1200,7 +1235,10 @@ fn read_access_column<'a>(
     // **The dictionary route.** The keys are the indices already; all this pass does is trim each
     // distinct value once and renumber, because a dictionary page may carry values no row uses
     // and a trim may make two of them one.
-    if let Some(dictionary) = column.as_any().downcast_ref::<DictionaryArray<Int32Type>>() {
+    if let Some(dictionary) = column
+        .as_any()
+        .downcast_ref::<DictionaryArray<Int32Type>>()
+    {
         let values = dictionary
             .values()
             .as_any()
@@ -1846,6 +1884,18 @@ fn column_index(path: &Path, schema: &arrow::datatypes::Schema, name: &str) -> R
         })
 }
 
+/// The first of `names` this file carries, from the Parquet footer alone.
+pub(crate) fn first_column_present(path: &Path, names: &[&str]) -> Result<Option<String>> {
+    let file = File::open(path).map_err(|e| BuildError::io(path, e))?;
+    let builder =
+        ParquetRecordBatchReaderBuilder::try_new(file).map_err(|e| BuildError::parquet(path, e))?;
+    let schema = builder.schema();
+    Ok(names
+        .iter()
+        .find(|name| schema.column_with_name(name).is_some())
+        .map(|name| (*name).to_string()))
+}
+
 /// Whether the points file carries the column a row's identity would be read from.
 pub(crate) fn has_id_column(path: &Path, fields: &Fields) -> Result<bool> {
     let file = File::open(path).map_err(|e| BuildError::io(path, e))?;
@@ -1857,21 +1907,7 @@ pub(crate) fn has_id_column(path: &Path, fields: &Fields) -> Result<bool> {
         .is_some())
 }
 
-/// The column index a row's identity is read from, or `None` on the positional route, where the
-/// file carries no such column and a row is named by where it sits.
-fn id_index(
-    path: &Path,
-    schema: &arrow::datatypes::Schema,
-    fields: &Fields,
-    ids: &crate::ids::IdSpace,
-) -> Result<Option<usize>> {
-    match ids.positional() {
-        true => Ok(None),
-        false => field_index(path, schema, fields, ENTITY_ID).map(Some),
-    }
-}
-
-/// `rows` source ids from `cursor` onward — the positional route's names for one batch's rows.
+/// `rows` source ids from `cursor` onward: the positional route's names for one batch's rows.
 ///
 /// **Every reader on this route walks the same file whole and in order**, which `IdSpace::prepare`
 /// is what guarantees, so each one's running count reaches the same row under the same name.
@@ -1946,7 +1982,7 @@ pub(crate) fn scan_id_keys<F: FnMut(&[u8])>(
 ///
 /// On the integer route this is [`read_u64_column`] unchanged. On the supplied route each row's
 /// bytes are resolved to their rank, and a key no points file carries reads as
-/// [`crate::ids::NO_SOURCE_ID`] — an id in no view, which every consumer already answers for.
+/// [`crate::ids::NO_SOURCE_ID`], an id in no view, which every consumer already answers for.
 pub(crate) fn read_id_column(
     path: &Path,
     batch: &RecordBatch,
@@ -2223,26 +2259,27 @@ pub fn read_vocabulary_file(
 /// `minters` is threaded through rather than owned here so the caller can hand its final state —
 /// every binding this scan minted, on top of whatever the schema seeded it with — to the manifest
 /// writer once the whole scan (there is exactly one, per build) has completed.
-#[allow(clippy::too_many_arguments)]
 pub fn scan_attributes<F: FnMut(AttributeBatch<'_>) -> Result<()>>(
-    path: &Path,
-    fields: &Fields,
+    src: Source<'_>,
     columns: &[&crate::config::Attribute],
     minters: &mut HashMap<String, VocabularyMinter>,
-    limit: Option<u64>,
-    select: Option<&ViewSelector>,
-    id_space: &crate::ids::IdSpace,
     mut visit: F,
 ) -> Result<()> {
     if columns.is_empty() {
         return Ok(());
     }
+    let Source {
+        path,
+        limit,
+        select,
+        ..
+    } = src;
     let file = File::open(path).map_err(|e| BuildError::io(path, e))?;
     let builder =
         ParquetRecordBatchReaderBuilder::try_new(file).map_err(|e| BuildError::parquet(path, e))?;
     let file_schema = builder.schema().clone();
 
-    let id_root = id_index(path, &file_schema, fields, id_space)?;
+    let id_root = src.id_index(&file_schema)?;
     let mut roots: Vec<usize> = id_root.into_iter().collect();
     for attribute in columns {
         roots.push(
@@ -2274,10 +2311,7 @@ pub fn scan_attributes<F: FnMut(AttributeBatch<'_>) -> Result<()>>(
     // prove they hold none of them ([`prunable_row_groups`]); this one read every row group of
     // every attribute source to the end of the file. On the GBIF corpus that is 55 GB decoded to
     // place 16.3×10⁶ rows.
-    let keep = match id_root {
-        Some(idx) => prunable_row_groups(builder.metadata(), idx, limit),
-        None => (0..builder.metadata().num_row_groups()).collect(),
-    };
+    let keep = src.row_groups(builder.metadata(), id_root);
     let reader = builder
         .with_row_groups(keep)
         .with_projection(projection)
@@ -2285,10 +2319,7 @@ pub fn scan_attributes<F: FnMut(AttributeBatch<'_>) -> Result<()>>(
         .build()
         .map_err(|e| BuildError::parquet(path, e))?;
     let projected = arrow::array::RecordBatchReader::schema(&reader);
-    let id_idx = match id_root {
-        Some(_) => Some(column_index(path, &projected, fields.of(ENTITY_ID))?),
-        None => None,
-    };
+    let id_idx = src.projected_id_index(&projected, id_root)?;
     let attribute_idx: Vec<usize> = columns
         .iter()
         .map(|a| column_index(path, &projected, a.column()))
@@ -2304,10 +2335,7 @@ pub fn scan_attributes<F: FnMut(AttributeBatch<'_>) -> Result<()>>(
     let mut cursor = 0u64;
     for batch in reader {
         let batch = batch.map_err(|e| BuildError::arrow(path, e))?;
-        let ids = match id_idx {
-            Some(idx) => read_id_column(path, &batch, idx, fields.of(ENTITY_ID), id_space)?,
-            None => positional_ids(&mut cursor, batch.num_rows()),
-        };
+        let ids = src.source_ids(&batch, id_idx, &mut cursor)?;
         let selected = match (select, select_idx) {
             (Some(select), Some(idx)) => Some(selected_rows(path, batch.column(idx), select)?),
             _ => None,
@@ -2864,7 +2892,9 @@ mod tests {
             Arc::new(StringArray::from(vec!["k"])),
             Arc::new(TimestampMicrosecondArray::from(vec![1i64])),
             // The near miss the decoder names outright: a timestamp in the wrong unit.
-            Arc::new(arrow::array::TimestampMillisecondArray::from(vec![1i64])),
+            Arc::new(
+                arrow::array::TimestampMillisecondArray::from(vec![1i64]),
+            ),
         ];
         let declared = [
             ScalarType::Bool,
@@ -2887,9 +2917,7 @@ mod tests {
         for ty in declared {
             for vocabulary in [None, Some("v")] {
                 // A category's width is the vocabulary's, so only the integer widths pair with one.
-                if vocabulary.is_some()
-                    && !matches!(ty, ScalarType::U8 | ScalarType::U16 | ScalarType::U32)
-                {
+                if vocabulary.is_some() && !matches!(ty, ScalarType::U8 | ScalarType::U16 | ScalarType::U32) {
                     continue;
                 }
                 let attribute = attribute(ty, vocabulary);
@@ -3011,11 +3039,7 @@ pub fn read_roster_table(
         .collect::<Result<_>>()?;
 
     /// One column's rows as strings, or a refusal naming the column's type.
-    fn strings(
-        path: &Path,
-        column: &arrow::array::ArrayRef,
-        name: &str,
-    ) -> Result<Vec<Option<String>>> {
+    fn strings(path: &Path, column: &arrow::array::ArrayRef, name: &str) -> Result<Vec<Option<String>>> {
         if let Some(values) = column.as_any().downcast_ref::<StringArray>() {
             return Ok((0..values.len())
                 .map(|i| (!values.is_null(i)).then(|| values.value(i).to_string()))
@@ -3081,13 +3105,8 @@ pub fn read_roster_table(
             return (0..list.len())
                 .map(|i| match list.is_null(i) {
                     true => Ok(None),
-                    false => row(
-                        list.values(),
-                        i,
-                        offsets[i] as usize,
-                        offsets[i + 1] as usize,
-                    )
-                    .map(Some),
+                    false => row(list.values(), i, offsets[i] as usize, offsets[i + 1] as usize)
+                        .map(Some),
                 })
                 .collect();
         }
@@ -3096,13 +3115,8 @@ pub fn read_roster_table(
             return (0..list.len())
                 .map(|i| match list.is_null(i) {
                     true => Ok(None),
-                    false => row(
-                        list.values(),
-                        i,
-                        offsets[i] as usize,
-                        offsets[i + 1] as usize,
-                    )
-                    .map(Some),
+                    false => row(list.values(), i, offsets[i] as usize, offsets[i + 1] as usize)
+                        .map(Some),
                 })
                 .collect();
         }
@@ -3146,18 +3160,17 @@ pub fn read_roster_table(
             } else {
                 match declared.ty {
                     ScalarType::Bool => {
-                        let values =
-                            column
-                                .as_any()
-                                .downcast_ref::<BooleanArray>()
-                                .ok_or_else(|| BuildError::Schema {
-                                    path: path.to_path_buf(),
-                                    detail: format!(
-                                        "the roster column '{name}' has type {:?}, and this group \
+                        let values = column
+                            .as_any()
+                            .downcast_ref::<BooleanArray>()
+                            .ok_or_else(|| BuildError::Schema {
+                                path: path.to_path_buf(),
+                                detail: format!(
+                                    "the roster column '{name}' has type {:?}, and this group \
                                      declares it 'bool'",
-                                        column.data_type()
-                                    ),
-                                })?;
+                                    column.data_type()
+                                ),
+                            })?;
                         (0..values.len())
                             .map(|row| match values.is_null(row) {
                                 true => Err(missing(row)),
@@ -3188,17 +3201,19 @@ pub fn read_roster_table(
                             .collect::<Result<_>>()?
                     }
                     ty => {
-                        let widened = read_integer(column.as_any(), column.data_type())
-                            .ok_or_else(|| BuildError::Schema {
-                                path: path.to_path_buf(),
-                                detail: format!(
-                                    "the roster column '{name}' has type {:?}, and this group \
+                        let widened =
+                            read_integer(column.as_any(), column.data_type()).ok_or_else(|| {
+                                BuildError::Schema {
+                                    path: path.to_path_buf(),
+                                    detail: format!(
+                                        "the roster column '{name}' has type {:?}, and this group \
                                          declares it '{}'. A `timestamp_us` reads a microsecond \
                                          timestamp or an `i64`, and nothing else — a millisecond \
                                          column read here would be a date a thousandfold wrong",
-                                    column.data_type(),
-                                    ty.arrow_type_name()
-                                ),
+                                        column.data_type(),
+                                        ty.arrow_type_name()
+                                    ),
+                                }
                             })?;
                         let nulls = column.nulls().cloned();
                         widened

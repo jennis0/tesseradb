@@ -262,7 +262,7 @@ pub fn check(config: &Config) -> CheckReport {
 /// named it — and a column reported missing is reported against the file that was supposed to hold
 /// it rather than against a single corpus that no longer exists.
 fn check_attribute_sources(config: &Config, report: &mut CheckReport) {
-    // A column with no file to read it from — legal to declare (`configuration.md` §2), and the
+    // A column with no file to read it from. Legal to declare (`configuration.md` §2), and the
     // normal state for a deployment that writes its values through the service. It is one of the
     // sources this check looked at and found nothing to open, beside a group that names no points
     // file, rather than a finding: there is no file, so there is no schema to disagree with.

@@ -19,8 +19,8 @@
 //! optimisation added later. The rule lives in [`signature_sort_key`] as a free function so the
 //! serving allocator applies exactly the same rule to appended items.
 
-pub mod artifact_pass;
 mod assembly;
+pub mod artifact_pass;
 pub mod check;
 mod column;
 pub mod config;
@@ -709,6 +709,17 @@ fn access_route(args: &BuildArgs) -> Result<AccessRoute<'_>> {
     }
 }
 
+/// One view's points file, as a reader of it needs it (`input::Source`).
+pub(crate) fn view_source<'a>(
+    view: &'a ViewArgs,
+    args: &BuildArgs,
+    ids: &'a crate::ids::IdSpace,
+) -> input::Source<'a> {
+    input::Source::new(&view.points, &view.point_fields, ids)
+        .limited(args.limit)
+        .selecting(view.select.as_ref())
+}
+
 /// Read whatever a build must know before assigning term ids (see [`AccessPlan`]).
 pub(crate) fn plan_access(args: &BuildArgs, ids: &crate::ids::IdSpace) -> Result<AccessPlan> {
     use crate::config::AccessSource;
@@ -729,13 +740,9 @@ pub(crate) fn plan_access(args: &BuildArgs, ids: &crate::ids::IdSpace) -> Result
             _ => None,
         };
         let (terms, unlabelled) = input::read_access_vocabulary(
-            &view.points,
-            &view.point_fields,
+            view_source(view, args, ids),
             field,
             view.access.default.as_deref(),
-            args.limit,
-            view.select.as_ref(),
-            ids,
         )?;
         // **A null or empty label is refused where the view declares no default** (decision
         // 0133), here, before a term id exists or a byte is written, naming the count and the
@@ -787,9 +794,9 @@ pub(crate) fn scan_access<F: FnMut(usize, u64, u64) -> std::ops::ControlFlow<()>
     if let AccessRoute::SharedRelation(path) = access_route(args)? {
         // Scanned **once**, not once per view: its rows are entity space, and a second pass over
         // them would double every posting.
-        input::scan_pairs(path, &access_fields(args), args.limit, ids, |id, term| {
-            visit(0, id, term)
-        })?;
+        let fields = access_fields(args);
+        let relation = input::Source::new(path, &fields, ids).limited(args.limit);
+        input::scan_pairs(relation, |id, term| visit(0, id, term))?;
         return Ok(input::AccessFill::default());
     }
     let input::TermDescriptors::Vocabulary(vocabulary) = &plan.descriptors else {
@@ -798,17 +805,13 @@ pub(crate) fn scan_access<F: FnMut(usize, u64, u64) -> std::ops::ControlFlow<()>
     let mut fill = input::AccessFill::default();
     for (index, view) in args.views.iter().enumerate() {
         let one = input::scan_access_field(
-            &view.points,
-            &view.point_fields,
+            view_source(view, args, ids),
             match &view.access.source {
                 AccessSource::Field(field) => Some(field.as_str()),
                 _ => None,
             },
             vocabulary,
             plan.default_term[index],
-            args.limit,
-            view.select.as_ref(),
-            ids,
             |id, term| visit(index, id, term),
         )?;
         fill.carried += one.carried;
@@ -1154,13 +1157,9 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
 
     // ---- 1. read inputs --------------------------------------------------------------
     let mut points = input::read_points(
-        &view.points,
-        &view.point_fields,
+        view_source(view, args, &id_space),
         view.projection,
         &view.extent,
-        args.limit,
-        view.select.as_ref(),
-        &id_space,
     )?;
     // **No refusal for an empty points file** (decision 0091): the oracle writes the same
     // zero-item bundle the streaming pipeline does, which is what keeps `build_equivalence`'s
@@ -1356,7 +1355,7 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
 
     // **Written where the declaration supplied the ids, and on the flag where it did not**
     // (`crate::ids::writes_external_ids`). With neither, no extent and no locator exist, which
-    // the reader treats as "no item has an external ID" — the ordinary case, not a degraded one.
+    // the reader treats as "no item has an external ID", which is the ordinary case.
     let external_ids_paths = if crate::ids::writes_external_ids(args, &id_space) {
         let (extent_paths, ext_locator_path) =
             write_external_ids(&entities_dir, &staged, n, &id_space)?;
@@ -1429,15 +1428,11 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
             let mut matched_rows = 0u64;
             let mut unknown_rows = 0u64;
             let mut present = vec![0u64; group.attributes.len()];
+            // An attribute source is entity space and has no view to select (`views.md` §5).
             input::scan_attributes(
-                &group.path,
-                &group.fields,
+                input::Source::new(&group.path, &group.fields, &id_space).limited(args.limit),
                 &columns,
                 &mut minters,
-                args.limit,
-                // An attribute source is entity space and has no view to select (`views.md` §5).
-                None,
-                &id_space,
                 |batch| {
                     // **Serial, row by row, on purpose.** This is the reference build: the
                     // streaming pipeline splits a batch across its columns for the speed
@@ -1538,14 +1533,10 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
                 // free-space figure: a column the streaming pipeline spills and this one placed at
                 // an entity would put the same value in the blob under two tags.
                 if routes.takes_extents(index) {
-                    return column::EntityColumn::spilled(
-                        &scratch,
-                        attribute.ty,
-                        tiler_items.len(),
-                    )
-                    .map_err(|e| {
-                        BuildError::Invalid(format!("attribute '{}': {e}", attribute.name))
-                    });
+                    return column::EntityColumn::spilled(&scratch, attribute.ty, tiler_items.len())
+                        .map_err(|e| {
+                            BuildError::Invalid(format!("attribute '{}': {e}", attribute.name))
+                        });
                 }
                 column::EntityColumn::from_values(
                     &scratch,
@@ -2734,7 +2725,7 @@ fn write_external_ids(
         .enumerate()
         .map(|(position, item)| ExternalIdRow::new(item.source_id, position as u32))
         .collect();
-    sort_external_id_rows(&mut rows, ids);
+    rows.sort_unstable_by_key(external_id_order(ids));
     let extent_paths = write_external_id_runs(dir, &rows, EXTERNAL_ID_ROWS_PER_EXTENT, ids)?;
     let locator_path = write_ext_locator(dir, &rows, entity_id_high_water)?;
     Ok((extent_paths, locator_path))
@@ -2820,8 +2811,10 @@ impl ExternalIdRow {
         }
     }
 
-    pub(crate) fn sort_key(&self) -> (u32, u32) {
-        (self.key_hi, self.key_lo)
+    /// The byte-swapped key as one integer, so that a plain comparison over it is a comparison
+    /// over the little-endian bytes this row's external id goes on disk as.
+    pub(crate) fn sort_key(&self) -> u64 {
+        ((self.key_hi as u64) << 32) | self.key_lo as u64
     }
 
     pub(crate) fn source_id(&self) -> u64 {
@@ -2840,6 +2833,20 @@ impl ExternalIdRow {
 /// what earlier builds wrote.
 pub(crate) const EXTERNAL_ID_ROWS_PER_EXTENT: usize = 100_000_000;
 
+/// The key that puts a row into ascending external-id **byte** order on this build's route.
+///
+/// A supplied key's source id is its rank among the keys, which are bytewise ascending
+/// (`crate::ids`), so rank order is byte order. An integer id's bytes are its eight little-endian
+/// ones, whose order is not the integer's, which is what [`ExternalIdRow`]'s byte-swapped key
+/// makes a plain comparison. One function decides which; each caller applies the sort it wants,
+/// the streaming build's being parallel.
+pub(crate) fn external_id_order(ids: &crate::ids::IdSpace) -> fn(&ExternalIdRow) -> u64 {
+    match ids.supplied() {
+        Some(_) => ExternalIdRow::source_id,
+        None => ExternalIdRow::sort_key,
+    }
+}
+
 /// Write `rows` — already in ascending external-id **byte** order — as one or more extents in
 /// `dir`, at most `rows_per_extent` rows each, returning their paths in order. The extents
 /// partition the global order into consecutive ranges, so each is individually sorted too.
@@ -2847,19 +2854,6 @@ pub(crate) const EXTERNAL_ID_ROWS_PER_EXTENT: usize = 100_000_000;
 /// `rows_per_extent` is a parameter rather than a direct use of
 /// [`EXTERNAL_ID_ROWS_PER_EXTENT`] so the splitting boundary is testable without writing a
 /// hundred million rows.
-/// Put `rows` into ascending external-id **byte** order, whichever route this build takes.
-///
-/// A supplied key's source id is its rank among the keys, bytewise ascending (`crate::ids`), so
-/// rank order *is* byte order and the sort is over the ranks. An integer id's bytes are its eight
-/// little-endian ones, whose order is not the integer's, which is what [`ExternalIdRow`]'s
-/// byte-swapped key makes a plain comparison.
-pub(crate) fn sort_external_id_rows(rows: &mut [ExternalIdRow], ids: &crate::ids::IdSpace) {
-    match ids {
-        crate::ids::IdSpace::Supplied(_) => rows.sort_unstable_by_key(ExternalIdRow::source_id),
-        _ => rows.sort_unstable_by_key(ExternalIdRow::sort_key),
-    }
-}
-
 fn write_external_id_runs(
     dir: &Path,
     rows: &[ExternalIdRow],
