@@ -151,9 +151,11 @@ impl ProjectionRoutes {
 
     /// Build a projection by [`RowProjection::new`] and count the route it took.
     ///
-    /// **A residual that cannot be read walks instead**, warned and counted as a walk. The split
-    /// route's residual reads the same postings the session's fragment was unioned from moments
-    /// earlier, so a failure here is a host condition rather than a state the request can reach;
+    /// **Postings the split route cannot read leave it walking instead**, warned and counted as a
+    /// walk. Both reads are of the same postings and tiers the session's fragment was unioned from
+    /// moments earlier — the chooser's sum over the satisfied terms' delta postings, and the
+    /// residual itself — so a failure here is a host condition rather than a state the request can
+    /// reach;
     /// what matters is that the fallback is the reference computation and not a narrower one. The
     /// walk crosses the whole fragment and returns the identical rows, so a session served this
     /// way is served the same set more slowly. Refusing instead would cost a session its map for a
@@ -168,8 +170,8 @@ impl ProjectionRoutes {
             Err(error) => {
                 tracing::warn!(
                     error = %error,
-                    "the split route's residual could not be read; this projection was built by \
-                     the walk, which produces the same rows"
+                    "the postings the split route prices and walks could not be read; this \
+                     projection was built by the walk, which produces the same rows"
                 );
                 self.counts[ProjectionRoute::Walk.index()].fetch_add(1, Ordering::Relaxed);
                 RowProjection::walk(inputs.fragment, rows)
