@@ -163,23 +163,23 @@ pub fn residual_fragment(
 }
 
 /// The sum of `terms`' delta-posting cardinalities across every live tier — the route chooser's
-/// residual overcount.
+/// residual overcount, in entities.
 ///
 /// It is a sum rather than the cardinality of a union, so an entity carried by two tiers is
 /// counted twice. The chooser prices the residual walk with it, and an overcount biases the choice
 /// toward the walk, which is the route whose cost is measured over the widest set of principals.
-pub fn delta_rows(terms: &[TermId], deltas: &[Arc<DeltaTier>]) -> io::Result<u64> {
-    let mut rows = 0u64;
+pub fn delta_entities(terms: &[TermId], deltas: &[Arc<DeltaTier>]) -> io::Result<u64> {
+    let mut entities = 0u64;
     for term in terms.iter().copied() {
         for tier in deltas {
             match tier.posting(term)? {
-                Some(PostingRef::Roaring(view)) => rows += view.cardinality(),
-                Some(PostingRef::Array(bytes)) => rows += (bytes.len() / 4) as u64,
+                Some(PostingRef::Roaring(view)) => entities += view.cardinality(),
+                Some(PostingRef::Array(bytes)) => entities += (bytes.len() / 4) as u64,
                 None => {}
             }
         }
     }
-    Ok(rows)
+    Ok(entities)
 }
 
 /// Union `terms`' postings **in the delta tiers only** into `into`, leaving the base unread.

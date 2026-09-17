@@ -350,7 +350,7 @@ impl RowProjection {
                 held,
                 bound,
                 complement_valid,
-                tessera_authz::delta_rows(inputs.satisfied, inputs.deltas)?,
+                tessera_authz::delta_entities(inputs.satisfied, inputs.deltas)?,
             ),
             None => ChooserInputs {
                 held,

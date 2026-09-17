@@ -163,9 +163,16 @@ pub struct GenerationStamp {
 // (`tessera_store::term_images`). An 11 bundle names no such file, and its side-manifest has no
 // field to name one in, so a reader at 12 refuses it at the manifest rather than serving every
 // session by the walk with nothing saying why.
+// 13: a term-image table entry records the base posting's entity count beside the image's row
+// count, which is what the route chooser prices the residual walk from: the walk reads one
+// permutation slot per entity, and in a `group:key` view a slot holds no row for an entity the key
+// does not cover. A 12 entry has four zero bytes where the count sits, so a reader at 13 would
+// price every unkept term at no entities and take the split where the walk is cheaper, and would
+// refuse every entry whose image has rows against a count of zero. The number is what stops a 12
+// file opening.
 // Each bump makes a stale local bundle a loud refusal rather than a silent misread — a fail-closed
 // guard, not compatibility (decision 0048).
-pub const BUNDLE_FORMAT: u32 = 12;
+pub const BUNDLE_FORMAT: u32 = 13;
 pub const API_VERSION: u32 = 1;
 pub const ABI_VERSION: u32 = 1;
 pub const ROW_ABSENT: u32 = 0xFFFF_FFFF;
@@ -189,7 +196,7 @@ mod tests {
     }
     #[test]
     fn constants() {
-        assert_eq!(BUNDLE_FORMAT, 12);
+        assert_eq!(BUNDLE_FORMAT, 13);
         assert_eq!(ROW_ABSENT, 0xFFFF_FFFF);
     }
 }

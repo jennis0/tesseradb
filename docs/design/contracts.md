@@ -558,7 +558,7 @@ The sidecar joined that list when `columns.arrow` stopped storing coordinates (Â
 - Digests: SHA-256, hex in JSON. All manifest paths are prefix-relative, forward slashes.
 - Every plane authenticates via `Authorization: Bearer <token-or-credential>`. Tokens and credentials never appear in URLs, query strings or logs.
 
-## 2. The bundle format (`bundle_format = 12`)
+## 2. The bundle format (`bundle_format = 13`)
 
 ### 2.1 Layout
 
