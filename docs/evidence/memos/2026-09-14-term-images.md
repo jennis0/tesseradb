@@ -98,8 +98,9 @@ admission question, not a route choice, and this memo does not reopen it.
 
 ## 6. Open
 
-**(a) Where do images live?** Not decided. Two options, both consistent with the measurements
-above:
+**(a) Where do images live?** **Decided** (2026-09-17): the first option below, in the bundle.
+See [decision 0143](../../decisions/0143-term-images-live-in-the-bundle-and-a-session-projection-is-built-by-the-cheapest-route.md).
+Two options, both consistent with the measurements above:
 
 - In the bundle, written by build and compaction, the bundle format bumped to carry them. The
   bundle's digests cover them, which matters because an image with extra rows is a disclosure, not a
