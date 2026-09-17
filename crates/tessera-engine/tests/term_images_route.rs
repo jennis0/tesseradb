@@ -864,7 +864,6 @@ fn a_view_created_while_running_has_no_images_and_is_served_by_the_walk() {
 /// folded prefix carries no image file, every view falls back to the walk, and the case would pass
 /// without having compared two routes.
 #[test]
-#[ignore = "the fold does not write term images until stage 3 has merged"]
 fn every_route_agrees_after_a_fold_executes_a_delete() {
     let fixture = fixture();
     let engine = fixture.writer("fold");
@@ -922,7 +921,6 @@ fn every_route_agrees_after_a_fold_executes_a_delete() {
 ///
 /// **Ignored until the fold writes images** (stage 3), for that case's reason.
 #[test]
-#[ignore = "the fold does not write term images until stage 3 has merged"]
 fn a_view_created_while_running_gains_images_at_its_first_fold() {
     let fixture = fixture();
     let engine = fixture.writer("runtime-view-fold");
