@@ -19,7 +19,7 @@ column (§3).
 
 **The SDK holds nothing about what the database contains.** There is no id map and no commit log: a
 row is named by its id column or by its `tessera_id`, and what the database already holds is asked
-of the database — `/v1/meta` for the views and layers it carries, and the routes' own answers for
+of the database: `/v1/meta` for the views and layers it carries, and the routes' own answers for
 everything else. A re-run of a cell is a re-run, and the server's refusal is what the report
 carries.
 """
@@ -162,6 +162,13 @@ class Database:
                 f"does not name is a row no member table and no value can reach. Name the id "
                 f"column with id="
             )
+        if held is not None and held.id_column is None and staged.id_column is not None:
+            raise Refusal(
+                f"stage: '{name}' names its rows by nothing, so every row of this database is "
+                f"addressed by the tessera_id the server hands back, and the bundle carries no "
+                f"external id for '{staged.id_column}' to match. Drop the column from the frame, "
+                f"or rebuild the database with an id column"
+            )
         self.deltas[name] = staged
         self._save_state()
         return staged
@@ -273,8 +280,9 @@ class Database:
         `scope={"group": name}` makes it a family of columns, one per view of that group, and
         `fields={"view": column}` says where a source of its own carries the view each value
         belongs to. Not built yet: an attribute declared after the first commit. The route and the
-        emitter's body both exist; whether `tessera check` takes a column with no source to read is
-        an open ruling (§11.2), so the SDK declares attributes before the first commit alone.
+        emitter's body both exist, and `tessera check` takes a declaration whose attribute names
+        no source, as a note (§11.1); what is missing is the SDK's own step 1 page for it, so
+        attributes are declared before the first commit alone.
         """
         self._refuse_a_later_commit("declare_attribute")
         block = D.attribute_block(name, type, **kwargs)
@@ -720,7 +728,7 @@ class Database:
 
         A supplied key is an external id and the build writes it without a flag. An integer id
         column is a source-corpus number rather than a namespace the caller owns, so writing the
-        sidecar from it is opt-in — and the SDK asks for it, because every route the later commits
+        sidecar from it is opt-in, and the SDK asks for it, because every route the later commits
         use addresses a row by the bytes of the column the user staged. A database whose points
         name no identity takes neither the flag nor the sidecar: its rows are `tessera_id` rows.
         """

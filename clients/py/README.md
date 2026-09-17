@@ -62,17 +62,17 @@ that moment, so a key the database already holds takes no second exclusion.
 `stage(name, data, id=...)` names the column that names the rows. Its bytes are that row's
 external id at every door: a string's UTF-8, an integer's eight little-endian bytes, binary as it
 stands, which is what the build reads and what `/control/ingest`, `/control/values` and
-`/control/changes` take. The declaration is what says where identity is — a view's
-`fields.entity_id`, an attribute's `entity_id_field`, a members table's `fields.entity` — and the
-SDK rewrites no column to say it. Without `id=` the SDK reads a column named `id`, then
+`/control/changes` take. The declaration is what says where identity is: a view's
+`fields.entity_id`, an attribute's `entity_id_field`, a members table's `fields.entity`. The SDK
+rewrites no column to say it. Without `id=` the SDK reads a column named `id`, then
 `entity_id`, then `entity`; a pandas index with a name is an id column under that name.
 
-A frame that names its rows by nothing — an unnamed default index — is the other route: the build
+A frame that names its rows by nothing, an unnamed default index, is the other route: the build
 writes no external id, and a row is addressed by the `tessera_id` a pick or the ingest route hands
 back, which is what `remove()` then sends.
 
 The SDK holds nothing about what the database contains. A re-run of a cell is a re-run: the same
-frame is staged again and sent again, and what happens then is the database's answer — a replay
+frame is staged again and sent again, and what happens then is the database's answer: a replay
 where the bytes and the batch id are the ones first sent, a `409` on the page where the ids are
 ones it holds. Databases are stateful, and this one says so rather than guessing.
 

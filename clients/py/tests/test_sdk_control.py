@@ -12,6 +12,8 @@ import http.server
 import json
 import threading
 
+import pytest
+
 from tesseradb._control import Control, addressed, batch_id, external_id
 
 
@@ -79,5 +81,9 @@ def test_an_external_id_is_the_bytes_the_id_column_holds():
     assert len(external_id(2**63)) == 8
     assert external_id("p3") == b"p3"
     assert external_id(b"\x00\xff") == b"\x00\xff"
+    # A frame's own ids arrive as numpy scalars, which are integers and are not `int`.
+    numpy = pytest.importorskip("numpy")
+    assert external_id(numpy.int64(5)) == external_id(5)
+    assert external_id(numpy.uint32(5)) == external_id(5)
     assert addressed(1) == "AQAAAAAAAAA="
     assert addressed("p3") == "cDM="

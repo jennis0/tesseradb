@@ -200,6 +200,16 @@ def test_a_delta_carries_the_id_column_the_source_names_its_rows_by(tmp_path):
         db.stage("points", frame(2))
 
 
+def test_a_delta_that_names_its_rows_on_a_database_that_names_none_is_refused(tmp_path):
+    """The mirror of the rule above: this database's rows are tessera_id rows (§3)."""
+    db = create(tmp_path / "db")
+    db.stage("points", frame(), default=True)
+    db.declare_view("map", source="points")
+    db.built = True
+    with pytest.raises(Refusal, match="names its rows by nothing"):
+        db.stage("points", frame(id=["a", "b", "c"]), id="id")
+
+
 def test_a_second_views_frame_without_the_access_column_is_refused_naming_it(tmp_path):
     """§4.2: the labels are the entity's, and the SDK copies nothing between views."""
     db = create(tmp_path / "db")

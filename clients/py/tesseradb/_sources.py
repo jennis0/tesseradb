@@ -11,9 +11,9 @@ is its index, which is pandas-specific and is detected by duck typing rather tha
 pandas: a named index is an id column under its name, and an unnamed one names nothing.
 
 **Which column is a source's identity.** `id=` names it. Without `id=`, a column named `id` is it,
-and after that the names configuration.md makes canonical — `entity_id` where an entity id is read
-and `entity` on a member row — since a file already written for Tessera spells identity that way
-and the declaration reads it under those names by default. A source with none of them has no
+and after that the names configuration.md makes canonical: `entity_id` where an entity id is read,
+and `entity` on a member row. A file already written for Tessera spells identity that way, and the
+declaration reads it under those names by default. A source with none of them has no
 identity column: its rows are named by their `tessera_id` (§3), which the build writes no external
 id for.
 """
@@ -58,17 +58,17 @@ class StagedSource:
         return None if self.id_column is None else self.columns.get(self.id_column)
 
 
-#: The Arrow types an id column may carry, by the name `str(type)` gives them: a reopened database
-#: holds the names rather than the types.
-INTEGER_TYPES = {f"{sign}int{width}" for sign in ("", "u") for width in (8, 16, 32, 64)}
+#: The integer types an id column may be read as, by the name `str(type)` gives them: a reopened
+#: database holds the names rather than the types. The build reads an id column at 32 or 64 bits
+#: and refuses the narrower widths, so they are not integers here either (configuration.md §8).
+INTEGER_TYPES = {f"{sign}int{width}" for sign in ("", "u") for width in (32, 64)}
 
 
 def is_integer_type(dtype: Any) -> bool:
+    """Whether an id column of this type is read as an integer, at the widths the build takes."""
     if dtype is None:
         return False
-    if isinstance(dtype, str):
-        return dtype in INTEGER_TYPES
-    return pa.types.is_integer(dtype)
+    return str(dtype) in INTEGER_TYPES
 
 
 def is_pandas_frame(data: Any) -> bool:

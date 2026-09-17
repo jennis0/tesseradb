@@ -142,7 +142,9 @@ class PagedReport:
 
     @property
     def ok(self) -> bool:
-        return not self.refusals and not any(finding.refuses for finding in self.findings)
+        # A finding refuses the commit (§6.3): the pre-flight sends nothing while one stands, and
+        # a commit that sent pages is ok only where every one of them was accepted.
+        return not self.refusals and not self.findings
 
     @property
     def rows(self) -> int:

@@ -10,10 +10,20 @@ matters for existence and for nothing else.
 two therefore cannot disagree about what would be sent.
 
 **The plan is built from what was staged and what the database says it holds.** The SDK keeps no
-record of what it sent: a delta goes as it was staged, a row the database already holds is a `409`
-on that page and the report carries it, and what the database has already been told — its views,
-its groups and its layers — is read from `/v1/meta` rather than from a log (§3, §6.4). A re-run of
-a cell is a re-run.
+record of what it sent: a delta goes as it was staged, and a row the database already holds is a
+`409` on that page which the report carries. What the database has already been told is read from
+`/v1/meta` rather than from a log: its views, its groups and its layers (§3, §6.4). A re-run of a
+cell is a re-run.
+
+**The declaration decides which route a delta takes.** A delta on a view's points source carrying
+both of that view's coordinate columns is a page of points; one carrying neither fills values on
+entities the database already holds. One carrying exactly one of them is refused naming both: a
+row with half a position is not a point, and sending it as values would drop the coordinate it
+did carry.
+
+**Nothing is dropped or rewritten.** Every column of a delta is sent or the commit is refused
+naming what could not be, and a finding stops the plan rather than trimming it (§6.3). The user
+corrects the data or the declaration and commits again.
 """
 
 from __future__ import annotations
@@ -43,14 +53,18 @@ FLUSH_INTERVAL = 0.2
 
 @dataclass
 class Finding:
-    """One pre-flight finding (§6.3). `refuses` is true where the server would refuse too."""
+    """One pre-flight finding (§6.3).
+
+    A finding refuses the commit. The pre-flight reports and sends nothing while one stands, and
+    it never drops a row or a column to make the rest sendable: what the user staged is what a
+    commit sends, or the commit does not happen.
+    """
 
     what: str
     detail: str
-    refuses: bool = False
 
     def __str__(self) -> str:
-        return f"{'refused' if self.refuses else 'reported'}: {self.what}. {self.detail}"
+        return f"refused: {self.what}. {self.detail}"
 
 
 @dataclass
@@ -198,7 +212,7 @@ class Planner:
         Which of them are new is read from `/v1/meta`: the database is what knows what it holds.
         The order is the one the routes need: a group before a view of it, and a view before the
         layer drawn on it. Not built yet: an attribute and a vocabulary declared after the first
-        commit, refused at the verb (§11.2 C).
+        commit, refused at the verb (§6.2 step 1).
         """
         if not self._pending(document):
             return
@@ -282,7 +296,20 @@ class Planner:
             delta = self.db.deltas.get(source)
             if delta is None:
                 continue
-            if view["x"] not in delta.columns or view["y"] not in delta.columns:
+            carried = [c for c in (view["x"], view["y"]) if c in delta.columns]
+            if len(carried) == 1:
+                self.findings.append(
+                    Finding(
+                        "a delta carrying one of a view's two coordinate columns",
+                        f"'{source}' stages '{carried[0]}' and not "
+                        f"'{view['x'] if carried[0] == view['y'] else view['y']}', and view "
+                        f"'{view['id'] or view['group']}' reads its positions from both. A row "
+                        f"with half a position is not a point, and a position is not a value the "
+                        f"values route can fill. Stage both columns, or neither",
+                    )
+                )
+                continue
+            if not carried:
                 # A row with no coordinates is not a point. The delta fills values on entities the
                 # database already holds, and step 3 carries it.
                 continue
@@ -316,7 +343,8 @@ class Planner:
     def _points_of(
         self, document: dict, view: dict, source: str, table: pa.Table, name: str
     ) -> None:
-        rows = self._inside_the_frame(name, table, view, list(range(table.num_rows)))
+        rows = list(range(table.num_rows))
+        self._refuse_outside_the_frame(name, table, view, rows)
         if not rows:
             return
         columns = self._point_columns(document, view, source, table)
@@ -329,47 +357,48 @@ class Planner:
             line=f"points into view '{name}' from '{source}'",
         )
 
-    def _inside_the_frame(
+    def _refuse_outside_the_frame(
         self, view: str, table: pa.Table, entry: dict, rows: list[int]
-    ) -> list[int]:
-        """Drop the rows outside the view's frame and list them (§6.3).
+    ) -> None:
+        """List the rows outside the view's frame, which refuses the commit (§6.3).
 
         A frame is fixed at the first commit and the ingest route refuses a whole page carrying a
-        row outside it, so a row that would take the page down is dropped here and reported with
-        the frame it missed.
+        row outside it. The rows stand as they were staged: dropping them would commit a corpus
+        the user did not stage, and the remedy is theirs — move the rows, or rebuild the database
+        with an `extent=` that holds them.
         """
         frame = next(
             (v.get("quantisation") for v in self.meta.get("views", []) if v.get("id") == view),
             None,
         )
         if frame is None:
-            return rows
+            return
         x_column, y_column = entry["x"], entry["y"]
         if x_column not in table.column_names or y_column not in table.column_names:
-            return rows
+            return
         xs = table[x_column].to_pylist()
         ys = table[y_column].to_pylist()
-        inside, outside = [], []
-        for row in rows:
-            x, y = xs[row], ys[row]
-            if x is None or y is None:
-                inside.append(row)
-                continue
-            if frame["x_min"] <= x <= frame["x_max"] and frame["y_min"] <= y <= frame["y_max"]:
-                inside.append(row)
-            else:
-                outside.append(row)
+        outside = [
+            row
+            for row in rows
+            if xs[row] is not None
+            and ys[row] is not None
+            and not (
+                frame["x_min"] <= xs[row] <= frame["x_max"]
+                and frame["y_min"] <= ys[row] <= frame["y_max"]
+            )
+        ]
         if outside:
             self.findings.append(
                 Finding(
                     "rows outside the frame",
-                    f"{len(outside)} row(s) fall outside view '{view}''s frame "
+                    f"{len(outside)} of {len(rows)} row(s) fall outside view '{view}''s frame "
                     f"[{frame['x_min']:g}, {frame['x_max']:g}] × "
-                    f"[{frame['y_min']:g}, {frame['y_max']:g}], and are dropped: the server would "
-                    f"refuse the whole page. A frame is fixed at the first commit",
+                    f"[{frame['y_min']:g}, {frame['y_max']:g}], and the ingest route refuses a "
+                    f"page carrying one. A frame is fixed at the first commit, so the remedy is "
+                    f"the rows or a rebuild with an extent= that holds them",
                 )
             )
-        return inside
 
     def _point_columns(
         self, document: dict, view: dict, source: str, table: pa.Table
@@ -441,17 +470,35 @@ class Planner:
             if not attributes:
                 continue
             table = pq.read_table(delta.path)
-            rendered = [block["name"] for block in attributes if block.get("render")]
+            rendered = [
+                block["name"]
+                for block in attributes
+                if block.get("render") and (block.get("field") or block["name"]) in delta.columns
+            ]
             if rendered:
                 self.findings.append(
                     Finding(
                         "a rendered column on the values route",
-                        f"'{source}' carries {', '.join(rendered)}, declared `render`, and a "
+                        f"'{source}' stages {', '.join(rendered)}, declared `render`, and a "
                         f"rendered value is drawn from the hot column of the row that carries it. "
-                        f"The values route fills entities and acquires no row, so it refuses one; "
-                        f"the column is left as the row that created it carries it",
+                        f"The values route fills entities and acquires no row, so it refuses one, "
+                        f"and the rest of this delta is not sent without it. Drop the column from "
+                        f"the frame, or stage the rows that carry it as points",
                     )
                 )
+                continue
+            unread = self._unread_by_values(document, source, delta, attributes)
+            if unread:
+                self.findings.append(
+                    Finding(
+                        "a column the values route has nowhere to put",
+                        f"'{source}' stages {', '.join(repr(c) for c in unread)}, which no "
+                        f"attribute of this declaration reads. The values route fills declared "
+                        f"columns on entities that exist, so a column it does not know would be "
+                        f"dropped from the page. Drop it from the frame, or declare what reads it",
+                    )
+                )
+                continue
             fillable = [block for block in attributes if not block.get("render")]
             entity = [block for block in fillable if _scoped_to(block) is None]
             self._values_of(source, table, entity, list(range(table.num_rows)), None)
@@ -472,7 +519,6 @@ class Planner:
                                 f"and a value belongs to one view. The values route names the view "
                                 f"in a header, so the delta carries column '{column}', which the "
                                 f"declaration's fields.view names and this delta does not",
-                                refuses=True,
                             )
                         )
                         continue
@@ -482,6 +528,35 @@ class Planner:
                     for key in dict.fromkeys(value for value in keys if value is not None):
                         rows = [i for i, value in enumerate(keys) if value == key]
                         self._values_of(source, table, columns, rows, f"{group}:{key}")
+
+    def _unread_by_values(
+        self, document: dict, source: str, delta, attributes: list[dict]
+    ) -> list[str]:
+        """The delta's columns the values step would not send (§6.3).
+
+        A points source's delta that took this route carries no coordinates, so anything beyond
+        the id column and the attributes' own columns is a column the route has no place for: a
+        layer's key column is the case that matters, since minting an artifact from a column is
+        the build's and the ingest route's, and this one fills cells. A source that is a layer's
+        own table as well as an attribute source keeps the artifact table's columns.
+        """
+        read = {self.db._id_column_of(source)}
+        for block in attributes:
+            read.add(block.get("field") or block["name"])
+            if _scoped_to(block) is not None:
+                read.add(dict(block.get("fields", {})).get("view") or "view")
+        points = {entry["source"] for entry in view_entries(document, self.db.default_source)}
+        if source not in points:
+            for block in document.get("layer", []):
+                for one in (block, block.get("labels")):
+                    if not isinstance(one, dict):
+                        continue
+                    members = one.get("members") if isinstance(one.get("members"), dict) else {}
+                    if source in (one.get("source"), members.get("source")):
+                        read |= self.ARTIFACT_COLUMNS
+                        read |= set(dict(one.get("fields", {})).values())
+                        read |= set(dict(members.get("fields", {})).values())
+        return [column for column in delta.columns if column not in read]
 
     def _values_of(
         self, source: str, table: pa.Table, attributes: list[dict], rows: list[int], view: str | None
@@ -496,7 +571,6 @@ class Planner:
                     "a values delta that names no entity",
                     f"'{source}' fills columns on entities this database holds, and a value is "
                     f"addressed by the row it belongs to. Name the id column with id=",
-                    refuses=True,
                 )
             )
             return
@@ -577,7 +651,6 @@ class Planner:
                     "a labels delta before its clustering",
                     f"'{layer}' labels '{parent}', which this commit neither holds nor stages. "
                     f"Stage the clustering's artifacts beside the labels",
-                    refuses=True,
                 )
             )
             return
@@ -628,7 +701,6 @@ class Planner:
                         f"fit one request is the list, the complement being taken against the "
                         f"view's entities on the executor. Name the members the artifact holds "
                         f"instead, which pages",
-                        refuses=True,
                     )
                 )
                 continue
@@ -657,7 +729,6 @@ class Planner:
                                 f"'{row['key']}': its membership does not fit one publication, and "
                                 f"the growth route that pages the rest carries no view. Split the "
                                 f"artifact into keys whose memberships fit",
-                                refuses=True,
                             )
                         )
                         continue

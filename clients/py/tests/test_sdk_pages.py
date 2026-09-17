@@ -364,7 +364,7 @@ def test_a_values_cell_re_run_is_sent_again_and_lands_on_the_cells_it_landed_on(
 
 def test_a_values_only_commit_returns_with_its_effect_visible(served, corpus):
     """§6.2 step 5: the flush answers with the publication its cycle carries, and `commit()` waits
-    for `/control/status` to reach it — a commit that wrote no row moves that counter too."""
+    for `/control/status` to reach it. A commit that wrote no row moves that counter too."""
     db = served(small)
     db.stage(
         "scores",
@@ -462,11 +462,10 @@ def test_leave_shrinks_a_generating_set_and_emptying_it_withdraws_the_content(se
 # ---------------------------------------------------------------------------- §6.3
 
 
-def test_the_pre_flight_reports_a_row_outside_the_frame_and_refuses_an_undeclared_column(
-    served, corpus
-):
+def test_a_row_outside_the_frame_refuses_the_commit_and_nothing_is_sent(served, corpus):
+    """§6.3: the pre-flight reports and sends nothing, and drops no row to send the rest."""
     db = served(small)
-    # Out of frame: dropped and listed, with the frame. The server would refuse the whole page.
+    before = viewport(db, "map", [-5.0, -5.0, 40.0, 40.0])["counts"]["visible"]
     db.stage(
         "points",
         pa.table(
@@ -480,10 +479,101 @@ def test_the_pre_flight_reports_a_row_outside_the_frame_and_refuses_an_undeclare
         id="id",
     )
     plan = db.check()
+    assert not plan.ok
     assert any("outside view 'map''s frame" in str(f) for f in plan.findings), plan
     report = db.commit()
-    assert report.ok, report
-    assert report.rows_accepted == {"map": 1}
+    assert not report.ok, report
+    assert report.rows_accepted == {} and not report.refusals
+    # Neither row was sent: the one inside the frame is not a commit the user staged on its own.
+    assert viewport(db, "map", [-5.0, -5.0, 40.0, 40.0])["counts"]["visible"] == before
+
+    # The remedy is the rows. With the far one moved inside, both go.
+    db.stage(
+        "points",
+        pa.table(
+            {
+                "id": pa.array(["far", "near"], pa.string()),
+                "x": pa.array([4.5, 3.5], pa.float64()),
+                "y": pa.array([0.0, 0.0], pa.float64()),
+                "labels": pa.array([["public"]] * 2, pa.list_(pa.string())),
+            }
+        ),
+        id="id",
+    )
+    again = db.commit()
+    assert again.ok, again
+    assert again.rows_accepted == {"map": 2}
+
+
+def test_a_delta_carrying_one_coordinate_column_is_refused_naming_both(served, corpus):
+    """§6.2 step 2: a row with half a position is not a point, and no other route takes one."""
+    db = served(small)
+    db.stage(
+        "points",
+        pa.table(
+            {
+                "id": pa.array(["p10"], pa.string()),
+                "x": pa.array([3.0], pa.float64()),
+                "labels": pa.array([["public"]], pa.list_(pa.string())),
+            }
+        ),
+        id="id",
+    )
+    plan = db.check()
+    assert not plan.ok
+    assert any("coordinate column" in str(f) and "'y'" in str(f) for f in plan.findings), plan
+    assert plan.plan == []
+
+
+def test_a_rendered_column_on_a_values_delta_refuses_the_commit(served, corpus):
+    """§6.3: the route refuses a rendered column, and the SDK does not send the delta without it."""
+    def with_a_rendered_score(db) -> None:
+        db.stage(
+            "points",
+            pa.table(
+                {
+                    "id": pa.array([f"p{i}" for i in range(20)], pa.string()),
+                    "x": pa.array([float(i) for i in range(20)], pa.float64()),
+                    "y": pa.array([0.0] * 20, pa.float64()),
+                    "labels": pa.array([["public"]] * 20, pa.list_(pa.string())),
+                }
+            ),
+            id="id",
+            default=True,
+        )
+        db.stage(
+            "scores",
+            pa.table(
+                {
+                    "id": pa.array(["p0"], pa.string()),
+                    "score": pa.array([0.5], pa.float64()),
+                    "note": pa.array([0.5], pa.float64()),
+                }
+            ),
+            id="id",
+        )
+        db.declare_view(
+            "map", source="points", access="labels", extent={"x": [-5, 40], "y": [-5, 40]}
+        )
+        db.declare_attribute("score", type="f64", source="scores", index=True, render=False)
+        db.declare_attribute("note", type="f64", source="scores", render=True)
+
+    db = served(with_a_rendered_score)
+    db.stage(
+        "scores",
+        pa.table(
+            {
+                "id": pa.array(["p1"], pa.string()),
+                "score": pa.array([1.0], pa.float64()),
+                "note": pa.array([1.0], pa.float64()),
+            }
+        ),
+        id="id",
+    )
+    plan = db.check()
+    assert not plan.ok
+    assert any("rendered column" in str(f) for f in plan.findings), plan
+    assert plan.plan == []
 
 
 def test_the_pre_flight_refuses_a_column_no_block_declares(served, corpus):

@@ -23,6 +23,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import numbers
 import time
 import urllib.error
 import urllib.parse
@@ -50,12 +51,17 @@ def external_id(value: Any) -> bytes:
 
     A string's UTF-8, an integer's eight little-endian bytes, binary as it stands. The build reads
     the same column and takes the same bytes, so one row is one address at both doors.
+
+    Any integer, not only Python's: a frame's own ids arrive as numpy or pyarrow scalars, and one
+    of those spelled as text would address a row nobody wrote. A boolean is not an integer here,
+    having no id space of its own.
     """
     if isinstance(value, bytes):
         return value
-    if isinstance(value, bool) or not isinstance(value, int):
+    if isinstance(value, bool) or not isinstance(value, numbers.Integral):
         return str(value).encode()
-    return int(value).to_bytes(8, "little", signed=value < 0)
+    number = int(value)
+    return number.to_bytes(8, "little", signed=number < 0)
 
 
 def addressed(value: Any) -> str:
