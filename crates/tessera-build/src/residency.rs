@@ -1164,8 +1164,8 @@ pub(crate) fn entity_order_residency(
     // dictionary, the table being written into the file as each window completes.
     //
     // ⊘ **Modelled**, and a ceiling rather than an expectation: a term over a third of the corpus
-    // in run-friendly order is kilobytes (assumed). The fold charges the same term over its own
-    // one thread (`tessera_engine`'s fold memory estimate).
+    // in run-friendly order is kilobytes (assumed). The fold's memory estimate charges the same
+    // window over its own one thread, at a flat ceiling for the scratch rather than this bound.
     let image_workers = rayon::current_num_threads().max(1) as u64;
     let scratch = tessera_store::permutation::project_scratch_bound(n, n);
     terms.push(Term {
