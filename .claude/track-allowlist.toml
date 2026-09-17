@@ -48,6 +48,7 @@ paths = [
   "crates/tessera-engine/src/write.rs",
   "crates/tessera-engine/src/session.rs",
   "crates/tessera-engine/tests/*",
+  "conformance/tests/test_restart_replay.py",
 ]
 
 # The build's supplied id column and the check note (python-sdk §11.2 A and §11.1).
