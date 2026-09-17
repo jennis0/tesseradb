@@ -348,11 +348,17 @@ async fn the_group_route_declares_answers_redeclarations_and_refuses_what_the_ru
 
     let (status, body) = declare_group(&served, "quarter", quarter()).await;
     assert_eq!(status, 201, "{body}");
-    assert_eq!(body, json!({ "group": "quarter", "existing": false }));
+    assert_eq!(
+        without_publication(body),
+        json!({ "group": "quarter", "existing": false })
+    );
 
     let (status, body) = declare_group(&served, "quarter", quarter()).await;
     assert_eq!(status, 200, "identical: the group that exists: {body}");
-    assert_eq!(body, json!({ "group": "quarter", "existing": true }));
+    assert_eq!(
+        without_publication(body),
+        json!({ "group": "quarter", "existing": true })
+    );
 
     let mut moved = quarter();
     moved["extent"] = json!({ "x": [0.0, 500.0], "y": [0.0, 1000.0] });
@@ -479,7 +485,10 @@ async fn a_plain_view_created_at_runtime_takes_rows_at_its_first_flush() {
     let mut served = serve().await;
     let (status, body) = declare_view(&served, "embedding", embedding()).await;
     assert_eq!(status, 201, "{body}");
-    assert_eq!(body, json!({ "view": "embedding", "existing": false }));
+    assert_eq!(
+        without_publication(body),
+        json!({ "view": "embedding", "existing": false })
+    );
 
     assert_eq!(
         declare_view(&served, "embedding", embedding()).await.0,
@@ -743,4 +752,19 @@ async fn the_declarations_survive_a_restart_and_a_fold() {
         200,
         "the folded view is still the one a redeclaration meets"
     );
+}
+
+/// A declaration's answer with `publication` taken out, so a whole-object comparison stays a
+/// whole-object comparison. The number is a running count and a test cannot name it, but its
+/// absence would be a route that stopped telling a caller when its declaration becomes visible
+/// (contracts §3.4), so this asserts it was there.
+fn without_publication(mut body: Value) -> Value {
+    assert!(
+        body.as_object_mut()
+            .expect("the answer is an object")
+            .remove("publication")
+            .is_some(),
+        "every write acknowledgement carries a publication number: {body}"
+    );
+    body
 }

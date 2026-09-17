@@ -295,7 +295,10 @@ pub fn router(state: Arc<AppState>) -> Router {
             "/control/view_groups/{name}",
             axum::routing::put(create_view_group),
         )
-        .route("/control/views/{name}", axum::routing::put(create_plain_view))
+        .route(
+            "/control/views/{name}",
+            axum::routing::put(create_plain_view),
+        )
         .route(
             "/control/layers/{name}/artifacts",
             // **Not the inherited 2 MiB default**: `ingest.publish_max_body_bytes`, a pagination
@@ -1416,6 +1419,21 @@ struct ValuesResp {
     held: u64,
     /// Members this batch's layer columns added to artifacts that did not already hold them.
     joined: u64,
+    /// **This batch id was already accepted with these bytes** (write-path §2.4).
+    ///
+    /// A values batch allocates nothing, so a replay has no identifiers to hand back and the
+    /// fill rule answers it on its own terms: every cell is held identically, so `filled` is `0`
+    /// and `held` is the row count, and a client summing `filled` over its pages is already
+    /// honest. The flag is what tells that apart from a first submission whose cells another
+    /// writer had filled with the same values.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    replayed: bool,
+    /// The cycle this batch's cells become visible in (contracts §3.4).
+    publication: u64,
+    /// `wait=visible` only: whether the counter reached `publication` inside
+    /// `serve.visible_wait_max_secs`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    visible: Option<bool>,
 }
 
 /// `POST /control/values` — fill attribute values on entities that already exist
@@ -1432,6 +1450,7 @@ struct ValuesResp {
 /// join (contracts §3.4 r68, decision 0116).
 async fn values(
     State(state): State<Arc<AppState>>,
+    axum::extract::Query(wait): axum::extract::Query<WaitQuery>,
     headers: HeaderMap,
     body: Result<Bytes, axum::extract::rejection::BytesRejection>,
 ) -> Result<Json<ValuesResp>, ApiError> {
@@ -1480,12 +1499,16 @@ async fn values(
             ),
         });
     };
-    let resp = tokio::task::spawn_blocking(move || {
+    let engine = Arc::clone(&state);
+    let mut resp = tokio::task::spawn_blocking(move || {
         let _permit = permit;
-        run_values(&state, encoding, &body, batch_id, view.as_deref())
+        run_values(&engine, encoding, &body, batch_id, view.as_deref())
     })
     .await
     .map_err(map_join_error)??;
+    let ack = publication_ack(&state, &wait).await?;
+    resp.publication = ack.publication;
+    resp.visible = ack.visible;
     Ok(Json(resp))
 }
 
@@ -1620,6 +1643,14 @@ fn run_values(
     }
 
     let accepted = request_rows.len() as u64;
+    // **The replay is read before the batch is submitted**, where `/control/ingest` reads it, and
+    // off the same index: a values batch is recorded there too, so a byte-identical retry is a
+    // batch id this deployment already holds under this body's hash. The fill rule would answer
+    // it as a no-op either way; what the flag adds is the reason.
+    let replayed = state
+        .engine
+        .accepted_batch(&batch_id)
+        .is_some_and(|(held_hash, _)| held_hash == body_hash);
     let receipt = state
         .engine
         .fill_values(tessera_engine::ValuesRequest {
@@ -1639,6 +1670,10 @@ fn run_values(
         filled: receipt.filled,
         held: receipt.held,
         joined: receipt.joined,
+        replayed,
+        // Filled by the handler, which is where the wait can be awaited.
+        publication: 0,
+        visible: None,
     })
 }
 
@@ -1693,8 +1728,8 @@ fn parse_values_batch(
                     })
                 }))
             }
-            BodyEncoding::Json => Box::new(std::iter::once(
-                crate::ingest_json::values_record_batch(
+            BodyEncoding::Json => {
+                Box::new(std::iter::once(crate::ingest_json::values_record_batch(
                     body,
                     &crate::ingest_json::JsonColumns {
                         // A values row carries no coordinates, so the axis names name nothing it
@@ -1706,8 +1741,8 @@ fn parse_values_batch(
                         scoped,
                         layer_of,
                     },
-                ),
-            )),
+                )))
+            }
         };
 
     let mut rows: Vec<ParsedValuesRow> = Vec::new();
@@ -1899,7 +1934,9 @@ fn parse_values_batch(
                     .column_by_name(&d.name)
                     .expect("the column was found above");
                 values.push(match d.vocabulary.as_deref() {
-                    Some(vocabulary) => category_code(col.as_ref(), i, d, vocabulary, vocabularies)?,
+                    Some(vocabulary) => {
+                        category_code(col.as_ref(), i, d, vocabulary, vocabularies)?
+                    }
                     None if col.is_null(i) => WalScalar::Null,
                     None => scalar_at(col.as_ref(), i, d.wire_type())
                         .expect("every declared column's type was checked above"),
@@ -2298,6 +2335,26 @@ struct IngestResp {
     /// permanent object instead of being refused — and the mitigation is that the caller who made
     /// the typo is told the number in the same 200 that took their rows.
     minted: u64,
+    /// **This body was already accepted under this batch id, so it took no rows** (write-path
+    /// §2.4). `accepted` is `0` beside it for the reason `minted` is: acceptance is an effect,
+    /// and this submission had none, so a client that sums `accepted` over its pages to learn
+    /// what the corpus took is not made to double-count every page it retried. `tessera_ids` is
+    /// the full list either way, which is what a caller correlates its rows by, and the flag is
+    /// what tells `0` here apart from `0` for an empty batch.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    replayed: bool,
+    /// The cycle this batch's rows become visible in (contracts §3.4).
+    ///
+    /// **A replay's number is later than the cycle its rows were published in**, and a caller
+    /// that waits on it waits longer than it needs to. The target is always the next cycle to
+    /// open, so a replay names one that has not happened rather than the one that took the rows;
+    /// waiting on it is sound, because a counter that reaches a later number has passed the
+    /// earlier one, and `replayed` is what tells a caller it is waiting for nothing.
+    publication: u64,
+    /// `wait=visible` only: whether the counter reached `publication` inside
+    /// `serve.visible_wait_max_secs`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    visible: Option<bool>,
 }
 
 /// The Arrow decode through the WAL append/fsync: everything CPU-bound or fsync-bearing for one
@@ -2471,7 +2528,9 @@ fn run_ingest(
             // re-derive from).
             let tessera_ids = tessera_ids_of(state, &prev_entity_ids)?;
             return Ok(IngestResp {
-                accepted: items.len() as u64,
+                // Nothing was accepted by *this* submission. See `IngestResp::replayed`.
+                accepted: 0,
+                replayed: true,
                 over_bound,
                 over_bound_ids,
                 // Clipping is a property of the rows, not an effect of accepting them, so a
@@ -2484,6 +2543,9 @@ fn run_ingest(
                 // A replay creates nothing: the artifacts this batch's keys named were minted when
                 // it was first accepted, and this submission had no effect at all.
                 minted: 0,
+                // Filled by the handler, which is where the wait can be awaited.
+                publication: 0,
+                visible: None,
             });
         }
         return Err(ApiError::Conflict(format!(
@@ -2677,12 +2739,15 @@ fn run_ingest(
 
     Ok(IngestResp {
         accepted,
+        replayed: false,
         over_bound,
         over_bound_ids,
         clipped,
         padded_columns,
         tessera_ids,
         minted,
+        publication: 0,
+        visible: None,
     })
 }
 
@@ -2735,6 +2800,7 @@ fn run_ingest(
 /// that belongs with flush, and no configuration bound substitutes for it.
 async fn ingest(
     State(state): State<Arc<AppState>>,
+    axum::extract::Query(wait): axum::extract::Query<WaitQuery>,
     headers: HeaderMap,
     body: Result<Bytes, axum::extract::rejection::BytesRejection>,
 ) -> Result<Json<IngestResp>, ApiError> {
@@ -2814,13 +2880,19 @@ async fn ingest(
     // The permit is **moved in**, not held across the `.await`: a disconnected client's handler
     // future is dropped while this closure keeps running and keeps its thread, so releasing on
     // handler-drop would under-count exactly when the pool is under pressure.
-    let resp = tokio::task::spawn_blocking(move || {
+    let engine = Arc::clone(&state);
+    let mut resp = tokio::task::spawn_blocking(move || {
         let _permit = permit;
-        run_ingest(&state, encoding, &body, batch_id, view.as_deref())
+        run_ingest(&engine, encoding, &body, batch_id, view.as_deref())
     })
     .await
     .map_err(map_join_error)??;
 
+    // **After the rows are buffered, never before**: the number names the cycle that carries
+    // them, and a cycle that opened before they arrived is not it.
+    let ack = publication_ack(&state, &wait).await?;
+    resp.publication = ack.publication;
+    resp.visible = ack.visible;
     Ok(Json(resp))
 }
 
@@ -3225,8 +3297,9 @@ fn alarm_change_failure(op: ChangeOp, e: &AcceptError) {
 /// happening at all. Body decoding stays on the reactor, bounded by [`CHANGES_MAX_BODY_BYTES`].
 async fn changes(
     State(state): State<Arc<AppState>>,
+    axum::extract::Query(wait): axum::extract::Query<WaitQuery>,
     body: Result<Json<Vec<ChangeItem>>, axum::extract::rejection::JsonRejection>,
-) -> Result<StatusCode, ApiError> {
+) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     // Contracts §3.1's 422 row is "malformed request, **bounds exceeded**, unknown filter operand",
     // which covers both shapes a `JsonRejection` carries. They are distinguished by the rejection's
     // own status rather than collapsed, because "your batch is too large" and "your JSON is
@@ -3271,12 +3344,126 @@ async fn changes(
     // `.await` needs the handler's own copy) and `items` (moved — the request body is already
     // fully decoded to owned `Vec<ChangeItem>` by this point, so there is nothing left to borrow).
     // `spawn_on_deny_lane`, not `tokio::task::spawn_blocking`: see its doc.
-    spawn_on_deny_lane(move || run_changes(&state, items))
+    let engine = Arc::clone(&state);
+    spawn_on_deny_lane(move || run_changes(&engine, items))
         .await
         .map_err(map_join_error)??;
 
+    // **The deny is in force and durable when this answer is sent** (decision 0041, write-path
+    // §5.4): the overlay entry applies to every request from acceptance, and the append is fsynced
+    // before the 200. The overlay's own side-manifest is written at every drain close, on its own
+    // schedule, so no publication cycle stands between this answer and the change being both
+    // applied and recoverable. `publication` is carried because every write acknowledgement on
+    // this plane carries it and a client should not have to remember which ones mean something.
+    // No reader needs to wait on it, and `wait=visible` here waits for the next cycle rather than
+    // for this change.
+    let mut body = serde_json::json!({});
+    publication_ack(&state, &wait).await?.merge(&mut body);
     // R5: `/control/changes` is 200 after fsync, never 429.
-    Ok(StatusCode::OK)
+    Ok((StatusCode::OK, Json(body)))
+}
+
+/// How often a `wait=visible` wait re-reads the publication counter.
+///
+/// A tick's own completion poll is 20 ms, so anything finer only spends wakeups; anything much
+/// coarser puts a whole poll between the publication and the answer. The wait holds no lock and
+/// no executor thread, so its only cost is this timer.
+const VISIBLE_WAIT_POLL: std::time::Duration = std::time::Duration::from_millis(5);
+
+/// The `wait` query parameter every write route takes (contracts §3.4).
+///
+/// One value, `visible`. An unrecognised value is a 422 naming the parameter rather than a wait
+/// nobody asked for or a wait silently not taken: a caller who typed `wait=true` and got an
+/// immediate answer would read it as "published".
+#[derive(Debug, Default, serde::Deserialize)]
+pub struct WaitQuery {
+    #[serde(default)]
+    wait: Option<String>,
+}
+
+impl WaitQuery {
+    fn asked(&self) -> Result<bool, ApiError> {
+        match self.wait.as_deref() {
+            None => Ok(false),
+            Some("visible") => Ok(true),
+            Some(other) => Err(ApiError::Contract(format!(
+                "wait takes 'visible' and nothing else; got '{other}'"
+            ))),
+        }
+    }
+}
+
+/// What a write acknowledgement says about when its work becomes visible.
+struct PublicationAck {
+    /// The cycle this write's work is published in (contracts §3.4).
+    publication: u64,
+    /// Present only where `wait=visible` was asked: whether the counter reached `publication`
+    /// within `serve.visible_wait_max_secs`.
+    visible: Option<bool>,
+}
+
+impl PublicationAck {
+    /// Write the two fields into an object body.
+    fn merge(&self, body: &mut serde_json::Value) {
+        body["publication"] = serde_json::json!(self.publication);
+        if let Some(visible) = self.visible {
+            body["visible"] = serde_json::json!(visible);
+        }
+    }
+}
+
+/// [`publication_ack`] for a declaration route, where what the number adds is uniformity.
+///
+/// **A declaration is in force from its answer** (`ingest.md` §1.3). It is WAL-durable before the
+/// 201 and resolvable from it, so the next request may name the column, the vocabulary, the layer
+/// or the view, and `/v1/meta` lists it. What a publication adds is the manifest entry that
+/// carries the declaration without a WAL replay, and that lands with the next flush that writes a
+/// segment. **No reader waits on this number**; it is carried because every write acknowledgement
+/// on this plane carries one, and a client should not have to remember which ones mean something.
+/// `wait=visible` on one of these routes waits for the next cycle rather than for the
+/// declaration, which is already in force.
+async fn declaration_ack(state: &AppState, wait: &WaitQuery) -> Result<PublicationAck, ApiError> {
+    publication_ack(state, wait).await
+}
+
+/// The publication number a write acknowledgement carries, and `wait=visible`'s wait.
+///
+/// **Called after the route's own engine call returned**, so the work the number names is already
+/// durable and buffered and the cycle it is measured against is the one that will carry it.
+///
+/// Without the parameter this reads the counter's target and returns. With it, the request pulls
+/// the tick forward exactly as `POST /control/flush` does, and then the answer is held until the
+/// counter has reached the number. **The wait is a poll of an atomic behind a mutex and nothing
+/// else**: it holds no executor thread, takes no lock across an await, and a caller that gives up
+/// costs the server one dropped future. Past `serve.visible_wait_max_secs` the answer is sent as
+/// it would have been without the wait, carrying `visible: false`, so the ceiling is a latency
+/// bound and never a refusal: the write happened either way and the caller reads
+/// `/control/status` for the rest.
+async fn publication_ack(state: &AppState, wait: &WaitQuery) -> Result<PublicationAck, ApiError> {
+    if !wait.asked()? {
+        return Ok(PublicationAck {
+            publication: state.engine.publication_target(),
+            visible: None,
+        });
+    }
+    let publication = state.engine.request_flush_publication();
+    let deadline =
+        std::time::Instant::now() + std::time::Duration::from_secs(state.visible_wait_max_secs);
+    loop {
+        if state.engine.publication() >= publication {
+            return Ok(PublicationAck {
+                publication,
+                visible: Some(true),
+            });
+        }
+        if std::time::Instant::now() >= deadline {
+            return Ok(PublicationAck {
+                publication,
+                visible: Some(false),
+            });
+        }
+        tokio::time::sleep(VISIBLE_WAIT_POLL).await;
+    }
 }
 
 /// `POST /control/flush` (contracts §3.4): **accepted at any time, executed promptly.**
@@ -3293,9 +3480,27 @@ async fn changes(
 ///
 /// Idempotent: two requests before one tick are satisfied by that tick together, because what is
 /// recorded is a flag and not a count.
-async fn flush(State(state): State<Arc<AppState>>) -> StatusCode {
-    state.engine.request_flush();
-    StatusCode::ACCEPTED
+///
+/// **The body carries `publication`: the number the cycle honouring this request will carry when
+/// it completes** (contracts §3.4). A client reads `GET /control/status` until its `publication`
+/// has reached it, and is then promised that a cycle which saw this request's buffered work has
+/// published. That covers the two cases `partitions[].segments_version` does not: a cycle that
+/// only filled values and one that only published artifact records write no segment and move no
+/// version. Two requests before one cycle are answered with the same number, which is the flag
+/// above read as a number.
+///
+/// **The number cannot name a cycle that skipped the request's work.** It is computed under the
+/// lock the flag is set beneath, so it is `completed + 1` only where no cycle was under way, and
+/// `completed + 2` where one was and may have planned first; and the counter moves at the
+/// publication rather than at the tick, so reaching it and the work being visible are one event.
+/// `Engine::request_flush_publication` and `ExecutorHealth::request_flush` carry the argument in
+/// full.
+async fn flush(State(state): State<Arc<AppState>>) -> (StatusCode, Json<serde_json::Value>) {
+    let publication = state.engine.request_flush_publication();
+    (
+        StatusCode::ACCEPTED,
+        Json(serde_json::json!({ "publication": publication })),
+    )
 }
 
 /// `POST /control/compact` (contracts §3.4): **accepted at any time, and then minutes to hours.**
@@ -3340,6 +3545,7 @@ async fn compact(State(state): State<Arc<AppState>>) -> StatusCode {
 /// published rules — a name already taken, a name tombstoned, a nested layer that declared levels.
 async fn register_layer(
     State(state): State<Arc<AppState>>,
+    axum::extract::Query(wait): axum::extract::Query<WaitQuery>,
     body: Json<tessera_types::layer::LayerDeclaration>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     let declaration = body.0;
@@ -3362,14 +3568,14 @@ async fn register_layer(
     // The **shared** blocking pool, not the deny runtime beside it. That runtime exists so a
     // suppression is never queued behind ingest; a registration is not a deny, and delaying one
     // under ingest load is backpressure working rather than a security operation refused.
-    let id = tokio::task::spawn_blocking(move || state.engine.register_layer(declaration))
+    let engine = Arc::clone(&state);
+    let id = tokio::task::spawn_blocking(move || engine.engine.register_layer(declaration))
         .await
         .map_err(crate::error::map_join_error)?
         .map_err(crate::error::map_accept_error)?;
-    Ok((
-        StatusCode::CREATED,
-        Json(serde_json::json!({ "name": name, "tessera_id": id.raw().to_string() })),
-    ))
+    let mut body = serde_json::json!({ "name": name, "tessera_id": id.raw().to_string() });
+    declaration_ack(&state, &wait).await?.merge(&mut body);
+    Ok((StatusCode::CREATED, Json(body)))
 }
 
 /// `DELETE /control/layers/{name}` — drop a layer and tombstone its name for ever.
@@ -3385,12 +3591,18 @@ async fn register_layer(
 async fn drop_layer(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(name): axum::extract::Path<String>,
-) -> Result<StatusCode, ApiError> {
-    tokio::task::spawn_blocking(move || state.engine.drop_layer(name))
+    axum::extract::Query(wait): axum::extract::Query<WaitQuery>,
+) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
+    let engine = Arc::clone(&state);
+    tokio::task::spawn_blocking(move || engine.engine.drop_layer(name))
         .await
         .map_err(crate::error::map_join_error)?
         .map_err(crate::error::map_accept_error)?;
-    Ok(StatusCode::NO_CONTENT)
+    // **200 with a body rather than 204**, so every write acknowledgement on this plane carries
+    // its publication number and a client needs no table of which ones do.
+    let mut body = serde_json::json!({});
+    declaration_ack(&state, &wait).await?.merge(&mut body);
+    Ok((StatusCode::OK, Json(body)))
 }
 
 /// `PUT /control/attributes`' body: the `[[attribute]]` block minus its acquisition keys
@@ -3439,6 +3651,7 @@ struct AttributeBody {
 /// default; the refusal and its reason are in `tessera_engine`'s `attributes::resolve`.
 async fn declare_attribute(
     State(state): State<Arc<AppState>>,
+    axum::extract::Query(wait): axum::extract::Query<WaitQuery>,
     body: Json<AttributeBody>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     let body = body.0;
@@ -3455,7 +3668,8 @@ async fn declare_attribute(
         scope: body.scope,
     };
     // The **shared** blocking pool, on `register_layer`'s rule: a declaration is not a deny.
-    let existing = tokio::task::spawn_blocking(move || state.engine.declare_attribute(request))
+    let engine = Arc::clone(&state);
+    let existing = tokio::task::spawn_blocking(move || engine.engine.declare_attribute(request))
         .await
         .map_err(crate::error::map_join_error)?
         .map_err(crate::error::map_accept_error)?;
@@ -3464,10 +3678,9 @@ async fn declare_attribute(
     } else {
         StatusCode::CREATED
     };
-    Ok((
-        status,
-        Json(serde_json::json!({ "name": name, "existing": existing })),
-    ))
+    let mut body = serde_json::json!({ "name": name, "existing": existing });
+    declaration_ack(&state, &wait).await?.merge(&mut body);
+    Ok((status, Json(body)))
 }
 
 /// `PUT /control/vocabularies/{name}`' body: the `[[vocabulary]]` block minus its acquisition
@@ -3548,6 +3761,7 @@ struct VocabularyValuesBody {
 async fn declare_vocabulary(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(name): axum::extract::Path<String>,
+    axum::extract::Query(wait): axum::extract::Query<WaitQuery>,
     body: Json<VocabularyBody>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     let body = body.0;
@@ -3568,25 +3782,26 @@ async fn declare_vocabulary(
         reserved: body.reserved,
     };
     // The **shared** blocking pool, on `register_layer`'s rule: a declaration is not a deny.
-    let (existing, added, titles) =
-        tokio::task::spawn_blocking(move || state.engine.declare_vocabulary(request))
-            .await
-            .map_err(crate::error::map_join_error)?
-            .map_err(crate::error::map_accept_error)?;
+    let (existing, added, titles) = tokio::task::spawn_blocking({
+        let state = Arc::clone(&state);
+        move || state.engine.declare_vocabulary(request)
+    })
+    .await
+    .map_err(crate::error::map_join_error)?
+    .map_err(crate::error::map_accept_error)?;
     let status = if existing {
         StatusCode::OK
     } else {
         StatusCode::CREATED
     };
-    Ok((
-        status,
-        Json(serde_json::json!({
-            "name": name,
-            "existing": existing,
-            "added": added,
-            "titles": titles
-        })),
-    ))
+    let mut body = serde_json::json!({
+        "name": name,
+        "existing": existing,
+        "added": added,
+        "titles": titles
+    });
+    declaration_ack(&state, &wait).await?.merge(&mut body);
+    Ok((status, Json(body)))
 }
 
 /// `PATCH /control/vocabularies/{name}/values` — a page of values for a vocabulary that exists
@@ -3606,6 +3821,7 @@ async fn declare_vocabulary(
 async fn mint_vocabulary_values(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(name): axum::extract::Path<String>,
+    axum::extract::Query(wait): axum::extract::Query<WaitQuery>,
     body: Json<VocabularyValuesBody>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let values: Vec<tessera_engine::DeclaredValue> = body
@@ -3618,18 +3834,21 @@ async fn mint_vocabulary_values(
         })
         .collect();
     let vocabulary = name.clone();
+    let engine = Arc::clone(&state);
     let (added, existing, titles) = tokio::task::spawn_blocking(move || {
-        state.engine.mint_vocabulary_values(vocabulary, values)
+        engine.engine.mint_vocabulary_values(vocabulary, values)
     })
     .await
     .map_err(crate::error::map_join_error)?
     .map_err(crate::error::map_accept_error)?;
-    Ok(Json(serde_json::json!({
+    let mut body = serde_json::json!({
         "name": name,
         "added": added,
         "existing": existing,
         "titles": titles
-    })))
+    });
+    declaration_ack(&state, &wait).await?.merge(&mut body);
+    Ok(Json(body))
 }
 
 /// The frame a view or a group declares, in **frame coordinates**: the four bounds a Morton code
@@ -3750,6 +3969,7 @@ fn projection_none() -> String {
 async fn create_view_group(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(name): axum::extract::Path<String>,
+    axum::extract::Query(wait): axum::extract::Query<WaitQuery>,
     body: Json<ViewGroupBody>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     let body = body.0;
@@ -3774,19 +3994,20 @@ async fn create_view_group(
             .collect(),
     };
     // The **shared** blocking pool, on `register_layer`'s rule: a declaration is not a deny.
-    let existing = tokio::task::spawn_blocking(move || state.engine.create_view_group(declaration))
-        .await
-        .map_err(crate::error::map_join_error)?
-        .map_err(crate::error::map_accept_error)?;
+    let engine = Arc::clone(&state);
+    let existing =
+        tokio::task::spawn_blocking(move || engine.engine.create_view_group(declaration))
+            .await
+            .map_err(crate::error::map_join_error)?
+            .map_err(crate::error::map_accept_error)?;
     let status = if existing {
         StatusCode::OK
     } else {
         StatusCode::CREATED
     };
-    Ok((
-        status,
-        Json(serde_json::json!({ "group": name, "existing": existing })),
-    ))
+    let mut body = serde_json::json!({ "group": name, "existing": existing });
+    declaration_ack(&state, &wait).await?.merge(&mut body);
+    Ok((status, Json(body)))
 }
 
 /// `PUT /control/views/{name}` — create a plain view while the service runs (`ingest.md` §1.3
@@ -3802,6 +4023,7 @@ async fn create_view_group(
 async fn create_plain_view(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(name): axum::extract::Path<String>,
+    axum::extract::Query(wait): axum::extract::Query<WaitQuery>,
     body: Json<PlainViewBody>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     let body = body.0;
@@ -3815,19 +4037,20 @@ async fn create_plain_view(
             .map(tessera_types::view::DeclaredGate::into_labels),
         point_default: body.point_visibility.and_then(|p| p.default),
     };
-    let existing = tokio::task::spawn_blocking(move || state.engine.create_plain_view(declaration))
-        .await
-        .map_err(crate::error::map_join_error)?
-        .map_err(crate::error::map_accept_error)?;
+    let engine = Arc::clone(&state);
+    let existing =
+        tokio::task::spawn_blocking(move || engine.engine.create_plain_view(declaration))
+            .await
+            .map_err(crate::error::map_join_error)?
+            .map_err(crate::error::map_accept_error)?;
     let status = if existing {
         StatusCode::OK
     } else {
         StatusCode::CREATED
     };
-    Ok((
-        status,
-        Json(serde_json::json!({ "view": name, "existing": existing })),
-    ))
+    let mut body = serde_json::json!({ "view": name, "existing": existing });
+    declaration_ack(&state, &wait).await?.merge(&mut body);
+    Ok((status, Json(body)))
 }
 
 /// `PUT /control/views/{group}/{key}`'s body: the roster record, which is the inline
@@ -3861,6 +4084,11 @@ struct DropViewQuery {
     /// deletes no entity.
     #[serde(default)]
     delete_dangling: bool,
+    /// `wait=visible` (contracts §3.4), carried here rather than in a second [`WaitQuery`]
+    /// extractor: two `Query` extractors each parse the whole string, and this one's
+    /// `deny_unknown_fields` would refuse the other's key.
+    #[serde(default)]
+    wait: Option<String>,
 }
 
 /// One supplied metadata value as the roster stores it.
@@ -3921,6 +4149,7 @@ fn metadata_value(name: &str, value: &serde_json::Value) -> Result<ViewMetadataV
 async fn create_view(
     State(state): State<Arc<AppState>>,
     axum::extract::Path((group, key)): axum::extract::Path<(String, String)>,
+    axum::extract::Query(wait): axum::extract::Query<WaitQuery>,
     body: Json<ViewRecord>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     let record = body.0;
@@ -3935,22 +4164,24 @@ async fn create_view(
     // The **shared** blocking pool, not the deny runtime beside it, on `register_layer`'s rule: a
     // creation is not a deny, and delaying one under ingest load is backpressure working rather
     // than a security operation refused.
-    tokio::task::spawn_blocking(move || {
-        state
-            .engine
-            .create_view(group_name, view_key, visibility, metadata)
+    tokio::task::spawn_blocking({
+        let state = Arc::clone(&state);
+        move || {
+            state
+                .engine
+                .create_view(group_name, view_key, visibility, metadata)
+        }
     })
     .await
     .map_err(crate::error::map_join_error)?
     .map_err(crate::error::map_accept_error)?;
-    Ok((
-        StatusCode::CREATED,
-        Json(serde_json::json!({
-            "view": format!("{group}:{key}"),
-            "group": group,
-            "key": key,
-        })),
-    ))
+    let mut body = serde_json::json!({
+        "view": format!("{group}:{key}"),
+        "group": group,
+        "key": key,
+    });
+    declaration_ack(&state, &wait).await?.merge(&mut body);
+    Ok((StatusCode::CREATED, Json(body)))
 }
 
 /// `DELETE /control/views/{group}/{key}` — drop a view, freeing its key (`views.md` §3.4).
@@ -3971,13 +4202,17 @@ async fn drop_view(
     axum::extract::Path((group, key)): axum::extract::Path<(String, String)>,
     axum::extract::Query(query): axum::extract::Query<DropViewQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    let wait = WaitQuery { wait: query.wait };
+    let engine = Arc::clone(&state);
     let deleted = tokio::task::spawn_blocking(move || {
-        state.engine.drop_view(group, key, query.delete_dangling)
+        engine.engine.drop_view(group, key, query.delete_dangling)
     })
     .await
     .map_err(crate::error::map_join_error)?
     .map_err(crate::error::map_accept_error)?;
-    Ok(Json(serde_json::json!({ "deleted": deleted })))
+    let mut body = serde_json::json!({ "deleted": deleted });
+    declaration_ack(&state, &wait).await?.merge(&mut body);
+    Ok(Json(body))
 }
 
 /// Turn a flat member offset back into `(artifact index, member index)`, so a refusal names the
@@ -4734,6 +4969,7 @@ struct IncomingContentBody {
 async fn publish_artifacts(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(name): axum::extract::Path<String>,
+    axum::extract::Query(wait): axum::extract::Query<WaitQuery>,
     headers: HeaderMap,
     body: Result<Bytes, axum::extract::rejection::BytesRejection>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
@@ -5039,11 +5275,13 @@ async fn publish_artifacts(
 
     // The **shared** blocking pool, on `register_layer`'s argument: a publication is not a deny,
     // and delaying one under ingest load is backpressure working.
-    let batch =
-        tokio::task::spawn_blocking(move || state.engine.put_artifacts(name, level, incoming))
-            .await
-            .map_err(crate::error::map_join_error)?
-            .map_err(crate::error::map_accept_error)?;
+    let batch = tokio::task::spawn_blocking({
+        let state = Arc::clone(&state);
+        move || state.engine.put_artifacts(name, level, incoming)
+    })
+    .await
+    .map_err(crate::error::map_join_error)?
+    .map_err(crate::error::map_accept_error)?;
 
     let published: Vec<serde_json::Value> = batch
         .tessera_ids
@@ -5074,6 +5312,7 @@ async fn publish_artifacts(
     } else {
         StatusCode::OK
     };
+    publication_ack(&state, &wait).await?.merge(&mut body);
     Ok((status, Json(body)))
 }
 
@@ -5192,6 +5431,7 @@ struct ContentFillBody {
 async fn grow_memberships(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(name): axum::extract::Path<String>,
+    axum::extract::Query(wait): axum::extract::Query<WaitQuery>,
     headers: HeaderMap,
     body: Result<Bytes, axum::extract::rejection::BytesRejection>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
@@ -5367,11 +5607,13 @@ async fn grow_memberships(
 
     // The shared blocking pool, on `publish_artifacts`'s argument: a growth is not a deny, and
     // delaying one under ingest load is backpressure working.
-    let grown =
-        tokio::task::spawn_blocking(move || state.engine.grow_memberships(name, level, joins))
-            .await
-            .map_err(crate::error::map_join_error)?
-            .map_err(crate::error::map_accept_error)?;
+    let grown = tokio::task::spawn_blocking({
+        let state = Arc::clone(&state);
+        move || state.engine.grow_memberships(name, level, joins)
+    })
+    .await
+    .map_err(crate::error::map_join_error)?
+    .map_err(crate::error::map_accept_error)?;
 
     let artifacts: Vec<serde_json::Value> = grown
         .iter()
@@ -5397,6 +5639,7 @@ async fn grow_memberships(
     if !shape_reports.is_empty() {
         body["shapes"] = serde_json::Value::Array(shape_reports);
     }
+    publication_ack(&state, &wait).await?.merge(&mut body);
     Ok((StatusCode::OK, Json(body)))
 }
 /// `POST /control/faults/arm` — the correctness suite's arming surface (decision 0071;
@@ -5521,6 +5764,12 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::V
     let segments: Vec<tessera_engine::ViewSegments> = state.engine.live_segment_counts();
     Ok(Json(serde_json::json!({
         "entity_id_high_water": state.engine.allocator_high_water(),
+        // **The publication counter** (contracts §3.4): cycles completed since the executor
+        // started, moving once per cycle whatever the cycle published. It is at the top level
+        // beside `partitions` and outside `write_executor`, whose counters an operator watches.
+        // This one a client waits on: `POST /control/flush` answers with the number its cycle
+        // will carry, and this is where that number is read back.
+        "publication": state.engine.publication(),
         // Contracts §3.4's per-partition block, and the write path's stage barrier
         // (correctness-suite §12.3): the version bump is how a harness knows a flush, merge or
         // fold *published* rather than was accepted, and the watermark is which entities the

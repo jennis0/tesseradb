@@ -444,6 +444,8 @@ async fn a_spent_walk_budget_reports_more_even_on_a_short_page() {
         operator_credential: OPERATOR_CREDENTIAL.to_string(),
         dev_cors_origins: Vec::new(),
         cors_origins: Vec::new(),
+        cors_loopback: false,
+        visible_wait_max_secs: 30,
         faults: Arc::new(tessera_lifecycle::faults::FaultSwitchboard::new()),
     });
 
