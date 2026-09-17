@@ -9,7 +9,7 @@ pub use dict::{
     coalesce_dict_extents, Dict, DictStreamWriter, DictWriter, PUBLIC_LABEL, PUBLIC_TERM,
 };
 pub use fragment::{
-    build_fragment, build_fragment_with_deltas, delta_rows, residual_fragment, FragmentCache,
+    build_fragment, build_fragment_with_deltas, delta_entities, residual_fragment, FragmentCache,
     FragmentCacheError, FrozenFragment,
 };
 pub use postings::{

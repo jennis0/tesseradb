@@ -641,14 +641,14 @@ const FOLD_MEMORY_SAFETY_FACTOR: u64 = 2;
 
 /// Workers the fold's term-image derivation runs across.
 ///
-/// **One**, because [`execute`] runs on one dedicated thread. A fold's input is the corpus, and
+/// One, because [`execute`] runs on one dedicated thread. A fold's input is the corpus, and
 /// occupying request-serving workers for the length of one is the maintenance schedule reaching
 /// the request path (decision 0043). Sequential also bounds the pass's memory to the one image and
 /// the one scratch [`memory_estimate`] charges. The build passes `rayon::current_num_threads()`
 /// instead. The bytes are identical either way: the derivation reads and appends a window at a
 /// time in term order, so the width is a choice about the host and not about the file.
 ///
-/// **What one thread costs, modelled.** The probe derived 1.4×10⁶ terms at rung 6 in 184 s across
+/// What one thread costs is modelled. The probe derived 1.4×10⁶ terms at rung 6 in 184 s across
 /// the box's cores (measured, `docs/evidence/memos/2026-09-17-term-images-handover.md` §3.4).
 /// Projection is per term and the workers share only a mutex over the scratch pool, so one thread
 /// is of the order of the core count times that: tens of minutes for one view at rung 6, against a
@@ -659,7 +659,7 @@ const TERM_IMAGE_THREADS: usize = 1;
 /// The publication number the fold's term-image files are named after
 /// (`tessera_store::derived::term_image_file`).
 ///
-/// **Zero, and the fold cannot do better.** A derived file is named after the publication that
+/// Zero, and the fold cannot do better. A derived file is named after the publication that
 /// introduces it, and a fold's side-manifest number is allocated on the executor at publication,
 /// hours after this pass writes the file. It has to be: a number taken at dispatch would sit below
 /// every flush that published during the flight, and the fold's `SEGMENTS-<n>.json` would then lose
@@ -686,23 +686,26 @@ const TERM_IMAGE_MANIFEST_N: u64 = 0;
 /// | 4 B × entity bound | `ext-locator.u32`, same (§3 pass 3) |
 /// | 8 B × dictionary length | `PostingsSpool`'s offsets buffer (§3's table: ~0.94 GB at 1.17×10⁸) |
 /// | 90 B × membership containers | the artifact pass's row forms, held while it rebuilds them |
-/// | threads × (posting + image + scratch) | pass 2b's window and its projection, modelled |
+/// | threads × (posting + image + frozen + scratch) | pass 2b's window and its projection, modelled |
 ///
 /// The permutation term is the **maximum** across views rather than their sum: pass 1 folds one
 /// view at a time and drops each view's writer before the next, so the peak is one of them. The
 /// image term takes its rows the same way, and for the same reason: pass 2b derives one view at a
 /// time and drops each row space before the next.
 ///
-/// **The pass 2b term is [`term_image_estimate`], modelled, and a ceiling rather than an
-/// expectation.** The pass holds one term per worker in flight: that term's posting as an owned
-/// bitmap over entity space, its image over row space, and one [`PROJECT_SCRATCH_BYTES`] scratch.
+/// The pass 2b term is [`term_image_estimate`], modelled, and a ceiling rather than an
+/// expectation. The pass holds one term per worker in flight: that term's posting as an owned
+/// bitmap over entity space, its image over row space, the buffer the image is serialised into,
+/// and one projection scratch, the last at
+/// [`tessera_store::permutation::project_scratch_bound`]'s figure for this view.
 /// A Roaring container covers 65 536 values and costs at most 8 KiB, at which point it is a bitset
 /// over every value in its range, so a term held by every entity is the widest posting expressible
 /// and one held by every row the widest image. Nothing in the pass scales with the dictionary: the
 /// table is written into the file as each window completes. The realistic figure is far below the
 /// ceiling, a term over a third of the corpus in run-friendly order being kilobytes (assumed; the
-/// probe reports whole-file sizes, not per term). ~437 MB of image at 3.5×10⁹ rows, against ~82 MiB
-/// of scratch (`docs/evidence/memos/2026-09-17-term-images-handover.md` §3.4).
+/// probe reports whole-file sizes, not per term). ~437 MB of image at 3.5×10⁹ rows, the same again
+/// for the frozen buffer beside it, against ~82 MiB of scratch
+/// (`docs/evidence/memos/2026-09-17-term-images-handover.md` §3.4).
 ///
 /// *(§3's first draft called the two mapped arrays free — page cache rather than RSS. r1 corrected
 /// it: a dirty shared file mapping is resident and cgroup-charged until writeback. They are charged
@@ -723,16 +726,6 @@ pub(crate) fn memory_estimate(
     terms.saturating_mul(FOLD_MEMORY_SAFETY_FACTOR)
 }
 
-/// What [`ProjectScratch`](tessera_store::permutation::ProjectScratch) holds at its widest, in
-/// bytes.
-///
-/// **Arithmetic from two constants, and a bound rather than a typical figure**: the projection
-/// emits and clears its buckets every 64 MiB of row ids whatever the mask, so what it holds is one
-/// window plus a partly filled chunk per bucket, at most 82 MiB at the 1,025 buckets of the `u32`
-/// entity ceiling. `permutation.rs` states it beside the window it follows from, and the anonymous
-/// peaks it produces are measured there.
-const PROJECT_SCRATCH_BYTES: u64 = 82 * 1024 * 1024;
-
 /// The widest a Roaring container can be once built, in bytes: a bitset over its 65 536 values.
 const BYTES_PER_BITSET_CONTAINER: u64 = 8 * 1024;
 
@@ -740,9 +733,17 @@ const BYTES_PER_BITSET_CONTAINER: u64 = 8 * 1024;
 const VALUES_PER_CONTAINER: u64 = 1 << 16;
 
 /// [`memory_estimate`]'s pass 2b term: per worker, the widest posting it can hold, the widest image
-/// it can build from one, and the scratch it projects through.
+/// it can build from one, the buffer that image is serialised into, and the scratch it projects
+/// through.
 ///
-/// **Zero where the pass does not run**, which is a view with no row and a dictionary with no term:
+/// The frozen buffer is charged at the image's own width. A frozen bitmap is the containers'
+/// payloads with five bytes of key, count and typecode each, so it is under the image's resident
+/// form for every shape but the one where each container is a full bitset, where the two are equal
+/// but for the headers. The buffer and the image stand together: the serialiser writes into the
+/// buffer while the image is still held, and the image is dropped only when the window it belongs
+/// to has been appended.
+///
+/// Zero where the pass does not run, which is a view with no row and a dictionary with no term:
 /// pass 2b skips both, so charging a scratch for them would refuse folds for work nothing does.
 fn term_image_estimate(dict_len: u64, permutation_bound: u64, base_rows: u64) -> u64 {
     if dict_len == 0 || base_rows == 0 {
@@ -753,9 +754,13 @@ fn term_image_estimate(dict_len: u64, permutation_bound: u64, base_rows: u64) ->
             .div_ceil(VALUES_PER_CONTAINER)
             .saturating_mul(BYTES_PER_BITSET_CONTAINER)
     };
+    let image = widest(base_rows);
+    let scratch =
+        tessera_store::permutation::project_scratch_bound(permutation_bound, base_rows).total();
     let held = widest(permutation_bound)
-        .saturating_add(widest(base_rows))
-        .saturating_add(PROJECT_SCRATCH_BYTES);
+        .saturating_add(image)
+        .saturating_add(image)
+        .saturating_add(scratch);
     (TERM_IMAGE_THREADS as u64).saturating_mul(held)
 }
 
@@ -1182,8 +1187,8 @@ impl Staircase {
 /// One view's term images as pass 2b wrote them: what the new side-manifest must name, and what
 /// the publication logs about them.
 ///
-/// The summary rides along rather than being recomputed from the file, because the wall clock and
-/// the counts are the pass's own and nothing in the file records them.
+/// The summary is carried rather than recomputed from the file, because the wall clock and the
+/// counts are the pass's own and nothing in the file records them.
 pub(crate) struct FoldedTermImages {
     pub(crate) extent: tessera_store::manifest::TermImageExtent,
     pub(crate) summary: tessera_store::term_images::TermImageSummary,
@@ -2986,7 +2991,7 @@ mod tests {
         assert!(
             (17.0..=19.0).contains(&gb),
             "the estimate is {gb:.1} GB; spec §3 budgets ~9–10 GB and this carries \
-             FOLD_MEMORY_SAFETY_FACTOR on top, so ~17.9 GB is the figure"
+             FOLD_MEMORY_SAFETY_FACTOR on top, so ~18.8 GB is the figure"
         );
     }
 
@@ -3006,16 +3011,17 @@ mod tests {
         assert_eq!(memory_estimate(0, 0, 1_000, 0, 0), 8 * 1_000 * 2);
     }
 
-    /// **Pass 2b is charged one posting, one image and one scratch, and only where it runs.** The
-    /// posting and the image are ceilings of a bitset container per 65 536 entities and per 65 536
-    /// rows, so the term moves with entity space and with the view's rows and not with the
-    /// dictionary. The scratch is flat.
+    /// **Pass 2b is charged one posting, one image, the buffer that image is frozen into and one
+    /// scratch, and only where it runs.** The posting and the image are ceilings of a bitset
+    /// container per 65 536 entities and per 65 536 rows, and the frozen buffer is charged at the
+    /// image's width, so the term moves with entity space and with the view's rows and not with
+    /// the dictionary. The scratch is flat.
     ///
     /// Kills the mutation that charges the scratch to a fold with nothing to project, which would
     /// refuse folds on a small host for work the pass skips, and the one that drops either
-    /// bitmap.
+    /// bitmap or the buffer.
     #[test]
-    fn the_estimate_charges_one_posting_one_image_and_one_scratch() {
+    fn the_estimate_charges_one_posting_one_image_one_buffer_and_one_scratch() {
         assert_eq!(
             memory_estimate(0, 0, 0, 0, 1_000_000),
             0,
@@ -3026,25 +3032,43 @@ mod tests {
             8 * 2,
             "a view with no row gets none either, so only the dictionary term is charged"
         );
-        // One container of rows and no entity space: one 8 KiB image and the scratch.
+        // The scratch is the store's bound over the same row space, not a figure restated here.
+        let scratch = |bound: u64, rows: u64| {
+            tessera_store::permutation::project_scratch_bound(bound, rows).total()
+        };
+        // One container of rows and no entity space: one 8 KiB image, the buffer it is frozen
+        // into at the same width, and the scratch.
         assert_eq!(
             memory_estimate(0, 0, 1, 0, VALUES_PER_CONTAINER),
-            (8 + BYTES_PER_BITSET_CONTAINER + PROJECT_SCRATCH_BYTES) * FOLD_MEMORY_SAFETY_FACTOR
+            (8 + 2 * BYTES_PER_BITSET_CONTAINER + scratch(0, VALUES_PER_CONTAINER))
+                * FOLD_MEMORY_SAFETY_FACTOR
         );
-        // One row past it takes a second container, and nothing else moves.
+        // One row past it takes a second container, in the image and in the buffer alike, and
+        // nothing else moves.
         assert_eq!(
             memory_estimate(0, 0, 1, 0, VALUES_PER_CONTAINER + 1),
-            (8 + 2 * BYTES_PER_BITSET_CONTAINER + PROJECT_SCRATCH_BYTES)
+            (8 + 4 * BYTES_PER_BITSET_CONTAINER + scratch(0, VALUES_PER_CONTAINER + 1))
                 * FOLD_MEMORY_SAFETY_FACTOR
         );
-        // The posting rides on the permutation bound, above the 4 B/entity the mapped array costs.
+        // The posting is a function of the permutation bound, above the 4 B/entity the mapped
+        // array costs.
         assert_eq!(
             memory_estimate(VALUES_PER_CONTAINER, 0, 1, 0, VALUES_PER_CONTAINER),
-            (4 * VALUES_PER_CONTAINER + 8 + 2 * BYTES_PER_BITSET_CONTAINER + PROJECT_SCRATCH_BYTES)
+            (4 * VALUES_PER_CONTAINER
+                + 8
+                + 3 * BYTES_PER_BITSET_CONTAINER
+                + scratch(VALUES_PER_CONTAINER, VALUES_PER_CONTAINER))
                 * FOLD_MEMORY_SAFETY_FACTOR
         );
-        // The memo's figure at rung 6: ~437 MB of image at 3.5×10⁹ rows.
-        let image = term_image_estimate(1, 0, 3_500_000_000) - PROJECT_SCRATCH_BYTES;
+        // The memo's figure at rung 6: ~437 MB of image at 3.5×10⁹ rows, and the frozen buffer
+        // beside it at the same width.
+        let held = term_image_estimate(1, 0, 3_500_000_000) - scratch(0, 3_500_000_000);
+        let image = held / 2;
+        assert_eq!(
+            held,
+            2 * image,
+            "the image and its buffer are one width each"
+        );
         assert!(
             (430_000_000..=445_000_000).contains(&image),
             "the widest image at 3.5×10⁹ rows is {image} B, against the memo's ~437 MB"
