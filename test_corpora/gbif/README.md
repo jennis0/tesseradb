@@ -84,12 +84,20 @@ them would be a rendering decision taken in a pipeline.
 
 ## The compartment is real, and every row carries a term
 
-`countrycode`, 251 values on the whole corpus. A record whose country is null or empty carries
-`UNRECORDED`, written into the column by `prepare.py` rather than left to the view's `default`, so
-the access column is never empty and **a principal holding no term sees nothing**. Rung 5's
-`unpublished` and rung 4's `unlicensed` have the same shape and exist for the same reason: the
-campaign's principal ladder starts at 1% of the corpus and cannot be composed under a floor every
-principal holds for free.
+`access` is a list of up to three terms a row: the country the occurrence was recorded in, `y:` and
+its year, and `s:` and its species key. A null year or a null species key contributes no term. A
+record whose country is null or empty carries `UNRECORDED`, written into the list by `prepare.py`
+rather than left to the view's `default`, so the list is never empty and **a principal holding no
+term sees nothing**. Rung 5's `unpublished` and rung 4's `unlicensed` have the same shape and exist
+for the same reason: the campaign's principal ladder starts at 1% of the corpus and cannot be
+composed under a floor every principal holds for free.
+
+The country term is the compartment, 251 values on the whole corpus. The year and species terms put
+about 1.4×10⁶ terms in the dictionary (modelled from the census's distinct counts) so that
+principals shaped like a user's term set — a few hundred years, a thousand or a hundred thousand
+species — can be measured on a real dictionary rather than on stand-ins (owner ruling, 2026-09-17).
+`countrycode`, `specieskey` and `year` stay as columns and as attributes; the access list is derived
+from them and does not replace them.
 
 `UNRECORDED` is 0.18% of the placed rows (47,565 of 25,846,007, spread sample) against 1.57% of all
 rows in the census. Records with no country largely have no coordinate either, so dropping the

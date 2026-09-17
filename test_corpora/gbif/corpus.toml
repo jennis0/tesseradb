@@ -39,17 +39,21 @@ entity_id_field = "entity_id"
 # for it, quantisation clamps, and the polar records are real observations — dropping them would
 # take a decision about Antarctica on rendering grounds. `prepare.py` reports how many.
 #
-# **`countrycode` is the compartment**: the country the occurrence was recorded in, 251 values,
-# US 1.25×10⁹, AU 320M, FR 206M. It is a property of the record rather than a synthetic stand-in,
-# and it is this rung's equivalent of rung 5's `publisher`.
+# **`access` is a list of up to three terms a row**, built by `prepare.py`: the country the
+# occurrence was recorded in, `y:` and its year, and `s:` and its species key. The country term is
+# the compartment — 251 values, US 1.25×10⁹, AU 320M, FR 206M, a property of the record rather than
+# a synthetic stand-in, this rung's equivalent of rung 5's `publisher`. The year and species terms
+# put about 1.4×10⁶ terms in the dictionary so that principals shaped like a user's term set — a
+# few hundred years, a thousand or a hundred thousand species — can be measured on a real
+# dictionary rather than on stand-ins (owner ruling, 2026-09-17).
 #
 # **The `default` never fires.** A record whose `countrycode` is null or empty carries
-# `UNRECORDED`, written into the column by `prepare.py`, so the column is never empty and a
-# principal holding no term **sees nothing**. Written as a real term rather than left to the
-# view's `default` for rung 5's reason: the campaign's principal ladder starts at 1% of the corpus
-# and cannot be composed under a floor every principal would hold for free. A `public` default
-# would put 1.6% of the map in front of a viewer with no grant at all, and every masked count
-# taken against it would measure that floor rather than the compartment.
+# `UNRECORDED`, written into the list by `prepare.py`, so the list is never empty and a principal
+# holding no term **sees nothing**. Written as a real term rather than left to the view's `default`
+# for rung 5's reason: the campaign's principal ladder starts at 1% of the corpus and cannot be
+# composed under a floor every principal would hold for free. A `public` default would put 1.6% of
+# the map in front of a viewer with no grant at all, and every masked count taken against it would
+# measure that floor rather than the compartment.
 # ---------------------------------------------------------------------------------------------
 
 [[view]]
@@ -59,7 +63,7 @@ projection       = "web_mercator"
 extent           = { lon = [-180.0, 180.0], lat = [-85.0511287798066, 85.0511287798066] }
 source           = "points"
 visibility       = "public"
-point_visibility = { field = "countrycode", default = "UNRECORDED" }
+point_visibility = { field = "access", default = "UNRECORDED" }
 
 # ---------------------------------------------------------------------------------------------
 # The one vocabulary, minted from the corpus and **closed**: a value it does not name is a refusal
