@@ -57,16 +57,6 @@ RAM_BACKED = Path("/dev/shm")
 #: the whole corpus.
 DELTA_FOLDER = ".tessera/deltas"
 
-#: What a declaration verb that the paged commit does not yet send says. `tessera check
-#: --payloads` emits a body for every block kind; the planner sends layers, label sets, views and
-#: view groups, and not yet attributes or vocabularies (§6.2 step 1).
-NO_RUNTIME_DECLARATION = (
-    "not built yet, {verb} after the first commit. The paged commit sends a layer, a label set, a "
-    "view and a view group to the running service, and not yet an attribute or a vocabulary. "
-    "Declare it before the first commit, or rebuild the database with create(path, replace=True)"
-)
-
-
 class Database:
     """One database directory, and the declaration the SDK is building for it."""
 
@@ -192,10 +182,11 @@ class Database:
         """One block of the declaration, spelled with configuration.md's own keys (§4.1).
 
         Every block is expressible this way; the typed verbs below build the dict and call here,
-        and this is the way to write a key whose verb is not built yet.
+        and this is the way to write a key no typed verb has a parameter for.
         """
-        if kind not in ("layer", "view", "view_group"):
-            self._refuse_a_later_commit("declare")
+        if kind == "attribute":
+            self._refuse_a_render_column(block.get("name"), block.get("render"))
+            self._mark_a_filled_column(block)
         return self._declared(self.blocks.add(kind, block))
 
     def declare_view(self, name: str, source: str | None = None, **kwargs) -> dict:
@@ -269,7 +260,15 @@ class Database:
             )
 
     def declare_vocabulary(self, name: str, **kwargs) -> dict:
-        self._refuse_a_later_commit("declare_vocabulary")
+        """One `[[vocabulary]]` block, at any commit (§4.4).
+
+        A vocabulary declared after the first commit is sent as
+        `PUT /control/vocabularies/{name}` at the next commit, with the body `tessera check
+        --payloads` emits over this declaration. A closed set's values follow as
+        `PATCH /control/vocabularies/{name}/values`, from the `values=` list or from the `source=`
+        table's `(key, title?)` rows; an open set needs nothing more, its codes being minted from
+        the values that arrive.
+        """
         return self._declared(self.blocks.add("vocabulary", D.vocabulary_block(name, **kwargs)))
 
     def declare_attribute(self, name: str, type: str, **kwargs) -> dict:
@@ -277,15 +276,48 @@ class Database:
 
         `scope={"group": name}` makes it a family of columns, one per view of that group, and
         `fields={"view": column}` says where a source of its own carries the view each value
-        belongs to. Not built yet: an attribute declared after the first commit. The route and the
-        emitter's body both exist, and `tessera check` takes a declaration whose attribute names
-        no source, as a note (§11.1); what is missing is the SDK's own step 1 page for it, so
-        attributes are declared before the first commit alone.
+        belongs to.
+
+        An attribute declared after the first commit is sent as `PUT /control/attributes` at the
+        next commit, with the body `tessera check --payloads` emits over this declaration; the
+        column reads absent on every entity that predates it, and a delta on the attribute's source
+        fills it through `POST /control/values` as any values delta does. `render=True` is the one
+        such attribute the route refuses, and the refusal is here.
         """
-        self._refuse_a_later_commit("declare_attribute")
         block = D.attribute_block(name, type, **kwargs)
+        self._refuse_a_render_column(name, block.get("render"))
         self._refuse_an_undeclared_group("attribute", name, block)
+        self._mark_a_filled_column(block)
         return self._declared(self.blocks.add("attribute", block))
+
+    def _mark_a_filled_column(self, block: dict) -> None:
+        """An attribute declared at a running service is filled, not read (§6.2 step 1).
+
+        The mark is kept beside the block and never written: what it decides is that the written
+        declaration names no source for this column, since the file the first commit built from has
+        never carried it. `tessera check` takes such a block as a note and emits its payload, which
+        is what the next commit declares.
+        """
+        if self.built and "source" not in block and not block.get("scope"):
+            block[D.FILLED] = True
+
+    def _refuse_a_render_column(self, name: Any, render: Any) -> None:
+        """A render column belongs to the first commit (decision 0136's amendment, §4.5).
+
+        `PUT /control/attributes` refuses `render: true` whatever the type: a rendered value is
+        served from the hot column of the row that carries it, and the route declares a column
+        against entities rather than rows. The rows this database holds have no slot for one, so
+        the refusal is at the verb, where the declaration is still the user's to change.
+        """
+        if not (self.built and render):
+            return
+        raise Refusal(
+            f"attribute {name!r}: render=True is fixed at the first commit. A rendered value is "
+            f"served from the hot column of the row that carries it, and PUT /control/attributes "
+            f"declares a column against entities that already exist, so it refuses one (decision "
+            f"0136's amendment). Declare it with index=True, which is filterable and drawn at "
+            f"drill-down, or rebuild the database with create(path, replace=True)"
+        )
 
     def _refuse_an_undeclared_group(self, kind: str, name: str, block: dict) -> None:
         """A scope names the group that owns the views its values or artifacts are keyed by."""
@@ -354,7 +386,7 @@ class Database:
                 f"own; write it through declare_layer"
             )
         if isinstance(source, dict):
-            source = self._stage_label_text(name, source)
+            source = self._stage_label_text(name, of, source)
         parent["labels"] = D.labels_block(name, source, members=members, **kwargs)
         self._save_state()
         return parent["labels"]
@@ -363,8 +395,15 @@ class Database:
         self._save_state()
         return block
 
-    def _stage_label_text(self, name: str, mapping: dict) -> str:
-        """A mapping from cluster key to text, as the `(key, contents)` table the block reads."""
+    def _stage_label_text(self, name: str, of: str, mapping: dict) -> str:
+        """A mapping from cluster key to text, as the artifacts table the block reads (§4.7).
+
+        Each row carries the attachment as well as the text: a label set expands to a layer that
+        depends on its clustering, and every artifact such a layer publishes attaches to one, so a
+        row naming no `attached_layer` and `attached_key` is refused at the build. The key the
+        mapping gives is the cluster's, which is what the label attaches to and what names the
+        label's own artifact in its own layer.
+        """
         source_name = name.replace("/", "_")
         if source_name in self.sources:
             raise Refusal(
@@ -379,6 +418,8 @@ class Database:
                     [[[v]] if isinstance(v, str) else [list(v)] for v in mapping.values()],
                     type=pa.list_(pa.list_(pa.string())),
                 ),
+                "attached_layer": pa.array([of] * len(mapping), type=pa.string()),
+                "attached_key": pa.array([str(k) for k in mapping], type=pa.string()),
             }
         )
         path = self.path / "sources" / f"{source_name}.parquet"
@@ -409,10 +450,6 @@ class Database:
                     return block["source"]
         return self.default_source
 
-    def _refuse_a_later_commit(self, verb: str) -> None:
-        if self.built:
-            raise Refusal(NO_RUNTIME_DECLARATION.format(verb=verb))
-
     # ------------------------------------------------------------------ the document
 
     @property
@@ -430,19 +467,18 @@ class Database:
         paths = {name: staged.declared_path for name, staged in self.sources.items()}
         for name, staged in self.deltas.items():
             paths.setdefault(name, staged.declared_path)
-        document = self.blocks.document(
-            paths,
-            self.default_source,
-            inferred_attributes,
-            inferred_vocabularies,
-        )
-        # Every source named on every block (§4.8): a view or an attribute that named none reads
-        # `[defaults].source`, and writing it out is what lets a reader of `schema.toml` see the
-        # whole declaration. A group-scoped attribute with no source is the exception, and the one
-        # the rule would break: its values are read from each of its group's views' own points
-        # files, and `[defaults].source` does not reach it (configuration.md §1).
+        document = self.blocks.document(paths, inferred_attributes, inferred_vocabularies)
+        # Every source named on every block (§4.8). `default=True` is the SDK's own convenience and
+        # is written here rather than under `[defaults]`: the file an object reads is on the
+        # object, which is what lets a reader of `schema.toml` see the whole declaration. A
+        # group-scoped attribute is the exception, and the one the rule would break: its values are
+        # read from each of its group's views' own points files (configuration.md §1).
         for kind in ("view", "attribute"):
             for block in document.get(kind, []):
+                if block.pop(D.FILLED, False):
+                    # An attribute declared at a running service names no source: its column is
+                    # filled through `POST /control/values` and read from no file (§6.2 step 1).
+                    continue
                 if "source" in block or block.get("scope"):
                     continue
                 if self.default_source is None:
@@ -675,7 +711,9 @@ class Database:
 
         The emitter writes one object with a key per block kind: `layers` and `attributes` as
         bare bodies, and `views`, `view_groups` and `vocabularies` as `{name, body}`, each
-        addressed by a path segment. The paged commit sends the layers, views and view groups.
+        addressed by a path segment. The paged commit sends every kind: the view groups and their
+        roster views, the plain views, the vocabularies with the pages of their values, the
+        attributes and the layers.
 
         The declaration minus its acquisition keys *is* the payload (configuration.md §2), so this
         is the binary serialising what it parsed rather than a second emitter in Python.

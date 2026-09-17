@@ -86,6 +86,17 @@ class Page:
     level: int = 0
 
 
+#: How many `{key, title?}` rows one `PATCH /control/vocabularies/{name}/values` carries. The
+#: route publishes a body cap (`limits.declarations.max_body_bytes`, 2 MiB) and no row cap, so the
+#: bytes are what bound a page and this is the SDK's own figure for how many rows to measure at a
+#: time: long titles make a page over the cap, which is halved and measured again.
+VALUES_PER_PAGE = 10_000
+
+#: Room left under the body cap for a vocabulary declaration's own fields — its width, value set,
+#: visibility, title and reserved codes — when the first page of values travels on it.
+DECLARATION_HEADROOM = 4096
+
+
 def _scoped_to(block: dict) -> str | None:
     """The view group a block's `scope` names, or `None` where it is entity-scoped."""
     scope = block.get("scope")
@@ -182,6 +193,18 @@ class Planner:
         self.held_views = {str(view.get("id")) for view in meta.get("views", [])}
         self.held_views |= {str(group.get("name")) for group in meta.get("groups", [])}
         self.held_layers = {str(layer.get("name")) for layer in meta.get("layers", [])}
+        #: The columns `/v1/meta` publishes, entity-scoped and group-scoped alike, and the
+        #: vocabularies their categories name. `/v1/meta` carries no vocabulary list of its own: a
+        #: value set is published through the column that reads it, so a vocabulary declared with
+        #: no column yet is not held here and its declaration is sent again, which the route
+        #: answers as an identical redeclaration (contracts §3.4).
+        columns = list(meta.get("declared_scalars", [])) + list(meta.get("scoped_scalars", []))
+        self.held_attributes = {str(column.get("name")) for column in columns}
+        self.held_vocabularies = {
+            str((column.get("category") or {}).get("vocabulary"))
+            for column in columns
+            if column.get("category")
+        }
         #: The sources this plan sends as points, so the values step leaves their columns alone.
         self._as_points: set[str] = set()
 
@@ -207,9 +230,9 @@ class Planner:
         declaration (views.md §3.2): the SDK holds the record and sends it here.
 
         Which of them are new is read from `/v1/meta`: the database is what knows what it holds.
-        The order is the one the routes need: a group before a view of it, and a view before the
-        layer drawn on it. Not built yet: an attribute and a vocabulary declared after the first
-        commit, refused at the verb (§6.2 step 1).
+        The order is the one the routes need: a group before a view of it, a view before the layer
+        drawn on it, a vocabulary before the attribute that names it, and every declaration before
+        the values pages that fill the columns it declared.
         """
         if not self._pending(document):
             return
@@ -253,6 +276,20 @@ class Planner:
                     body=entry["body"],
                 )
             )
+        for entry in payloads.get("vocabularies", []):
+            self._vocabulary(document, entry)
+        for body in payloads.get("attributes", []):
+            name = body["name"]
+            if name in self.held_attributes:
+                continue
+            self.pages.append(
+                Page(
+                    kind="attribute",
+                    name=name,
+                    line=f"declare attribute '{name}' ({body['type']})",
+                    body=body,
+                )
+            )
         for payload in payloads.get("layers", []):
             name = payload["name"]
             if name in self.held_layers:
@@ -265,6 +302,121 @@ class Planner:
                     body=payload,
                 )
             )
+
+    def _vocabulary(self, document: dict, entry: dict) -> None:
+        """One vocabulary's declaration and the pages of its values (§6.2 step 1).
+
+        The body is the emitter's. A closed set's first page of values travels on it as well as in
+        the pages that follow, because the route refuses a closed set declared with no values: the
+        set is the authority on what may be ingested, and an empty one refuses every value. A key
+        already bound binds nothing and changes no title, and the route answers such a page without
+        a record (contracts §3.4).
+
+        A sourced value set's keys are rows rather than declaration, so the emitter names the
+        source and the SDK reads the table here: the block's `fields` says which columns hold the
+        key and the title.
+        """
+        name = entry["name"]
+        if name in self.held_vocabularies:
+            return
+        body = dict(entry["body"])
+        values = list((entry.get("values") or {}).get("values", []))
+        if entry.get("values_source") is not None:
+            read = self._values_of_table(document, name, entry["values_source"])
+            if read is None:
+                # The table cannot be read as a value set. The finding refuses the commit, and
+                # planning the declaration as well would print a request that will not be made.
+                return
+            values = read
+        cap = int(self.limits.get("declarations", {}).get("max_body_bytes", 2 << 20))
+        pages = _value_pages(values, cap - DECLARATION_HEADROOM)
+        carried = 0
+        if body.get("value_set") == "closed" and pages:
+            # A closed set with no values is refused at the route, so the declaration carries the
+            # first page and the pages that follow are the rest of the set.
+            body["values"] = pages[0]
+            carried = 1
+        self.pages.append(
+            Page(
+                kind="vocabulary",
+                name=name,
+                line=f"declare vocabulary '{name}' ({body.get('value_set')})",
+                body=body,
+                rows=len(body.get("values", [])),
+            )
+        )
+        for page in pages[carried:]:
+            self.pages.append(
+                Page(
+                    kind="vocabulary_values",
+                    name=name,
+                    line=f"page {len(page)} value(s) into vocabulary '{name}'",
+                    body={"values": page},
+                    rows=len(page),
+                )
+            )
+
+    def _values_of_table(
+        self, document: dict, vocabulary: str, source: str
+    ) -> list[dict] | None:
+        """A sourced value set's `(key, title?)` rows, or `None` where the table is not one.
+
+        No code travels: codes are the server's to assign (per-point-attributes §3.1) and both
+        routes refuse a body that names one, so a table carrying the column the build reads codes
+        from is a finding rather than a page whose codes were dropped. A finding refuses the
+        commit, and `None` is what keeps the declaration out of the plan with it.
+        """
+        block = next(
+            (one for one in document.get("vocabulary", []) if one["name"] == vocabulary), {}
+        )
+        fields = dict(block.get("fields", {}))
+        staged = self.db.deltas.get(source) or self.db.sources.get(source)
+        if staged is None:
+            self.findings.append(
+                Finding(
+                    "a sourced value set with no table",
+                    f"vocabulary '{vocabulary}' reads its values from source '{source}', which "
+                    f"this database has not staged. Stage the (key, title?) rows under that name",
+                )
+            )
+            return None
+        table = pq.read_table(staged.path)
+        code = fields.get("code", "code")
+        if code in table.column_names:
+            self.findings.append(
+                Finding(
+                    "a sourced value set carrying its own codes",
+                    f"vocabulary '{vocabulary}' is declared at a running service, and '{source}' "
+                    f"carries column '{code}'. A code is the server's to assign, and both "
+                    f"vocabulary routes refuse a body that names one. Drop the column, and read "
+                    f"the codes back from the values verb",
+                )
+            )
+            return None
+        key = fields.get("key", "key")
+        if key not in table.column_names:
+            self.findings.append(
+                Finding(
+                    "a sourced value set with no key column",
+                    f"vocabulary '{vocabulary}' reads its values from '{source}', which carries "
+                    f"no column '{key}'. A value is a key and its properties, so the table names "
+                    f"the column with fields = {{key = ...}} or calls it 'key'",
+                )
+            )
+            return None
+        title = fields.get("title", "title")
+        titles = (
+            table[title].to_pylist() if title in table.column_names else [None] * table.num_rows
+        )
+        values = []
+        for one, shown in zip(table[key].to_pylist(), titles):
+            if one is None:
+                continue
+            row = {"key": str(one)}
+            if shown is not None:
+                row["title"] = str(shown)
+            values.append(row)
+        return values
 
     def _pending(self, document: dict) -> bool:
         """Whether this declaration carries a block the database does not."""
@@ -282,6 +434,12 @@ class Planner:
                 return True
             labels = block.get("labels")
             if labels is not None and labels["name"] not in self.held_layers:
+                return True
+        for block in document.get("vocabulary", []):
+            if block["name"] not in self.held_vocabularies:
+                return True
+        for block in document.get("attribute", []):
+            if block["name"] not in self.held_attributes:
                 return True
         return False
 
@@ -876,6 +1034,14 @@ class Planner:
                         claimed[table].update(dict(one.get("fields", {})).values())
                 if members.get("source"):
                     claimed[members["source"]].update(dict(members.get("fields", {})).values())
+        for block in document.get("vocabulary", []):
+            table = block.get("source")
+            if not table:
+                continue
+            fields = dict(block.get("fields", {}))
+            claimed.setdefault(table, set()).update(
+                {"key", "title", "code"} | set(fields.values())
+            )
         for column in _from_columns(document).values():
             for source in points:
                 claimed.setdefault(source, set()).add(column)
@@ -934,6 +1100,27 @@ def _bodies(table: pa.Table, start: int, cap: int):
             pending.append((first, piece.slice(0, half)))
             continue
         yield first, body, piece.num_rows
+
+
+def _value_pages(values: list[dict], cap: int) -> list[list[dict]]:
+    """A value set sliced into pages under both of the route's units (§6.2 step 1).
+
+    The row figure sizes a slice and the byte cap decides it: a slice whose encoded body is over
+    the cap is halved and each half encoded again, so the body that is measured is the body that
+    is sent. A single value over the cap is sent as it is and the route's refusal is what says so.
+    """
+    pages: list[list[dict]] = []
+    for start in range(0, len(values), VALUES_PER_PAGE):
+        pending = [values[start : start + VALUES_PER_PAGE]]
+        while pending:
+            piece = pending.pop()
+            if len(json.dumps({"values": piece}).encode()) > cap and len(piece) > 1:
+                half = len(piece) // 2
+                pending.append(piece[half:])
+                pending.append(piece[:half])
+                continue
+            pages.append(piece)
+    return pages
 
 
 def _in_dependency_order(layers: Sequence[dict]) -> list[dict]:
@@ -1223,6 +1410,12 @@ def _send(control: Control, page: Page) -> Answer:
         return control.declare_view_group(page.name, page.body)
     if page.kind == "view":
         return control.declare_view(page.name, page.body)
+    if page.kind == "attribute":
+        return control.declare_attribute(page.body)
+    if page.kind == "vocabulary":
+        return control.declare_vocabulary(page.name, page.body)
+    if page.kind == "vocabulary_values":
+        return control.vocabulary_values(page.name, page.body)
     if page.kind == "group_view":
         group, _, key = page.name.partition(":")
         return control.create_view(group, key, page.body)
@@ -1276,6 +1469,17 @@ def _fold(report, page: Page, answer: Answer) -> None:
         minted = report.artifact_ids.setdefault(page.name, {})
         for one in body.get("artifacts", []):
             minted[one["key"]] = str(one["tessera_id"])
+    elif page.kind in ("attribute", "vocabulary"):
+        # `existing: true` is the held-part arm of the fill rule: the name is there under this
+        # identity and the request applied nothing but its values (contracts §3.4).
+        report.already_present += 1 if body.get("existing") else 0
+        report.values_bound += int(body.get("added", 0))
+        report.titles_set += int(body.get("titles", 0))
+    elif page.kind == "vocabulary_values":
+        # Here `existing` is a count: the keys of this page the value set already bound.
+        report.already_present += int(body.get("existing", 0))
+        report.values_bound += int(body.get("added", 0))
+        report.titles_set += int(body.get("titles", 0))
     elif page.kind == "grow":
         for one in body.get("artifacts", []):
             report.memberships_joined += int(one.get("joined", 0))

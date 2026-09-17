@@ -122,6 +122,11 @@ def normalised(document: dict, filling: bool = False) -> dict:
         for block in document.get("attribute", [])
     ]
     out["layer"] = [_layer(block, filling) for block in document.get("layer", [])]
+    # `[defaults].source` is resolved onto every block above and compared there. The SDK writes it
+    # nowhere: `default=True` fills the source onto each block that named none, which is what §4.8
+    # asks for, so a default in the document would only bind a column declared at a running
+    # service to the file the first commit built from.
+    defaults.pop("source", None)
     return {key: value for key, value in out.items() if value not in ({}, [])}
 
 

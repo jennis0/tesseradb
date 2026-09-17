@@ -127,6 +127,10 @@ class PagedReport:
     artifacts_minted: int = 0
     memberships_joined: int = 0
     values_filled: int = 0
+    #: Vocabulary values this commit's declarations and value pages drew a code for.
+    values_bound: int = 0
+    #: Held values whose title one of those pages replaced (contracts §3.4, the upsert rule).
+    titles_set: int = 0
     #: Parts a page supplied that the database already held: the fill rule's no-effect arm.
     already_present: int = 0
     without_content: int = 0
@@ -174,6 +178,10 @@ class PagedReport:
         out.append(f"  memberships joined: {self.memberships_joined}")
         if self.values_filled:
             out.append(f"  values filled: {self.values_filled}")
+        if self.values_bound:
+            out.append(f"  vocabulary values bound to a code: {self.values_bound}")
+        if self.titles_set:
+            out.append(f"  vocabulary titles replaced: {self.titles_set}")
         out.append(f"  parts already present: {self.already_present}")
         if self.without_content:
             out.append(f"  artifacts published without their declared content: {self.without_content}")
