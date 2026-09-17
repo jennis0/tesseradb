@@ -1161,7 +1161,8 @@ pub(crate) fn entity_order_residency(
     // each, which is under the resident form for every shape but an image of full bitsets. The
     // scratch is `tessera_store`'s own bound over this corpus's entity space, so a small build pays
     // its own rows rather than the ceiling a 10⁹ one reaches. Nothing in the pass scales with the
-    // dictionary, the table being written into the file as each window completes.
+    // dictionary: the table is written into the file as the pass's row buffer fills, and that
+    // buffer is a constant 160 KiB.
     //
     // **The worker count is the pass's own** (`crate::term_images_pass::derive_threads`), which is
     // capped rather than the machine's width, and capped for this term: three bitmaps a worker is
