@@ -294,7 +294,7 @@ pub struct TermImageSummary {
     pub wall: Duration,
 }
 
-/// One term's posting as the derivation holds it while the window is projected.
+/// One term's posting as the walk read it.
 enum Posting {
     /// The walk carried no record of the term.
     Absent,
@@ -313,25 +313,40 @@ struct Outcome {
     arrays: u32,
     runs: u32,
     bitsets: u32,
-    derived: bool,
-    skipped_small: bool,
     /// The frozen bytes and where they start inside the buffer the serialiser aligned them in.
     image: Option<(Vec<u8>, usize)>,
 }
 
+/// A posting waiting for its window to fill: which term it is, where its table row is reserved in
+/// the buffer of rows awaiting their positioned write, and the entities to project.
+struct Pending {
+    term: u32,
+    row_at: usize,
+    entities: Bitmap,
+}
+
+/// Table rows the derivation buffers before a positioned write. A window that fills first writes
+/// its rows sooner; this is what bounds the buffer where a long run of terms that are not
+/// projected separates two windows.
+const TABLE_ROW_BUFFER: usize = 4096;
+
 /// Derive every term's image for one view and write them to `out`.
 ///
 /// `posting` is called once per term id below `dict_len`, in ascending order, on the calling
-/// thread: the walk reads a file and is not required to be callable from a worker. Each window of
-/// `threads` consecutive terms is read, then projected across the workers, then appended in term
-/// order before the next window is read, so the bytes written do not depend on `threads`.
+/// thread: the walk reads a file and is not required to be callable from a worker. A term the walk
+/// carries no posting for, and a posting the skip rule above leaves unprojected, is settled as it
+/// is read and contributes a table row only. A posting that is projected joins a window of
+/// `threads` such postings; the workers project the window and its images are appended in term
+/// order before reading goes on, so the bytes written do not depend on `threads`. A window counted
+/// in terms would dispatch the workers once per `threads` terms for work that is mostly a table
+/// row, most terms holding too few entities to be projected.
 ///
-/// **Nothing here scales with the dictionary.** What this holds at once is one window's postings,
-/// each read into an owned bitmap before it is projected, one window's kept images, and one
-/// [`ProjectScratch`] per worker. Each window's table entries are written into the table region as
-/// the window completes, at `table_offset + term × TABLE_ENTRY_BYTES`, which the `set_len` below
-/// has already created. Holding the table instead costs 40 bytes per term id, which is 4.7 GB at a
-/// dictionary of 1.17×10⁸.
+/// **Nothing here scales with the dictionary.** What this holds at once is one window of `threads`
+/// postings, each read into an owned bitmap before it is projected, that window's kept images, one
+/// [`ProjectScratch`] per worker, and at most [`TABLE_ROW_BUFFER`] table rows. The rows are written
+/// into the table region as the buffer empties, at `table_offset + term × TABLE_ENTRY_BYTES`, which
+/// the `set_len` below has already created. Holding the whole table instead costs 40 bytes per term
+/// id, which is 4.7 GB at a dictionary of 1.17×10⁸.
 ///
 /// The header is written after the payload and the table, and the file is synced between the two,
 /// so a file interrupted part way carries a zero header and is refused at open rather than read
@@ -390,10 +405,11 @@ fn write_term_images(
     options: DeriveOptions,
 ) -> io::Result<TermImageSummary> {
     let threads = options.threads.max(1);
-    // One term per worker in flight. A wider window holds that many more owned postings and kept
-    // images for no gain: the workers are saturated at one term each, and the window is the term
-    // this pass holds in memory.
+    // One projection per worker in flight. A wider window holds that many more owned postings and
+    // kept images for no gain: the workers are saturated at one posting each, and the window is
+    // what this pass holds in memory.
     let window = threads;
+    let table_buffer_bytes = TABLE_ROW_BUFFER.max(window) * TABLE_ENTRY_BYTES;
     let table_bytes = u64::from(dict_len) * TABLE_ENTRY_BYTES as u64;
     let table_offset = HEADER_BYTES as u64;
     let payload_offset = align_up(table_offset + table_bytes);
@@ -425,90 +441,97 @@ fn write_term_images(
     };
     let zeros = [0u8; PAYLOAD_ALIGN];
     let mut at = payload_offset;
-    let mut window_postings: Vec<Posting> = Vec::with_capacity(window);
-    let mut entries: Vec<u8> = Vec::with_capacity(window * TABLE_ENTRY_BYTES);
+    let mut pending: Vec<Pending> = Vec::with_capacity(window);
+    let mut table: Vec<u8> = Vec::with_capacity(table_buffer_bytes);
+    // The term whose row starts `table`.
+    let mut table_first = 0u32;
 
-    let mut first = 0u32;
-    while first < dict_len {
-        let last = ((u64::from(first) + window as u64).min(u64::from(dict_len))) as u32;
-        window_postings.clear();
-        entries.clear();
-        for term in first..last {
-            window_postings.push(read_posting(posting, term)?);
-        }
-
-        let outcomes: Vec<Outcome> = match &pool {
-            Some(pool) => pool.install(|| {
-                window_postings
-                    .par_iter()
-                    .map(|p| derive_one(space, p, &scratches))
-                    .collect()
-            }),
-            None => window_postings
-                .iter()
-                .map(|p| derive_one(space, p, &scratches))
-                .collect(),
-        };
-
-        for (step, outcome) in outcomes.into_iter().enumerate() {
-            let term = first + step as u32;
-            // The entity ceiling is `u32::MAX` (I9), so a posting cannot hold more entities than
-            // the field admits. Raised rather than clamped: a clamp would record a cardinality
-            // below the term's own rows and the open check below would refuse the file.
-            let entities = u32::try_from(outcome.entities).map_err(|_| {
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!(
-                        "term images: term {term}'s posting holds {} entities",
-                        outcome.entities
-                    ),
-                )
-            })?;
-            let mut entry = TermImageEntry {
-                offset: 0,
-                len: 0,
-                rows: outcome.rows,
-                containers: outcome.containers,
-                arrays: outcome.arrays,
-                runs: outcome.runs,
-                bitsets: outcome.bitsets,
-                entities,
-            };
-            if outcome.derived {
-                summary.derived += 1;
-            }
-            if outcome.skipped_small {
-                summary.skipped_small += 1;
-            }
-            if let Some((buffer, start)) = outcome.image {
-                let bytes = &buffer[start..];
-                let aligned = align_up(at);
-                if aligned > at {
-                    writer.write_all(&zeros[..(aligned - at) as usize])?;
-                    at = aligned;
+    let mut term = 0u32;
+    while term < dict_len || !pending.is_empty() || !table.is_empty() {
+        // Read until the window is full, the row buffer is full, or the dictionary ends.
+        while term < dict_len && pending.len() < window && table.len() < table_buffer_bytes {
+            match read_posting(posting, term)? {
+                Posting::Absent => {
+                    table.extend_from_slice(&encode_row(term, &Outcome::default(), 0, 0)?);
                 }
-                let len = u32::try_from(bytes.len()).map_err(|_| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!("term images: term {term}'s image is {} bytes", bytes.len()),
-                    )
-                })?;
-                writer.write_all(bytes)?;
-                entry.offset = at;
-                entry.len = len;
-                at += u64::from(len);
-                summary.kept += 1;
-                summary.largest_image_bytes = summary.largest_image_bytes.max(u64::from(len));
+                Posting::Small(entities) => {
+                    summary.skipped_small += 1;
+                    let outcome = Outcome {
+                        entities,
+                        rows: entities,
+                        ..Outcome::default()
+                    };
+                    table.extend_from_slice(&encode_row(term, &outcome, 0, 0)?);
+                }
+                Posting::Large(entities) => {
+                    // The row is reserved here and filled once the window is projected, so the
+                    // rows either side of it keep their term order.
+                    pending.push(Pending {
+                        term,
+                        row_at: table.len(),
+                        entities,
+                    });
+                    table.resize(table.len() + TABLE_ENTRY_BYTES, 0);
+                }
             }
-            entries.extend_from_slice(&entry.encode());
+            term += 1;
         }
-        // The window's rows, into the region `set_len` created. `write_all_at` is a positioned
+
+        if !pending.is_empty() {
+            let outcomes: Vec<Outcome> = match &pool {
+                Some(pool) => pool.install(|| {
+                    pending
+                        .par_iter()
+                        .map(|p| project_one(space, &p.entities, &scratches))
+                        .collect()
+                }),
+                None => pending
+                    .iter()
+                    .map(|p| project_one(space, &p.entities, &scratches))
+                    .collect(),
+            };
+            summary.derived += pending.len() as u32;
+            for (held, mut outcome) in pending.drain(..).zip(outcomes) {
+                let mut offset = 0u64;
+                let mut len = 0u32;
+                if let Some((buffer, start)) = outcome.image.take() {
+                    let bytes = &buffer[start..];
+                    let aligned = align_up(at);
+                    if aligned > at {
+                        writer.write_all(&zeros[..(aligned - at) as usize])?;
+                        at = aligned;
+                    }
+                    len = u32::try_from(bytes.len()).map_err(|_| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            format!(
+                                "term images: term {}'s image is {} bytes",
+                                held.term,
+                                bytes.len()
+                            ),
+                        )
+                    })?;
+                    writer.write_all(bytes)?;
+                    offset = at;
+                    at += u64::from(len);
+                    summary.kept += 1;
+                    summary.largest_image_bytes = summary.largest_image_bytes.max(u64::from(len));
+                }
+                let row = encode_row(held.term, &outcome, offset, len)?;
+                table[held.row_at..held.row_at + TABLE_ENTRY_BYTES].copy_from_slice(&row);
+            }
+        }
+
+        // The rows read so far, into the region `set_len` created. `write_all_at` is a positioned
         // write, so it leaves the payload writer's cursor where the next image goes.
-        writer.get_ref().write_all_at(
-            &entries,
-            table_offset + u64::from(first) * TABLE_ENTRY_BYTES as u64,
-        )?;
-        first = last;
+        if !table.is_empty() {
+            writer.get_ref().write_all_at(
+                &table,
+                table_offset + u64::from(table_first) * TABLE_ENTRY_BYTES as u64,
+            )?;
+            table_first += (table.len() / TABLE_ENTRY_BYTES) as u32;
+            table.clear();
+        }
     }
 
     summary.payload_bytes = at - payload_offset;
@@ -574,55 +597,74 @@ fn read_posting(posting: PostingWalk<'_>, term: u32) -> io::Result<Posting> {
     })
 }
 
-/// Project one posting and decide whether its image is kept.
-fn derive_one(
+/// Project one posting and decide whether its image is kept. Runs on a worker.
+fn project_one(
     space: &RowSpace,
-    posting: &Posting,
+    entities: &Bitmap,
     scratches: &Mutex<Vec<ProjectScratch>>,
 ) -> Outcome {
-    match posting {
-        Posting::Absent => Outcome::default(),
-        Posting::Small(rows) => Outcome {
-            entities: *rows,
-            rows: *rows,
-            skipped_small: true,
-            ..Outcome::default()
-        },
-        Posting::Large(entities) => {
-            let held = entities.cardinality();
-            let mut scratch = scratches
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .pop()
-                .unwrap_or_default();
-            let mut image = space.project_base_with(entities, &mut scratch);
-            scratches
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .push(scratch);
+    let held = entities.cardinality();
+    let mut scratch = scratches
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .pop()
+        .unwrap_or_default();
+    let mut image = space.project_base_with(entities, &mut scratch);
+    scratches
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .push(scratch);
 
-            image.run_optimize();
-            let stats = image.statistics();
-            let keep = stats.cardinality > KEEP_ROWS_PER_CONTAINER * u64::from(stats.n_containers);
-            let bytes = keep.then(|| {
-                let mut buffer = Vec::new();
-                let len = image.serialize_into_vec::<Frozen>(&mut buffer).len();
-                let start = buffer.len() - len;
-                (buffer, start)
-            });
-            Outcome {
-                entities: held,
-                rows: stats.cardinality,
-                containers: stats.n_containers,
-                arrays: stats.n_array_containers,
-                runs: stats.n_run_containers,
-                bitsets: stats.n_bitset_containers,
-                derived: true,
-                skipped_small: false,
-                image: bytes,
-            }
-        }
+    image.run_optimize();
+    let stats = image.statistics();
+    let keep = stats.cardinality > KEEP_ROWS_PER_CONTAINER * u64::from(stats.n_containers);
+    let bytes = keep.then(|| {
+        let mut buffer = Vec::new();
+        let len = image.serialize_into_vec::<Frozen>(&mut buffer).len();
+        let start = buffer.len() - len;
+        (buffer, start)
+    });
+    Outcome {
+        entities: held,
+        rows: stats.cardinality,
+        containers: stats.n_containers,
+        arrays: stats.n_array_containers,
+        runs: stats.n_run_containers,
+        bitsets: stats.n_bitset_containers,
+        image: bytes,
     }
+}
+
+/// One term's table row, once the term's image has been placed in the payload.
+fn encode_row(
+    term: u32,
+    outcome: &Outcome,
+    offset: u64,
+    len: u32,
+) -> io::Result<[u8; TABLE_ENTRY_BYTES]> {
+    // The entity ceiling is `u32::MAX` (I9), so a posting cannot hold more entities than the field
+    // admits. Raised rather than clamped: a clamp would record a cardinality below the term's own
+    // rows, which open refuses.
+    let entities = u32::try_from(outcome.entities).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "term images: term {term}'s posting holds {} entities",
+                outcome.entities
+            ),
+        )
+    })?;
+    Ok(TermImageEntry {
+        offset,
+        len,
+        rows: outcome.rows,
+        containers: outcome.containers,
+        arrays: outcome.arrays,
+        runs: outcome.runs,
+        bitsets: outcome.bitsets,
+        entities,
+    }
+    .encode())
 }
 
 // -------------------------------------------------------------------------------------------
