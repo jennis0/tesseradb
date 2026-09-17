@@ -95,8 +95,9 @@ pub fn run(
 
     // **The row space of the bundle this build just wrote**, reloaded from the file rather than
     // kept from the sort, so the images are a function of the published permutation. The artifact
-    // pass loads it for the same reason and the two loads are independent: it may return before
-    // reaching one, and a view with no drawn layer never reaches its.
+    // pass loads the same file for the same reason. Its load is not shared with this one: that
+    // pass returns before reaching it for a view with no drawn layer, and this one runs for every
+    // view.
     let permutation_path =
         tessera_store::view_path(&prefix_dir.join("partitions").join(partition), view)
             .join("permutation.bin");
@@ -113,8 +114,7 @@ pub fn run(
         bound: space.base().bound(),
     };
 
-    let file = tessera_store::derived::term_image_file(prefix_dir, partition, MANIFEST_N, index)
-        .map_err(|e| BuildError::io(prefix_dir, e))?;
+    let file = tessera_store::derived::term_image_file(prefix_dir, partition, MANIFEST_N, index)?;
 
     // The one adapter between the postings format and the derivation: `tessera-store` does not
     // depend on `tessera-authz`, so the shape is handed across and the walk is written where the

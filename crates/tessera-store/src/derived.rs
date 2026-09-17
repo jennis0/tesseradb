@@ -1052,12 +1052,15 @@ pub fn term_image_file(
     partition: &str,
     n: u64,
     index: &mut DerivedIndex,
-) -> std::io::Result<DerivedFile> {
+) -> crate::Result<DerivedFile> {
     const KIND: &str = "term-images";
     let position = index.term_images;
     index.term_images += 1;
     let dir = prefix_dir.join("partitions").join(partition).join(KIND);
-    std::fs::create_dir_all(&dir)?;
+    std::fs::create_dir_all(&dir).map_err(|source| crate::StoreError::Io {
+        path: dir.clone(),
+        source,
+    })?;
     let name = derived_name(KIND, n, position, "timg");
     Ok(DerivedFile {
         path: dir.join(&name),
