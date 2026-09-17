@@ -588,7 +588,7 @@ db.map(colour_by="cluster:clusters/second")
 
 ```python
 db.stage("points", df_knn, id="arxiv_id", default=True)
-db.stage("points_pca", df_pca, id="arxiv_id")    # arxiv_id, x, y; the SDK copies `categories` by id
+db.stage("points_pca", df_pca, id="arxiv_id")    # arxiv_id, x, y, categories: the same labels, or refused
 db.declare_view("knn",   source="points",     access="categories")
 db.declare_view("pca64", source="points_pca", access="categories")
 db.declare_layer("clusters/kmeans", kind="flat", from_column="cluster", views=["knn", "pca64"])
