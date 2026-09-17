@@ -24,8 +24,9 @@ stages 1 to 5.
    constant written into the file header and checked at open. Compared against 10, 100 and 300 at
    the memo's §2.
 3. **Images are read mapped**, as frozen `BitmapView`s, never built in the serving process.
-4. **One implementation writes images at build and at fold** ([decision 0091](0091-build-is-ingest-into-an-empty-database.md),
-   [decision 0139](0139-one-implementation-between-build-and-ingest-and-across-a-type-family.md)).
+4. **One implementation writes images at build and at fold** ([decision 0091](0091-build-is-ingest-into-an-empty-database.md)
+   and decision 0139, which the code cites by number; no file of that number exists in this tree at
+   the time of this record, and that gap is not this record's to close).
 5. **Extents get no images.** Rows a flush or a merge added since the last fold are walked; the
    served set is identical either way. An ingest-only deployment gets images at its first fold.
 6. **The complement route is included, chosen by cost, not by a fixed coverage share.**
