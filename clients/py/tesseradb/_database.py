@@ -715,10 +715,20 @@ class Database:
         so a typo would otherwise mint a principal who sees nothing and draw an empty map with no
         error anywhere.
 
+        An empty term list is refused too. A principal holding no term sees nothing, which is the
+        blank map this refusal exists to prevent, and `viewer()` with no argument is how the
+        database's own principal is asked for.
+
         The credential stays here: what the viewer holds is a source that calls `token()`, and
         what the source hands out is the minted token.
         """
+        self._refuse_before_the_first_commit("viewer")
         if terms is not None:
+            if not list(terms):
+                raise Refusal(
+                    "viewer: a principal holding no term sees nothing, and a map of nothing is "
+                    "what this refuses. viewer() with no terms is this database's own principal"
+                )
             unknown = [term for term in terms if term not in self.terms]
             if unknown:
                 raise Refusal(
@@ -758,6 +768,7 @@ class Database:
         here and handed to the page as a custom message; the session credential never leaves the
         kernel and no traitlet carries either.
         """
+        self._refuse_before_the_first_commit("map")
         return self._all_terms().map(
             view=view,
             layers=layers,
@@ -769,11 +780,33 @@ class Database:
 
     def meta(self) -> dict:
         """`/v1/meta` as this database's own principal reads it: the frames and the schema."""
+        self._refuse_before_the_first_commit("meta")
         return self._all_terms().meta()
 
     def item(self, tessera_id, idset: int | None = None) -> dict:
-        """The drill-down record for one item, as this database's own principal (§8)."""
-        return self._all_terms().item(tessera_id, idset)
+        """The drill-down record for one item, as this database's own principal (§8).
+
+        `external_id` comes back as the staged id column's own type: an integer column's eight
+        little-endian bytes as an integer, a string column's as text, anything else as the bytes
+        themselves. The wire says bytes and the SDK knows which column those bytes came from, so
+        the id a cell prints here is the id the user staged and can look up in their own frame.
+        """
+        self._refuse_before_the_first_commit("item")
+        record = self._all_terms().item(tessera_id, idset)
+        if record.get("external_id") is not None:
+            record["external_id"] = self._staged_id(record["external_id"])
+        return record
+
+    def _staged_id(self, raw: bytes):
+        """External-id bytes read as the type the id column staged (`_control.external_id`)."""
+        staged = self.sources.get(self._identity_source())
+        dtype = None if staged is None else staged.id_type
+        if is_integer_type(dtype):
+            # `_control.external_id` writes eight little-endian bytes, signed where the value was.
+            return int.from_bytes(raw, "little", signed=str(dtype).startswith("int"))
+        if dtype is not None and (pa.types.is_string(dtype) or pa.types.is_large_string(dtype)):
+            return raw.decode()
+        return raw
 
     def viewport(
         self,
@@ -784,6 +817,7 @@ class Database:
         zoom: int = 0,
     ):
         """The points served for a box, as a pyarrow table (§8). `Viewer.viewport` is the verb."""
+        self._refuse_before_the_first_commit("viewport")
         return self._all_terms().viewport(bbox, view, filters, k, zoom)
 
     def _id_arguments(self) -> list[str]:
@@ -917,8 +951,8 @@ class Database:
     def _refuse_before_the_first_commit(self, verb: str) -> None:
         if not self.built:
             raise Refusal(
-                f"{verb}: this database has not been committed, so there are no rows to address. "
-                f"commit() builds it first"
+                f"{verb}: this database has not been committed, so there is nothing serving it "
+                f"and no rows to address. commit() builds it first"
             )
 
     def serve(self) -> _instance.Listening:

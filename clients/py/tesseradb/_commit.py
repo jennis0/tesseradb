@@ -1238,13 +1238,8 @@ def _send(control: Control, page: Page) -> Answer:
 
 
 def _fold(report, page: Page, answer: Answer) -> None:
-    if answer.ok:
-        # Every write acknowledgement names the cycle its work is published in (decision 0144).
-        # The report prints the last of them: the numbers do not decrease, so it is the one every
-        # page of this commit is visible at.
-        held = answer.body.get("publication")
-        if held is not None:
-            report.publication = int(held)
+    # A page's acknowledgement names the cycle its own work publishes in (decision 0144), and the
+    # report does not print it: the closing flush's number is the one every page is visible at.
     if not answer.ok:
         report.refusals.append(
             {

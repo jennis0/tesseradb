@@ -58,7 +58,7 @@ def _(DATA, td):
 @app.cell
 def _(db, mo):
     # The database's own principal: every access label it staged. The token is minted in the
-    # kernel and handed to the page as a message; the session credential never leaves here.
+    # kernel and handed to the page as a message. The session credential never leaves here.
     m = mo.ui.anywidget(db.map(colour_by="cluster:clusters/kmeans", height=520))
     m
     return (m,)
@@ -73,15 +73,15 @@ def _(m):
 
 @app.cell
 def _(db):
-    # What one arXiv category's principal sees, computed inside their own mask and not filtered
-    # down from the operator's: `db.viewer(terms)` mints for exactly those terms.
+    # What one arXiv category's principal sees, computed inside their own mask: `viewer(terms)`
+    # mints for exactly those terms.
     db.viewer(["cs.LG"]).map(height=380)
     return
 
 
 @app.cell
 def _(db):
-    # The query verbs, through the same plane with the same token: never by reading the bundle.
+    # The query verbs, through the same plane with the same token, never by reading the bundle.
     _points = db.viewport(k=64)
     _points.column_names, _points.num_rows, db.item(_points.column("tessera_id")[0].as_py())["fields"]
     return
@@ -92,8 +92,8 @@ def _(mo):
     mo.md(
         """
         A deployment somebody else runs is the same widget and the same read verbs, against a
-        token that deployment issued you — and no `viewer(terms)`, minting another principal
-        needing the session credential:
+        token that deployment issued you. There is no `viewer(terms)` there: minting another
+        principal needs the session credential.
 
         ```python
         v = td.connect("https://tessera.example/viewer", token=my_token)
@@ -102,7 +102,7 @@ def _(mo):
 
         The page there calls the viewer plane from this page's origin, so that origin must be in
         the deployment's CORS list. A database made here needs no list: its three planes are on
-        loopback and `serve.cors_loopback` admits a page served from one.
+        loopback, and `serve.cors_loopback` admits a page served from a loopback address.
         """
     )
     return

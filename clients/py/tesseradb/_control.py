@@ -165,20 +165,20 @@ class Control:
         return self._limits
 
     def ingest(
-        self, body: bytes, batch: str, view: str | None = None, wait: bool = False
+        self, body: bytes, batch: str, view: str | None = None
     ) -> Answer:
         headers = {"content-type": ARROW, "x-tessera-batch-id": batch}
         if view is not None:
             headers["x-tessera-view"] = view
-        return self._send("POST", "/control/ingest" + _wait(wait), body, headers)
+        return self._send("POST", "/control/ingest", body, headers)
 
     def values(
-        self, body: bytes, batch: str, view: str | None = None, wait: bool = False
+        self, body: bytes, batch: str, view: str | None = None
     ) -> Answer:
         headers = {"content-type": ARROW, "x-tessera-batch-id": batch}
         if view is not None:
             headers["x-tessera-view"] = view
-        return self._send("POST", "/control/values" + _wait(wait), body, headers)
+        return self._send("POST", "/control/values", body, headers)
 
     def declare_layer(self, payload: dict) -> Answer:
         return self._send(
@@ -204,11 +204,11 @@ class Control:
             {"content-type": JSON},
         )
 
-    def publish(self, layer: str, body: bytes, wait: bool = False) -> Answer:
-        return self._send("PUT", _artifacts(layer) + _wait(wait), body, {"content-type": JSON})
+    def publish(self, layer: str, body: bytes) -> Answer:
+        return self._send("PUT", _artifacts(layer), body, {"content-type": JSON})
 
-    def grow(self, layer: str, body: bytes, wait: bool = False) -> Answer:
-        return self._send("PATCH", _artifacts(layer) + _wait(wait), body, {"content-type": JSON})
+    def grow(self, layer: str, body: bytes) -> Answer:
+        return self._send("PATCH", _artifacts(layer), body, {"content-type": JSON})
 
     def changes(self, items: list[dict]) -> Answer:
         return self._send(

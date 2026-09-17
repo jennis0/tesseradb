@@ -180,11 +180,16 @@ db.item(tessera_id)                            # one record: fields, labels, vie
 ```
 
 `viewport()` returns a pyarrow table of `tessera_id`, `code` and the columns the schema declares
-as rendered — points, not records. A served set is not the whole set, so the table's schema
-metadata carries what the response said about the set it came from: `tessera.counts` (`visible`
-inside the mask and the box, `matched` inside the filter, `served` inside `k`),
-`tessera.trailer`, and `tessera.request`. `bbox` defaults to the view's whole extent and `view`
-to the first this principal is served.
+as rendered. Those are points; a record is what `item()` returns. A served set is bounded by `k`,
+so the table's schema metadata carries what the response said about the set it came from:
+`tessera.counts` (`visible` is inside the mask and the tiles the box touches at the request's
+zoom, `matched` is that and the filter, `served` is that and `k`), `tessera.trailer` and
+`tessera.request`. `bbox` defaults to the view's whole extent and `view` to the first this
+principal is served.
+
+`item()` returns `fields` by declared column name, `labels` (the item's labels this principal
+also holds), `views`, and `external_id` where the database has one: on a `Database` it comes back
+as the type its id column staged, and on a `connect()` viewer as the bytes the wire carries.
 
 `db.close()` stops the server. It invalidates nothing: a token this database minted stays good
 until its lifetime runs out (`[disclosure] token_max_lifetime`, an hour), and no route withdraws

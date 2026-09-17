@@ -16,7 +16,9 @@ import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
-from typing import Callable, Optional, Sequence
+from typing import Callable, Optional, Sequence, Union
+
+from ._refusal import Refusal
 
 
 @dataclass
@@ -25,16 +27,51 @@ class Token:
 
     ``renew`` is set when the token came from ``authorise`` and can be minted again; a token handed
     in as a string has no renewal, and a widget holding one reports ``expired`` when the server
-    refuses it rather than asking for another.
+    refuses it rather than asking for another. ``terms`` is what it was minted for, where this
+    process minted it, and ``None`` for a token handed in as a string: the holder of one cannot
+    read what it grants.
     """
 
     token: str
     expires_at: Optional[float] = None
     renew: Optional[Callable[[], "Token"]] = field(default=None, repr=False, compare=False)
+    terms: Optional[Sequence[str]] = field(default=None, repr=False, compare=False)
 
     @property
     def seconds_left(self) -> Optional[float]:
         return None if self.expires_at is None else self.expires_at - time.time()
+
+    def __repr__(self) -> str:
+        """The expiry and how many terms, and never the token itself.
+
+        A repr is printed by a cell that returns one, by a traceback and by a logger, and a token
+        printed in a notebook is a token in the saved file.
+        """
+        left = "" if self.seconds_left is None else f", {self.seconds_left:.0f}s left"
+        granting = "" if self.terms is None else f", {len(self.terms)} term(s)"
+        return f"Token(expires_at={self.expires_at}{left}{granting})"
+
+
+#: What a token may be given as: the token itself, a `Token`, or a callable returning either. A
+#: callable is what an issuer with its own renewal looks like from here.
+TokenSource = Union[str, Token, Callable[[], Union[str, "Token"]]]
+
+
+def minted(source: TokenSource) -> Token:
+    """One token from a token source, whatever shape the source is.
+
+    The widget and the query verbs both take a source and both have to make a token of it, and a
+    second reading of what a source may be is a second set of shapes one of them accepts and the
+    other does not.
+    """
+    got = source() if callable(source) and not isinstance(source, Token) else source
+    if isinstance(got, str):
+        got = Token(got)
+    if not isinstance(got, Token) or not got.token:
+        raise Refusal(
+            f"a token must be a string, a Token or a callable returning one; got {got!r}"
+        )
+    return got
 
 
 def authorise(
@@ -86,4 +123,5 @@ def authorise(
         token=answer["token"],
         expires_at=float(answer["expires_at"]),
         renew=lambda: authorise(session_url, credential, terms, timeout=timeout),
+        terms=list(terms),
     )

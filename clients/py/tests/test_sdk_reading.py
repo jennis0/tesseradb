@@ -105,6 +105,12 @@ def test_viewer_refuses_a_term_the_union_does_not_hold_and_names_it(db):
         db.viewer([ONE_TERM, "cs.LGG"])
 
 
+def test_viewer_refuses_an_empty_term_set(db):
+    """A principal holding no term sees nothing, which is the blank map the verb prevents."""
+    with pytest.raises(Refusal, match="holding no term"):
+        db.viewer([])
+
+
 def test_the_union_is_every_access_label_the_sdk_staged(db):
     """§8: the SDK records the distinct labels of every access column it staged."""
     assert ONE_TERM in db.terms
@@ -161,6 +167,42 @@ def test_a_viewport_refusal_says_what_the_plane_said(db):
         db.viewport(view="not-a-view")
 
 
+def test_a_viewport_that_serves_no_point_still_has_the_two_fixed_columns(db):
+    """A response with no points frame: the table is empty, and its columns are not invented."""
+    empty = db.viewport(filters={"arxiv_id": {"eq": "no-such-paper"}})
+    assert empty.num_rows == 0
+    assert empty.column_names == ["tessera_id", "code"]
+    assert json.loads(empty.schema.metadata[b"tessera.counts"])["matched"] == 0
+
+
+def test_the_external_id_comes_back_as_the_column_that_staged_it(db):
+    """The wire says base64 bytes; the SDK knows which column those bytes came from.
+
+    The notebook corpus names its rows by an integer column, so the database reads the eight
+    little-endian bytes back as that integer. A `connect()` viewer has no declaration to read and
+    answers with the bytes.
+    """
+    table = db.viewport(k=8)
+    one = table.column("tessera_id")[0].as_py()
+    staged = db.item(one)["external_id"]
+    assert isinstance(staged, int)
+
+    token = authorise(db.session_url, db.session_credential, db.terms)
+    raw = connect(db.viewer_url, token).item(one)["external_id"]
+    assert isinstance(raw, bytes)
+    assert int.from_bytes(raw, "little") == staged
+
+
+def test_a_string_id_column_comes_back_as_the_string_it_staged(served):
+    """The other arm: a database whose rows are named by a string column."""
+    from test_sdk_pages import small
+
+    one = served(small)
+    table = one.viewport(k=8)
+    picked = one.item(table.column("tessera_id")[0].as_py())["external_id"]
+    assert isinstance(picked, str) and picked.startswith("p")
+
+
 # ---------------------------------------------------------------------------- connect()
 
 
@@ -189,7 +231,30 @@ def test_connect_takes_a_string_a_token_or_a_callable(db):
         assert connect(db.viewer_url, source).meta()["views"][0]["id"] == "s0"
 
 
+# ---------------------------------------------------------------------------- before a commit
+
+
+def test_reading_an_uncommitted_database_names_the_commit_that_would_build_it(tmp_path, corpus):
+    """There is no server yet, so every read says so rather than failing on a missing key file."""
+    from tesseradb._database import create
+
+    db = create(tmp_path / "unbuilt")
+    try:
+        for read in (db.map, db.meta, db.viewport, lambda: db.item(1), lambda: db.viewer(["a"])):
+            with pytest.raises(Refusal, match="commit\\(\\) builds it first"):
+                read()
+    finally:
+        db.close()
+
+
 # ---------------------------------------------------------------------------- renewal
+
+
+def test_a_token_never_prints_itself(db):
+    """A repr reaches a saved notebook, a traceback and a log; the token must not be in it."""
+    minted = db.token()
+    assert minted.token not in repr(minted)
+    assert f"{len(db.terms)} term(s)" in repr(minted)
 
 
 def test_a_token_past_its_expiry_is_renewed_and_the_next_read_answers(db):
