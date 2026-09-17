@@ -1053,14 +1053,16 @@ impl Permutation {
     ///
     /// # Transient memory
     ///
-    /// ⊘ **Modelled.** Two bitmaps are held at once, and each is at most one bitset container per
-    /// 65 536 entities of `bound`: the complement of the mask, and the image of it the walk
-    /// produces. At `bound = rows = 3.5×10⁹` that is 53 407 containers of 8 KiB, **437 MB each and
-    /// 875 MB together**, on top of the walk's own transient, which is as [`Self::project`] states
-    /// (at most 82 MiB of buckets and a 512 KB stamp). The complement is dropped as soon as the
-    /// walk over it returns, and the result that replaces it is the answer rather than a transient.
-    /// A grant close to the whole domain, which is what this route is for, holds far less than
-    /// that on both counts, because its complement is small.
+    /// ⊘ **Modelled.** The peak is two bitmaps: the complement of the mask, at most one bitset
+    /// container per 65 536 entities of `bound`, and the image of it the walk produces, at most one
+    /// per 65 536 rows. At `bound = rows = 3.5×10⁹` each is 53 407 containers of 8 KiB, **437 MB
+    /// each and 875 MB together**, on top of the walk's own transient, which is as
+    /// [`Self::project`] states (at most 82 MiB of buckets and a 512 KB stamp). The complement is
+    /// built in place, so that step holds one bitmap and the mask's own containers rather than a
+    /// second copy of the range, and it is dropped as soon as the walk over it returns. What
+    /// replaces it is the answer rather than a transient. A grant close to the whole domain, which
+    /// is what this route is for, holds far less than that on both counts, because its complement
+    /// is small.
     pub fn project_complement_with(
         &self,
         mask: &croaring::Bitmap,
@@ -1074,7 +1076,8 @@ impl Permutation {
             .checked_sub(1)
             .and_then(|hi| u32::try_from(hi).ok())?;
         let outside = {
-            let complement = croaring::Bitmap::from_range(0..=hi).andnot(mask);
+            let mut complement = croaring::Bitmap::from_range(0..=hi);
+            complement.andnot_inplace(mask);
             self.project_windowed(&complement, scratch, PROJECT_WINDOW_ROWS)
         };
         let mut image = Self::row_range(rows);

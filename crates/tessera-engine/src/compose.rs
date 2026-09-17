@@ -234,9 +234,9 @@ impl RowProjection {
     /// fragment — then walks the residual and the extents. The complement walks the entities the
     /// grant does not hold and subtracts their rows from the base's row range, which is exact
     /// where the base's slots are a bijection onto that range. It adds the extents above that, as
-    /// the walk's own route does. The whole-domain answer is the row range. `tessera_store::term_images`' module doc carries the
-    /// algebra; `tests/term_images_route.rs` checks the routes against each other over a built
-    /// corpus.
+    /// the walk's own route does. The whole-domain answer is the row range.
+    /// `tessera_store::term_images`' module doc carries the algebra;
+    /// `tests/term_images_route.rs` checks the routes against each other over a built corpus.
     ///
     /// **The route is chosen before any route runs, from the principal's own grant**: the
     /// fragment's cardinality below the bound, the image table's sizes for the terms the principal
@@ -466,8 +466,8 @@ impl RowProjection {
         // **Run containers, because a projection is held for a session and read for its life.**
         // The rows a grant projects to are a contiguous range wherever the grant covers a run of
         // row space, and a bitmap container spends 8 KiB stating what a run container states in
-        // four bytes plus a count. A whole-corpus grant at 3.5×10⁹ rows is 53 342 containers: 437 MB
-        // of bitmap containers, or 53 342 run containers of one run each, on the order of a
+        // four bytes plus a count. A whole-corpus grant at 3.5×10⁹ rows is 53 407 containers:
+        // 437 MB of bitmap containers, or 53 407 run containers of one run each, on the order of a
         // megabyte. Run form is per container and never global — the count does not fall, only what
         // each container costs — and `run_optimize` converts one only where the run form is
         // smaller, so a projection that runs badly keeps the representation it had.
