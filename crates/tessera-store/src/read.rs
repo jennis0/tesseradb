@@ -62,6 +62,12 @@ pub struct ViewData {
     /// recreated view is declared under the same id, so "is this view still declared" no longer
     /// tells the predecessor's row space from the successor's. This does.
     pub incarnation: tessera_types::view::ViewIncarnation,
+    /// This view's term images, mapped, or `None` where the side-manifest names none and where
+    /// the file it names would not open ([`crate::term_images`]).
+    ///
+    /// `None` costs time and changes no answer: a session whose terms have no image walks its
+    /// permutation instead, and arrives at the same rows.
+    pub term_images: Option<Arc<crate::term_images::TermImages>>,
 }
 
 /// One loaded segment: its row count, its Morton codes (row order, ascending), and a zero-copy
@@ -185,6 +191,10 @@ impl Bundle {
                 // that is live, and neither crosses a drop — a dropped view has no row space to
                 // extend and no segments to collapse.
                 incarnation: view_data.incarnation,
+                // **The base's own, unchanged.** A flush and a merge write no images: an image is
+                // the base permutation applied to a term's base posting, and neither publication
+                // touches either. The rows they add are walked (ruling B, the term-images memo).
+                term_images: view_data.term_images.clone(),
             })
         })
     }
@@ -229,6 +239,10 @@ impl Bundle {
                 // that is live, and neither crosses a drop — a dropped view has no row space to
                 // extend and no segments to collapse.
                 incarnation: view_data.incarnation,
+                // **The base's own, unchanged.** A flush and a merge write no images: an image is
+                // the base permutation applied to a term's base posting, and neither publication
+                // touches either. The rows they add are walked (ruling B, the term-images memo).
+                term_images: view_data.term_images.clone(),
             })
         })
     }
@@ -257,6 +271,7 @@ impl Bundle {
                 row_space: view_data.row_space.clone(),
                 segments: view_data.segments.clone(),
                 incarnation: view_data.incarnation,
+                term_images: view_data.term_images.clone(),
             })
         })
     }
@@ -300,6 +315,9 @@ impl Bundle {
                         ),
                         segments: Vec::new(),
                         incarnation: view.incarnation,
+                        // A view created while the service runs owns no row space until its first
+                        // flush, so there is nothing to have projected.
+                        term_images: None,
                     });
             }
         }
@@ -626,6 +644,10 @@ fn open_prefix(
                             row_space,
                             segments: Vec::new(),
                             incarnation: seg_desc.incarnation,
+                            // Attached below, once the base segment's row count and the
+                            // permutation's bound have been checked: both are stamped into the
+                            // file and the open compares them.
+                            term_images: None,
                         },
                     );
                     views.get_mut(&seg_desc.view).expect("just inserted")
@@ -736,6 +758,23 @@ fn open_prefix(
                         .base()
                         .declare_dense_rows(seg_desc.row_count),
                 }
+
+                // **The view's term images, here and not earlier**: the file's stamp names the
+                // base segment's row count and the permutation's bound, and the bound is only
+                // established once the permutation above has been validated or declared.
+                //
+                // A digest failure is not this path. The sweep covers this file as it covers
+                // every other file the manifest lists and refuses the whole bundle before the
+                // first view is opened; under [`Verification::JustWritten`] the bytes are the
+                // writer's own.
+                view_entry.term_images = open_term_images(
+                    &prefix_dir,
+                    prefix,
+                    &segments_manifest,
+                    &manifest.files,
+                    seg_desc,
+                    view_entry.row_space.base().bound(),
+                )?;
             }
 
             // Every segment after the first is one a flush appended or a merge collapsed, and it
@@ -803,6 +842,7 @@ fn open_prefix(
                 ),
                 segments: Vec::new(),
                 incarnation: view.incarnation,
+                term_images: None,
             });
         }
 
@@ -863,6 +903,77 @@ fn ensure_verified(
         Err(StoreError::UnverifiedFile {
             path: full_path.to_path_buf(),
         })
+    }
+}
+
+/// Map one view's term images, or answer `None` where it has none to map.
+///
+/// `None` is the answer for a manifest that names no file for this view and for a file that fails
+/// any of [`crate::term_images::TermImages::open`]'s checks. A refused file costs the time the
+/// images would have saved and changes no answer: the session walks its permutation instead, and
+/// the rows it arrives at are the same ones.
+///
+/// Two refusals are the bundle's rather than the file's, and both fail closed. A side-manifest
+/// naming two files for one incarnation of one view describes a state no publication produces, and
+/// there is no rule for choosing between them. A file no `files` map digests is one the loader
+/// would map without its bytes having been covered, which is the check every derived file passes.
+fn open_term_images(
+    prefix_dir: &Path,
+    prefix: &str,
+    segments_manifest: &SegmentsManifest,
+    manifest_files: &BTreeMap<String, FileDigest>,
+    seg_desc: &crate::manifest::SegmentDescriptor,
+    bound: u64,
+) -> Result<Option<Arc<crate::term_images::TermImages>>> {
+    let mut named = segments_manifest
+        .term_image_extents
+        .iter()
+        .filter(|entry| entry.view == seg_desc.view && entry.incarnation == seg_desc.incarnation);
+    let Some(entry) = named.next() else {
+        return Ok(None);
+    };
+    if named.next().is_some() {
+        return Err(StoreError::MalformedBundle {
+            detail: format!(
+                "view '{}' is named by two term-image extents at incarnation {}",
+                seg_desc.view, seg_desc.incarnation
+            ),
+        });
+    }
+
+    let path = safe_join(prefix_dir, &entry.path)?;
+    ensure_verified(&entry.path, segments_manifest, manifest_files, &path)?;
+
+    if u64::from(entry.keep_rows_per_container) != crate::term_images::KEEP_ROWS_PER_CONTAINER {
+        tracing::warn!(
+            view = %seg_desc.view,
+            found = entry.keep_rows_per_container,
+            expected = crate::term_images::KEEP_ROWS_PER_CONTAINER,
+            "term images were derived under another keep rule and are dropped; the view's \
+             sessions walk their permutation"
+        );
+        return Ok(None);
+    }
+
+    let expected = crate::term_images::TermImageStamp {
+        prefix: prefix.to_string(),
+        view: seg_desc.view.clone(),
+        base_seg_id: seg_desc.seg_id.clone(),
+        incarnation: seg_desc.incarnation,
+        base_rows: seg_desc.row_count,
+        bound,
+    };
+    match crate::term_images::TermImages::open(&path, &expected, entry.dict_len) {
+        Ok(images) => Ok(Some(Arc::new(images))),
+        Err(refusal) => {
+            tracing::warn!(
+                view = %seg_desc.view,
+                %refusal,
+                "term images would not open and are dropped; the view's sessions walk their \
+                 permutation"
+            );
+            Ok(None)
+        }
     }
 }
 
@@ -1606,7 +1717,9 @@ impl CutIndex {
             }
         }
         if !starts.windows(2).all(|w| w[0] < w[1]) {
-            return Err(malformed("cell starts are not strictly ascending".to_string()));
+            return Err(malformed(
+                "cell starts are not strictly ascending".to_string(),
+            ));
         }
         if starts.last().is_some_and(|&last| last >= row_count) {
             return Err(malformed(format!(

@@ -635,12 +635,7 @@ impl ScopedScalar {
     /// `vocabulary` is whether the family names one, which is the category arm of the family
     /// classification: a category over a `text` storage type is not the text family, and takes the
     /// render arm like every other category.
-    pub fn licence_of(
-        arrow_type: ScalarType,
-        vocabulary: bool,
-        index: bool,
-        render: bool,
-    ) -> bool {
+    pub fn licence_of(arrow_type: ScalarType, vocabulary: bool, index: bool, render: bool) -> bool {
         index || (render && (vocabulary || arrow_type != ScalarType::Text))
     }
 
@@ -1717,6 +1712,36 @@ pub struct ShapeHeldExtent {
     pub level_version: u64,
 }
 
+/// One entry of `term_image_extents`: one `(partition, view)`'s term images — every
+/// authorisation term's base posting projected into that view's row space
+/// (`tessera_store::term_images`).
+///
+/// One file per view rather than one per term: the table is dense over term ids, so a term with no
+/// image still reports the size the route chooser prices its walk from.
+///
+/// `dict_len` and `keep_rows_per_container` are the two figures a reader must agree with the
+/// writer about before it maps anything. The dictionary length fixes where the table ends and the
+/// payload begins, and the keep rule fixes which terms the chooser may read rather than walk, so a
+/// file written under either of them and opened under the other would be read against the wrong
+/// layout or priced against the wrong cost model. Both are also in the file's own header, and the
+/// open compares the pair.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct TermImageExtent {
+    /// Prefix-relative path of the term-image file.
+    pub path: String,
+    /// The view whose row space the images are in.
+    pub view: String,
+    /// The view's incarnation when the images were derived (decision 0115). Carried for
+    /// [`SegmentDescriptor::incarnation`]'s reason: an image is a set of *rows*, so one derived
+    /// over a dropped incarnation's row space names the rows of a key created again.
+    pub incarnation: ViewIncarnation,
+    /// Terms the table covers, which is the dictionary length the file was derived against.
+    pub dict_len: u32,
+    /// The keep rule the file was derived under, in rows per Roaring container.
+    pub keep_rows_per_container: u32,
+}
+
 /// One entry of `locator_extents`: the **reverse** external-id direction for one flush segment's
 /// entity range (§3.6).
 ///
@@ -1942,6 +1967,15 @@ pub struct SegmentsManifest {
     /// Every persisted decomposition this partition holds — see [`ShapeHeldExtent`]. Empty in a
     /// bundle with no spatial layer. No `serde(default)`, on `shape_rows_extents`' argument.
     pub shape_held_extents: Vec<ShapeHeldExtent>,
+    /// Every view's term images this partition holds. See [`TermImageExtent`]. Empty in a bundle
+    /// whose views hold no rows, in one whose dictionary carries no terms, and in one published
+    /// before a build or a fold derived them.
+    ///
+    /// No `serde(default)`, on `membership_extents`' argument: an absent list and a lost list are
+    /// indistinguishable under a default. The consequence here is that every session builds its
+    /// row projection by walking its permutation, which answers the same rows and takes the time
+    /// the images exist to remove, with nothing reporting a fault.
+    pub term_image_extents: Vec<TermImageExtent>,
     /// Every record-blob extent holding **artifact supplied content** — the same format, reader and
     /// store as [`SegmentsManifest::record_extents`], listed separately.
     ///
@@ -2338,6 +2372,7 @@ mod tests {
             row_column_extents: Vec::new(),
             shape_rows_extents: Vec::new(),
             shape_held_extents: Vec::new(),
+            term_image_extents: Vec::new(),
             artifact_record_extents: Vec::new(),
             segments: Vec::new(),
             deltas: Vec::new(),
@@ -2353,6 +2388,37 @@ mod tests {
             vocabulary_extensions: Vec::new(),
             files: BTreeMap::new(),
         }
+    }
+
+    /// The term-image list survives a round trip, and a manifest that omits it is refused.
+    ///
+    /// The refusal is the half worth testing. There is no `serde(default)` on the field, so a
+    /// manifest written without it fails to parse rather than parsing as a partition whose views
+    /// have no images, which is what a list lost in transit would look like.
+    #[test]
+    fn a_term_image_list_round_trips_and_an_absent_one_is_refused() {
+        let mut manifest = empty_segments_manifest();
+        manifest.term_image_extents.push(TermImageExtent {
+            path: "partitions/default/term-images/term-images-000000-000.timg".to_string(),
+            view: "s0".to_string(),
+            incarnation: DECLARED_INCARNATION,
+            dict_len: 41,
+            keep_rows_per_container: crate::term_images::KEEP_ROWS_PER_CONTAINER as u32,
+        });
+        let bytes = serde_json::to_vec(&manifest).expect("a manifest serialises");
+        let parsed: SegmentsManifest = serde_json::from_slice(&bytes).expect("and parses back");
+        assert_eq!(parsed.term_image_extents, manifest.term_image_extents);
+
+        let mut value: serde_json::Value = serde_json::from_slice(&bytes).expect("as JSON");
+        value
+            .as_object_mut()
+            .expect("an object")
+            .remove("term_image_extents");
+        let without = serde_json::to_vec(&value).expect("re-serialises");
+        assert!(
+            serde_json::from_slice::<SegmentsManifest>(&without).is_err(),
+            "a manifest with no term-image list must not parse"
+        );
     }
 
     /// The guard must be invisible on the shape `tessera build` writes, or every bundle in the

@@ -157,9 +157,15 @@ pub struct GenerationStamp {
 // begin, which is what selection evaluates per cell instead of per row. A 10 bundle does not have
 // the file, and the open names every segment file it maps, so a reader at 11 refuses it there. The
 // number is what says the absence is a stale bundle rather than a damaged one.
+// 12: a partition holds one term-image file per view, named by the side-manifest's
+// `term_image_extents` and digested with everything else: every authorisation term's base posting
+// projected into that view's row space, which a session unions instead of walking its permutation
+// (`tessera_store::term_images`). An 11 bundle names no such file, and its side-manifest has no
+// field to name one in, so a reader at 12 refuses it at the manifest rather than serving every
+// session by the walk with nothing saying why.
 // Each bump makes a stale local bundle a loud refusal rather than a silent misread — a fail-closed
 // guard, not compatibility (decision 0048).
-pub const BUNDLE_FORMAT: u32 = 11;
+pub const BUNDLE_FORMAT: u32 = 12;
 pub const API_VERSION: u32 = 1;
 pub const ABI_VERSION: u32 = 1;
 pub const ROW_ABSENT: u32 = 0xFFFF_FFFF;
@@ -183,7 +189,7 @@ mod tests {
     }
     #[test]
     fn constants() {
-        assert_eq!(BUNDLE_FORMAT, 11);
+        assert_eq!(BUNDLE_FORMAT, 12);
         assert_eq!(ROW_ABSENT, 0xFFFF_FFFF);
     }
 }
