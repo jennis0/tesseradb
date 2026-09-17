@@ -1,8 +1,8 @@
 # `tesseradb`
 
 Tessera's Python package (decision 0095): one package whether you want the widget, the SDK or
-both. The widget is here; the SDK and the in-process instance join it later. It shares no code
-with `reference/`, the test-only oracle.
+both. The widget and the SDK are here; the in-process instance joins them later. It shares no
+code with `reference/`, the test-only oracle.
 
 ```
 pip install tesseradb            # authorise, Token — the standard library and nothing else
@@ -78,8 +78,6 @@ ones it holds. Databases are stateful, and this one says so rather than guessing
 
 Not built yet, and what each does instead:
 
-- **`map()` and `viewer(terms)`.** `tesseradb.Map(db.viewer_url, token=...)` is the widget, and
-  `tesseradb.authorise(db.session_url, db.session_credential, terms)` is the token for it.
 - **An attribute or a vocabulary declared after the first commit.** Those two verbs refuse on a
   built database and name a rebuild. A layer, a label set, a plain view, a view group and a view
   added to a group are declarable at any commit, and the next commit sends each to the running
@@ -113,9 +111,10 @@ are new is read from `/v1/meta`, so the database is what says what it holds. A d
 view's coordinate columns is a page of points; one that carries none of them fills values on
 entities that are already there.
 
-Every acknowledgement names the publication its work becomes visible in, and the last page of the
-commit carries `?wait=visible`, which holds its answer until that publication has happened. So the
-commit blocks once, not once per page, and the next cell sees the rows. Past the server's
+Every acknowledgement names the publication its work becomes visible in. The pages all go
+unwaited and one `POST /control/flush?wait=visible` closes the commit: the flush arms a cycle and
+holds its answer until that cycle has completed, which covers every page before it. So the commit
+blocks once, not once per page, and the next cell sees the rows. Past the server's
 `serve.visible_wait_max_secs` the answer says `visible: false`, which is a finding; the write is
 durable and reaches the served forms at the next cycle either way.
 
@@ -153,7 +152,61 @@ loopback address on the viewer plane. A notebook page's origin is the front end'
 and not enumerable for a webview, so an origin list cannot state it; the three planes bind
 loopback, so what this admits are pages on this machine.
 
-## The entry point is a token
+## Reading it: the map, a principal, and the query verbs
+
+```python
+db.map(colour_by="cluster:clusters/kmeans")   # the explorer over this database, in this cell
+db.viewer(["cs.LG"]).map()                    # what one principal sees, not the operator filtered down
+```
+
+`map(view=None, layers=None, colour_by=None, filters=None, height=480)` is the widget below,
+pointed at this database's own viewer plane with a token minted from the directory's session
+credential. The terms it grants are every access label the SDK staged plus each view's default:
+that is Python asserting the local principal's authority, which is admissible on a
+single-operator database and nowhere else.
+
+`viewer(terms)` mints for exactly the terms named, so the map of any principal is one call, and
+every count, density, cluster and label in it is computed inside that principal's mask rather
+than filtered out of the operator's. A term the database has staged no label for is refused and
+named: a typo would otherwise draw an empty map with no error anywhere.
+
+The three query verbs are `Viewer`'s and are reached on a database through its all-terms viewer.
+Each goes through the viewer plane with the token, never by reading the bundle:
+
+```python
+db.meta()                                      # the views, layers and schema this principal reads
+db.viewport(bbox=None, view=None, filters=None, k=None, zoom=0)   # the points served, as a table
+db.item(tessera_id)                            # one record: fields, labels, views
+```
+
+`viewport()` returns a pyarrow table of `tessera_id`, `code` and the columns the schema declares
+as rendered — points, not records. A served set is not the whole set, so the table's schema
+metadata carries what the response said about the set it came from: `tessera.counts` (`visible`
+inside the mask and the box, `matched` inside the filter, `served` inside `k`),
+`tessera.trailer`, and `tessera.request`. `bbox` defaults to the view's whole extent and `view`
+to the first this principal is served.
+
+`db.close()` stops the server. It invalidates nothing: a token this database minted stays good
+until its lifetime runs out (`[disclosure] token_max_lifetime`, an hour), and no route withdraws
+one.
+
+## A deployment somebody else runs
+
+```python
+v = tesseradb.connect("https://tessera.example/viewer", token=my_token)
+v.map(colour_by="cluster:clusters/kmeans")
+v.viewport(k=64)
+```
+
+`token` is a string, a `Token` or a callable returning either, as `Map` takes one. A `Viewer` from
+`connect` has `map()` and the three read verbs and nothing else: no `viewer(terms)`, minting
+another principal needing the session credential, and no write verb, the control plane having one
+operator credential and no per-principal authority.
+
+## The widget, and the entry point being a token
+
+`map()` above builds this; `tesseradb.Map(url, token=my_token)` is it directly, for a URL and a
+token you already hold:
 
 ```python
 import tesseradb

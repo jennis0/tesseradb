@@ -136,7 +136,7 @@ class PagedReport:
     tessera_ids: list = field(default_factory=list)
     #: The pages the server answered as a replay of one it had already applied (decision 0144).
     replayed: list = field(default_factory=list)
-    #: The publication this commit's work is visible at, from its last acknowledgement.
+    #: The publication this commit's work is visible at, from the closing flush's answer.
     publication: int | None = None
     #: The identity each published artifact was given, by layer and key. A layer's own
     #: `tessera_id` is the only address by which it can later be addressed (I10).

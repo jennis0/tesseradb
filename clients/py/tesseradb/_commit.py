@@ -2,7 +2,7 @@
 
 The first commit builds. Every commit after it pages the staged deltas through the control plane,
 in the order §6.2 fixes: declarations, points per view, values on existing entities, artifacts per
-layer, then a flush and a wait for the publication the flush answered with. A part supplied twice
+layer, then a flush that waits for the publication it arms. A part supplied twice
 is accepted and a part supplied differently is a `409` on that part (ingest §1.1), so the order
 matters for existence and for nothing else.
 
@@ -25,12 +25,14 @@ did carry.
 naming what could not be, and a finding stops the plan rather than trimming it (§6.3). The user
 corrects the data or the declaration and commits again.
 
-**One page of the commit waits.** Every acknowledgement names the publication its work becomes
-visible in, and `?wait=visible` holds a route's answer until the counter has reached that number
-(decision 0144). The last page of the plan carries it and every page before it goes unwaited, so
-the commit blocks once rather than once per page and the SDK reads no counter of its own. A page
-past the server's `visible_wait_max_secs` answers `visible: false`, which is a finding: the write
-happened and is durable, and what it wrote reaches the served forms at the next cycle.
+**The commit waits once, at the end.** Every acknowledgement names the publication its work
+becomes visible in, and `?wait=visible` holds a route's answer until the counter has reached that
+number (decision 0144). Every page of the plan goes unwaited and one `POST
+/control/flush?wait=visible` closes the commit: the flush arms a cycle and then waits on the
+number that cycle will carry, so it covers every page before it and the SDK reads no counter of
+its own. `visible: true` ends the commit. `visible: false` — the server's
+`serve.visible_wait_max_secs` reached — is a finding: the write happened and is durable, and what
+it wrote reaches the served forms at the next cycle.
 """
 
 from __future__ import annotations
@@ -82,8 +84,6 @@ class Page:
     artifacts: int = 0
     members: int = 0
     level: int = 0
-    #: This page carries `?wait=visible`: the last of the plan, and the only one that waits.
-    wait: bool = False
 
 
 def _scoped_to(block: dict) -> str | None:
@@ -194,13 +194,6 @@ class Planner:
         self._points(document)
         self._values(document)
         self._artifacts(document)
-        if self.pages:
-            # The last page waits for the publication its own acknowledgement names, which is the
-            # commit's whole wait: a publication number is not passed while any of that cycle's
-            # work is outstanding, so every page before it has published too.
-            last = self.pages[-1]
-            last.wait = True
-            last.line += ", and wait for the publication it lands in"
         return self.pages, self.findings
 
     # ------------------------------------------------------------------ 1. declarations
@@ -1206,12 +1199,12 @@ def _declared_artifacts(artifacts, inline) -> list[dict]:
 
 
 def run(control: Control, pages: Sequence[Page], report) -> None:
-    """Send the plan, in order, and fold every answer into the report.
+    """Send the plan, in order, then flush once and wait for the publication that flush arms.
 
-    The last page carries the wait. Where it was refused there is nothing to wait on, and the
-    pages before it are made visible by a flush: the tick they would otherwise sit for is the
-    executor's own period, and a commit that reported a refusal should not also leave its
-    accepted pages unpublished.
+    Every page goes unwaited and the flush is the commit's whole wait, whatever the pages did: a
+    commit that reported a refusal on one page should not also leave its accepted ones sitting for
+    the executor's own period. Where nothing was accepted there is nothing to publish and no flush
+    is sent.
     """
     accepted = 0
     for page in pages:
@@ -1219,10 +1212,8 @@ def run(control: Control, pages: Sequence[Page], report) -> None:
         _fold(report, page, answer)
         if answer.ok:
             accepted += 1
-            if page.wait:
-                _waited(report, answer)
-        elif page.wait and accepted:
-            control.flush()
+    if accepted:
+        _waited(report, control.flush(wait=True))
 
 
 def _send(control: Control, page: Page) -> Answer:
@@ -1236,13 +1227,13 @@ def _send(control: Control, page: Page) -> Answer:
         group, _, key = page.name.partition(":")
         return control.create_view(group, key, page.body)
     if page.kind == "points":
-        return control.ingest(page.body, page.batch, page.view, page.wait)
+        return control.ingest(page.body, page.batch, page.view)
     if page.kind == "values":
-        return control.values(page.body, page.batch, page.view, page.wait)
+        return control.values(page.body, page.batch, page.view)
     if page.kind == "publish":
-        return control.publish(page.name, page.body, page.wait)
+        return control.publish(page.name, page.body)
     if page.kind == "grow":
-        return control.grow(page.name, page.body, page.wait)
+        return control.grow(page.name, page.body)
     raise Refusal(f"commit: no route for a page of kind {page.kind!r}")
 
 
@@ -1304,20 +1295,35 @@ def _detail(answer: Answer) -> str:
 
 
 def _waited(report, answer: Answer) -> None:
-    """What the waited page's answer says about the commit's visibility (§6.2 step 5).
+    """What the closing flush says about the commit's visibility (§6.2 step 5).
 
-    `visible: true` is the wait: the publication the acknowledgement names has happened, so the
-    next cell reads what this commit wrote. `visible: false` is the server's bound reached, which
-    is a finding rather than a refusal — the write is durable and publishes at the next cycle.
+    `visible: true` is the wait: the publication the flush armed has completed, so the next cell
+    reads what this commit wrote. `visible: false` is the server's bound reached, which is a
+    finding rather than a refusal — the write is durable and publishes at the next cycle.
     """
+    if not answer.ok:
+        # The pages landed and are durable; what failed is the request that would have published
+        # them, so this is a finding on visibility and not a refusal of the commit.
+        report.flush_reached = False
+        report.findings.append(
+            Finding(
+                "the closing flush was refused",
+                f"POST /control/flush?wait=visible answered {answer.status}: "
+                f"{_detail(answer)}. Every page this commit sent was acknowledged and is durable; "
+                f"what it wrote reaches the served forms at the executor's next cycle",
+            )
+        )
+        return
     report.flush_wait = answer.seconds
+    if answer.body.get("publication") is not None:
+        report.publication = int(answer.body["publication"])
     if answer.body.get("visible"):
         return
     report.flush_reached = False
     report.findings.append(
         Finding(
             "the publication did not arrive within the server's wait",
-            f"publication {answer.body.get('publication')} had not completed when the route's "
+            f"publication {answer.body.get('publication')} had not completed when the flush's "
             f"wait ran out (serve.visible_wait_max_secs). Every page this commit sent was "
             f"acknowledged and is durable; what it wrote reaches the served forms at the "
             f"executor's next cycle",
