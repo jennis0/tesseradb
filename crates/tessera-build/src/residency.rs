@@ -1163,10 +1163,15 @@ pub(crate) fn entity_order_residency(
     // its own rows rather than the ceiling a 10⁹ one reaches. Nothing in the pass scales with the
     // dictionary, the table being written into the file as each window completes.
     //
+    // **The worker count is the pass's own** (`crate::term_images_pass::derive_threads`), which is
+    // capped rather than the machine's width, and capped for this term: three bitmaps a worker is
+    // about 1.3 GB at rung 6, so an uncapped width forecasts past the budget such a build runs
+    // under.
+    //
     // ⊘ **Modelled**, and a ceiling rather than an expectation: a term over a third of the corpus
     // in run-friendly order is kilobytes (assumed). The fold's memory estimate charges the same
     // window over its own one thread, at a flat ceiling for the scratch rather than this bound.
-    let image_workers = rayon::current_num_threads().max(1) as u64;
+    let image_workers = crate::term_images_pass::derive_threads() as u64;
     let scratch = tessera_store::permutation::project_scratch_bound(n, n);
     terms.push(Term {
         what: format!(
@@ -2860,6 +2865,79 @@ mod tests {
         );
     }
 
+    /// **The rung-6 forecast fits the budget that build runs under.**
+    ///
+    /// 3.5×10⁹ rows and entities over the GBIF declaration's four columns and three member rows an
+    /// item, priced against the 24 GiB budget the rung is built under. The pre-flight refuses a
+    /// build whose anonymous total exceeds the budget (`crate::pipeline`), so this is that refusal
+    /// read at the model: under the bound is a build that starts.
+    ///
+    /// The term this test exists for is the term images'. It is the worker count times three
+    /// bitmaps of a bitset container per 65,536 values, so at the machine's own width on a
+    /// twelve-core box it came to 15,002 MiB by itself and put the forecast over the budget.
+    /// `crate::term_images_pass::derive_threads` caps the width, and this asserts the consequence
+    /// rather than the cap.
+    #[test]
+    fn the_rung_six_forecast_fits_the_twenty_four_gibibyte_budget() {
+        const BUDGET: u64 = 24 << 30;
+        const N: u64 = 3_495_729_729;
+        // The declaration's columns at the characters an item the corpus measures, as
+        // `the_gbif_rung_spills_where_the_slice_that_fits_does_not` states them.
+        let columns = vec![
+            column(ScalarType::U8, 0),
+            column(ScalarType::Keyword, (6.60 * N as f64) as u64),
+            column(ScalarType::U16, 0),
+            spilled(ScalarType::Keyword, (31.22 * N as f64) as u64),
+        ];
+        let schema = route_schema(&[
+            (ScalarType::U8, false),
+            (ScalarType::Keyword, true),
+            (ScalarType::U16, false),
+            (ScalarType::Keyword, false),
+        ]);
+        // 459 GB of disk, which is what the box the rung was attempted on has.
+        let (_routes, residency) = super::choose_routes(
+            &schema,
+            N,
+            IdShape::dense(N),
+            columns,
+            &[],
+            3 * N,
+            3 * N,
+            3 * N,
+            Some(459_000_000_000),
+            BUDGET,
+        );
+        let total = residency.total();
+        assert!(
+            total <= BUDGET,
+            "the rung-6 forecast is {} MiB against a {} MiB budget, so the build is refused              before it starts:{}",
+            total >> 20,
+            BUDGET >> 20,
+            residency.describe()
+        );
+        // The term images are a real share of it and not a term that rounded to nothing: a model
+        // charging them at zero would pass the bound above for the wrong reason.
+        let images: u64 = residency
+            .terms
+            .iter()
+            .filter(|term| term.what.starts_with("the term images"))
+            .map(|term| term.bytes)
+            .sum();
+        assert_eq!(
+            images,
+            crate::term_images_pass::derive_threads() as u64
+                * (term_image_bitmap_bytes(N)
+                    + tessera_store::permutation::project_scratch_bound(N, N).total()),
+            "the two term-image terms must be the pass's own width times what one worker holds"
+        );
+        assert!(
+            images > 1 << 30,
+            "the term images are {} MiB, which is too small for this bound to be about them",
+            images >> 20
+        );
+    }
+
     /// **The rung the route exists for, at the schema it exists for.** GBIF's `scientificname` is
     /// a `keyword` with neither `index` nor `render`, measured at 31.22 characters an item over
     /// 125,789,091 occurrences, beside an indexed `keyword` at 6.60 and three member rows an item
@@ -3727,7 +3805,7 @@ require_member_visibility = "none"
         // **And the term images' three bitmaps**: a posting, an image and a frozen buffer a
         // worker. The projection scratch beside them is bounded by one window and is one of the
         // constants, so it appears in the second assertion and not the first.
-        let workers = rayon::current_num_threads().max(1) as u64;
+        let workers = crate::term_images_pass::derive_threads() as u64;
         let images = |n: u64| workers * term_image_bitmap_bytes(n);
         let image_scratch =
             |n: u64| workers * tessera_store::permutation::project_scratch_bound(n, n).total();
