@@ -883,10 +883,10 @@ schema = "schema.toml"            # the corpus declaration. This is the default
 env = "TESSERA_IDENTITY_KEY"      # the variable carrying the key, never the key. This is the default
 ```
 
-**Two of the serving side's keys belong in this document even so**, because they are disclosure
+**Three of the serving side's keys belong in this document even so**, because they are disclosure
 controls rather than tuning and §1's closure argument applies to them: a control nobody has
-enumerated is a control nobody has reasoned about. Both name browser origins, both are absent by
-default, and **neither takes a wildcard** — a list carrying `*` is refused at startup, naming the
+enumerated is a control nobody has reasoned about. Each names browser origins, by list or by the loopback rule, each is absent by
+default, and **none takes a wildcard** — a list carrying `*` is refused at startup, naming the
 key, because an origin list is a deployment's statement about which pages may call it and `*` is
 not a statement.
 
@@ -894,6 +894,7 @@ not a statement.
 |---|---|---|---|
 | `serve.dev_cors_origins` | O | viewer **and session** | a development affordance. It opens `/session/authorise` to a browser, which means the page holds the deployment's **session credential** — the secret that decides who may mint tokens at all. Logged at `warn` on every start |
 | `serve.cors_origins` | O | **viewer only** | the production list ([decision 0102](../decisions/0102-the-viewer-plane-gains-an-enumerated-cors-origin-list.md)). A page it names may present a **token** — already per-principal, already scoped to what the server decided that principal may see, already expiring — and can reach `/session/authorise` no more than any other origin can. Silent at startup |
+| `serve.cors_loopback` | O | **viewer only** | a rule rather than a list: a page served from `localhost`, `127.0.0.1` or `[::1]`, on any port, is admitted as a listed origin is, with the same exposed headers. The origin of a notebook front end is a port the kernel chose, which no operator can enumerate ([`python-sdk.md`](python-sdk.md) §7). The host is matched whole, so `localhost.evil.example` and `127.0.0.1.evil.example` are refused, as are `0.0.0.0` and the rest of `127/8`. `false` by default; logged once at startup at `info`, since it admits a page that may present a token, on `cors_origins`' argument |
 
 **The difference between them is which bearer a browser ends up holding**, and that is why the
 production key stops at the viewer plane rather than covering both for symmetry. Letting a named
