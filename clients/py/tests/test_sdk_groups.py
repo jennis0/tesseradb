@@ -16,6 +16,7 @@ import pytest
 
 from conftest import browse, viewport
 from tesseradb._database import create
+from tesseradb._refusal import Refusal
 
 pytest.importorskip("pyarrow")
 
@@ -158,11 +159,18 @@ def test_a_groups_views_are_served_with_their_own_metadata(grouped):
     }
 
 
-def test_each_view_of_a_group_answers_a_viewport(grouped):
+def test_each_view_of_a_group_has_its_own_row_space(grouped):
     """A view of a group is a view in every respect below the declaration (views.md §3.1), and
     `<group>:<key>` is what a request names it by (decision 0113)."""
     assert viewport(grouped, "slices:a", FRAME)["counts"]["visible"] == N
     assert viewport(grouped, "slices:b", FRAME)["counts"]["visible"] == N
+    # `a`'s points are laid out at x in [0, 19] and `b`'s at [40, 59], so the right half of the
+    # frame holds every point of `b` and none of `a`: a page sent under the wrong view's header
+    # would land where the geometry says it did not. Read at a zoom whose tiles are smaller than
+    # the box, one tile covering the whole view at zoom 0.
+    right = [30.0, -5.0, 60.0, 60.0]
+    assert viewport(grouped, "slices:b", right, zoom=4)["counts"]["visible"] == N
+    assert viewport(grouped, "slices:a", right, zoom=4)["counts"]["visible"] == 0
     # A term the corpus staged on half its points, under one view of the group: the mask is the
     # view's own rows, so the count is that half and not the group's.
     half = viewport(grouped, "slices:a", FRAME, terms=["alpha"])
@@ -238,9 +246,12 @@ def test_a_plain_view_declared_after_the_first_commit_is_created_and_served(grou
     db = grouped
     db.declare_view("extra", source="slice_d", extent=EXTENT, access="access")
     # A batch into a plain view may not carry a group-scoped family: there is no view of the
-    # group for the value to belong to (views.md §5), which the pre-flight refuses by name.
-    plain = points(list(range(9201, 9216)), 10.0).drop_columns(["quality"])
-    db.stage("slice_d", plain)
+    # group for the value to belong to (views.md §5), and the pre-flight refuses it by name.
+    staged = points(list(range(9201, 9216)), 10.0)
+    db.stage("slice_d", staged)
+    with pytest.raises(Refusal, match="no block of this declaration reads"):
+        db.check()
+    db.stage("slice_d", staged.drop_columns(["quality"]))
     report = db.commit()
     assert report.ok, report.refusals
     assert report.plan[0] == "declare view 'extra'"

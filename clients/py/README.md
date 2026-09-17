@@ -45,9 +45,9 @@ map, `declare` and the typed verbs for plain views and view groups, vocabularies
 scoped and unscoped, layers of every kind and membership and labels, inference, `check()`, the build and the server the first commit starts,
 and the paged commit below.
 
-`declare_view_group` carries three of the four rosters — a view per file (`views=`), one file
+`declare_view_group` carries three of the four rosters: a view per file (`views=`), one file
 with a discriminator (`source=` and `view_field=`), and `members=` for a group sharing another's
-views — and the roster as a table is written through `declare(kind, block)`. `add_view(group,
+views. The roster as a table is written through `declare(kind, block)`, and `add_view(group,
 key, source=…, **metadata)` adds a key to a group. An attribute or a layer scoped to a group
 takes `scope={"group": name}`, and `fields={"view": column}` where it reads a source of its own.
 
@@ -64,7 +64,7 @@ Not built yet, and what each does instead:
 - **An attribute or a vocabulary declared after the first commit.** Those two verbs refuse on a
   built database and name a rebuild. A layer, a label set, a plain view, a view group and a view
   added to a group are declarable at any commit, and the next commit sends each to the running
-  service — a view declared after the first commit names its own `extent=`, there being no rows
+  service. A view declared after the first commit names its own `extent=`, there being no rows
   at a running service to fit a frame against.
 
 ## The commit after the first

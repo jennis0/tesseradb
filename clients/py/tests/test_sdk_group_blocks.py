@@ -194,3 +194,27 @@ def test_a_scoped_layer_with_no_views_is_drawn_on_its_group(db):
     db.declare_layer("clusters", kind="flat", source="clusters", members="clusters",
                      scope={"group": "quarter"}, fields={"view": "quarter"})
     assert 'views = ["quarter"]' in db.declaration
+
+
+def test_a_scoped_layer_takes_no_from_column(db):
+    """Every published record carries the view it belongs to (contracts §3.4 r84), and one key
+    per point says nothing about which view; the refusal names the tables that do."""
+    db.declare_view_group("quarter", extent=BOX, views=[{"key": "a", "source": "q1"}])
+    for built in (False, True):
+        db.built = built
+        with pytest.raises(Refusal, match="Declare it with source= and members="):
+            db.declare_layer("clusters", kind="flat", from_column="cluster",
+                             scope={"group": "quarter"}, fields={"view": "quarter"})
+
+
+def test_a_group_sharing_another_s_views_is_declared_after_it():
+    """A group naming `members` is a 404 at the route until the group it names exists, whatever
+    order the declaration is in (views.md §3.3)."""
+    from tesseradb._commit import _owners_first
+
+    groups = [
+        {"name": "quarter_map", "body": {"members": "quarter"}},
+        {"name": "quarter", "body": {}},
+        {"name": "region", "body": {}},
+    ]
+    assert [one["name"] for one in _owners_first(groups)] == ["quarter", "quarter_map", "region"]

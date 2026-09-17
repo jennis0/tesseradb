@@ -347,8 +347,8 @@ def view_entries(document: dict, default_source: str | None) -> list[dict]:
     """Every view the declaration carries, plain and grouped, as one entry each.
 
     An entry is what the commit works from: the view's id, the source its points are staged in,
-    where its coordinates and its labels are, and — for a group whose views are its source's own
-    distinct values — the discriminator to split those rows by. A group under that spelling names
+    where its coordinates and its labels are, and, for a group whose views are its source's own
+    distinct values, the discriminator to split those rows by. A group under that spelling names
     no keys, so its entry carries `id = None` and the rows decide.
     """
     entries: list[dict] = []
@@ -542,7 +542,7 @@ def layer_block(
     if kind not in HIERARCHY_KINDS:
         raise Refusal(f"layer {name!r}: {kind!r} is not a hierarchy kind: {HIERARCHY_KINDS}")
     membership_value, how = _membership(name, membership)
-    group = _scope(name, scope, fields)
+    group = _scope(name, scope, fields, from_column)
     if withdraw_on_member_deletion:
         raise Refusal(
             f"layer {name!r}: withdraw_on_member_deletion is specified and not built "
@@ -651,7 +651,9 @@ def _membership(name: str, membership: Any) -> tuple[Any, str]:
     return membership, membership
 
 
-def _scope(name: str, scope: Any, fields: dict | None) -> str | None:
+def _scope(
+    name: str, scope: Any, fields: dict | None, from_column: str | None = None
+) -> str | None:
     """`entity`, or the view group a group-scoped layer keeps one artifact set per view of."""
     if scope == "entity" or scope is None:
         return None
@@ -661,6 +663,13 @@ def _scope(name: str, scope: Any, fields: dict | None) -> str | None:
             f"{sorted(scope)!r}"
         )
     group = scope["group"] if isinstance(scope, dict) else scope
+    if from_column is not None:
+        raise Refusal(
+            f"layer {name!r}: a layer scoped to group {group!r} keys its artifacts per view, and "
+            f"every published record carries the view it belongs to, which one key per point "
+            f"cannot say. Declare it with source= and members= over tables carrying that column, "
+            f"and fields={{'view': column}}"
+        )
     if not fields or "view" not in dict(fields):
         raise Refusal(
             f"layer {name!r}: a layer scoped to group {group!r} keys its artifacts per view, so "

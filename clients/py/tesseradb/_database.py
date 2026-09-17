@@ -245,7 +245,7 @@ class Database:
         """One `[[view_group]]` block, at any commit (§4.3).
 
         A group declared after the first commit is sent as `PUT /control/view_groups/{name}`, and
-        each view of its roster as `PUT /control/views/{group}/{key}` — the group first, since a
+        each view of its roster as `PUT /control/views/{group}/{key}`, the group first, since a
         create resolves its group. `add_view` adds a key to a group that already exists.
         """
         block = D.view_group_block(name, **kwargs)
@@ -341,6 +341,11 @@ class Database:
         """
         views = kwargs.get("views")
         from_column = kwargs.get("from_column")
+        if from_column is not None and isinstance(kwargs.get("scope"), dict):
+            # Checked here as well as in the block, since the runtime path below rewrites the
+            # column into a members table before the block is built.
+            D.layer_block(name, kind, None, from_column=from_column, scope=kwargs["scope"],
+                          fields=kwargs.get("fields"))
         if self.built and from_column is not None:
             kwargs = dict(kwargs)
             kwargs.pop("from_column")
@@ -818,9 +823,9 @@ class Database:
     def _payloads(self) -> dict:
         """`tessera check --payloads` over this declaration: one body per runtime declaration.
 
-        The emitter writes one object with a key per block kind — `layers` and `attributes` as
-        bare bodies, `views`, `view_groups` and `vocabularies` as `{name, body}`, each addressed by
-        a path segment. The paged commit sends the layers, the views and the view groups.
+        The emitter writes one object with a key per block kind: `layers` and `attributes` as
+        bare bodies, and `views`, `view_groups` and `vocabularies` as `{name, body}`, each
+        addressed by a path segment. The paged commit sends the layers, views and view groups.
 
         The declaration minus its acquisition keys *is* the payload (configuration.md §2), so this
         is the binary serialising what it parsed rather than a second emitter in Python.
