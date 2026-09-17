@@ -459,6 +459,11 @@ pub(crate) struct FoldViewPlan {
     /// space, the floor is exactly what every post-snapshot publication had to clear to become live
     /// in the first place.
     pub(crate) permutation_bound: u64,
+    /// The rows this view holds at the snapshot, base and extents together. This is an upper
+    /// bound on the new base's, since every row pass 1 drops is a deletion, and it is what
+    /// [`memory_estimate`] charges pass 2b's image against. Nothing else reads it. The exact
+    /// figure is not available until pass 1 has run.
+    pub(crate) rows: u64,
 }
 
 /// One fold's immutable plan: the files it consumes, and `D₀`.
@@ -674,9 +679,20 @@ const TERM_IMAGE_MANIFEST_N: u64 = 0;
 /// | 4 B × entity bound | `ext-locator.u32`, same (§3 pass 3) |
 /// | 8 B × dictionary length | `PostingsSpool`'s offsets buffer (§3's table: ~0.94 GB at 1.17×10⁸) |
 /// | 90 B × membership containers | the artifact pass's row forms, held while it rebuilds them |
+/// | threads × (8 KiB × containers + scratch) | pass 2b's widest image and its scratch, modelled |
 ///
 /// The permutation term is the **maximum** across views rather than their sum: pass 1 folds one
-/// view at a time and drops each view's writer before the next, so the peak is one of them.
+/// view at a time and drops each view's writer before the next, so the peak is one of them. The
+/// image term takes its rows the same way, and for the same reason: pass 2b derives one view at a
+/// time and drops each row space before the next.
+///
+/// **The image term is [`term_image_estimate`], modelled, and a ceiling rather than an
+/// expectation.** [`TERM_IMAGE_THREADS`] of them, each with a [`PROJECT_SCRATCH_BYTES`] scratch.
+/// A Roaring container covers 65 536 rows and costs at most 8 KiB, at which point it is a bitset
+/// covering every row in its range, so a term held by every row of the view is the widest image
+/// expressible and no posting can produce a larger one. The realistic figure is far below it:
+/// a term over a third of the corpus in run-friendly order is kilobytes. ~437 MB at 3.5×10⁹ rows,
+/// against ~82 MiB of scratch (`docs/evidence/memos/2026-09-17-term-images-handover.md` §3.4).
 ///
 /// *(§3's first draft called the two mapped arrays free — page cache rather than RSS. r1 corrected
 /// it: a dirty shared file mapping is resident and cgroup-charged until writeback. They are charged
@@ -686,13 +702,46 @@ pub(crate) fn memory_estimate(
     entity_bound: u64,
     dict_len: u64,
     membership_containers: u64,
+    base_rows: u64,
 ) -> u64 {
     let terms = 4u64
         .saturating_mul(permutation_bound)
         .saturating_add(4u64.saturating_mul(entity_bound))
         .saturating_add(8u64.saturating_mul(dict_len))
-        .saturating_add(ARTIFACT_BYTES_PER_CONTAINER.saturating_mul(membership_containers));
+        .saturating_add(ARTIFACT_BYTES_PER_CONTAINER.saturating_mul(membership_containers))
+        .saturating_add(term_image_estimate(dict_len, base_rows));
     terms.saturating_mul(FOLD_MEMORY_SAFETY_FACTOR)
+}
+
+/// What [`ProjectScratch`](tessera_store::permutation::ProjectScratch) holds at its widest, in
+/// bytes.
+///
+/// **Arithmetic from two constants, and a bound rather than a typical figure**: the projection
+/// emits and clears its buckets every 64 MiB of row ids whatever the mask, so what it holds is one
+/// window plus a partly filled chunk per bucket, at most 82 MiB at the 1,025 buckets of the `u32`
+/// entity ceiling. `permutation.rs` states it beside the window it follows from, and the anonymous
+/// peaks it produces are measured there.
+const PROJECT_SCRATCH_BYTES: u64 = 82 * 1024 * 1024;
+
+/// The widest a Roaring container can be once built, in bytes: a bitset over its 65 536 values.
+const IMAGE_BYTES_PER_CONTAINER: u64 = 8 * 1024;
+
+/// Rows one Roaring container covers.
+const ROWS_PER_CONTAINER: u64 = 1 << 16;
+
+/// [`memory_estimate`]'s pass 2b term: one worker's largest possible image and its scratch, per
+/// worker.
+///
+/// **Zero where the pass does not run**, which is a view with no row and a dictionary with no term:
+/// pass 2b skips both, so charging a scratch for them would refuse folds for work nothing does.
+fn term_image_estimate(dict_len: u64, base_rows: u64) -> u64 {
+    if dict_len == 0 || base_rows == 0 {
+        return 0;
+    }
+    let image = base_rows
+        .div_ceil(ROWS_PER_CONTAINER)
+        .saturating_mul(IMAGE_BYTES_PER_CONTAINER);
+    (TERM_IMAGE_THREADS as u64).saturating_mul(image.saturating_add(PROJECT_SCRATCH_BYTES))
 }
 
 /// What one Roaring container costs resident, in bytes — the artifact pass's whole price model.
@@ -796,6 +845,7 @@ pub(crate) fn plan_fold(
                 })
                 .collect(),
             permutation_bound,
+            rows: row_space.total_rows(),
         });
     }
     if views.is_empty() {
@@ -832,6 +882,9 @@ pub(crate) fn plan_fold(
             entity_bound,
             u64::from(dict_len),
             resources.membership_containers,
+            // The widest view's rows, on the permutation term's rule: pass 2b derives one view at
+            // a time.
+            views.iter().map(|view| view.rows).max().unwrap_or(0),
         );
         if need > available {
             return Err(NoFold::InsufficientMemory { need, available });
@@ -2913,7 +2966,7 @@ mod tests {
     /// assertion fails low, which is r4's original error (`permutation.bin` omitted) reintroduced.
     #[test]
     fn the_memory_estimate_is_section_3s_budget_at_ten_to_the_nine() {
-        let need = memory_estimate(1_000_000_000, 1_000_000_000, 117_000_000, 0);
+        let need = memory_estimate(1_000_000_000, 1_000_000_000, 117_000_000, 0, 1_000_000_000);
         let gb = need as f64 / 1e9;
         assert!(
             (17.0..=19.0).contains(&gb),
@@ -2930,11 +2983,48 @@ mod tests {
     fn the_estimate_charges_one_permutation_and_one_locator() {
         // 4 B + 4 B per entity, doubled by the safety factor, and no dictionary term.
         assert_eq!(
-            memory_estimate(1_000, 1_000, 0, 0),
-            (4 * 1_000 + 4 * 1_000) * 2
+            memory_estimate(1_000, 1_000, 0, 0, 1_000),
+            (4 * 1_000 + 4 * 1_000) * 2,
+            "a dictionary of no terms has no images either, whatever the rows"
         );
         // The dictionary term is 8 B per ordinal and independent of entity space.
-        assert_eq!(memory_estimate(0, 0, 1_000, 0), 8 * 1_000 * 2);
+        assert_eq!(memory_estimate(0, 0, 1_000, 0, 0), 8 * 1_000 * 2);
+    }
+
+    /// **Pass 2b is charged one image and one scratch, and only where it runs.** The image is a
+    /// ceiling of a bitset container per 65 536 rows, so the term moves with the rows and not with
+    /// the terms. The scratch is flat.
+    ///
+    /// Kills the mutation that charges the scratch to a fold with nothing to project, which would
+    /// refuse folds on a small host for work the pass skips.
+    #[test]
+    fn the_estimate_charges_one_term_image_and_one_scratch() {
+        assert_eq!(
+            memory_estimate(0, 0, 0, 0, 1_000_000),
+            0,
+            "a dictionary with no term gets no images"
+        );
+        assert_eq!(
+            memory_estimate(0, 0, 1, 0, 0),
+            8 * 2,
+            "a view with no row gets none either, so only the dictionary term is charged"
+        );
+        // One container's rows, one term: one 8 KiB image and the scratch.
+        assert_eq!(
+            memory_estimate(0, 0, 1, 0, ROWS_PER_CONTAINER),
+            (8 + IMAGE_BYTES_PER_CONTAINER + PROJECT_SCRATCH_BYTES) * FOLD_MEMORY_SAFETY_FACTOR
+        );
+        // One row past it takes a second container, and nothing else moves.
+        assert_eq!(
+            memory_estimate(0, 0, 1, 0, ROWS_PER_CONTAINER + 1),
+            (8 + 2 * IMAGE_BYTES_PER_CONTAINER + PROJECT_SCRATCH_BYTES) * FOLD_MEMORY_SAFETY_FACTOR
+        );
+        // The memo's figure at rung 6: ~437 MB of image at 3.5×10⁹ rows.
+        let image = term_image_estimate(1, 3_500_000_000) - PROJECT_SCRATCH_BYTES;
+        assert!(
+            (430_000_000..=445_000_000).contains(&image),
+            "the widest image at 3.5×10⁹ rows is {image} B, against the memo's ~437 MB"
+        );
     }
 
     /// **The artifact pass is charged, and charged per container.** A deployment holding no
@@ -2947,11 +3037,11 @@ mod tests {
     #[test]
     fn the_estimate_charges_the_artifact_pass_per_container() {
         assert_eq!(
-            memory_estimate(0, 0, 0, 0),
+            memory_estimate(0, 0, 0, 0, 0),
             0,
             "a deployment with no artifacts is charged nothing for the pass"
         );
-        let need = memory_estimate(0, 0, 0, 40_000_000);
+        let need = memory_estimate(0, 0, 0, 40_000_000, 0);
         let gb = need as f64 / 1e9 / FOLD_MEMORY_SAFETY_FACTOR as f64;
         assert!(
             (3.2..=3.9).contains(&gb),
@@ -2993,9 +3083,15 @@ mod tests {
             ("wal_poisoned", None, None),
             "a condition with no figures publishes its name and two nulls"
         );
-        assert_eq!(NoFold::OverlayDiverged.gauge(), ("overlay_diverged", None, None));
+        assert_eq!(
+            NoFold::OverlayDiverged.gauge(),
+            ("overlay_diverged", None, None)
+        );
         assert_eq!(NoFold::SteppedDown.gauge(), ("stepped_down", None, None));
-        assert_eq!(NoFold::NothingToFold.gauge(), ("nothing_to_fold", None, None));
+        assert_eq!(
+            NoFold::NothingToFold.gauge(),
+            ("nothing_to_fold", None, None)
+        );
         assert_eq!(
             NoFold::InsufficientMemory {
                 need: 9,
