@@ -225,6 +225,58 @@ pub struct ProjectScratch {
     members: Vec<u32>,
 }
 
+/// The widest a [`ProjectScratch`] grows while projecting masks of at most `rows` rows through a
+/// permutation of `bound` entities, in bytes, split into the half that moves with the corpus and
+/// the half that does not.
+///
+/// ⊘ **Modelled**, by the arithmetic [`Permutation::project_with`] sizes its pool with: the chunks
+/// a window's rows fill plus a partial chunk a bucket, never above one window, the decode block
+/// that crossed it and a full chunk for each bucket and one more. 77 MiB at 3.5×10⁹ rows over 834
+/// buckets and 80 MiB at the 1,025 buckets of the `u32` entity ceiling, the figures
+/// [`PROJECT_WINDOW_ROWS`] quotes. A mask under one window costs its own rows instead, which is
+/// what a small corpus pays.
+///
+/// Here so that a caller estimating a pass that projects — the build's residency model — prices
+/// the scratch from the arithmetic that sizes it rather than from a figure copied into another
+/// crate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ProjectScratchBound {
+    /// The stamp and its mark array, the same size whatever the corpus.
+    pub fixed: u64,
+    /// The chunk pool the buckets fill.
+    pub pool: u64,
+}
+
+impl ProjectScratchBound {
+    /// Both halves.
+    pub fn total(self) -> u64 {
+        self.fixed.saturating_add(self.pool)
+    }
+}
+
+/// [`ProjectScratchBound`] for one permutation and the widest mask projected through it.
+pub fn project_scratch_bound(bound: u64, rows: u64) -> ProjectScratchBound {
+    let window = PROJECT_WINDOW_ROWS as u64;
+    let buckets = (bound >> BUCKET_SHIFT) + 1;
+    let buffered_max = if rows <= window {
+        rows
+    } else {
+        window.saturating_add(DECODE_WINDOW as u64)
+    };
+    let chunk_rows = (window.min(rows) / buckets)
+        .next_power_of_two()
+        .clamp(CHUNK_ROWS_MIN as u64, CHUNK_ROWS_MAX as u64);
+    let chunks = buffered_max.div_ceil(chunk_rows).saturating_add(buckets);
+    let ceiling = window
+        .saturating_add(DECODE_WINDOW as u64)
+        .saturating_add((buckets + 1).saturating_mul(CHUNK_ROWS_MAX as u64));
+    let pool_rows = chunks.saturating_mul(chunk_rows).min(ceiling);
+    ProjectScratchBound {
+        fixed: 8 * (STAMP_WORDS + MARK_WORDS) as u64,
+        pool: 4u64.saturating_mul(pool_rows),
+    }
+}
+
 /// A bucket's position in the pool: the index its next row is written at, and the end of its
 /// current chunk. The two are equal when the bucket has no chunk with room, which is also how an
 /// empty bucket starts. Kept side by side so a push reads one 16-byte entry.
