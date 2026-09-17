@@ -62,11 +62,11 @@ TOKEN_MARGIN = 60.0
 DELTA_FOLDER = ".tessera/deltas"
 
 #: What a declaration verb that the paged commit does not yet send says. `tessera check
-#: --payloads` emits a body for every block kind; the planner sends layers and label sets and not
-#: yet the other four (§6.2 step 1).
+#: --payloads` emits a body for every block kind; the planner sends layers, label sets, views and
+#: view groups, and not yet attributes or vocabularies (§6.2 step 1).
 NO_RUNTIME_DECLARATION = (
-    "not built yet, {verb} after the first commit. The paged commit sends a layer or a label set "
-    "to the running service and not yet an attribute, a vocabulary, a view or a view group. "
+    "not built yet, {verb} after the first commit. The paged commit sends a layer, a label set, a "
+    "view and a view group to the running service, and not yet an attribute or a vocabulary. "
     "Declare it before the first commit, or rebuild the database with create(path, replace=True)"
 )
 
@@ -192,7 +192,9 @@ class Database:
         """
         if name == self.default_source:
             return True
-        for block in self.blocks.blocks["view"] + self.blocks.blocks["attribute"]:
+        if any(entry["source"] == name for entry in self.view_entries()):
+            return True
+        for block in self.blocks.blocks["attribute"]:
             if block.get("source") == name:
                 return True
         for block in self.blocks.blocks["layer"]:
@@ -225,28 +227,107 @@ class Database:
         Every block is expressible this way; the typed verbs below build the dict and call here,
         and this is the way to write a key whose verb is not built yet.
         """
-        if kind != "layer":
+        if kind not in ("layer", "view", "view_group"):
             self._refuse_a_later_commit("declare")
         return self._declared(self.blocks.add(kind, block))
 
     def declare_view(self, name: str, source: str | None = None, **kwargs) -> dict:
-        self._refuse_a_later_commit("declare_view")
+        """One `[[view]]` block, at any commit (§4.2).
+
+        A view declared after the first commit is sent as `PUT /control/views/{name}` at the next
+        commit, with the body `tessera check --payloads` emits over this declaration. A frame is
+        fixed for the life of a view and the route has no rows to fit one against, so such a view
+        declares `extent=`; an `auto` frame reaches the route as written and is refused there.
+        """
         return self._declared(self.blocks.add("view", D.view_block(name, source, **kwargs)))
 
-    def declare_view_group(self, *args, **kwargs):
-        raise Refusal(
-            "not built yet, declare_view_group. declare('view_group', block) writes the block as "
-            "given"
+    def declare_view_group(self, name: str, **kwargs) -> dict:
+        """One `[[view_group]]` block, at any commit (§4.3).
+
+        A group declared after the first commit is sent as `PUT /control/view_groups/{name}`, and
+        each view of its roster as `PUT /control/views/{group}/{key}`, the group first, since a
+        create resolves its group. `add_view` adds a key to a group that already exists.
+        """
+        block = D.view_group_block(name, **kwargs)
+        for record in block.get("view") or []:
+            self._refuse_an_unstaged_roster_source(name, record)
+        return self._declared(self.blocks.add("view_group", block))
+
+    def add_view(
+        self,
+        group: str,
+        key: str,
+        source: str | None = None,
+        visibility: Any = None,
+        **metadata,
+    ) -> dict:
+        """One more view of a declared group: the roster record (§4.3, views.md §3.2).
+
+        Before the first commit it is a `[[view_group.view]]` block the build compiles; after it,
+        `PUT /control/views/{group}/{key}` at the next commit. The record is immutable, so every
+        metadata name the group declared is carried here and a wrong one is a drop and a recreate.
+        """
+        block = self.blocks.group(group)
+        if block.get("members"):
+            raise Refusal(
+                f"view group {group!r}: its views are {block['members']!r}'s, and a key belongs to "
+                f"the group that owns it. Add the view to {block['members']!r}; creating a key "
+                f"there creates it here"
+            )
+        if block.get("source"):
+            raise Refusal(
+                f"view group {group!r}: its views are the distinct values of its own "
+                f"'{dict(block.get('fields', {})).get('view')}' column, so a view added by hand "
+                f"would be a second roster. Stage the rows that name the key"
+            )
+        record = D.roster_record(
+            group, key, source, visibility, metadata, dict(block.get("metadata") or {})
         )
+        if any(held["key"] == key for held in block.get("view") or []):
+            raise Refusal(
+                f"view group {group!r}: a view keyed {key!r} is already declared. A roster record "
+                f"is immutable: drop the key and recreate it under the record you want"
+            )
+        self._refuse_an_unstaged_roster_source(group, record)
+        block.setdefault("view", []).append(record)
+        self._save_state()
+        return record
+
+    def _refuse_an_unstaged_roster_source(self, group: str, record: dict) -> None:
+        """A view of a group is its own points file, and `[defaults].source` does not reach one."""
+        if record.get("source") is None:
+            raise Refusal(
+                f"view group {group!r}, view {record['key']!r}: under a roster of inline views the "
+                f"file is the view, and `[defaults].source` does not reach a group. Give source="
+            )
 
     def declare_vocabulary(self, name: str, **kwargs) -> dict:
         self._refuse_a_later_commit("declare_vocabulary")
         return self._declared(self.blocks.add("vocabulary", D.vocabulary_block(name, **kwargs)))
 
     def declare_attribute(self, name: str, type: str, **kwargs) -> dict:
+        """One `[[attribute]]` block (§4.5).
+
+        `scope={"group": name}` makes it a family of columns, one per view of that group, and
+        `fields={"view": column}` says where a source of its own carries the view each value
+        belongs to. Not built yet: an attribute declared after the first commit. The route and the
+        emitter's body both exist; whether `tessera check` takes a column with no source to read is
+        an open ruling (§11.2), so the SDK declares attributes before the first commit alone.
+        """
         self._refuse_a_later_commit("declare_attribute")
-        return self._declared(
-            self.blocks.add("attribute", D.attribute_block(name, type, **kwargs))
+        block = D.attribute_block(name, type, **kwargs)
+        self._refuse_an_undeclared_group("attribute", name, block)
+        return self._declared(self.blocks.add("attribute", block))
+
+    def _refuse_an_undeclared_group(self, kind: str, name: str, block: dict) -> None:
+        """A scope names the group that owns the views its values or artifacts are keyed by."""
+        scope = block.get("scope")
+        group = scope.get("group") if isinstance(scope, dict) else None
+        if group is None or group in self.blocks.group_names():
+            return
+        raise Refusal(
+            f"{kind} {name!r}: scope names view group {group!r}, which this declaration does not "
+            f"carry. declare_view_group({group!r}, …) before the block scoped to it"
         )
 
     def declare_layer(self, name: str, kind: str, **kwargs) -> dict:
@@ -260,6 +341,11 @@ class Database:
         """
         views = kwargs.get("views")
         from_column = kwargs.get("from_column")
+        if from_column is not None and isinstance(kwargs.get("scope"), dict):
+            # Checked here as well as in the block, since the runtime path below rewrites the
+            # column into a members table before the block is built.
+            D.layer_block(name, kind, None, from_column=from_column, scope=kwargs["scope"],
+                          fields=kwargs.get("fields"))
         if self.built and from_column is not None:
             kwargs = dict(kwargs)
             kwargs.pop("from_column")
@@ -268,6 +354,7 @@ class Database:
             block["value_set"] = "open"
         else:
             block = D.layer_block(name, kind, self._points_source(views), **kwargs)
+        self._refuse_an_undeclared_group("layer", name, block)
         if from_column is not None:
             self.from_columns[name] = from_column
         return self._declared(self.blocks.add("layer", block))
@@ -388,16 +475,19 @@ class Database:
         )
         # Every source named on every block (§4.8): a view or an attribute that named none reads
         # `[defaults].source`, and writing it out is what lets a reader of `schema.toml` see the
-        # whole declaration.
+        # whole declaration. A group-scoped attribute with no source is the exception, and the one
+        # the rule would break: its values are read from each of its group's views' own points
+        # files, and `[defaults].source` does not reach it (configuration.md §1).
         for kind in ("view", "attribute"):
             for block in document.get(kind, []):
-                if "source" not in block:
-                    if self.default_source is None:
-                        raise Refusal(
-                            f"{kind} {block.get('name')!r} names no source and no source is "
-                            f"staged with default=True"
-                        )
-                    block["source"] = self.default_source
+                if "source" in block or block.get("scope"):
+                    continue
+                if self.default_source is None:
+                    raise Refusal(
+                        f"{kind} {block.get('name')!r} names no source and no source is "
+                        f"staged with default=True"
+                    )
+                block["source"] = self.default_source
         return document
 
     def _write_runtime_members(self) -> None:
@@ -478,12 +568,19 @@ class Database:
         self._copy_access_columns()
         self.id_map.save()
 
+    def view_entries(self) -> list[dict]:
+        """Every view this declaration carries, plain and grouped, as the commit works from it."""
+        return D.view_entries(
+            {"view": self.blocks.blocks["view"], "view_group": self.blocks.blocks["view_group"]},
+            self.default_source,
+        )
+
     def _view_sources(self) -> list[tuple[StagedSource, dict]]:
         pairs = []
-        for block in self.blocks.blocks["view"]:
-            staged = self.sources.get(block.get("source") or self.default_source)
+        for entry in self.view_entries():
+            staged = self.sources.get(entry["source"])
             if staged is not None:
-                pairs.append((staged, block))
+                pairs.append((staged, entry))
         return pairs
 
     def _copy_access_columns(self) -> None:
@@ -514,12 +611,20 @@ class Database:
             return [], []
         staged = self.sources[default]
         claimed = {"entity_id", "entity"}
-        for block in self.blocks.blocks["view"]:
-            if block.get("source") in (default, None):
-                claimed |= set(dict(block.get("fields", {})).values())
-                visibility = dict(block.get("point_visibility", {}))
-                if "field" in visibility:
-                    claimed.add(visibility["field"])
+        for entry in self.view_entries():
+            if entry["source"] != default:
+                continue
+            claimed |= {entry["x"], entry["y"]}
+            if entry["discriminator"]:
+                claimed.add(entry["discriminator"])
+            visibility = entry["point_visibility"]
+            if "field" in visibility:
+                claimed.add(visibility["field"])
+        for block in self.blocks.blocks["attribute"]:
+            # A group-scoped column with no source is read from each view's own points file, so it
+            # is claimed on the default source wherever that file is one of them.
+            if block.get("scope") and "source" not in block:
+                claimed.add(block.get("field") or block["name"])
         for block in self.blocks.blocks["layer"]:
             members = block.get("members")
             if isinstance(members, dict) and members.get("source") == default:
@@ -648,10 +753,11 @@ class Database:
                     )
         self.id_map.acknowledge_all()
         self.id_map.save()
-        # Every layer the build compiled exists at the running service, so the next commit declares
-        # only what was added after this one. The names are the emitter's, a label set expanding to
-        # a layer of its own.
-        self.commit_log.declare(payload["name"] for payload in self._payloads())
+        # Every declaration the build compiled exists at the running service, so the next commit
+        # declares only what was added after this one. The layer names are the emitter's, a label
+        # set expanding to a layer of its own; the views and the groups are recorded under C.held,
+        # which is how the planner reads them back.
+        self.commit_log.declare(C.declarations(self._payloads(), document))
         # The inline roster the build compiled: recorded as published so the next commit does not
         # offer the same keys to the control plane (§6.4).
         for layer, keys in C.inline_publications(document):
@@ -667,15 +773,20 @@ class Database:
 
     def _refuse_an_empty_build(self, document: dict) -> None:
         """A first commit with no points staged needs an explicit extent on every view (§6.1)."""
-        for block in document.get("view", []):
-            staged = self.sources.get(block.get("source"))
+        for entry in D.view_entries(document, self.default_source):
+            staged = self.sources.get(entry["source"])
             if staged is not None and staged.rows:
                 continue
-            extent = block.get("extent")
+            extent = entry["extent"]
             fitted = extent == "auto" or (isinstance(extent, dict) and extent.get("auto"))
             if fitted:
+                named = (
+                    f"view {entry['id']!r}"
+                    if entry["id"]
+                    else f"view group {entry['group']!r}"
+                )
                 raise Refusal(
-                    f"commit: view {block['name']!r} has no staged rows to fit a frame around. "
+                    f"commit: {named} has no staged rows to fit a frame around. "
                     f"An empty database needs extent= on every view"
                 )
 
@@ -709,11 +820,12 @@ class Database:
         credential = (self.path / ".tessera" / "operator.cred").read_text(encoding="utf-8")
         return Control(f"http://{listening.control}", credential.strip())
 
-    def _payloads(self) -> list[dict]:
-        """`tessera check --payloads` over this declaration: the `PUT /control/layers` bodies.
+    def _payloads(self) -> dict:
+        """`tessera check --payloads` over this declaration: one body per runtime declaration.
 
-        The emitter writes one object with a key per block kind; the paged commit sends the
-        layers and, not yet, the other four kinds.
+        The emitter writes one object with a key per block kind: `layers` and `attributes` as
+        bare bodies, and `views`, `view_groups` and `vocabularies` as `{name, body}`, each
+        addressed by a path segment. The paged commit sends the layers, views and view groups.
 
         The declaration minus its acquisition keys *is* the payload (configuration.md §2), so this
         is the binary serialising what it parsed rather than a second emitter in Python.
@@ -724,11 +836,11 @@ class Database:
         )
         if result.returncode != 0:
             raise Refusal(
-                "commit: the declaration did not check, so no layer payload was emitted\n"
+                "commit: the declaration did not check, so no declaration payload was emitted\n"
                 + result.stdout
                 + result.stderr
             )
-        return json.loads(result.stdout)["layers"]
+        return json.loads(result.stdout)
 
     def token(self, terms: Sequence[str] | None = None):
         """A viewer token for this database, minted from its own session credential (§8).
@@ -765,13 +877,13 @@ class Database:
     def _staged_terms(self, document: dict) -> list[str]:
         """Every access label this commit staged, plus each view's default label (§8)."""
         terms: list[str] = []
-        for block in document.get("view", []):
-            visibility = dict(block.get("point_visibility", {}))
+        for entry in D.view_entries(document, self.default_source):
+            visibility = entry["point_visibility"]
             default = visibility.get("default")
             if default:
                 terms.append(default)
             field = visibility.get("field")
-            source = block.get("source") or self.default_source
+            source = entry["source"]
             for staged in (self.sources.get(source), self.deltas.get(source)):
                 if staged is None or not field or field not in staged.columns:
                     continue

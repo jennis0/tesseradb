@@ -192,18 +192,21 @@ def test_a_label_set_from_a_mapping_is_written_as_a_key_contents_table(db):
     assert 'source = "topics"' in db.declaration
 
 
-def test_what_is_not_built_yet_says_so_and_names_what_writes_it(db):
-    db.stage("members", pd.DataFrame({"key": ["a"], "entity": [1]}))
+def test_form_bs_roster_table_goes_through_the_generic_form(db):
+    """Form A, the one-source form and `members` are `declare_view_group`'s three rosters; the
+    roster as a table has no parameter and is written as the block it is."""
     db.declare_view("s0")
-    for call in (
-        lambda: db.declare_view_group("g"),
-        lambda: db.declare_attribute("a", type="u8", scope={"group": "g"}),
-    ):
-        with pytest.raises(Refusal, match="not built yet"):
-            call()
-    # The generic form carries what the typed verbs do not: it writes whatever block it is given.
-    db.declare("view_group", {"name": "quarter", "source": "points"})
-    assert "[[view_group]]" in db.declaration
+    db.declare("view_group", {
+        "name": "quarter",
+        "source": "points",
+        "fields": Inline({"view": "quarter"}),
+        "extent": Inline({"x": [0.0, 1.0], "y": [0.0, 1.0]}),
+        "point_visibility": Inline({"default": "public"}),
+        "views": {"source": "roster", "fields": Inline({"key": "quarter"})},
+    })
+    text = db.declaration
+    assert "[[view_group]]" in text
+    assert '[view_group.views]\nsource = "roster"' in text
 
 
 def test_a_category_names_its_vocabulary_and_a_closed_one_names_its_values(db):

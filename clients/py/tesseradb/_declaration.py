@@ -51,6 +51,16 @@ class Declaration:
         name = block.get("name")
         if name is not None and any(b.get("name") == name for b in self.blocks[kind]):
             raise Refusal(f"declare: a {kind} named {name!r} is already declared")
+        if kind in ("view", "view_group") and name is not None:
+            # A view of a group is addressed `<group>:<key>` and a plain view by its own name
+            # (decision 0113), so one name held by both would make a request mean two things.
+            other = "view_group" if kind == "view" else "view"
+            if any(b.get("name") == name for b in self.blocks[other]):
+                held = "view group" if other == "view_group" else "view"
+                raise Refusal(
+                    f"declare: {name!r} is already declared as a {held}, and a group and a plain "
+                    f"view share one name space. Rename this one"
+                )
         self.blocks[kind].append(block)
         return block
 
@@ -60,8 +70,17 @@ class Declaration:
                 return block
         raise Refusal(f"no layer named {name!r} is declared")
 
+    def group(self, name: str) -> dict:
+        for block in self.blocks["view_group"]:
+            if block.get("name") == name:
+                return block
+        raise Refusal(f"no view group named {name!r} is declared")
+
     def view_names(self) -> list[str]:
         return [block["name"] for block in self.blocks["view"]]
+
+    def group_names(self) -> list[str]:
+        return [block["name"] for block in self.blocks["view_group"]]
 
     def attribute_names(self) -> set[str]:
         return {block["name"] for block in self.blocks["attribute"]}
@@ -73,13 +92,20 @@ class Declaration:
         """The first declared view unless another says `anchor=True` (decision 0112).
 
         Written into the TOML in either case, so a rebuild that reorders the blocks cannot re-key
-        the corpus.
+        the corpus. A declaration carrying only groups anchors on the first roster key of the first
+        group, `<group>:<key>`, that being a view's only address; a group whose views are minted
+        from its discriminator names none the SDK could write, and the build chooses.
         """
         anchored = [b["name"] for b in self.blocks["view"] if b.get(ANCHOR)]
         if anchored:
             return anchored[0]
         names = self.view_names()
-        return names[0] if names else None
+        if names:
+            return names[0]
+        for group in self.blocks["view_group"]:
+            for record in group.get("view") or []:
+                return f"{group['name']}:{record['key']}"
+        return None
 
     def document(
         self,
@@ -100,12 +126,15 @@ class Declaration:
         if defaults:
             document["defaults"] = defaults
 
-        views = self.view_names()
+        # A layer that named no views takes every one: the plain views by name, and each group by
+        # its own, which draws the layer on every view of it, present and future (views.md §3.5).
+        views = self.view_names() + self.group_names()
         declared_attributes = self.attribute_names()
         declared_vocabularies = self.vocabulary_names()
-        document["view"] = [
-            {k: v for k, v in block.items() if k != ANCHOR} for block in self.blocks["view"]
-        ]
+        if self.blocks["view"]:
+            document["view"] = [
+                {k: v for k, v in block.items() if k != ANCHOR} for block in self.blocks["view"]
+            ]
         if self.blocks["view_group"]:
             document["view_group"] = [dict(b) for b in self.blocks["view_group"]]
         vocabularies = [dict(b) for b in self.blocks["vocabulary"]]
@@ -166,6 +195,200 @@ def view_block(
     block["visibility"] = visibility
     block[ANCHOR] = anchor
     return block
+
+
+#: The roster's own keys, which a metadata name may not take: the inline block and the roster
+#: table would otherwise be ambiguous (views.md §3.2).
+ROSTER_KEYS = ("key", "source", "visibility")
+
+
+def view_group_block(
+    name: str,
+    views: Sequence[Any] | None = None,
+    source: str | None = None,
+    view_field: str | None = None,
+    members: str | None = None,
+    metadata: dict | None = None,
+    access: str | None = None,
+    default_label: str | None = "public",
+    extent: Any = None,
+    projection: str | None = None,
+    visibility: Any = "public",
+    title: str | None = None,
+) -> dict:
+    """One `[[view_group]]`: a set of views sharing every setting, differing by a key (§4.3).
+
+    Three of the four rosters have a parameter here. `views` is form A, one view per block, each
+    naming its own points file; `source` with `view_field` is one points file for every view, the
+    column saying which view a row lands in; `members` names the group whose views these are.
+    Form B, the roster as a table (`[view_group.views]`), has no parameter and is declared through
+    `declare('view_group', block)`.
+    """
+    projection = projection or "none"
+    declared = _metadata(name, metadata, view_field) if metadata else {}
+    records = [_roster_record(name, record, declared) for record in (views or [])]
+    if members is not None and (records or metadata):
+        raise Refusal(
+            f"view group {name!r}: keys, metadata and each view's own gate belong to the group "
+            f"that owns them, so a group naming members={members!r} declares no roster and no "
+            f"metadata. Declare them on {members!r}, and give this group its own source= and "
+            f"view_field="
+        )
+    if records and source is not None:
+        raise Refusal(
+            f"view group {name!r}: the roster decides where the points come from. Under views= "
+            f"each view's own file is that view, so the group declares no source of its own. Drop "
+            f"source= and view_field=, or drop views="
+        )
+    if (source is None) != (view_field is None):
+        raise Refusal(
+            f"view group {name!r}: one points file for every view needs the column saying which "
+            f"view each row lands in. Give source= and view_field= together"
+        )
+    if not records and source is None:
+        raise Refusal(
+            f"view group {name!r}: a group's points come from its views' own files (views=) or "
+            f"from one file with a discriminator (source= and view_field=)"
+        )
+    block: dict[str, Any] = {"name": name}
+    if title is not None:
+        block["title"] = title
+    block["projection"] = projection
+    if members is not None:
+        block["members"] = members
+    if source is not None:
+        block["source"] = source
+        block["fields"] = Inline({"view": view_field})
+    block["extent"] = _extent(extent, projection)
+    point_visibility: dict[str, str] = {}
+    if access is not None:
+        point_visibility["field"] = access
+    if default_label is not None:
+        point_visibility["default"] = default_label
+    if not point_visibility:
+        raise Refusal(
+            f"view group {name!r}: a view names no label for any point. Give access= or "
+            f"default_label="
+        )
+    block["point_visibility"] = Inline(point_visibility)
+    block["visibility"] = visibility
+    if declared:
+        block["metadata"] = Inline(
+            {
+                key: Inline(value) if isinstance(value, dict) else value
+                for key, value in declared.items()
+            }
+        )
+    if records:
+        block["view"] = records
+    return block
+
+
+def _metadata(group: str, metadata: dict, view_field: str | None) -> dict:
+    for key in metadata:
+        if key in ROSTER_KEYS or key == view_field:
+            raise Refusal(
+                f"view group {group!r}: {key!r} is the roster's own key, so a per-view value of "
+                f"that name would make the roster record ambiguous. Rename the metadata name"
+            )
+    return dict(metadata)
+
+
+def roster_record(group: str, key: str, source: str | None, visibility: Any, values: dict,
+                  declared: dict | None) -> dict:
+    """One `[[view_group.view]]`: the key, its points file, its gate and its per-view values."""
+    record: dict[str, Any] = {"key": key}
+    if source is not None:
+        record["source"] = source
+    if visibility is not None:
+        record["visibility"] = visibility
+    record.update(values)
+    return _roster_record(group, record, declared)
+
+
+def _roster_record(group: str, record: Any, declared: dict | None) -> dict:
+    record = dict(record)
+    if "key" not in record:
+        raise Refusal(f"view group {group!r}: a view of a group names its key. Give key=")
+    key = record["key"]
+    declared = set(declared or {})
+    carried = set(record) - set(ROSTER_KEYS)
+    # The record is immutable (views.md §3.2), so a value left out is one that can never be
+    # supplied, and a name the group did not declare has no slot to sit in.
+    missing = sorted(declared - carried)
+    if missing:
+        raise Refusal(
+            f"view group {group!r}, view {key!r}: the roster record is immutable, so a metadata "
+            f"value left out can never be supplied. Give " + ", ".join(missing)
+        )
+    undeclared = sorted(carried - declared)
+    if undeclared:
+        raise Refusal(
+            f"view group {group!r}, view {key!r}: {', '.join(undeclared)} is not a metadata name "
+            f"this group declares. Declare it in metadata=, or drop it from the record"
+        )
+    return record
+
+
+def coordinate_columns(block: dict) -> tuple[str, str]:
+    """The columns a view's points file carries its coordinates in.
+
+    Under a projection they are `lon` and `lat` and otherwise `x` and `y`, each overridable through
+    the block's own `fields` (configuration.md §1). A group declares them once for every view of
+    it, so this reads the group's block for a view of one.
+    """
+    fields = dict(block.get("fields", {}))
+    if block.get("projection", "none") == "none":
+        return fields.get("x") or "x", fields.get("y") or "y"
+    return fields.get("lon") or "lon", fields.get("lat") or "lat"
+
+
+def view_entries(document: dict, default_source: str | None) -> list[dict]:
+    """Every view the declaration carries, plain and grouped, as one entry each.
+
+    An entry is what the commit works from: the view's id, the source its points are staged in,
+    where its coordinates and its labels are, and, for a group whose views are its source's own
+    distinct values, the discriminator to split those rows by. A group under that spelling names
+    no keys, so its entry carries `id = None` and the rows decide.
+    """
+    entries: list[dict] = []
+    for block in document.get("view", []):
+        entries.append(_entry(block, block["name"], block.get("source") or default_source, None))
+    for group in document.get("view_group", []):
+        fields = dict(group.get("fields", {}))
+        records = group.get("view") or []
+        if records:
+            for record in records:
+                entries.append(
+                    _entry(
+                        group,
+                        f"{group['name']}:{record['key']}",
+                        record.get("source"),
+                        record["key"],
+                    )
+                )
+        elif group.get("source"):
+            entry = _entry(group, None, group["source"], None)
+            entry["discriminator"] = fields.get("view")
+            entries.append(entry)
+    return entries
+
+
+def _entry(block: dict, view_id: str | None, source: str | None, key: str | None) -> dict:
+    x, y = coordinate_columns(block)
+    is_group = "name" in block and view_id != block.get("name")
+    return {
+        "id": view_id,
+        "source": source,
+        "x": x,
+        "y": y,
+        "extent": block.get("extent"),
+        "point_visibility": dict(block.get("point_visibility", {})),
+        "group": block["name"] if is_group else None,
+        "key": key,
+        "discriminator": None,
+        "block": block,
+    }
 
 
 def _coordinate_fields(x: str, y: str, projection: str) -> Inline:
@@ -243,15 +466,13 @@ def attribute_block(
 ) -> dict:
     if type == "category" and vocabulary is None:
         raise Refusal(f"attribute {name!r}: a category names its vocabulary. Give vocabulary=")
-    if scope != "entity":
-        raise Refusal(
-            f"attribute {name!r}: not built yet, a group-scoped attribute. "
-            f"declare('attribute', block) writes the block as given"
-        )
+    group = _attribute_scope(name, scope, fields, source)
     block: dict[str, Any] = {"name": name}
     if title is not None:
         block["title"] = title
     block["type"] = type
+    if group is not None:
+        block["scope"] = Inline({"group": group})
     if vocabulary is not None:
         block["vocabulary"] = vocabulary
     if field is not None:
@@ -269,6 +490,25 @@ def attribute_block(
     if index is not None:
         block["index"] = index
     return block
+
+
+def _attribute_scope(name: str, scope: Any, fields: dict | None, source: str | None) -> str | None:
+    """`entity`, or the view group whose views this column holds one value per (views.md §5)."""
+    if scope == "entity" or scope is None:
+        return None
+    if isinstance(scope, dict) and set(scope) != {"group"}:
+        raise Refusal(
+            f"attribute {name!r}: a scoped attribute names one view group, as {{'group': name}}, "
+            f"not {sorted(scope)!r}"
+        )
+    group = scope["group"] if isinstance(scope, dict) else scope
+    if source is not None and "view" not in dict(fields or {}):
+        raise Refusal(
+            f"attribute {name!r}: a value scoped to group {group!r} belongs to one view, so a "
+            f"source of its own carries the column saying which. Give fields={{'view': column}}, "
+            f"or drop source= to read the value from each view's own points file"
+        )
+    return group
 
 
 def layer_block(
@@ -302,7 +542,7 @@ def layer_block(
     if kind not in HIERARCHY_KINDS:
         raise Refusal(f"layer {name!r}: {kind!r} is not a hierarchy kind: {HIERARCHY_KINDS}")
     membership_value, how = _membership(name, membership)
-    group = _scope(name, scope, fields)
+    group = _scope(name, scope, fields, from_column)
     if withdraw_on_member_deletion:
         raise Refusal(
             f"layer {name!r}: withdraw_on_member_deletion is specified and not built "
@@ -346,7 +586,12 @@ def layer_block(
         block["source"] = source
     if group is not None:
         block["scope"] = Inline({"group": group})
-    block["views"] = list(views) if views is not None else VIEWS_ALL
+    if views is not None:
+        block["views"] = list(views)
+    else:
+        # A scoped layer's views may name only its own group and the groups sharing its views
+        # (configuration.md §1), so "every view" is that group and nothing else.
+        block["views"] = [group] if group is not None else VIEWS_ALL
     block["membership"] = membership_value
     if how == "spatial":
         block["default_space"] = default_space
@@ -406,7 +651,9 @@ def _membership(name: str, membership: Any) -> tuple[Any, str]:
     return membership, membership
 
 
-def _scope(name: str, scope: Any, fields: dict | None) -> str | None:
+def _scope(
+    name: str, scope: Any, fields: dict | None, from_column: str | None = None
+) -> str | None:
     """`entity`, or the view group a group-scoped layer keeps one artifact set per view of."""
     if scope == "entity" or scope is None:
         return None
@@ -416,6 +663,13 @@ def _scope(name: str, scope: Any, fields: dict | None) -> str | None:
             f"{sorted(scope)!r}"
         )
     group = scope["group"] if isinstance(scope, dict) else scope
+    if from_column is not None:
+        raise Refusal(
+            f"layer {name!r}: a layer scoped to group {group!r} keys its artifacts per view, and "
+            f"every published record carries the view it belongs to, which one key per point "
+            f"cannot say. Declare it with source= and members= over tables carrying that column, "
+            f"and fields={{'view': column}}"
+        )
     if not fields or "view" not in dict(fields):
         raise Refusal(
             f"layer {name!r}: a layer scoped to group {group!r} keys its artifacts per view, so "
