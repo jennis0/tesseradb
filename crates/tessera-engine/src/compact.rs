@@ -634,6 +634,30 @@ pub(crate) struct FoldResources {
 /// says nothing about this one.
 const FOLD_MEMORY_SAFETY_FACTOR: u64 = 2;
 
+/// Workers the fold's term-image derivation runs across.
+///
+/// **One**, because [`execute`] runs on one dedicated thread. A fold's input is the corpus, and
+/// occupying request-serving workers for the length of one is the maintenance schedule reaching
+/// the request path (decision 0043). Sequential also bounds the pass's memory to the one image and
+/// the one scratch [`memory_estimate`] charges. The build passes `rayon::current_num_threads()`
+/// instead. The bytes are identical either way: the derivation reads and appends a window at a
+/// time in term order, so the width is a choice about the host and not about the file.
+const TERM_IMAGE_THREADS: usize = 1;
+
+/// The publication number the fold's term-image files are named after
+/// (`tessera_store::derived::term_image_file`).
+///
+/// **Zero, and the fold cannot do better.** A derived file is named after the publication that
+/// introduces it, and a fold's side-manifest number is allocated on the executor at publication,
+/// hours after this pass writes the file. It has to be: a number taken at dispatch would sit below
+/// every flush that published during the flight, and the fold's `SEGMENTS-<n>.json` would then lose
+/// to theirs at the next open. What the number is for is uniqueness within a prefix, and that holds
+/// here without it. A fold writes into a prefix it has just created, images are written once per
+/// prefix by whichever publication creates it, and no flush, merge or coalesce writes this kind at
+/// all (ruling 5, `docs/evidence/memos/2026-09-17-term-images-handover.md`). The build names its
+/// own files from the same zero, being publication zero.
+const TERM_IMAGE_MANIFEST_N: u64 = 0;
+
 /// The fold's peak **un-reclaimable** memory in bytes, from quantities the plan already knows.
 ///
 /// **Un-reclaimable is the whole of what this estimates, and it is not what a fold's RSS reads.**
@@ -1087,6 +1111,16 @@ impl Staircase {
     }
 }
 
+/// One view's term images as pass 2b wrote them: what the new side-manifest must name, and what
+/// the publication logs about them.
+///
+/// The summary rides along rather than being recomputed from the file, because the wall clock and
+/// the counts are the pass's own and nothing in the file records them.
+pub(crate) struct FoldedTermImages {
+    pub(crate) extent: tessera_store::manifest::TermImageExtent,
+    pub(crate) summary: tessera_store::term_images::TermImageSummary,
+}
+
 /// A fold whose files are durable under a prefix nothing yet names.
 pub(crate) struct CompletedFold {
     pub(crate) plan: FoldPlan,
@@ -1099,6 +1133,10 @@ pub(crate) struct CompletedFold {
     /// The new run 0's prefix-relative path — `None` when the deployment holds no external ids at
     /// all, in which case pass 3 wrote nothing and the new manifest lists no runs.
     pub(crate) external_id_run: Option<String>,
+    /// One entry per view pass 2b wrote images for, in the plan's view order. The extents go into
+    /// the new `SEGMENTS-<n>.json` unchanged: the images are the fold's own files under the fold's
+    /// own prefix, so there is nothing for the publication to rebase.
+    pub(crate) term_images: Vec<FoldedTermImages>,
     /// The largest new base segment's `columns.arrow + morton.u32 + cuts.u32` bytes — compaction
     /// §4 step 3's operand, computed here because these are the files that were just written.
     /// The same three files the server sums at startup for the merge-size relation
@@ -1317,9 +1355,121 @@ pub(crate) fn execute(plan: FoldPlan, ctx: FoldContext) -> Result<CompletedFold,
         outcome?;
         pairs.finish().map_err(|e| failed("pass 2 (pairs)", &e))?;
     }
-    written.push((postings_rel, postings_path));
+    written.push((postings_rel, postings_path.clone()));
     written.push((pairs_rel, pairs_path));
     stairs.record("2 postings");
+
+    // ---- pass 2b: the term images -------------------------------------------------------------
+    //
+    // One file per view, each term's new base posting projected into the view's new row space
+    // (`tessera_store::term_images`). Here rather than at publication because the derivation is
+    // minutes of work at corpus scale and the executor must stay free to reach a queued deny; and
+    // after pass 2 rather than beside pass 1 because the postings it reads are the ones pass 2 has
+    // just written, from which every folded deletion is already gone. A deleted entity is in no
+    // posting, so it is in no image, and that is the whole of the deletion rule reaching this
+    // artefact. There is no second removal route (write-path §5.4).
+    //
+    // **The new base only.** Rows a later flush appends are an extent, and an extent gets no
+    // images: a session unions the images of the terms it holds and walks the rest, and the rows
+    // it arrives at are the same either way.
+    let mut term_images: Vec<FoldedTermImages> = Vec::new();
+    {
+        let postings = PostingsReader::open(&postings_path, true)
+            .map_err(|e| failed("pass 2b (term images: the new postings)", &e))?;
+        let dict_len = postings.term_count();
+        // The counter that names the files, as a publication's own does
+        // (`tessera_store::derived::DerivedIndex`). This one belongs to the fold thread: the
+        // publication's counter is created hours later and numbers the structures the executor
+        // writes. The two cannot collide, because the kinds are different and this prefix is one
+        // no other publication has ever written a term image into.
+        let mut index = tessera_store::derived::DerivedIndex::default();
+        // **Over the descriptors pass 1 pushed.** Each carries the view, its incarnation and the
+        // rows the new base holds: the three fields the opener matches an entry on, and the two
+        // the stamp must agree with. Reading them from the plan instead would be a second
+        // statement of what pass 1 wrote.
+        for segment in &segments {
+            // Neither has an image to hold: projection maps entities to rows, and a view with no
+            // row projects every posting to the empty set. The build's pass skips both for the
+            // same reason, and a view with no entry is one the opener leaves walking.
+            if segment.row_count == 0 || dict_len == 0 {
+                continue;
+            }
+            let permutation_path = ctx.to_prefix_dir.join(format!(
+                "partitions/{}/{}/permutation.bin",
+                plan.partition,
+                tessera_store::view_rel(&segment.view)
+            ));
+            // Reloaded from the file pass 1 wrote rather than kept from that pass, so the images
+            // are a function of the published permutation. The build's pass loads it for the same
+            // reason.
+            let permutation = tessera_store::Permutation::load(&permutation_path)
+                .map_err(|e| failed("pass 2b (term images: the new permutation)", &e))?;
+            let space = tessera_store::RowSpace::new(Arc::new(permutation), segment.row_count);
+            let stamp = tessera_store::term_images::TermImageStamp {
+                prefix: ctx.to_prefix.clone(),
+                view: segment.view.clone(),
+                base_seg_id: segment.seg_id.clone(),
+                incarnation: segment.incarnation,
+                base_rows: segment.row_count,
+                bound: space.base().bound(),
+            };
+            let file = tessera_store::derived::term_image_file(
+                &ctx.to_prefix_dir,
+                &plan.partition,
+                TERM_IMAGE_MANIFEST_N,
+                &mut index,
+            )
+            .map_err(|e| failed("pass 2b (term images: naming the file)", &e))?;
+
+            // The one adapter between the postings format and the derivation: `tessera-store` does
+            // not depend on `tessera-authz`, so the shape is handed across. `term_images_pass::run`
+            // in `tessera-build` holds the identical six lines, and `containment` here holds them
+            // for its own derivation.
+            let walk = |term: u32,
+                        visit: &mut dyn FnMut(tessera_store::derived::PostingSlice<'_>)|
+             -> std::io::Result<()> {
+                if let Some(posting) = postings.posting_at(term)? {
+                    match posting {
+                        tessera_authz::PostingRef::Array(bytes) => {
+                            visit(tessera_store::derived::PostingSlice::Array(bytes))
+                        }
+                        tessera_authz::PostingRef::Roaring(bitmap) => {
+                            visit(tessera_store::derived::PostingSlice::Roaring(&bitmap))
+                        }
+                    }
+                }
+                Ok(())
+            };
+            let summary = tessera_store::term_images::derive_term_images(
+                &space,
+                dict_len,
+                &walk,
+                &stamp,
+                &file.path,
+                tessera_store::term_images::DeriveOptions {
+                    threads: TERM_IMAGE_THREADS,
+                },
+            )
+            .map_err(|e| failed("pass 2b (term images: the derivation)", &e))?;
+
+            // Pass 5 digests and syncs what `written` names, the file's directory entry included
+            // (`tessera_store::fsync_written`), so this pass syncs nothing of its own. The build's
+            // does, because its digest pass has no such list.
+            written.push((file.rel.clone(), file.path));
+            term_images.push(FoldedTermImages {
+                extent: tessera_store::manifest::TermImageExtent {
+                    path: file.rel,
+                    view: segment.view.clone(),
+                    incarnation: segment.incarnation,
+                    dict_len,
+                    keep_rows_per_container: tessera_store::term_images::KEEP_ROWS_PER_CONTAINER
+                        as u32,
+                },
+                summary,
+            });
+        }
+    }
+    stairs.record("2b term images");
 
     // ---- pass 3 — external ids ----------------------------------------------------------------
     //
@@ -1818,6 +1968,7 @@ pub(crate) fn execute(plan: FoldPlan, ctx: FoldContext) -> Result<CompletedFold,
         segments,
         files,
         external_id_run,
+        term_images,
         base_segment_bytes,
         cost: stairs.into_cost(),
         finished,
