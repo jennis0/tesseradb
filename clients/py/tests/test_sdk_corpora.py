@@ -7,10 +7,10 @@ verbs, written, parsed, and compared with the committed `corpus.toml` block by b
 key. `test_sdk_corpus.py` carries the two corpora whose files can be present, where the comparison
 is the binary's own disclosure table.
 
-Every source is staged as a placeholder parquet carrying the entity id, a view's coordinate columns
-and its access column. That is what the SDK reads to settle the id map and to decide what to infer;
-no other column is staged, so nothing is inferred and every block compared is one a call below
-wrote.
+Every source is staged as a placeholder parquet carrying the id column, a view's coordinate columns
+and its access column. That is what the SDK reads to see where identity is and to decide what to
+infer; no other column is staged, so nothing is inferred and every block compared is one a call
+below wrote.
 
 **The normalisations.** Four of them fill the committed document in with what §4.8 requires the
 SDK to write, so the test fails if the SDK stops writing one; the rest are applied to both

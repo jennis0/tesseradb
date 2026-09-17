@@ -131,7 +131,8 @@ def test_a_delta_of_new_papers_with_a_cluster_and_a_label_is_served(served, corp
     # its labels.
     kinds = [line.split()[0] for line in plan.plan]
     assert kinds[0] == "points"
-    assert plan.plan[-1].startswith("flush")
+    # The last page of the plan is the one that waits for the publication (decision 0144).
+    assert plan.plan[-1].endswith("wait for the publication it lands in")
     assert plan.plan.index(next(p for p in plan.plan if "clusters/kmeans" in p)) < plan.plan.index(
         next(p for p in plan.plan if "topics/kmeans" in p)
     )
@@ -186,66 +187,85 @@ def test_the_new_label_is_served_over_the_rows_the_same_commit_ingested(served, 
     assert served_labels == [("topics/kmeans", "k-new-label", ["Audio diffusion"])]
 
 
-def test_the_same_delta_staged_twice_on_an_in_place_corpus_sends_nothing_the_second_time(
-    served, corpus
-):
-    """§3: the same frame staged again is wholly already present, and nothing is sent.
+def test_a_re_staged_frame_is_sent_again_and_the_database_answers_for_it(served, corpus):
+    """§3: a re-run of a cell is a re-run, and the database is what says the rows are there.
 
-    The notebook corpus is read where it lies, so the map is the identity over its ids and nothing
-    is assigned. An id still carries a state, and it is the state that tells a delta's held rows
-    from its new ones: without one the page would be offered again at every commit and, past the
-    WAL retention window, refused as a page of duplicates.
+    The SDK keeps no record of what it sent, so the same frame staged again is sent again. What
+    happens then is the server's to decide, and it is two different things: identical bytes under
+    the batch id they were first sent under are a **replay** and land nothing (write-path §2.4),
+    while a page naming ids the database holds is a `409` on the whole page, reported by the page
+    it refused and applied nowhere.
     """
     db = notebook(served, corpus)
     delta = new_papers(db)
     db.stage("points", delta)
-    stage_the_new_cluster(db)
     first = db.commit()
     assert first.ok and first.rows_accepted == {"s0": len(NEW_IDS)}
-    assert first.artifacts_minted == 2
+    after = viewport(db, "s0", whole_frame(db))["counts"]["visible"]
 
     db.stage("points", delta)
-    stage_the_new_cluster(db)
     plan = db.check()
-    assert plan.ok, plan
-    assert any("already holds" in str(f) for f in plan.findings), plan
-    # Nothing at all: the rows are held, every set was sent whole at the first commit, and the
-    # fixed parts are the ones the publication carried, so the plan has no request in it.
-    assert plan.plan == [], plan
-    again = db.commit()
-    assert again.ok, again
-    assert again.plan == [] and again.rows_accepted == {} and again.artifacts_minted == 0
-    assert not again.refusals
+    assert len(plan.plan) == 1 and plan.plan[0].startswith("points"), plan
+    replayed = db.commit()
+    assert replayed.ok, replayed
+    # The server says it applied nothing rather than the SDK inferring it from a count.
+    assert len(replayed.replayed) == 1 and replayed.rows_accepted == {}
+    assert viewport(db, "s0", whole_frame(db))["counts"]["visible"] == after
+
+    # The same rows moved a little: different bytes, so a batch the server has not seen, and
+    # every id on it is one it holds.
+    db.stage("points", new_papers(db, x_offset=0.5))
+    refused = db.commit()
+    assert not refused.ok
+    assert [r["status"] for r in refused.refusals] == [409]
+    assert refused.rows_accepted == {}
+    assert viewport(db, "s0", whole_frame(db))["counts"]["visible"] == after
 
 
 # ---------------------------------------------------------------------------- §10.4
 
 
-def test_a_second_clustering_over_existing_rows_is_published_and_served(served, corpus):
-    """python-sdk.md §10.4: a column staged over held ids, declared after the first commit."""
+def test_a_second_clustering_over_held_rows_is_published_through_its_tables(served, corpus):
+    """python-sdk.md §10.4, on §6.2 step 3's terms: a clustering over rows the database holds.
+
+    `from_column=` mints artifacts from the rows that carry the column, which happens at the build
+    and on the ingest route; rows that are already there carry nothing. So the layer is declared
+    over its own tables and the keys are published with their members.
+    """
     db = notebook(served, corpus)
     held = [7, 8, 9, 10, 11]
+    db.declare_layer("clusters/second", kind="flat", source="second", members="second_members")
     db.stage(
-        "points",
+        "second",
+        pa.table({"level": pa.array([0, 0], pa.uint32()),
+                  "key": pa.array(["c2-a", "c2-b"], pa.string())}),
+    )
+    db.stage(
+        "second_members",
         pa.table(
             {
-                "entity_id": pa.array(held, pa.uint64()),
-                "cluster2": pa.array(["c2-a", "c2-a", "c2-b", "c2-b", "c2-b"], pa.string()),
+                "level": pa.array([0] * len(held), pa.uint32()),
+                "key": pa.array(["c2-a", "c2-a", "c2-b", "c2-b", "c2-b"], pa.string()),
+                "entity": pa.array(held, pa.uint64()),
             }
         ),
     )
-    db.declare_layer("clusters/second", kind="flat", from_column="cluster2")
 
     report = db.commit()
     assert report.ok, report
-    # No row was created: every id is one this database already holds, so the keys travel as
-    # publications rather than through the values route, which mints nothing.
     assert report.rows_accepted == {}
     assert report.artifacts_minted == 2
-    assert any("already present" in str(f) for f in report.findings)
 
-    rows = {row["key"]: row["masked_count"] for row in browse(db, "s0", "clusters/second")["artifacts"]}
+    rows = {row["key"]: row["masked_count"]
+            for row in browse(db, "s0", "clusters/second")["artifacts"]}
     assert rows == {"c2-a": 2, "c2-b": 3}
+
+
+def test_a_from_column_layer_over_held_rows_is_refused_naming_the_tables(served, corpus):
+    """§6.2 step 3: the values route fills a column and mints no artifact."""
+    db = notebook(served, corpus)
+    with pytest.raises(Refusal, match="through its tables"):
+        db.declare_layer("clusters/third", kind="flat", from_column="cluster3")
 
 
 # ---------------------------------------------------------------------------- values
@@ -310,7 +330,7 @@ def test_a_values_delta_fills_an_indexed_attribute_and_a_filter_finds_it(served,
 # ---------------------------------------------------------------------------- §3, §6.4
 
 
-def test_a_cell_re_run_is_wholly_already_present_and_a_changed_value_is_a_409(served, corpus):
+def test_a_values_cell_re_run_is_sent_again_and_lands_on_the_cells_it_landed_on(served, corpus):
     db = served(small)
     delta = pa.table(
         {"id": pa.array(["p4", "p5"], pa.string()), "score": pa.array([4.0, 5.0], pa.float64())}
@@ -319,13 +339,12 @@ def test_a_cell_re_run_is_wholly_already_present_and_a_changed_value_is_a_409(se
     first = db.commit()
     assert first.ok and first.values_filled == 2
 
-    # The same frame staged again: the same bytes, so the same batch id, which the commit log
-    # already holds. Nothing is sent and the report says so.
+    # The same frame staged again is sent again: a value that matches the cell it names is
+    # accepted with no effect, which is the route's own dedupe rather than a log in the SDK.
     db.stage("scores", delta, id="id")
     again = db.commit()
     assert again.ok, again
-    assert again.skipped and again.values_filled == 0
-    assert again.already_present >= len(again.skipped)
+    assert again.values_filled == 0
 
     # A changed value on a held cell is a `409` on that part, reported and not retried: an edit is
     # a delete and a re-ingest (decision 0047), and the SDK does not do that for the user.
@@ -344,6 +363,56 @@ def test_a_cell_re_run_is_wholly_already_present_and_a_changed_value_is_a_409(se
     answer = viewport(db, "map", [-5.0, -5.0, 40.0, 40.0],
                       filters={"score": {"range": {"gte": 8.0}}})
     assert answer["counts"]["matched"] == 0
+
+
+def test_a_values_only_commit_returns_with_its_effect_visible(served, corpus):
+    """§6.2 step 5: the last page waits for the publication its acknowledgement names, and a
+    commit whose only work was filling cells reaches it like any other (decision 0144)."""
+    db = served(small)
+    db.stage(
+        "scores",
+        pa.table(
+            {"id": pa.array(["p8", "p9"], pa.string()),
+             "score": pa.array([8.0, 9.0], pa.float64())}
+        ),
+        id="id",
+    )
+    report = db.commit()
+    assert report.ok, report
+    assert not any(line.startswith("points") for line in report.plan)
+    assert report.flush_wait is not None and report.flush_reached
+    # The acknowledgement named the publication its work is visible at, and the report prints it.
+    assert report.publication is not None
+    assert f"for publication {report.publication}" in str(report)
+    # The cell after the commit sees the values, with no wait of its own.
+    answer = viewport(db, "map", [-5.0, -5.0, 40.0, 40.0],
+                      filters={"score": {"range": {"gte": 8.0}}})
+    assert answer["counts"]["matched"] == 2
+
+
+def test_an_artifacts_only_commit_returns_with_its_effect_visible(served, corpus):
+    """The same wait, for a commit whose only work was publishing artifacts."""
+    db = served(clustering)
+    db.stage(
+        "cl",
+        pa.table({"level": pa.array([0], pa.uint32()), "key": pa.array(["c1"], pa.string())}),
+    )
+    db.stage(
+        "clm",
+        pa.table(
+            {
+                "level": pa.array([0] * 4, pa.uint32()),
+                "key": pa.array(["c1"] * 4, pa.string()),
+                "entity": pa.array([f"p{i}" for i in range(4)], pa.string()),
+            }
+        ),
+    )
+    report = db.commit()
+    assert report.ok, report
+    assert report.artifacts_minted == 1
+    assert report.flush_wait is not None and report.flush_reached
+    rows = {row["key"]: row["masked_count"] for row in browse(db, "map", "clusters")["artifacts"]}
+    assert rows == {"c0": 20, "c1": 4}
 
 
 # ---------------------------------------------------------------------------- §6.5
@@ -399,11 +468,10 @@ def test_leave_shrinks_a_generating_set_and_emptying_it_withdraws_the_content(se
 # ---------------------------------------------------------------------------- §6.3
 
 
-def test_the_pre_flight_reports_a_row_outside_the_frame_and_refuses_an_undeclared_column(
-    served, corpus
-):
+def test_a_row_outside_the_frame_refuses_the_commit_and_nothing_is_sent(served, corpus):
+    """§6.3: the pre-flight reports and sends nothing, and drops no row to send the rest."""
     db = served(small)
-    # Out of frame: dropped and listed, with the frame. The server would refuse the whole page.
+    before = viewport(db, "map", [-5.0, -5.0, 40.0, 40.0])["counts"]["visible"]
     db.stage(
         "points",
         pa.table(
@@ -417,10 +485,101 @@ def test_the_pre_flight_reports_a_row_outside_the_frame_and_refuses_an_undeclare
         id="id",
     )
     plan = db.check()
+    assert not plan.ok
     assert any("outside view 'map''s frame" in str(f) for f in plan.findings), plan
     report = db.commit()
-    assert report.ok, report
-    assert report.rows_accepted == {"map": 1}
+    assert not report.ok, report
+    assert report.rows_accepted == {} and not report.refusals
+    # Neither row was sent: the one inside the frame is not a commit the user staged on its own.
+    assert viewport(db, "map", [-5.0, -5.0, 40.0, 40.0])["counts"]["visible"] == before
+
+    # The remedy is the rows. With the far one moved inside, both go.
+    db.stage(
+        "points",
+        pa.table(
+            {
+                "id": pa.array(["far", "near"], pa.string()),
+                "x": pa.array([4.5, 3.5], pa.float64()),
+                "y": pa.array([0.0, 0.0], pa.float64()),
+                "labels": pa.array([["public"]] * 2, pa.list_(pa.string())),
+            }
+        ),
+        id="id",
+    )
+    again = db.commit()
+    assert again.ok, again
+    assert again.rows_accepted == {"map": 2}
+
+
+def test_a_delta_carrying_one_coordinate_column_is_refused_naming_both(served, corpus):
+    """§6.2 step 2: a row with half a position is not a point, and no other route takes one."""
+    db = served(small)
+    db.stage(
+        "points",
+        pa.table(
+            {
+                "id": pa.array(["p10"], pa.string()),
+                "x": pa.array([3.0], pa.float64()),
+                "labels": pa.array([["public"]], pa.list_(pa.string())),
+            }
+        ),
+        id="id",
+    )
+    plan = db.check()
+    assert not plan.ok
+    assert any("coordinate column" in str(f) and "'y'" in str(f) for f in plan.findings), plan
+    assert plan.plan == []
+
+
+def test_a_rendered_column_on_a_values_delta_refuses_the_commit(served, corpus):
+    """§6.3: the route refuses a rendered column, and the SDK does not send the delta without it."""
+    def with_a_rendered_score(db) -> None:
+        db.stage(
+            "points",
+            pa.table(
+                {
+                    "id": pa.array([f"p{i}" for i in range(20)], pa.string()),
+                    "x": pa.array([float(i) for i in range(20)], pa.float64()),
+                    "y": pa.array([0.0] * 20, pa.float64()),
+                    "labels": pa.array([["public"]] * 20, pa.list_(pa.string())),
+                }
+            ),
+            id="id",
+            default=True,
+        )
+        db.stage(
+            "scores",
+            pa.table(
+                {
+                    "id": pa.array(["p0"], pa.string()),
+                    "score": pa.array([0.5], pa.float64()),
+                    "note": pa.array([0.5], pa.float64()),
+                }
+            ),
+            id="id",
+        )
+        db.declare_view(
+            "map", source="points", access="labels", extent={"x": [-5, 40], "y": [-5, 40]}
+        )
+        db.declare_attribute("score", type="f64", source="scores", index=True, render=False)
+        db.declare_attribute("note", type="f64", source="scores", render=True)
+
+    db = served(with_a_rendered_score)
+    db.stage(
+        "scores",
+        pa.table(
+            {
+                "id": pa.array(["p1"], pa.string()),
+                "score": pa.array([1.0], pa.float64()),
+                "note": pa.array([1.0], pa.float64()),
+            }
+        ),
+        id="id",
+    )
+    plan = db.check()
+    assert not plan.ok
+    assert any("rendered column" in str(f) for f in plan.findings), plan
+    assert plan.plan == []
 
 
 def test_the_pre_flight_refuses_a_column_no_block_declares(served, corpus):
@@ -438,15 +597,6 @@ def test_the_pre_flight_refuses_a_column_no_block_declares(served, corpus):
     )
     with pytest.raises(Refusal, match="sentiment"):
         db.check()
-
-
-def test_the_pre_flight_lists_held_rows_and_sends_none_of_them(served, corpus):
-    """§6.3: a row whose id the map holds as acknowledged is listed and not sent."""
-    db = notebook(served, corpus)
-    db.stage("points", new_papers(db, ids=[7, 8]))
-    plan = db.check()
-    assert any("already holds" in str(f) for f in plan.findings), plan
-    assert not any(line.startswith("points") for line in plan.plan)
 
 
 def test_a_labels_delta_whose_clustering_is_neither_held_nor_staged_is_refused(served, corpus):
@@ -485,14 +635,36 @@ def test_a_labels_delta_whose_clustering_is_neither_held_nor_staged_is_refused(s
     assert any("labels delta before its clustering" in str(f) for f in plan.findings), plan
 
 
-def test_a_key_column_for_a_layer_with_supplied_content_is_refused(served, corpus):
-    db = served(small)
-    db.declare_layer(
-        "topics/inline",
-        kind="flat",
-        from_column="topic",
-        supplied=[("topic", "text", "inherited")],
-    )
+def test_a_key_column_staged_for_a_layer_with_supplied_content_is_refused(served, corpus):
+    """§6.3: an artifact served without content its layer declares cannot be told from one whose
+    content was withheld, so such a layer takes an artifacts table."""
+
+    def with_a_supplied_layer(db) -> None:
+        db.stage(
+            "points",
+            pa.table(
+                {
+                    "id": pa.array([f"p{i}" for i in range(20)], pa.string()),
+                    "x": pa.array([float(i) for i in range(20)], pa.float64()),
+                    "y": pa.array([0.0] * 20, pa.float64()),
+                    "labels": pa.array([["public"]] * 20, pa.list_(pa.string())),
+                    "topic": pa.array(["t"] * 20, pa.string()),
+                }
+            ),
+            id="id",
+            default=True,
+        )
+        db.declare_view(
+            "map", source="points", access="labels", extent={"x": [-5, 40], "y": [-5, 40]}
+        )
+        db.declare_layer(
+            "topics/inline",
+            kind="flat",
+            from_column="topic",
+            supplied=[("topic", "text", "inherited")],
+        )
+
+    db = served(with_a_supplied_layer)
     db.stage(
         "points",
         pa.table(
@@ -620,35 +792,7 @@ def test_a_label_set_declared_after_the_first_commit_is_declared_and_served(serv
     report = db.commit()
     assert report.ok, report
     assert report.artifacts_minted == 1
-    assert db.commit_log.declared("topics")
+    # The database is what says the layer is there, and the next commit reads it from there.
+    assert "topics" in {layer["name"] for layer in db.meta()["layers"]}
 
     assert ("topics", "l0", ["A generated label"], 20) in artifact_rows_of(db)
-
-
-def test_all_gated_content_on_a_held_artifact_that_has_none_is_refused(served, corpus):
-    """§6.3's last row: filling one has no route, so the plan refuses and names the artifact."""
-    db = served(clustering)
-    db.declare_labels("topics", of="clusters", source="lb", members="lbm", content_requires="all")
-    # First the artifact, with its membership and no content.
-    db.stage(
-        "lb",
-        pa.table(
-            {
-                "level": pa.array([0], pa.uint32()),
-                "key": pa.array(["l0"], pa.string()),
-                "attached_layer": pa.array(["clusters"], pa.string()),
-                "attached_key": pa.array(["c0"], pa.string()),
-            }
-        ),
-    )
-    db.stage("lbm", label_members(ranked=False))
-    first = db.commit()
-    assert first.ok, first
-    assert first.without_content == 1
-
-    # Then the content, which the route will not fill onto it.
-    db.stage("lb", label_rows())
-    db.stage("lbm", label_members())
-    plan = db.check()
-    assert not plan.ok
-    assert any("has none" in str(f) and "l0" in str(f) for f in plan.findings), plan

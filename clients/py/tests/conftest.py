@@ -131,8 +131,8 @@ def viewport(db, view: str, bbox, zoom: int = 0, k: int = 512, filters: dict | N
                     counts[name] = sum(int(v) for v in table.column(name).to_pylist())
         elif kind == 3:
             table = ipc.open_stream(io.BytesIO(payload)).read_all()
-            if "id" in table.column_names:
-                ids += [str(v) for v in table.column("id").to_pylist()]
+            if "tessera_id" in table.column_names:
+                ids += [str(v) for v in table.column("tessera_id").to_pylist()]
         elif kind == 4:
             trailer = _json.loads(payload.decode())
     return {"counts": counts, "trailer": trailer, "ids": ids, "complete": bool(trailer)}

@@ -1,4 +1,4 @@
-"""The control-plane client on its own: the retry rule, the batch id and the commit log (§6.4).
+"""The control-plane client on its own: the retry rule and the batch id (§6.4).
 
 The `429` is the one status the SDK retries, and it must resend identical bytes: a batch id maps to
 the SHA-256 of the raw request body, so a body re-serialised before the retry would be a new batch
@@ -12,14 +12,9 @@ import http.server
 import json
 import threading
 
-from tesseradb._control import (
-    CommitLog,
-    Control,
-    addressed,
-    batch_id,
-    content_digest,
-    external_id,
-)
+import pytest
+
+from tesseradb._control import Control, addressed, batch_id, external_id
 
 
 class _Backpressure(http.server.BaseHTTPRequestHandler):
@@ -80,33 +75,15 @@ def test_a_batch_id_is_stable_across_runs_and_moves_with_the_bytes():
     assert batch_id("points", 0, body).startswith("points-0-")
 
 
-def test_an_external_id_is_the_source_id_in_eight_little_endian_bytes():
+def test_an_external_id_is_the_bytes_the_id_column_holds():
+    """§3: a string's UTF-8, an integer's eight little-endian bytes, binary as it stands."""
     assert external_id(1) == b"\x01\x00\x00\x00\x00\x00\x00\x00"
     assert len(external_id(2**63)) == 8
+    assert external_id("p3") == b"p3"
+    assert external_id(b"\x00\xff") == b"\x00\xff"
+    # A frame's own ids arrive as numpy scalars, which are integers and are not `int`.
+    numpy = pytest.importorskip("numpy")
+    assert external_id(numpy.int64(5)) == external_id(5)
+    assert external_id(numpy.uint32(5)) == external_id(5)
     assert addressed(1) == "AQAAAAAAAAA="
-
-
-def test_the_commit_log_holds_what_was_acknowledged_and_reopens_with_it(tmp_path):
-    path = tmp_path / "commit-log.json"
-    log = CommitLog(path)
-    assert not log.holds("points-0-abc")
-    log.acknowledge("points-0-abc", "points", type("A", (), {"status": 200})())
-    log.declare(["clusters", "topics"])
-    log.publish("clusters", [("c0", None, None), ("c0", content_digest([["a label"]]), None)])
-    log.add_terms(["public", "public", "cs.LG"])
-    log.save()
-
-    reopened = CommitLog(path)
-    assert reopened.holds("points-0-abc")
-    assert reopened.declared("clusters") and not reopened.declared("other")
-    assert reopened.published("clusters") == {
-        "c0": {"content": content_digest([["a label"]]), "parts": None}
-    }
-    assert reopened.terms == ["public", "cs.LG"]
-
-
-def test_a_content_digest_is_stable_and_absent_where_there_is_no_content():
-    assert content_digest([]) is None
-    assert content_digest(None) is None
-    assert content_digest([["a label"]]) == content_digest([["a label"]])
-    assert content_digest([["a label"]]) != content_digest([["another label"]])
+    assert addressed("p3") == "cDM="

@@ -58,15 +58,18 @@ def test_every_block_names_its_source_and_the_defaults_name_the_allocation_view(
     text = db.declaration
     assert '[defaults]\nsource = "points"\nallocation_view = "s0"' in text
     # A view and an attribute that named no source read `[defaults].source`, and the SDK writes it
-    # out on both, so a reader sees the whole declaration.
-    # The view, the attribute, and the keyword attribute the SDK keeps for the user's own id.
-    assert text.count('source = "points"') == 3 + 1
+    # out on both, so a reader sees the whole declaration: `[defaults]`, the view, the attribute.
+    assert text.count('source = "points"') == 3
+    # And where identity is, since 'id' is not what configuration.md reads it under by default.
+    assert 'entity_id = "id"' in text and 'entity_id_field = "id"' in text
 
 
-def test_the_users_id_column_is_kept_as_an_indexed_keyword_attribute(db):
-    db.declare_view("s0")
+def test_the_id_column_is_the_identity_rather_than_an_attribute(db):
+    """§3: the build takes the column's bytes as the external id, so it is no column of values."""
+    db.declare_view("s0", access=None)
     text = db.declaration
-    assert '[[attribute]]\nname = "id"\ntype = "keyword"\nsource = "points"\nindex = true' in text
+    assert 'name = "id"' not in text
+    assert 'fields = { x = "x", y = "y", entity_id = "id" }' in text
 
 
 def test_an_explicit_declaration_overrides_the_inferred_block(db):
@@ -95,8 +98,8 @@ def test_the_anchor_view_is_the_allocation_view(db):
 def test_a_view_names_a_label_for_every_point(db):
     with pytest.raises(Refusal, match="names no label"):
         db.declare_view("s0", default_label=None)
-    db.declare_view("s0", access="terms", default_label=None)
-    assert 'point_visibility = { field = "terms" }' in db.declaration
+    db.declare_view("s0", access="cluster", default_label=None)
+    assert 'point_visibility = { field = "cluster" }' in db.declaration
 
 
 def test_a_layer_always_writes_its_value_set_and_its_three_disclosure_controls(db):
@@ -110,7 +113,7 @@ def test_a_layer_always_writes_its_value_set_and_its_three_disclosure_controls(d
     assert 'artifact_visibility = { default = "inherited" }' in text
     assert 'require_member_visibility = "none"' in text
     assert '[layer.members]\nsource = "points"' in text
-    assert 'fields = { key = "cluster", entity = "entity_id" }' in text
+    assert 'fields = { key = "cluster", entity = "id" }' in text
     assert 'views = ["s0"]' in text
 
 
