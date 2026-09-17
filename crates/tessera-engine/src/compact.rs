@@ -649,7 +649,7 @@ const FOLD_MEMORY_SAFETY_FACTOR: u64 = 2;
 /// time in term order, so the width is a choice about the host and not about the file.
 ///
 /// What one thread costs is modelled. The probe derived 1.4×10⁶ terms at rung 6 in 184 s across
-/// the box's cores (measured, `docs/evidence/memos/2026-09-17-term-images-handover.md` §3.4).
+/// the box's cores (measured, decision 0143).
 /// Projection is per term and the workers share only a mutex over the scratch pool, so one thread
 /// is of the order of the core count times that: tens of minutes for one view at rung 6, against a
 /// fold already measured in hours. Stage 6 measures the pass on a fold of `gbif-64p` and models
@@ -666,7 +666,7 @@ const TERM_IMAGE_THREADS: usize = 1;
 /// to theirs at the next open. What the number is for is uniqueness within a prefix, and that holds
 /// here without it. A fold writes into a prefix it has just created, images are written once per
 /// prefix by whichever publication creates it, and no flush, merge or coalesce writes this kind at
-/// all (ruling 5, `docs/evidence/memos/2026-09-17-term-images-handover.md`). The build names its
+/// all (ruling 5, decision 0143). The build names its
 /// own files from the same zero, being publication zero.
 const TERM_IMAGE_MANIFEST_N: u64 = 0;
 
@@ -705,7 +705,7 @@ const TERM_IMAGE_MANIFEST_N: u64 = 0;
 /// ceiling, a term over a third of the corpus in run-friendly order being kilobytes (assumed; the
 /// probe reports whole-file sizes, not per term). ~437 MB of image at 3.5×10⁹ rows, the same again
 /// for the frozen buffer beside it, against ~82 MiB of scratch
-/// (`docs/evidence/memos/2026-09-17-term-images-handover.md` §3.4).
+/// (`compaction.md` §3).
 ///
 /// *(§3's first draft called the two mapped arrays free — page cache rather than RSS. r1 corrected
 /// it: a dirty shared file mapping is resident and cgroup-charged until writeback. They are charged
