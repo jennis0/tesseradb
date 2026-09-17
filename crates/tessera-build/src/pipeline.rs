@@ -1029,6 +1029,10 @@ fn build_bundle(
     let plugin = Passthrough::new();
     require_decomposable_labelling(&plugin)?;
     let bounds = plugin.declared_bounds();
+    // **How this declaration names a row, decided before pass one** (`crate::ids`): the identity
+    // column's type says whether a source id is the integer the file holds or the rank of a
+    // supplied key, and the supplied keys are interned here, once, for every pass below.
+    let id_space = crate::ids::IdSpace::prepare(args)?;
 
     // ---- 1. pass one: entity space, once over every view's points (`views.md` §7) -----
     // An item's *ordinal* is its index in this array. Ordinal order is source-id order over the
@@ -1047,7 +1051,7 @@ fn build_bundle(
     // source ids: `.build-tmp/` is the build's scratch from pass one to the segment write, and
     // every structure in it is swept by the `close` at the end or by the next build's `create`.
     let tmp = spill::TmpDir::create(&args.out)?;
-    let (source_ids, view_anchors) = read_source_ids_union(args, tmp.path())?;
+    let (source_ids, view_anchors) = read_source_ids_union(args, tmp.path(), &id_space)?;
     let n = source_ids.len() as u64;
     if n > u32::MAX as u64 {
         return Err(BuildError::Invalid(format!(
@@ -1071,7 +1075,7 @@ fn build_bundle(
     std::fs::create_dir_all(&dict_dir).map_err(|e| BuildError::io(&dict_dir, e))?;
     // What every source term is called, established before any term id exists — a field-sourced
     // view's sorted vocabulary, or the relation's own integers (`crate::AccessPlan`).
-    let access = crate::plan_access(args)?;
+    let access = crate::plan_access(args, &id_space)?;
     // Whether the label-agreement identity applies at all: a shared relation is entity space and
     // is scanned once, so its rows cannot disagree between views (`crate::AccessRoute`).
     let per_view_labels = !matches!(access.descriptors, crate::input::TermDescriptors::Ids);
@@ -1084,7 +1088,7 @@ fn build_bundle(
         histogram,
         histogram_shift,
         dict_paths,
-    } = build_dictionary(args, &access, source_ids.ids(), &dict_dir)?;
+    } = build_dictionary(args, &access, source_ids.ids(), &dict_dir, &id_space)?;
     if term_count >= u32::MAX as u64 {
         return Err(BuildError::Invalid(format!(
             "{term_count} distinct terms exceeds the 2^32 term-ID space"
@@ -1175,7 +1179,7 @@ fn build_bundle(
         )
     };
     let mut current: Option<(usize, u64)> = None;
-    crate::scan_access(args, &access, |view, source_id, source_term| {
+    crate::scan_access(args, &access, &id_space, |view, source_id, source_term| {
         // A chunk **never spans two views**, and never splits a row: rows of one view arrive
         // contiguously (a view holds one row per entity), so the boundary is taken at the change
         // of view — always — or at the next change of entity once the chunk is full.
@@ -1229,8 +1233,7 @@ fn build_bundle(
     // **A mapped file**, on the same argument as the geometry beside it: 4 B an item is 13.3 GiB
     // at the GBIF rung, held from here to the end of the batch loop, and as anonymous memory it
     // was the largest term of that loop's residency that no model named.
-    let mut appearances =
-        spill::MappedU32::zeroed(tmp.path(), "appearances.u32", n as usize)?;
+    let mut appearances = spill::MappedU32::zeroed(tmp.path(), "appearances.u32", n as usize)?;
     for (index, view) in args.views.iter().enumerate() {
         let mut x_map =
             spill::MappedU32::zeroed(tmp.path(), &format!("x-of-ordinal-{index}.u32"), n as usize)?;
@@ -1276,6 +1279,7 @@ fn build_bundle(
                 &view.extent,
                 args.limit,
                 view.select.as_ref(),
+                &id_space,
                 |point| {
                     chunk.push((point.source_id, (point.qx, point.qy)));
                     if chunk.len() == JOIN_CHUNK_ROWS {
@@ -1751,7 +1755,8 @@ fn build_bundle(
     // ---- 7. external ids (only when minting — see `BuildArgs::mint_external_ids`) -----
     let mut external_ids_paths: Vec<PathBuf> = Vec::new();
     let mut ext_locator_path: Option<PathBuf> = None;
-    if args.mint_external_ids {
+    let writes_external_ids = crate::ids::writes_external_ids(args, &id_space);
+    if writes_external_ids {
         // Sorted by the external id's *bytes* (R4); `ExternalIdRow` holds each id as the sort
         // key that makes that a plain integer comparison, in twelve bytes rather than a padded
         // sixteen.
@@ -1760,11 +1765,21 @@ fn build_bundle(
                 ExternalIdRow::new(source_ids.ids().id_of(ordinal), entity_of_ordinal[ordinal])
             })
             .collect();
-        // Keys are the byte-swapped source ids — dup-checked, hence unique: a total order, one
-        // output under the parallel unstable sort.
-        external.par_sort_unstable_by_key(ExternalIdRow::sort_key);
-        external_ids_paths =
-            write_external_id_runs(&entities_dir, &external, EXTERNAL_ID_ROWS_PER_EXTENT)?;
+        // Keys are the byte-swapped source ids on the integer route and the ranks themselves on
+        // the supplied one — dup-checked, hence unique: a total order, one output under the
+        // parallel unstable sort (`crate::sort_external_id_rows` states which and why).
+        match &id_space {
+            crate::ids::IdSpace::Supplied(_) => {
+                external.par_sort_unstable_by_key(ExternalIdRow::source_id)
+            }
+            _ => external.par_sort_unstable_by_key(ExternalIdRow::sort_key),
+        }
+        external_ids_paths = write_external_id_runs(
+            &entities_dir,
+            &external,
+            EXTERNAL_ID_ROWS_PER_EXTENT,
+            &id_space,
+        )?;
         // `external` is still in the concatenated extent order at this point (the extents
         // partition it into consecutive ranges, in order) — its index *is* each row's ordinal,
         // which is exactly what the locator addresses (contracts §2.4/§2.6 r6).
@@ -1773,7 +1788,7 @@ fn build_bundle(
 
     timer.end(
         BuildStage::ExternalIds,
-        if args.mint_external_ids { n } else { 0 },
+        if writes_external_ids { n } else { 0 },
     );
 
     // ---- 8. the declared attribute tail ----------------------------------------------
@@ -1802,6 +1817,7 @@ fn build_bundle(
         n,
         &plan.routes,
         source_ids.ids(),
+        &id_space,
         entity_of_ordinal,
         &mut minters,
         &scratch,
@@ -1821,6 +1837,7 @@ fn build_bundle(
         &partition_dir,
         n,
         source_ids.ids(),
+        &id_space,
         entity_of_ordinal,
         &mut minters,
         &scratch,
@@ -1854,6 +1871,7 @@ fn build_bundle(
         let mut plan = crate::layers::read(
             &args.layers,
             &args.layer_inputs,
+            &id_space,
             &args.scoped_layers,
             // **A frame per view, never the anchor's for all of them** (decision 0111): a
             // shape layer is canonicalised in each view it is drawn in, against that view's
@@ -1982,9 +2000,8 @@ fn build_bundle(
     // dictionary pass's alone, so they go back to the disk here rather than standing through the
     // record blob, which is the phase the measured peak falls on.
     let mut open_extents = open_extents;
-    open_extents.retain(|extents| {
-        blob_resident(&args.schema, &args.schema.attributes[extents.column])
-    });
+    open_extents
+        .retain(|extents| blob_resident(&args.schema, &args.schema.attributes[extents.column]));
     for column in spilled.iter_mut() {
         if !blob_resident(&args.schema, &args.schema.attributes[column.column]) {
             column.remove();
@@ -2312,6 +2329,7 @@ fn read_attributes_by_entity(
     n: u64,
     routes: &ColumnRoutes,
     ids: Ids<'_>,
+    id_space: &crate::ids::IdSpace,
     entity_of_ordinal: &[u32],
     minters: &mut std::collections::HashMap<String, tessera_store::vocabulary::VocabularyMinter>,
     scratch: &crate::column::ColumnScratch,
@@ -2388,6 +2406,7 @@ fn read_attributes_by_entity(
             group,
             n,
             ids,
+            id_space,
             entity_of_ordinal,
             minters,
             scratch,
@@ -2418,7 +2437,9 @@ fn read_attributes_by_entity(
             for record in store.load(k)?.chunks_exact(record_width) {
                 let entity =
                     u32::from_le_bytes(record[..4].try_into().expect("a record carries its key"));
-                let at = (entity as u64).checked_sub(lo as u64).filter(|&at| at < span as u64);
+                let at = (entity as u64)
+                    .checked_sub(lo as u64)
+                    .filter(|&at| at < span as u64);
                 let Some(at) = at.map(|at| at as usize) else {
                     return Err(BuildError::Invalid(format!(
                         "attribute '{name}': bucket {k} of its value partition holds entity \
@@ -2546,6 +2567,7 @@ fn read_one_attribute_source(
     group: &crate::config::AttributeSource,
     n: u64,
     ids: Ids<'_>,
+    id_space: &crate::ids::IdSpace,
     entity_of_ordinal: &[u32],
     minters: &mut std::collections::HashMap<String, tessera_store::vocabulary::VocabularyMinter>,
     scratch: &crate::column::ColumnScratch,
@@ -2758,6 +2780,7 @@ fn read_one_attribute_source(
         // An attribute source is entity space: one value per entity, in a file of its own, with
         // no view to select (`views.md` §5).
         None,
+        id_space,
         |batch| {
             // Flushed **before** the batch rather than after a row count is reached, because a
             // batch is staged as a unit. Chunk boundaries are unobservable in the output — see
@@ -2871,6 +2894,7 @@ fn write_scoped_columns(
     partition_dir: &Path,
     n: u64,
     ids: Ids<'_>,
+    id_space: &crate::ids::IdSpace,
     entity_of_ordinal: &[u32],
     minters: &mut std::collections::HashMap<String, tessera_store::vocabulary::VocabularyMinter>,
     scratch: &crate::column::ColumnScratch,
@@ -2915,6 +2939,7 @@ fn write_scoped_columns(
                 view,
                 n,
                 ids,
+                id_space,
                 entity_of_ordinal,
                 minters,
                 scratch,
@@ -3166,6 +3191,7 @@ fn read_scoped_column(
     view: &crate::ViewArgs,
     n: u64,
     ids: Ids<'_>,
+    id_space: &crate::ids::IdSpace,
     entity_of_ordinal: &[u32],
     minters: &mut std::collections::HashMap<String, tessera_store::vocabulary::VocabularyMinter>,
     scratch: &crate::column::ColumnScratch,
@@ -3237,6 +3263,7 @@ fn read_scoped_column(
         minters,
         args.limit,
         select,
+        id_space,
         |batch| {
             if !chunk.is_empty() && chunk.len() + batch.rows.len() > staged_rows {
                 flush(&mut chunk, &mut staged, &mut values, &mut present)?;
@@ -4151,11 +4178,9 @@ impl KeywordValues<'_> {
     fn rows_hint(&self) -> usize {
         match self {
             KeywordValues::Column(values) => values.len(),
-            KeywordValues::Extents(extents) => extents
-                .blobs
-                .iter()
-                .map(|blob| blob.rows() as usize)
-                .sum(),
+            KeywordValues::Extents(extents) => {
+                extents.blobs.iter().map(|blob| blob.rows() as usize).sum()
+            }
         }
     }
 }
@@ -5609,7 +5634,11 @@ pub(crate) fn render_presence_of(
 /// No limit and no selection ⇒ every row is selected ⇒ the metadata row count is exact and the
 /// counting decode is a whole pass over the file for nothing. A form B source's rows are several
 /// views', so the count there is data-dependent like a limit's.
-fn count_source_ids(args: &BuildArgs, view: &crate::ViewArgs) -> Result<usize> {
+fn count_source_ids(
+    args: &BuildArgs,
+    view: &crate::ViewArgs,
+    id_space: &crate::ids::IdSpace,
+) -> Result<usize> {
     match args.limit {
         None if view.select.is_none() => Ok(input::count_point_rows(&view.points)? as usize),
         _ => {
@@ -5621,6 +5650,7 @@ fn count_source_ids(args: &BuildArgs, view: &crate::ViewArgs) -> Result<usize> {
                 &view.extent,
                 args.limit,
                 view.select.as_ref(),
+                id_space,
                 |_| {
                     count += 1;
                     ControlFlow::Continue(())
@@ -5678,6 +5708,7 @@ fn read_source_ids_into(
     args: &BuildArgs,
     view: &crate::ViewArgs,
     slot: &mut [u64],
+    id_space: &crate::ids::IdSpace,
 ) -> Result<ViewIdAnchor> {
     let mut written = 0usize;
     let mut mixed = 0u64;
@@ -5689,6 +5720,7 @@ fn read_source_ids_into(
         &view.extent,
         args.limit,
         view.select.as_ref(),
+        id_space,
         |point| {
             let Some(cell) = slot.get_mut(written) else {
                 // Past the end of the slot: stop the scan rather than decode the rest of a file
@@ -5899,13 +5931,10 @@ impl IdPresence {
     fn ids(&self) -> impl Iterator<Item = u64> + '_ {
         self.words.iter().enumerate().flat_map(|(index, &word)| {
             let base = self.base + index as u64 * 64;
-            std::iter::successors(
-                (word != 0).then_some(word),
-                |w| {
-                    let rest = *w & (*w - 1);
-                    (rest != 0).then_some(rest)
-                },
-            )
+            std::iter::successors((word != 0).then_some(word), |w| {
+                let rest = *w & (*w - 1);
+                (rest != 0).then_some(rest)
+            })
             .map(move |w| base + w.trailing_zeros() as u64)
         })
     }
@@ -5928,10 +5957,24 @@ impl IdPresence {
 /// `None` where any view cannot be bounded — no statistics, or an id the statistics cannot state
 /// as a `u64` — which leaves the array as the only route. A view selecting no rows contributes
 /// nothing to the fold.
-fn union_id_span(args: &BuildArgs, counts: &[usize]) -> Result<Option<(u64, u64)>> {
+fn union_id_span(
+    args: &BuildArgs,
+    counts: &[usize],
+    id_space: &crate::ids::IdSpace,
+) -> Result<Option<(u64, u64)>> {
     let total: u64 = counts.iter().map(|&count| count as u64).sum();
     if total == 0 {
         return Ok(None);
+    }
+    // **The supplied route's span is exact and needs no statistics.** A key's source id is its
+    // rank among the keys this build interned, so the union is `0..n` (`crate::ids`). A
+    // positional route's ids are the row numbers of the one file, which is the same span, read
+    // from the count rather than from a footer that says nothing about a column that is not there.
+    if let Some((low, high)) = id_space.rank_bounds() {
+        return Ok(Some((low, high - low + 1)));
+    }
+    if id_space.positional() {
+        return Ok(Some((0, total)));
     }
     let mut low = u64::MAX;
     let mut high = 0u64;
@@ -5976,6 +6019,7 @@ fn read_source_ids_present(
     counts: &[usize],
     base: u64,
     span: u64,
+    id_space: &crate::ids::IdSpace,
 ) -> Result<Option<(IdPresence, Vec<ViewIdAnchor>)>> {
     let mut union: Option<IdPresence> = None;
     let mut anchors = Vec::with_capacity(args.views.len());
@@ -5996,6 +6040,7 @@ fn read_source_ids_present(
             &view.extent,
             args.limit,
             view.select.as_ref(),
+            id_space,
             |point| {
                 let Some(bits) = bits.as_mut().filter(|_| written < count) else {
                     overran = true;
@@ -6099,13 +6144,19 @@ fn source_ids_of_presence(present: &IdPresence, tmp: &Path) -> Result<SourceIds>
 /// read**, so the union is one array of the final length rather than a concatenation holding both
 /// copies while it ran — 16 bytes an item where the thing it produces is 8, which is 52.1 GiB at
 /// the GBIF rung against a 47 GiB machine (`probes/2026-09-10-source-ids-memory/`).
-fn read_source_ids_union(args: &BuildArgs, tmp: &Path) -> Result<(SourceIds, Vec<ViewIdAnchor>)> {
+fn read_source_ids_union(
+    args: &BuildArgs,
+    tmp: &Path,
+    id_space: &crate::ids::IdSpace,
+) -> Result<(SourceIds, Vec<ViewIdAnchor>)> {
     let mut counts = Vec::with_capacity(args.views.len());
     for view in &args.views {
-        counts.push(count_source_ids(args, view)?);
+        counts.push(count_source_ids(args, view, id_space)?);
     }
-    if let Some((base, span)) = union_id_span(args, &counts)? {
-        if let Some((present, anchors)) = read_source_ids_present(args, &counts, base, span)? {
+    if let Some((base, span)) = union_id_span(args, &counts, id_space)? {
+        if let Some((present, anchors)) =
+            read_source_ids_present(args, &counts, base, span, id_space)?
+        {
             return Ok((source_ids_of_presence(&present, tmp)?, anchors));
         }
     }
@@ -6115,7 +6166,7 @@ fn read_source_ids_union(args: &BuildArgs, tmp: &Path) -> Result<(SourceIds, Vec
     let mut offset = 0usize;
     for (view, &count) in args.views.iter().zip(&counts) {
         let segment = &mut ids.as_mut_slice()[offset..offset + count];
-        anchors.push(read_source_ids_into(args, view, segment)?);
+        anchors.push(read_source_ids_into(args, view, segment, id_space)?);
         segment.par_sort_unstable();
         if segment.windows(2).any(|w| w[0] == w[1]) {
             return Err(duplicate_view_ids(view));
@@ -6208,6 +6259,7 @@ fn build_dictionary(
     access: &crate::AccessPlan,
     ids: Ids<'_>,
     dict_dir: &std::path::Path,
+    id_space: &crate::ids::IdSpace,
 ) -> Result<Dictionary> {
     // Chunk-order insensitivity ([`join_chunk`]): per-term min-ordinal and row counts, and the
     // per-range histogram, are commutative aggregations — no arrival order is observable.
@@ -6242,7 +6294,7 @@ fn build_dictionary(
         })
     };
     let mut failure: Option<BuildError> = None;
-    let fill = crate::scan_access(args, access, |_view, source_id, source_term| {
+    let fill = crate::scan_access(args, access, id_space, |_view, source_id, source_term| {
         pair_rows += 1;
         chunk.push((source_id, source_term));
         if chunk.len() == JOIN_CHUNK_ROWS {
@@ -6868,13 +6920,22 @@ mod tests {
             })
             .collect();
         prose_source.push((prose_source[3].0, "the later value, adjacent".to_string()));
-        prose_source.insert(2, (prose_source[9].0, "the earlier value, far apart".to_string()));
+        prose_source.insert(
+            2,
+            (
+                prose_source[9].0,
+                "the earlier value, far apart".to_string(),
+            ),
+        );
         let mut note_source: Vec<(u32, String)> = (0..N)
             .filter(|entity| entity % 4 != 3)
             .map(|entity| ((entity * 11 % N) as u32, format!("note-{entity}")))
             .collect();
         note_source.push((note_source[7].0, "the later note, adjacent".to_string()));
-        note_source.insert(1, (note_source[19].0, "the earlier note, far apart".to_string()));
+        note_source.insert(
+            1,
+            (note_source[19].0, "the earlier note, far apart".to_string()),
+        );
 
         let blob_of = |dir: &Path, chunk: usize| -> Vec<PathBuf> {
             let extent_dir = dir.join("extents");
@@ -7283,9 +7344,7 @@ mod tests {
         // The source rows, in an order that is not entity order, with two entities written twice.
         let mut source: Vec<(u32, String)> = (0..N_KEYWORD)
             .filter_map(|entity| match keyword_fixture_key(entity) {
-                ScalarValue::Utf8(key) => {
-                    Some(((entity * 37 % N_KEYWORD) as u32, key))
-                }
+                ScalarValue::Utf8(key) => Some(((entity * 37 % N_KEYWORD) as u32, key)),
                 _ => None,
             })
             .collect();
@@ -7335,8 +7394,11 @@ mod tests {
             std::fs::create_dir_all(&extent_dir).expect("extent dir");
             let spilled = spilled_column(&extent_dir, 0, "key", &source, chunk);
             let open = spilled.open().expect("the extents open");
-            let from_extents =
-                files_of(&dir.path().join(format!("spilled-{chunk}")), &empty, Some(&open));
+            let from_extents = files_of(
+                &dir.path().join(format!("spilled-{chunk}")),
+                &empty,
+                Some(&open),
+            );
             assert_eq!(
                 from_extents, from_arena,
                 "extents in chunks of {chunk} wrote different files"
@@ -7671,10 +7733,14 @@ mod tests {
             (u64::MAX, 16), // absent, past the last source id
         ];
         let mut seen: Vec<(Option<u32>, u64, u32)> = Vec::new();
-        join_chunk(&mut chunk, Ids::Sparse(&source_ids), |ordinal, id, payload| {
-            seen.push((ordinal, id, payload));
-            Ok(())
-        })
+        join_chunk(
+            &mut chunk,
+            Ids::Sparse(&source_ids),
+            |ordinal, id, payload| {
+                seen.push((ordinal, id, payload));
+                Ok(())
+            },
+        )
         .unwrap();
         assert!(chunk.is_empty(), "the chunk must be drained");
         seen.sort_unstable_by_key(|&(_, _, p)| p);
@@ -7697,14 +7763,15 @@ mod tests {
     fn join_chunk_propagates_the_callbacks_error() {
         let source_ids: Vec<u64> = vec![1, 2];
         let mut chunk: Vec<(u64, ())> = vec![(1, ()), (3, ())];
-        let result = join_chunk(
-            &mut chunk,
-            Ids::Sparse(&source_ids),
-            |ordinal, id, ()| match ordinal {
-                Some(_) => Ok(()),
-                None => Err(input_changed(&format!("entity {id} missing"))),
-            },
-        );
+        let result =
+            join_chunk(
+                &mut chunk,
+                Ids::Sparse(&source_ids),
+                |ordinal, id, ()| match ordinal {
+                    Some(_) => Ok(()),
+                    None => Err(input_changed(&format!("entity {id} missing"))),
+                },
+            );
         assert!(result.is_err());
     }
 
@@ -7796,7 +7863,10 @@ mod tests {
         assert_eq!(other.set(163), Some(false));
         bits.union_with(&other);
         assert_eq!(bits.count(), 5);
-        assert_eq!(bits.ids().collect::<Vec<_>>(), vec![100, 101, 163, 164, 299]);
+        assert_eq!(
+            bits.ids().collect::<Vec<_>>(),
+            vec![100, 101, 163, 164, 299]
+        );
     }
 
     /// **A span ending at `u64::MAX` has padding bits in its last word**, and naming one of them
@@ -7832,5 +7902,4 @@ mod tests {
         assert!(!range(&[0, 2]));
         assert!(!range(&[0, 1, 2, 63]));
     }
-
 }

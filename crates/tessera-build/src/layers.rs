@@ -629,6 +629,9 @@ impl Default for PublishedLayers {
 pub fn read(
     declarations: &[LayerDeclaration],
     inputs: &[LayerSources],
+    // How this declaration names a row, so a members table and an inline membership resolve their
+    // entities the way the points file spells them (`crate::ids`).
+    ids: &crate::ids::IdSpace,
     // Which layers are scoped to a group, by name (`views.md` §3.5).
     scoped: &BTreeMap<String, crate::ScopedLayer>,
     // **Every view this build materialises, each with its own frame** (decision 0111): a shape
@@ -712,6 +715,7 @@ pub fn read(
                 scoped.get(&input.name),
                 &mut plan,
                 shapes.as_mut(),
+                ids,
             )?,
             Some(ArtifactSource::Inline(rows)) => {
                 // **A scoped layer's artifacts are read from a file**, because the view each
@@ -833,6 +837,7 @@ pub fn read(
                 &members.fields,
                 declaration,
                 &mut plan,
+                ids,
             )?;
             let minted = (plan.artifacts.len() - before) as u64;
             if minted > 0 {
@@ -889,6 +894,7 @@ fn read_artifacts(
     scoped: Option<&crate::ScopedLayer>,
     plan: &mut LayerPlan,
     mut shapes: Option<&mut ShapeReader>,
+    ids: &crate::ids::IdSpace,
 ) -> Result<()> {
     for batch in batches(path)? {
         let batch = batch?;
@@ -996,10 +1002,10 @@ fn read_artifacts(
             // carried.
             let membership = match (&members, &excluding) {
                 (Some(column), _) => {
-                    PlannedMembership::Included(u64s_at(path, column, row, &address.2)?)
+                    PlannedMembership::Included(u64s_at(path, column, row, &address.2, ids)?)
                 }
                 (_, Some(column)) => {
-                    PlannedMembership::Excluded(u64s_at(path, column, row, &address.2)?)
+                    PlannedMembership::Excluded(u64s_at(path, column, row, &address.2, ids)?)
                 }
                 (None, None) => PlannedMembership::default(),
             };
@@ -1176,6 +1182,7 @@ fn read_members(
     fields: &Fields,
     declaration: &LayerDeclaration,
     plan: &mut LayerPlan,
+    ids: &crate::ids::IdSpace,
 ) -> Result<(u64, u64)> {
     let value_set = declaration.value_set;
     let (mut unclustered, mut read) = (0u64, 0u64);
@@ -1200,7 +1207,7 @@ fn read_members(
         let key = member_keys(path, &batch, fields, layer, declaration)?;
         let level = optional_u32(path, &batch, LEVEL)?;
         let rank = optional_u32_field(path, &batch, fields, "rank")?;
-        let entity = u64s(path, &batch, fields, "entity")?;
+        let entity = member_entities(path, &batch, fields, ids)?;
         read += batch.num_rows() as u64;
 
         // **Ignored and said so**, rather than refused or read: the positions in a list are what
@@ -1464,11 +1471,7 @@ fn record_lineage(
 /// column are two spellings of one edge, and an artifact holding a different parent in each is the
 /// same conflict as two points disagreeing. A duplicate edge is one edge whichever spelling stated
 /// it.
-fn apply_lineage(
-    plan: &mut LayerPlan,
-    lineage: Vec<Option<usize>>,
-    path: &Path,
-) -> Result<()> {
+fn apply_lineage(plan: &mut LayerPlan, lineage: Vec<Option<usize>>, path: &Path) -> Result<()> {
     // **Applied in address order, not arena order.** The conflict below is a refusal, and which of
     // several a corpus carries is reported must not depend on the order keys happened to be met —
     // it is the order they sort in, which is what it has always been. One sort of at most one entry
@@ -1896,7 +1899,13 @@ pub fn publish(
             },
         )
         .collect();
-    write_membership_extents(&mut store, prefix_dir, partition, &mut published, &mut streamed)?;
+    write_membership_extents(
+        &mut store,
+        prefix_dir,
+        partition,
+        &mut published,
+        &mut streamed,
+    )?;
     write_content_extent(&store, prefix_dir, partition, &mut published)?;
     published.store = store;
     Ok(published)
@@ -1933,8 +1942,11 @@ fn merge_member_runs(
     if receipts.is_empty() {
         return Ok(spill::MemberTable::empty(plan.bodies.len()));
     }
-    let receipts =
-        cascade_member_runs(receipts, &plan.members.dir, member_merge_fan_in(plan.memory_budget))?;
+    let receipts = cascade_member_runs(
+        receipts,
+        &plan.members.dir,
+        member_merge_fan_in(plan.memory_budget),
+    )?;
     let path = plan.members.dir.join("member-table.spill");
     let mut writer = spill::MemberTableWriter::create(&path, plan.bodies.len())?;
     let mut merge = MemberRunMerge::open(&receipts)?;
@@ -3389,17 +3401,58 @@ fn optional_utf8<'a>(
     }
 }
 
-fn u64s<'a>(
+/// One member table batch's `entity` column, at whichever type the declaration spells identity.
+///
+/// The integer route hands back the `uint64` column itself, with no copy. A supplied id column is
+/// resolved to the source ids the build joins on, one per row; a key no points file carries
+/// becomes [`crate::ids::NO_SOURCE_ID`], which is the refusal an unknown integer earns where the
+/// member is attached.
+enum MemberEntities<'a> {
+    Integer(&'a UInt64Array),
+    Supplied(Vec<Option<u64>>),
+}
+
+impl MemberEntities<'_> {
+    fn is_null(&self, row: usize) -> bool {
+        match self {
+            MemberEntities::Integer(column) => column.is_null(row),
+            MemberEntities::Supplied(rows) => rows[row].is_none(),
+        }
+    }
+
+    fn value(&self, row: usize) -> u64 {
+        match self {
+            MemberEntities::Integer(column) => column.value(row),
+            MemberEntities::Supplied(rows) => rows[row].unwrap_or(crate::ids::NO_SOURCE_ID),
+        }
+    }
+}
+
+fn member_entities<'a>(
     path: &Path,
     batch: &'a arrow::record_batch::RecordBatch,
     fields: &Fields,
-    canonical: &str,
-) -> Result<&'a UInt64Array> {
-    typed(
+    ids: &crate::ids::IdSpace,
+) -> Result<MemberEntities<'a>> {
+    let column = required(path, batch, fields, "entity")?;
+    if ids.supplied().is_some() {
+        let mut rows = Vec::with_capacity(column.len());
+        for row in 0..column.len() {
+            rows.push(match crate::ids::key_at(column.as_ref(), row) {
+                None => None,
+                Some(key) => match ids.resolve(&key) {
+                    crate::ids::NO_SOURCE_ID => return Err(unknown_member(path, &key)),
+                    source_id => Some(source_id),
+                },
+            });
+        }
+        return Ok(MemberEntities::Supplied(rows));
+    }
+    Ok(MemberEntities::Integer(typed(
         path,
-        required(path, batch, fields, canonical)?,
-        fields.of(canonical),
-    )
+        column,
+        fields.of("entity"),
+    )?))
 }
 
 /// A `u32` column read under its own name — the two the field map may not move.
@@ -3479,11 +3532,32 @@ fn value_index(column: &UInt32Array, row: usize) -> Option<u32> {
 /// **A null element is a refusal rather than entity zero**, on the member source's own rule: Arrow
 /// reads the values buffer whatever the validity bitmap says, so a producer whose join missed a row
 /// would otherwise publish the corpus's lowest-numbered document into the artifact.
-fn u64s_at(path: &Path, column: &ListArray, row: usize, key: &str) -> Result<Vec<u64>> {
+fn u64s_at(
+    path: &Path,
+    column: &ListArray,
+    row: usize,
+    key: &str,
+    ids: &crate::ids::IdSpace,
+) -> Result<Vec<u64>> {
     if column.is_null(row) {
         return Ok(Vec::new());
     }
     let values = column.value(row);
+    // **Named the way the declaration names a row** (`crate::ids`): the integer route takes the
+    // list of uint64 it always did, and a supplied id column makes this a list of keys, each
+    // resolved to the source id the build joins on.
+    if ids.supplied().is_some() {
+        return (0..values.len())
+            .map(|i| {
+                let member =
+                    crate::ids::key_at(values.as_ref(), i).ok_or_else(|| null_member(path, key))?;
+                match ids.resolve(&member) {
+                    crate::ids::NO_SOURCE_ID => Err(unknown_member(path, &member)),
+                    source_id => Ok(source_id),
+                }
+            })
+            .collect();
+    }
     let ids = values
         .as_any()
         .downcast_ref::<UInt64Array>()
@@ -3497,15 +3571,34 @@ fn u64s_at(path: &Path, column: &ListArray, row: usize, key: &str) -> Result<Vec
     (0..ids.len())
         .map(|i| {
             if ids.is_null(i) {
-                return Err(BuildError::Invalid(format!(
-                    "{}: {key} has a null entity in its membership; a null is not entity zero, and \
-                     publishing it as one puts a document nobody named into the artifact",
-                    path.display()
-                )));
+                return Err(null_member(path, key));
             }
             Ok(ids.value(i))
         })
         .collect()
+}
+
+/// **A member naming a row no points file carries is refused**, exactly as an integer naming an
+/// entity this build did not assign is: a dropped member moves the count a viewer is shown and the
+/// size a proportional criterion divides by. Named here, where the key itself is still in hand.
+fn unknown_member(path: &Path, key: &[u8]) -> BuildError {
+    BuildError::Invalid(format!(
+        "{}: the membership names '{}', which no points file of this build carries. A member is \
+         named by the column the declaration spells identity in (configuration.md §8)",
+        path.display(),
+        String::from_utf8_lossy(key)
+    ))
+}
+
+/// **A null element is not entity zero.** Arrow reads the values buffer whatever the validity
+/// bitmap says, so a producer whose join missed a row would otherwise publish the corpus's
+/// lowest-numbered document into the artifact.
+fn null_member(path: &Path, key: &str) -> BuildError {
+    BuildError::Invalid(format!(
+        "{}: {key} has a null entity in its membership; a null is not entity zero, and publishing \
+         it as one puts a document nobody named into the artifact",
+        path.display()
+    ))
 }
 
 /// One row's ranked contents: entry *k* is `contents[k]`'s values, one per supplied kind.
@@ -4173,6 +4266,7 @@ mod tests {
         let plan = read(
             &declarations,
             &sources,
+            &crate::ids::IdSpace::Integer,
             &BTreeMap::new(),
             &[tessera_store::derived::ViewFrame::new(
                 "world", projection, extent,
@@ -4283,6 +4377,7 @@ mod tests {
         let mut plan = read(
             std::slice::from_ref(&declaration),
             &sources,
+            &crate::ids::IdSpace::Integer,
             &BTreeMap::new(),
             &[tessera_store::derived::ViewFrame::new(
                 "world",
@@ -4338,6 +4433,7 @@ mod tests {
         let error = read(
             &declarations,
             &sources,
+            &crate::ids::IdSpace::Integer,
             &BTreeMap::new(),
             &[
                 tessera_store::derived::ViewFrame::new(
@@ -4379,6 +4475,7 @@ mod tests {
         read(
             &declarations,
             &sources,
+            &crate::ids::IdSpace::Integer,
             &BTreeMap::new(),
             &[tessera_store::derived::ViewFrame::new(
                 "world", projection, extent,
@@ -4531,7 +4628,11 @@ mod tests {
 
         let temp = tempfile::tempdir().expect("a scratch directory");
         let path = temp.path().join("rows.parquet");
-        let schema = Arc::new(Schema::new(vec![Field::new("entity", DataType::UInt64, false)]));
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "entity",
+            DataType::UInt64,
+            false,
+        )]));
         let mut writer = parquet::arrow::ArrowWriter::try_new(
             File::create(&path).expect("create the file"),
             schema.clone(),
@@ -4653,12 +4754,20 @@ mod tests {
                 "attempt {attempt}: each child escapes its parent by one member"
             );
             assert_eq!(
-                coverage.iter().map(|c| c.parent.clone()).collect::<Vec<String>>(),
-                expected.iter().map(|(parent, _)| parent.clone()).collect::<Vec<String>>(),
+                coverage
+                    .iter()
+                    .map(|c| c.parent.clone())
+                    .collect::<Vec<String>>(),
+                expected
+                    .iter()
+                    .map(|(parent, _)| parent.clone())
+                    .collect::<Vec<String>>(),
                 "attempt {attempt}: the coverage is not in the parents' order"
             );
             assert!(
-                coverage.iter().all(|c| c.members == 1 && c.stray_members == 0),
+                coverage
+                    .iter()
+                    .all(|c| c.members == 1 && c.stray_members == 0),
                 "attempt {attempt}: each parent's one member is covered by its child"
             );
         }
@@ -4674,7 +4783,11 @@ mod tests {
 
         let temp = tempfile::tempdir().expect("a scratch directory");
         let path = temp.path().join("rows.parquet");
-        let schema = Arc::new(Schema::new(vec![Field::new("entity", DataType::UInt64, false)]));
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "entity",
+            DataType::UInt64,
+            false,
+        )]));
         let mut writer = parquet::arrow::ArrowWriter::try_new(
             File::create(&path).expect("create the file"),
             schema.clone(),

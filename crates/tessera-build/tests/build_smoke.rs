@@ -1036,7 +1036,8 @@ fn morton_plus_residual_recovers_sub_cell_position() {
         tessera_spatial::Projection::None,
         &IDENTITY_EXTENT,
         None,
-            None,
+        None,
+        &tessera_build::ids::IdSpace::Integer,
     )
     .unwrap();
     rows.sort_by_key(|r| r.source_id);
@@ -1074,7 +1075,8 @@ fn bare_morton_widens_with_a_zero_residual() {
         tessera_spatial::Projection::None,
         &IDENTITY_EXTENT,
         None,
-            None,
+        None,
+        &tessera_build::ids::IdSpace::Integer,
     )
     .unwrap();
     assert!(!rows.is_empty());

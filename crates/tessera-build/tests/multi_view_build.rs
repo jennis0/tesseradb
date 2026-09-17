@@ -329,10 +329,7 @@ fn a_discriminator_selects_each_views_rows_out_of_one_file() {
     let points = dir.path().join("quarter-alt.parquet");
     // Q2 holds 0..24 and Q3 holds 12..36 — the same overlap the file-per-view case has, written
     // as one file with a key per row.
-    write_discriminated(
-        &points,
-        &[("2026-Q2", WORLD), ("2026-Q3", QUARTER)],
-    );
+    write_discriminated(&points, &[("2026-Q2", WORLD), ("2026-Q3", QUARTER)]);
     let pairs = dir.path().join("pairs.parquet");
     write_pairs(&pairs);
     let out = dir.path().join("bundle");
@@ -551,6 +548,7 @@ fn an_auto_frame_over_a_group_fits_every_views_source() {
             &group.extent,
             None,
             None,
+            &tessera_build::ids::IdSpace::Integer,
         )
         .expect("points read");
         assert!(!rows.is_empty());
@@ -633,7 +631,10 @@ fields = { key = "quarter" }
         ["quarter:2026-Q2", "quarter:2026-Q3"]
     );
     let group = registry[1].group.as_ref().expect("a group's view");
-    assert_eq!(group.key, "2026-Q3", "the roster's own order is the registry's");
+    assert_eq!(
+        group.key, "2026-Q3",
+        "the roster's own order is the registry's"
+    );
     assert_eq!(
         group.metadata.get("label"),
         Some(&tessera_build::config::MetadataValue::Text(
@@ -666,7 +667,11 @@ fn a_roster_tables_gate_column_may_be_a_large_list_of_large_strings() {
     let dir = tempfile::tempdir().unwrap();
     write_discriminated(
         &dir.path().join("quarter-alt.parquet"),
-        &[("2026-Q2", WORLD), ("2026-Q3", QUARTER), ("2026-Q4", QUARTER)],
+        &[
+            ("2026-Q2", WORLD),
+            ("2026-Q3", QUARTER),
+            ("2026-Q4", QUARTER),
+        ],
     );
     let roster = dir.path().join("roster.parquet");
     let gate_field = Arc::new(Field::new("item", DataType::LargeUtf8, false));

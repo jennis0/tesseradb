@@ -88,8 +88,10 @@ fn positions(path: &Path, extent: &Bounds) -> Vec<(u32, u32)> {
         tessera_spatial::Projection::None,
         extent,
         None,
-            None,
-    ).expect("the points read");
+        None,
+        &tessera_build::ids::IdSpace::Integer,
+    )
+    .expect("the points read");
     rows.sort_by_key(|r| r.source_id);
     rows.iter().map(|r| (r.qx, r.qy)).collect()
 }
@@ -189,7 +191,9 @@ fn a_point_inside_a_small_polygon_is_inside_it_at_its_stored_position() {
         (cx - lo, cy + hi),
         (cx - lo, cy - lo),
     ]]]);
-    let (shape, report) = square.canonical(Space::View, &extent).expect("the fixture square canonicalises");
+    let (shape, report) = square
+        .canonical(Space::View, &extent)
+        .expect("the fixture square canonicalises");
     assert_eq!(
         report.rings_dropped, 0,
         "the square must survive quantisation, or nothing below is being tested"

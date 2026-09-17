@@ -256,8 +256,9 @@ fn a_moved_geometry_name_does_not_fall_through_to_the_other_shape() {
             tessera_spatial::Projection::None,
             &extent(),
             None,
-                None,
-    )
+            None,
+            &tessera_build::ids::IdSpace::Integer,
+        )
         .expect_err("expected a refusal")
     );
     assert!(message.contains("field `x`"), "{message}");
