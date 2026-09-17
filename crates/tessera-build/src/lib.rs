@@ -19,8 +19,8 @@
 //! optimisation added later. The rule lives in [`signature_sort_key`] as a free function so the
 //! serving allocator applies exactly the same rule to appended items.
 
-mod assembly;
 pub mod artifact_pass;
+mod assembly;
 pub mod check;
 mod column;
 pub mod config;
@@ -35,6 +35,7 @@ mod pipeline;
 mod residency;
 pub mod shapes;
 pub(crate) mod spill;
+pub mod term_images_pass;
 pub mod unique_key;
 
 /// The commit this binary was built from, or `"unknown"` where the source was not a git checkout.
@@ -414,6 +415,9 @@ pub struct ViewReport {
     pub rows: u64,
     /// What this view's frame gave the corpus, counted off its own sorted Morton codes.
     pub occupancy: Occupancy,
+    /// What deriving this view's term images came to, and `None` where the view has none
+    /// (`crate::term_images_pass`).
+    pub term_images: Option<crate::term_images_pass::TermImageReport>,
 }
 
 /// What a completed build produced, per view.
@@ -1527,10 +1531,14 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
                 // free-space figure: a column the streaming pipeline spills and this one placed at
                 // an entity would put the same value in the blob under two tags.
                 if routes.takes_extents(index) {
-                    return column::EntityColumn::spilled(&scratch, attribute.ty, tiler_items.len())
-                        .map_err(|e| {
-                            BuildError::Invalid(format!("attribute '{}': {e}", attribute.name))
-                        });
+                    return column::EntityColumn::spilled(
+                        &scratch,
+                        attribute.ty,
+                        tiler_items.len(),
+                    )
+                    .map_err(|e| {
+                        BuildError::Invalid(format!("attribute '{}': {e}", attribute.name))
+                    });
                 }
                 column::EntityColumn::from_values(
                     &scratch,
@@ -1793,6 +1801,24 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
         .shape_held_extents
         .clone_from(&artifact_pass.shape_held_extents);
 
+    // ---- 8c. the view's term images (`crate::term_images_pass`) ------------------------
+    //
+    // After the permutation they are projected through is durable, and before the digest pass
+    // that covers the file this writes. The streaming build calls the same pass at the same point
+    // in its own view loop.
+    let term_images = {
+        let postings = tessera_authz::postings::PostingsReader::open(&postings_path, true)
+            .map_err(|e| BuildError::io(&postings_path, e))?;
+        vec![crate::term_images_pass::run(
+            &postings,
+            &args.out.join(PREFIX),
+            PHASH,
+            &view.view_id,
+            n as u32,
+            &mut derived_index,
+        )?]
+    };
+
     // ---- 9. manifests ------------------------------------------------------------------
     other_paths.extend([
         permutation_path,
@@ -1805,6 +1831,12 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
     other_paths.extend(filter_paths);
     other_paths.extend(published_layers.paths.iter().cloned());
     other_paths.extend(artifact_pass.paths.iter().cloned());
+    other_paths.extend(
+        term_images
+            .iter()
+            .flatten()
+            .map(|images| images.path.clone()),
+    );
     other_paths.extend(
         published_layers
             .containment_extents
@@ -1835,6 +1867,7 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
             entity_hi: n,
         }],
         std::slice::from_ref(&occupancy),
+        &term_images,
     )?;
     report.attribute_coverage = attribute_coverage;
     report.hierarchy_shapes = published_layers.hierarchy_shapes.clone();
@@ -1897,6 +1930,7 @@ fn write_manifests(
     published_layers: &crate::layers::PublishedLayers,
     segments_written: &[SegmentDescriptor],
     occupancies: &[Occupancy],
+    term_images: &[Option<crate::term_images_pass::ViewTermImages>],
 ) -> Result<BuildReport> {
     let bounds = plugin.declared_bounds();
     let partition_dir = args.out.join(PREFIX).join("partitions").join(PHASH);
@@ -1966,7 +2000,14 @@ fn write_manifests(
         row_column_extents: published_layers.row_column_extents.clone(),
         shape_rows_extents: published_layers.shape_rows_extents.clone(),
         shape_held_extents: published_layers.shape_held_extents.clone(),
-        term_image_extents: Vec::new(),
+        // One entry per view that has images, in the order the views were built
+        // (`crate::term_images_pass`). A view with no rows, and a build over a dictionary with no
+        // terms, have none.
+        term_image_extents: term_images
+            .iter()
+            .flatten()
+            .map(|images| images.extent.clone())
+            .collect(),
         artifact_record_extents: published_layers.artifact_record_extents.clone(),
         // One per view the build materialised (`views.md` §7), in registry order. `entity_hi`
         // is inclusive, and an empty build has no entity range at all — hence the saturating
@@ -2199,10 +2240,12 @@ fn write_manifests(
         views: segments_written
             .iter()
             .zip(occupancies)
-            .map(|(descriptor, occupancy)| ViewReport {
+            .zip(term_images)
+            .map(|((descriptor, occupancy), images)| ViewReport {
                 view_id: descriptor.view.clone(),
                 rows: descriptor.row_count as u64,
                 occupancy: *occupancy,
+                term_images: images.as_ref().map(|images| images.report),
             })
             .collect(),
         items: n,
