@@ -17,6 +17,28 @@ From this checkout, `pip install -e 'clients/py[widget]'` — the wheel's build 
 Nothing built is committed. `check.sh` is the package's half of the gate: the tests, and a wheel
 built and opened to prove the bundle is inside it.
 
+## Try it
+
+Two notebooks under `examples/`, the same guided walk in each front end:
+
+```
+marimo edit clients/py/examples/notebook_marimo.py
+jupyter lab clients/py/examples/notebook.ipynb
+```
+
+Six sections: a DataFrame with a cluster column mapped in three calls; the 50,000-paper arXiv
+corpus from files, with terms and three clusterings, mapped as its own principal and as two arXiv
+categories; a week of new papers into the database while it serves; a second clustering over rows
+it already holds; one set of points under two projections; and the database saved, reopened and
+handed to `tessera serve --deployment`.
+
+They need `pip install -e 'clients/py[widget,local]'`, a `tessera` binary on `PATH` or named by
+`TESSERA_BIN`, and the corpus at `data/notebook/`, which `TESSERA_NOTEBOOK_DATA` names elsewhere.
+Marimo is a dependency of neither extra: `pip install marimo` for the first of the two.
+
+`tests/test_sdk_examples.py` executes the marimo notebook's cells with no browser and asserts the
+counts each section prints, so a notebook that drifts from the package fails the gate.
+
 ## A database in a directory
 
 The SDK (`python-sdk.md`) makes a Tessera database out of frames and files. `create()` makes the
