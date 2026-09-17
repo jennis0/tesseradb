@@ -533,6 +533,7 @@ token_max_lifetime  = 3600            # seconds, integer. Required: there is no 
 viewer  = "127.0.0.1:7407"            # loopback by default; binding wider is an explicit act
 session = "127.0.0.1:7408"            # authorise/revoke only; the app tier's surface
 control = "unix:/run/tessera/control.sock"   # loopback TCP + credential on Windows
+                                      # a TCP address may name port 0; the kernel then chooses
 # credentials: by file or by env var, never inline. The locator is checked here; the secret is
 # read at startup, so `tessera build` — which reads this same file — needs neither exported
 session_credential_file  = "/etc/tessera/session.cred"
@@ -579,6 +580,12 @@ overlay_soft_limit = 500_000
 flush_max_items = 100_000             # parsed; inert until flush exists (§6.4)
 flush_max_age_secs = 60               # likewise
 ```
+
+Once all three planes are bound, `tessera serve` writes one JSON line to stdout naming the
+addresses it bound, `{"event":"listening","viewer":"127.0.0.1:7407","session":"127.0.0.1:7408","control":"unix:/run/tessera/control.sock"}`,
+a unix control plane reported as `unix:` and its path. Nothing else goes to stdout; the
+process's diagnostics go to stderr. A supervisor that declared port 0 reads that first line and
+sends its first request to the address in it.
 
 `dev_cors_origins` is the one key deliberately absent from the example. Its absence means no CORS layer at all, which is the only sensible default for a knob whose effect is to let a page from another origin present a session token; there is no environment variable and no wildcard, and the enumerated list is what keeps a development affordance from becoming an integration pattern.
 

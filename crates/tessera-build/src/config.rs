@@ -822,6 +822,24 @@ pub struct Config {
     /// rather than against `[[view]]` alone: a group's view is nameable as `<group>:<key>` and is
     /// an ordinary candidate ([decision 0112](../decisions/0112-the-anchor-view-orders-a-signature-groups-ids.md)).
     pub allocation_view: Option<String>,
+    /// Every declared attribute's name in declaration order, the group-scoped ones included.
+    ///
+    /// **Held here because the two halves are two lists.** A scoped column is not in
+    /// [`Schema::attributes`] — it has no slot in the manifest's flat list — so neither list alone
+    /// is the declaration's order, and the control-plane emitter states the order the author
+    /// wrote ([`control_payloads`]).
+    pub attribute_order: Vec<String>,
+    /// Every declared vocabulary's name in declaration order. [`Schema::vocabularies`] is keyed by
+    /// name and a map has no order to state.
+    pub vocabulary_order: Vec<String>,
+    /// Vocabulary name → the `[sources]` key its values are read from, for the vocabularies that
+    /// name one.
+    ///
+    /// **Beside the declaration rather than inside it**, on [`Config::layer_sources`]' rule: a
+    /// [`Vocabulary`] is what the manifest carries, and the file its keys came from is not part of
+    /// the value set. It is kept because a sourced value set's keys are *rows* — the emitter says
+    /// which source they are in rather than putting a corpus's contents in a declaration payload.
+    pub vocabulary_sources: BTreeMap<String, String>,
     /// Each layer's bound sources, parallel to [`Config::layers`] and by the same name.
     ///
     /// **Beside the declarations rather than inside them.** A [`LayerDeclaration`] is exactly what
@@ -999,6 +1017,34 @@ pub struct ViewMetadata {
     pub ty: ScalarType,
     /// The vocabulary a category's keys are drawn from; `None` for a plain scalar.
     pub vocabulary: Option<String>,
+}
+
+impl ViewMetadata {
+    /// The kind this name takes on the wire, as the manifest publishes it and as
+    /// `PUT /control/view_groups/{name}` takes it.
+    ///
+    /// **One implementation** ([decision 0139](../../../docs/decisions/0139-one-implementation-between-build-and-ingest-and-across-a-type-family.md)):
+    /// the manifest's group registry and the control-plane emitter answer the same declaration the
+    /// same way, so a build and a runtime declaration of one block cannot disagree about a name's
+    /// type — which is what the create operation's type check measures a supplied value against.
+    pub fn declared_type(&self) -> tessera_store::manifest::ViewMetadataType {
+        use tessera_store::manifest::ViewMetadataType;
+        match (self.vocabulary.is_some(), self.ty) {
+            (true, _) => ViewMetadataType::Category,
+            (false, ScalarType::Bool) => ViewMetadataType::Bool,
+            (false, ScalarType::F32) | (false, ScalarType::F64) => ViewMetadataType::Float,
+            // `text` and `keyword` both hold a string; the served type is what a client renders,
+            // and both render as text. The fallthrough to the integer arm they took before was
+            // caught by the conformance work (2026-08-31): a build looked right because `/v1/meta`
+            // types off the stored value, and what would have bitten is the create operation's
+            // type check refusing a text value.
+            (false, ScalarType::Utf8)
+            | (false, ScalarType::Text)
+            | (false, ScalarType::Keyword) => ViewMetadataType::Text,
+            (false, ScalarType::TimestampUs) => ViewMetadataType::TimestampUs,
+            (false, _) => ViewMetadataType::Int,
+        }
+    }
 }
 
 /// A metadata value as one roster record carries it, typed against its declaration.
@@ -2219,6 +2265,15 @@ impl Config {
             },
             scoped_attributes,
             layers,
+            // Declaration order, read off the blocks themselves: the compiled halves are two
+            // lists, and a map of vocabularies has no order at all.
+            attribute_order: file.attribute.iter().map(|b| b.name.clone()).collect(),
+            vocabulary_order: file.vocabulary.iter().map(|b| b.name.clone()).collect(),
+            vocabulary_sources: file
+                .vocabulary
+                .iter()
+                .filter_map(|b| b.source.clone().map(|s| (b.name.clone(), s)))
+                .collect(),
             layer_sources,
             label_layers,
             allocation_view: defaults.allocation_view.clone(),
@@ -6368,8 +6423,7 @@ impl Config {
         resolved: &[crate::ViewArgs],
     ) -> Vec<tessera_store::manifest::GroupDescriptor> {
         use tessera_store::manifest::{
-            GroupDescriptor, GroupMetadataField, GroupViewDescriptor, ViewMetadataType,
-            ViewMetadataValue,
+            GroupDescriptor, GroupMetadataField, GroupViewDescriptor, ViewMetadataValue,
         };
         let mut groups: Vec<GroupDescriptor> = Vec::new();
         for view in registry {
@@ -6435,29 +6489,12 @@ impl Config {
                         owner
                             .metadata
                             .iter()
+                            // The mapping is [`ViewMetadata::declared_type`], shared with the
+                            // control-plane emitter so a build and a runtime declaration of one
+                            // block cannot disagree about a name's type (decision 0139).
                             .map(|field| GroupMetadataField {
                                 name: field.name.clone(),
-                                ty: match (field.vocabulary.is_some(), field.ty) {
-                                    (true, _) => ViewMetadataType::Category,
-                                    (false, ScalarType::Bool) => ViewMetadataType::Bool,
-                                    (false, ScalarType::F32) | (false, ScalarType::F64) => {
-                                        ViewMetadataType::Float
-                                    }
-                                    // `text` and `keyword` both hold a string; the served
-                                    // type is what a client renders, and both render as text.
-                                    // The fallthrough to the integer arm they took before was
-                                    // caught by the conformance work (2026-08-31): a build
-                                    // looked right because `/v1/meta` types off the stored
-                                    // value, and what would have bitten is the create
-                                    // operation's type check refusing a text value.
-                                    (false, ScalarType::Utf8)
-                                    | (false, ScalarType::Text)
-                                    | (false, ScalarType::Keyword) => ViewMetadataType::Text,
-                                    (false, ScalarType::TimestampUs) => {
-                                        ViewMetadataType::TimestampUs
-                                    }
-                                    (false, _) => ViewMetadataType::Int,
-                                },
+                                ty: field.declared_type(),
                                 vocabulary: field.vocabulary.clone(),
                             })
                             .collect()
@@ -6524,5 +6561,698 @@ impl Config {
                 candidates()
             ))),
         }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// The control-plane payloads
+// ---------------------------------------------------------------------------------------------
+
+/// The declaration, minus its acquisition keys, as the control plane's declaration routes take it
+/// (`configuration.md` §2; `ingest.md` §1.3): one array per runtime block kind, each in
+/// declaration order.
+///
+/// **One implementation of declaration-to-payload** ([decision 0139](../../../docs/decisions/0139-one-implementation-between-build-and-ingest-and-across-a-type-family.md)).
+/// This serialises the same parsed types the build compiles from, so a key the parser accepts and
+/// this does not is a key the emitter can be seen to drop, rather than one a second reading of the
+/// TOML never knew about.
+///
+/// **The emitter states the declaration; the route decides.** Where a compiled block carries
+/// something a running service refuses — `render` on an attribute (decision 0136's amendment), an
+/// `auto` extent, which has no data to fit against here — it is emitted as declared and the route
+/// answers. An emitter that pre-filtered would hide the refusal instead of delivering it.
+///
+/// **Where the name travels decides the shape.** A layer body and an attribute body carry their
+/// own `name`, so those two arrays are bare bodies; a vocabulary, a view and a view group are
+/// addressed by a path segment, so each of those entries is `{ "name", "body" }` and the body is
+/// what goes on the wire. A vocabulary's entry carries a third key: `values`, the
+/// `PATCH /control/vocabularies/{name}/values` page its inline values make — or `values_source`,
+/// the `[sources]` name a sourced value set reads, whose values are rows rather than declaration
+/// and are not emitted. **A sourced closed set is therefore a declaration the route refuses**: a
+/// closed set with no values refuses every ingest, so its keys have to be paged before it can be
+/// declared, and `values_source` says where they are.
+pub fn control_payloads(config: &Config) -> serde_json::Value {
+    serde_json::json!({
+        "layers": config.layers,
+        "attributes": attribute_payloads(config),
+        "vocabularies": vocabulary_payloads(config),
+        "views": view_payloads(config),
+        "view_groups": view_group_payloads(config),
+    })
+}
+
+/// Drop the key where the value is absent: every optional on a declaration route is
+/// `#[serde(default)]`, and `deny_unknown_fields` is the reason nothing is invented to fill one.
+fn insert_some<T: serde::Serialize>(
+    body: &mut serde_json::Map<String, serde_json::Value>,
+    key: &str,
+    value: Option<T>,
+) {
+    if let Some(value) = value {
+        body.insert(
+            key.to_string(),
+            serde_json::to_value(value).unwrap_or_default(),
+        );
+    }
+}
+
+/// One `PUT /control/attributes` body per declared column, entity-scoped and group-scoped alike,
+/// in declaration order.
+///
+/// **`field`, `source`, `entity_id_field` and `fields` are the acquisition half** — where a build
+/// reads the column from — and are gone by this point: an [`Attribute`] carries `field` because a
+/// build needs it, and nothing else here does.
+fn attribute_payloads(config: &Config) -> Vec<serde_json::Value> {
+    let mut out = Vec::with_capacity(config.attribute_order.len());
+    for name in &config.attribute_order {
+        let (attribute, scope) = match config.schema.attributes.iter().find(|a| &a.name == name) {
+            Some(attribute) => (attribute, tessera_types::layer::LayerScope::Entity),
+            None => match config
+                .scoped_attributes
+                .iter()
+                .find(|a| &a.attribute.name == name)
+            {
+                Some(scoped) => (
+                    &scoped.attribute,
+                    tessera_types::layer::LayerScope::Group(scoped.group.clone()),
+                ),
+                // A name in the order list that compiled to no column is not reachable: both
+                // halves are pushed from the same block list. Skipped rather than asserted,
+                // because an emitter is not the place to panic over a declaration.
+                None => continue,
+            },
+        };
+        out.push(attribute_payload(attribute, scope));
+    }
+    out
+}
+
+fn attribute_payload(
+    attribute: &Attribute,
+    scope: tessera_types::layer::LayerScope,
+) -> serde_json::Value {
+    let mut body = serde_json::Map::new();
+    body.insert("name".to_string(), attribute.name.clone().into());
+    insert_some(&mut body, "title", attribute.title.clone());
+    // **A category is spelled as the block spells it**: `type = "category"` with the vocabulary
+    // beside it and the code space's width in `width`. The compiled type is that width
+    // (`Attribute::ty`), so writing it into `type` would state the storage where the declaration
+    // stated the kind.
+    match &attribute.vocabulary {
+        Some(vocabulary) => {
+            body.insert("type".to_string(), "category".into());
+            body.insert("vocabulary".to_string(), vocabulary.clone().into());
+            body.insert("width".to_string(), attribute.ty.arrow_type_name().into());
+        }
+        None => {
+            body.insert("type".to_string(), attribute.ty.arrow_type_name().into());
+        }
+    }
+    // **The declared name, not the resolved identity.** A `text` column's analyser is resolved to
+    // `<name>/<version>` at parse (decision 0070) and the route resolves it again from the name,
+    // so the version is this binary's answer rather than anything the author wrote.
+    insert_some(
+        &mut body,
+        "analyser",
+        attribute
+            .analyser
+            .as_deref()
+            .and_then(|identity| identity.split('/').next())
+            .map(str::to_string),
+    );
+    body.insert("index".to_string(), attribute.index.into());
+    body.insert("render".to_string(), attribute.render.into());
+    body.insert(
+        "scope".to_string(),
+        serde_json::to_value(scope).unwrap_or_default(),
+    );
+    serde_json::Value::Object(body)
+}
+
+/// One vocabulary per declared block, in declaration order: the `PUT /control/vocabularies/{name}`
+/// body, and beside it either the values page or the source its values are rows from.
+fn vocabulary_payloads(config: &Config) -> Vec<serde_json::Value> {
+    let mut out = Vec::with_capacity(config.vocabulary_order.len());
+    for name in &config.vocabulary_order {
+        let Some(vocabulary) = config.schema.vocabularies.get(name) else {
+            continue;
+        };
+        let mut body = serde_json::Map::new();
+        insert_some(&mut body, "title", vocabulary.title.clone());
+        body.insert(
+            "value_set".to_string(),
+            match vocabulary.value_set {
+                ValueSet::Closed => "closed",
+                ValueSet::Open => "open",
+            }
+            .into(),
+        );
+        body.insert(
+            "visibility".to_string(),
+            serde_json::to_value(vocabulary.visibility).unwrap_or_default(),
+        );
+        body.insert(
+            "width".to_string(),
+            vocabulary.width.arrow_type_name().into(),
+        );
+        if !vocabulary.reserved.is_empty() {
+            body.insert(
+                "reserved".to_string(),
+                serde_json::to_value(&vocabulary.reserved).unwrap_or_default(),
+            );
+        }
+
+        let mut entry = serde_json::Map::new();
+        entry.insert("name".to_string(), name.clone().into());
+        match config.vocabulary_sources.get(name) {
+            // **A sourced value set is rows, not declaration.** The file is read at a build and
+            // its keys are data; emitting them here would put a corpus's contents in a payload a
+            // declare-only deployment posts before it has any.
+            Some(source) => {
+                entry.insert("values_source".to_string(), source.clone().into());
+            }
+            None if !vocabulary.codes.is_empty() => {
+                // **No `code` anywhere.** Codes are the server's to assign
+                // (`per-point-attributes.md` §3.1), and the route refuses a body that names one —
+                // so an inline `key = code` table reaches the wire as its keys and titles, and the
+                // running service draws the codes.
+                let values: Vec<serde_json::Value> = vocabulary
+                    .codes
+                    .keys()
+                    .map(|key| {
+                        let mut row = serde_json::Map::new();
+                        row.insert("key".to_string(), key.clone().into());
+                        insert_some(&mut row, "title", vocabulary.titles.get(key).cloned());
+                        serde_json::Value::Object(row)
+                    })
+                    .collect();
+                // **On the declaration body and beside it.** A closed set with no values is
+                // refused at the route — an authored set of nothing refuses every ingest — so the
+                // values travel with the declaration that needs them; the page is the same rows
+                // as `PATCH /control/vocabularies/{name}/values` takes, which is how a value set
+                // grows after its declaration (`ingest.md` §1.3).
+                body.insert("values".to_string(), values.clone().into());
+                entry.insert(
+                    "values".to_string(),
+                    serde_json::json!({ "values": values }),
+                );
+            }
+            None => {}
+        }
+        entry.insert("body".to_string(), serde_json::Value::Object(body));
+        out.push(serde_json::Value::Object(entry));
+    }
+    out
+}
+
+/// One `PUT /control/views/{name}` body per plain `[[view]]` block, in declaration order.
+///
+/// **A group's views are not here.** They are created through the roster route
+/// (`PUT /control/views/{group}/{key}`), whose body is a roster record rather than a declaration.
+fn view_payloads(config: &Config) -> Vec<serde_json::Value> {
+    config
+        .views
+        .iter()
+        .map(|view| {
+            let mut body = serde_json::Map::new();
+            insert_some(&mut body, "title", view.title.clone());
+            body.insert("projection".to_string(), view.projection.name().into());
+            body.insert(
+                "extent".to_string(),
+                extent_payload(view.projection, &view.extent),
+            );
+            insert_some(&mut body, "visibility", view.visibility.clone());
+            insert_some(
+                &mut body,
+                "point_visibility",
+                point_visibility_payload(&view.point_visibility),
+            );
+            serde_json::json!({ "name": view.name, "body": serde_json::Value::Object(body) })
+        })
+        .collect()
+}
+
+/// One `PUT /control/view_groups/{name}` body per `[[view_group]]` block, in declaration order.
+///
+/// The roster and the group's own points file are acquisition and are gone: a group declared at a
+/// running service starts with an empty roster, and its keys are created one at a time.
+fn view_group_payloads(config: &Config) -> Vec<serde_json::Value> {
+    config
+        .view_groups
+        .iter()
+        .map(|group| {
+            let mut body = serde_json::Map::new();
+            insert_some(&mut body, "title", group.title.clone());
+            body.insert("projection".to_string(), group.projection.name().into());
+            body.insert(
+                "extent".to_string(),
+                extent_payload(group.projection, &group.extent),
+            );
+            insert_some(&mut body, "visibility", group.visibility.clone());
+            insert_some(
+                &mut body,
+                "point_visibility",
+                point_visibility_payload(&group.point_visibility),
+            );
+            insert_some(&mut body, "members", group.members.clone());
+            let metadata: Vec<serde_json::Value> = group
+                .metadata
+                .iter()
+                .map(|field| {
+                    let mut entry = serde_json::Map::new();
+                    entry.insert("name".to_string(), field.name.clone().into());
+                    entry.insert(
+                        "type".to_string(),
+                        serde_json::to_value(field.declared_type()).unwrap_or_default(),
+                    );
+                    insert_some(&mut entry, "vocabulary", field.vocabulary.clone());
+                    serde_json::Value::Object(entry)
+                })
+                .collect();
+            if !metadata.is_empty() {
+                body.insert("metadata".to_string(), metadata.into());
+            }
+            serde_json::json!({ "name": group.name, "body": serde_json::Value::Object(body) })
+        })
+        .collect()
+}
+
+/// `point_visibility` as a declaration at a running service spells it: the default alone.
+///
+/// `field` and `source` are where a build reads each point's own label; a batch carries its own
+/// `access` list, so the only half that crosses is what a point carrying none is given
+/// (decision 0133). A block that declared only those two leaves nothing to send, and the key is
+/// dropped rather than sent empty.
+fn point_visibility_payload(visibility: &PointVisibility) -> Option<serde_json::Value> {
+    visibility
+        .default
+        .as_ref()
+        .map(|default| serde_json::json!({ "default": default }))
+}
+
+/// The frame, in the coordinates the route takes: the four bounds a Morton code is a fraction of.
+///
+/// **A projected view's declared degree box is snapped here, by the routine the build snaps with**
+/// (`projections.md` §4.2), so a view declared at a running service lands on the frame a build of
+/// the same declaration would have given it — not on the unsnapped box.
+///
+/// **`auto` has nothing to resolve against** and is emitted as declared. There is no source to
+/// survey at a running service, so the route refuses it naming the key; an emitter that guessed a
+/// box would give a view a frame nobody chose, and a frame is immutable for the view's life
+/// (decision 0040).
+fn extent_payload(projection: Projection, extent: &Extent) -> serde_json::Value {
+    match extent {
+        Extent::Fixed(bounds) => serde_json::json!({
+            "x": [bounds.x_min, bounds.x_max],
+            "y": [bounds.y_min, bounds.y_max],
+        }),
+        Extent::LonLat(box_) => {
+            let bounds = snap_lon_lat(projection, box_).square.bounds();
+            serde_json::json!({
+                "x": [bounds.x_min, bounds.x_max],
+                "y": [bounds.y_min, bounds.y_max],
+            })
+        }
+        Extent::Auto { margin } => serde_json::json!({ "auto": true, "margin": margin }),
+        Extent::AutoLonLat => serde_json::json!({ "auto": true }),
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// The control-plane payloads' own tests
+// ---------------------------------------------------------------------------------------------
+
+/// [`control_payloads`] over a declaration that writes every key each block takes.
+///
+/// **One test a block kind**, each asking the same two questions: is every acquisition key gone,
+/// and is everything else there in the shape the route takes? The round trip — that a running
+/// service accepts what comes out — is `tessera-server`'s `tests/payload_emitter.rs`, because only
+/// a server can answer it.
+#[cfg(test)]
+mod payload_tests {
+    use super::*;
+
+    /// A vocabulary's values read from a file: the one block whose parse opens anything, and the
+    /// case `values_source` exists for.
+    fn write_value_file(path: &Path) {
+        use arrow::array::{ArrayRef, StringArray};
+        use arrow::datatypes::{DataType, Field};
+        use std::sync::Arc;
+        let schema = Arc::new(arrow::datatypes::Schema::new(vec![
+            Field::new("name", DataType::Utf8, false),
+            Field::new("title", DataType::Utf8, true),
+        ]));
+        let keys: ArrayRef = Arc::new(StringArray::from(vec!["north", "south"]));
+        let titles: ArrayRef = Arc::new(StringArray::from(vec!["North", "South"]));
+        let batch =
+            arrow::record_batch::RecordBatch::try_new(schema.clone(), vec![keys, titles]).unwrap();
+        let mut writer = parquet::arrow::ArrowWriter::try_new(
+            std::fs::File::create(path).unwrap(),
+            schema,
+            None,
+        )
+        .unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+    }
+
+    /// Every block kind, every key: two plain views (one projected, one not), a form B view group
+    /// with a roster table and metadata of three types, two vocabularies (inline with pinned codes
+    /// and reserved, and sourced), four attributes (plain, category, text, group-scoped) and two
+    /// layers.
+    const EVERY_KEY: &str = r#"
+[sources]
+points   = "points.parquet"
+extra    = "extra.parquet"
+regions  = "regions.parquet"
+quarters = "quarters.parquet"
+roster   = "roster.parquet"
+members  = "members.parquet"
+clusters = "clusters.parquet"
+
+[defaults]
+source          = "points"
+entity_id_field = "id"
+allocation_view = "world"
+
+[[view]]
+name             = "world"
+title            = "Whole corpus"
+projection       = "web_mercator"
+source           = "points"
+extent           = { lon = [-180.0, 180.0], lat = [-85.0511287798066, 85.0511287798066] }
+visibility       = "ir:analyst"
+point_visibility = { field = "access", default = "public" }
+
+[[view]]
+name             = "embedding"
+extent           = { x = [0.0, 1000.0], y = [0.0, 1000.0] }
+point_visibility = { default = "public" }
+
+[[view_group]]
+name             = "quarter"
+title            = "By quarter"
+projection       = "none"
+source           = "quarters"
+fields           = { view = "quarter" }
+extent           = { x = [-40.0, 40.0], y = [-40.0, 40.0] }
+visibility       = "ir:analyst"
+point_visibility = { field = "access", default = "public" }
+metadata         = { label = "text", starts = "timestamp_us", region = { type = "category", vocabulary = "region" } }
+
+[view_group.views]
+source = "roster"
+fields = { key = "quarter" }
+
+[[vocabulary]]
+name       = "kind"
+title      = "Feature kind"
+width      = "u8"
+value_set  = "closed"
+visibility = "public"
+values     = { alpha = 3, beta = 7 }
+reserved   = [9]
+
+[[vocabulary]]
+name       = "region"
+title      = "Region"
+width      = "u16"
+value_set  = "closed"
+visibility = "derived"
+source     = "regions"
+fields     = { key = "name" }
+
+[[attribute]]
+name            = "importance"
+title           = "Importance"
+field           = "pop"
+source          = "extra"
+entity_id_field = "row_id"
+type            = "u32"
+index           = true
+render          = true
+
+[[attribute]]
+name       = "feature"
+title      = "Feature class"
+type       = "category"
+vocabulary = "kind"
+render     = true
+
+[[attribute]]
+name     = "note"
+type     = "text"
+analyser = "unicode"
+index    = true
+
+[[attribute]]
+name            = "coverage"
+type            = "f32"
+source          = "quarters"
+entity_id_field = "id"
+fields          = { view = "quarter" }
+scope           = { group = "quarter" }
+
+[[layer]]
+name       = "clusters/a"
+title      = "Clusters"
+views      = ["world"]
+source     = "clusters"
+membership = "enumerated"
+hierarchy  = { kind = "flat" }
+visibility = "ir:analyst"
+artifact_visibility       = { default = "inherited" }
+require_member_visibility = "any"
+
+[layer.members]
+source = "members"
+"#;
+
+    fn every_key() -> (tempfile::TempDir, serde_json::Value) {
+        let dir = tempfile::tempdir().unwrap();
+        write_value_file(&dir.path().join("regions.parquet"));
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, EVERY_KEY).unwrap();
+        let config = Config::parse(&path, &HashMap::new()).expect("the fixture should compile");
+        let payloads = control_payloads(&config);
+        (dir, payloads)
+    }
+
+    /// Nothing anywhere in the object names a file: acquisition is the half a running service
+    /// does not have.
+    #[test]
+    fn no_payload_names_a_file() {
+        let (_dir, payloads) = every_key();
+        let text = serde_json::to_string(&payloads).unwrap();
+        assert!(!text.contains("parquet"), "{text}");
+        // The four kinds this emitter compiles by hand. A layer body is `LayerDeclaration` as it
+        // has always been, and its `artifact_visibility.field` is a key of that route rather than
+        // an acquisition key of this one.
+        for kind in ["attributes", "vocabularies", "views", "view_groups"] {
+            let text = serde_json::to_string(&payloads[kind]).unwrap();
+            for key in ["field", "entity_id_field", "fields", "source"] {
+                assert!(
+                    !text.contains(&format!("\"{key}\"")),
+                    "the acquisition key `{key}` reached a {kind} payload: {text}"
+                );
+            }
+        }
+    }
+
+    /// **Layers**: the array key and the bodies are exactly what they were — a `[[layer]]` block
+    /// minus its acquisition keys is the `PUT /control/layers` body.
+    #[test]
+    fn layer_payloads_are_the_registration_bodies() {
+        let (_dir, payloads) = every_key();
+        let layers: Vec<tessera_types::layer::LayerDeclaration> =
+            serde_json::from_value(payloads["layers"].clone()).expect("layer bodies");
+        assert_eq!(layers.len(), 1);
+        assert_eq!(layers[0].name, "clusters/a");
+        assert_eq!(layers[0].views, vec!["world".to_string()]);
+    }
+
+    /// **Attributes**: declaration order over both halves of the schema, a category spelled as the
+    /// block spells it, and the analyser as its declared name rather than this binary's resolved
+    /// identity.
+    #[test]
+    fn attribute_payloads_are_the_declaration_bodies() {
+        let (_dir, payloads) = every_key();
+        let attributes = payloads["attributes"].as_array().unwrap();
+        let names: Vec<&str> = attributes
+            .iter()
+            .map(|a| a["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            names,
+            vec!["importance", "feature", "note", "coverage"],
+            "declaration order, the group-scoped column in its own place"
+        );
+
+        assert_eq!(attributes[0]["type"], "u32");
+        assert_eq!(attributes[0]["title"], "Importance");
+        assert_eq!(attributes[0]["index"], true);
+        // **Emitted although the route refuses it** (decision 0136's amendment): the emitter
+        // states the declaration and the route decides.
+        assert_eq!(attributes[0]["render"], true);
+        assert_eq!(attributes[0]["scope"], "entity");
+
+        assert_eq!(attributes[1]["type"], "category");
+        assert_eq!(attributes[1]["vocabulary"], "kind");
+        assert_eq!(attributes[1]["width"], "u8");
+
+        assert_eq!(attributes[2]["type"], "text");
+        assert_eq!(
+            attributes[2]["analyser"], "unicode",
+            "the declared name, not `unicode/<version>`"
+        );
+        assert!(attributes[2].get("vocabulary").is_none());
+
+        assert_eq!(attributes[3]["type"], "f32");
+        assert_eq!(
+            attributes[3]["scope"],
+            serde_json::json!({ "group": "quarter" })
+        );
+    }
+
+    /// **Vocabularies**: the declaration body, the values page beside it, and never a code.
+    #[test]
+    fn vocabulary_payloads_carry_values_but_no_codes() {
+        let (_dir, payloads) = every_key();
+        let vocabularies = payloads["vocabularies"].as_array().unwrap();
+        assert_eq!(vocabularies.len(), 2);
+
+        let kind = &vocabularies[0];
+        assert_eq!(kind["name"], "kind");
+        assert_eq!(kind["body"]["title"], "Feature kind");
+        assert_eq!(kind["body"]["value_set"], "closed");
+        assert_eq!(kind["body"]["visibility"], "public");
+        assert_eq!(kind["body"]["width"], "u8");
+        assert_eq!(kind["body"]["reserved"], serde_json::json!([9]));
+        // **On the body and beside it**: a closed set with no values is refused at the route, so
+        // the values travel with the declaration that needs them, and the page is how a value set
+        // grows afterwards.
+        assert_eq!(
+            kind["body"]["values"],
+            serde_json::json!([{ "key": "alpha" }, { "key": "beta" }]),
+            "the pinned codes are the server's to draw again"
+        );
+        assert_eq!(
+            kind["values"],
+            serde_json::json!({ "values": [{ "key": "alpha" }, { "key": "beta" }] })
+        );
+
+        let region = &vocabularies[1];
+        assert_eq!(region["name"], "region");
+        assert_eq!(region["body"]["visibility"], "derived");
+        assert_eq!(region["body"]["width"], "u16");
+        assert!(
+            region.get("values").is_none(),
+            "a sourced value set's keys are rows, not declaration"
+        );
+        assert_eq!(region["values_source"], "regions");
+    }
+
+    /// **Views**: the frame in the coordinates the route takes — a projected view's degree box
+    /// snapped by the routine the build snaps with, so a view declared at a running service lands
+    /// where a build of the same declaration would have put it.
+    #[test]
+    fn view_payloads_carry_the_resolved_frame() {
+        let (_dir, payloads) = every_key();
+        let views = payloads["views"].as_array().unwrap();
+        assert_eq!(views.len(), 2);
+
+        assert_eq!(views[0]["name"], "world");
+        assert_eq!(views[0]["body"]["title"], "Whole corpus");
+        assert_eq!(views[0]["body"]["projection"], "web_mercator");
+        assert_eq!(
+            views[0]["body"]["visibility"],
+            serde_json::json!(["ir:analyst"])
+        );
+        assert_eq!(
+            views[0]["body"]["point_visibility"],
+            serde_json::json!({ "default": "public" }),
+            "`field` is where a build reads a point's own label and does not cross"
+        );
+        let asked = LonLatBox {
+            lon_min: -180.0,
+            lon_max: 180.0,
+            lat_min: -85.0511287798066,
+            lat_max: 85.0511287798066,
+        };
+        let snapped = snap_lon_lat(Projection::WebMercator, &asked)
+            .square
+            .bounds();
+        assert_eq!(
+            views[0]["body"]["extent"],
+            serde_json::json!({
+                "x": [snapped.x_min, snapped.x_max],
+                "y": [snapped.y_min, snapped.y_max],
+            })
+        );
+
+        assert_eq!(views[1]["name"], "embedding");
+        assert_eq!(views[1]["body"]["projection"], "none");
+        assert_eq!(
+            views[1]["body"]["extent"],
+            serde_json::json!({ "x": [0.0, 1000.0], "y": [0.0, 1000.0] })
+        );
+        assert!(views[1]["body"].get("title").is_none());
+    }
+
+    /// **View groups**: the settings its views share, and none of the roster — a group declared at
+    /// a running service starts empty and its keys are created one at a time.
+    #[test]
+    fn view_group_payloads_drop_the_roster() {
+        let (_dir, payloads) = every_key();
+        let groups = payloads["view_groups"].as_array().unwrap();
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0]["name"], "quarter");
+        let body = &groups[0]["body"];
+        assert_eq!(body["title"], "By quarter");
+        assert_eq!(body["projection"], "none");
+        assert_eq!(
+            body["extent"],
+            serde_json::json!({ "x": [-40.0, 40.0], "y": [-40.0, 40.0] })
+        );
+        assert_eq!(body["visibility"], serde_json::json!(["ir:analyst"]));
+        assert_eq!(
+            body["point_visibility"],
+            serde_json::json!({ "default": "public" })
+        );
+        assert_eq!(
+            body["metadata"],
+            serde_json::json!([
+                { "name": "label", "type": "text" },
+                { "name": "region", "type": "category", "vocabulary": "region" },
+                { "name": "starts", "type": "timestamp_us" },
+            ]),
+            "the declared names, in the order the group carries them"
+        );
+        assert!(body.get("members").is_none(), "this group owns its views");
+    }
+
+    /// **`auto` has nothing to resolve against**, so it is emitted as declared and the route
+    /// refuses it naming the key. Guessing a box would give a view a frame nobody chose, and a
+    /// frame is immutable for the view's life.
+    #[test]
+    fn an_auto_extent_is_emitted_as_declared() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+[[view]]
+name             = "s0"
+extent           = "auto"
+point_visibility = { default = "public" }
+"#,
+        )
+        .unwrap();
+        let config = Config::parse(&path, &HashMap::new()).unwrap();
+        let payloads = control_payloads(&config);
+        assert_eq!(
+            payloads["views"][0]["body"]["extent"],
+            serde_json::json!({ "auto": true, "margin": DEFAULT_AUTO_MARGIN })
+        );
     }
 }

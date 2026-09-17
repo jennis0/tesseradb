@@ -740,6 +740,15 @@ no sources is a legal config rather than a special mode.
 - **Layers.** `PUT /control/layers` takes the same declaration as JSON, and the build runs the same
   registry and allocator the control plane runs (`annotation-write-cycle.md` §6.1). A `[[layer]]`
   block minus its acquisition keys *is* that payload. `[layer.labels]` expands to a second
+
+**`tessera check --payloads` emits all five.** Over a declaration that checks clean it writes
+one JSON object with the keys `layers`, `attributes`, `vocabularies`, `views` and `view_groups`,
+each an array in declaration order carrying the body the matching control route takes. A
+layer's and an attribute's carry their own `name`; a vocabulary's, a view's and a group's travel
+as `{name, body}`, because those routes take the name in the path. A vocabulary's entry also
+carries `values`, the page `PATCH /control/vocabularies/{name}/values` takes from its inline
+values (keys and titles, never a code), or `values_source` naming the `[sources]` key a sourced
+value set reads, whose keys are rows rather than declaration and are not emitted.
   declaration, so the sugar is available to both.
 - **Memberships.** A point names its artifacts in a column **named for the layer** — the
   declaration's `name`, exactly as an attribute column is named for the attribute's `name`

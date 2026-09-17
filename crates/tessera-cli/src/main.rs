@@ -181,7 +181,15 @@ enum Command {
         #[arg(long = "file", value_name = "NAME=PATH", value_parser = parse_file_binding)]
         file: Vec<(String, PathBuf)>,
         /// Write the control-plane payloads to stdout instead of the disclosure table: one JSON
-        /// array of `PUT /control/layers` bodies, in declaration order.
+        /// object, a key per runtime block kind — `layers`, `attributes`, `vocabularies`, `views`,
+        /// `view_groups` — each an array in declaration order.
+        ///
+        /// A layer body and an attribute body carry their own `name`, so those two arrays are the
+        /// bodies themselves. A vocabulary, a view and a view group are addressed by a path
+        /// segment, so each of those entries is `{ "name", "body" }`. A vocabulary's entry also
+        /// carries `values` — the `PATCH /control/vocabularies/{name}/values` page its inline
+        /// values make — or `values_source`, naming the `[sources]` key a sourced value set reads:
+        /// those keys are rows rather than declaration, and are not emitted.
         ///
         /// **This is the one thing a declare-only deployment cannot get anywhere else.** Such a
         /// deployment authors every layer twice — once as TOML to compile an empty bundle, once as
@@ -2055,10 +2063,12 @@ fn main() -> ExitCode {
                 // (`configuration.md` §2) — so this is a serialisation and not a translation, and
                 // there is no second authority to drift. On stdout alone, so the stream a CI job
                 // pipes into `curl` carries nothing else.
-                match serde_json::to_string_pretty(&config.layers) {
+                match serde_json::to_string_pretty(&tessera_build::config::control_payloads(
+                    &config,
+                )) {
                     Ok(json) => println!("{json}"),
                     Err(e) => {
-                        eprintln!("check FAILED: serialising the layer payloads: {e}");
+                        eprintln!("check FAILED: serialising the declaration payloads: {e}");
                         return ExitCode::FAILURE;
                     }
                 }
@@ -2087,7 +2097,12 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Command::Serve { deployment } => {
-            tracing_subscriber::fmt::init();
+            // Diagnostics on stderr, because stdout carries one thing: the JSON line naming the
+            // three bound addresses, which a supervisor reads as the process's first stdout line
+            // (`tessera_server::serve_announcing`).
+            tracing_subscriber::fmt()
+                .with_writer(std::io::stderr)
+                .init();
             let deployment = match tessera_server::config::discover(
                 deployment.as_deref(),
                 &std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),

@@ -350,8 +350,10 @@ fn payloads_are_the_control_plane_bodies() {
 
     // Round-tripped through the type the endpoint takes: a body that will not deserialise there is
     // not a payload, whatever it looks like.
+    let payloads: serde_json::Value =
+        serde_json::from_str(&stdout(&output)).expect("stdout is one JSON object of payloads");
     let bodies: Vec<tessera_types::layer::LayerDeclaration> =
-        serde_json::from_str(&stdout(&output)).expect("stdout is a JSON array of layer bodies");
+        serde_json::from_value(payloads["layers"].clone()).expect("`layers` is the layer bodies");
     assert_eq!(bodies.len(), 2, "the label sugar's layer is a body too");
     assert_eq!(bodies[0].name, "clusters/a");
     assert_eq!(bodies[0].visibility, None, "`public` is an absence here");
@@ -394,8 +396,9 @@ require_member_visibility = "any"
     let output = run(tmp.path(), &["check", "--payloads"]);
     assert!(output.status.success(), "{}", stderr(&output));
     assert!(stderr(&output).contains("declared and empty"), "{}", stderr(&output));
+    let payloads: serde_json::Value = serde_json::from_str(&stdout(&output)).unwrap();
     let bodies: Vec<tessera_types::layer::LayerDeclaration> =
-        serde_json::from_str(&stdout(&output)).unwrap();
+        serde_json::from_value(payloads["layers"].clone()).unwrap();
     assert_eq!(bodies.len(), 1);
     assert_eq!(bodies[0].visibility.as_deref(), Some("ir:analyst"));
 }
