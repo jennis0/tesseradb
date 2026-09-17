@@ -696,7 +696,8 @@ const TERM_IMAGE_MANIFEST_N: u64 = 0;
 /// The pass 2b term is [`term_image_estimate`], modelled, and a ceiling rather than an
 /// expectation. The pass holds one term per worker in flight: that term's posting as an owned
 /// bitmap over entity space, its image over row space, the buffer the image is serialised into,
-/// and one [`PROJECT_SCRATCH_BYTES`] scratch.
+/// and one projection scratch, the last at
+/// [`tessera_store::permutation::project_scratch_bound`]'s figure for this view.
 /// A Roaring container covers 65 536 values and costs at most 8 KiB, at which point it is a bitset
 /// over every value in its range, so a term held by every entity is the widest posting expressible
 /// and one held by every row the widest image. Nothing in the pass scales with the dictionary: the
@@ -724,16 +725,6 @@ pub(crate) fn memory_estimate(
         .saturating_add(term_image_estimate(dict_len, permutation_bound, base_rows));
     terms.saturating_mul(FOLD_MEMORY_SAFETY_FACTOR)
 }
-
-/// What [`ProjectScratch`](tessera_store::permutation::ProjectScratch) holds at its widest, in
-/// bytes.
-///
-/// Arithmetic from two constants, and a bound rather than a typical figure: the projection
-/// emits and clears its buckets every 64 MiB of row ids whatever the mask, so what it holds is one
-/// window plus a partly filled chunk per bucket, at most 82 MiB at the 1,025 buckets of the `u32`
-/// entity ceiling. `permutation.rs` states it beside the window it follows from, and the anonymous
-/// peaks it produces are measured there.
-const PROJECT_SCRATCH_BYTES: u64 = 82 * 1024 * 1024;
 
 /// The widest a Roaring container can be once built, in bytes: a bitset over its 65 536 values.
 const BYTES_PER_BITSET_CONTAINER: u64 = 8 * 1024;
@@ -764,10 +755,12 @@ fn term_image_estimate(dict_len: u64, permutation_bound: u64, base_rows: u64) ->
             .saturating_mul(BYTES_PER_BITSET_CONTAINER)
     };
     let image = widest(base_rows);
+    let scratch =
+        tessera_store::permutation::project_scratch_bound(permutation_bound, base_rows).total();
     let held = widest(permutation_bound)
         .saturating_add(image)
         .saturating_add(image)
-        .saturating_add(PROJECT_SCRATCH_BYTES);
+        .saturating_add(scratch);
     (TERM_IMAGE_THREADS as u64).saturating_mul(held)
 }
 
@@ -3039,30 +3032,37 @@ mod tests {
             8 * 2,
             "a view with no row gets none either, so only the dictionary term is charged"
         );
+        // The scratch is the store's bound over the same row space, not a figure restated here.
+        let scratch = |bound: u64, rows: u64| {
+            tessera_store::permutation::project_scratch_bound(bound, rows).total()
+        };
         // One container of rows and no entity space: one 8 KiB image, the buffer it is frozen
         // into at the same width, and the scratch.
         assert_eq!(
             memory_estimate(0, 0, 1, 0, VALUES_PER_CONTAINER),
-            (8 + 2 * BYTES_PER_BITSET_CONTAINER + PROJECT_SCRATCH_BYTES)
+            (8 + 2 * BYTES_PER_BITSET_CONTAINER + scratch(0, VALUES_PER_CONTAINER))
                 * FOLD_MEMORY_SAFETY_FACTOR
         );
         // One row past it takes a second container, in the image and in the buffer alike, and
         // nothing else moves.
         assert_eq!(
             memory_estimate(0, 0, 1, 0, VALUES_PER_CONTAINER + 1),
-            (8 + 4 * BYTES_PER_BITSET_CONTAINER + PROJECT_SCRATCH_BYTES)
+            (8 + 4 * BYTES_PER_BITSET_CONTAINER + scratch(0, VALUES_PER_CONTAINER + 1))
                 * FOLD_MEMORY_SAFETY_FACTOR
         );
         // The posting is a function of the permutation bound, above the 4 B/entity the mapped
         // array costs.
         assert_eq!(
             memory_estimate(VALUES_PER_CONTAINER, 0, 1, 0, VALUES_PER_CONTAINER),
-            (4 * VALUES_PER_CONTAINER + 8 + 3 * BYTES_PER_BITSET_CONTAINER + PROJECT_SCRATCH_BYTES)
+            (4 * VALUES_PER_CONTAINER
+                + 8
+                + 3 * BYTES_PER_BITSET_CONTAINER
+                + scratch(VALUES_PER_CONTAINER, VALUES_PER_CONTAINER))
                 * FOLD_MEMORY_SAFETY_FACTOR
         );
         // The memo's figure at rung 6: ~437 MB of image at 3.5×10⁹ rows, and the frozen buffer
         // beside it at the same width.
-        let held = term_image_estimate(1, 0, 3_500_000_000) - PROJECT_SCRATCH_BYTES;
+        let held = term_image_estimate(1, 0, 3_500_000_000) - scratch(0, 3_500_000_000);
         let image = held / 2;
         assert_eq!(
             held,
