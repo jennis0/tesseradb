@@ -146,7 +146,7 @@ fn bench_compose(c: &mut Criterion) {
 
     let bundle = open_bundle(&bundle_root).expect("bundle should open");
     let view = &bundle.partitions["default"].views["s0"];
-    let base = Arc::new(RowProjection::new(&fragment, &view.row_space));
+    let base = Arc::new(RowProjection::walk(&fragment, &view.row_space));
 
     let satisfied: rustc_hash::FxHashSet<TermId> = terms.iter().copied().collect();
     let overlay = Overlay::new();

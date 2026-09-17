@@ -244,7 +244,7 @@ fn fixture(v_per_tile: usize) -> (TempDir, SegmentData, EffectiveMask) {
         std::sync::Arc::new(Permutation::load(&perm_path).unwrap()),
         bound as u32,
     );
-    let base = Arc::new(RowProjection::new(&fragment, &perm));
+    let base = Arc::new(RowProjection::walk(&fragment, &perm));
     let satisfied: FxHashSet<TermId> = [TermId::new(0)].into_iter().collect();
     let mask = compose(
         &satisfied,

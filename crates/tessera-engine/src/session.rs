@@ -943,6 +943,20 @@ pub struct Engine {
     /// is a correctness-shaped one for a deployment's latency, and a test that only runs under a
     /// feature flag is a test that does not run.
     pub(crate) full_projection_builds: AtomicU64,
+    /// Every full projection build split by the route it took, and the route a test has fixed —
+    /// see [`crate::compose::ProjectionRoutes`].
+    ///
+    /// **Shared with the background refresh**, which is the other place a full projection is
+    /// built, and counted from both. It therefore does not sum to
+    /// [`Self::full_projection_builds`], which counts the request path alone and keeps that
+    /// meaning.
+    ///
+    /// **Unconditional, not `bench-timing`-gated**, on [`Self::full_projection_builds`]' argument.
+    /// The chooser's constants are modelled from one probe at one scale, and the way a model like
+    /// that is found to be wrong in a deployment is a route distribution nothing predicted: every
+    /// session walking where the images were written to be read, or every session reading images
+    /// for a residual that swamps them. `full_projection_builds` alone cannot see either.
+    pub(crate) projection_routes: Arc<crate::compose::ProjectionRoutes>,
     /// Walks of the mask and the Morton column that resolved a rung of `N_occ`'s ladder — the
     /// observable behind [`Engine::occupancy_walks`].
     ///
@@ -1864,6 +1878,7 @@ impl Engine {
             fold_publication_paused: Arc::clone(&fold_publication_paused),
             merge_publication_paused: Arc::clone(&merge_publication_paused),
             full_projection_builds: AtomicU64::new(0),
+            projection_routes: Arc::new(crate::compose::ProjectionRoutes::default()),
             occupancy_walks: Arc::clone(&occupancy_walks),
             stage,
         };
@@ -2961,6 +2976,92 @@ impl Engine {
         self.full_projection_builds.load(Ordering::Relaxed)
     }
 
+    /// Projection builds split by route, in [`crate::compose::ProjectionRoute::ALL`]'s order —
+    /// the request path's and the background refresh's together, so it does not sum to
+    /// [`Self::full_projection_builds`].
+    ///
+    /// The distribution is what says whether a deployment's term images are earning anything: a
+    /// corpus whose images are written and never read is one whose keep rule or whose chooser
+    /// constants do not match the principals it actually serves.
+    pub fn projection_builds_by_route(&self) -> [u64; 4] {
+        self.projection_routes.counts()
+    }
+
+    /// Take every projection build by `route` rather than by the one the chooser prices, or by the
+    /// chosen route again on `None`.
+    ///
+    /// **A test hook, gated so it cannot exist in a shipped build**, on
+    /// [`Self::set_background_refresh_for_test`]'s argument. What it is for is the property that
+    /// the routes agree: a test that only compared chosen routes would compare one route with
+    /// itself, because the chooser picks the same one for the same principal every time.
+    ///
+    /// A forced route with nothing to run — a split where the view has no images or the session
+    /// holds no term with one, a complement while its arithmetic is unwritten, a whole-domain
+    /// answer over a grant that is not whole — walks instead, and
+    /// [`Self::projection_builds_by_route`] records the walk. A caller asserting that its forced
+    /// route ran reads the gauge.
+    #[cfg(feature = "fault-injection")]
+    #[doc(hidden)]
+    pub fn force_projection_route_for_test(&self, route: Option<crate::compose::ProjectionRoute>) {
+        self.projection_routes.force(route);
+    }
+
+    /// The rows this session's row projection holds in `view`, built or served exactly as a
+    /// viewport would reach it.
+    ///
+    /// **A test hook, gated so it cannot exist in a shipped build.** A row projection is a
+    /// per-session cache entry behind the single-flight ladder and reaches no public surface: the
+    /// answers it produces do, and a test that only compared answers could not tell a projection
+    /// that lost rows from a request that was never going to return them. The suite that checks
+    /// the three routes against each other compares the projections themselves, which is the
+    /// claim.
+    #[cfg(feature = "fault-injection")]
+    #[doc(hidden)]
+    pub fn session_projection_rows_for_test(
+        &self,
+        session: &Session,
+        view: &str,
+    ) -> Result<croaring::Bitmap> {
+        let generation = self.generation.load_full();
+        let view_data = generation
+            .bundle
+            .partitions
+            .values()
+            .find_map(|partition| partition.views.get(view))
+            .ok_or_else(|| EngineError::UnknownView(view.to_string()))?;
+        let mut probe = crate::timing::Probe::new();
+        let geometry =
+            self.session_geometry(session, &generation, view, view_data, &None, &mut probe)?;
+        Ok(geometry.projection.bitmap().clone())
+    }
+
+    /// The same rows by the walk, built here and cached nowhere — the reference every route is
+    /// compared against.
+    ///
+    /// **A test hook, gated so it cannot exist in a shipped build**, on
+    /// [`Self::session_projection_rows_for_test`]'s argument. It goes through `RowSpace::project`
+    /// rather than through [`crate::compose::ProjectionRoute::Walk`] so that the reference is the
+    /// row space's own crossing and not the same code path under another name.
+    #[cfg(feature = "fault-injection")]
+    #[doc(hidden)]
+    pub fn session_walk_rows_for_test(
+        &self,
+        session: &Session,
+        view: &str,
+    ) -> Result<croaring::Bitmap> {
+        let generation = self.generation.load_full();
+        let view_data = generation
+            .bundle
+            .partitions
+            .values()
+            .find_map(|partition| partition.views.get(view))
+            .ok_or_else(|| EngineError::UnknownView(view.to_string()))?;
+        let fragment = self.fragment_for(session, &generation)?;
+        let mut rows = view_data.row_space.project(&fragment.view());
+        rows.run_optimize();
+        Ok(rows)
+    }
+
     /// How many walks of the mask and the Morton column this engine has made to resolve a rung of
     /// θ's occupied-tile anchor — see [`crate::occupancy`] and [`crate::stage`].
     ///
@@ -3303,6 +3404,7 @@ impl Engine {
                     refreshes: Arc::clone(&self.refreshes),
                     enabled: Arc::clone(&self.refresh_enabled),
                     paused: Arc::clone(&self.refresh_paused),
+                    projection_routes: Arc::clone(&self.projection_routes),
                 },
                 bundle_root: self.bundle_root.clone(),
                 identity_key: self.identity_key,
@@ -3354,6 +3456,7 @@ impl Engine {
                     refreshes: Arc::clone(&self.refreshes),
                     enabled: Arc::clone(&self.refresh_enabled),
                     paused: Arc::clone(&self.refresh_paused),
+                    projection_routes: Arc::clone(&self.projection_routes),
                 },
                 bundle_root: self.bundle_root.clone(),
                 identity_key: self.identity_key,

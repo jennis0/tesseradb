@@ -288,7 +288,7 @@ impl Fixture {
         let fragment = cache
             .get_or_build(&sorted, [3u8; 32], 0, &self.postings, &[], UNIVERSE as u64)
             .unwrap();
-        let base = Arc::new(RowProjection::new(&fragment, &self.row_space));
+        let base = Arc::new(RowProjection::walk(&fragment, &self.row_space));
         let buffer = IngestBuffer::new();
         let denied = denied_rows_of(overlay, &self.row_space);
         let mask = compose(&satisfied, overlay, &buffer, base, &self.row_space, &denied);

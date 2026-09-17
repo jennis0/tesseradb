@@ -283,7 +283,7 @@ fn mask_over(visible_rows: &[u32], row_count: u32) -> (TempDir, EffectiveMask) {
     write_permutation(&perm_path, &identity, bound).unwrap();
     let perm = RowSpace::new(Arc::new(Permutation::load(&perm_path).unwrap()), row_count);
 
-    let base = Arc::new(RowProjection::new(&fragment, &perm));
+    let base = Arc::new(RowProjection::walk(&fragment, &perm));
     let satisfied: FxHashSet<TermId> = [TermId::new(0)].into_iter().collect();
     let overlay = Overlay::default();
     let buffer = IngestBuffer::default();
