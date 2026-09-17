@@ -473,9 +473,22 @@ single-operator database and nowhere else. `viewer(terms)` mints for the named t
 map of any principal is one call. `connect(url, token)` takes a token the deployment issued and
 has no `viewer(terms)`.
 
-Query verbs (`meta()`, `viewport(...)`, `item(id)`, `artifacts(...)`) are issue #47's and follow
-the same rule: a local handle and a hosted one answer through the viewer plane with a token,
-never by reading the bundle. Their signatures are not fixed here.
+`viewer(terms)` refuses a term outside the union the SDK recorded, naming it and listing the
+union, and refuses an empty set, since either is the blank map the verb exists to prevent. A
+`Token` carries the terms it was minted for and never prints its bearer string. `close()` stops
+the child and invalidates nothing on the server; a token stays valid for its lifetime.
+
+The read verbs, a first cut of issue #47, on a `Viewer` and so on a `Database` through its
+all-terms viewer, each through the viewer plane with a token and never by reading the bundle:
+
+- `meta()`: the parsed `/v1/meta`.
+- `item(tessera_id, idset=None)`: the drill-down record, its `external_id` decoded to the
+  staged id column's type on a `Database` and to bytes on a `connect()` viewer, which knows no
+  declaration.
+- `viewport(bbox=None, view=None, filters=None, k=None, zoom=0)`: the served points frames as one
+  pyarrow table whose schema metadata carries the tiles frame's `visible`, `matched` and `served`
+  counts, the trailer and the request, so a served set is never mistaken for the whole. `zoom` is a
+  coordinate of the request that `map()` chooses and a verb cannot. `artifacts(...)` is not built.
 
 ## 9. What the first commit fixes, and what it does not
 
