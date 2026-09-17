@@ -2390,8 +2390,6 @@ mod tests {
         }
     }
 
-    /// The guard must be invisible on the shape `tessera build` writes, or every bundle in the
-    /// project stops opening.
     /// The term-image list survives a round trip, and a manifest that omits it is refused.
     ///
     /// The refusal is the half worth testing. There is no `serde(default)` on the field, so a
@@ -2423,6 +2421,8 @@ mod tests {
         );
     }
 
+    /// The guard must be invisible on the shape `tessera build` writes, or every bundle in the
+    /// project stops opening.
     #[test]
     fn a_manifest_with_no_state_carries_nothing_unhonourable() {
         assert!(empty_segments_manifest().unhonourable_state().is_empty());

@@ -397,24 +397,96 @@ fn a_stamp_the_bundle_disagrees_with_leaves_the_view_walking() {
     );
 }
 
-/// Restate `path`'s digest in `MANIFEST.json` and `CURRENT`, so that a file edited in place passes
-/// the sweep and the check under test is the one that runs.
+/// Two entries for one `(view, incarnation)` describe a state no publication produces, and there
+/// is no rule for choosing between them.
+#[test]
+fn two_term_image_extents_for_one_view_refuse_the_bundle() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let root = built(temp.path(), "streaming", build);
+    rewrite_side_manifest(&root.join("v00000"), |manifest| {
+        let list = manifest["term_image_extents"]
+            .as_array_mut()
+            .expect("the list the build wrote");
+        let first = list[0].clone();
+        list.push(first);
+    });
+
+    let error = open_bundle(&root).expect_err("two extents for one view refuse the bundle");
+    assert!(
+        matches!(error, tessera_store::StoreError::MalformedBundle { .. }),
+        "{error}"
+    );
+}
+
+/// A file derived under another keep rule is priced by the chooser against the wrong cost model,
+/// so it is dropped. The view serves by the walk; the refusal names the view in a warning.
+#[test]
+fn a_file_derived_under_another_keep_rule_leaves_the_view_walking() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let root = built(temp.path(), "streaming", build);
+    rewrite_side_manifest(&root.join("v00000"), |manifest| {
+        manifest["term_image_extents"][0]["keep_rows_per_container"] =
+            serde_json::Value::from(KEEP_ROWS_PER_CONTAINER - 1);
+    });
+
+    let bundle = open_bundle(&root).expect("the bundle still opens");
+    assert!(
+        bundle.partitions["default"].views["s0"]
+            .term_images
+            .is_none(),
+        "a file under another keep rule leaves the view with no images"
+    );
+}
+
+/// A file the manifests name and no digest covers is one the loader would map without its bytes
+/// having been verified, which is the check every derived file passes.
+#[test]
+fn a_term_image_file_no_digest_covers_refuses_the_bundle() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let root = built(temp.path(), "streaming", build);
+    let prefix = root.join("v00000");
+    let (images, _, path) = images_of(&root);
+    drop(images);
+
+    let rel = rel_of(&prefix, &path);
+    rewrite_manifest(&prefix, &root, |manifest| {
+        manifest["files"]
+            .as_object_mut()
+            .expect("the files map")
+            .remove(&rel)
+            .expect("the build digested the file");
+    });
+
+    let error = open_bundle(&root).expect_err("an undigested file refuses the bundle");
+    assert!(
+        matches!(error, tessera_store::StoreError::UnverifiedFile { .. }),
+        "{error}"
+    );
+}
+
+/// Restate `path`'s digest in `MANIFEST.json`, so that a file edited in place passes the sweep and
+/// the check under test is the one that runs.
 fn redigest(prefix: &Path, root: &Path, path: &Path) {
     use sha2::{Digest, Sha256};
 
-    let rel = path
-        .strip_prefix(prefix)
-        .unwrap()
-        .components()
-        .map(|c| c.as_os_str().to_string_lossy().into_owned())
-        .collect::<Vec<_>>()
-        .join("/");
+    let rel = rel_of(prefix, path);
     let bytes = std::fs::read(path).unwrap();
+    rewrite_manifest(prefix, root, |manifest| {
+        manifest["files"][&rel]["sha256"] =
+            serde_json::Value::String(hex_of(&Sha256::digest(&bytes)));
+        manifest["files"][&rel]["size"] = serde_json::Value::from(bytes.len() as u64);
+    });
+}
+
+/// Edit `MANIFEST.json` and restate its own digest in `CURRENT`, which is what makes the edit
+/// reachable: the pointer carries the manifest's digest and the open checks it first.
+fn rewrite_manifest(prefix: &Path, root: &Path, edit: impl FnOnce(&mut serde_json::Value)) {
+    use sha2::{Digest, Sha256};
+
     let manifest_path = prefix.join("MANIFEST.json");
     let mut manifest: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
-    manifest["files"][&rel]["sha256"] = serde_json::Value::String(hex_of(&Sha256::digest(&bytes)));
-    manifest["files"][&rel]["size"] = serde_json::Value::from(bytes.len() as u64);
+    edit(&mut manifest);
     let manifest_bytes = serde_json::to_vec_pretty(&manifest).unwrap();
     std::fs::write(&manifest_path, &manifest_bytes).unwrap();
 
@@ -427,6 +499,29 @@ fn redigest(prefix: &Path, root: &Path, path: &Path) {
         serde_json::to_vec_pretty(&current).unwrap(),
     )
     .unwrap();
+}
+
+/// Edit the partition's `SEGMENTS-0.json`. Nothing digests a side-manifest, so an edit to one
+/// needs no other file moved with it: the loader verifies the files it *names*.
+fn rewrite_side_manifest(prefix: &Path, edit: impl FnOnce(&mut serde_json::Value)) {
+    let path = prefix
+        .join("partitions")
+        .join("default")
+        .join("SEGMENTS-0.json");
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    edit(&mut manifest);
+    std::fs::write(&path, serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
+}
+
+/// A file's prefix-relative name, as the manifests carry it.
+fn rel_of(prefix: &Path, path: &Path) -> String {
+    path.strip_prefix(prefix)
+        .unwrap()
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 /// A digest as the manifests carry it.

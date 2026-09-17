@@ -63,6 +63,25 @@ pub struct TermImageReport {
     pub wall_s: f64,
 }
 
+impl TermImageReport {
+    /// What the build says about one view's images, in the shape the occupancy line beside it
+    /// takes. Printed by the caller that prints the rest of the build's report, so the figures
+    /// reach an operator from one place (ruling G,
+    /// `docs/evidence/memos/2026-09-14-term-images.md`).
+    pub fn report(&self, view: &str) -> String {
+        format!(
+            "view '{view}': term images: {} kept of {} terms, {} payload, {} table, largest {}, \
+             {:.1} s",
+            crate::thousands(u64::from(self.kept)),
+            crate::thousands(u64::from(self.terms)),
+            crate::unique_key::human_bytes(self.payload_bytes),
+            crate::unique_key::human_bytes(self.table_bytes),
+            crate::unique_key::human_bytes(self.largest_image_bytes),
+            self.wall_s,
+        )
+    }
+}
+
 /// One view's file, its manifest entry and its figures.
 pub struct ViewTermImages {
     /// The entry for `SEGMENTS-0.json`'s `term_image_extents`.
@@ -146,17 +165,6 @@ pub fn run(
         largest_image_bytes: summary.largest_image_bytes,
         wall_s: summary.wall.as_secs_f64(),
     };
-    eprintln!(
-        "  view '{view}': term images: {} kept of {} terms, {} payload, {} table, largest {}, \
-         {:.1} s",
-        crate::thousands(u64::from(report.kept)),
-        crate::thousands(u64::from(report.terms)),
-        crate::unique_key::human_bytes(report.payload_bytes),
-        crate::unique_key::human_bytes(report.table_bytes),
-        crate::unique_key::human_bytes(report.largest_image_bytes),
-        report.wall_s,
-    );
-
     Ok(Some(ViewTermImages {
         extent: TermImageExtent {
             path: file.rel,

@@ -1816,6 +1816,13 @@ fn main() -> ExitCode {
                         if let Some(detail) = view.occupancy.warning(&view.view_id) {
                             eprintln!("{detail}");
                         }
+                        // What this view's term images cost and came to, per view because a
+                        // group's keys are separate views over one dictionary and each pays its
+                        // own table and payload (ruling G, the term-images memo). Absent for a
+                        // view with no rows.
+                        if let Some(images) = &view.term_images {
+                            eprintln!("{}", images.report(&view.view_id));
+                        }
                     }
                     if let Err(e) = tessera_build::write_disclosure_report(&out, &disclosure) {
                         eprintln!("build FAILED: writing reports/disclosure.json: {e}");

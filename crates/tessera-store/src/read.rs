@@ -66,7 +66,7 @@ pub struct ViewData {
     /// the file it names would not open ([`crate::term_images`]).
     ///
     /// `None` costs time and changes no answer: a session whose terms have no image walks its
-    /// permutation, which is what every session did before the file existed.
+    /// permutation instead, and arrives at the same rows.
     pub term_images: Option<Arc<crate::term_images::TermImages>>,
 }
 
@@ -941,7 +941,7 @@ fn open_term_images(
         });
     }
 
-    let path = prefix_dir.join(&entry.path);
+    let path = safe_join(prefix_dir, &entry.path)?;
     ensure_verified(&entry.path, segments_manifest, manifest_files, &path)?;
 
     if u64::from(entry.keep_rows_per_container) != crate::term_images::KEEP_ROWS_PER_CONTAINER {
