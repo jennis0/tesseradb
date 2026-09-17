@@ -64,7 +64,10 @@ pub use categories::{
 // is the only reader. The rest of `compact` stays private — what a fold *is* is this crate's
 // business, and when it runs is the deployment's.
 pub use compact::{CompactionSchedule, PassCost};
-pub use compose::{compose, denied_rows_of, visible_to, EffectiveMask, RowProjection};
+pub use compose::{
+    compose, denied_rows_of, visible_to, EffectiveMask, ProjectionInputs, ProjectionRoute,
+    RowProjection,
+};
 // The publication guard's refusal, which a publisher outside this crate must handle.
 // `check_publishable` itself stays private: whether a geometry may be published is this crate's
 // judgement, and a caller that could ask separately could also act on a stale answer.
@@ -353,6 +356,7 @@ pub(crate) fn synthetic_generation_parts() -> (Arc<FragmentCache>, Arc<session::
         row_column_extents: Vec::new(),
         shape_rows_extents: Vec::new(),
         shape_held_extents: Vec::new(),
+        term_image_extents: Vec::new(),
         artifact_record_extents: Vec::new(),
         segments: Vec::new(),
         deltas: Vec::new(),

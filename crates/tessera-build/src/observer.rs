@@ -86,6 +86,13 @@ pub enum BuildStage {
     ///    composes a column per level per view. One number over the two is a number an operator
     ///    cannot act on.
     ArtifactPass,
+    /// 10c. The term images: every authorisation term's base posting projected into each view's
+    ///    row space and written (`crate::term_images_pass`).
+    ///
+    ///    Its own stage because it is a projection per term over the whole dictionary, and at
+    ///    corpus scale it is minutes rather than the seconds the pass above it takes. Folded into
+    ///    [`BuildStage::ArtifactPass`] it would read as a polygon resolution that had become slow.
+    TermImages,
     /// 11. Manifests — including a full SHA-256 re-read of every byte written.
     Manifests,
 }
@@ -110,11 +117,12 @@ impl BuildStage {
             BuildStage::TilerSort => "tiler_sort",
             BuildStage::SegmentWrite => "segment_write",
             BuildStage::ArtifactPass => "artifact_pass",
+            BuildStage::TermImages => "term_images",
             BuildStage::Manifests => "manifests",
         }
     }
 
-    pub const ALL: [BuildStage; 18] = [
+    pub const ALL: [BuildStage; 19] = [
         BuildStage::SourceIds,
         BuildStage::Dictionary,
         BuildStage::PairsPack,
@@ -132,6 +140,7 @@ impl BuildStage {
         BuildStage::TilerSort,
         BuildStage::SegmentWrite,
         BuildStage::ArtifactPass,
+        BuildStage::TermImages,
         BuildStage::Manifests,
     ];
 }
@@ -314,7 +323,10 @@ mod tests {
         sink.stage_end(BuildStage::TextIndex, Duration::from_secs(3), 0, 0);
         let r = &sink.records()[0];
         assert!((r.ended_at - r.started_at - 3.0).abs() < 1e-6);
-        assert!(r.started_at > 1_700_000_000.0, "wall clock, not a monotonic reading");
+        assert!(
+            r.started_at > 1_700_000_000.0,
+            "wall clock, not a monotonic reading"
+        );
     }
 
     #[test]

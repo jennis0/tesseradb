@@ -115,6 +115,13 @@ but under near-unique grant sets it saves nothing, so it must not be presented a
 answer. **One real cost:** `revoke` calls `prune_token`, which works only because the key
 *is* the token; sharing needs refcounting or drop-when-unreferenced.
 
+**The entry is built by whichever of three routes costs least, and the cached value is identical
+whichever built it** ([decision 0143](../decisions/0143-term-images-live-in-the-bundle-and-a-session-projection-is-built-by-the-cheapest-route.md)):
+the walk over the fragment, a split that unions the bundle's term images for the terms the session
+holds and walks the rest, or a complement that walks the entities outside the grant. The key is
+unchanged, so nothing about eviction, sharing or invalidation above depends on which route filled
+an entry.
+
 ## 6. Client caching, which is the latency mechanism
 
 **Caching is how revisits become free, and exploration is revisit-dominated.** Zoom in then out and

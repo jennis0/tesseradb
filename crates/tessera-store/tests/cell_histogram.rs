@@ -127,6 +127,7 @@ fn build_bundle(root: &Path) {
         row_column_extents: Vec::new(),
         shape_rows_extents: Vec::new(),
         shape_held_extents: Vec::new(),
+        term_image_extents: Vec::new(),
         artifact_record_extents: Vec::new(),
         segments: vec![SegmentDescriptor {
             incarnation: 0,

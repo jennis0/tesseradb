@@ -317,7 +317,10 @@ fn check_reports_every_finding_rather_than_the_first() {
     assert!(text.contains("field `members`"), "{text}");
     assert!(text.contains("2 finding(s)"), "{text}");
     // And it says what it could not have seen, so a green check is not read as a green build.
-    assert!(text.contains("a clean check is not a clean build"), "{text}");
+    assert!(
+        text.contains("a clean check is not a clean build"),
+        "{text}"
+    );
 }
 
 /// A source the declaration names and the filesystem does not carry is a finding rather than a
@@ -395,12 +398,85 @@ require_member_visibility = "any"
     .unwrap();
     let output = run(tmp.path(), &["check", "--payloads"]);
     assert!(output.status.success(), "{}", stderr(&output));
-    assert!(stderr(&output).contains("declared and empty"), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("declared and empty"),
+        "{}",
+        stderr(&output)
+    );
     let payloads: serde_json::Value = serde_json::from_str(&stdout(&output)).unwrap();
     let bodies: Vec<tessera_types::layer::LayerDeclaration> =
         serde_json::from_value(payloads["layers"].clone()).unwrap();
     assert_eq!(bodies.len(), 1);
     assert_eq!(bodies[0].visibility.as_deref(), Some("ir:analyst"));
+}
+
+/// **An attribute that names no file is declared and empty**, not a finding (`configuration.md`
+/// §2, python-sdk §6.2): the values arrive through `PUT /control/attributes` and the batches after
+/// it, so there is no file for the check to disagree with. The payload is emitted, which is what
+/// the deployment posts to declare the column.
+#[test]
+fn an_attribute_naming_no_source_is_a_note_and_a_payload() {
+    let tmp = tempfile::tempdir().unwrap();
+    project(tmp.path());
+    std::fs::write(
+        tmp.path().join("schema.toml"),
+        r#"
+[[view]]
+name             = "s0"
+extent           = { min = -25.0, max = 25.0 }
+point_visibility = { default = "public" }
+
+[[attribute]]
+name  = "sentiment"
+type  = "f32"
+"#,
+    )
+    .unwrap();
+    let output = run(tmp.path(), &["check", "--payloads"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let said = stderr(&output);
+    assert!(said.contains("attribute 'sentiment'"), "{said}");
+    assert!(said.contains("declared and empty"), "{said}");
+    let payloads: serde_json::Value = serde_json::from_str(&stdout(&output)).unwrap();
+    let attributes = payloads["attributes"].as_array().unwrap();
+    assert_eq!(attributes.len(), 1);
+    assert_eq!(attributes[0]["name"], "sentiment");
+}
+
+/// **A view group that names no points file and no roster is declared and empty** on the same
+/// rule. `tessera build` refuses it, the points having to come from somewhere, and the refusal
+/// names the two roster forms.
+#[test]
+fn a_view_group_naming_no_source_is_a_note_at_check_and_a_refusal_at_build() {
+    let tmp = tempfile::tempdir().unwrap();
+    project(tmp.path());
+    std::fs::write(
+        tmp.path().join("schema.toml"),
+        r#"
+[[view_group]]
+name             = "quarters"
+extent           = { min = -25.0, max = 25.0 }
+point_visibility = { default = "public" }
+"#,
+    )
+    .unwrap();
+    let output = run(tmp.path(), &["check", "--payloads"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let said = stderr(&output);
+    assert!(said.contains("view group 'quarters'"), "{said}");
+    assert!(said.contains("declared and empty"), "{said}");
+    let payloads: serde_json::Value = serde_json::from_str(&stdout(&output)).unwrap();
+    let groups = payloads["view_groups"].as_array().unwrap();
+    assert_eq!(groups.len(), 1);
+    assert_eq!(groups[0]["name"], "quarters");
+
+    let built = run(tmp.path(), &["build"]);
+    assert!(!built.status.success(), "{}", stderr(&built));
+    assert!(
+        stderr(&built).contains("no `source` and no `[[view_group.view]]` roster"),
+        "{}",
+        stderr(&built)
+    );
 }
 
 /// **Never a payload out of a declaration that failed its check.** The stream is what a CI job
@@ -483,7 +559,10 @@ fn the_disclosure_report_carries_every_decision() {
     assert_eq!(topics["visibility"], "ir:analyst");
     assert_eq!(topics["require_member_visibility"], "all");
     assert_eq!(topics["depends_on"][0], "clusters/a");
-    assert_eq!(topics["content"]["supplied"][0]["require_member_visibility"], "all");
+    assert_eq!(
+        topics["content"]["supplied"][0]["require_member_visibility"],
+        "all"
+    );
 }
 
 /// **`tessera check` computes the same document**, which is the whole reason it lives on the
@@ -497,7 +576,10 @@ fn a_moved_gate_moves_exactly_one_line_of_the_report() {
 
     std::fs::write(
         tmp.path().join("schema.toml"),
-        DECLARATION.replace("visibility                = \"ir:analyst\"", "visibility                = \"public\""),
+        DECLARATION.replace(
+            "visibility                = \"ir:analyst\"",
+            "visibility                = \"public\"",
+        ),
     )
     .unwrap();
     let after = build_out(tmp.path(), "after");
@@ -509,7 +591,10 @@ fn a_moved_gate_moves_exactly_one_line_of_the_report() {
         .collect();
     assert_eq!(
         changed,
-        vec![("      \"visibility\": \"ir:analyst\",", "      \"visibility\": \"public\",")],
+        vec![(
+            "      \"visibility\": \"ir:analyst\",",
+            "      \"visibility\": \"public\","
+        )],
         "a gate moving must move one line and nothing else"
     );
 }
@@ -531,4 +616,145 @@ fn a_declaration_that_decides_nothing_writes_no_report() {
     .unwrap();
     build(tmp.path());
     assert!(!tmp.path().join("bundles/corpus/reports").exists());
+}
+
+// -------------------------------------------------------------------------------------------
+// A points file with no identity column
+// -------------------------------------------------------------------------------------------
+
+/// The project's points, minus the identity column: geometry, access terms and one attribute.
+fn write_points_without_identity(dir: &Path) {
+    let rows = N as usize;
+    let ids: Vec<u64> = (0..N).collect();
+    write(
+        &dir.join("points.parquet"),
+        Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new(
+                "categories",
+                DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
+                true,
+            ),
+            Field::new("severity", DataType::Utf8, true),
+        ])),
+        vec![
+            Arc::new(Float64Array::from(
+                ids.iter().map(|e| *e as f64).collect::<Vec<_>>(),
+            )),
+            Arc::new(Float64Array::from(
+                ids.iter().map(|e| (*e % 7) as f64).collect::<Vec<_>>(),
+            )),
+            list_of_strings(rows, "public"),
+            Arc::new(StringArray::from(vec!["low"; rows])),
+        ],
+    );
+}
+
+/// One layer's artifacts, keys and nothing else — no membership beside them.
+fn write_keys(dir: &Path) {
+    write(
+        &dir.join("keys.parquet"),
+        Arc::new(Schema::new(vec![Field::new("key", DataType::Utf8, false)])),
+        vec![Arc::new(StringArray::from(vec!["t0"]))],
+    );
+}
+
+/// The whole declaration over that file. The attribute is read from the points file itself, which
+/// is the one place a positional build can read one from.
+const NO_IDENTITY: &str = r#"
+[sources]
+points = "points.parquet"
+
+[defaults]
+source = "points"
+
+[[view]]
+name             = "s0"
+extent           = "auto"
+source           = "points"
+point_visibility = { field = "categories", default = "public" }
+
+[[vocabulary]]
+name       = "severity"
+width      = "u8"
+value_set  = "closed"
+visibility = "public"
+values     = ["low", "medium", "high"]
+
+[[attribute]]
+name       = "severity"
+type       = "category"
+vocabulary = "severity"
+render     = true
+"#;
+
+/// **A points file may carry no identity column** (`configuration.md` §8), and the check accepts
+/// exactly what the build does: the rows are named by their position, the note says how they are
+/// addressed instead, and the check stays clean.
+#[test]
+fn a_points_file_with_no_identity_column_checks_clean_and_builds() {
+    let tmp = tempfile::tempdir().unwrap();
+    project(tmp.path());
+    write_points_without_identity(tmp.path());
+    std::fs::write(tmp.path().join("schema.toml"), NO_IDENTITY).unwrap();
+
+    let output = run(tmp.path(), &["check"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let said = stderr(&output);
+    assert!(
+        said.contains("no identity column: rows addressable by tessera_id only"),
+        "{said}"
+    );
+    assert!(said.contains("check OK"), "{said}");
+
+    build(tmp.path());
+}
+
+/// A `[layer.members]` table names one entity per row, and a position is not an entity. The
+/// finding names the table, so the author reads what needs the column rather than that one is
+/// missing.
+#[test]
+fn a_members_table_over_a_file_with_no_identity_column_is_a_finding_naming_it() {
+    let tmp = tempfile::tempdir().unwrap();
+    project(tmp.path());
+    write_points_without_identity(tmp.path());
+    write_keys(tmp.path());
+    std::fs::write(
+        tmp.path().join("schema.toml"),
+        r#"
+[sources]
+points        = "points.parquet"
+keys          = "keys.parquet"
+topic_members = "topic_members.parquet"
+
+[[view]]
+name             = "s0"
+extent           = "auto"
+source           = "points"
+point_visibility = { field = "categories", default = "public" }
+
+[[layer]]
+name       = "topics/a"
+views      = ["s0"]
+source     = "keys"
+membership = "enumerated"
+hierarchy  = { kind = "flat" }
+
+visibility                = "public"
+artifact_visibility       = { default = "inherited" }
+require_member_visibility = "all"
+
+  [layer.members]
+  source = "topic_members"
+"#,
+    )
+    .unwrap();
+
+    let output = run(tmp.path(), &["check"]);
+    assert!(!output.status.success(), "{}", stderr(&output));
+    let said = stderr(&output);
+    assert!(said.contains("view 's0'"), "{said}");
+    assert!(said.contains("topic_members.parquet"), "{said}");
+    assert!(said.contains("Declare an identity column"), "{said}");
 }

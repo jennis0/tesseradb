@@ -22,6 +22,9 @@ use tessera_spatial::Bounds;
 use tessera_store::read::open_bundle;
 use tessera_types::{IdentityKey, TermId};
 
+/// This file's fixtures name their rows by an integer `entity_id` column (`tessera_build::ids`).
+static INTEGER_IDS: tessera_build::ids::IdSpace = tessera_build::ids::IdSpace::Integer;
+
 /// A fixed, non-degenerate test key shared by every fixture in this file.
 const TEST_KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f";
 
@@ -280,6 +283,8 @@ fn build_produces_a_verifiable_signature_sorted_bundle() {
         // The Morton column's run-length index, which selection walks per cell
         // (`tessera_store::read::CutIndex`).
         "partitions/default/views/s0/segments/seg-0/cuts.u32",
+        // The view's term images (`tessera_store::term_images`), one file per view with rows.
+        "partitions/default/term-images/term-images-000000-000.timg",
     ] {
         assert!(
             bundle.manifest.files.contains_key(rel),
@@ -289,7 +294,7 @@ fn build_produces_a_verifiable_signature_sorted_bundle() {
     }
     assert_eq!(
         bundle.manifest.files.len(),
-        13,
+        14,
         "MANIFEST.json must list every build-written file and nothing else"
     );
 
@@ -1030,13 +1035,11 @@ fn morton_plus_residual_recovers_sub_cell_position() {
     w.write(&batch).unwrap();
     w.close().unwrap();
 
+    let fields = Default::default();
     let mut rows = read_points(
-        &points,
-        &Default::default(),
+        tessera_build::input::Source::new(&points, &fields, &INTEGER_IDS),
         tessera_spatial::Projection::None,
         &IDENTITY_EXTENT,
-        None,
-            None,
     )
     .unwrap();
     rows.sort_by_key(|r| r.source_id);
@@ -1068,13 +1071,11 @@ fn bare_morton_widens_with_a_zero_residual() {
     let points = tmp.path().join("points.parquet");
     write_morton_points(&points);
 
+    let fields = Default::default();
     let rows = read_points(
-        &points,
-        &Default::default(),
+        tessera_build::input::Source::new(&points, &fields, &INTEGER_IDS),
         tessera_spatial::Projection::None,
         &IDENTITY_EXTENT,
-        None,
-            None,
     )
     .unwrap();
     assert!(!rows.is_empty());

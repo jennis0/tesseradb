@@ -63,7 +63,6 @@ use std::sync::Arc;
 use tessera_authz::FragmentCacheError;
 
 use crate::cache::{RowProjectionCache, RowProjectionKey, SessionGeometry};
-use crate::compose::RowProjection;
 use crate::Generation;
 
 /// What a resident entry may contribute to its own replacement at `generation`.
@@ -120,6 +119,7 @@ pub(crate) fn refresh_resident(
     cache: &RowProjectionCache,
     pool: &rayon::ThreadPool,
     generation: &Generation,
+    projection_routes: &crate::compose::ProjectionRoutes,
 ) -> usize {
     let mut produced = 0usize;
     for (key, previous) in cache.resident() {
@@ -204,7 +204,17 @@ pub(crate) fn refresh_resident(
                 } else if carry == Carry::Derive && previous_projection.can_rebase_extents(space) {
                     previous_projection.rebase_extents(&fragment, space)
                 } else {
-                    RowProjection::new(&fragment, space)
+                    // Rung 3, the only rung that chooses a route: rungs 1 and 2 derive from the
+                    // projection this session already holds and read no image.
+                    let inputs = crate::compose::ProjectionInputs {
+                        fragment: &fragment,
+                        satisfied: &previous.satisfied_sorted,
+                        postings: &generation.postings,
+                        deltas: &generation.delta_postings,
+                        images: view_data.term_images.as_deref(),
+                        force: projection_routes.forced(),
+                    };
+                    projection_routes.build(&inputs, space)
                 }
             });
             SessionGeometry {
@@ -280,6 +290,9 @@ pub(crate) struct RefreshDeps {
     /// which is the window rung 3 sheds a racer in. The two hooks are different states and a test
     /// that used one for the other would assert the wrong thing.
     pub(crate) paused: Arc<std::sync::atomic::AtomicBool>,
+    /// The engine's projection-route counters and forced route, shared so that rung 3's builds
+    /// are counted where the request path's are and a forced route reaches both.
+    pub(crate) projection_routes: Arc<crate::compose::ProjectionRoutes>,
 }
 
 impl RefreshDeps {
@@ -304,11 +317,12 @@ impl RefreshDeps {
         }
         let spawn_on = Arc::clone(&self.pool);
         let paused = Arc::clone(&self.paused);
+        let projection_routes = Arc::clone(&self.projection_routes);
         spawn_on.spawn(move || {
             while paused.load(Ordering::SeqCst) {
                 std::thread::sleep(std::time::Duration::from_millis(2));
             }
-            let produced = refresh_resident(&cache, &pool, &generation);
+            let produced = refresh_resident(&cache, &pool, &generation, &projection_routes);
             refreshes.fetch_add(produced as u64, Ordering::Relaxed);
             clear_if_current(&in_flight, mine);
         });

@@ -5613,6 +5613,7 @@ mod vocabulary_extensions_tests {
             row_column_extents: Vec::new(),
             shape_rows_extents: Vec::new(),
             shape_held_extents: Vec::new(),
+            term_image_extents: Vec::new(),
             artifact_record_extents: Vec::new(),
             segments: Vec::new(),
             deltas: Vec::new(),
@@ -8442,9 +8443,12 @@ impl Executor {
                 .with_artifacts(|store| store.levels_moved_by(&executed)),
             retired: executed.clone(),
         };
-        // **One counter for the whole publication.** Every derived file this fold writes is named
-        // from it, so no two of these calls can name the same file — see
-        // `tessera_store::derived::DerivedIndex`.
+        // **One counter for the whole publication.** Every derived file the executor writes below
+        // is named from it, so no two of these calls can name the same file — see
+        // `tessera_store::derived::DerivedIndex`. Pass 2b's term images are named from a second
+        // counter, on the fold thread, from the number a build uses: the two counters cover
+        // disjoint kinds, and `compact::TERM_IMAGE_MANIFEST_N` carries why that pass cannot use
+        // this one.
         let mut derived_index = tessera_store::derived::DerivedIndex::default();
         let containment = self.write_containment_partitions(
             &to_prefix_dir,
@@ -8687,6 +8691,16 @@ impl Executor {
             row_column_extents: Vec::new(),
             shape_rows_extents: Vec::new(),
             shape_held_extents: Vec::new(),
+            // **Pass 2b's own output, not the live list.** The paths are prefix-relative and the
+            // fold publishes a new prefix, so what the fold thread wrote is the only list naming
+            // files this prefix contains. The images cover the new base alone, which is what a
+            // projection of the base is: a flush landing during the flight is carried forward as
+            // an extent, and an extent's rows are walked.
+            term_image_extents: completed
+                .term_images
+                .iter()
+                .map(|images| images.extent.clone())
+                .collect(),
             artifact_record_extents: self.artifact_record_extents.clone(),
             segments,
             deltas: carried_tiers.clone(),
@@ -9317,6 +9331,24 @@ impl Executor {
             .last_fold_attr_written
             .store(completed.attr_bytes_written, Ordering::Relaxed);
         *lock_recover(&self.health.last_fold_passes) = cost;
+        // **One line per view, beside the summary rather than inside it** (ruling G, decision
+        // 0143): a group's keys are separate
+        // views over one dictionary, each paying its own table and its own payload, and a total
+        // says nothing about which of them is expensive. The build reports the same four figures
+        // per view, so the two routes' reports read alike.
+        for images in &completed.term_images {
+            let summary = &images.summary;
+            tracing::info!(
+                prefix = %completed.prefix,
+                view = %images.extent.view,
+                kept = summary.kept,
+                terms = summary.terms,
+                payload_bytes = summary.payload_bytes,
+                table_bytes = summary.table_bytes,
+                wall_s = summary.wall.as_secs_f64(),
+                "a fold wrote a view's term images"
+            );
+        }
         tracing::info!(
             prefix = %completed.prefix,
             segments_version,

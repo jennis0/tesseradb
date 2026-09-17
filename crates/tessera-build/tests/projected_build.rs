@@ -25,6 +25,14 @@ use tessera_spatial::{fixed32, AlignedSquare, Bounds, Projection};
 use tessera_store::read::open_bundle;
 use tessera_types::IdentityKey;
 
+/// This file's fixtures name their rows by an integer `entity_id` column (`tessera_build::ids`).
+static INTEGER_IDS: tessera_build::ids::IdSpace = tessera_build::ids::IdSpace::Integer;
+
+/// That fixture's points file, as a reader of it needs it.
+fn source<'a>(path: &'a std::path::Path, fields: &'a Fields) -> tessera_build::input::Source<'a> {
+    tessera_build::input::Source::new(path, fields, &INTEGER_IDS)
+}
+
 /// A points file with the coordinate columns under the names a projected view reads.
 fn write_points(path: &Path, columns: (&str, &str), xs: &[f64], ys: &[f64]) {
     let schema = Arc::new(Schema::new(vec![
@@ -63,7 +71,8 @@ fn whole_world() -> Extent {
 
 /// The cells a file's rows land in, by source id.
 fn cells(path: &Path, projection: Projection, extent: &Bounds) -> Vec<(u16, u16)> {
-    let mut rows = read_points(path, &geographic(), projection, extent, None, None).expect("points read");
+    let mut rows =
+        read_points(source(path, &geographic()), projection, extent).expect("points read");
     rows.sort_by_key(|r| r.source_id);
     rows.iter()
         .map(|r| ((r.qx >> 16) as u16, (r.qy >> 16) as u16))
@@ -332,12 +341,9 @@ fn an_unprojected_view_stores_the_files_own_coordinates() {
     assert_eq!(frame.clipped(), 0, "`none` has no domain to clip against");
 
     let mut rows = read_points(
-        &points,
-        &Default::default(),
+        source(&points, &Default::default()),
         Projection::None,
         &extent,
-        None,
-            None,
     )
     .expect("points read");
     rows.sort_by_key(|r| r.source_id);
@@ -858,8 +864,8 @@ fn a_morton_points_file_under_a_projected_view_is_refused_by_the_survey() {
 #[test]
 fn a_wgs84_shape_layer_holds_the_rows_of_its_curved_image() {
     use tessera_build::shapes::{ShapeContext, ShapeReader};
-    use tessera_store::derived::ViewFrame;
     use tessera_spatial::shape::{Shape, ShapeF64, Space};
+    use tessera_store::derived::ViewFrame;
     use tessera_store::derived::{ShapeInput, ShapeSpace};
     use tessera_types::layer::ShapeKind;
 
@@ -919,15 +925,9 @@ fn a_wgs84_shape_layer_holds_the_rows_of_its_curved_image() {
         chorded.vertex_count()
     );
 
-    let mut rows = read_points(
-        &points,
-        &Fields::moved("view 'world'", [("x", "lon"), ("y", "lat")]),
-        Projection::WebMercator,
-        &extent,
-        None,
-            None,
-    )
-    .expect("the places read");
+    let fields = Fields::moved("view 'world'", [("x", "lon"), ("y", "lat")]);
+    let mut rows = read_points(source(&points, &fields), Projection::WebMercator, &extent)
+        .expect("the places read");
     rows.sort_by_key(|r| r.source_id);
     assert_eq!(rows.len(), PLACES.len());
 

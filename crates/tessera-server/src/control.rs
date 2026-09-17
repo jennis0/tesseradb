@@ -5525,6 +5525,7 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::V
     // denies a `tessera-server → tessera-authz` edge (SA §3), and the re-export at
     // `tessera-engine`'s crate root exists precisely so this call site has a nameable type.
     let projection_cache: tessera_engine::CacheStats = state.engine.row_projection_cache_stats();
+    let projection_routes = state.engine.projection_builds_by_route();
     let fragment_cache: tessera_engine::FragmentCacheStats = state.engine.fragment_cache_stats();
     // The four per-session caches beside the two above, and the memo. Each is keyed by `token_id`,
     // each is bounded, and until they were published here an operator reading this response saw
@@ -5979,6 +5980,25 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::V
             "young_evictions": projection_cache.young_evictions,
             "thrashing": projection_cache.young_evictions > 0,
             "oversized_admissions": projection_cache.oversized_admissions,
+        },
+        // **How each session's row projection was built** (`tessera_engine::compose::RowProjection`).
+        // A session's projection is the walk over its fragment, the row range where its grant
+        // covers the whole entity domain, or the union of the bundle's images of the terms it
+        // holds plus a walk over the residual. The route is priced before any of them runs, from
+        // that principal's own grant, and every route returns the identical rows — so this is a
+        // cost distribution and never an answer difference.
+        //
+        // **The number to read is the share, not the totals.** The chooser's constants are
+        // modelled from one probe at one scale (`tessera_store::term_images::ROUTE_COSTS`), and a
+        // deployment where they are wrong shows it here: images written into every bundle and
+        // never read, or a split taken for every session while first-viewport time does not fall.
+        // The request path and the background refresh both count here, so these do not sum to the
+        // request path's own build counter.
+        "projection_builds_by_route": {
+            "whole_domain": projection_routes[0],
+            "walk": projection_routes[1],
+            "split": projection_routes[2],
+            "complement": projection_routes[3],
         },
         "fragment_cache": {
             "entries": fragment_cache.entries,

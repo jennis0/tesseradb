@@ -154,6 +154,26 @@ fn the_whole_invocation_is_tessera_build() {
     );
 }
 
+/// **Each view's term images are reported once, from the build's report** (ruling G,
+/// `docs/evidence/memos/2026-09-14-term-images.md`): a group's keys are separate views over one
+/// dictionary and each pays its own table and payload, so the figures are per view and a single
+/// total would say nothing about which view is expensive.
+#[test]
+fn the_build_reports_each_views_term_images() {
+    let tmp = tempfile::tempdir().unwrap();
+    project(tmp.path());
+    let output = build_in(tmp.path(), &[]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let text = stderr(&output);
+    let lines: Vec<&str> = text
+        .lines()
+        .filter(|l| l.contains("term images:"))
+        .collect();
+    assert_eq!(lines.len(), 1, "one line for the one view: {text}");
+    assert!(lines[0].contains("view 's0'"), "{}", lines[0]);
+    assert!(lines[0].contains("payload"), "{}", lines[0]);
+}
+
 /// The deployment file is found by walking up, as `Cargo.toml` is — so the verb works from
 /// anywhere under the project root and the paths inside it still mean what they say.
 #[test]

@@ -128,9 +128,8 @@ the first and the call says so.
   doors: the build takes it as supplied, in any type, mints its own entity ids, writes the
   external-id index from it and joins members tables on it; the ingest route takes the same
   bytes as `external_id`. Members tables and attribute sources name rows by the same column.
-  Not built yet: the build reads a `u64` column named `entity_id` and mints external ids from
-  that integer under a flag; until it takes a supplied column, an id column must be an integer,
-  the SDK writes it as `entity_id`, and the first commit passes `--mint-external-ids` (§11.2).
+  The SDK writes the column under the name `[defaults].entity_id_field` declares and names it
+  on a members table through `[layer.members].fields = { entity = <column> }`.
 - **No id column** means Tessera ids. The build mints no external id; rows are addressable only
   by the `tessera_id` a viewer gets back from a pick or a drill-down, the ingest route returns
   the ids it assigned, and `remove()` and a members table name them with `addressing: tessera`.
@@ -641,8 +640,6 @@ Rulings of 2026-09-17, on the first stages' review findings:
 
 ### 11.2 Needed
 
-- **A. The build's supplied id column.** The build takes an id column of any type as the
-  external id and joins members tables on it (§3). Until then an id column is an integer.
 - **D. The demo.** A marimo notebook and a Jupyter twin over the arXiv 50k corpus running
   §10.1 to §10.5 and §10.7, in `clients/py/examples/`. A headless test in `clients/py/check.sh`
   that creates, commits and queries a database with no browser.

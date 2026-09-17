@@ -237,6 +237,7 @@ fn two_views_derived_files_do_not_collide() {
     paths.extend(manifest.containment_extents.iter().map(|e| e.path.as_str()));
     paths.extend(manifest.shape_rows_extents.iter().map(|e| e.path.as_str()));
     paths.extend(manifest.shape_held_extents.iter().map(|e| e.path.as_str()));
+    paths.extend(manifest.term_image_extents.iter().map(|e| e.path.as_str()));
     let total = paths.len();
     paths.sort_unstable();
     paths.dedup();

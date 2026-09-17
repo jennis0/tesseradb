@@ -21,6 +21,9 @@ use tessera_spatial::Bounds;
 use tessera_store::read::open_bundle;
 use tessera_types::{EntityId, IdentityKey};
 
+/// This file's fixtures name their rows by an integer `entity_id` column (`tessera_build::ids`).
+static INTEGER_IDS: tessera_build::ids::IdSpace = tessera_build::ids::IdSpace::Integer;
+
 const TEST_KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f";
 
 /// `world` holds 0..24; `quarter` holds 12..36. 12..24 is the overlap — the ordinary case
@@ -545,12 +548,9 @@ fn an_auto_frame_over_a_group_fits_every_views_source() {
     // The group's box holds both views' data; the single view's does not hold the other's.
     for path in [q2, q3] {
         let rows = tessera_build::input::read_points(
-            path,
-            &fields,
+            tessera_build::input::Source::new(path, &fields, &INTEGER_IDS),
             tessera_spatial::Projection::None,
             &group.extent,
-            None,
-            None,
         )
         .expect("points read");
         assert!(!rows.is_empty());

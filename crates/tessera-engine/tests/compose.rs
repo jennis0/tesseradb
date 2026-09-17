@@ -78,7 +78,7 @@ fn build_fixture() -> Fixture {
         BOUND as u32,
     );
 
-    let base = Arc::new(RowProjection::new(&fragment, &perm));
+    let base = Arc::new(RowProjection::walk(&fragment, &perm));
 
     let mut fragment_entities: HashSet<u32> = HashSet::new();
     for t in per_term {
