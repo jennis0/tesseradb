@@ -753,6 +753,12 @@ fn open_prefix(
                     // the same premise rather than a weaker one. Without it a compaction's
                     // in-process open would leave every session on the new prefix walking
                     // `permutation.bin` for a whole-domain grant until the process restarted.
+                    //
+                    // The complement route rests on this same count: it subtracts the rows of the
+                    // entities outside a grant from `[0, row_count)`, which is the whole row space
+                    // only if the count is right. A wrong declaration would make both routes wrong
+                    // together, which is why the premise is that these are the bytes this process
+                    // wrote and nothing weaker.
                     Verification::JustWritten => view_entry
                         .row_space
                         .base()

@@ -37,7 +37,9 @@ use rustc_hash::FxHashSet;
 
 use tessera_authz::{DeltaTier, FrozenFragment, PostingsReader};
 use tessera_lifecycle::{IngestBuffer, Overlay};
-use tessera_store::term_images::{choose, chooser_inputs, Route, TermImages, ROUTE_COSTS};
+use tessera_store::term_images::{
+    choose, chooser_inputs, ChooserInputs, Route, TermImages, ROUTE_COSTS,
+};
 use tessera_store::{Bundle, RowSpace};
 use tessera_types::{EntityId, TermId};
 
@@ -229,9 +231,12 @@ impl RowProjection {
     /// **Every route returns the identical projection.** The walk crosses the whole fragment. The
     /// split unions the bundle's images of the terms the session holds — each image is the base
     /// projection of that term's posting, and every satisfied term's posting lies inside the
-    /// fragment — then walks the residual and the extents. The whole-domain answer is the row
-    /// range. `tessera_store::term_images`' module doc carries the algebra; `tests/
-    /// term_images_route.rs` checks the three against each other over a built corpus.
+    /// fragment — then walks the residual and the extents. The complement walks the entities the
+    /// grant does not hold and subtracts their rows from the base's row range, which is exact
+    /// where the base's slots are a bijection onto that range. It adds the extents above that, as
+    /// the walk's own route does. The whole-domain answer is the row range.
+    /// `tessera_store::term_images`' module doc carries the algebra;
+    /// `tests/term_images_route.rs` checks the routes against each other over a built corpus.
     ///
     /// **The route is chosen before any route runs, from the principal's own grant**: the
     /// fragment's cardinality below the bound, the image table's sizes for the terms the principal
@@ -259,9 +264,8 @@ impl RowProjection {
         let walked = |route| Ok((Self::over(rows.project(&fragment), rows), route));
         match wanted {
             // A forced whole-domain route over a grant that does not cover the domain has no
-            // answer of its own, and neither has a forced complement while the complement's
-            // arithmetic is unwritten. Both walk, and the gauge says so rather than reporting a
-            // route that did not run.
+            // answer of its own. It walks, and the gauge says so rather than reporting a route
+            // that did not run.
             ProjectionRoute::WholeDomain if whole_domain => walked(ProjectionRoute::WholeDomain),
             ProjectionRoute::Split => {
                 let Some(images) = inputs.images else {
@@ -289,14 +293,24 @@ impl RowProjection {
                 union.or_inplace(&rows.project_extents_from(&fragment, 0));
                 Ok((Self::over(union, rows), ProjectionRoute::Split))
             }
-            ProjectionRoute::Complement => {
-                debug_assert!(
-                    inputs.force.is_some(),
-                    "the chooser is called with complement_valid = false, so a chosen complement \
-                     route is a chooser bug"
-                );
-                walked(ProjectionRoute::Walk)
-            }
+            ProjectionRoute::Complement => match rows.project_complement_base(&fragment) {
+                Some(mut base) => {
+                    base.or_inplace(&rows.project_extents_from(&fragment, 0));
+                    Ok((Self::over(base, rows), ProjectionRoute::Complement))
+                }
+                // The base's row count is not recorded, which is the whole of the route's
+                // validity and is what the chooser is given, so this is a forced complement over
+                // a row space that has no complement answer. The walk answers it.
+                None => {
+                    debug_assert!(
+                        inputs.force.is_some(),
+                        "the chooser is offered the complement only where the base records the \
+                         row count it is a bijection onto, so a chosen complement with none is a \
+                         chooser bug"
+                    );
+                    walked(ProjectionRoute::Walk)
+                }
+            },
             _ => walked(ProjectionRoute::Walk),
         }
     }
@@ -304,34 +318,47 @@ impl RowProjection {
     /// Price the routes over `fragment` and return the cheapest, or [`ProjectionRoute::Walk`]
     /// where there is nothing to price against.
     ///
-    /// `complement_valid` is `false`: the complement's arithmetic is not written yet, so it is not
-    /// offered.
+    /// The complement is offered where the base records the row count its slots are a bijection
+    /// onto, which is what `RowSpace::project_complement_base` needs and all it needs.
+    ///
+    /// **A view with no image table is priced too.** Images are written by the build and by each
+    /// fold, so a view can be served without them, and a session can hold no term that has one.
+    /// Either way there is no split to take, and what is left is the walk against the complement,
+    /// which is a choice about the principal's grant and the row space rather than about any
+    /// image. The residual is not priced in that case and the delta postings are not read: the
+    /// split is not on offer for the residual estimate to change.
     fn price(
         inputs: &ProjectionInputs<'_>,
         rows: &RowSpace,
         fragment: &croaring::Bitmap,
     ) -> io::Result<ProjectionRoute> {
-        let Some(images) = inputs.images else {
-            return Ok(ProjectionRoute::Walk);
-        };
-        if !inputs.satisfied.iter().any(|term| images.kept(*term)) {
-            return Ok(ProjectionRoute::Walk);
-        }
         let bound = rows.base().bound();
         // A bound of zero holds no entity, and one above the `u32` entity ceiling (I9) names
-        // entities no mask can hold. Neither has a split to price.
+        // entities no mask can hold. Neither has a route to price against the walk.
         let Some(hi) = bound.checked_sub(1).and_then(|hi| u32::try_from(hi).ok()) else {
             return Ok(ProjectionRoute::Walk);
         };
         let held = fragment.range_cardinality(0..=hi);
-        let chooser = chooser_inputs(
-            images,
-            inputs.satisfied,
-            held,
-            bound,
-            false,
-            tessera_authz::delta_rows(inputs.satisfied, inputs.deltas)?,
-        );
+        let complement_valid = rows.base().dense_rows().is_some();
+        let unionable = inputs
+            .images
+            .filter(|images| inputs.satisfied.iter().any(|term| images.kept(*term)));
+        let chooser = match unionable {
+            Some(images) => chooser_inputs(
+                images,
+                inputs.satisfied,
+                held,
+                bound,
+                complement_valid,
+                tessera_authz::delta_rows(inputs.satisfied, inputs.deltas)?,
+            ),
+            None => ChooserInputs {
+                held,
+                bound,
+                complement_valid,
+                ..ChooserInputs::default()
+            },
+        };
         Ok(match choose(&chooser, &ROUTE_COSTS) {
             Route::Walk => ProjectionRoute::Walk,
             Route::Split => ProjectionRoute::Split,
@@ -439,8 +466,8 @@ impl RowProjection {
         // **Run containers, because a projection is held for a session and read for its life.**
         // The rows a grant projects to are a contiguous range wherever the grant covers a run of
         // row space, and a bitmap container spends 8 KiB stating what a run container states in
-        // four bytes plus a count. A whole-corpus grant at 3.5×10⁹ rows is 53 342 containers: 437 MB
-        // of bitmap containers, or 53 342 run containers of one run each, on the order of a
+        // four bytes plus a count. A whole-corpus grant at 3.5×10⁹ rows is 53 407 containers:
+        // 437 MB of bitmap containers, or 53 407 run containers of one run each, on the order of a
         // megabyte. Run form is per container and never global — the count does not fall, only what
         // each container costs — and `run_optimize` converts one only where the run form is
         // smaller, so a projection that runs badly keeps the representation it had.
