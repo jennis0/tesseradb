@@ -27,12 +27,12 @@ the declaration, and `commit()` builds it and serves it.
 import tesseradb as td
 
 db = td.create()                                   # a temporary directory, on /dev/shm where there is one
-db.stage("points", df, default=True)               # index as id; x, y, title, year, cluster
+db.stage("points", df, id="paper_id", default=True)   # paper_id, x, y, title, year, cluster
 db.declare_view("map", source="points")
 db.declare_layer("clusters", kind="flat", from_column="cluster")
 db.declare_labels("topics", of="clusters", source=topic_names)   # {cluster_key: text}
 print(db.check())                                  # what the declaration reads, and what it discloses
-print(db.commit())                                 # tessera check, tessera build --mint-external-ids, tessera serve
+print(db.commit())                                 # tessera check, tessera build, tessera serve
 ```
 
 `db.declaration` is the TOML the SDK wrote, and `tessera check` reads that file: the mapping from
@@ -40,8 +40,8 @@ verb to block is checked by the binary rather than mirrored in Python. The direc
 the binary reads, so `db.save("~/somewhere")` and `tessera serve --deployment
 ~/somewhere/tessera.toml` on another machine serve the same database.
 
-What is built is the first commit and every commit after it: `create`, `open`, `stage` with the id
-map, `declare` and the typed verbs for plain views and view groups, vocabularies, attributes
+What is built is the first commit and every commit after it: `create`, `open`, `stage`,
+`declare` and the typed verbs for plain views and view groups, vocabularies, attributes
 scoped and unscoped, layers of every kind and membership and labels, inference, `check()`, the build and the server the first commit starts,
 and the paged commit below.
 
@@ -57,6 +57,25 @@ dependent layers, and artifacts inline or in a table. A membership may be spelle
 and such an artifact is published once: the complement is taken over the entities that exist at
 that moment, so a key the database already holds takes no second exclusion.
 
+## How a row is named
+
+`stage(name, data, id=...)` names the column that names the rows. Its bytes are that row's
+external id at every door: a string's UTF-8, an integer's eight little-endian bytes, binary as it
+stands, which is what the build reads and what `/control/ingest`, `/control/values` and
+`/control/changes` take. The declaration is what says where identity is — a view's
+`fields.entity_id`, an attribute's `entity_id_field`, a members table's `fields.entity` — and the
+SDK rewrites no column to say it. Without `id=` the SDK reads a column named `id`, then
+`entity_id`, then `entity`; a pandas index with a name is an id column under that name.
+
+A frame that names its rows by nothing — an unnamed default index — is the other route: the build
+writes no external id, and a row is addressed by the `tessera_id` a pick or the ingest route hands
+back, which is what `remove()` then sends.
+
+The SDK holds nothing about what the database contains. A re-run of a cell is a re-run: the same
+frame is staged again and sent again, and what happens then is the database's answer — a replay
+where the bytes and the batch id are the ones first sent, a `409` on the page where the ids are
+ones it holds. Databases are stateful, and this one says so rather than guessing.
+
 Not built yet, and what each does instead:
 
 - **`map()` and `viewer(terms)`.** `tesseradb.Map(db.viewer_url, token=...)` is the widget, and
@@ -65,7 +84,9 @@ Not built yet, and what each does instead:
   built database and name a rebuild. A layer, a label set, a plain view, a view group and a view
   added to a group are declarable at any commit, and the next commit sends each to the running
   service. A view declared after the first commit names its own `extent=`, there being no rows
-  at a running service to fit a frame against.
+  at a running service to fit a frame against. `declare_layer(from_column=...)` is refused there
+  too: the column mints artifacts at the build and on the ingest route, so a clustering over rows
+  the database already holds is published through `source=` and `members=`.
 
 ## The commit after the first
 
@@ -87,28 +108,31 @@ rows accepted per view, artifacts minted, memberships joined, parts already pres
 row and part, and how long the flush took.
 
 The order is fixed: declarations, then points per view with the allocation view first, then values
-on entities that already exist, then artifacts per layer in dependency order, then a flush. A row
-is addressed by its external id, which is the source id in eight little-endian bytes at both doors,
-and the first commit passes `--mint-external-ids` so that every built row is addressable.
+on entities that already exist, then artifacts per layer in dependency order, then a flush. Which
+declarations are new is read from `/v1/meta`, so the database is what says what it holds. A delta
+carrying a view's coordinate columns is a page of points; one that carries none of them fills
+values on entities that are already there.
 
-A page's batch id is derived from the source name, the page index and a hash of the bytes, and the
-commit log under `.tessera/` records each acknowledgement, the sets it sent whole and the fixed
-parts each artifact was published with. Re-running a cell therefore sends nothing: the rows are
-held, the sets were sent, and the parts are the ones the publication carried. A value that changed
-is a `409` on that part, reported and not retried, because an edit is a delete and a re-ingest. A
-`429` is backpressure and is retried after its `Retry-After` with identical bytes, and a request
-that reached no server is reported as a refusal rather than raised, so the pages already
-acknowledged stay acknowledged.
+The flush answers with the publication its cycle will carry, and `commit()` reads
+`/control/status` until the counter reaches it, so the next cell sees the rows. The wait is
+bounded; a wait that runs out is a finding, and everything the commit sent is durable either way.
 
-The pre-flight runs before a byte is sent. Rows outside a view's frame are dropped and listed with
-the frame, rows whose id this database already holds are listed and not sent, and a column no block
-declares is refused by name. A content is supplied once and replaced never, so one gated `all` on
-an artifact published without it is refused naming the artifact, and one that differs from the held
-content is reported and not sent.
+A page's batch id is derived from the source name, the page index and a hash of the bytes, which is
+what the `429` retry and the resend of a lost acknowledgement carry. A `429` is backpressure and is
+retried after its `Retry-After` with identical bytes; a request that reached no server is reported
+as a refusal rather than raised. A value that changed is a `409` on that part, reported and not
+retried, because an edit is a delete and a re-ingest.
 
-`remove(ids)`, `suppress(ids)` and `unsuppress(ids)` take the user's own ids and map them; a
-removed id staged again goes as a point row. `leave(layer, key, ids, rank)` shrinks a content's
-generating set, which is the one set that may shrink.
+The pre-flight runs before a byte is sent and it sends nothing while a finding stands: it reports,
+names the finding, and drops or rewrites no row. Rows outside a view's frame are listed with the
+frame, a column no block declares is refused by name, a key column staged for a layer that declares
+supplied content is refused naming the artifacts-table route, and a labels delta whose clustering is
+neither held nor staged is named.
+
+`remove(ids)`, `suppress(ids)` and `unsuppress(ids)` take the ids the id column holds, or the
+`tessera_id`s where the declaration names no id column; a removed id staged again goes as a point
+row. `leave(layer, key, ids, rank)` shrinks a content's generating set, which is the one set that
+may shrink.
 
 The binary is `TESSERA_BIN` when set, else the first `tessera` on `PATH`, else a checkout's target
 directory, release before debug; `create()` names the one it found. The database directory keeps
@@ -118,10 +142,10 @@ the three bound addresses from the JSON line the child prints once all three pla
 `db.viewer_url`, `db.session_url` and `db.session_credential` are what a token is minted against.
 The child is killed by its pid at `close()` and at interpreter exit.
 
-**Not built yet: the viewer plane's origin list for a notebook page.** The SDK writes
-`serve.cors_origins` from `TESSERA_NOTEBOOK_ORIGIN`, and a widget served from an origin that names
-none is refused by the browser. `serve.cors_loopback`, which would admit any page served from a
-loopback address, is a disclosure ruling (python-sdk.md §11.2 B).
+The deployment file the SDK writes sets `serve.cors_loopback`, which admits a page served from a
+loopback address on the viewer plane. A notebook page's origin is the front end's, unknown at start
+and not enumerable for a webview, so an origin list cannot state it; the three planes bind
+loopback, so what this admits are pages on this machine.
 
 ## The entry point is a token
 

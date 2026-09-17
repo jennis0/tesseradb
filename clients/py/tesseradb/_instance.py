@@ -63,11 +63,16 @@ class Listening:
     control: str
 
 
-def write_deployment(directory: Path, cors_origins: list[str] | None = None) -> Path:
+def write_deployment(directory: Path) -> Path:
     """`tessera.toml`, as `tessera build` and `tessera serve` both read it (SA §7).
 
     Every path in it resolves against this file's own directory, so the database directory serves
     from wherever it is copied to.
+
+    `serve.cors_loopback` admits a page served from a loopback address on the viewer plane (§7).
+    A notebook page's origin is the front end's, unknown at start and not enumerable for a
+    webview, so it is what a widget in a notebook needs; the three planes bind loopback, so the
+    pages it admits are pages on this machine.
     """
     serve = {
         "viewer": "127.0.0.1:0",
@@ -75,9 +80,8 @@ def write_deployment(directory: Path, cors_origins: list[str] | None = None) -> 
         "control": "127.0.0.1:0",
         "session_credential_file": ".tessera/session.cred",
         "operator_credential_file": ".tessera/operator.cred",
+        "cors_loopback": True,
     }
-    if cors_origins:
-        serve["cors_origins"] = list(cors_origins)
     document = {
         "bundle": {
             "path": "bundle",
@@ -96,18 +100,6 @@ def write_deployment(directory: Path, cors_origins: list[str] | None = None) -> 
     path = directory / "tessera.toml"
     path.write_text(dumps(document), encoding="utf-8")
     return path
-
-
-def notebook_origins() -> list[str]:
-    """The viewer plane's origin list, from `TESSERA_NOTEBOOK_ORIGIN`.
-
-    The notebook page's origin is the front end's, unknown at start and not enumerable for a
-    webview. Not built yet: `serve.cors_loopback`, which would admit any page served from a
-    loopback address and is a disclosure ruling (§11.2 B). Until it exists a widget from an
-    unlisted origin is refused by the browser.
-    """
-    origin = os.environ.get("TESSERA_NOTEBOOK_ORIGIN", "").strip()
-    return [o for o in origin.split(",") if o] if origin else []
 
 
 def secrets_for(directory: Path) -> tuple[str, str]:

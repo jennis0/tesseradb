@@ -91,14 +91,13 @@ class CommitReport(Report):
     viewer: str | None = None
     session: str | None = None
     control: str | None = None
-    #: How many ids the map assigned. Zero where every source was read in place, the map being the
-    #: identity over their own ids.
-    entities: int = 0
+    #: How this database names a row: its id column, or the tessera_id (§3).
+    identity: str = ""
 
     def lines(self) -> list[str]:
         out = super().lines()
-        if self.entities:
-            out.insert(1, f"  {self.entities} entity id(s) assigned from the user's own ids")
+        if self.identity:
+            out.insert(1, f"  {self.identity}")
         out.insert(
             1,
             "  the allocation is signature-sorted over the whole staged corpus, which affects "
@@ -133,8 +132,6 @@ class PagedReport:
     without_content: int = 0
     clipped: int = 0
     refusals: list = field(default_factory=list)
-    #: Batch ids the commit log already held, so the page was not sent again (§6.4).
-    skipped: list = field(default_factory=list)
     #: The identities the ingest route answered with, one per accepted row.
     tessera_ids: list = field(default_factory=list)
     #: The identity each published artifact was given, by layer and key. A layer's own
@@ -176,8 +173,6 @@ class PagedReport:
             out.append(f"  artifacts published without their declared content: {self.without_content}")
         if self.clipped:
             out.append(f"  rows clipped onto the frame's edge by the projection: {self.clipped}")
-        if self.skipped:
-            out.append(f"  pages this database had already had acknowledged: {len(self.skipped)}")
         if self.flush_wait is not None:
             reached = "" if self.flush_reached else ", not reached within the wait"
             out.append(f"  flush: {self.flush_wait:.2f} s to the publication{reached}")
@@ -199,7 +194,6 @@ class ChangeReport:
 
     op: str
     requested: int = 0
-    unknown: list = field(default_factory=list)
     refusals: list = field(default_factory=list)
 
     @property
@@ -208,11 +202,6 @@ class ChangeReport:
 
     def lines(self) -> list[str]:
         out = [f"{self.op}: {self.requested} id(s), {'ok' if self.ok else 'FAILED'}"]
-        if self.unknown:
-            out.append(
-                f"  {len(self.unknown)} id(s) this database's map does not hold, so nothing "
-                f"addresses them: {', '.join(repr(i) for i in self.unknown[:10])}"
-            )
         for refusal in self.refusals:
             out.append(f"  refused {refusal['status']}: {refusal['detail']}")
         return out

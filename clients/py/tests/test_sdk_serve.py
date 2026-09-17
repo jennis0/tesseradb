@@ -115,13 +115,15 @@ def test_stop_kills_by_pid_and_leaves_nothing_running():
 
 
 def test_the_deployment_file_names_three_loopback_planes_at_port_zero(tmp_path):
-    path = _instance.write_deployment(tmp_path, ["http://localhost:5173"])
+    path = _instance.write_deployment(tmp_path)
     text = path.read_text()
     assert 'viewer = "127.0.0.1:0"' in text
     assert 'session = "127.0.0.1:0"' in text
     assert 'control = "127.0.0.1:0"' in text
     assert "[disclosure]\ntoken_max_lifetime = 3600" in text
-    assert 'cors_origins = ["http://localhost:5173"]' in text
+    # The widget's page is served from a loopback address, and its origin cannot be enumerated.
+    assert "cors_loopback = true" in text
+    assert "cors_origins" not in text
     assert 'module = "builtin:passthrough"' in text
     assert (tmp_path / ".tessera" / "cache").is_dir()
 

@@ -2,18 +2,18 @@
 
 The first commit builds. Every commit after it pages the staged deltas through the control plane,
 in the order §6.2 fixes: declarations, points per view, values on existing entities, artifacts per
-layer, then a flush and a wait for the publication that follows the last acknowledgement. A part
-supplied twice is accepted and a part supplied differently is a `409` on that part (ingest §1.1),
-so the order matters for existence and for nothing else.
+layer, then a flush and a wait for the publication the flush answered with. A part supplied twice
+is accepted and a part supplied differently is a `409` on that part (ingest §1.1), so the order
+matters for existence and for nothing else.
 
-`check()` runs the planner and the pre-flight and sends nothing; `commit()` runs the same plan.
-The two therefore cannot disagree about what would be sent.
+`check()` runs the planner and the pre-flight and sends nothing; `commit()` runs the same plan. The
+two therefore cannot disagree about what would be sent.
 
-A points delta's held rows send nothing. python-sdk.md §6.3 lists a row whose id the map already
-holds as acknowledged and does not send it, which is what makes a re-staged frame read as already
-present rather than as a page of refusals, and the values route at step 3 therefore carries a delta
-on a source that feeds attributes and no view. The one part of a held row that travels is a
-from-column layer's key, which §6.2 step 3 sends as a publication in step 4.
+**The plan is built from what was staged and what the database says it holds.** The SDK keeps no
+record of what it sent: a delta goes as it was staged, a row the database already holds is a `409`
+on that page and the report carries it, and what the database has already been told — its views,
+its groups and its layers — is read from `/v1/meta` rather than from a log (§3, §6.4). A re-run of
+a cell is a re-run.
 """
 
 from __future__ import annotations
@@ -21,38 +21,24 @@ from __future__ import annotations
 import datetime
 import json
 import time
-from dataclasses import dataclass, field
-from typing import Any, Iterable, Sequence
+from dataclasses import dataclass
+from typing import Any, Sequence
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 
 from . import _control
-from ._control import (
-    Answer,
-    Control,
-    addressed,
-    arrow_body,
-    batch_id,
-    content_digest,
-    members_digest,
-    parts_digest,
-)
+from ._control import Answer, Control, addressed, arrow_body, batch_id
 from ._declaration import SHAPE_FIELDS, rows_of, view_entries
 from ._refusal import Refusal
 
-#: How long `commit()` waits for the publication after its last acknowledgement, in seconds. The
-#: flush request pulls the tick's deadline forward, so the wait is one executor loop on an idle
-#: server; the figure is a ceiling on a busy one, not an expectation.
+#: How long `commit()` waits for the publication the flush named, in seconds. The flush request
+#: pulls the tick's deadline forward, so the wait is one executor loop on an idle server; the
+#: figure is a ceiling on a busy one, not an expectation.
 FLUSH_TIMEOUT = 60.0
 
 #: How often the flush wait reads `/control/status`, in seconds.
 FLUSH_INTERVAL = 0.2
-
-#: How long the second wait of a commit that created a view of a group and filled it may take, in
-#: seconds. It is one executor loop on an idle server; the ceiling is short because the rows it
-#: waits for are already durable and the commit is answered either way.
-SETTLE_TIMEOUT = 10.0
 
 
 @dataclass
@@ -85,11 +71,6 @@ class Page:
     artifacts: int = 0
     members: int = 0
     level: int = 0
-    #: The source ids a points page carries, moved to `acknowledged` at its acknowledgement (§3).
-    entities: tuple = ()
-    #: The sets this page is the last of, as `(layer, key, rank, digest)`. Recorded at the page's
-    #: acknowledgement, so a later commit knows the set was sent whole and plans no page for it.
-    completes: list = field(default_factory=list)
 
 
 def _scoped_to(block: dict) -> str | None:
@@ -109,42 +90,23 @@ def _groups_of(view: dict) -> set[str]:
     return {view["group"], view["block"].get("members")} - {None}
 
 
-def held(kind: str, name: str) -> str:
-    """How the commit log names one declaration: a layer by its own name, the rest qualified.
+def _from_columns(document: dict) -> dict[str, str]:
+    """Each layer whose membership is a column of a points file, and the column (§4.6).
 
-    A layer is recorded under its bare name because it was there before the other kinds were, and
-    a view and a group share a name space with nothing, so `view:` and `view_group:` keep one log
-    for all three. A view of a group is `view:<group>:<key>`, the view's own address.
+    The declaration is what says so: such a layer's `[layer.members]` reads the points source and
+    names the column as `key`. The column travels on a points page under the layer's own name, and
+    the window close mints the artifact it names (contracts §3.4).
     """
-    return name if kind == "layer" else f"{kind}:{name}"
-
-
-def _declaration_names(document: dict) -> list[str]:
-    """Every runtime declaration this document carries, as the commit log names it."""
-    names: list[str] = []
-    for group in document.get("view_group", []):
-        names.append(held("view_group", group["name"]))
-        for record in group.get("view") or []:
-            names.append(held("view", f"{group['name']}:{record['key']}"))
-    for block in document.get("view", []):
-        names.append(held("view", block["name"]))
+    points = {entry["source"] for entry in view_entries(document, None)}
+    columns: dict[str, str] = {}
     for block in document.get("layer", []):
-        names.append(block["name"])
-        if block.get("labels"):
-            names.append(block["labels"]["name"])
-    return names
-
-
-def declarations(payloads: dict, document: dict) -> list[str]:
-    """What the first commit's build compiled, as the commit log names each (§6.4).
-
-    The layers are the emitter's own names, a label set expanding to a layer of its own; the views
-    and the groups are the document's, a group whose views are minted from its discriminator
-    carrying no key the SDK could name: those views exist in the bundle and are never offered to
-    the control plane, since nothing in the declaration says what they are called.
-    """
-    names = [payload["name"] for payload in payloads.get("layers", [])]
-    return names + [name for name in _declaration_names(document) if name not in names]
+        members = block.get("members")
+        if not isinstance(members, dict) or members.get("source") not in points:
+            continue
+        key = dict(members.get("fields", {})).get("key")
+        if key:
+            columns[block["name"]] = key
+    return columns
 
 
 def _owners_first(groups: list[dict]) -> list[dict]:
@@ -199,17 +161,16 @@ class Planner:
         self.db = database
         self.control = control
         self.meta = meta
-        self.log = database.commit_log
         self.limits = control.limits()
         self.findings: list[Finding] = []
         self.pages: list[Page] = []
-        #: The keys this plan will publish per layer, so a later step reads them as held.
-        self._planned_keys: dict[str, set[str]] = {}
-        #: How many artifact pages this plan has built per layer, which is a page's index in its
-        #: batch id. The artifact routes carry no batch-id header, so the id is the SDK's own
-        #: bookkeeping: the commit log holds it and a re-run skips the page rather than re-sending
-        #: a publication whose every part the level already holds.
-        self._artifact_pages: dict[str, int] = {}
+        #: What the database says it already carries: the views, the groups and the layers
+        #: `/v1/meta` lists. A declaration it names is one this commit does not send again.
+        self.held_views = {str(view.get("id")) for view in meta.get("views", [])}
+        self.held_views |= {str(group.get("name")) for group in meta.get("groups", [])}
+        self.held_layers = {str(layer.get("name")) for layer in meta.get("layers", [])}
+        #: The sources this plan sends as points, so the values step leaves their columns alone.
+        self._as_points: set[str] = set()
 
     # ------------------------------------------------------------------ entry
 
@@ -227,29 +188,25 @@ class Planner:
     # ------------------------------------------------------------------ 1. declarations
 
     def _declarations(self, document: dict) -> None:
-        """The runtime `PUT`s for every block declared since the last commit (§6.2 step 1).
+        """The runtime `PUT`s for every block this database does not carry yet (§6.2 step 1).
 
         The bodies come from `tessera check --payloads` over the SDK's own declaration, so the
         mapping from a block to a request body is the binary's and not a second one in Python. The
         one body it does not carry is a group's roster record, which is a request rather than a
         declaration (views.md §3.2): the SDK holds the record and sends it here.
 
+        Which of them are new is read from `/v1/meta`: the database is what knows what it holds.
         The order is the one the routes need: a group before a view of it, and a view before the
         layer drawn on it. Not built yet: an attribute and a vocabulary declared after the first
         commit, refused at the verb (§11.2 C).
         """
-        pending = [
-            name for name in _declaration_names(document) if not self.log.declared(name)
-        ]
-        if not pending:
+        if not self._pending(document):
             return
         payloads = self.db._payloads()
-        sent: list[str] = []
         for entry in _owners_first(payloads.get("view_groups", [])):
             name = entry["name"]
-            if self.log.declared(held("view_group", name)):
+            if name in self.held_views:
                 continue
-            sent.append(held("view_group", name))
             self.pages.append(
                 Page(
                     kind="view_group",
@@ -261,9 +218,8 @@ class Planner:
         for group in document.get("view_group", []):
             for record in group.get("view") or []:
                 view = f"{group['name']}:{record['key']}"
-                if self.log.declared(held("view", view)):
+                if view in self.held_views:
                     continue
-                sent.append(held("view", view))
                 self.pages.append(
                     Page(
                         kind="group_view",
@@ -275,9 +231,8 @@ class Planner:
                 )
         for entry in payloads.get("views", []):
             name = entry["name"]
-            if self.log.declared(held("view", name)):
+            if name in self.held_views:
                 continue
-            sent.append(held("view", name))
             self.pages.append(
                 Page(
                     kind="view",
@@ -289,9 +244,8 @@ class Planner:
             )
         for payload in payloads.get("layers", []):
             name = payload["name"]
-            if self.log.declared(name):
+            if name in self.held_layers:
                 continue
-            sent.append(name)
             self.pages.append(
                 Page(
                     kind="layer",
@@ -300,12 +254,25 @@ class Planner:
                     body=payload,
                 )
             )
-        missing = [name for name in pending if name not in sent]
-        if missing:
-            raise Refusal(
-                "commit: `tessera check --payloads` emitted no body for "
-                + ", ".join(sorted(missing))
-            )
+
+    def _pending(self, document: dict) -> bool:
+        """Whether this declaration carries a block the database does not."""
+        for group in document.get("view_group", []):
+            if group["name"] not in self.held_views:
+                return True
+            for record in group.get("view") or []:
+                if f"{group['name']}:{record['key']}" not in self.held_views:
+                    return True
+        for block in document.get("view", []):
+            if block["name"] not in self.held_views:
+                return True
+        for block in document.get("layer", []):
+            if block["name"] not in self.held_layers:
+                return True
+            labels = block.get("labels")
+            if labels is not None and labels["name"] not in self.held_layers:
+                return True
+        return False
 
     # ------------------------------------------------------------------ 2. points
 
@@ -315,6 +282,11 @@ class Planner:
             delta = self.db.deltas.get(source)
             if delta is None:
                 continue
+            if view["x"] not in delta.columns or view["y"] not in delta.columns:
+                # A row with no coordinates is not a point. The delta fills values on entities the
+                # database already holds, and step 3 carries it.
+                continue
+            self._as_points.add(source)
             table = pq.read_table(delta.path)
             if view["discriminator"] is None:
                 self._points_of(document, view, source, table, view["id"])
@@ -344,30 +316,17 @@ class Planner:
     def _points_of(
         self, document: dict, view: dict, source: str, table: pa.Table, name: str
     ) -> None:
-        entities = table["entity_id"].to_pylist()
-        acknowledged = self.db.id_map.acknowledged()
-        held = [i for i, entity in enumerate(entities) if entity in acknowledged]
-        fresh = [i for i, entity in enumerate(entities) if entity not in acknowledged]
-        if held:
-            self.findings.append(
-                Finding(
-                    "rows already present",
-                    f"{len(held)} of {len(entities)} row(s) staged on '{source}' carry an id this "
-                    f"database already holds, so they are not sent as points of view '{name}'",
-                )
-            )
-        fresh = self._inside_the_frame(name, table, view, fresh)
-        if not fresh:
+        rows = self._inside_the_frame(name, table, view, list(range(table.num_rows)))
+        if not rows:
             return
         columns = self._point_columns(document, view, source, table)
         self._page_rows(
             kind="points",
             name=source,
             view=name,
-            table=_selected(table, fresh, columns),
+            table=_selected(table, rows, columns),
             limits=self.limits.get("ingest", {}),
             line=f"points into view '{name}' from '{source}'",
-            entities=[entities[row] for row in fresh],
         )
 
     def _inside_the_frame(
@@ -428,14 +387,9 @@ class Planner:
         access = view["point_visibility"].get("field")
         if access and access in table.column_names:
             columns.append(("access", _label_lists(table[access])))
-        columns.append(
-            (
-                "external_id",
-                pa.array(
-                    [_control.external_id(e) for e in table["entity_id"].to_pylist()], pa.binary()
-                ),
-            )
-        )
+        identity = self.db._id_column_of(source)
+        if identity and identity in table.column_names:
+            columns.append(("external_id", _external_ids(table[identity])))
         for block in document.get("attribute", []):
             group = _scoped_to(block)
             if group is None:
@@ -448,7 +402,7 @@ class Planner:
             column = block.get("field") or block["name"]
             if column in table.column_names:
                 columns.append((block["name"], table[column]))
-        for layer, column in self.db.from_columns.items():
+        for layer, column in _from_columns(document).items():
             if column in table.column_names and self._layer_draws(document, layer, view):
                 columns.append((layer, table[column]))
         return columns
@@ -465,15 +419,19 @@ class Planner:
     # ------------------------------------------------------------------ 3. values
 
     def _values(self, document: dict) -> None:
-        """A delta on a source that feeds attributes and no view (§6.2 step 3).
+        """A delta that fills columns on entities the database already holds (§6.2 step 3).
+
+        Every staged delta an attribute reads comes here, except one this plan is already sending
+        as points: a points page carries its own attribute columns, so a values page beside it
+        would write the same cells twice and, for a row this commit creates, fill an entity the
+        bundle does not hold yet.
 
         A group-scoped family reading a source of its own is paged per view: its `fields.view`
         column says which view each row's value belongs to, and the page carries that view in
         `x-tessera-view`, without which no family may be named (contracts §3.4).
         """
-        view_sources = {entry["source"] for entry in view_entries(document, self.db.default_source)}
         for source, delta in self.db.deltas.items():
-            if source in view_sources:
+            if source in self._as_points:
                 continue
             attributes = [
                 block
@@ -531,15 +489,18 @@ class Planner:
         """One page sequence of `POST /control/values`, over the rows and columns named."""
         if not attributes or not rows:
             return
-        columns: list[tuple[str, Any]] = [
-            (
-                "external_id",
-                pa.array(
-                    [_control.external_id(e) for e in table["entity_id"].to_pylist()],
-                    pa.binary(),
-                ),
+        identity = self.db._id_column_of(source)
+        if identity is None or identity not in table.column_names:
+            self.findings.append(
+                Finding(
+                    "a values delta that names no entity",
+                    f"'{source}' fills columns on entities this database holds, and a value is "
+                    f"addressed by the row it belongs to. Name the id column with id=",
+                    refuses=True,
+                )
             )
-        ]
+            return
+        columns: list[tuple[str, Any]] = [("external_id", _external_ids(table[identity]))]
         for block in attributes:
             column = block.get("field") or block["name"]
             if column in table.column_names:
@@ -566,7 +527,6 @@ class Planner:
         table: pa.Table,
         limits: dict,
         line: str,
-        entities: Sequence[int] = (),
     ) -> None:
         """Slice a table into pages under both of the route's units and build each body.
 
@@ -587,7 +547,6 @@ class Planner:
                         body=body,
                         batch=batch_id(name, first, body),
                         rows=count,
-                        entities=tuple(entities[first : first + count]),
                     )
                 )
 
@@ -603,24 +562,16 @@ class Planner:
     def _artifacts_of(self, document: dict, block: dict, parent: str | None = None) -> None:
         layer = block["name"]
         view_field = _view_field(block)
-        column = self.db.from_columns.get(layer)
-        if column is not None:
-            self._from_column(document, block, column)
-            return
         artifacts = self.db.deltas.get(block.get("source"))
         members_source = (block.get("members") or {}).get("source")
         members = self.db.deltas.get(members_source)
-        # The inline roster stays in the declaration, so it would be read as rows to send at every
-        # commit. The build compiled it and recorded it as published (§6.4), and a key already
-        # published is not offered again: a second `excluding` on a held key is a `409`, the
-        # complement being taken over the entities that exist now (ingest §2.3).
-        held_keys = self.log.published(layer)
-        inline = [
-            row for row in (block.get("artifacts") or []) if str(row.get("key")) not in held_keys
-        ]
+        # An inline roster stays in the declaration, so it is offered once: with the layer it
+        # belongs to, which this commit is declaring. The build compiled the roster of a layer
+        # declared before the first commit, and a key already published takes no second record.
+        inline = (block.get("artifacts") or []) if layer not in self.held_layers else []
         if artifacts is None and members is None and not inline:
             return
-        if parent is not None and not self._clustering_is_reachable(parent):
+        if parent is not None and parent not in self.held_layers and not self._planned(parent):
             self.findings.append(
                 Finding(
                     "a labels delta before its clustering",
@@ -635,8 +586,8 @@ class Planner:
             return
         self._publish(block, rows)
 
-    def _clustering_is_reachable(self, parent: str) -> bool:
-        """Whether a label set's clustering can hold the keys the labels attach to (§6.3).
+    def _planned(self, layer: str) -> bool:
+        """Whether this plan publishes a key into a layer (§6.3).
 
         A clustering this database declared at an earlier commit may hold any key, and the SDK does
         not enumerate the server's artifacts to find out: a label naming a key it does not hold is
@@ -644,73 +595,27 @@ class Planner:
         case where the clustering is new in this commit, where a label can only attach to a key
         this commit stages.
         """
-        if self.log.declared(parent) or self.log.published(parent):
-            return True
-        return bool(self._planned_keys.get(parent))
-
-    def _from_column(self, document: dict, block: dict, column: str) -> None:
-        """A from-column layer's keys on entities this database already holds (§6.2 step 3).
-
-        The values route fills a column and mints nothing, so a key no artifact holds is refused
-        there. The delta is grouped by key instead and sent as publications, each artifact carrying
-        its members, which is what the column would have done at the build. A key on a row this
-        commit creates travels with the row and mints its artifact at the window close.
-
-        The column is read from the first of the layer's views whose points source has a delta. A
-        layer drawn on several views reads one of them, the column naming one key per entity and an
-        entity holding one row per view.
-        """
-        source = None
-        for view in view_entries(document, self.db.default_source):
-            if not self._layer_draws(document, block["name"], view):
-                continue
-            if view["source"] in self.db.deltas:
-                source = view["source"]
-                break
-        if source is None:
-            return
-        table = pq.read_table(self.db.deltas[source].path)
-        if column not in table.column_names:
-            return
-        acknowledged = self.db.id_map.acknowledged()
-        keys = table[column].to_pylist()
-        entities = table["entity_id"].to_pylist()
-        grouped: dict[str, list[int]] = {}
-        for key, entity in zip(keys, entities):
-            if key is None or entity not in acknowledged:
-                continue
-            grouped.setdefault(str(key), []).append(entity)
-        if not grouped:
-            return
-        rows = [
-            {"key": key, "level": 0, "members": members, "content": [], "parent": [], "attached": None}
-            for key, members in grouped.items()
-        ]
-        self._publish(block, rows)
+        return any(page.name == layer and page.kind == "publish" for page in self.pages)
 
     def _publish(self, block: dict, rows: list[dict]) -> None:
-        """One layer's artifact rows, as publications and growths (§6.2 step 4).
+        """One layer's artifact rows, as publications (§6.2 step 4).
 
         Within a layer the levels go coarse first, a nested batch resolves parents that are its own
-        siblings, and a key the level already holds falls under the fill rule: its members join by
-        `PATCH` and its `inherited` content is filled the same way. Content gated `all` travels on
-        the publish record with the first page of its generating set, the route refusing a content
-        fill on such a layer; further set pages are `PATCH` at the rank.
+        siblings, and a key the level already holds falls under the route's fill rule: its members
+        join, its absent fixed parts are filled and a differing one is a `409` the report carries
+        (ingest §1.5). Content gated `all` travels on the publish record with the first page of its
+        generating set, the route refusing a content fill on such a layer; further set pages are
+        `PATCH` at the rank.
         """
         layer = block["name"]
-        gates = _content_gates(block)
         scoped = _scoped_to(block) is not None
-        held = self.log.published(layer)
         publish_limits = self.limits.get("publish", {})
         grow_limits = self.limits.get("grow", {})
         cap = int(publish_limits.get("max_body_bytes", 64 << 20))
         most = int(publish_limits.get("max_artifacts_per_request", 10_000))
-        planned: set[str] = self._planned_keys.setdefault(layer, set())
-
         most_excluded = int(publish_limits.get("max_excluded_per_request", 1_000_000))
-        spatial = block.get("membership") == "spatial"
 
-        new_rows: list[dict] = []
+        carried: list[dict] = []
         for row in rows:
             excluding = row.get("excluding")
             if excluding is not None and len(excluding) > most_excluded:
@@ -727,79 +632,22 @@ class Planner:
                     )
                 )
                 continue
-            state = held.get(published_key(row["key"], row.get("view")))
-            if state is None:
-                new_rows.append(row)
-                continue
-            if scoped:
-                # The growth route carries no view, and a key on a scoped layer names one artifact
-                # per view of the group, so it refuses such a key outright (contracts §3.4 r84).
-                # An artifact of a scoped layer is therefore published whole, once.
-                self.findings.append(
-                    Finding(
-                        "a scoped artifact this database has already published",
-                        f"layer '{layer}', view '{row.get('view')}', artifact '{row['key']}': the "
-                        f"growth route carries no view, so a scoped layer's artifact takes its "
-                        f"whole membership and content at its publication and no record after it. "
-                        f"Publish it under a new key",
-                        refuses=True,
-                    )
-                )
-                continue
-            if row["content"] and "all" in gates and not state.get("content"):
-                self.findings.append(
-                    Finding(
-                        "content gated `all` on a held artifact that has none",
-                        f"layer '{layer}', artifact '{row['key']}': a content whose gate is `all` "
-                        f"is served only to a viewer who can see every member of its generating "
-                        f"set, so it travels on the publication with the set's first page. Not "
-                        f"built yet: filling one onto an artifact published without it has no "
-                        f"route. Publish the artifact under a new key",
-                        refuses=True,
-                    )
-                )
-                continue
-            if (
-                row["content"]
-                and "all" in gates
-                and content_digest(row["content"]) != state.get("content")
-            ):
-                # The artifact holds a different content, and a content is a fixed part: supplied
-                # once and replaced never (ingest §1.5). The route refuses a content fill on a
-                # layer whose content requires every member visible, so this one is not sent, and
-                # the caller is told rather than left to read an unchanged label as an applied one.
-                # A content re-supplied unchanged is a cell re-run and says nothing.
-                self.findings.append(
-                    Finding(
-                        "content gated `all` differs from the one the artifact holds",
-                        f"layer '{layer}', artifact '{row['key']}': a content is supplied once and "
-                        f"replaced never, so this one is not sent. Publish the artifact under a "
-                        f"new key",
-                    )
-                )
-            if spatial:
-                # A spatial artifact's membership is its shape, resolved per request against each
-                # generation's own segments, so there is no member set to page (§6.2 step 4).
-                continue
-            self._grow(block, row, gates, grow_limits, state)
+            carried.append(row)
 
-        for level in sorted({int(row.get("level") or 0) for row in new_rows}):
-            at_level = [row for row in new_rows if int(row.get("level") or 0) == level]
+        for level in sorted({int(row.get("level") or 0) for row in carried}):
+            at_level = [row for row in carried if int(row.get("level") or 0) == level]
             for batch in _batched(_parents_first(at_level), cap, most):
                 blocks, artifacts, members = batch
                 body = _publish_body(level, blocks)
-                keys = [published_key(row["key"], row.get("view")) for row in artifacts]
-                planned.update(keys)
                 self._artifact_page(
                     "publish",
                     layer,
                     level,
-                    f"publish {len(keys)} artifact(s) into '{layer}' level {level}",
+                    f"publish {len(artifacts)} artifact(s) into '{layer}' level {level}",
                     body,
-                    artifacts=len(keys),
+                    artifacts=len(artifacts),
                     members=members,
                 )
-                page = self.pages[-1]
                 for row in artifacts:
                     if scoped and row.get("remainders"):
                         self.findings.append(
@@ -814,89 +662,9 @@ class Planner:
                         )
                         continue
                     # The publication carries a first page of every set; what did not fit follows
-                    # as growths. The page that carries the last of a set is the one that records
-                    # it, so a set half sent is a set this database does not claim to hold.
-                    last: dict[Any, Page] = {}
+                    # as growths.
                     for rank, remainder in row.get("remainders", []):
-                        grown = self._grow_pages(
-                            layer, level, row["key"], rank, remainder, grow_limits
-                        )
-                        if grown:
-                            last[rank] = grown[-1]
-                    for rank, members in [(None, row.get("members", []))] + list(
-                        enumerate(row.get("sets", []))
-                    ):
-                        if not members:
-                            continue
-                        carrier = last.get(rank, page)
-                        carrier.completes.append(
-                            (
-                                layer,
-                                published_key(row["key"], row.get("view")),
-                                rank,
-                                members_digest(members),
-                            )
-                        )
-
-    def _grow(
-        self, block: dict, row: dict, gates: set[str], grow_limits: dict, state: dict
-    ) -> None:
-        """A key the level holds: its members join, and an `inherited` content is filled.
-
-        A set this database has already sent whole is not sent again. A page of it would be a
-        lawful no-op, the join answering `joined: 0`, but §3 says a re-staged frame sends nothing.
-        """
-        layer = block["name"]
-        level = int(row.get("level") or 0)
-        fills: dict[str, Any] = {"key": row["key"]}
-        if row["content"] and "all" not in gates:
-            fills["content"] = [
-                {"rank": rank, "values": list(values)}
-                for rank, values in enumerate(row["content"])
-                if values is not None
-            ]
-        # A fixed part this database published with the artifact is already what the artifact
-        # holds, so no record carries it a second time.
-        if parts_digest(row.get("parent"), row.get("attached")) != state.get("parts"):
-            if row.get("parent"):
-                fills["parent"] = list(row["parent"])
-            if row.get("attached"):
-                fills["attached_to"] = row["attached"]
-        if len(fills) > 1:
-            body = json.dumps(
-                {"level": level, "addressing": "external", "artifacts": [fills]}
-            ).encode()
-            self._artifact_page(
-                "grow",
-                layer,
-                level,
-                f"fill '{row['key']}' in '{layer}' level {level}",
-                body,
-                artifacts=1,
-            )
-        for rank, members in [(None, row.get("members", []))] + list(
-            enumerate(row.get("sets", []))
-        ):
-            self._set_pages(layer, level, row["key"], rank, members, grow_limits)
-
-    def _set_pages(
-        self,
-        layer: str,
-        level: int,
-        key: str,
-        rank: int | None,
-        members: Sequence[int],
-        grow_limits: dict,
-    ) -> None:
-        """One set's growth pages, unless this database has already sent that set whole."""
-        if not members:
-            return
-        digest = members_digest(members)
-        if self.log.holds_set(layer, key, rank, digest):
-            return
-        pages = self._grow_pages(layer, level, key, rank, members, grow_limits)
-        if pages:
-            pages[-1].completes.append((layer, key, rank, digest))
+                        self._grow_pages(layer, level, row["key"], rank, remainder, grow_limits)
 
     def _artifact_page(
         self,
@@ -908,9 +676,7 @@ class Planner:
         artifacts: int = 0,
         members: int = 0,
     ) -> None:
-        """One publication or growth, with the batch id the commit log records it under."""
-        index = self._artifact_pages.get(layer, 0)
-        self._artifact_pages[layer] = index + 1
+        """One publication or growth. The artifact routes carry no batch-id header."""
         self.pages.append(
             Page(
                 kind=kind,
@@ -918,7 +684,6 @@ class Planner:
                 level=level,
                 line=line,
                 body=body,
-                batch=batch_id(layer, index, body),
                 artifacts=artifacts,
                 members=members,
             )
@@ -930,16 +695,15 @@ class Planner:
         level: int,
         key: str,
         rank: int | None,
-        members: Sequence[int],
+        members: Sequence[Any],
         grow_limits: dict,
-    ) -> list[Page]:
-        """The pages that join one set, in order. The caller marks the last of them."""
+    ) -> None:
+        """The pages that join one set, in order."""
         if not members:
-            return []
+            return
         cap = int(grow_limits.get("max_body_bytes", 64 << 20))
         most = int(grow_limits.get("max_members_per_request", 5_000_000))
         per_page = max(1, min((cap - 512) // 16, most))
-        appended: list[Page] = []
         for start in range(0, len(members), per_page):
             slice_ = list(members[start : start + per_page])
             body = patch_body(level, key, joining=slice_, rank=rank)
@@ -952,8 +716,6 @@ class Planner:
                 body,
                 members=len(slice_),
             )
-            appended.append(self.pages[-1])
-        return appended
 
     # ------------------------------------------------------------------ the column check
 
@@ -970,7 +732,7 @@ class Planner:
             for block in document.get("layer", [])
             if (block.get("content") or {}).get("supplied")
         }
-        for layer, column in self.db.from_columns.items():
+        for layer, column in _from_columns(document).items():
             if layer not in supplied:
                 continue
             for source, delta in self.db.deltas.items():
@@ -1001,17 +763,17 @@ class Planner:
         """Which columns each staged source may carry, by the blocks that read it."""
         claimed: dict[str, set[str]] = {}
         for name, staged in list(self.db.sources.items()) + list(self.db.deltas.items()):
-            # The user's own id column is in the file the SDK wrote beside the `entity_id` it
-            # minted from it, so a delta on that source carries it too.
-            into = claimed.setdefault(name, {"entity_id", "entity"})
-            if staged.user_id_column:
-                into.add(staged.user_id_column)
+            # A source's id column is claimed wherever it is read: it is this source's identity
+            # rather than one of its values (§3).
+            into = claimed.setdefault(name, set())
+            if staged.id_column:
+                into.add(staged.id_column)
         points: set[str] = set()
         by_group: dict[str, set[str]] = {}
         for view in view_entries(document, self.db.default_source):
             source = view["source"]
             points.add(source)
-            into = claimed.setdefault(source, {"entity_id", "entity"})
+            into = claimed.setdefault(source, set())
             into |= {view["x"], view["y"]}
             if view["discriminator"]:
                 into.add(view["discriminator"])
@@ -1026,10 +788,10 @@ class Planner:
             if group is not None and not block.get("source"):
                 # A family read from each view's own points file: the column is that file's.
                 for source in by_group.get(group, ()):
-                    claimed.setdefault(source, {"entity_id", "entity"}).add(column)
+                    claimed.setdefault(source, set()).add(column)
                 continue
             source = block.get("source") or self.db.default_source
-            into = claimed.setdefault(source, {"entity_id", "entity"})
+            into = claimed.setdefault(source, set())
             into.add(column)
             if group is not None:
                 into.add(dict(block.get("fields", {})).get("view") or "view")
@@ -1046,13 +808,18 @@ class Planner:
                         claimed[table].update(dict(one.get("fields", {})).values())
                 if members.get("source"):
                     claimed[members["source"]].update(dict(members.get("fields", {})).values())
-        for column in self.db.from_columns.values():
+        for column in _from_columns(document).values():
             for source in points:
                 claimed.setdefault(source, set()).add(column)
         return claimed
 
 
 # ---------------------------------------------------------------------------- helpers
+
+
+def _external_ids(column) -> pa.Array:
+    """One id column as the wire's `external_id`: the bytes each value holds (§3)."""
+    return pa.array([_control.external_id(v) for v in column.to_pylist()], pa.binary())
 
 
 def _selected(table: pa.Table, rows: list[int], columns: list[tuple[str, Any]]) -> pa.Table:
@@ -1099,29 +866,6 @@ def _bodies(table: pa.Table, start: int, cap: int):
             pending.append((first, piece.slice(0, half)))
             continue
         yield first, body, piece.num_rows
-
-
-def published_key(key: str, view: str | None) -> str:
-    """How the commit log names one published artifact: its key, under its view where it has one.
-
-    `#` is reserved out of a view key and an artifact key alike (views.md §3.2), so one name here
-    can never be read as another artifact's.
-    """
-    return key if view is None else f"{view}#{key}"
-
-
-def _content_gates(block: dict) -> set[str]:
-    """The content-grain gates a layer's supplied kinds declare: `all`, `inherited`, or neither."""
-    content = block.get("content") or {}
-    gates = {
-        kind.get("require_member_visibility")
-        for kind in content.get("supplied", [])
-        if isinstance(kind, dict)
-    }
-    named = content.get("require_member_visibility")
-    if named:
-        gates.add(named)
-    return {gate for gate in gates if gate}
 
 
 def _in_dependency_order(layers: Sequence[dict]) -> list[dict]:
@@ -1177,7 +921,7 @@ def _artifact_block(row: dict, budget: int) -> tuple[bytes, list, int]:
     block carries. A remainder is sent as a `PATCH` after the publication: members join the
     membership, and a set page at the rank pages that content's generating set.
     """
-    remainders: list[tuple[int | None, list[int]]] = []
+    remainders: list[tuple[int | None, list]] = []
     record: dict[str, Any] = {"key": row["key"]}
     if row.get("view") is not None:
         # Part of the artifact's identity on a layer whose scope names a group, and no later
@@ -1259,8 +1003,8 @@ def _batched(rows: list[dict], cap: int, most: int):
 def patch_body(
     level: int,
     key: str,
-    joining: Sequence[int] = (),
-    leaving: Sequence[int] = (),
+    joining: Sequence[Any] = (),
+    leaving: Sequence[Any] = (),
     rank: int | None = None,
 ) -> bytes:
     """One `PATCH` row: the set this page moves, and the members joining or leaving it.
@@ -1337,7 +1081,7 @@ def _artifact_rows(artifacts, members, block: dict, inline=None, view_field=None
     if members is not None:
         table = pq.read_table(members.path)
         fields = table.column_names
-        entity_column = "entity" if "entity" in fields else "entity_id"
+        entity_column = _member_entity(block, members, fields)
         levels = table["level"].to_pylist() if "level" in fields else [0] * table.num_rows
         ranks = table["rank"].to_pylist() if "rank" in fields else [None] * table.num_rows
         keys = table["key"].to_pylist()
@@ -1360,25 +1104,16 @@ def _artifact_rows(artifacts, members, block: dict, inline=None, view_field=None
     return list(rows.values())
 
 
-def inline_publications(document: dict):
-    """The inline roster each layer declares, as the commit log records a publication (§6.4).
-
-    The build compiles `artifacts = [{ … }]` into the bundle, and nothing in the exchange with the
-    control plane says so. Recording the keys here is what stops the next commit offering them a
-    second time.
-    """
-    for block in document.get("layer", []):
-        rows = block.get("artifacts")
-        if not rows:
-            continue
-        yield block["name"], [
-            (
-                published_key(row["key"], row.get("view")),
-                content_digest(row["content"]),
-                parts_digest(row["parent"], row["attached"]),
-            )
-            for row in _artifact_rows(None, None, block, rows, _view_field(block))
-        ]
+def _member_entity(block: dict, members, fields: Sequence[str]) -> str:
+    """The column a member row names its entity in: what `[layer.members].fields` says (§4.6)."""
+    named = dict((block.get("members") or {}).get("fields", {})).get("entity")
+    for column in (named, members.id_column, "entity", "entity_id"):
+        if column and column in fields:
+            return column
+    raise Refusal(
+        f"commit: the members table '{members.name}' names no entity column. "
+        f"[layer.members].fields = {{ entity = <column> }} says which column that is"
+    )
 
 
 def _view_field(block: dict) -> str | None:
@@ -1395,64 +1130,20 @@ def _declared_artifacts(artifacts, inline) -> list[dict]:
 # ---------------------------------------------------------------------------- the run
 
 
-def run(database, control: Control, pages: Sequence[Page], report) -> None:
-    """Send the plan, in order, and fold every answer into the report.
-
-    The log and the id map are written after every page rather than at the end. A page is durable
-    at its acknowledgement, and a commit interrupted after one would otherwise send it again at the
-    next: within the WAL retention window that is a replay, and past it a page of duplicates.
-    """
-    log = database.commit_log
-    #: The publication as it stood before the page in flight was sent. The flush wait compares
-    #: against this and not against a reading taken afterwards: a period tick landing between the
-    #: last page and the request would otherwise have already moved every counter, and the wait
-    #: would run to its ceiling.
-    published = control.publication()
+def run(control: Control, pages: Sequence[Page], report) -> None:
+    """Send the plan, in order, and fold every answer into the report."""
     accepted = 0
-    rows = 0
-    #: The views of a group this commit created, and those of them a points page landed rows in.
-    #: Such a view takes its row space at this window's publication and its rows at the next one,
-    #: so a commit that did both waits twice; a plain view created here publishes its rows at the
-    #: first (issue #153).
-    created: set[str] = set()
-    filled: set[str] = set()
-    try:
-        for page in pages:
-            if page.kind == "flush":
-                # A commit that wrote nothing has nothing to make visible, and a tick over an empty
-                # buffer publishes nothing and moves no counter, so the wait would run to its
-                # ceiling and report a flush that never happened.
-                if accepted:
-                    report.flush_wait = _flush(control, published, report, rows > 0)
-                    if created & filled:
-                        # One more publication. A view of a group created in this window takes
-                        # its row space at that window's publication, and the rows buffered for it
-                        # are published at the next one, so without this the cell after the commit
-                        # reads the new view as empty (issue #153).
-                        report.flush_wait += _flush(
-                            control, control.publication(), report, True, SETTLE_TIMEOUT
-                        )
-                continue
-            if page.batch is not None and log.holds(page.batch):
-                report.already_present += 1
-                report.skipped.append(page.batch)
-                continue
-            published = control.publication()
-            answer = _send(control, page)
-            _fold(database, report, page, answer)
-            log.save()
-            database.id_map.save()
-            if answer.ok:
-                accepted += 1
-                if page.kind in ("points", "values"):
-                    rows += 1
-                if page.kind == "group_view":
-                    created.add(page.name)
-                if page.kind == "points" and page.view is not None:
-                    filled.add(page.view)
-    finally:
-        log.save()
-        database.id_map.save()
+    for page in pages:
+        if page.kind == "flush":
+            # A commit that wrote nothing has nothing to make visible, and a tick over an empty
+            # buffer publishes nothing, so the wait would report a flush that never happened.
+            if accepted:
+                report.flush_wait = _flush(control, report)
+            continue
+        answer = _send(control, page)
+        _fold(report, page, answer)
+        if answer.ok:
+            accepted += 1
 
 
 def _send(control: Control, page: Page) -> Answer:
@@ -1476,14 +1167,8 @@ def _send(control: Control, page: Page) -> Answer:
     raise Refusal(f"commit: no route for a page of kind {page.kind!r}")
 
 
-def _fold(database, report, page: Page, answer: Answer) -> None:
-    log = database.commit_log
+def _fold(report, page: Page, answer: Answer) -> None:
     if not answer.ok:
-        if page.kind == "points" and answer.status == 409:
-            # A duplicate external id is the database saying it holds the row already. The page is
-            # not acknowledged, since none of it was applied, but the ids it named are held, and
-            # marking them so is what stops the next commit offering them again.
-            database.id_map.acknowledge_ids(page.entities)
         report.refusals.append(
             {
                 "what": page.line,
@@ -1493,19 +1178,8 @@ def _fold(database, report, page: Page, answer: Answer) -> None:
             }
         )
         return
-    if page.batch is not None:
-        log.acknowledge(page.batch, page.kind, answer)
-    for layer, key, rank, digest in page.completes:
-        log.record_set(layer, key, rank, digest)
     body = answer.body
-    if page.kind == "layer":
-        log.declare([page.name])
-    elif page.kind in ("view", "group_view", "view_group"):
-        log.declare([held("view_group" if page.kind == "view_group" else "view", page.name)])
-    elif page.kind == "points":
-        # The commit that carried the row is what acknowledges its id (§3), so the next commit's
-        # pre-flight reads it as already present and a page refused here is sent again.
-        database.id_map.acknowledge_ids(page.entities)
+    if page.kind == "points":
         view = page.view or ""
         report.rows_accepted[view] = report.rows_accepted.get(view, 0) + int(
             body.get("accepted", 0)
@@ -1522,18 +1196,6 @@ def _fold(database, report, page: Page, answer: Answer) -> None:
         report.already_present += int(body.get("filled", 0))
         report.memberships_joined += int(body.get("joined", 0))
         report.without_content += int(body.get("without_content", 0))
-        sent = json.loads(page.body.decode())["artifacts"]
-        log.publish(
-            page.name,
-            [
-                (
-                    published_key(one["key"], one.get("view")),
-                    content_digest([c["values"] for c in one.get("content", [])]),
-                    parts_digest(one.get("parent"), one.get("attached_to")),
-                )
-                for one in sent
-            ],
-        )
         minted = report.artifact_ids.setdefault(page.name, {})
         for one in body.get("artifacts", []):
             minted[one["key"]] = str(one["tessera_id"])
@@ -1550,51 +1212,56 @@ def _detail(answer: Answer) -> str:
     return answer.detail.strip()[:1000]
 
 
-def _flush(
-    control: Control,
-    published: tuple[dict[str, int], int, int],
-    report,
-    rows: bool,
-    timeout: float = FLUSH_TIMEOUT,
-) -> float:
-    """`POST /control/flush`, then the wait for the publication after the last acknowledgement.
+def _flush(control: Control, report, timeout: float = FLUSH_TIMEOUT) -> float:
+    """`POST /control/flush`, then the wait for the publication it named (§6.2 step 5).
 
     The flush pulls the tick's deadline forward and the 202 means accepted rather than done, so the
-    wait is on `/control/status`: a partition whose published `segments_version` has moved past the
-    one read at the last acknowledgement has published the rows this commit sent. The wait is
-    reported whether or not it was reached, a commit being durable at its acknowledgements and
-    visible at the tick.
+    wait is on `/control/status`: the 202 carries the publication the honouring cycle will complete
+    with, and `publication` there reaching it means this commit's work is visible. The wait is
+    bounded; a wait that runs out is a finding, the commit being durable at its acknowledgements
+    and visible at the tick either way.
     """
-    versions, flushes, ticks = published
-    control.flush()
+    answer = control.flush()
     started = time.monotonic()
+    if not answer.ok:
+        report.refusals.append(
+            {
+                "what": "flush",
+                "layer_or_view": "",
+                "status": answer.status,
+                "detail": _detail(answer),
+            }
+        )
+        return 0.0
+    wanted = int(answer.body.get("publication", 0))
     deadline = started + timeout
     while time.monotonic() < deadline:
-        now, flushed, ticked = control.publication()
-        if any(now.get(name, 0) > version for name, version in versions.items()):
-            return time.monotonic() - started
-        if flushed > flushes:
-            return time.monotonic() - started
-        # A commit that sent no row wrote nothing the buffer holds, so its effects reach the served
-        # forms at the executor's next loop and move neither counter above.
-        if not rows and ticked > ticks:
+        if control.publication() >= wanted:
             return time.monotonic() - started
         time.sleep(FLUSH_INTERVAL)
     report.flush_reached = False
+    report.findings.append(
+        Finding(
+            "the publication did not arrive within the wait",
+            f"publication {wanted} had not completed after {timeout:g}s. Every page this commit "
+            f"sent was acknowledged and is durable; what it wrote reaches the served forms at the "
+            f"executor's next cycle",
+        )
+    )
     return time.monotonic() - started
 
 
-def changes(control: Control, source_ids: Iterable[int], op: str, limits: dict) -> list[Answer]:
+def changes(control: Control, items: Sequence[dict], op: str, limits: dict) -> list[Answer]:
     """`POST /control/changes` for one op, paged under the route's two units (§6.5)."""
-    items = [{"external_id": addressed(i), "op": op} for i in source_ids]
+    rows = [{**item, "op": op} for item in items]
     per_page = int(limits.get("changes", {}).get("max_changes_per_request", 10_000))
     answers = []
-    for start in range(0, len(items), per_page):
-        answers.append(control.changes(items[start : start + per_page]))
+    for start in range(0, len(rows), per_page):
+        answers.append(control.changes(rows[start : start + per_page]))
     return answers
 
 
-def leave(control: Control, layer: str, key: str, source_ids: Sequence[int], rank: int,
+def leave(control: Control, layer: str, key: str, ids: Sequence[Any], rank: int,
           level: int = 0) -> Answer:
     """`PATCH` a generating set at a rank, the one set that may shrink (decision 0135, §6.5)."""
-    return control.grow(layer, patch_body(level, key, leaving=source_ids, rank=rank))
+    return control.grow(layer, patch_body(level, key, leaving=ids, rank=rank))

@@ -22,7 +22,17 @@ def db(tmp_path):
 
     database = create(tmp_path / "db")
     for name in ("q1", "q2", "all_quarters", "scoped_values", "clusters"):
-        database.stage(name, pa.table({"entity_id": pa.array([1], pa.uint64())}))
+        # Each carries the access column its group names: a view whose points file does not
+        # carry its labels is refused naming the column (§4.2).
+        database.stage(
+            name,
+            pa.table(
+                {
+                    "entity_id": pa.array([1], pa.uint64()),
+                    "access": pa.array([["public"]], pa.list_(pa.string())),
+                }
+            ),
+        )
     return database
 
 

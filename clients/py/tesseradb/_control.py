@@ -1,11 +1,13 @@
 """The control plane as the SDK calls it (contracts §3.4, ingest.md §1).
 
-One class per concern: `Control` is the routes, `CommitLog` is what this database has already had
-acknowledged. Both are small because the plane is small: seven routes carry every later commit.
+`Control` is the routes and nothing else: the SDK keeps no record of what it sent, so what a
+database holds is asked of the database (§6.4).
 
 **A retry resends identical bytes.** A batch id maps to the SHA-256 of the raw request body, so a
 retry that re-serialised its table would be a new batch rather than a replay (contracts §3.4). The
-bodies are therefore built once, by the plan, and this module sends the bytes it was given.
+bodies are therefore built once, by the plan, and this module sends the bytes it was given. The id
+is derived from the page rather than remembered, so the `429` retry and the resend of a lost
+acknowledgement within one `commit()` carry the id the first attempt carried.
 
 **A `429` is backpressure.** The buffer-occupancy refusal carries `Retry-After`, and the caller
 waits that long and sends the same bytes again. Every other status is an answer: a `409` on a
@@ -26,8 +28,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 ARROW = "application/vnd.apache.arrow.stream"
 JSON = "application/json"
@@ -44,26 +45,30 @@ MAX_ATTEMPTS = 600
 UNANSWERED = 0
 
 
-def external_id(source_id: int) -> bytes:
-    """The external id of a row: the source id in eight little-endian bytes (§3).
+def external_id(value: Any) -> bytes:
+    """The external id of a row: the bytes its id column holds (§3, configuration.md §8).
 
-    The build mints it under `--mint-external-ids` and the SDK sends the same bytes, so one row is
-    one address at both doors.
+    A string's UTF-8, an integer's eight little-endian bytes, binary as it stands. The build reads
+    the same column and takes the same bytes, so one row is one address at both doors.
     """
-    return int(source_id).to_bytes(8, "little")
+    if isinstance(value, bytes):
+        return value
+    if isinstance(value, bool) or not isinstance(value, int):
+        return str(value).encode()
+    return int(value).to_bytes(8, "little", signed=value < 0)
 
 
-def addressed(source_id: int) -> str:
+def addressed(value: Any) -> str:
     """The same id where a JSON route carries it: base64, external ids being bytes and not text."""
-    return base64.b64encode(external_id(source_id)).decode()
+    return base64.b64encode(external_id(value)).decode()
 
 
 def batch_id(source: str, index: int, body: bytes) -> str:
     """A page's batch id: the source name, the page index and a hash of the bytes (§6.4).
 
-    Stable across runs, so a cell re-run derives the same id for the same page and the commit log
-    recognises it. The hash is of the body that is sent, so two pages that differ in one row differ
-    here.
+    Stable across runs, so a page re-sent after a `429` or a lost acknowledgement carries the id
+    the first attempt carried and the server answers it as a replay. The hash is of the body that
+    is sent, so two pages that differ in one row differ here.
     """
     digest = hashlib.sha256(body).hexdigest()[:16]
     return f"{source}-{index}-{digest}"
@@ -153,22 +158,14 @@ class Control:
             self._limits = self.status().get("limits", {})
         return self._limits
 
-    def publication(self) -> tuple[dict[str, int], int, int]:
-        """What a publication moves: the segments version, the flush count and the tick count.
+    def publication(self) -> int:
+        """`/control/status`'s publication counter: what the last completed cycle carried.
 
-        The version is the contract's own figure (`partitions`, contracts §3.4) and says a tick
-        published rows. A tick whose only work is filling cells writes no segment and moves no
-        version, and one whose only work is publishing artifacts moves neither that nor the flush
-        count, so the two counters beside it are read as well. They are outside the endpoint's
-        contract and end a wait; they never decide whether a page was accepted.
+        It moves at every publication whatever that publication wrote, so a commit whose only work
+        was filling cells or publishing artifacts is as visible in it as one that wrote rows
+        (contracts §3.4).
         """
-        status = self.status()
-        versions = {
-            str(block.get("partition")): int(block.get("segments_version", 0))
-            for block in status.get("partitions", [])
-        }
-        flush = status.get("write_executor", {}).get("flush", {})
-        return versions, int(flush.get("flushes", 0)), int(flush.get("ticks", 0))
+        return int(self.status().get("publication", 0))
 
     def ingest(self, body: bytes, batch: str, view: str | None = None) -> Answer:
         headers = {"content-type": ARROW, "x-tessera-batch-id": batch}
@@ -257,139 +254,6 @@ def _retry_after(headers, body: dict) -> float:
     except (TypeError, ValueError):
         seconds = 1.0
     return max(0.0, min(seconds, MAX_BACKOFF))
-
-
-class CommitLog:
-    """What this database has had acknowledged, under `.tessera/` (§6.4).
-
-    A page's batch id is recorded here at its acknowledgement, so a cell re-run past the WAL
-    retention window skips the page rather than sending it again and relying on the server's replay
-    window. Beside the batch ids it holds the layers this database has declared and the artifact
-    keys it has published, which the pre-flight reads: a content gated `all` on an artifact
-    published without one has no route to fill it, and the plan refuses that case by name.
-    """
-
-    def __init__(self, path: Path) -> None:
-        self.path = Path(path)
-        self.batches: dict[str, dict] = {}
-        self.layers: list[str] = []
-        self.keys: dict[str, dict[str, dict]] = {}
-        #: The digest of every set this database has sent whole, by layer and `key|rank`. A set is
-        #: a delta on the wire, so a page of it re-sent is a lawful no-op; recording what was sent
-        #: is what lets a cell re-run send nothing at all.
-        self.sets: dict[str, dict[str, str]] = {}
-        #: Every access label this database has staged, plus each view's default (§8).
-        self.terms: list[str] = []
-        if self.path.exists():
-            document = json.loads(self.path.read_text(encoding="utf-8"))
-            self.batches = document.get("batches", {})
-            self.layers = document.get("layers", [])
-            self.keys = document.get("keys", {})
-            self.sets = document.get("sets", {})
-            self.terms = document.get("terms", [])
-
-    def holds(self, batch: str) -> bool:
-        return batch in self.batches
-
-    def acknowledge(self, batch: str, what: str, answer: Answer) -> None:
-        self.batches[batch] = {"what": what, "status": answer.status}
-
-    def declared(self, layer: str) -> bool:
-        return layer in self.layers
-
-    def declare(self, layers: Iterable[str]) -> None:
-        for layer in layers:
-            if layer not in self.layers:
-                self.layers.append(layer)
-
-    def published(self, layer: str) -> dict[str, dict]:
-        """The keys this database has published into a layer, each with its content's digest.
-
-        The digest is `None` where the artifact was published without content. A content gated
-        `all` has no fill route, so the plan reads this to refuse one on an artifact published
-        without it rather than sending a request the server would refuse, and to tell a content
-        re-supplied unchanged from one that differs.
-        """
-        return self.keys.get(layer, {})
-
-    def publish(self, layer: str, keys: Iterable[tuple[str, str | None, str | None]]) -> None:
-        held = self.keys.setdefault(layer, {})
-        for key, content, parts in keys:
-            state = held.setdefault(key, {"content": None, "parts": None})
-            state["content"] = state["content"] or content
-            state["parts"] = state.get("parts") or parts
-
-
-    def holds_set(self, layer: str, key: str, rank: int | None, digest: str) -> bool:
-        """Whether this database has already sent that set whole, under that digest."""
-        return self.sets.get(layer, {}).get(set_key(key, rank)) == digest
-
-    def record_set(self, layer: str, key: str, rank: int | None, digest: str) -> None:
-        self.sets.setdefault(layer, {})[set_key(key, rank)] = digest
-
-    def add_terms(self, terms: Iterable[str]) -> None:
-        for term in terms:
-            if term not in self.terms:
-                self.terms.append(term)
-
-    def save(self) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(
-            json.dumps(
-                {
-                    "batches": self.batches,
-                    "layers": self.layers,
-                    "keys": self.keys,
-                    "sets": self.sets,
-                    "terms": self.terms,
-                },
-                indent=1,
-            ),
-            encoding="utf-8",
-        )
-
-
-def set_key(key: str, rank: int | None) -> str:
-    """How a set is named in the log: an artifact's key, and the rank of the content it belongs to.
-
-    A rank of `None` is the membership and a rank of *k* is content *k*'s generating set, which is
-    the member table's own grain (annotation-write-cycle §6.1).
-    """
-    return f"{key}|{'' if rank is None else rank}"
-
-
-def members_digest(source_ids: Iterable[int]) -> str:
-    """A stable digest of the ids a set holds, in the order the caller staged them."""
-    return hashlib.sha256(
-        b",".join(str(int(i)).encode() for i in source_ids)
-    ).hexdigest()[:16]
-
-
-def parts_digest(parent: Any, attached: Any) -> str | None:
-    """A stable digest of an artifact's fixed parts, or `None` where it carries none.
-
-    `parent` and `attached_to` are filled once and never replaced (ingest §1.5), so an artifact
-    this database published with them takes no second record carrying the same ones.
-    """
-    if not parent and not attached:
-        return None
-    return hashlib.sha256(
-        json.dumps({"parent": list(parent or []), "attached_to": attached}, sort_keys=True).encode()
-    ).hexdigest()[:16]
-
-
-def content_digest(content: Any) -> str | None:
-    """A stable digest of an artifact's supplied content, or `None` where it carries none.
-
-    A content is a fixed part: supplied once and replaced never. The digest is what lets a later
-    commit tell a cell re-run, which supplies the same values again, from a caller supplying
-    different ones, which no route can apply.
-    """
-    if not content:
-        return None
-    return hashlib.sha256(
-        json.dumps([list(values) for values in content], sort_keys=True).encode()
-    ).hexdigest()[:16]
 
 
 def arrow_body(table: Any) -> bytes:
