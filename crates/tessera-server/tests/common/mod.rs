@@ -490,6 +490,8 @@ pub struct CorsOrigins {
     pub dev: Vec<String>,
     /// `serve.cors_origins` — viewer plane only.
     pub production: Vec<String>,
+    /// `serve.cors_loopback`: viewer plane only, and a rule instead of a list.
+    pub loopback: bool,
 }
 
 impl CorsOrigins {
@@ -502,15 +504,23 @@ impl CorsOrigins {
     pub fn dev(origins: &[&str]) -> Self {
         Self {
             dev: origins.iter().map(|o| o.to_string()).collect(),
-            production: Vec::new(),
+            ..Self::default()
         }
     }
 
     /// The production list alone.
     pub fn production(origins: &[&str]) -> Self {
         Self {
-            dev: Vec::new(),
             production: origins.iter().map(|o| o.to_string()).collect(),
+            ..Self::default()
+        }
+    }
+
+    /// `serve.cors_loopback` alone: no list on either plane.
+    pub fn loopback() -> Self {
+        Self {
+            loopback: true,
+            ..Self::default()
         }
     }
 }
@@ -650,6 +660,7 @@ async fn mount_server_with_flush(
         operator_credential: OPERATOR_CREDENTIAL.to_string(),
         dev_cors_origins: cors.dev,
         cors_origins: cors.production,
+        cors_loopback: cors.loopback,
         faults,
     });
 

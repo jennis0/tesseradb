@@ -3531,12 +3531,12 @@ impl Engine {
     /// is rate-decoupled from ingest, so it cannot recreate the publish-on-trip hazard that got
     /// `flush_max_items` deleted (decision 0045) — a publication period proportional to load,
     /// rotating every session's projection key at that rate.
+    /// [`Engine::request_flush_publication`] is the same request with its publication number,
+    /// which is the form the control plane takes; this one drops the number for a caller that
+    /// only wants the tick pulled forward. One request path, so the flag is set under the
+    /// publication lock whichever is called.
     pub fn request_flush(&self) {
-        self.write
-            .health()
-            .flush_requested
-            .store(true, Ordering::SeqCst);
-        self.write.wake();
+        let _ = self.request_flush_publication();
     }
 
     /// Request a **compaction fold** — the trigger `POST /control/compact` will take (contracts

@@ -184,7 +184,12 @@ async fn the_session_plane_carries_the_dev_layer_too() {
     let tmp = TempDir::new().unwrap();
     let server = server_with_cors(&tmp, CorsOrigins::dev(&[DEV_ORIGIN])).await;
 
-    let resp = preflight(&server, server.session_url("/session/authorise"), DEV_ORIGIN).await;
+    let resp = preflight(
+        &server,
+        server.session_url("/session/authorise"),
+        DEV_ORIGIN,
+    )
+    .await;
 
     assert_eq!(
         resp.headers()
@@ -211,7 +216,12 @@ async fn a_listed_production_origin_gets_its_viewer_preflight() {
     let tmp = TempDir::new().unwrap();
     let server = server_with_cors(&tmp, CorsOrigins::production(&[PRODUCTION_ORIGIN])).await;
 
-    let resp = preflight(&server, server.viewer_url("/v1/viewport"), PRODUCTION_ORIGIN).await;
+    let resp = preflight(
+        &server,
+        server.viewer_url("/v1/viewport"),
+        PRODUCTION_ORIGIN,
+    )
+    .await;
 
     assert_eq!(
         resp.headers()
@@ -336,6 +346,7 @@ async fn both_lists_may_be_set_and_only_the_dev_one_opens_the_session_plane() {
         CorsOrigins {
             dev: vec![DEV_ORIGIN.to_string()],
             production: vec![PRODUCTION_ORIGIN.to_string()],
+            loopback: false,
         },
     )
     .await;
@@ -354,7 +365,12 @@ async fn both_lists_may_be_set_and_only_the_dev_one_opens_the_session_plane() {
     }
 
     // Only the development one reaches the session plane.
-    let resp = preflight(&server, server.session_url("/session/authorise"), DEV_ORIGIN).await;
+    let resp = preflight(
+        &server,
+        server.session_url("/session/authorise"),
+        DEV_ORIGIN,
+    )
+    .await;
     assert!(resp.headers().get("access-control-allow-origin").is_some());
     let resp = preflight(
         &server,
@@ -366,6 +382,174 @@ async fn both_lists_may_be_set_and_only_the_dev_one_opens_the_session_plane() {
         resp.headers().get("access-control-allow-origin").is_none(),
         "setting both lists must not launder the production origin onto the session plane"
     );
+}
+
+// ---- The loopback rule (`serve.cors_loopback`) -------------------------------------------------
+
+/// A page whose origin is a port the kernel chose cannot be enumerated in advance
+/// (`python-sdk.md` §7), so the key states the set instead. What it admits is the same thing a
+/// listed origin is admitted for: a page that may present a **token**.
+#[tokio::test]
+async fn a_loopback_origin_is_admitted_on_the_viewer_plane_with_the_exposed_headers() {
+    let tmp = TempDir::new().unwrap();
+    let server = server_with_cors(&tmp, CorsOrigins::loopback()).await;
+    let auth = authorise(&server, &["0"]).await;
+
+    // A port no list names, which is the case the key exists for.
+    let origin = "http://localhost:41273";
+    let resp = server
+        .client
+        .get(server.viewer_url("/v1/meta"))
+        .header("Origin", origin)
+        .bearer_auth(auth["token"].as_str().unwrap())
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 200);
+    assert_eq!(
+        resp.headers()
+            .get("access-control-allow-origin")
+            .expect("a loopback origin is admitted under serve.cors_loopback")
+            .to_str()
+            .unwrap(),
+        origin
+    );
+    let exposed = exposed_headers(&resp);
+    for header in EXPOSED {
+        assert!(
+            exposed.contains(header),
+            "{header} must be exposed to a loopback origin too, got: {exposed}"
+        );
+    }
+    assert!(
+        resp.headers()
+            .get("access-control-allow-credentials")
+            .is_none(),
+        "credentials mode must stay off for a loopback origin as for every other"
+    );
+}
+
+#[tokio::test]
+async fn every_loopback_spelling_answers_a_viewer_preflight() {
+    let tmp = TempDir::new().unwrap();
+    let server = server_with_cors(&tmp, CorsOrigins::loopback()).await;
+
+    for origin in [
+        "http://localhost:5173",
+        "https://localhost:8888",
+        "http://127.0.0.1:9000",
+        "http://[::1]:9000",
+    ] {
+        let resp = preflight(&server, server.viewer_url("/v1/viewport"), origin).await;
+        assert_eq!(
+            resp.headers()
+                .get("access-control-allow-origin")
+                .unwrap_or_else(|| panic!("{origin} is a loopback origin"))
+                .to_str()
+                .unwrap(),
+            origin
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_non_loopback_origin_is_refused_under_the_loopback_rule() {
+    let tmp = TempDir::new().unwrap();
+    let server = server_with_cors(&tmp, CorsOrigins::loopback()).await;
+    let auth = authorise(&server, &["0"]).await;
+
+    for origin in ["https://app.example", "http://192.168.0.35:5173"] {
+        let resp = server
+            .client
+            .get(server.viewer_url("/v1/meta"))
+            .header("Origin", origin)
+            .bearer_auth(auth["token"].as_str().unwrap())
+            .send()
+            .await
+            .unwrap();
+        assert!(
+            resp.headers().get("access-control-allow-origin").is_none(),
+            "the rule is loopback and nothing else, but {origin} was admitted"
+        );
+    }
+}
+
+/// **The host is matched whole.** `localhost.evil.example` is a name anybody can register and
+/// serve from anywhere; a prefix match would hand it every token a viewer holds.
+#[tokio::test]
+async fn a_host_that_merely_begins_with_a_loopback_name_is_refused() {
+    let tmp = TempDir::new().unwrap();
+    let server = server_with_cors(&tmp, CorsOrigins::loopback()).await;
+
+    for origin in [
+        "http://localhost.evil.example",
+        "https://localhost.evil.example:8443",
+        "http://127.0.0.1.evil.example",
+        "http://127.0.0.1.evil.example:5173",
+    ] {
+        let resp = preflight(&server, server.viewer_url("/v1/viewport"), origin).await;
+        assert!(
+            resp.headers().get("access-control-allow-origin").is_none(),
+            "{origin} is not a loopback origin and must be refused"
+        );
+    }
+}
+
+/// The loopback rule stops where the production list stops, and for the same reason: the session
+/// plane's bearer is the credential that mints tokens (decision 0102). A page on a laptop is
+/// still a browser page.
+#[tokio::test]
+async fn the_session_plane_never_admits_a_loopback_origin() {
+    let tmp = TempDir::new().unwrap();
+    let server = server_with_cors(&tmp, CorsOrigins::loopback()).await;
+
+    let resp = preflight(
+        &server,
+        server.session_url("/session/authorise"),
+        "http://localhost:5173",
+    )
+    .await;
+
+    assert!(
+        resp.headers().get("access-control-allow-origin").is_none(),
+        "serve.cors_loopback must not reach the session plane"
+    );
+}
+
+#[tokio::test]
+async fn the_loopback_rule_admits_a_listed_origin_beside_it() {
+    let tmp = TempDir::new().unwrap();
+    let server = server_with_cors(
+        &tmp,
+        CorsOrigins {
+            dev: Vec::new(),
+            production: vec![PRODUCTION_ORIGIN.to_string()],
+            loopback: true,
+        },
+    )
+    .await;
+
+    for origin in [PRODUCTION_ORIGIN, "http://127.0.0.1:7777"] {
+        let resp = preflight(&server, server.viewer_url("/v1/viewport"), origin).await;
+        assert_eq!(
+            resp.headers()
+                .get("access-control-allow-origin")
+                .unwrap_or_else(|| panic!("{origin} must be admitted"))
+                .to_str()
+                .unwrap(),
+            origin
+        );
+    }
+
+    // And the session plane still admits neither.
+    for origin in [PRODUCTION_ORIGIN, "http://127.0.0.1:7777"] {
+        let resp = preflight(&server, server.session_url("/session/authorise"), origin).await;
+        assert!(
+            resp.headers().get("access-control-allow-origin").is_none(),
+            "{origin} must not reach the session plane"
+        );
+    }
 }
 
 // ---- The control plane -------------------------------------------------------------------------
@@ -381,11 +565,12 @@ async fn the_control_plane_never_carries_a_layer() {
         CorsOrigins {
             dev: vec![DEV_ORIGIN.to_string()],
             production: vec![PRODUCTION_ORIGIN.to_string()],
+            loopback: true,
         },
     )
     .await;
 
-    for origin in [DEV_ORIGIN, PRODUCTION_ORIGIN] {
+    for origin in [DEV_ORIGIN, PRODUCTION_ORIGIN, "http://localhost:5173"] {
         let resp = server
             .client
             .get(server.control_url("/control/status"))
