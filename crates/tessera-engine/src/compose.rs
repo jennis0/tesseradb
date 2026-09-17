@@ -231,8 +231,8 @@ impl RowProjection {
     /// projection of that term's posting, and every satisfied term's posting lies inside the
     /// fragment — then walks the residual and the extents. The complement walks the entities the
     /// grant does not hold and subtracts their rows from the base's row range, which is exact
-    /// where the base's slots are a bijection onto that range, and adds the extents above it. The
-    /// whole-domain answer is the row range. `tessera_store::term_images`' module doc carries the
+    /// where the base's slots are a bijection onto that range. It adds the extents above that, as
+    /// the walk's own route does. The whole-domain answer is the row range. `tessera_store::term_images`' module doc carries the
     /// algebra; `tests/term_images_route.rs` checks the routes against each other over a built
     /// corpus.
     ///

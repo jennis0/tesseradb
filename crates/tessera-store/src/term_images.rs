@@ -1628,8 +1628,8 @@ mod tests {
 
         // The same grant with a split worth taking. The split prices 350 × 100 + 1 000 × 10 +
         // 11 × 1 000 = 56 000 against the walk's 6.5 × 10⁹, and the complement would price
-        // 11 × 1 000 = 11 000 and win — which is what the second assertion pins, so that the
-        // first is a case the complement lost by being invalid rather than by being dear.
+        // 11 × 1 000 = 11 000 and win. The second assertion pins that, so the first is a case the
+        // complement lost for want of a row space it can answer over and not for want of cost.
         let split_instead = ChooserInputs {
             held: 1_000_000_000,
             bound: 1_000_001_000,

@@ -67,7 +67,7 @@ fn projecting_the_whole_equals_the_union_of_the_parts() {
 ///
 /// `RowSpace::project` is the base's contribution unioned with every extent's own. The complement
 /// route replaces the first of those two and nothing else, so a projection built that way must be
-/// the projection the walk builds — over a mask reaching into both parts, over the whole of both,
+/// the projection the walk builds. Over a mask reaching into both parts, over the whole of both,
 /// and over a narrow one.
 #[test]
 fn the_complement_route_under_the_extents_projects_what_the_walk_projects() {

@@ -2,9 +2,9 @@
 //! viewport response over it.
 //!
 //! A session's row projection is built by the walk over its whole fragment, by the row range where
-//! its grant covers the entity domain, by the split route — the union of the bundle's images of
-//! the terms it holds, plus a walk over the residual, plus the extents — or by the complement
-//! route, a walk over the entities the grant does not hold subtracted from the base's row range
+//! its grant covers the entity domain, by the split route, which unions the bundle's images of the
+//! terms it holds and then walks the residual and the extents, or by the complement route, a walk
+//! over the entities the grant does not hold subtracted from the base's row range
 //! (`tessera_engine::compose::RowProjection::new`). The chooser picks one from the principal's own
 //! grant before any of them runs. What that buys is first-viewport time; what it must never cost
 //! is a row.
@@ -552,8 +552,8 @@ fn every_route_builds_the_same_projection_over_a_built_bundle() {
 /// Every other case forces the route it compares; this one reads the gauge on the chosen arm. The
 /// grant is `ALMOST_ALL` and `SCATTERED`, which leaves under two hundred entities of the corpus
 /// outside it, so the complement walks those where the walk would cross two hundred thousand and
-/// the split would union an image covering almost every container of row space. It is not the
-/// whole domain — the entities `ALMOST_ALL` omits are not all recovered by `SCATTERED` — so the
+/// the split would union an image covering almost every container of row space. The grant is not
+/// the whole domain, because `SCATTERED` does not recover every entity `ALMOST_ALL` omits, so the
 /// whole-domain answer does not take the case before the chooser sees it.
 #[test]
 fn a_principal_holding_almost_everything_is_sent_to_the_complement_by_the_chooser() {

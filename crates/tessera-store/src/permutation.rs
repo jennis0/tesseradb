@@ -525,10 +525,10 @@ pub struct Permutation {
     /// `[0, dense_rows)` rather than some subset of it. With it, [`Self::project_with`] answers a
     /// whole-domain mask as that range and reads no page, and [`Self::project_complement_with`]
     /// answers any mask by walking the entities outside it; without it, every mask walks. Two
-    /// routes set it,
-    /// and both are the same claim from a different source: [`Self::validate_rows`] counts the
-    /// slots and finds they number `row_count`, and [`Self::declare_dense_rows`] takes the writer's
-    /// word for the same count where the caller's premise is that this process wrote the file.
+    /// routes set it, and both are the same claim from a different source:
+    /// [`Self::validate_rows`] counts the slots and finds they number `row_count`, and
+    /// [`Self::declare_dense_rows`] takes the writer's word for the same count where the caller's
+    /// premise is that this process wrote the file.
     /// Unset means neither has spoken, and the walk answers everything.
     dense_rows: std::sync::OnceLock<u32>,
 }
@@ -991,9 +991,9 @@ impl Permutation {
     /// **[`Self::project_complement_with`] is the same shape.** Whether a session takes it depends
     /// on how large the principal's own grant is against the domain, which is a fact the principal
     /// holds already, and the set it returns is the set this walk returns from the same mask. It
-    /// reads the slots of entities the principal does not hold, and nothing read there is
-    /// aggregated or served: the slots are subtracted, never emitted. C19 covers it on the same
-    /// ruling.
+    /// reads the slots of entities the principal does not hold, and what it does with them is
+    /// subtract their rows from the row range. Nothing read there is aggregated or served. C19
+    /// covers it on the same ruling.
     ///
     /// The invariant this file carries is I4 — it is the only EntityId→RowId path — and both
     /// routes keep it, neither handing an entity id or a `tessera_id` to a caller, so I10 stands
@@ -1046,9 +1046,9 @@ impl Permutation {
     /// rather than some subset, the subtraction would remove rows no entity claims, and the answer
     /// is `None`.
     ///
-    /// An entity in the complement with no row — an absent slot, an absent page — projects to
-    /// nothing and so subtracts nothing, which is right: it claims no row for the mask to be denied.
-    /// An entity at or above `bound` in the mask is not this permutation's; the walk skips it, and
+    /// An entity in the complement with no row, from an absent slot or an absent page, projects to
+    /// nothing and subtracts nothing. That is right: it claims no row the mask could be denied.
+    /// An entity at or above `bound` in the mask is not this permutation's. The walk skips it, and
     /// the complement is taken over `[0, bound)`, so neither route lets it reach a row.
     ///
     /// # Transient memory
@@ -1059,8 +1059,8 @@ impl Permutation {
     /// 875 MB together**, on top of the walk's own transient, which is as [`Self::project`] states
     /// (at most 82 MiB of buckets and a 512 KB stamp). The complement is dropped as soon as the
     /// walk over it returns, and the result that replaces it is the answer rather than a transient.
-    /// A grant close to the whole domain — the case this route is for — holds far less than that
-    /// on both counts, since the complement is small.
+    /// A grant close to the whole domain, which is what this route is for, holds far less than
+    /// that on both counts, because its complement is small.
     pub fn project_complement_with(
         &self,
         mask: &croaring::Bitmap,
@@ -2317,8 +2317,8 @@ mod tests {
     /// **The arithmetic does not turn on how much of the domain the mask holds.** The share decides
     /// only which route costs less, and that decision is the session chooser's
     /// (`crate::term_images::choose`); here the complement must agree with the walk at every share,
-    /// including the two either side of half where a threshold would once have switched. An even
-    /// and an odd `bound`, so nothing rests on the halving being exact.
+    /// from an empty mask to one entity short of the domain, and at the three shares around half.
+    /// An even and an odd `bound`, so nothing rests on the halving being exact.
     #[test]
     fn the_complement_agrees_with_the_walk_at_every_share() {
         for (seed, bound) in [(37u64, 4_096u64), (41, 4_097)] {
