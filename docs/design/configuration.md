@@ -1334,6 +1334,21 @@ and shared: a point has one identity across every view it appears in, and it is 
 names — so a source that spells the column differently is joined by naming the column, never by
 being a second entity space.
 
+The column may hold an integer, a string or binary bytes, and whatever it holds is that row's
+external id (contracts §2.4): the build reads it as supplied, mints its own entity ids, writes the
+external-id index and the locator from those bytes, and joins every member row, attribute row and
+label row on them. An integer is read as its eight little-endian bytes. A null in that column is
+refused, and so is a duplicate. Every view of one build spells identity at one type, the views
+sharing one entity space. `--limit` keeps the rows whose identity is below it, which needs an
+integer; over a string or binary column it is refused.
+
+A points file may carry no identity column at all. The caller then supplied no external id, the
+bundle writes no extent and no locator, and a row is addressable by its `tessera_id` alone. A row
+is then named by its position in that file, so the route is admitted only where every reader
+walks that one file whole and in order: a second view or a view selection, a `--limit`, an
+attribute source in another file, a `[layer.members]` table, a membership on an artifact row, and
+`point_visibility.source` are each refused naming what to declare instead.
+
 **The exploded label relation is `(entity_id, term_id)` under those names.** It takes no `fields`
 map and `[defaults].entity_id_field` does not reach it: a default a block has no way to override
 would be a constraint rather than a default, and this is the one reader with nowhere to write one.
