@@ -58,10 +58,12 @@
 //! unsafe: the bytes must be a frozen bitmap, aligned to 32 bytes, and exactly the serialised
 //! length. [`TermImages::open`] checks the alignment, checks that every kept entry's range lies
 //! inside the payload and overlaps no other, and checks that its length is at least what the
-//! entry's own container counts require. It does not read the payload and so does not establish
-//! that a range holds a well-formed frozen bitmap. That rests on the bundle's digest sweep, which
-//! covers this file as it covers every other file the manifest lists, the same discharge
-//! `tessera_authz`'s cached fragment makes against its own recorded digest.
+//! entry's own container counts require. It does not read the payload, so it does not establish
+//! that a range holds a well-formed frozen bitmap. Nothing in this module verifies those bytes.
+//! That the payload is what the derivation wrote rests on the bundle's digest sweep, which covers
+//! this file as it covers every other file the manifest lists. `tessera_authz`'s cached fragment
+//! is a different arrangement and not a precedent for this one: it records a SHA-256 of its own
+//! frozen bytes in a sidecar and checks it inside its `open`, before it deserialises anything.
 
 use std::fs::File;
 use std::io::{self, Seek, SeekFrom, Write};
@@ -313,12 +315,16 @@ struct Outcome {
 /// `posting` is called once per term id below `dict_len`, in ascending order, on the calling
 /// thread: the walk reads a file and is not required to be callable from a worker. Each window of
 /// `threads × 4` consecutive terms is read, then projected across the workers, then appended in
-/// term order before the next window is read, so the bytes written do not depend on `threads` and
-/// the memory held is one window's images plus one scratch per worker.
+/// term order before the next window is read, so the bytes written do not depend on `threads`.
+///
+/// What this holds at once is one window's postings, each read into an owned bitmap before it is
+/// projected, plus one window's kept images, plus one [`ProjectScratch`] per worker. The table is
+/// held whole: 40 bytes per term id. Nothing else scales with the dictionary.
 ///
 /// The header is written after the payload and the table, and the file is synced between the two
 /// writes, so a file interrupted part way carries a zero header and is refused at open rather than
-/// read short.
+/// read short. On any error the partial file is removed, so a failed derivation leaves no path for
+/// a later caller to pick up.
 ///
 /// The caller names the file and syncs the directory it was placed in.
 pub fn derive_term_images(
@@ -331,8 +337,9 @@ pub fn derive_term_images(
 ) -> io::Result<TermImageSummary> {
     let started = Instant::now();
 
-    // A stamp describing another row space would be written into a file whose images belong to
-    // this one, and open would then accept images that name rows the view does not hold.
+    // Before anything is created at `out`: a stamp describing another row space would be written
+    // into a file whose images belong to this one, and open would then accept images that name
+    // rows the view does not hold.
     if stamp.base_rows != space.base_rows() || stamp.bound != space.base().bound() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -347,6 +354,25 @@ pub fn derive_term_images(
         ));
     }
 
+    let mut summary = write_term_images(space, dict_len, posting, stamp, out, options)
+        .inspect_err(|_| {
+            // Best effort: a file that cannot be removed is one open refuses anyway, because the
+            // header was never written.
+            let _ = std::fs::remove_file(out);
+        })?;
+    summary.wall = started.elapsed();
+    Ok(summary)
+}
+
+/// [`derive_term_images`] after its stamp check, from the first byte written to the last sync.
+fn write_term_images(
+    space: &RowSpace,
+    dict_len: u32,
+    posting: PostingWalk<'_>,
+    stamp: &TermImageStamp,
+    out: &Path,
+    options: DeriveOptions,
+) -> io::Result<TermImageSummary> {
     let threads = options.threads.max(1);
     let window = threads * 4;
     let table_bytes = u64::from(dict_len) * TABLE_ENTRY_BYTES as u64;
@@ -476,7 +502,6 @@ pub fn derive_term_images(
     file.write_all(&header)?;
     file.sync_all()?;
 
-    summary.wall = started.elapsed();
     Ok(summary)
 }
 
@@ -718,7 +743,7 @@ impl TermImages {
         let file = File::open(path).map_err(TermImageRefusal::Io)?;
         // SAFETY: a term-image file is written once under a fresh name and placed; nothing in this
         // process opens a published one for writing, so the mapping's bytes do not change under
-        // the reader. The same discharge the other mapped bundle files make.
+        // the reader. The other mapped bundle files are read the same way.
         let mmap = unsafe { memmap2::Mmap::map(&file) }.map_err(TermImageRefusal::Io)?;
 
         if mmap.len() < HEADER_BYTES {
@@ -790,7 +815,10 @@ impl TermImages {
         for term in 0..dict_len {
             let at = table_offset + term as usize * TABLE_ENTRY_BYTES;
             let entry = TermImageEntry::decode(&mmap[at..at + TABLE_ENTRY_BYTES]);
-            if entry.containers != entry.arrays + entry.runs + entry.bitsets {
+            // Widened before summing: all four counts come from the file, and three `u32`s from
+            // a mutated table can carry a sum that does not fit in one.
+            let parts = u64::from(entry.arrays) + u64::from(entry.runs) + u64::from(entry.bitsets);
+            if u64::from(entry.containers) != parts {
                 return Err(TermImageRefusal::EntryMalformed { term });
             }
             if !entry.kept() {
@@ -856,6 +884,12 @@ impl TermImages {
     }
 
     /// `term`'s image as a view over the mapped payload, or `None` where it has none.
+    ///
+    /// CRoaring's frozen reader returns a null bitmap for bytes it rejects and the binding asserts
+    /// on it, so a payload it rejects panics here; a payload it accepts that the serialiser did not
+    /// produce is undefined behaviour. Neither is refusable from this module, which would have to
+    /// read the payload to tell. The bundle's digest sweep over this file is what establishes that
+    /// the bytes are the ones the derivation wrote.
     pub fn view(&self, term: TermId) -> Option<BitmapView<'_>> {
         let entry = self.entry(term)?;
         if !entry.kept() {
@@ -873,6 +907,10 @@ impl TermImages {
 
     /// The union of the images of whichever of `terms` have one. Empty where none do. Terms at or
     /// above [`Self::dict_len`] are ignored.
+    ///
+    /// `terms` are terms the principal satisfies, the `K ⊆ T` of the module doc's exactness
+    /// argument. An image of a term outside the grant contributes rows the principal was never
+    /// granted, which is an I2 disclosure rather than a wrong count.
     pub fn union(&self, terms: &[TermId]) -> Bitmap {
         let views: Vec<BitmapView<'_>> = terms
             .iter()
@@ -963,6 +1001,10 @@ pub enum Route {
 /// set of principals, and the split's inputs are an overcount, so the cheaper-looking route at a
 /// tie is the less certain one.
 pub fn choose(inputs: &ChooserInputs, costs: &RouteCosts) -> Route {
+    debug_assert!(
+        inputs.held <= inputs.bound,
+        "a fragment cannot hold more entities below the bound than the bound admits"
+    );
     let mut route = Route::Walk;
     let mut cheapest = costs.walk_ns_per_entity * inputs.held as f64;
 
@@ -1175,6 +1217,37 @@ mod tests {
         assert!(refused.is_err());
     }
 
+    /// A walk that stops answering part way leaves no file at the output path.
+    #[test]
+    fn a_failed_derivation_removes_its_partial_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let space = identity_space(dir.path(), 1 << 17);
+        let mut dense = Bitmap::new();
+        dense.add_range(0..4000);
+        let walk = |term: u32, visit: &mut dyn FnMut(PostingSlice<'_>)| -> io::Result<()> {
+            if term < 2 {
+                visit(PostingSlice::Roaring(&dense));
+                Ok(())
+            } else {
+                Err(io::Error::other("the postings file stopped answering"))
+            }
+        };
+        let out = dir.path().join("interrupted.timg");
+        let refused = derive_term_images(
+            &space,
+            8,
+            &walk,
+            &stamp_of(&space),
+            &out,
+            DeriveOptions::default(),
+        );
+        assert!(refused.is_err());
+        assert!(
+            !out.exists(),
+            "a failed derivation must not leave a file for a later caller to open"
+        );
+    }
+
     // ----------------------------------------------------------------------------------------
     // Refusals
     // ----------------------------------------------------------------------------------------
@@ -1357,6 +1430,18 @@ mod tests {
                 let at = first_kept_entry_at(b) + ENTRY_ARRAYS;
                 let wrong = le_u32(b, at) + 7;
                 b[at..at + 4].copy_from_slice(&wrong.to_le_bytes());
+            }
+        );
+        // Counts that do not fit in a `u32` when summed: the check widens before comparing, so
+        // this is a refusal rather than an overflow.
+        case!(
+            "counts-overflow.timg",
+            TermImageRefusal::EntryMalformed { .. },
+            |b: &mut Vec<u8>| {
+                let at = first_kept_entry_at(b);
+                b[at + ENTRY_ARRAYS..at + ENTRY_ARRAYS + 4]
+                    .copy_from_slice(&u32::MAX.to_le_bytes());
+                b[at + ENTRY_RUNS..at + ENTRY_RUNS + 4].copy_from_slice(&7u32.to_le_bytes());
             }
         );
         case!(
