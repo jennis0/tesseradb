@@ -37,7 +37,9 @@ use rustc_hash::FxHashSet;
 
 use tessera_authz::{DeltaTier, FrozenFragment, PostingsReader};
 use tessera_lifecycle::{IngestBuffer, Overlay};
-use tessera_store::term_images::{choose, chooser_inputs, Route, TermImages, ROUTE_COSTS};
+use tessera_store::term_images::{
+    choose, chooser_inputs, ChooserInputs, Route, TermImages, ROUTE_COSTS,
+};
 use tessera_store::{Bundle, RowSpace};
 use tessera_types::{EntityId, TermId};
 
@@ -319,37 +321,44 @@ impl RowProjection {
     /// The complement is offered where the base records the row count its slots are a bijection
     /// onto, which is what `RowSpace::project_complement_base` needs and all it needs.
     ///
-    /// **A view with no image table is walked**, whatever the grant. The chooser is reached
-    /// through the table, so a session on such a view is not offered the complement either, even
-    /// where it would be the cheaper route. Nothing is served differently for it; what it costs is
-    /// first-viewport time for a broad principal on a view whose images have not been written or
-    /// did not open.
+    /// **A view with no image table is priced too.** Images are written by the build and by each
+    /// fold, so a view can be served without them, and a session can hold no term that has one.
+    /// Either way there is no split to take, and what is left is the walk against the complement,
+    /// which is a choice about the principal's grant and the row space rather than about any
+    /// image. The residual is not priced in that case and the delta postings are not read: the
+    /// split is not on offer for the residual estimate to change.
     fn price(
         inputs: &ProjectionInputs<'_>,
         rows: &RowSpace,
         fragment: &croaring::Bitmap,
     ) -> io::Result<ProjectionRoute> {
-        let Some(images) = inputs.images else {
-            return Ok(ProjectionRoute::Walk);
-        };
-        if !inputs.satisfied.iter().any(|term| images.kept(*term)) {
-            return Ok(ProjectionRoute::Walk);
-        }
         let bound = rows.base().bound();
         // A bound of zero holds no entity, and one above the `u32` entity ceiling (I9) names
-        // entities no mask can hold. Neither has a split to price.
+        // entities no mask can hold. Neither has a route to price against the walk.
         let Some(hi) = bound.checked_sub(1).and_then(|hi| u32::try_from(hi).ok()) else {
             return Ok(ProjectionRoute::Walk);
         };
         let held = fragment.range_cardinality(0..=hi);
-        let chooser = chooser_inputs(
-            images,
-            inputs.satisfied,
-            held,
-            bound,
-            rows.base().dense_rows().is_some(),
-            tessera_authz::delta_rows(inputs.satisfied, inputs.deltas)?,
-        );
+        let complement_valid = rows.base().dense_rows().is_some();
+        let unionable = inputs
+            .images
+            .filter(|images| inputs.satisfied.iter().any(|term| images.kept(*term)));
+        let chooser = match unionable {
+            Some(images) => chooser_inputs(
+                images,
+                inputs.satisfied,
+                held,
+                bound,
+                complement_valid,
+                tessera_authz::delta_rows(inputs.satisfied, inputs.deltas)?,
+            ),
+            None => ChooserInputs {
+                held,
+                bound,
+                complement_valid,
+                ..ChooserInputs::default()
+            },
+        };
         Ok(match choose(&chooser, &ROUTE_COSTS) {
             Route::Walk => ProjectionRoute::Walk,
             Route::Split => ProjectionRoute::Split,

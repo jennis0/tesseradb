@@ -1653,6 +1653,31 @@ mod tests {
         );
     }
 
+    /// A session with no image to union is still priced. The split is not on offer, and what is
+    /// left is the walk against the complement, which turns on the grant and the row space alone.
+    #[test]
+    fn the_complement_is_offered_with_no_kept_term() {
+        // walk = 6.5 x 10^9; complement = 11 x 1 000 = 11 000.
+        let no_kept_term = ChooserInputs {
+            held: 1_000_000_000,
+            bound: 1_000_001_000,
+            complement_valid: true,
+            kept_arrays_and_runs: 0,
+            kept_bitsets: 0,
+            kept_terms: 0,
+            residual_rows: 0,
+        };
+        assert_eq!(choose(&no_kept_term, &ROUTE_COSTS), Route::Complement);
+
+        // The same session over a grant of a thousand entities in a domain of 10^9, where the
+        // walk is the cheaper of the two.
+        let narrow = ChooserInputs {
+            held: 1_000,
+            ..no_kept_term
+        };
+        assert_eq!(choose(&narrow, &ROUTE_COSTS), Route::Walk);
+    }
+
     #[test]
     fn a_tie_goes_to_the_walk_then_the_split() {
         // walk = 6.5 × 100 = 650; split = 350 × 1 + 11 × 0 + 1000 × 0 = 350 with two containers.

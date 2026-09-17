@@ -344,6 +344,52 @@ fn authorise(engine: &Engine, credential: &[u8]) -> tessera_engine::Session {
     }
 }
 
+/// Rewrite every `SEGMENTS-<n>.json` under `root` to name no term-image extent.
+///
+/// A view whose segments manifest names no extent for it has no image table, which is the state
+/// `open_bundle` reaches without reading a file (`read.rs::open_term_images`). It is what an
+/// ingest-only deployment carries until its first fold. The image files stay on disk and stay in
+/// the digest maps, so the bundle verifies exactly as it did.
+fn drop_term_image_extents(root: &Path) {
+    fn walk(dir: &Path, found: &mut usize) {
+        for entry in std::fs::read_dir(dir).expect("the bundle is readable") {
+            let path = entry.expect("a directory entry").path();
+            if path.is_dir() {
+                walk(&path, found);
+                continue;
+            }
+            let is_segments = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("SEGMENTS-") && name.ends_with(".json"));
+            if !is_segments {
+                continue;
+            }
+            let mut manifest: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&path).expect("the manifest is readable"))
+                    .expect("the manifest is JSON");
+            let extents = manifest
+                .get_mut("term_image_extents")
+                .expect("a segments manifest carries the field");
+            assert!(
+                !extents.as_array().expect("an array").is_empty(),
+                "{path:?} named no term-image extent before it was stripped"
+            );
+            *extents = serde_json::Value::Array(Vec::new());
+            std::fs::write(
+                &path,
+                serde_json::to_vec_pretty(&manifest).expect("the manifest serialises"),
+            )
+            .expect("the manifest is writable");
+            *found += 1;
+        }
+    }
+
+    let mut found = 0;
+    walk(root, &mut found);
+    assert!(found > 0, "no segments manifest was found under {root:?}");
+}
+
 fn wait_until(what: &str, mut ready: impl FnMut() -> bool) {
     let deadline = Instant::now() + Duration::from_secs(60);
     while !ready() {
@@ -817,6 +863,74 @@ fn a_principal_holding_no_kept_term_walks_and_a_forced_split_falls_back_to_the_w
         );
     }
     engine.force_projection_route_for_test(None);
+}
+
+/// **A view with no image table is still priced**, and a near-total principal on it is sent to the
+/// complement.
+///
+/// A view can be served without images: an ingest-only deployment has none until its first fold,
+/// and a view created while running has none until then either. There is no split to take, so what
+/// is left is the walk against the complement, and a grant leaving a couple of hundred entities
+/// outside it is answered by walking those. The chooser is reached through the image table, so this
+/// is the case that says a missing table does not take the complement away with it.
+#[test]
+fn a_view_with_no_image_table_is_still_priced_against_the_complement() {
+    let fixture = fixture();
+    drop_term_image_extents(&fixture.root);
+    let engine = fixture.reader("no-table");
+
+    let generation = engine.generation();
+    let view = generation
+        .bundle
+        .partitions
+        .values()
+        .find_map(|partition| partition.views.get(VIEW))
+        .expect("the fixture has one view");
+    assert!(
+        view.term_images.is_none(),
+        "the segments manifest names no extent for this view, so it can carry no image table"
+    );
+
+    // A grant leaving under two hundred entities outside it.
+    let session = authorise(&engine, &credential(&[ALMOST_ALL, SCATTERED]));
+    let before = engine.projection_builds_by_route();
+    let rows = engine
+        .session_projection_rows_for_test(&session, VIEW)
+        .expect("the projection builds");
+    let after = engine.projection_builds_by_route();
+    assert_eq!(
+        route_taken(before, after),
+        ProjectionRoute::Complement,
+        "a near-total grant over a view with no images must still price the complement"
+    );
+    let walked = engine
+        .session_walk_rows_for_test(&session, VIEW)
+        .expect("the reference walk runs");
+    assert!(
+        rows == walked,
+        "the complement over a view with no images is not the walk's set"
+    );
+
+    // And a narrow grant on the same view walks, which is the other side of the same pricing.
+    let narrow = authorise(&engine, &credential(&[THOUSANDTH]));
+    let before = engine.projection_builds_by_route();
+    let rows = engine
+        .session_projection_rows_for_test(&narrow, VIEW)
+        .expect("the projection builds");
+    let after = engine.projection_builds_by_route();
+    assert_eq!(
+        route_taken(before, after),
+        ProjectionRoute::Walk,
+        "two hundred entities are walked, not two hundred thousand"
+    );
+    let walked = engine
+        .session_walk_rows_for_test(&narrow, VIEW)
+        .expect("the reference walk runs");
+    assert!(rows == walked, "the walk over a narrow grant lost rows");
+    assert!(
+        rows.cardinality() > 0,
+        "the narrow grant must hold something"
+    );
 }
 
 /// **A view created while the engine runs has no images at all**, and every principal of it is
