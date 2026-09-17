@@ -62,7 +62,7 @@ A database is a directory:
   schema.toml         the declaration (configuration.md), written by the SDK
   sources/            parquet files the SDK wrote from frames; paths staged from files are read in place
   bundle/             what the build wrote
-  .tessera/           cache, WAL, the SDK's commit log and its id map
+  .tessera/           cache, WAL, the SDK's JSON copy of the declaration
 ```
 
 Everything in it is what `tessera build` and `tessera serve` read. `tessera serve --deployment
@@ -122,43 +122,23 @@ that names no source reads it. Without a default the SDK writes no `source` unde
 `check()` naming the block. A second `default=True` replaces
 the first and the call says so.
 
-**Identity.** The build reads a `u64` source id from each points file's `entity_id` column
-(an unsigned or non-negative signed integer column is accepted), assigns its own entity ids
-after the signature sort, and mints the external id as the source id in eight little-endian
-bytes. The SDK assigns the source id. `id` names the column that identifies a row in the user's
-own terms: a string, an integer, anything hashable. `None` means the frame's index: a named
-index is an id column under its name; an unnamed default index is accepted at the first commit
-as the row position, printed as such, and refused on a delta naming `id=`, since a filtered or
-reset frame's positions name nothing. The SDK keeps a map from the user's id to the source id
-under `.tessera/`, assigns a new source id to a user id it has not seen, in staging order, and
-continues the sequence across commits. Every source that names entities (a points source, an
-attribute source, a members table's `entity` column) goes through the same map, so one user id
-is one entity everywhere. A frame is written with the `entity_id` column the build reads.
+**Identity.** A row is named one of two ways, and the SDK keeps no map between them.
 
-Each id in the map carries a state: assigned at staging, acknowledged at a commit (from the
-commit log of §6.4), or removed. The pre-flight's "already present" reads acknowledged ids
-only, so a page refused at one commit is sent at the next, and a removed id staged again goes
-as a point row, which decision 0047 allows.
+- **An explicit id column** (`id=` on `stage`, or a column named `id`) is the external id at both
+  doors: the build takes it as supplied, in any type, mints its own entity ids, writes the
+  external-id index from it and joins members tables on it; the ingest route takes the same
+  bytes as `external_id`. Members tables and attribute sources name rows by the same column.
+  Not built yet: the build reads a `u64` column named `entity_id` and mints external ids from
+  that integer under a flag; until it takes a supplied column, an id column must be an integer,
+  the SDK writes it as `entity_id`, and the first commit passes `--mint-external-ids` (§11.2).
+- **No id column** means Tessera ids. The build mints no external id; rows are addressable only
+  by the `tessera_id` a viewer gets back from a pick or a drill-down, the ingest route returns
+  the ids it assigned, and `remove()` and a members table name them with `addressing: tessera`.
 
-The user's id column is kept as an indexed `keyword` attribute under its own name, so a
-record served at drill-down carries it and a pick joins back to the user's frame.
-
-**Files read in place.** A path-staged points file whose `entity_id` column is an integer is
-read in place, the map is the identity over its ids, and no keyword attribute is written, the
-user's id being the source id. An entity-naming column (`entity`, `entity_id`) of any other
-path-staged file with integer values is then read in place too, so a members table beside an
-in-place points file names the same entities. A path-staged file whose id column is anything
-else is read, mapped and written under `sources/`, and the report says so.
-
-**External ids** are how a row is addressed after the first commit: on the ingest and values
-routes, in `remove()`, and by the duplicate check (contracts §3.4). The external id is the
-source id in eight little-endian bytes at both doors. The first commit passes
-`--mint-external-ids`, so every built row is addressable afterwards; without it every route
-that names a built row is refused. At ingest the SDK sends the same bytes.
-
-**Re-running a cell.** The same frame staged again after a commit is wholly already present,
-nothing is sent, and the report says so. A row whose value changed is a `409` on that part,
-reported and not applied (§6.4).
+The SDK holds nothing about which rows the database has. A commit sends what was staged; a row
+whose id the database holds is refused by the server, whole page, and the report says so. A
+re-run of a cell is a re-run: databases are stateful, and the SDK does not make a second
+`commit()` of the same frame silent.
 
 After the first commit, `stage(name, data)` binds a delta: rows to add to what the source
 already holds. The declaration says what the source feeds, so the SDK knows that a delta on the
@@ -203,10 +183,11 @@ The first declared view is the allocation view (decision 0112) unless another sa
 that reorders the blocks cannot re-key the corpus.
 
 A second plain view over the same entities names a source carrying the same ids, a second
-pair of coordinates, and the same labels: the build refuses an entity whose labels disagree
-between views, and the ingest route refuses a join row whose labels differ from the held ones
-(views.md §4). For a frame the SDK copies the first view's access column into the second by
-id and says so; for a file read in place that lacks the column, it refuses naming the column.
+pair of coordinates, and the same access column: the build refuses an entity whose labels
+disagree between views, and the ingest route refuses a join row whose labels differ from the
+held ones (views.md §4). A frame for a second view that lacks the column is refused naming it;
+the SDK copies nothing. A declaration form under which a second view's file needs only ids and
+coordinates, its labels being the entity's, is a views.md question for later.
 
 ### 4.3 View groups
 
@@ -399,12 +380,11 @@ the order is fixed:
    coordinates and the entity's held labels, which the SDK staged (§4.2), and joins existing
    entities; a join row with different labels is refused as a re-label.
 3. **Values** on existing entities, one page sequence per staged attribute delta
-   (`POST /control/values`). A from-column layer's key on an existing entity does not go here:
-   the values route fills a column and mints nothing, so a key no artifact holds is refused.
-   The plan groups such a delta by key and sends it as publish requests in step 4, each
-   artifact carrying its members, which is what the column would have done at the build. A new
-   clustering over existing points is therefore a new layer and its artifacts, whether the user
-   staged a column or an artifacts table.
+   (`POST /control/values`). A from-column layer declared after the first commit is refused
+   naming the artifacts-table route, because the values route fills a column and mints no
+   artifact; the SDK does not turn a column into publish requests. Whether the values route
+   should read a layer column as the ingest route does (decision 0128) is an engine question,
+   §11.2.
 4. **Artifacts**, per layer in dependency order: a clustering before its labels, a target before
    a layer attached to it, a layer before one that depends on it. Within a layer, `PUT` pages
    carry members, parent, shape and content; a nested batch resolves parents that are its own
@@ -419,31 +399,32 @@ the order is fixed:
    so the next cell sees the rows; the report's flush time is that wait.
 
 The commit returns a report: rows accepted per view, artifacts minted, memberships joined, parts
-already present, refusals by row and part, and the flush time.
+refusals by row and part, and the flush time.
 
 ### 6.3 Pre-flight
 
-Before a byte is sent, against the declaration, the id map and `/v1/meta`:
+Before a byte is sent, against the declaration and `/v1/meta`, `check()` and `commit()` report:
 
-| Finding | Action |
+| Finding | Report |
 |---|---|
-| rows outside a view's frame | dropped and listed, with the frame; the server would refuse the whole page |
-| rows whose id the map holds as acknowledged, in a points delta | listed with their count and not sent, so a re-staged full frame reads as already present rather than as a page of refusals |
-| a column no block declares | refused, naming the column |
-| a key column staged for a layer that declares supplied content | refused, naming the artifacts-table route |
-| a labels delta whose clustering is not yet held | ordered after the clustering's pages, or refused if none are staged |
-| `all`-gated content on a held artifact that has none | refused, naming the artifact |
+| rows outside a view's frame | listed with the frame; the server refuses the page |
+| rows with no id where the declaration names an id column | listed |
+| a column no block declares | named |
+| a key column staged for a layer that declares supplied content | named, with the artifacts-table route as the remedy |
+| a labels delta whose clustering is neither held nor staged | named |
 
-This is CLAUDE.md's rule for inputs: ignore and report, and refuse only where the server would.
+`check()` reports and sends nothing. `commit()` reports and refuses to send while a finding
+stands, naming it; nothing is dropped or rewritten. The user corrects the data or the
+declaration and commits again.
 
-### 6.4 Idempotency and resumption
+### 6.4 Retries
 
-A page's batch id is derived from the source name, the page index and a hash of its bytes, and
-the commit log under `.tessera/` records each acknowledgement. A cell re-run inside the WAL
-retention window is answered as a replay (write-path §2.4). Past it, the log skips acknowledged
-pages, and identical parts are no-ops. A `409` on a differing part is reported and not retried:
-an edit is a delete and a re-ingest (decision 0047), and the SDK does not do that on the user's
-behalf.
+A page is sent with a batch id derived from the source name, the page index and a hash of its
+bytes. A `429` is retried after its `Retry-After` with identical bytes, and a lost
+acknowledgement is resent the same way within the WAL retention window, where the server
+answers it as a replay (write-path §2.4). A `409` on a differing part is reported per row and
+part and not retried: an edit is refused by the server, and the SDK has no edit verb. The SDK
+keeps no log of what it sent.
 
 ### 6.5 Verbs that are not stages
 
@@ -644,39 +625,34 @@ Owner rulings on the first review's findings, 2026-09-16:
 - The goal is the whole declaration surface, staged in §12, with `declare(kind, block)` as the
   generic form every typed verb compiles to (§1, §4.1).
 
+Rulings of 2026-09-17, on the first stages' review findings:
+
+- The SDK keeps no id map and no commit log: a row is named by an explicit id column or by its
+  Tessera id, and a re-run is a re-run (§3, §6.4).
+- The pre-flight reports and sends nothing until the finding is fixed; it never drops a row (§6.3).
+- Edits are refused by the server and the SDK has no edit verb.
+- A second view's frame carries the access column or is refused (§4.2).
+- `serve.cors_loopback` is granted (§7); `tessera check` accepts a declaration whose attribute
+  or view group names no source, as a note (§6.2 step 1).
+- A general client needs a signal that a flush has published: a monotonic publication counter
+  on `/control/status` that moves at every tick whatever it published, and a flush response
+  naming the publication its tick will carry. Through the design process as a contracts
+  amendment.
+
 ### 11.2 Needed
 
-- **A. Port 0 and the announce line in `serve`.** A small change to the server's start. Without
-  it the SDK picks free ports and writes them, which races.
-- **B. `serve.cors_loopback`.** A disclosure control, so an owner ruling. The alternative is
-  the proxy arm of client-components §7, which is more work and serves VS Code and Colab too.
-- **C. Settled: `check --payloads` emits every block kind** (configuration.md §2).
-- **G1. A second view after the first commit.** The id map holds one acknowledged state per id,
-  so a delta for a second plain view over held rows is dropped as already present. (a) Record
-  the views each id was acknowledged into and test per view; (b) second views before the first
-  commit only. Recommended: (a).
-- **G2. Edits on held rows.** A points delta's held rows are not sent, so a changed attribute in
-  a re-staged frame is neither applied nor reported. (a) Page a held row's non-render attribute
-  columns to `/control/values`, so an identical value is a no-op and a change is the `409` §3
-  promises; (b) keep the drop and say attributes on held rows come through an attribute source.
-  Recommended: (a).
-- **G3. The flush wait.** A tick that only fills cells or only publishes artifacts moves no
-  publication version, so `commit()` ends its wait on `write_executor.flush.flushes` and
-  `.ticks`, which contracts §3.4 marks as outside the contract. (a) Add the two counters to the
-  status row as fields a client may wait on; (b) a contract-level "the tick after this request"
-  signal. Recommended: (a).
-- **G4. A declaration with no sources cannot be checked.** `tessera check` fails an attribute
-  with no source and refuses a view group with no source at parse, so a database cannot get
-  payloads for an attribute or a vocabulary declared after the first commit. (a) Both become a
-  note in `check` when the declaration names no source for them, which is configuration.md §2's
-  rule; (b) the SDK writes a one-row placeholder source. Recommended: (a).
+- **A. The build's supplied id column.** The build takes an id column of any type as the
+  external id and joins members tables on it (§3). Until then an id column is an integer.
 - **D. The demo.** A marimo notebook and a Jupyter twin over the arXiv 50k corpus running
   §10.1 to §10.5 and §10.7, in `clients/py/examples/`. A headless test in `clients/py/check.sh`
   that creates, commits and queries a database with no browser.
 - **E. The binary at release.** Platform wheels carrying it. Until then `PATH`, `TESSERA_BIN`
   or the checkout.
-- **F. Edits.** No edit verb; a changed value is reported as a `409`. A `set(replace=True)`
-  that deletes and re-ingests under the same id is a ruling under decisions 0047 and 0081.
+- **F. The values route and layer columns.** Whether `POST /control/values` reads a layer
+  column and mints artifacts as the ingest route does (decision 0128), so a new clustering
+  over held rows can be staged as a column after the first commit. Until ruled, refused (§6.2).
+- **G. Issues #150 to #153**, engine and build defects the SDK's tests found; the SDK's second
+  publication wait comes out with #153.
 
 ## 12. Order of work
 
@@ -686,12 +662,13 @@ prints. The stages order the building; the goal is all of them.
 
 | Stage | Delivers | Proven by | Depends on |
 |---|---|---|---|
-| S1 the notebook corpus | `create`, `open`, `stage` with the id map, `declare` and the typed verbs for plain views, vocabularies, attributes, enumerated layers of every kind with supplied content and value sets, labels; inference; `check()`; the first commit with mint, serve, `save`, `close` | `data/notebook/schema.toml`, `test_corpora/arxiv` | A |
+| S1 the notebook corpus | `create`, `open`, `stage`, `declare` and the typed verbs for plain views, vocabularies, attributes, enumerated layers of every kind with supplied content and value sets, labels; inference; `check()`; the first commit with mint, serve, `save`, `close` | `data/notebook/schema.toml`, `test_corpora/arxiv` | A |
 | S2 reading | `map()`, `viewer(terms)`, the term union, `connect(url, token)` | the widget's tests | S1, B |
-| S3 pages | later commits: the plan, the pre-flight, batch ids and the commit log, the flush wait, the report, the from-column publish, layers and labels declared after the first commit (the emitter covers them); `remove`, `suppress`, `unsuppress`, `leave` | §10.3 and §10.4 against the served answers | S1 |
+| S3 pages | later commits: the plan, the pre-flight, batch ids, the flush wait, the report, layers and labels declared after the first commit; `remove`, `suppress`, `unsuppress`, `leave` | §10.3 and §10.4 against the served answers | S1 |
 | S4 the rest of the layer surface | spatial and attribute membership, shapes and spaces, per-level zoom, prune, attached and dependent layers, inline artifacts and values, exclusion | `overture`, `geonames`, `gbif`, `treeoflife`, `medcpt`, `paperseek` | S1 |
 | S5 groups | `declare_view_group`, `add_view`, scoped attributes and layers, `view` on the record; views and groups after the first commit | `multiview` | S1, S3 |
 | S6 runtime declarations | attributes and vocabularies declared after the first commit | | S3, G4 |
 | S7 demo | the two notebooks and the headless test | | S2, S3 |
+| S8 simplification | the id map, the commit log and its digests, the access-column copy, the from-column publish and the held-row logic removed; the pre-flight reports and sends nothing; the wait on the publication counter | every existing test, rewritten to the stateful reading | A, the publication signal |
 
 The Rust changes (A, B, C) are small and sit in the server and the CLI; the engine is untouched.
