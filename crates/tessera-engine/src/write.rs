@@ -9163,8 +9163,8 @@ impl Executor {
             .last_fold_attr_written
             .store(completed.attr_bytes_written, Ordering::Relaxed);
         *lock_recover(&self.health.last_fold_passes) = cost;
-        // **One line per view, beside the summary rather than inside it** (ruling G,
-        // `docs/evidence/memos/2026-09-17-term-images-handover.md`): a group's keys are separate
+        // **One line per view, beside the summary rather than inside it** (ruling G, decision
+        // 0143): a group's keys are separate
         // views over one dictionary, each paying its own table and its own payload, and a total
         // says nothing about which of them is expensive. The build reports the same four figures
         // per view, so the two routes' reports read alike.

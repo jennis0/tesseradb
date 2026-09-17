@@ -154,6 +154,7 @@ plan-time-clone hazard applies here identically and at greater cost.
 | **text extents** (`text_extents`) | **all** merged with the base into one token dictionary and one postings file, `D₀` subtracted per term and a term whose every carrier was blanked dropped (`records-and-search.md` §4.4) | the flight's carried forward, all three files linked |
 | `deleted` | `D₀` **executed**: its rows dropped, its postings dropped, its keys dropped | `executed ⊆ D₀` retires; `live deleted − executed` published as `tombstones` |
 | `suppressed` | untouched — rows and postings stay (Rule S) | the **live** set, serialised fresh, copied forward whole |
+| term images (`term_image_extents`) | derived fresh, per view, from the new base postings and the new permutation (pass 2b; [decision 0143](../decisions/0143-term-images-live-in-the-bundle-and-a-session-projection-is-built-by-the-cheapest-route.md)) | the fold's own new files under the new prefix; nothing from the old prefix is carried forward or rebased |
 | ingest buffer, WAL | untouched | untouched |
 
 **There is no evaluate arm, and there is not going to be one** (decision 0048). Rule F names two
@@ -200,10 +201,11 @@ Only the second is worth budgeting, and it is what the pre-flight compares:
 | the largest term's encode | corpus × the widest term's coverage | ~375–500 MB (**measured** 125.12 MB per 25% grant, `probes/results.md` §4.2) |
 | `permutation.bin`, written through a mapping (pass 1) | **entity space** | 4 GB, resident until writeback |
 | `ext-locator.u32`, written through a mapping (pass 3) | **entity space** | 4 GB, same |
+| pass 2b's window: one worker's posting, image, frozen buffer and projection scratch (`memory_estimate`'s pass 2b term) | **entity and row space, times the fold's one worker** | ⊘ **modelled** ~1.4 GB at 3.5×10⁹ rows: two ~437 MB bitset-container ceilings (the posting and the image), the frozen buffer at the image's own width, and ~82 MiB of scratch |
 | k-way cursors, spool buffers | inputs | negligible |
 
-So the fold's un-reclaimable peak is **~9–10 GB at 10⁹**, dominated by three arrays that scale with
-the *dictionary* and the *entity space*. **A dirty shared file mapping is resident and
+So the fold's un-reclaimable peak is **~10–11 GB at 10⁹**, dominated by four arrays that scale with
+the *dictionary*, the *entity space* and, for pass 2b, both at once. **A dirty shared file mapping is resident and
 cgroup-charged**, which is why the two 4 GB arrays are in the table at all and not dismissed as page
 cache; a clean one is not, which is why the fold's own inputs are absent from it. A **rows-frozen
 fold does not run pass 1**, so it drops the first of the three and peaks at ~5.5 GB; splitting the
@@ -330,6 +332,30 @@ requires. It cannot be carried forward from the old prefix: it would then disagr
 postings about every folded deletion, which is the one disagreement the differential exists to
 catch. A fold that omitted it would silently make the compacted bundle unconformable, and the
 suite is the deliverable.
+
+### Pass 2b — the term images
+
+One file per view: every term's new base posting projected into the view's new row space and
+written in CRoaring frozen form, kept only above the keep rule ([decision 0143](../decisions/0143-term-images-live-in-the-bundle-and-a-session-projection-is-built-by-the-cheapest-route.md)),
+by the same derivation `tessera build` uses (`tessera_store::term_images::derive_term_images`,
+decisions 0091 and 0139).
+
+**After pass 2 and not beside pass 1**, because the postings this pass reads are pass 2's own
+output, from which every folded deletion is already gone. A deleted entity is in no posting, so it
+is in no image, and that is the whole of the deletion rule reaching this file: there is no second
+removal route (write-path §5.4). The pass runs once per view, over that view's own new
+`permutation.bin`, on the fold's one dedicated thread. It is sequential, so the pass holds at most
+one term's posting, one image, the buffer it is serialised into and one projection scratch at a
+time, which is what the memory table above prices. A view with no row and a dictionary with no term have
+no image to hold, and the pass skips both.
+
+✔ **The pass is built.** Measured on a fold of the 64-part rung, the 2026-09-17 term-images-rung6 probe:
+1.484 s of a 51.4 s fold, 2.9% of it; the derivation itself 1.413 s; 5,516 of 186,179 terms kept.
+**The fold reproduced the build's own file exactly**: the same kept count, the same payload and
+table bytes, and the same bytes on disk. That is decision 0139's one implementation, confirmed on a
+corpus rather than on a fixture. Scaling by rows models **~201 s at rung 6**, which agrees with
+the build-side model in the same probe's pre-flight, taken by a different route; neither is a rung
+6 measurement, and stage 6 takes one.
 
 ### Pass 3 — external ids
 
@@ -1505,6 +1531,8 @@ are.
 
 | Figure | Class | Source |
 |---|---|---|
+| pass 2b, term images: 1.484 s of a 51.4 s fold (2.9%), byte-identical to the build's own file | **measured**, 64-part rung | the 2026-09-17 term-images-rung6 probe |
+| pass 2b at rung 6, ~201 s, scaled by rows from the 64-part figure and agreeing with the build's own pre-flight model | **modelled**, not a rung 6 measurement | same probe |
 | on-disc bytes 2.0–2.6× manifest-named, monotone | **measured** at 10⁷ | `docs/evidence/memos/2026-08-05-write-path-at-scale.md` §2 |
 | merge peak RSS 4.4–4.9× input bytes — the multiplier this design refuses to inherit | **measured** | `probes/2026-08-04-maintenance-memory/` |
 | full row-projection build **1 277 ms** (primitive) at 10⁹, 25% grant, single-threaded | **measured** | `probes/2026-08-14-project-decomposition/` |

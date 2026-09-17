@@ -129,7 +129,7 @@ pub fn build_fragment_with_deltas(
     Ok(fragment)
 }
 
-/// **S for the split route** (`docs/evidence/memos/2026-09-17-term-images-handover.md` §3.2): the
+/// **S for the split route** (`architecture.md` §6.3): the
 /// entities `fragment` holds that the `kept` terms' base postings do not cover, as a superset that
 /// is still inside the fragment.
 ///

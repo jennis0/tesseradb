@@ -1,6 +1,11 @@
 # Tessera — Conformance Suite Design
 
-**Status:** Draft r22 — **the suggestion verb's second route is driven, and C31's closed-once-warm
+**Status:** Draft r23 — **the mask catalogue is shown to reach the split route** (r23, 2026-09-17;
+[decision 0143](../decisions/0143-term-images-live-in-the-bundle-and-a-session-projection-is-built-by-the-cheapest-route.md)).
+One case in `test_mask_catalogue.py`; the checked marker moves to **762**. No row of §4.6 is added
+and none moves position: the I1 and I2 cells each gain a sentence naming the case, which asserts
+through `/control/status`'s route gauge that at least one of the catalogue's principals was served
+through the split, without which the I1 and I2 comparisons pass against one route run twice.  **r22 — the suggestion verb's second route is driven, and C31's closed-once-warm
 state with it** (r22, 2026-09-02; `value-suggestion.md` §6.3, decision 0124). Two cases in
 `test_suggest_differential.py`; the checked marker moves to **759**. No row of §4.6 is added and
 none moves position: the evidence lands in the I12 cell's C31 sentence, which stops reading "named

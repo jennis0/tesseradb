@@ -781,6 +781,14 @@ The reverse, which decision 0091 calls equally unfinished:
 - **A generating set that shrinks** (decision 0135) has no build spelling, because a build supplies
   each set once. A rebuild is the build's replace.
 
+**Term images are neither list's shape** ([decision 0143](../decisions/0143-term-images-live-in-the-bundle-and-a-session-projection-is-built-by-the-cheapest-route.md)).
+A build over rows writes them at the build, its own step 10c. A build into an empty database,
+exactly as an ingest-only deployment starts, holds no rows and writes none, there being nothing to
+project. An ingest-only deployment gets its images at its first fold, and until then every session
+walks its permutation as it would over any view with no images, serving the identical rows more
+slowly. The derivation is the same routine either way (decisions 0091, 0139): what differs is which
+publication runs it first, not what it produces.
+
 ## 6. Visibility, the invariants and the register
 
 ### 6.1 The one visibility moment
