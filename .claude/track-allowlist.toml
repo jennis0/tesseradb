@@ -46,6 +46,7 @@ paths = [
   "crates/tessera-server/src/*",
   "crates/tessera-server/tests/*",
   "crates/tessera-engine/src/write.rs",
+  "crates/tessera-engine/src/session.rs",
   "crates/tessera-engine/tests/*",
 ]
 
