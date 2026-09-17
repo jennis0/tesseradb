@@ -19,7 +19,6 @@ def _():
     import pathlib
 
     import marimo as mo
-    import pandas as pd
     import pyarrow as pa
     import pyarrow.compute as pc
     import pyarrow.parquet as pq
@@ -58,7 +57,7 @@ def _():
         """
         return json.loads(table.schema.metadata[b"tessera.counts"])
 
-    return DATA, counts, math, mo, os, pa, pathlib, pc, pd, pq, td
+    return DATA, counts, math, mo, os, pa, pathlib, pc, pq, td
 
 
 @app.cell
@@ -93,53 +92,41 @@ def _(mo):
         The cluster keys here come from the corpus's k-means membership file, joined onto the
         points so the frame carries one column of keys.
 
-        Each cluster gets a line of text, gated on the papers it was written from
-        (`content_requires="all"`): a viewer reads the line only where they may read every paper
-        in its generating set. This database has one principal, who holds everything, so every
-        line is served. Section 2 is where that gate starts refusing.
+        Each cluster gets a line of text. `declare_labels` takes it as a mapping from cluster key
+        to text and writes the table the declaration reads. The line is gated on the papers it
+        was written from (`content_requires="all"`), so it names its generating set, which is a
+        table of its own: a viewer reads the line only where they may read every paper in that
+        set. This database has one principal, who holds everything, so every line is served.
+        Section 2 is where that gate starts refusing.
         """
     )
     return
 
 
 @app.cell
-def _(DATA, pa, pd, pq):
+def _(DATA, pq):
     _points = pq.read_table(DATA / "points.parquet").to_pandas()
     _members = pq.read_table(DATA / "clusters-kmeans-members.parquet").to_pandas()
 
     frame = _points[["entity_id", "x", "y", "title"]].copy()
     frame["cluster"] = frame["entity_id"].map(_members.set_index("entity")["key"])
-    # pandas gives a string column as Arrow `large_string`, and a `text` attribute is stored at
-    # `string` width, so the cast is what lets the build read the column.
-    frame = frame.astype({"title": pd.ArrowDtype(pa.string()), "cluster": pd.ArrowDtype(pa.string())})
     frame.head()
     return (frame,)
 
 
 @app.cell
 def _(DATA, mo, pa, pq):
-    # One line of text per cluster, as the `(key, contents)` table a label set reads.
-    # `attached_key` is the cluster the label hangs from: a label is served only where that
-    # cluster is served.
+    # One line of text per cluster, keyed by the cluster it was written about. `declare_labels`
+    # takes the mapping and writes the table, attachment and all.
     _topics = pq.read_table(DATA / "topics-kmeans.parquet").to_pandas()
-    _named = {row.attached_key: row.contents[0][0] for row in _topics.itertuples()}
+    topic_names = {row.attached_key: row.contents[0][0] for row in _topics.itertuples()}
 
-    topic_text = pa.table(
-        {
-            "level": pa.array([0] * len(_named), pa.uint32()),
-            "key": pa.array([f"{key}-label" for key in _named], pa.string()),
-            "contents": pa.array([[[text]] for text in _named.values()],
-                                 pa.list_(pa.list_(pa.string()))),
-            "attached_layer": pa.array(["clusters"] * len(_named), pa.string()),
-            "attached_key": pa.array(list(_named), pa.string()),
-        }
-    )
-
-    # The generating set: the papers each line was written from. A null rank is the membership
-    # and rank 0 is the set content 0 came from, so each pair goes in twice.
+    # The generating set: the papers each line was written from, keyed by the same cluster key.
+    # A null rank is the membership and rank 0 is the set content 0 came from, so each pair goes
+    # in twice.
     _members = pq.read_table(DATA / "clusters-kmeans-members.parquet",
                              columns=["key", "entity"])
-    _keys = [f"{key}-label" for key in _members.column("key").to_pylist()]
+    _keys = _members.column("key").to_pylist()
     _entities = _members.column("entity").to_pylist()
     topic_members = pa.table(
         {
@@ -149,20 +136,19 @@ def _(DATA, mo, pa, pq):
             "entity": pa.array(_entities + _entities, pa.uint64()),
         }
     )
-    mo.md(f"{topic_text.num_rows} labels, one per cluster: {list(_named.values())[:3]}")
-    return topic_members, topic_text
+    mo.md(f"{len(topic_names)} labels, one per cluster: {list(topic_names.values())[:3]}")
+    return topic_members, topic_names
 
 
 @app.cell
-def _(frame, td, topic_members, topic_text):
+def _(frame, td, topic_members, topic_names):
     simple = td.create()  # a temporary directory, on /dev/shm where the platform has one
     simple.stage("points", frame, default=True)
-    simple.stage("topics", topic_text)
     simple.stage("topic_members", topic_members)
     simple.declare_view("map", source="points")
     simple.declare_layer("clusters", kind="flat", from_column="cluster")
-    simple.declare_labels("topics", of="clusters", source="topics", members="topic_members",
-                          content_requires="all")
+    simple.declare_labels("topics", of="clusters", source=topic_names,
+                          members="topic_members", content_requires="all")
     print(simple.commit())  # tessera check, tessera build, tessera serve
     return (simple,)
 
