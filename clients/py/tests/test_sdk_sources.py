@@ -178,19 +178,21 @@ def test_open_reads_the_blocks_back_from_the_sdks_own_copy(tmp_path):
 
 
 def test_a_built_database_refuses_the_declarations_that_have_no_runtime_route(tmp_path):
-    """The emitter behind `PUT /control/layers` covers layers, so the other four blocks refuse."""
+    """A layer, a view and a group are sent to the running service; an attribute and a vocabulary
+    are the two the SDK does not send, so they refuse on a built database and name a rebuild."""
     db = Database(tmp_path)
     db.built = True
     for call in (
-        lambda: db.declare_view("v", source="points"),
         lambda: db.declare_attribute("a", type="u8"),
         lambda: db.declare_vocabulary("v", values=["a"], closed=True),
         lambda: db.declare("attribute", {"name": "a", "type": "u8"}),
     ):
         with pytest.raises(Refusal, match="not built yet"):
             call()
-    # A layer is declarable, and so is the generic form that writes one.
+    # A layer, a view and a view group are declarable, the generic form included.
     assert db.declare("layer", {"name": "l"})["name"] == "l"
+    assert db.declare_view("v", source="points")["name"] == "v"
+    assert db.declare_view_group("g", source="points", view_field="q")["name"] == "g"
 
 
 def test_a_delta_names_a_source_the_declaration_knows(tmp_path):

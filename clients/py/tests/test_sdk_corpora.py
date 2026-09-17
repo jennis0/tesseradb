@@ -21,7 +21,8 @@ Filled into the committed document alone:
 1. `[defaults].allocation_view` where one view is declared and the file names none.
 2. `visibility = "public"` on a view that declares none.
 3. `source` on a view or an attribute that names none, which is `[defaults].source`. Not on a
-   layer: `[defaults].source` does not reach one.
+   layer, and not on a group-scoped attribute: `[defaults].source` reaches neither, a scoped
+   column with no source of its own being read from each of its group's views' points files.
 4. A layer's `value_set` where the file names none, which is `closed`.
 
 Applied to both:
@@ -117,7 +118,8 @@ def normalised(document: dict, filling: bool = False) -> dict:
     out["defaults"] = defaults
     out["view"] = [_view(block, defaults, filling) for block in views]
     out["attribute"] = [
-        _sourced(block, defaults, filling) for block in document.get("attribute", [])
+        block if block.get("scope") else _sourced(block, defaults, filling)
+        for block in document.get("attribute", [])
     ]
     out["layer"] = [_layer(block, filling) for block in document.get("layer", [])]
     return {key: value for key, value in out.items() if value not in ({}, [])}
@@ -469,13 +471,13 @@ def test_treeoflife(tmp_path):
 
 
 def test_multiview(tmp_path):
-    """The view groups and the attributes scoped to one are the next stage's verbs, so they are
-    declared here through `declare(kind, block)`. Everything else, the group-scoped layer included,
-    goes through the typed verbs.
+    """Every block of this corpus through the typed verbs, the view groups included.
+
+    The two groups are the two rosters `declare_view_group` carries: `quarter` is form A, one
+    inline view per quarter naming its own file, and `quarter_alt` shares its keys and takes one
+    points file with a discriminator.
     """
     import datetime as dt
-
-    from tesseradb._toml import Inline
 
     db = database(
         tmp_path,
@@ -489,7 +491,6 @@ def test_multiview(tmp_path):
         },
         ["attrs_constant", "attrs_scoped", "vocab_kind", "collections", "clusters_q"],
     )
-    access = Inline({"field": "access", "default": "public"})
     db.declare_view("world", projection="web_mercator", extent=WORLD, access="access",
                     title="Whole corpus")
     db.declare_view("world_flat", source="world", projection="equirectangular", extent=WORLD,
@@ -500,50 +501,44 @@ def test_multiview(tmp_path):
                 "starts": dt.datetime(*starts, tzinfo=dt.timezone.utc),
                 "ends": dt.datetime(*ends, tzinfo=dt.timezone.utc)}
 
-    db.declare("view_group", {
-        "name": "quarter",
-        "title": "By quarter",
-        "projection": "none",
-        "extent": Inline({"x": [-40.0, 40.0], "y": [-40.0, 40.0]}),
-        "visibility": "public",
-        "point_visibility": access,
-        "metadata": Inline({"label": "text", "starts": "timestamp_us", "ends": "timestamp_us"}),
-        "view": [
+    db.declare_view_group(
+        "quarter",
+        title="By quarter",
+        extent={"x": [-40.0, 40.0], "y": [-40.0, 40.0]},
+        access="access",
+        metadata={"label": "text", "starts": "timestamp_us", "ends": "timestamp_us"},
+        views=[
             quarter("2026-Q1", "quarter_2026_q1", "Q1 2026", (2026, 1, 1), (2026, 4, 1)),
             quarter("2026-Q2", "quarter_2026_q2", "Q2 2026", (2026, 4, 1), (2026, 7, 1)),
             quarter("2026-Q3", "quarter_2026_q3", "Q3 2026", (2026, 7, 1), (2026, 10, 1)),
             quarter("2026-Q4", "quarter_2026_q4", "Q4 2026", (2026, 10, 1), (2027, 1, 1)),
         ],
-    })
-    db.declare("view_group", {
-        "name": "quarter_alt",
-        "title": "By quarter, geographic",
-        "members": "quarter",
-        "projection": "web_mercator",
-        "extent": Inline(WORLD),
-        "source": "quarter_alt_pts",
-        "fields": Inline({"view": "quarter"}),
-        "visibility": "public",
-        "point_visibility": access,
-    })
+    )
+    db.declare_view_group(
+        "quarter_alt",
+        title="By quarter, geographic",
+        members="quarter",
+        projection="web_mercator",
+        extent=WORLD,
+        source="quarter_alt_pts",
+        view_field="quarter",
+        access="access",
+    )
 
     db.declare_vocabulary("kind", source="vocab_kind", closed=True, width="u8",
                           title="Feature kind")
     db.declare_attribute("importance", type="i64", index=True, source="attrs_constant")
     db.declare_attribute("kind", type="category", vocabulary="kind", index=True, render=True,
                          source="attrs_constant")
-    db.declare("attribute", {"name": "sentiment", "type": "f32",
-                             "scope": Inline({"group": "quarter"}), "index": True,
-                             "render": True})
+    db.declare_attribute("sentiment", type="f32", scope={"group": "quarter"}, index=True,
+                         render=True)
     db.declare_vocabulary("mood", closed=True, width="u8", visibility="derived",
                           values=["calm", "tense", "wild", "still"], title="Mood")
-    db.declare("attribute", {"name": "mood", "type": "category", "vocabulary": "mood",
-                             "scope": Inline({"group": "quarter"}), "index": True})
-    db.declare("attribute", {"name": "note", "type": "text",
-                             "scope": Inline({"group": "quarter"}), "index": True})
-    db.declare("attribute", {"name": "coverage", "type": "f32",
-                             "scope": Inline({"group": "quarter"}), "index": True,
-                             "source": "attrs_scoped", "fields": Inline({"view": "quarter"})})
+    db.declare_attribute("mood", type="category", vocabulary="mood",
+                         scope={"group": "quarter"}, index=True)
+    db.declare_attribute("note", type="text", scope={"group": "quarter"}, index=True)
+    db.declare_attribute("coverage", type="f32", scope={"group": "quarter"}, index=True,
+                         source="attrs_scoped", fields={"view": "quarter"})
 
     db.declare_layer(
         "collections",

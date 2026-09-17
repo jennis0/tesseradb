@@ -187,6 +187,25 @@ class Control:
             "PUT", "/control/layers", json.dumps(payload).encode(), {"content-type": JSON}
         )
 
+    def declare_view_group(self, name: str, body: dict) -> Answer:
+        """`PUT /control/view_groups/{name}`: the group, with an empty roster (contracts §3.4)."""
+        return self._send("PUT", f"/control/view_groups/{_segment(name)}", _json(body),
+                          {"content-type": JSON})
+
+    def declare_view(self, name: str, body: dict) -> Answer:
+        """`PUT /control/views/{name}`: one plain view while the service runs."""
+        return self._send("PUT", f"/control/views/{_segment(name)}", _json(body),
+                          {"content-type": JSON})
+
+    def create_view(self, group: str, key: str, body: dict) -> Answer:
+        """`PUT /control/views/{group}/{key}`: the roster record, which creates the view."""
+        return self._send(
+            "PUT",
+            f"/control/views/{_segment(group)}/{_segment(key)}",
+            _json(body),
+            {"content-type": JSON},
+        )
+
     def publish(self, layer: str, body: bytes) -> Answer:
         return self._send("PUT", _artifacts(layer), body, {"content-type": JSON})
 
@@ -200,6 +219,15 @@ class Control:
 
     def flush(self) -> Answer:
         return self._send("POST", "/control/flush", b"")
+
+
+def _json(body: dict) -> bytes:
+    return json.dumps(body).encode()
+
+
+def _segment(name: str) -> str:
+    """One path segment, percent-encoded: a name the router must see whole."""
+    return urllib.parse.quote(name, safe="")
 
 
 def _artifacts(layer: str) -> str:

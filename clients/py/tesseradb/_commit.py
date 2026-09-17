@@ -18,6 +18,7 @@ from-column layer's key, which §6.2 step 3 sends as a publication in step 4.
 
 from __future__ import annotations
 
+import datetime
 import json
 import time
 from dataclasses import dataclass, field
@@ -37,7 +38,7 @@ from ._control import (
     members_digest,
     parts_digest,
 )
-from ._declaration import SHAPE_FIELDS, rows_of
+from ._declaration import SHAPE_FIELDS, rows_of, view_entries
 from ._refusal import Refusal
 
 #: How long `commit()` waits for the publication after its last acknowledgement, in seconds. The
@@ -47,6 +48,11 @@ FLUSH_TIMEOUT = 60.0
 
 #: How often the flush wait reads `/control/status`, in seconds.
 FLUSH_INTERVAL = 0.2
+
+#: How long the second wait of a commit that created a view of a group and filled it may take, in
+#: seconds. It is one executor loop on an idle server; the ceiling is short because the rows it
+#: waits for are already durable and the commit is answered either way.
+SETTLE_TIMEOUT = 10.0
 
 
 @dataclass
@@ -84,6 +90,86 @@ class Page:
     #: The sets this page is the last of, as `(layer, key, rank, digest)`. Recorded at the page's
     #: acknowledgement, so a later commit knows the set was sent whole and plans no page for it.
     completes: list = field(default_factory=list)
+
+
+def _scoped_to(block: dict) -> str | None:
+    """The view group a block's `scope` names, or `None` where it is entity-scoped."""
+    scope = block.get("scope")
+    return scope.get("group") if isinstance(scope, dict) else None
+
+
+def _groups_of(view: dict) -> set[str]:
+    """The groups whose scoped families a batch into this view may name (decision 0116).
+
+    The address of a scoped value is `(attribute → its group, key)` and never the view, so a view
+    of a group that shares another's keys writes the owner's cells through its own door.
+    """
+    if view["group"] is None:
+        return set()
+    return {view["group"], view["block"].get("members")} - {None}
+
+
+def held(kind: str, name: str) -> str:
+    """How the commit log names one declaration: a layer by its own name, the rest qualified.
+
+    A layer is recorded under its bare name because it was there before the other kinds were, and
+    a view and a group share a name space with nothing, so `view:` and `view_group:` keep one log
+    for all three. A view of a group is `view:<group>:<key>`, the view's own address.
+    """
+    return name if kind == "layer" else f"{kind}:{name}"
+
+
+def _declaration_names(document: dict) -> list[str]:
+    """Every runtime declaration this document carries, as the commit log names it."""
+    names: list[str] = []
+    for group in document.get("view_group", []):
+        names.append(held("view_group", group["name"]))
+        for record in group.get("view") or []:
+            names.append(held("view", f"{group['name']}:{record['key']}"))
+    for block in document.get("view", []):
+        names.append(held("view", block["name"]))
+    for block in document.get("layer", []):
+        names.append(block["name"])
+        if block.get("labels"):
+            names.append(block["labels"]["name"])
+    return names
+
+
+def declarations(payloads: dict, document: dict) -> list[str]:
+    """What the first commit's build compiled, as the commit log names each (§6.4).
+
+    The layers are the emitter's own names, a label set expanding to a layer of its own; the views
+    and the groups are the document's, a group whose views are minted from its discriminator
+    carrying no key the SDK could name — those views exist in the bundle and are never offered to
+    the control plane, since nothing in the declaration says what they are called.
+    """
+    names = [payload["name"] for payload in payloads.get("layers", [])]
+    return names + [name for name in _declaration_names(document) if name not in names]
+
+
+def _roster_body(group: dict, record: dict) -> dict:
+    """One `PUT /control/views/{group}/{key}` body: the roster record as a request.
+
+    Every metadata name the group declared is here and typed against it (contracts §3.4 r55); a
+    `timestamp_us` travels as microseconds since the epoch, JSON carrying no date type.
+    """
+    body: dict[str, Any] = {}
+    if record.get("visibility") is not None:
+        body["visibility"] = record["visibility"]
+    metadata = {
+        name: _metadata_value(value)
+        for name, value in record.items()
+        if name not in ("key", "source", "visibility")
+    }
+    body["metadata"] = metadata
+    return body
+
+
+def _metadata_value(value: Any) -> Any:
+    if isinstance(value, datetime.datetime):
+        moment = value if value.tzinfo else value.replace(tzinfo=datetime.timezone.utc)
+        return int(moment.timestamp() * 1_000_000)
+    return value
 
 
 # ---------------------------------------------------------------------------- the pre-flight
@@ -124,29 +210,71 @@ class Planner:
     # ------------------------------------------------------------------ 1. declarations
 
     def _declarations(self, document: dict) -> None:
-        """The runtime `PUT`s for every layer declared since the last commit (§6.2 step 1).
+        """The runtime `PUT`s for every block declared since the last commit (§6.2 step 1).
 
         The bodies come from `tessera check --payloads` over the SDK's own declaration, so the
-        mapping from a block to a request body is the binary's and not a second one in Python.
+        mapping from a block to a request body is the binary's and not a second one in Python. The
+        one body it does not carry is a group's roster record, which is a request rather than a
+        declaration (views.md §3.2): the SDK holds the record and sends it here.
 
-        Not built yet: the emitter covers layers only. An attribute, a vocabulary, a view or a view
-        group declared after the first commit is refused at the verb, naming `declare(kind, block)`
-        and a rebuild as what to do instead (§11.2 C).
+        The order is the one the routes need: a group before a view of it, and a view before the
+        layer drawn on it. Not built yet: an attribute and a vocabulary declared after the first
+        commit, refused at the verb (§11.2 C).
         """
-        declared: list[str] = []
-        for block in document.get("layer", []):
-            declared.append(block["name"])
-            if block.get("labels"):
-                declared.append(block["labels"]["name"])
-        pending = [name for name in declared if not self.log.declared(name)]
+        pending = [
+            name for name in _declaration_names(document) if not self.log.declared(name)
+        ]
         if not pending:
             return
         payloads = self.db._payloads()
-        by_name = {payload["name"]: payload for payload in payloads}
-        for payload in payloads:
+        sent: list[str] = []
+        for entry in payloads.get("view_groups", []):
+            name = entry["name"]
+            if self.log.declared(held("view_group", name)):
+                continue
+            sent.append(held("view_group", name))
+            self.pages.append(
+                Page(
+                    kind="view_group",
+                    name=name,
+                    line=f"declare view group '{name}'",
+                    body=entry["body"],
+                )
+            )
+        for group in document.get("view_group", []):
+            for record in group.get("view") or []:
+                view = f"{group['name']}:{record['key']}"
+                if self.log.declared(held("view", view)):
+                    continue
+                sent.append(held("view", view))
+                self.pages.append(
+                    Page(
+                        kind="group_view",
+                        name=view,
+                        view=view,
+                        line=f"create view '{view}' of group '{group['name']}'",
+                        body=_roster_body(group, record),
+                    )
+                )
+        for entry in payloads.get("views", []):
+            name = entry["name"]
+            if self.log.declared(held("view", name)):
+                continue
+            sent.append(held("view", name))
+            self.pages.append(
+                Page(
+                    kind="view",
+                    name=name,
+                    view=name,
+                    line=f"declare view '{name}'",
+                    body=entry["body"],
+                )
+            )
+        for payload in payloads.get("layers", []):
             name = payload["name"]
             if self.log.declared(name):
                 continue
+            sent.append(name)
             self.pages.append(
                 Page(
                     kind="layer",
@@ -155,7 +283,7 @@ class Planner:
                     body=payload,
                 )
             )
-        missing = [name for name in pending if name not in by_name]
+        missing = [name for name in pending if name not in sent]
         if missing:
             raise Refusal(
                 "commit: `tessera check --payloads` emitted no body for "
@@ -166,22 +294,39 @@ class Planner:
 
     def _points(self, document: dict) -> None:
         for view in self._views_in_order(document):
-            source = view.get("source") or self.db.default_source
+            source = view["source"]
             delta = self.db.deltas.get(source)
             if delta is None:
                 continue
-            self._points_of(document, view, source, delta)
+            table = pq.read_table(delta.path)
+            if view["discriminator"] is None:
+                self._points_of(document, view, source, table, view["id"])
+                continue
+            # A group whose views are its source's own distinct values: the rows say which view
+            # each belongs to, so the delta is split by that column and each part is a page into
+            # the view it names. A key the group does not hold is a 404 at the route, which is the
+            # refusal a mistyped key must be (views.md §3.2).
+            column = table[view["discriminator"]].to_pylist()
+            for key in dict.fromkeys(value for value in column if value is not None):
+                rows = [i for i, value in enumerate(column) if value == key]
+                self._points_of(
+                    document,
+                    view,
+                    source,
+                    table.take(pa.array(rows, pa.int64())),
+                    f"{view['group']}:{key}",
+                )
 
     def _views_in_order(self, document: dict) -> list[dict]:
         """The allocation view first, then the rest in declaration order (§6.2 step 2)."""
-        views = list(document.get("view", []))
+        views = view_entries(document, self.db.default_source)
         anchor = document.get("defaults", {}).get("allocation_view")
-        views.sort(key=lambda block: 0 if block.get("name") == anchor else 1)
+        views.sort(key=lambda entry: 0 if entry["id"] == anchor else 1)
         return views
 
-    def _points_of(self, document: dict, view: dict, source: str, delta) -> None:
-        name = view["name"]
-        table = pq.read_table(delta.path)
+    def _points_of(
+        self, document: dict, view: dict, source: str, table: pa.Table, name: str
+    ) -> None:
         entities = table["entity_id"].to_pylist()
         acknowledged = self.db.id_map.acknowledged()
         held = [i for i, entity in enumerate(entities) if entity in acknowledged]
@@ -209,7 +354,7 @@ class Planner:
         )
 
     def _inside_the_frame(
-        self, view: str, table: pa.Table, block: dict, rows: list[int]
+        self, view: str, table: pa.Table, entry: dict, rows: list[int]
     ) -> list[int]:
         """Drop the rows outside the view's frame and list them (§6.3).
 
@@ -223,9 +368,7 @@ class Planner:
         )
         if frame is None:
             return rows
-        fields = dict(block.get("fields", {}))
-        x_column = fields.get("x") or fields.get("lon") or "x"
-        y_column = fields.get("y") or fields.get("lat") or "y"
+        x_column, y_column = entry["x"], entry["y"]
         if x_column not in table.column_names or y_column not in table.column_names:
             return rows
         xs = table[x_column].to_pylist()
@@ -255,15 +398,17 @@ class Planner:
     def _point_columns(
         self, document: dict, view: dict, source: str, table: pa.Table
     ) -> list[tuple[str, pa.Array]]:
-        """The wire's columns for one points page: geometry, labels, the id, values, layer keys."""
-        fields = dict(view.get("fields", {}))
-        x_column = fields.get("x") or fields.get("lon") or "x"
-        y_column = fields.get("y") or fields.get("lat") or "y"
+        """The wire's columns for one points page: geometry, labels, the id, values, layer keys.
+
+        A group-scoped family reading its group's views' own points files travels here under its
+        plain name: the view is known from `x-tessera-view`, so the column is not qualified
+        (views.md §5).
+        """
         columns: list[tuple[str, Any]] = [
-            ("x", table[x_column].cast(pa.float64())),
-            ("y", table[y_column].cast(pa.float64())),
+            ("x", table[view["x"]].cast(pa.float64())),
+            ("y", table[view["y"]].cast(pa.float64())),
         ]
-        access = dict(view.get("point_visibility", {})).get("field")
+        access = view["point_visibility"].get("field")
         if access and access in table.column_names:
             columns.append(("access", _label_lists(table[access])))
         columns.append(
@@ -275,30 +420,41 @@ class Planner:
             )
         )
         for block in document.get("attribute", []):
-            if (block.get("source") or self.db.default_source) != source:
+            group = _scoped_to(block)
+            if group is None:
+                if (block.get("source") or self.db.default_source) != source:
+                    continue
+            elif block.get("source") or group not in _groups_of(view):
+                # A family with a source of its own is read through that source's own view column
+                # and goes to the values route; one scoped to another group has no value here.
                 continue
             column = block.get("field") or block["name"]
             if column in table.column_names:
                 columns.append((block["name"], table[column]))
         for layer, column in self.db.from_columns.items():
-            if column in table.column_names and self._layer_draws(document, layer, view["name"]):
+            if column in table.column_names and self._layer_draws(document, layer, view):
                 columns.append((layer, table[column]))
         return columns
 
-    def _layer_draws(self, document: dict, layer: str, view: str) -> bool:
+    def _layer_draws(self, document: dict, layer: str, view: dict) -> bool:
+        """Whether a layer is drawn on one view: by its own id, or by its group's name."""
+        named = {view["id"], view["group"]} - {None}
         for block in document.get("layer", []):
             if block.get("name") == layer:
                 views = block.get("views")
-                return not isinstance(views, list) or view in views
+                return not isinstance(views, list) or bool(named & set(views))
         return False
 
     # ------------------------------------------------------------------ 3. values
 
     def _values(self, document: dict) -> None:
-        """A delta on a source that feeds attributes and no view (§6.2 step 3)."""
-        view_sources = {
-            block.get("source") or self.db.default_source for block in document.get("view", [])
-        }
+        """A delta on a source that feeds attributes and no view (§6.2 step 3).
+
+        A group-scoped family reading a source of its own is paged per view: its `fields.view`
+        column says which view each row's value belongs to, and the page carries that view in
+        `x-tessera-view`, without which no family may be named (contracts §3.4).
+        """
+        view_sources = {entry["source"] for entry in view_entries(document, self.db.default_source)}
         for source, delta in self.db.deltas.items():
             if source in view_sources:
                 continue
@@ -321,31 +477,61 @@ class Planner:
                         f"the column is left as the row that created it carries it",
                     )
                 )
-            columns: list[tuple[str, Any]] = [
-                (
-                    "external_id",
-                    pa.array(
-                        [_control.external_id(e) for e in table["entity_id"].to_pylist()],
-                        pa.binary(),
-                    ),
-                )
-            ]
-            for block in attributes:
-                if block.get("render"):
+            fillable = [block for block in attributes if not block.get("render")]
+            entity = [block for block in fillable if _scoped_to(block) is None]
+            self._values_of(source, table, entity, list(range(table.num_rows)), None)
+            for group in dict.fromkeys(
+                _scoped_to(block) for block in fillable if _scoped_to(block) is not None
+            ):
+                family = [block for block in fillable if _scoped_to(block) == group]
+                column = dict(family[0].get("fields", {})).get("view")
+                if column is None or column not in table.column_names:
+                    self.findings.append(
+                        Finding(
+                            "a scoped family with no view column",
+                            f"'{source}' carries {', '.join(b['name'] for b in family)}, scoped to "
+                            f"group '{group}', and a value belongs to one view. The values route "
+                            f"names the view in a header, so the delta carries the column the "
+                            f"declaration's fields.view names",
+                            refuses=True,
+                        )
+                    )
                     continue
-                column = block.get("field") or block["name"]
-                if column in table.column_names:
-                    columns.append((block["name"], table[column]))
-            if len(columns) == 1:
-                continue
-            self._page_rows(
-                kind="values",
-                name=source,
-                view=None,
-                table=_selected(table, list(range(table.num_rows)), columns),
-                limits=self.limits.get("values", {}),
-                line=f"values on existing entities from '{source}'",
+                keys = table[column].to_pylist()
+                for key in dict.fromkeys(value for value in keys if value is not None):
+                    rows = [i for i, value in enumerate(keys) if value == key]
+                    self._values_of(source, table, family, rows, f"{group}:{key}")
+
+    def _values_of(
+        self, source: str, table: pa.Table, attributes: list[dict], rows: list[int], view: str | None
+    ) -> None:
+        """One page sequence of `POST /control/values`, over the rows and columns named."""
+        if not attributes or not rows:
+            return
+        columns: list[tuple[str, Any]] = [
+            (
+                "external_id",
+                pa.array(
+                    [_control.external_id(e) for e in table["entity_id"].to_pylist()],
+                    pa.binary(),
+                ),
             )
+        ]
+        for block in attributes:
+            column = block.get("field") or block["name"]
+            if column in table.column_names:
+                columns.append((block["name"], table[column]))
+        if len(columns) == 1:
+            return
+        where = "" if view is None else f" of view '{view}'"
+        self._page_rows(
+            kind="values",
+            name=source if view is None else f"{source}-{view}",
+            view=view,
+            table=_selected(table, rows, columns),
+            limits=self.limits.get("values", {}),
+            line=f"values on existing entities{where} from '{source}'",
+        )
 
     # ------------------------------------------------------------------ 2/3. paging
 
@@ -393,6 +579,7 @@ class Planner:
 
     def _artifacts_of(self, document: dict, block: dict, parent: str | None = None) -> None:
         layer = block["name"]
+        view_field = dict(block.get("fields", {})).get("view") if _scoped_to(block) else None
         column = self.db.from_columns.get(layer)
         if column is not None:
             self._from_column(document, block, column)
@@ -420,7 +607,7 @@ class Planner:
                 )
             )
             return
-        rows = _artifact_rows(artifacts, members, block, inline)
+        rows = _artifact_rows(artifacts, members, block, inline, view_field)
         if not rows:
             return
         self._publish(block, rows)
@@ -450,14 +637,12 @@ class Planner:
         layer drawn on several views reads one of them, the column naming one key per entity and an
         entity holding one row per view.
         """
-        views = block.get("views")
         source = None
-        for view in document.get("view", []):
-            if isinstance(views, list) and view["name"] not in views:
+        for view in view_entries(document, self.db.default_source):
+            if not self._layer_draws(document, block["name"], view):
                 continue
-            candidate = view.get("source") or self.db.default_source
-            if candidate in self.db.deltas:
-                source = candidate
+            if view["source"] in self.db.deltas:
+                source = view["source"]
                 break
         if source is None:
             return
@@ -491,6 +676,7 @@ class Planner:
         """
         layer = block["name"]
         gates = _content_gates(block)
+        scoped = _scoped_to(block) is not None
         held = self.log.published(layer)
         publish_limits = self.limits.get("publish", {})
         grow_limits = self.limits.get("grow", {})
@@ -518,9 +704,24 @@ class Planner:
                     )
                 )
                 continue
-            state = held.get(row["key"])
+            state = held.get(published_key(row["key"], row.get("view")))
             if state is None:
                 new_rows.append(row)
+                continue
+            if scoped:
+                # The growth route carries no view, and a key on a scoped layer names one artifact
+                # per view of the group, so it refuses such a key outright (contracts §3.4 r84).
+                # An artifact of a scoped layer is therefore published whole, once.
+                self.findings.append(
+                    Finding(
+                        "a scoped artifact this database has already published",
+                        f"layer '{layer}', view '{row.get('view')}', artifact '{row['key']}': the "
+                        f"growth route carries no view, so a scoped layer's artifact takes its "
+                        f"whole membership and content at its publication and no record after it. "
+                        f"Publish it under a new key",
+                        refuses=True,
+                    )
+                )
                 continue
             if row["content"] and "all" in gates and not state.get("content"):
                 self.findings.append(
@@ -564,7 +765,7 @@ class Planner:
             for batch in _batched(_parents_first(at_level), cap, most):
                 blocks, artifacts, members = batch
                 body = _publish_body(level, blocks)
-                keys = [row["key"] for row in artifacts]
+                keys = [published_key(row["key"], row.get("view")) for row in artifacts]
                 planned.update(keys)
                 self._artifact_page(
                     "publish",
@@ -577,6 +778,18 @@ class Planner:
                 )
                 page = self.pages[-1]
                 for row in artifacts:
+                    if scoped and row.get("remainders"):
+                        self.findings.append(
+                            Finding(
+                                "a scoped membership over one publication",
+                                f"layer '{layer}', view '{row.get('view')}', artifact "
+                                f"'{row['key']}': its membership does not fit one publication, and "
+                                f"the growth route that pages the rest carries no view. Split the "
+                                f"artifact into keys whose memberships fit",
+                                refuses=True,
+                            )
+                        )
+                        continue
                     # The publication carries a first page of every set; what did not fit follows
                     # as growths. The page that carries the last of a set is the one that records
                     # it, so a set half sent is a set this database does not claim to hold.
@@ -594,7 +807,12 @@ class Planner:
                             continue
                         carrier = last.get(rank, page)
                         carrier.completes.append(
-                            (layer, row["key"], rank, members_digest(members))
+                            (
+                                layer,
+                                published_key(row["key"], row.get("view")),
+                                rank,
+                                members_digest(members),
+                            )
                         )
 
     def _grow(
@@ -766,19 +984,32 @@ class Planner:
             if staged.user_id_column:
                 into.add(staged.user_id_column)
         points: set[str] = set()
-        for view in document.get("view", []):
-            source = view.get("source") or self.db.default_source
+        by_group: dict[str, set[str]] = {}
+        for view in view_entries(document, self.db.default_source):
+            source = view["source"]
             points.add(source)
             into = claimed.setdefault(source, {"entity_id", "entity"})
-            into |= set(dict(view.get("fields", {})).values())
-            access = dict(view.get("point_visibility", {})).get("field")
+            into |= {view["x"], view["y"]}
+            if view["discriminator"]:
+                into.add(view["discriminator"])
+            access = view["point_visibility"].get("field")
             if access:
                 into.add(access)
+            for group in _groups_of(view):
+                by_group.setdefault(group, set()).add(source)
         for block in document.get("attribute", []):
+            group = _scoped_to(block)
+            column = block.get("field") or block["name"]
+            if group is not None and not block.get("source"):
+                # A family read from each view's own points file: the column is that file's.
+                for source in by_group.get(group, ()):
+                    claimed.setdefault(source, {"entity_id", "entity"}).add(column)
+                continue
             source = block.get("source") or self.db.default_source
-            claimed.setdefault(source, {"entity_id", "entity"}).add(
-                block.get("field") or block["name"]
-            )
+            into = claimed.setdefault(source, {"entity_id", "entity"})
+            into.add(column)
+            if group is not None:
+                into.add(dict(block.get("fields", {})).get("view") or "view")
         for block in document.get("layer", []):
             # A label set is a block of its own inside its clustering's, and it names two sources.
             for one in (block, block.get("labels")):
@@ -788,6 +1019,8 @@ class Planner:
                 for table in (one.get("source"), members.get("source")):
                     if table:
                         claimed.setdefault(table, set()).update(self.ARTIFACT_COLUMNS)
+                        # A scoped layer's rows carry the view, wherever its `fields` names it.
+                        claimed[table].update(dict(one.get("fields", {})).values())
                 if members.get("source"):
                     claimed[members["source"]].update(dict(members.get("fields", {})).values())
         for column in self.db.from_columns.values():
@@ -843,6 +1076,15 @@ def _bodies(table: pa.Table, start: int, cap: int):
             pending.append((first, piece.slice(0, half)))
             continue
         yield first, body, piece.num_rows
+
+
+def published_key(key: str, view: str | None) -> str:
+    """How the commit log names one published artifact: its key, under its view where it has one.
+
+    `#` is reserved out of a view key and an artifact key alike (views.md §3.2), so one name here
+    can never be read as another artifact's.
+    """
+    return key if view is None else f"{view}#{key}"
 
 
 def _content_gates(block: dict) -> set[str]:
@@ -914,6 +1156,10 @@ def _artifact_block(row: dict, budget: int) -> tuple[bytes, list, int]:
     """
     remainders: list[tuple[int | None, list[int]]] = []
     record: dict[str, Any] = {"key": row["key"]}
+    if row.get("view") is not None:
+        # Part of the artifact's identity on a layer whose scope names a group, and no later
+        # record fills it (contracts §3.4 r84).
+        record["view"] = row["view"]
     if row.get("parent"):
         record["parent"] = list(row["parent"])
     if row.get("attached"):
@@ -1020,12 +1266,12 @@ def _publish_body(level: int, blocks: list[bytes]) -> bytes:
     )
 
 
-def _blank(key: str, level: int) -> dict:
-    return {"key": key, "level": level, "members": [], "sets": [], "content": [], "parent": [],
-            "attached": None, "excluding": None, "space": None}
+def _blank(key: str, level: int, view: str | None = None) -> dict:
+    return {"key": key, "level": level, "view": view, "members": [], "sets": [], "content": [],
+            "parent": [], "attached": None, "excluding": None, "space": None}
 
 
-def _artifact_rows(artifacts, members, block: dict, inline=None) -> list[dict]:
+def _artifact_rows(artifacts, members, block: dict, inline=None, view_field=None) -> list[dict]:
     """One layer's staged tables as artifact records: the key, its parts and its sets.
 
     A member table's grain is `(key, entity, rank)`: a null rank is the membership and rank *k* is
@@ -1034,11 +1280,14 @@ def _artifact_rows(artifacts, members, block: dict, inline=None) -> list[dict]:
     and `excluding` are columns of the artifact row, and the publication record carries each as
     the row wrote it (contracts §3.4).
     """
-    rows: dict[tuple[int, str], dict] = {}
+    rows: dict[tuple[int, str, str | None], dict] = {}
     for record in _declared_artifacts(artifacts, inline):
         level = int(record.get("level") or 0)
         key = str(record["key"])
-        row = rows.setdefault((level, key), _blank(key, level))
+        # On a layer scoped to a group the key is unique per view, one key in two views being two
+        # artifacts (contracts §3.4 r84), so the view is part of the row's identity here.
+        view = None if view_field is None else record.get(view_field)
+        row = rows.setdefault((level, key, view), _blank(key, level, view))
         contents = record.get("contents")
         if contents:
             row["content"] = [list(values) for values in contents]
@@ -1070,9 +1319,14 @@ def _artifact_rows(artifacts, members, block: dict, inline=None) -> list[dict]:
         ranks = table["rank"].to_pylist() if "rank" in fields else [None] * table.num_rows
         keys = table["key"].to_pylist()
         entities = table[entity_column].to_pylist()
-        for level, key, rank, entity in zip(levels, keys, ranks, entities):
+        views = (
+            table[view_field].to_pylist()
+            if view_field is not None and view_field in fields
+            else [None] * table.num_rows
+        )
+        for level, key, rank, entity, view in zip(levels, keys, ranks, entities, views):
             level = int(level or 0)
-            record = rows.setdefault((level, str(key)), _blank(str(key), level))
+            record = rows.setdefault((level, str(key), view), _blank(str(key), level, view))
             if rank is None:
                 record["members"].append(entity)
             else:
@@ -1096,7 +1350,7 @@ def inline_publications(document: dict):
             continue
         yield block["name"], [
             (
-                row["key"],
+                published_key(row["key"], row.get("view")),
                 content_digest(row["content"]),
                 parts_digest(row["parent"], row["attached"]),
             )
@@ -1128,6 +1382,12 @@ def run(database, control: Control, pages: Sequence[Page], report) -> None:
     published = control.publication()
     accepted = 0
     rows = 0
+    #: The views of a group this commit created, and those of them a points page landed rows in.
+    #: Such a view takes its row space at this window's publication and its rows at the next one,
+    #: so a commit that did both waits twice; a plain view created here publishes its rows at the
+    #: first (measured 2026-09-17 on this branch).
+    created: set[str] = set()
+    filled: set[str] = set()
     try:
         for page in pages:
             if page.kind == "flush":
@@ -1136,6 +1396,14 @@ def run(database, control: Control, pages: Sequence[Page], report) -> None:
                 # ceiling and report a flush that never happened.
                 if accepted:
                     report.flush_wait = _flush(control, published, report, rows > 0)
+                    if created & filled:
+                        # One more publication. A view of a group created in this window takes
+                        # its row space at that window's publication, and the rows buffered for it
+                        # are published at the next one — so without this the cell after the commit
+                        # reads the new view as empty (measured 2026-09-17).
+                        report.flush_wait += _flush(
+                            control, control.publication(), report, True, SETTLE_TIMEOUT
+                        )
                 continue
             if page.batch is not None and log.holds(page.batch):
                 report.already_present += 1
@@ -1150,6 +1418,10 @@ def run(database, control: Control, pages: Sequence[Page], report) -> None:
                 accepted += 1
                 if page.kind in ("points", "values"):
                     rows += 1
+                if page.kind == "group_view":
+                    created.add(page.name)
+                if page.kind == "points" and page.view is not None:
+                    filled.add(page.view)
     finally:
         log.save()
         database.id_map.save()
@@ -1158,10 +1430,17 @@ def run(database, control: Control, pages: Sequence[Page], report) -> None:
 def _send(control: Control, page: Page) -> Answer:
     if page.kind == "layer":
         return control.declare_layer(page.body)
+    if page.kind == "view_group":
+        return control.declare_view_group(page.name, page.body)
+    if page.kind == "view":
+        return control.declare_view(page.name, page.body)
+    if page.kind == "group_view":
+        group, _, key = page.name.partition(":")
+        return control.create_view(group, key, page.body)
     if page.kind == "points":
         return control.ingest(page.body, page.batch, page.view)
     if page.kind == "values":
-        return control.values(page.body, page.batch)
+        return control.values(page.body, page.batch, page.view)
     if page.kind == "publish":
         return control.publish(page.name, page.body)
     if page.kind == "grow":
@@ -1193,6 +1472,8 @@ def _fold(database, report, page: Page, answer: Answer) -> None:
     body = answer.body
     if page.kind == "layer":
         log.declare([page.name])
+    elif page.kind in ("view", "group_view", "view_group"):
+        log.declare([held("view_group" if page.kind == "view_group" else "view", page.name)])
     elif page.kind == "points":
         # The commit that carried the row is what acknowledges its id (§3), so the next commit's
         # pre-flight reads it as already present and a page refused here is sent again.
@@ -1218,7 +1499,7 @@ def _fold(database, report, page: Page, answer: Answer) -> None:
             page.name,
             [
                 (
-                    one["key"],
+                    published_key(one["key"], one.get("view")),
                     content_digest([c["values"] for c in one.get("content", [])]),
                     parts_digest(one.get("parent"), one.get("attached_to")),
                 )
@@ -1242,7 +1523,11 @@ def _detail(answer: Answer) -> str:
 
 
 def _flush(
-    control: Control, published: tuple[dict[str, int], int, int], report, rows: bool
+    control: Control,
+    published: tuple[dict[str, int], int, int],
+    report,
+    rows: bool,
+    timeout: float = FLUSH_TIMEOUT,
 ) -> float:
     """`POST /control/flush`, then the wait for the publication after the last acknowledgement.
 
@@ -1255,7 +1540,7 @@ def _flush(
     versions, flushes, ticks = published
     control.flush()
     started = time.monotonic()
-    deadline = started + FLUSH_TIMEOUT
+    deadline = started + timeout
     while time.monotonic() < deadline:
         now, flushed, ticked = control.publication()
         if any(now.get(name, 0) > version for name, version in versions.items()):
