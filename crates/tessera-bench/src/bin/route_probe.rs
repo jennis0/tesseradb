@@ -879,7 +879,7 @@ fn run(args: Args) -> Result<(), String> {
             "walk": ROUTE_COSTS.walk_ns_per_entity * chooser.held as f64,
             "split": ROUTE_COSTS.split_ns_per_array_or_run * chooser.kept_arrays_and_runs as f64
                 + ROUTE_COSTS.split_ns_per_bitset * chooser.kept_bitsets as f64
-                + ROUTE_COSTS.residual_ns_per_row * chooser.residual_rows as f64,
+                + ROUTE_COSTS.residual_ns_per_entity * chooser.residual_entities as f64,
             "complement": ROUTE_COSTS.complement_ns_per_entity
                 * (chooser.bound.saturating_sub(chooser.held)) as f64,
         });
@@ -935,7 +935,7 @@ fn run(args: Args) -> Result<(), String> {
                 "kept_arrays_and_runs": chooser.kept_arrays_and_runs,
                 "kept_bitsets": chooser.kept_bitsets,
                 "kept_terms": chooser.kept_terms,
-                "residual_rows": chooser.residual_rows,
+                "residual_entities": chooser.residual_entities,
             },
             "chooser_priced_ns": priced,
             "chooser_route_offline": chosen_offline,
@@ -967,7 +967,7 @@ fn run(args: Args) -> Result<(), String> {
             "walk_ns_per_entity": ROUTE_COSTS.walk_ns_per_entity,
             "split_ns_per_array_or_run": ROUTE_COSTS.split_ns_per_array_or_run,
             "split_ns_per_bitset": ROUTE_COSTS.split_ns_per_bitset,
-            "residual_ns_per_row": ROUTE_COSTS.residual_ns_per_row,
+            "residual_ns_per_entity": ROUTE_COSTS.residual_ns_per_entity,
             "complement_ns_per_entity": ROUTE_COSTS.complement_ns_per_entity,
         },
         "evictable": evictable.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),

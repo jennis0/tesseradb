@@ -3,50 +3,50 @@ principal p1: 4 terms
   walk        cold    0.002 s  warm    0.002 s  route walk  258459 rows
   chooser     cold    0.010 s  warm    0.000 s  route split  258459 rows
   split       cold    0.000 s  warm    0.000 s  route split  258459 rows
-  complement  cold    0.137 s  warm    0.134 s  route complement  258459 rows
+  complement  cold    0.150 s  warm    0.184 s  route complement  258459 rows
 principal p5: 6 terms
-  walk        cold    0.007 s  warm    0.008 s  route walk  1292304 rows
-  chooser     cold    0.010 s  warm    0.000 s  route split  1292304 rows
+  walk        cold    0.008 s  warm    0.008 s  route walk  1292304 rows
+  chooser     cold    0.012 s  warm    0.000 s  route split  1292304 rows
   split       cold    0.000 s  warm    0.000 s  route split  1292304 rows
-  complement  cold    0.128 s  warm    0.129 s  route complement  1292304 rows
+  complement  cold    0.162 s  warm    0.136 s  route complement  1292304 rows
 principal p10: 5 terms
-  walk        cold    0.015 s  warm    0.015 s  route walk  2584596 rows
-  chooser     cold    0.004 s  warm    0.000 s  route split  2584596 rows
+  walk        cold    0.016 s  warm    0.015 s  route walk  2584596 rows
+  chooser     cold    0.005 s  warm    0.000 s  route split  2584596 rows
   split       cold    0.000 s  warm    0.000 s  route split  2584596 rows
-  complement  cold    0.121 s  warm    0.122 s  route complement  2584596 rows
+  complement  cold    0.132 s  warm    0.130 s  route complement  2584596 rows
 principal p25: 7 terms
-  walk        cold    0.038 s  warm    0.037 s  route walk  6461499 rows
-  chooser     cold    0.014 s  warm    0.000 s  route split  6461499 rows
+  walk        cold    0.041 s  warm    0.039 s  route walk  6461499 rows
+  chooser     cold    0.016 s  warm    0.000 s  route split  6461499 rows
   split       cold    0.000 s  warm    0.000 s  route split  6461499 rows
-  complement  cold    0.106 s  warm    0.106 s  route complement  6461499 rows
+  complement  cold    0.115 s  warm    0.109 s  route complement  6461499 rows
 principal p50: 7 terms
-  walk        cold    0.070 s  warm    0.071 s  route walk  12923003 rows
-  chooser     cold    0.012 s  warm    0.001 s  route split  12923003 rows
+  walk        cold    0.081 s  warm    0.080 s  route walk  12923003 rows
+  chooser     cold    0.014 s  warm    0.001 s  route split  12923003 rows
   split       cold    0.001 s  warm    0.001 s  route split  12923003 rows
-  complement  cold    0.075 s  warm    0.075 s  route complement  12923003 rows
+  complement  cold    0.100 s  warm    0.096 s  route complement  12923003 rows
 principal all: 252 terms
   walk        cold    0.000 s  warm    0.000 s  route walk  25846007 rows
   chooser     cold    0.000 s  warm    0.000 s  route whole_domain  25846007 rows
-  split       cold    0.032 s  warm    0.002 s  route split  25846007 rows
-  complement  cold    0.000 s  warm    0.000 s  route complement  25846007 rows
+  split       cold    0.037 s  warm    0.002 s  route split  25846007 rows
+  complement  cold    0.001 s  warm    0.001 s  route complement  25846007 rows
 principal year300: 300 terms
-  walk        cold    0.069 s  warm    0.070 s  route walk  12186941 rows
-  chooser     cold    0.034 s  warm    0.013 s  route split  12186941 rows
+  walk        cold    0.081 s  warm    0.073 s  route walk  12186941 rows
+  chooser     cold    0.038 s  warm    0.014 s  route split  12186941 rows
   split       cold    0.013 s  warm    0.013 s  route split  12186941 rows
-  complement  cold    0.080 s  warm    0.079 s  route complement  12186941 rows
+  complement  cold    0.082 s  warm    0.078 s  route complement  12186941 rows
 principal species1000: 1000 terms
-  walk        cold    0.079 s  warm    0.078 s  route walk  13355838 rows
-  chooser     cold    0.044 s  warm    0.025 s  route split  13355838 rows
-  split       cold    0.024 s  warm    0.024 s  route split  13355838 rows
-  complement  cold    0.080 s  warm    0.076 s  route complement  13355838 rows
+  walk        cold    0.079 s  warm    0.079 s  route walk  13355838 rows
+  chooser     cold    0.047 s  warm    0.024 s  route split  13355838 rows
+  split       cold    0.026 s  warm    0.025 s  route split  13355838 rows
+  complement  cold    0.084 s  warm    0.081 s  route complement  13355838 rows
 principal species10000: 10000 terms
-  walk        cold    0.116 s  warm    0.114 s  route walk  21017298 rows
-  chooser     cold    0.040 s  warm    0.041 s  route complement  21017298 rows
-  split       cold    0.076 s  warm    0.067 s  route split  21017298 rows
-  complement  cold    0.041 s  warm    0.040 s  route complement  21017298 rows
+  walk        cold    0.139 s  warm    0.138 s  route walk  21017298 rows
+  chooser     cold    0.046 s  warm    0.039 s  route complement  21017298 rows
+  split       cold    0.073 s  warm    0.070 s  route split  21017298 rows
+  complement  cold    0.042 s  warm    0.044 s  route complement  21017298 rows
 principal species100000: 100000 terms
-  walk        cold    0.122 s  warm    0.123 s  route walk  23786088 rows
-  chooser     cold    0.022 s  warm    0.022 s  route complement  23786088 rows
-  split       cold    0.121 s  warm    0.117 s  route split  23786088 rows
-  complement  cold    0.022 s  warm    0.021 s  route complement  23786088 rows
+  walk        cold    0.127 s  warm    0.133 s  route walk  23786088 rows
+  chooser     cold    0.025 s  warm    0.023 s  route complement  23786088 rows
+  split       cold    0.122 s  warm    0.121 s  route split  23786088 rows
+  complement  cold    0.025 s  warm    0.024 s  route complement  23786088 rows
 wrote probes/2026-09-17-term-images-rung6/gbif-64p-terms/results.json

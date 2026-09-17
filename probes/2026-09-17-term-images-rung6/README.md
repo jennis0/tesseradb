@@ -238,10 +238,12 @@ measurement and the chooser's constants, follow the build.
 
 ## Part B at the 64-part rung: the four routes
 
-Status: measured 2026-09-17 on `data/ladder/gbif-64p-terms/bundle` (25,846,007 rows, one segment,
-no extents, 186,179 dictionary terms, an 84,052,461-byte image file), commit `3cfa971d`,
-which is this branch after main's stage 5 merged. Uncapped: the bundle holds 1.6 GiB and the cap
-exists for the whole-corpus one, which nothing here opened. `nice -n 10`, under `setsid`.
+Status: measured 2026-09-17 on `data/ladder/gbif-64p-terms/bundle` at **bundle format 13**,
+commit `a625a98f`, which is this branch after main's whole-piece review fixes merged.
+25,846,007 rows, one segment, no extents, 186,179 dictionary terms, an 84,052,461-byte image file
+at header version 2. The rung was rebuilt from scratch for this: the earlier bundle was format 12
+and is refused. Uncapped — the bundle holds 1.6 GiB and the cap exists for the whole-corpus one,
+which nothing here opened. `nice -n 10`, under `setsid`.
 
 `crates/tessera-bench/src/bin/route_probe.rs` is a new binary rather than an extension of the
 parked `projection_probe`. That probe hand-rolls each route to size the structure the design
@@ -276,38 +278,43 @@ measured.
 
 | principal | terms | coverage | walk cold / warm | split cold / warm | complement cold / warm | chooser cold / warm | route taken | fastest forced | margin |
 |---|---|---|---|---|---|---|---|---|---|
-| `p1` | 4 | 1.0% | 2.2 / 2.2 | 0.3 / 0.3 | 136.9 / 133.8 | 9.8 / 0.3 | `split` | `split` | -7% |
-| `p5` | 6 | 5.0% | 7.2 / 7.7 | 0.3 / 0.3 | 127.7 / 128.6 | 10.0 / 0.3 | `split` | `split` | +5% |
-| `p10` | 5 | 10.0% | 14.7 / 14.6 | 0.4 / 0.4 | 121.3 / 122.4 | 3.5 / 0.4 | `split` | `split` | +2% |
-| `p25` | 7 | 25.0% | 38.1 / 36.8 | 0.3 / 0.3 | 106.0 / 105.9 | 13.6 / 0.4 | `split` | `split` | +6% |
-| `p50` | 7 | 50.0% | 70.4 / 70.6 | 0.7 / 0.7 | 75.3 / 74.6 | 11.6 / 0.7 | `split` | `split` | -11% |
-| `all` | 252 | 100.0% | 0.1 / 0.1 | 31.8 / 2.0 | 0.5 / 0.5 | 0.1 / 0.1 | `whole_domain` | `walk` | -9% |
-| `year300` | 300 | 47.2% | 69.4 / 69.7 | 12.9 / 13.3 | 80.3 / 78.8 | 34.1 / 13.0 | `split` | `split` | -3% |
-| `species1000` | 1,000 | 51.7% | 79.1 / 78.1 | 24.3 / 24.3 | 80.0 / 76.3 | 43.7 / 24.9 | `split` | `split` | +2% |
-| `species10000` | 10,000 | 81.3% | 116.0 / 114.2 | 75.8 / 66.6 | 41.1 / 39.6 | 39.8 / 40.6 | `complement` | `complement` | +3% |
-| `species100000` | 100,000 | 92.0% | 122.4 / 123.5 | 120.5 / 117.4 | 21.8 / 21.4 | 22.0 / 21.9 | `complement` | `complement` | +2% |
+| `p1` | 4 | 1.0% | 2.4 / 2.4 | 0.3 / 0.3 | 150.5 / 183.6 | 10.2 / 0.3 | `split` | `split` | +4% |
+| `p5` | 6 | 5.0% | 8.3 / 7.7 | 0.3 / 0.3 | 162.0 / 136.3 | 12.0 / 0.3 | `split` | `split` | -3% |
+| `p10` | 5 | 10.0% | 15.5 / 14.9 | 0.4 / 0.4 | 132.3 / 130.3 | 4.7 / 0.4 | `split` | `split` | +9% |
+| `p25` | 7 | 25.0% | 40.7 / 39.2 | 0.4 / 0.4 | 115.1 / 108.8 | 15.5 / 0.4 | `split` | `split` | +0% |
+| `p50` | 7 | 50.0% | 80.6 / 79.7 | 0.7 / 0.7 | 100.0 / 96.2 | 14.4 / 0.9 | `split` | `split` | +30% |
+| `all` | 252 | 100.0% | 0.2 / 0.1 | 37.2 / 2.3 | 0.7 / 0.5 | 0.1 / 0.1 | `whole_domain` | `walk` | -12% |
+| `year300` | 300 | 47.2% | 81.2 / 72.9 | 12.9 / 12.8 | 82.5 / 78.2 | 38.2 / 13.5 | `split` | `split` | +6% |
+| `species1000` | 1,000 | 51.7% | 78.9 / 79.4 | 25.8 / 25.2 | 84.1 / 80.7 | 47.0 / 24.5 | `split` | `split` | -3% |
+| `species10000` | 10,000 | 81.3% | 138.5 / 137.7 | 72.9 / 70.3 | 42.4 / 43.6 | 45.8 / 39.3 | `complement` | `complement` | -10% |
+| `species100000` | 100,000 | 92.0% | 126.8 / 132.8 | 122.3 / 121.2 | 25.1 / 24.5 | 25.5 / 23.0 | `complement` | `complement` | -6% |
 
 **Every arm's rows equal the walk's, for all ten principals** — checked by symmetric difference
 per arm, and the probe exits non-zero if any differ. Cold and warm agree too.
 
-**The chooser takes the fastest forced route for every principal.** The margin column is the
-chosen route against the fastest forced one; it runs −11% to +6%, which at arms of 0.3 to 124 ms
-is run-to-run noise rather than a preference — the chosen and fastest routes are the same route in
-every row. On `all` the chooser answers `whole_domain`, which is neither of the three the offline
-`choose` prices: `RowProjection::new` checks the whole-domain short-circuit before it prices
-anything, so a grant covering the domain never reaches the chooser. The offline verdict recorded
-beside it says `complement`, and that is not a miss.
+**The chooser takes the fastest forced route for every principal**, and takes the same route it
+took at format 12: the split from 1% to 52% coverage, the complement above 81%, the whole-domain
+short-circuit for the principal holding every term. The margin column is the chosen route against
+the fastest forced one; it runs −12% to +30%, wider than the format 12 run's −11% to +6% and for
+the same reason — the arms it is a ratio of are 0.3 to 0.9 ms at the compartment ladder, so a
+tenth of a millisecond of scheduling is tens of per cent. The chosen and fastest routes are the
+same route in every row, which is the statement that does not depend on the noise.
+
+On `all` the chooser answers `whole_domain`, which is neither of the three the offline `choose`
+prices: `RowProjection::new` checks the whole-domain short-circuit before it prices anything, so a
+grant covering the domain never reaches the chooser. The offline verdict recorded beside it says
+`complement`, and that is not a miss.
 
 ⊘ **The cold arms are barely cold.** `read_bytes` is 0 and the major-fault delta is 0 on every
 run: `posix_fadvise(DONTNEED)` does not reach a page this process holds mapped, and the
 permutation and the images are mapped for the probe's whole life. What the cold column shows at
-this rung is a first touch of pages the previous arm left resident — the split's 0.3 ms against
-its 9.8 ms first run is croaring's own warm-up, not disk. A cold reading that means disk needs a
-rung whose files do not fit the page cache.
+this rung is a first touch of pages the previous arm left resident — the split's 10.2 ms against
+its 0.3 ms repeat is croaring's own warm-up, not disk. A cold reading that means disk needs a rung
+whose files do not fit the page cache.
 
 ### What the chooser was given
 
-| principal | held | kept images | array+run | bitset | residual rows | walk ns | split ns | complement ns | chosen |
+| principal | held | kept images | array+run | bitset | residual entities | walk ns | split ns | complement ns | chosen |
 |---|---|---|---|---|---|---|---|---|---|
 | `p1` | 258,459 | 4 | 53 | 0 | 0 | 2 | 0 | 281 | `split` |
 | `p5` | 1,292,304 | 4 | 34 | 0 | 14 | 8 | 0 | 270 | `split` |
@@ -324,21 +331,19 @@ Milliseconds of modelled cost, from `ROUTE_COSTS` as it stands. The split's adva
 compartment ladder is the shape the design predicted: a country's rows are long runs in Morton
 order, so `p50` unions 278 containers where the walk crosses 12.9 million entities.
 
-### The projections
+### The residual, now priced per entity
 
-| principal | projection rows | Portable bytes | anon rise, warm | read_bytes cold / warm | majflt cold / warm |
-|---|---|---|---|---|---|
-| `p1` | 258,459 | 3,949 | 2.2 MB | 0 / 0 | 0 / 0 |
-| `p5` | 1,292,304 | 2,881 | 6.7 MB | 0 / 0 | 0 / 0 |
-| `p10` | 2,584,596 | 4,157 | 12.2 MB | 0 / 0 | 0 / 0 |
-| `p25` | 6,461,499 | 7,183 | 30.0 MB | 0 / 0 | 0 / 0 |
-| `p50` | 12,923,003 | 7,107 | 57.0 MB | 0 / 0 | 0 / 0 |
-| `all` | 25,846,007 | 5,584 | 0.0 MB | 0 / 0 | 0 / 0 |
-| `year300` | 12,186,941 | 3,223,234 | 55.6 MB | 0 / 0 | 0 / 0 |
-| `species1000` | 13,355,838 | 3,209,838 | 60.0 MB | 0 / 0 | 0 / 0 |
-| `species10000` | 21,017,298 | 2,985,346 | 76.9 MB | 0 / 0 | 0 / 0 |
-| `species100000` | 23,786,088 | 1,986,568 | 76.8 MB | 0 / 0 | 0 / 0 |
+The review changed the residual term from rows to entities and had the image table record each
+posting's cardinality to supply it (header version 2). **At this rung the two are the same
+number**, for every principal:
 
+Residual, the old row overcount against the new entity count:
+
+The base permutation is a bijection onto its rows here — `bound`, `base_rows` and `total_rows` are
+all 25,846,007 and there are no extents — so every held entity has exactly one row and a posting's
+cardinality is its image's. The change is right where a permutation drops entities or a view
+carries extents; **the 64-part rung cannot demonstrate it**, and this table is the evidence that it
+is a no-op here rather than evidence that it does nothing.
 
 ## Pass 2b, measured on a fold of the 64-part rung
 
@@ -347,32 +352,58 @@ read from `/control/status`. Server stopped by pid afterwards. Measured.
 
 | | |
 |---|---|
-| whole fold | **51.4 s** (`last_secs` 51, staircase max RSS 1.65 GB) |
-| **pass 2b, term images** | **1.484 s**, 2.9% of the fold |
-| the derivation inside it | 1.413 s |
+| whole fold | **54.1 s** (`last_secs` 54, staircase max RSS 1.65 GB) |
+| **pass 2b, term images** | **1.377 s**, 2.5% of the fold |
+| the derivation inside it | 1.304 s |
 | kept | 5,516 of 186,179 terms |
 | payload / table | 76,605,165 B / 7,447,160 B |
 | `.timg` on disk | 84,052,461 B |
 
 **The fold reproduced the build's image file exactly**: same kept count, same payload, same table,
 and the same 84,052,461 bytes on disk as the build wrote. That is decision 0139's one
-implementation, confirmed on a real corpus rather than on a fixture.
+implementation, confirmed on a real corpus rather than on a fixture. The file is the same size at
+format 13 as at format 12 — header version 2 reinterprets the table's existing per-term field as
+the posting's cardinality rather than adding one, so an entry is still 40 bytes.
 
-The staircase, seconds: `1 row space` 5.05, `2 postings` 1.54, **`2b term images` 1.48**,
-`3 external ids` 0.00, `4a attributes` 5.10, `4c entity terms` 24.35, `5 digests + fsync` 0.92,
-`6 hand-off` 0.16, `7 memberships` 0.62, `8 derived` 9.55, `10 manifest` 0.01, `11 flip` 0.00,
-`12 retire` 0.25, `13 open` 0.09, `14 adopt` 0.19, `15 warm` 1.91, `16 wal` 0.01, `17 reclaim`
-0.12. `4c entity terms` is 47% of the fold and pass 2b is 2.9% of it.
+The staircase, seconds: `1 row space` 4.68, `2 postings` 1.53, **`2b term images` 1.38**,
+`4a attributes` 5.70, `4c entity terms` 25.92, `5 digests + fsync` 1.60, `7 memberships` 0.55,
+`8 derived` 10.10, `12 retire` 0.26, `13 open` 0.09, `14 adopt` 0.19, `15 warm` 1.92,
+`17 reclaim` 0.14. `4c entity terms` is 48% of the fold and pass 2b is 2.5% of it.
 
-⊘ The build's `term_images` stage took 6.63 s for the identical output that pass 2b produced in
-1.48 s. Both measured, on the same box and the same corpus; the difference is not explained here.
+### What the format 13 rebuild changed
+
+| | format 12, 2026-09-17 | format 13, the review's fixes | |
+|---|---|---|---|
+| build `term_images` stage | 6.63 s at twelve workers | **12.00 s at four** | **1.8× slower** |
+| fold pass 2b | 1.484 s | 1.377 s | −7% |
+| the fold's own derivation | 1.413 s | 1.304 s | −8% |
+| whole fold | 51.4 s | 54.1 s | +5% |
+| kept / payload / table / `.timg` | 5,516 / 76,605,165 / 7,447,160 / 84,052,461 | identical | — |
+| routes chosen, all ten principals | split, complement, whole_domain | identical | — |
+
+**Capping the build's derivation at four workers made the stage slower, not faster.** The cap was
+taken to bound the pass's memory — four workers hold four bitmaps rather than twelve, which is what
+keeps a rung 6 build inside its budget — and `TERM_IMAGE_BUILD_THREADS`' comment reasons that width
+buys little because each projection is short beside the mutex over the scratch pool. At twelve
+workers the stage was 6.63 s; at four it is 12.00 s. Width was buying something here, and the
+explanation in that comment does not fit the measurement.
+
+Two things that follow, neither of them a reason to change the cap on this evidence. The cap's
+purpose is the memory forecast rather than the wall, and 5.4 s at the 64-part rung is not what
+decides a rung 6 build. And the fold, which derives the same images single-threaded in 1.3 s, is
+faster than either — so whatever the build's derivation is spending, it is not the projection
+itself. Stage 6's rung 6 build measures the stage where the terms are large enough for the balance
+to be the one that matters; this figure says only that the 64-part rung does not support the
+comment's reasoning.
 
 ### Rung 6, modelled
 
-Scaling pass 2b by rows (135.25×) gives **201 s**. The Part A pre-flight modelled the build's
+Scaling pass 2b by rows (135.25×) gives **186 s**. The Part A pre-flight modelled the build's
 `term_images` stage at 160 to 270 s from the projection-build probe's own rung 6 derivation, by a
 different route, and the two agree — which is the cross-check that scaling was worth making, not a
-second measurement. Both are modelled; neither has been run at rung 6.
+second measurement. Both are modelled; neither has been run at rung 6. ⊘ The build's stage is now
+measured at 1.8× the fold's pass at this rung, so the build's rung 6 stage may be above that
+bracket; the pre-flight's figure is not re-stated here on the strength of one 64-part reading.
 
-Scaling the whole fold by rows gives 1.9 h, which is **not** reported as a rung 6 fold estimate:
-`4c entity terms` and `8 derived` are half the fold here and neither is linear in rows.
+Scaling the whole fold by rows gives 2.0 h, which is **not** reported as a rung 6 fold estimate:
+`4c entity terms` and `8 derived` are two thirds of the fold here and neither is linear in rows.

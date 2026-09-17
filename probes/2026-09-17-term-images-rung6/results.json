@@ -263,13 +263,15 @@
   },
   "part_b": {
     "measured": true,
+    "bundle_format": 13,
+    "image_header_version": 2,
     "bundle": "/home/joe/code/tessera/data/ladder/gbif-64p-terms/bundle",
-    "commit": "3cfa971d25d36f50103cb7fda716abc1ade7855d",
+    "commit": "a625a98faaf3091474f3130848471169a3d9f5cf",
     "seed": 20260917,
     "rows": 25846007,
     "dictionary_terms": 186179,
     "image_file_bytes": 84052461,
-    "open_wall_s": 0.342992538,
+    "open_wall_s": 0.357764228,
     "principals": {
       "p1": {
         "terms": 4,
@@ -281,7 +283,7 @@
           "kept_arrays_and_runs": 53,
           "kept_bitsets": 0,
           "kept_terms": 4,
-          "residual_rows": 0
+          "residual_entities": 0
         },
         "chooser_priced_ns": {
           "complement": 281463028.0,
@@ -291,19 +293,19 @@
         "chooser_route_offline": "split",
         "arms": {
           "walk": {
-            "cold_s": 0.002249447,
-            "warm_s": 0.002163721,
+            "cold_s": 0.002360961,
+            "warm_s": 0.002397648,
             "route_taken": "walk",
             "equal_to_walk": true,
             "cardinality": 258459,
             "portable_bytes": 3949,
-            "anon_rise_bytes": 2211840,
+            "anon_rise_bytes": 2252800,
             "cold_read_bytes": 0,
             "cold_majflt": 0
           },
           "chooser": {
-            "cold_s": 0.009759051,
-            "warm_s": 0.000262557,
+            "cold_s": 0.010201808,
+            "warm_s": 0.000279445,
             "route_taken": "split",
             "equal_to_walk": true,
             "cardinality": 258459,
@@ -313,24 +315,24 @@
             "cold_majflt": 2
           },
           "split": {
-            "cold_s": 0.000260721,
-            "warm_s": 0.000281319,
+            "cold_s": 0.000291072,
+            "warm_s": 0.000268979,
             "route_taken": "split",
             "equal_to_walk": true,
             "cardinality": 258459,
             "portable_bytes": 3949,
-            "anon_rise_bytes": 544768,
+            "anon_rise_bytes": 552960,
             "cold_read_bytes": 0,
             "cold_majflt": 0
           },
           "complement": {
-            "cold_s": 0.13689647,
-            "warm_s": 0.13378373,
+            "cold_s": 0.150475005,
+            "warm_s": 0.183578087,
             "route_taken": "complement",
             "equal_to_walk": true,
             "cardinality": 258459,
             "portable_bytes": 3949,
-            "anon_rise_bytes": 77189120,
+            "anon_rise_bytes": 77201408,
             "cold_read_bytes": 0,
             "cold_majflt": 0
           }
@@ -346,7 +348,7 @@
           "kept_arrays_and_runs": 34,
           "kept_bitsets": 0,
           "kept_terms": 4,
-          "residual_rows": 14
+          "residual_entities": 14
         },
         "chooser_priced_ns": {
           "complement": 270090733.0,
@@ -356,46 +358,46 @@
         "chooser_route_offline": "split",
         "arms": {
           "walk": {
-            "cold_s": 0.007177265,
-            "warm_s": 0.007679301,
+            "cold_s": 0.008250285,
+            "warm_s": 0.007689634,
             "route_taken": "walk",
             "equal_to_walk": true,
             "cardinality": 1292304,
             "portable_bytes": 2881,
-            "anon_rise_bytes": 6737920,
+            "anon_rise_bytes": 6668288,
             "cold_read_bytes": 0,
             "cold_majflt": 0
           },
           "chooser": {
-            "cold_s": 0.010047122,
-            "warm_s": 0.000270445,
+            "cold_s": 0.01203204,
+            "warm_s": 0.000298974,
             "route_taken": "split",
             "equal_to_walk": true,
             "cardinality": 1292304,
             "portable_bytes": 2881,
-            "anon_rise_bytes": 528384,
+            "anon_rise_bytes": 532480,
             "cold_read_bytes": 16711680,
             "cold_majflt": 2
           },
           "split": {
-            "cold_s": 0.000259746,
-            "warm_s": 0.000258722,
+            "cold_s": 0.000330757,
+            "warm_s": 0.000309293,
             "route_taken": "split",
             "equal_to_walk": true,
             "cardinality": 1292304,
             "portable_bytes": 2881,
-            "anon_rise_bytes": 536576,
+            "anon_rise_bytes": 540672,
             "cold_read_bytes": 0,
             "cold_majflt": 0
           },
           "complement": {
-            "cold_s": 0.127741113,
-            "warm_s": 0.128620139,
+            "cold_s": 0.161997795,
+            "warm_s": 0.136312222,
             "route_taken": "complement",
             "equal_to_walk": true,
             "cardinality": 1292304,
             "portable_bytes": 2881,
-            "anon_rise_bytes": 76419072,
+            "anon_rise_bytes": 76423168,
             "cold_read_bytes": 0,
             "cold_majflt": 0
           }
@@ -411,7 +413,7 @@
           "kept_arrays_and_runs": 53,
           "kept_bitsets": 0,
           "kept_terms": 2,
-          "residual_rows": 1670
+          "residual_entities": 1670
         },
         "chooser_priced_ns": {
           "complement": 255875521.0,
@@ -421,46 +423,46 @@
         "chooser_route_offline": "split",
         "arms": {
           "walk": {
-            "cold_s": 0.014734407,
-            "warm_s": 0.014602091,
+            "cold_s": 0.015526549,
+            "warm_s": 0.014852012,
             "route_taken": "walk",
             "equal_to_walk": true,
             "cardinality": 2584596,
             "portable_bytes": 4157,
-            "anon_rise_bytes": 12230656,
+            "anon_rise_bytes": 12546048,
             "cold_read_bytes": 0,
             "cold_majflt": 0
           },
           "chooser": {
-            "cold_s": 0.003532927,
-            "warm_s": 0.000363246,
+            "cold_s": 0.004712408,
+            "warm_s": 0.000388791,
             "route_taken": "split",
             "equal_to_walk": true,
             "cardinality": 2584596,
             "portable_bytes": 4157,
-            "anon_rise_bytes": 544768,
+            "anon_rise_bytes": 552960,
             "cold_read_bytes": 8192000,
             "cold_majflt": 1
           },
           "split": {
-            "cold_s": 0.000359021,
-            "warm_s": 0.000356411,
+            "cold_s": 0.000424348,
+            "warm_s": 0.000356772,
             "route_taken": "split",
             "equal_to_walk": true,
             "cardinality": 2584596,
             "portable_bytes": 4157,
-            "anon_rise_bytes": 544768,
+            "anon_rise_bytes": 557056,
             "cold_read_bytes": 0,
             "cold_majflt": 0
           },
           "complement": {
-            "cold_s": 0.12128977,
-            "warm_s": 0.122420067,
+            "cold_s": 0.132262066,
+            "warm_s": 0.130312293,
             "route_taken": "complement",
             "equal_to_walk": true,
             "cardinality": 2584596,
             "portable_bytes": 4157,
-            "anon_rise_bytes": 76484608,
+            "anon_rise_bytes": 76517376,
             "cold_read_bytes": 0,
             "cold_majflt": 0
           }
@@ -476,7 +478,7 @@
           "kept_arrays_and_runs": 159,
           "kept_bitsets": 0,
           "kept_terms": 6,
-          "residual_rows": 3
+          "residual_entities": 3
         },
         "chooser_priced_ns": {
           "complement": 213229588.0,
@@ -486,19 +488,19 @@
         "chooser_route_offline": "split",
         "arms": {
           "walk": {
-            "cold_s": 0.03808112,
-            "warm_s": 0.036821775,
+            "cold_s": 0.040715138,
+            "warm_s": 0.039193506,
             "route_taken": "walk",
             "equal_to_walk": true,
             "cardinality": 6461499,
             "portable_bytes": 7183,
-            "anon_rise_bytes": 30031872,
+            "anon_rise_bytes": 30048256,
             "cold_read_bytes": 0,
             "cold_majflt": 0
           },
           "chooser": {
-            "cold_s": 0.013565658,
-            "warm_s": 0.000356752,
+            "cold_s": 0.015517379,
+            "warm_s": 0.000353558,
             "route_taken": "split",
             "equal_to_walk": true,
             "cardinality": 6461499,
@@ -508,24 +510,24 @@
             "cold_majflt": 3
           },
           "split": {
-            "cold_s": 0.000340945,
-            "warm_s": 0.000335916,
+            "cold_s": 0.000357449,
+            "warm_s": 0.000352152,
             "route_taken": "split",
             "equal_to_walk": true,
             "cardinality": 6461499,
             "portable_bytes": 7183,
-            "anon_rise_bytes": 593920,
+            "anon_rise_bytes": 598016,
             "cold_read_bytes": 0,
             "cold_majflt": 0
           },
           "complement": {
-            "cold_s": 0.10597535,
-            "warm_s": 0.105857069,
+            "cold_s": 0.115067679,
+            "warm_s": 0.108779646,
             "route_taken": "complement",
             "equal_to_walk": true,
             "cardinality": 6461499,
             "portable_bytes": 7183,
-            "anon_rise_bytes": 74534912,
+            "anon_rise_bytes": 74502144,
             "cold_read_bytes": 0,
             "cold_majflt": 0
           }
@@ -541,7 +543,7 @@
           "kept_arrays_and_runs": 278,
           "kept_bitsets": 0,
           "kept_terms": 6,
-          "residual_rows": 3
+          "residual_entities": 3
         },
         "chooser_priced_ns": {
           "complement": 142153044.0,
@@ -551,46 +553,46 @@
         "chooser_route_offline": "split",
         "arms": {
           "walk": {
-            "cold_s": 0.0704245,
-            "warm_s": 0.07057559,
+            "cold_s": 0.080567022,
+            "warm_s": 0.079749304,
             "route_taken": "walk",
             "equal_to_walk": true,
             "cardinality": 12923003,
             "portable_bytes": 7107,
-            "anon_rise_bytes": 57032704,
+            "anon_rise_bytes": 56090624,
             "cold_read_bytes": 0,
             "cold_majflt": 0
           },
           "chooser": {
-            "cold_s": 0.011551989,
-            "warm_s": 0.000663594,
+            "cold_s": 0.014381715,
+            "warm_s": 0.000861735,
             "route_taken": "split",
             "equal_to_walk": true,
             "cardinality": 12923003,
             "portable_bytes": 7107,
-            "anon_rise_bytes": 892928,
+            "anon_rise_bytes": 909312,
             "cold_read_bytes": 24969216,
             "cold_majflt": 3
           },
           "split": {
-            "cold_s": 0.000669113,
-            "warm_s": 0.000746911,
+            "cold_s": 0.000708982,
+            "warm_s": 0.00066055,
             "route_taken": "split",
             "equal_to_walk": true,
             "cardinality": 12923003,
             "portable_bytes": 7107,
-            "anon_rise_bytes": 917504,
+            "anon_rise_bytes": 897024,
             "cold_read_bytes": 0,
             "cold_majflt": 0
           },
           "complement": {
-            "cold_s": 0.075310163,
-            "warm_s": 0.074601851,
+            "cold_s": 0.099966797,
+            "warm_s": 0.096188094,
             "route_taken": "complement",
             "equal_to_walk": true,
             "cardinality": 12923003,
             "portable_bytes": 7107,
-            "anon_rise_bytes": 57409536,
+            "anon_rise_bytes": 56983552,
             "cold_read_bytes": 0,
             "cold_majflt": 0
           }
@@ -606,7 +608,7 @@
           "kept_arrays_and_runs": 1252,
           "kept_bitsets": 0,
           "kept_terms": 246,
-          "residual_rows": 1716
+          "residual_entities": 1716
         },
         "chooser_priced_ns": {
           "complement": 0.0,
@@ -616,19 +618,19 @@
         "chooser_route_offline": "complement",
         "arms": {
           "walk": {
-            "cold_s": 0.00014888,
-            "warm_s": 0.000133776,
+            "cold_s": 0.00019646,
+            "warm_s": 0.00014229,
             "route_taken": "walk",
             "equal_to_walk": true,
             "cardinality": 25846007,
             "portable_bytes": 5584,
-            "anon_rise_bytes": 12288,
+            "anon_rise_bytes": 16384,
             "cold_read_bytes": 0,
             "cold_majflt": 0
           },
           "chooser": {
-            "cold_s": 0.000111647,
-            "warm_s": 0.000121343,
+            "cold_s": 0.000136934,
+            "warm_s": 0.00012534,
             "route_taken": "whole_domain",
             "equal_to_walk": true,
             "cardinality": 25846007,
@@ -638,8 +640,8 @@
             "cold_majflt": 0
           },
           "split": {
-            "cold_s": 0.031763661,
-            "warm_s": 0.002023739,
+            "cold_s": 0.037248013,
+            "warm_s": 0.002348812,
             "route_taken": "split",
             "equal_to_walk": true,
             "cardinality": 25846007,
@@ -649,8 +651,8 @@
             "cold_majflt": 9
           },
           "complement": {
-            "cold_s": 0.000469041,
-            "warm_s": 0.0004716,
+            "cold_s": 0.000713766,
+            "warm_s": 0.000529658,
             "route_taken": "complement",
             "equal_to_walk": true,
             "cardinality": 25846007,
@@ -671,7 +673,7 @@
           "kept_arrays_and_runs": 21368,
           "kept_bitsets": 333,
           "kept_terms": 64,
-          "residual_rows": 53155
+          "residual_entities": 53155
         },
         "chooser_priced_ns": {
           "complement": 150249726.0,
@@ -681,46 +683,46 @@
         "chooser_route_offline": "split",
         "arms": {
           "walk": {
-            "cold_s": 0.069357198,
-            "warm_s": 0.069711483,
+            "cold_s": 0.081212946,
+            "warm_s": 0.072898696,
             "route_taken": "walk",
             "equal_to_walk": true,
             "cardinality": 12186941,
             "portable_bytes": 3223234,
-            "anon_rise_bytes": 55570432,
+            "anon_rise_bytes": 54939648,
             "cold_read_bytes": 0,
             "cold_majflt": 0
           },
           "chooser": {
-            "cold_s": 0.034120178,
-            "warm_s": 0.012976883,
+            "cold_s": 0.038226059,
+            "warm_s": 0.013522422,
             "route_taken": "split",
             "equal_to_walk": true,
             "cardinality": 12186941,
             "portable_bytes": 3223234,
-            "anon_rise_bytes": 4505600,
+            "anon_rise_bytes": 4608000,
             "cold_read_bytes": 38330368,
             "cold_majflt": 6
           },
           "split": {
-            "cold_s": 0.012938728,
-            "warm_s": 0.013338402,
+            "cold_s": 0.012914313,
+            "warm_s": 0.012774551,
             "route_taken": "split",
             "equal_to_walk": true,
             "cardinality": 12186941,
             "portable_bytes": 3223234,
-            "anon_rise_bytes": 4509696,
+            "anon_rise_bytes": 4612096,
             "cold_read_bytes": 0,
             "cold_majflt": 0
           },
           "complement": {
-            "cold_s": 0.080348742,
-            "warm_s": 0.078751533,
+            "cold_s": 0.082450867,
+            "warm_s": 0.078170086,
             "route_taken": "complement",
             "equal_to_walk": true,
             "cardinality": 12186941,
             "portable_bytes": 3223234,
-            "anon_rise_bytes": 61722624,
+            "anon_rise_bytes": 61550592,
             "cold_read_bytes": 0,
             "cold_majflt": 0
           }
@@ -736,7 +738,7 @@
           "kept_arrays_and_runs": 68488,
           "kept_bitsets": 48,
           "kept_terms": 642,
-          "residual_rows": 343917
+          "residual_entities": 343917
         },
         "chooser_priced_ns": {
           "complement": 137391859.0,
@@ -746,46 +748,46 @@
         "chooser_route_offline": "split",
         "arms": {
           "walk": {
-            "cold_s": 0.079122768,
-            "warm_s": 0.078124468,
+            "cold_s": 0.078918019,
+            "warm_s": 0.079429636,
             "route_taken": "walk",
             "equal_to_walk": true,
             "cardinality": 13355838,
             "portable_bytes": 3209838,
-            "anon_rise_bytes": 59994112,
+            "anon_rise_bytes": 59715584,
             "cold_read_bytes": 0,
             "cold_majflt": 0
           },
           "chooser": {
-            "cold_s": 0.043748178,
-            "warm_s": 0.024886127,
+            "cold_s": 0.046981504,
+            "warm_s": 0.024460671,
             "route_taken": "split",
             "equal_to_walk": true,
             "cardinality": 13355838,
             "portable_bytes": 3209838,
-            "anon_rise_bytes": 8925184,
+            "anon_rise_bytes": 8683520,
             "cold_read_bytes": 33468416,
             "cold_majflt": 9
           },
           "split": {
-            "cold_s": 0.024322779,
-            "warm_s": 0.024346219,
+            "cold_s": 0.025810136,
+            "warm_s": 0.025224205,
             "route_taken": "split",
             "equal_to_walk": true,
             "cardinality": 13355838,
             "portable_bytes": 3209838,
-            "anon_rise_bytes": 8159232,
+            "anon_rise_bytes": 8388608,
             "cold_read_bytes": 0,
             "cold_majflt": 0
           },
           "complement": {
-            "cold_s": 0.079974794,
-            "warm_s": 0.076321337,
+            "cold_s": 0.084108897,
+            "warm_s": 0.08065321,
             "route_taken": "complement",
             "equal_to_walk": true,
             "cardinality": 13355838,
             "portable_bytes": 3209838,
-            "anon_rise_bytes": 58363904,
+            "anon_rise_bytes": 58122240,
             "cold_read_bytes": 0,
             "cold_majflt": 0
           }
@@ -801,7 +803,7 @@
           "kept_arrays_and_runs": 136501,
           "kept_bitsets": 58,
           "kept_terms": 3095,
-          "residual_rows": 2711579
+          "residual_entities": 2711579
         },
         "chooser_priced_ns": {
           "complement": 53115799.0,
@@ -811,46 +813,46 @@
         "chooser_route_offline": "complement",
         "arms": {
           "walk": {
-            "cold_s": 0.116035508,
-            "warm_s": 0.114216538,
+            "cold_s": 0.138518716,
+            "warm_s": 0.137744862,
             "route_taken": "walk",
             "equal_to_walk": true,
             "cardinality": 21017298,
             "portable_bytes": 2985346,
-            "anon_rise_bytes": 76931072,
+            "anon_rise_bytes": 75767808,
             "cold_read_bytes": 0,
             "cold_majflt": 0
           },
           "chooser": {
-            "cold_s": 0.039823938,
-            "warm_s": 0.040626923,
+            "cold_s": 0.045817454,
+            "warm_s": 0.03928633,
             "route_taken": "complement",
             "equal_to_walk": true,
             "cardinality": 21017298,
             "portable_bytes": 2985346,
-            "anon_rise_bytes": 28037120,
+            "anon_rise_bytes": 26779648,
             "cold_read_bytes": 0,
             "cold_majflt": 0
           },
           "split": {
-            "cold_s": 0.075766909,
-            "warm_s": 0.066553562,
+            "cold_s": 0.072940356,
+            "warm_s": 0.070301325,
             "route_taken": "split",
             "equal_to_walk": true,
             "cardinality": 21017298,
             "portable_bytes": 2985346,
-            "anon_rise_bytes": 25784320,
+            "anon_rise_bytes": 25751552,
             "cold_read_bytes": 12603392,
             "cold_majflt": 10
           },
           "complement": {
-            "cold_s": 0.041103934,
-            "warm_s": 0.039609993,
+            "cold_s": 0.042434324,
+            "warm_s": 0.043592409,
             "route_taken": "complement",
             "equal_to_walk": true,
             "cardinality": 21017298,
             "portable_bytes": 2985346,
-            "anon_rise_bytes": 29364224,
+            "anon_rise_bytes": 28471296,
             "cold_read_bytes": 0,
             "cold_majflt": 0
           }
@@ -866,7 +868,7 @@
           "kept_arrays_and_runs": 145633,
           "kept_bitsets": 58,
           "kept_terms": 5162,
-          "residual_rows": 4981644
+          "residual_entities": 4981644
         },
         "chooser_priced_ns": {
           "complement": 22659109.0,
@@ -876,46 +878,46 @@
         "chooser_route_offline": "complement",
         "arms": {
           "walk": {
-            "cold_s": 0.122365159,
-            "warm_s": 0.12349052,
+            "cold_s": 0.126832849,
+            "warm_s": 0.132848008,
             "route_taken": "walk",
             "equal_to_walk": true,
             "cardinality": 23786088,
             "portable_bytes": 1986568,
-            "anon_rise_bytes": 76820480,
+            "anon_rise_bytes": 77455360,
             "cold_read_bytes": 0,
             "cold_majflt": 0
           },
           "chooser": {
-            "cold_s": 0.021958388,
-            "warm_s": 0.021874519,
+            "cold_s": 0.025454045,
+            "warm_s": 0.022952499,
             "route_taken": "complement",
             "equal_to_walk": true,
             "cardinality": 23786088,
             "portable_bytes": 1986568,
-            "anon_rise_bytes": 16556032,
+            "anon_rise_bytes": 16629760,
             "cold_read_bytes": 0,
             "cold_majflt": 0
           },
           "split": {
-            "cold_s": 0.120532873,
-            "warm_s": 0.117406936,
+            "cold_s": 0.122260269,
+            "warm_s": 0.121152463,
             "route_taken": "split",
             "equal_to_walk": true,
             "cardinality": 23786088,
             "portable_bytes": 1986568,
-            "anon_rise_bytes": 51953664,
+            "anon_rise_bytes": 51920896,
             "cold_read_bytes": 3072000,
             "cold_majflt": 1
           },
           "complement": {
-            "cold_s": 0.021764471,
-            "warm_s": 0.021439258,
+            "cold_s": 0.02509078,
+            "warm_s": 0.024479568,
             "route_taken": "complement",
             "equal_to_walk": true,
             "cardinality": 23786088,
             "portable_bytes": 1986568,
-            "anon_rise_bytes": 16719872,
+            "anon_rise_bytes": 16732160,
             "cold_read_bytes": 0,
             "cold_majflt": 0
           }
@@ -925,49 +927,74 @@
     "all_arms_equal_to_walk": true,
     "route_costs": {
       "complement_ns_per_entity": 11.0,
-      "residual_ns_per_row": 11.0,
+      "residual_ns_per_entity": 11.0,
       "split_ns_per_array_or_run": 350.0,
       "split_ns_per_bitset": 1000.0,
       "walk_ns_per_entity": 6.5
     },
-    "note": "cold arms show read_bytes 0 and majflt 0: DONTNEED does not reach a page this process holds mapped"
+    "note": "cold arms show read_bytes 0 and majflt 0: DONTNEED does not reach a page this process holds mapped",
+    "residual_note": "residual_entities equals the format 12 residual_rows for every principal: the base permutation is a bijection onto its rows at this rung, so the change is a no-op here",
+    "superseded": {
+      "format_12_run": "see git history for the format 12 table"
+    }
   },
   "fold_64p": {
     "measured": true,
-    "whole_fold_s": 51,
-    "staircase_max_rss_bytes": 1648803840,
+    "bundle_format": 13,
+    "whole_fold_s": 54,
+    "staircase_sum_s": 54.1,
+    "staircase_max_rss_bytes": 1651634176,
     "passes_ms": {
       "entry": 0,
-      "1 row space": 5049,
-      "2 postings": 1544,
-      "2b term images": 1484,
+      "1 row space": 4683,
+      "2 postings": 1528,
+      "2b term images": 1377,
       "3 external ids": 0,
-      "4a attributes": 5101,
-      "4c entity terms": 24352,
-      "5 digests + fsync": 924,
-      "6 hand-off": 162,
-      "7 memberships": 619,
-      "8 derived": 9551,
+      "4a attributes": 5701,
+      "4c entity terms": 25917,
+      "5 digests + fsync": 1602,
+      "6 hand-off": 14,
+      "7 memberships": 546,
+      "8 derived": 10104,
       "9 report": 0,
-      "10 manifest": 6,
-      "11 flip": 1,
-      "12 retire": 250,
-      "13 open": 87,
-      "14 adopt": 185,
-      "15 warm": 1914,
-      "16 wal": 8,
-      "17 reclaim": 117
+      "10 manifest": 5,
+      "11 flip": 2,
+      "12 retire": 256,
+      "13 open": 86,
+      "14 adopt": 187,
+      "15 warm": 1921,
+      "16 wal": 18,
+      "17 reclaim": 135
     },
-    "pass_2b_s": 1.484,
+    "pass_2b_s": 1.377,
     "images": {
       "kept": 5516,
       "terms": 186179,
       "payload_bytes": 76605165,
       "table_bytes": 7447160,
       "timg_bytes": 84052461,
-      "derivation_s": 1.413026578
+      "derivation_s": 1.303601561
     },
     "equals_the_build": "same kept count, payload, table and .timg size as the build wrote",
-    "rung6_pass_2b_modelled_s": 200.7
+    "rung6_pass_2b_modelled_s": 186.2
+  },
+  "format_13_rebuild": {
+    "measured": true,
+    "build_term_images_stage_s": {
+      "format_12_twelve_workers": 6.63,
+      "format_13_four_workers": 12.0,
+      "ratio": 1.81,
+      "finding": "capping the build's derivation at four workers made the stage 1.8x slower at this rung; TERM_IMAGE_BUILD_THREADS' comment reasons that width buys little, which this measurement does not support"
+    },
+    "fold_pass_2b_s": {
+      "format_12": 1.484,
+      "format_13": 1.377
+    },
+    "whole_fold_s": {
+      "format_12": 51,
+      "format_13": 54
+    },
+    "images_identical": true,
+    "routes_identical": true
   }
 }
