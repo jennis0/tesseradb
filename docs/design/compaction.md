@@ -349,7 +349,7 @@ one term's posting, one image, the buffer it is serialised into and one projecti
 time, which is what the memory table above prices. A view with no row and a dictionary with no term have
 no image to hold, and the pass skips both.
 
-✔ **The pass is built.** Measured on a fold of the 64-part rung (`probes/2026-09-17-term-images-rung6/README.md`):
+✔ **The pass is built.** Measured on a fold of the 64-part rung, the 2026-09-17 term-images-rung6 probe:
 1.484 s of a 51.4 s fold, 2.9% of it; the derivation itself 1.413 s; 5,516 of 186,179 terms kept.
 **The fold reproduced the build's own file exactly**: the same kept count, the same payload and
 table bytes, and the same bytes on disk. That is decision 0139's one implementation, confirmed on a
@@ -1531,7 +1531,7 @@ are.
 
 | Figure | Class | Source |
 |---|---|---|
-| pass 2b, term images: 1.484 s of a 51.4 s fold (2.9%), byte-identical to the build's own file | **measured**, 64-part rung | `probes/2026-09-17-term-images-rung6/README.md` |
+| pass 2b, term images: 1.484 s of a 51.4 s fold (2.9%), byte-identical to the build's own file | **measured**, 64-part rung | the 2026-09-17 term-images-rung6 probe |
 | pass 2b at rung 6, ~201 s, scaled by rows from the 64-part figure and agreeing with the build's own pre-flight model | **modelled**, not a rung 6 measurement | same probe |
 | on-disc bytes 2.0–2.6× manifest-named, monotone | **measured** at 10⁷ | `docs/evidence/memos/2026-08-05-write-path-at-scale.md` §2 |
 | merge peak RSS 4.4–4.9× input bytes — the multiplier this design refuses to inherit | **measured** | `probes/2026-08-04-maintenance-memory/` |
