@@ -57,16 +57,6 @@ RAM_BACKED = Path("/dev/shm")
 #: the whole corpus.
 DELTA_FOLDER = ".tessera/deltas"
 
-#: What a declaration verb that the paged commit does not yet send says. `tessera check
-#: --payloads` emits a body for every block kind; the planner sends layers, label sets, views and
-#: view groups, and not yet attributes or vocabularies (§6.2 step 1).
-NO_RUNTIME_DECLARATION = (
-    "not built yet, {verb} after the first commit. The paged commit sends a layer, a label set, a "
-    "view and a view group to the running service, and not yet an attribute or a vocabulary. "
-    "Declare it before the first commit, or rebuild the database with create(path, replace=True)"
-)
-
-
 class Database:
     """One database directory, and the declaration the SDK is building for it."""
 
@@ -194,8 +184,8 @@ class Database:
         Every block is expressible this way; the typed verbs below build the dict and call here,
         and this is the way to write a key whose verb is not built yet.
         """
-        if kind not in ("layer", "view", "view_group"):
-            self._refuse_a_later_commit("declare")
+        if kind == "attribute":
+            self._refuse_a_render_column(block.get("name"), block.get("render"))
         return self._declared(self.blocks.add(kind, block))
 
     def declare_view(self, name: str, source: str | None = None, **kwargs) -> dict:
@@ -269,7 +259,15 @@ class Database:
             )
 
     def declare_vocabulary(self, name: str, **kwargs) -> dict:
-        self._refuse_a_later_commit("declare_vocabulary")
+        """One `[[vocabulary]]` block, at any commit (§4.4).
+
+        A vocabulary declared after the first commit is sent as
+        `PUT /control/vocabularies/{name}` at the next commit, with the body `tessera check
+        --payloads` emits over this declaration. A closed set's values follow as
+        `PATCH /control/vocabularies/{name}/values`, from the `values=` list or from the `source=`
+        table's `(key, title?)` rows; an open set needs nothing more, its codes being minted from
+        the values that arrive.
+        """
         return self._declared(self.blocks.add("vocabulary", D.vocabulary_block(name, **kwargs)))
 
     def declare_attribute(self, name: str, type: str, **kwargs) -> dict:
@@ -277,15 +275,36 @@ class Database:
 
         `scope={"group": name}` makes it a family of columns, one per view of that group, and
         `fields={"view": column}` says where a source of its own carries the view each value
-        belongs to. Not built yet: an attribute declared after the first commit. The route and the
-        emitter's body both exist, and `tessera check` takes a declaration whose attribute names
-        no source, as a note (§11.1); what is missing is the SDK's own step 1 page for it, so
-        attributes are declared before the first commit alone.
+        belongs to.
+
+        An attribute declared after the first commit is sent as `PUT /control/attributes` at the
+        next commit, with the body `tessera check --payloads` emits over this declaration; the
+        column reads absent on every entity that predates it, and a delta on the attribute's source
+        fills it through `POST /control/values` as any values delta does. `render=True` is the one
+        such attribute the route refuses, and the refusal is here.
         """
-        self._refuse_a_later_commit("declare_attribute")
         block = D.attribute_block(name, type, **kwargs)
+        self._refuse_a_render_column(name, block.get("render"))
         self._refuse_an_undeclared_group("attribute", name, block)
         return self._declared(self.blocks.add("attribute", block))
+
+    def _refuse_a_render_column(self, name: Any, render: Any) -> None:
+        """A render column belongs to the first commit (decision 0136's amendment, §4.5).
+
+        `PUT /control/attributes` refuses `render: true` whatever the type: a rendered value is
+        served from the hot column of the row that carries it, and the route declares a column
+        against entities rather than rows. The rows this database holds have no slot for one, so
+        the refusal is at the verb, where the declaration is still the user's to change.
+        """
+        if not (self.built and render):
+            return
+        raise Refusal(
+            f"attribute {name!r}: render=True is fixed at the first commit. A rendered value is "
+            f"served from the hot column of the row that carries it, and PUT /control/attributes "
+            f"declares a column against entities that already exist, so it refuses one (decision "
+            f"0136's amendment). Declare it with index=True, which is filterable and drawn at "
+            f"drill-down, or rebuild the database with create(path, replace=True)"
+        )
 
     def _refuse_an_undeclared_group(self, kind: str, name: str, block: dict) -> None:
         """A scope names the group that owns the views its values or artifacts are keyed by."""
@@ -409,10 +428,6 @@ class Database:
                     return block["source"]
         return self.default_source
 
-    def _refuse_a_later_commit(self, verb: str) -> None:
-        if self.built:
-            raise Refusal(NO_RUNTIME_DECLARATION.format(verb=verb))
-
     # ------------------------------------------------------------------ the document
 
     @property
@@ -445,17 +460,56 @@ class Database:
             for block in document.get(kind, []):
                 if "source" in block or block.get("scope"):
                     continue
+                if kind == "attribute" and self._fills_through_the_values_route(block):
+                    continue
                 if self.default_source is None:
                     raise Refusal(
                         f"{kind} {block.get('name')!r} names no source and no source is "
                         f"staged with default=True"
                     )
                 block["source"] = self.default_source
+        self._drop_the_default_source(document)
         # Where identity is, block by block: the SDK rewrites no file, so a column staged under
         # the user's own name is named here rather than copied into a canonical one (§3).
         D.name_identity(document, self._id_column_of)
         self._refuse_a_view_without_its_labels(document)
         return document
+
+    def _drop_the_default_source(self, document: dict) -> None:
+        """`[defaults].source` goes where a column is filled rather than read (§6.2 step 1).
+
+        An attribute declared at a running service names no source, and the default is what such a
+        block would otherwise take: the file the first commit built from, which has never carried
+        the column. Every view and every other attribute names its source above, so nothing else
+        reads the default and dropping it binds nothing.
+        """
+        filled = [
+            block
+            for block in document.get("attribute", [])
+            if "source" not in block and not block.get("scope")
+        ]
+        if not filled:
+            return
+        defaults = document.get("defaults", {})
+        defaults.pop("source", None)
+        if not defaults:
+            document.pop("defaults", None)
+
+    def _fills_through_the_values_route(self, block: dict) -> bool:
+        """Whether an attribute that names no source is filled rather than read (§6.2 step 1).
+
+        An attribute declared at a running service has no acquisition half: its column reads absent
+        on every entity that predates it and is filled by `POST /control/values` from a delta.
+        `[defaults].source` names the file the first commit built from, and that file has never
+        carried the column, so naming it here would point `tessera check` at a column nobody wrote.
+        `tessera check` takes a block that names no source as a note (§11.1) and emits its payload,
+        which is what the next commit declares.
+        """
+        if not self.built:
+            return False
+        staged = self.sources.get(self.default_source) or self.deltas.get(self.default_source)
+        column = block.get("field") or block["name"]
+        return staged is None or column not in staged.columns
 
     def _refuse_a_view_without_its_labels(self, document: dict) -> None:
         """A view whose points file does not carry the access column it names (§4.2).

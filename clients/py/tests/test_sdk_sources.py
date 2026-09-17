@@ -152,22 +152,27 @@ def test_open_reads_the_blocks_back_from_the_sdks_own_copy(tmp_path):
         open_database(tmp_path)
 
 
-def test_a_built_database_refuses_the_declarations_that_have_no_runtime_route(tmp_path):
-    """A layer, a view and a group are sent to the running service; an attribute and a vocabulary
-    are the two the SDK does not send, so they refuse on a built database and name a rebuild."""
+def test_a_built_database_takes_every_declaration_but_a_render_column(tmp_path):
+    """Every block kind is declared at any commit; `render=True` is the one the route refuses.
+
+    A rendered value is served from the hot column of the row that carries it, and
+    `PUT /control/attributes` declares a column against entities that already exist, so the SDK
+    refuses it at the verb naming the first commit (decision 0136's amendment, §4.5).
+    """
     db = Database(tmp_path)
     db.built = True
-    for call in (
-        lambda: db.declare_attribute("a", type="u8"),
-        lambda: db.declare_vocabulary("v", values=["a"], closed=True),
-        lambda: db.declare("attribute", {"name": "a", "type": "u8"}),
-    ):
-        with pytest.raises(Refusal, match="not built yet"):
-            call()
-    # A layer, a view and a view group are declarable, the generic form included.
+    assert db.declare_attribute("a", type="u8")["name"] == "a"
+    assert db.declare_vocabulary("kinds", values=["a"], closed=True)["name"] == "kinds"
+    assert db.declare("attribute", {"name": "b", "type": "u8"})["name"] == "b"
     assert db.declare("layer", {"name": "l"})["name"] == "l"
     assert db.declare_view("v", source="points")["name"] == "v"
     assert db.declare_view_group("g", source="points", view_field="q")["name"] == "g"
+    for call in (
+        lambda: db.declare_attribute("hot", type="u8", render=True),
+        lambda: db.declare("attribute", {"name": "hot", "type": "u8", "render": True}),
+    ):
+        with pytest.raises(Refusal, match="render=True is fixed at the first commit"):
+            call()
 
 
 def test_a_from_column_layer_after_the_first_commit_is_refused_naming_the_tables(tmp_path):

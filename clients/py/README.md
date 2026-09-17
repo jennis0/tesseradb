@@ -76,15 +76,19 @@ frame is staged again and sent again, and what happens then is the database's an
 where the bytes and the batch id are the ones first sent, a `409` on the page where the ids are
 ones it holds. Databases are stateful, and this one says so rather than guessing.
 
-Not built yet, and what each does instead:
+Every declaration is made at any commit, and the next commit sends it to the running service: a
+vocabulary, an attribute, a layer, a label set, a plain view, a view group and a view added to a
+group. Three of them are narrower after the first commit than before it:
 
-- **An attribute or a vocabulary declared after the first commit.** Those two verbs refuse on a
-  built database and name a rebuild. A layer, a label set, a plain view, a view group and a view
-  added to a group are declarable at any commit, and the next commit sends each to the running
-  service. A view declared after the first commit names its own `extent=`, there being no rows
-  at a running service to fit a frame against. `declare_layer(from_column=...)` is refused there
-  too: the column mints artifacts at the build and on the ingest route, so a clustering over rows
-  the database already holds is published through `source=` and `members=`.
+- A **view** names its own `extent=`, there being no rows at a running service to fit a frame
+  against.
+- An **attribute** declared there is not a render column: a rendered value is served from the hot
+  row that carries it, and `PUT /control/attributes` declares a column against entities that
+  already exist, so `render=True` is refused at the verb (decision 0136's amendment). An indexed
+  column is added at any time, and a delta on its source fills it.
+- `declare_layer(from_column=...)` is refused: the column mints artifacts at the build and on the
+  ingest route, so a clustering over rows the database already holds is published through
+  `source=` and `members=`.
 
 ## The commit after the first
 
