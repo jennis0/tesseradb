@@ -116,10 +116,12 @@ data names one. `data` is a pandas or polars frame, a pyarrow table, or a path. 
 written to `sources/<name>.parquet`; a path is recorded and read in place, so a large file is
 not copied. Staging a name twice before the first commit replaces the earlier data.
 
-`default=True` makes this source the declaration's `[defaults].source`: a declaration block
-that names no source reads it. Without a default the SDK writes no `source` under `[defaults]`
-(the block still carries `allocation_view`, §4.2), and a block with no source is refused at
-`check()` naming the block. A second `default=True` replaces
+`default=True` makes this source the one a declaration block that names no source reads. The
+SDK fills that source onto every such block when it writes the declaration and never writes
+`source` under `[defaults]` (the block carries `allocation_view` alone, §4.2), so the written
+TOML is fully explicit and has one shape before and after the first commit; an attribute
+declared after the first commit names no source, since nothing reads it from a file. Without a
+default, a block with no source is refused at `check()` naming the block. A second `default=True` replaces
 the first and the call says so.
 
 **Identity.** A row is named one of two ways, and the SDK keeps no map between them.
@@ -370,9 +372,13 @@ the order is fixed:
 1. **Declarations** added since the last commit, as the runtime `PUT`s (ingest.md §1.3): view
    groups, then a `members` group after the group it names, roster views, plain views, layers
    and label sets, each body from `tessera check --payloads` (configuration.md §2) except the
-   roster record, which the SDK builds. Not built yet: an attribute or a vocabulary declared
-   after the first commit is refused naming the first commit as the place to declare it, because
-   `tessera check` refuses a declaration whose attribute names no source (§11.2 G4).
+   roster record, which the SDK builds; vocabularies before the attributes that name them, both
+   before any values page. A closed vocabulary's body carries its first page of values, since the
+   route refuses a closed set with none, and the rest follow as `PATCH` pages sized by rows and by
+   the route's body cap; a sourced set's `(key, title?)` rows are paged the same way. A vocabulary
+   no column names yet is not on `/v1/meta`, so it is redeclared at each commit and the route
+   answers it as held. A `render` column is refused at the verb after the first commit (decision
+   0136's amendment).
 2. **Points**, per view, the allocation view first, in pages under the limits `/control/status`
    publishes, with `x-tessera-view` on each. A from-column layer's key travels with a new row
    and mints its artifact at the window close. A delta on a second view's source carries ids,
@@ -671,7 +677,7 @@ prints. The stages order the building; the goal is all of them.
 | S3 pages | later commits: the plan, the pre-flight, batch ids, the flush wait, the report, layers and labels declared after the first commit; `remove`, `suppress`, `unsuppress`, `leave` | §10.3 and §10.4 against the served answers | S1 |
 | S4 the rest of the layer surface | spatial and attribute membership, shapes and spaces, per-level zoom, prune, attached and dependent layers, inline artifacts and values, exclusion | `overture`, `geonames`, `gbif`, `treeoflife`, `medcpt`, `paperseek` | S1 |
 | S5 groups | `declare_view_group`, `add_view`, scoped attributes and layers, `view` on the record; views and groups after the first commit | `multiview` | S1, S3 |
-| S6 runtime declarations | attributes and vocabularies declared after the first commit | | S3, G4 |
+| S6 runtime declarations | attributes and vocabularies declared after the first commit | the served filter and category listing | S3 |
 | S7 demo | the two notebooks and the headless test | | S2, S3 |
 | S8 simplification | the id map, the commit log and its digests, the access-column copy, the from-column publish and the held-row logic removed; the pre-flight reports and sends nothing; the wait on the publication counter | every existing test, rewritten to the stateful reading | A, the publication signal |
 
