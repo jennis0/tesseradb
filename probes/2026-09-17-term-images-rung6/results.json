@@ -1,0 +1,264 @@
+{
+  "probe": "term images at rung 6, Part A",
+  "date": "2026-09-17",
+  "status": "Part A only: corpus prepared, gbif-64p-terms built and measured, rung 6 modelled and not built",
+  "box": {
+    "host": "WSL2, 12 cores, 47 GiB in the VM, local NVMe",
+    "commit": "032b8296",
+    "build_command": "tessera build --memory-budget 24g --no-oracle-pairs --stage-timings",
+    "cap": "none; both 64-part builds hold 2.8 GiB. The rung 6 bundle was not opened."
+  },
+  "corpus": {
+    "gbif-64p-terms": {
+      "measured": true,
+      "rows": 25846007,
+      "terms": 186178,
+      "pairs": 75023354,
+      "pairs_per_row": 2.903,
+      "terms_by_class": {
+        "country": 252,
+        "year": 508,
+        "species": 185418
+      },
+      "pairs_by_class": {
+        "country": 25846007,
+        "year": 25221921,
+        "species": 23955426
+      },
+      "points_parquet_bytes_in": 430242971,
+      "points_parquet_bytes_out": 519511000,
+      "rewrite_wall_s": 13.42
+    },
+    "gbif-terms": {
+      "measured": true,
+      "rows": 3495729729,
+      "terms": 1399205,
+      "pairs": 10124084726,
+      "pairs_per_row": 2.896,
+      "terms_by_class": {
+        "country": 253,
+        "year": 527,
+        "species": 1398425
+      },
+      "pairs_by_class": {
+        "country": 3495729729,
+        "year": 3407218226,
+        "species": 3221136771
+      },
+      "points_parquet_bytes_in": 55053977475,
+      "note": "terms and pairs are the first pass's census, not extrapolated",
+      "points_parquet_bytes_out": 66518543857,
+      "rewrite_wall_s": 1972.33,
+      "members_taxonomy_hardlinked_from": "data/ladder/gbif"
+    }
+  },
+  "build_64p": {
+    "measured": true,
+    "unit": "seconds",
+    "stages": {
+      "source_ids": [
+        0.73,
+        1.34
+      ],
+      "dictionary": [
+        1.62,
+        18.3
+      ],
+      "geometry_read": [
+        3.69,
+        9.83
+      ],
+      "signature_sort": [
+        0.86,
+        1.89
+      ],
+      "assignment": [
+        6.49,
+        9.03
+      ],
+      "postings_write": [
+        0.38,
+        1.54
+      ],
+      "attribute_tail": [
+        12.45,
+        11.04
+      ],
+      "layers": [
+        14.31,
+        14.61
+      ],
+      "filter_postings": [
+        6.33,
+        5.6
+      ],
+      "record_blob": [
+        3.34,
+        2.85
+      ],
+      "column_release": [
+        0.12,
+        0.16
+      ],
+      "tiler_sort": [
+        2.23,
+        2.47
+      ],
+      "segment_write": [
+        5.47,
+        5.15
+      ],
+      "artifact_pass": [
+        10.64,
+        8.62
+      ],
+      "term_images": [
+        0.13,
+        6.63
+      ],
+      "manifests": [
+        0.24,
+        0.22
+      ]
+    },
+    "stage_sum": [
+      69.03,
+      99.28
+    ],
+    "ratio": 1.44,
+    "stage_peak_vmhwm_mib": 2774,
+    "bundle_bytes": [
+      1456908819,
+      1662295444
+    ],
+    "term_images": {
+      "country_only": {
+        "terms": 253,
+        "kept": 246,
+        "payload_bytes": 92210,
+        "table_bytes": 10120,
+        "largest_bytes": 7250,
+        "wall_s": 0.1,
+        "timg_bytes": 102485
+      },
+      "terms": {
+        "terms": 186179,
+        "kept": 5516,
+        "payload_bytes": 76610000,
+        "table_bytes": 7450000,
+        "largest_bytes": 2660000,
+        "wall_s": 6.6,
+        "timg_bytes": 84052461
+      }
+    },
+    "bundle_file_deltas_bytes": {
+      "entities/terms/terms.u32": 196709388,
+      "term-images/*.timg": 83949976,
+      "terms/postings.arrow": 20367680,
+      "dictionary/terms-0.dict": 2425488,
+      "attrs/record/blocks.bin": -92135560,
+      "attrs/year+specieskey/presence.roaring": -2264173,
+      "members": -3666658
+    }
+  },
+  "rung6_today": {
+    "measured": true,
+    "format": 11,
+    "bundle_bytes": 209848836527,
+    "terms_u32_bytes": 13982918916,
+    "postings_arrow_bytes": 792946,
+    "dict_bytes": 1536,
+    "wall_s": 10353,
+    "wall": "2 h 52 m 33 s",
+    "source": "docs/ingest-campaign.md 4d, third build, main 488e43e5"
+  },
+  "rung6_model": {
+    "measured": false,
+    "terms_u32_bytes": 40496338904,
+    "terms_u32_delta_bytes": 26513419988,
+    "terms_u32_note": "exact: 4 B a pair, measured at both rungs",
+    "timg_payload_bytes": 11208000000,
+    "timg_table_bytes": 55968200,
+    "timg_bytes": 11264000000,
+    "timg_source": "probe/projection-build, rung 6 derivation measured 2026-09-16 at the same keep rule",
+    "kept_images": 89224,
+    "postings_arrow_bytes": [
+      153000000,
+      2750000000
+    ],
+    "dict_bytes": 18190000,
+    "bundle_bytes": [
+      247600000000,
+      250200000000
+    ],
+    "bundle_gib": [
+      230.6,
+      233.0
+    ],
+    "stage_s": {
+      "source_ids": [
+        149,
+        149
+      ],
+      "dictionary": [
+        1760,
+        2470
+      ],
+      "geometry_read": [
+        940,
+        1330
+      ],
+      "signature_sort": [
+        260,
+        400
+      ],
+      "assignment": [
+        1490,
+        1490
+      ],
+      "postings_write": [
+        210,
+        240
+      ],
+      "term_images": [
+        160,
+        270
+      ],
+      "other_stages": [
+        7763,
+        7763
+      ],
+      "untimed": [
+        685,
+        685
+      ]
+    },
+    "wall_s": [
+      13441,
+      14794
+    ],
+    "wall": "3 h 45 m to 4 h 07 m",
+    "cross_check": "the whole 64-part build scaled by its own 1.44 ratio gives 4 h 08 m"
+  },
+  "disk": {
+    "measured": true,
+    "free_gb_df": 135,
+    "free_gb_statvfs": 144,
+    "rung6_build_needs_gb": 248,
+    "note": "the build's transient never exceeded the finished bundle at the third build (ingest-campaign 4d)",
+    "releasable_gb": {
+      "gbif/bundle": 209.8,
+      "gbif/points.parquet": 55.05,
+      "gbif/members-taxonomy.parquet": 0.0
+    },
+    "members_note": "gbif and gbif-terms share one inode for members-taxonomy.parquet, so deleting gbif's copy frees nothing",
+    "after_option_a_gb": {
+      "before_build": 345,
+      "after_build": 97
+    },
+    "after_option_b_gb": {
+      "before_build": 400,
+      "after_build": 152
+    }
+  }
+}
