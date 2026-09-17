@@ -54,8 +54,8 @@ use crate::DenyMask;
 pub struct ProjectionInputs<'a> {
     /// The session's mask fragment, in entity space.
     pub fragment: &'a FrozenFragment,
-    /// The terms the session satisfies, ascending and deduplicated — the `T` of the exactness
-    /// argument in `tessera_store::term_images`.
+    /// The terms the session satisfies, ascending and deduplicated. This is the `T` of the
+    /// exactness argument in `tessera_store::term_images`.
     pub satisfied: &'a [TermId],
     /// The generation's base postings.
     pub postings: &'a PostingsReader,
@@ -84,8 +84,8 @@ pub enum ProjectionRoute {
 }
 
 impl ProjectionRoute {
-    /// Every route, in the order [`ProjectionRoute::index`] numbers them — the order the engine's
-    /// per-route counters and `/control/status` publish.
+    /// Every route, in the order [`ProjectionRoute::index`] numbers them, which is the order the
+    /// engine's per-route counters and `/control/status` publish.
     pub const ALL: [ProjectionRoute; 4] = [
         ProjectionRoute::WholeDomain,
         ProjectionRoute::Walk,
@@ -117,9 +117,9 @@ impl ProjectionRoute {
 /// The per-route build counters, the forced route a test may fix, and the one place a projection
 /// build is counted.
 ///
-/// **One value shared by the two sites that build a full projection** — the request path's
-/// `Engine::session_geometry` and the background refresh's rung 3 — so a forced route reaches both
-/// and neither can count into a gauge the other does not.
+/// **One value shared by the two sites that build a full projection**, the request path's
+/// `Engine::session_geometry` and the background refresh's rung 3. A forced route therefore reaches
+/// both, and neither can count into a gauge the other does not.
 #[derive(Debug, Default)]
 pub struct ProjectionRoutes {
     counts: [AtomicU64; 4],
@@ -154,11 +154,11 @@ impl ProjectionRoutes {
     /// Build a projection by [`RowProjection::new`] and count the route it took.
     ///
     /// **Postings the split route cannot read leave it walking instead**, warned and counted as a
-    /// walk. Both reads are of the same postings and tiers the session's fragment was unioned from
-    /// moments earlier — the chooser's sum over the satisfied terms' delta postings, and the
-    /// residual itself — so a failure here is a host condition rather than a state the request can
-    /// reach;
-    /// what matters is that the fallback is the reference computation and not a narrower one. The
+    /// walk. The two reads are the chooser's sum over the satisfied terms' delta postings and the
+    /// residual itself, both over the postings and tiers the session's fragment was unioned from
+    /// moments earlier, so a failure here is a host condition rather than a state the request can
+    /// reach. What matters is that the fallback is the reference computation and not a narrower
+    /// one. The
     /// walk crosses the whole fragment and returns the identical rows, so a session served this
     /// way is served the same set more slowly. Refusing instead would cost a session its map for a
     /// fault that costs it nothing, and the two call sites cannot carry an error out in any case:
@@ -350,7 +350,7 @@ impl RowProjection {
                 held,
                 bound,
                 complement_valid,
-                tessera_authz::delta_rows(inputs.satisfied, inputs.deltas)?,
+                tessera_authz::delta_entities(inputs.satisfied, inputs.deltas)?,
             ),
             None => ChooserInputs {
                 held,

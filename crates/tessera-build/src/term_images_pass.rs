@@ -40,6 +40,29 @@ use crate::error::{BuildError, Result};
 /// it belongs to, and a build writes `SEGMENTS-0.json`.
 const MANIFEST_N: u64 = 0;
 
+/// The most workers this pass runs across, whatever the machine offers.
+///
+/// Four. The pass holds one term per worker in flight, and what that costs is the worker count
+/// times three bitmaps of a bitset container per 65,536 values: at 3.5×10⁹ rows a worker is about
+/// 1.3 GB, so an unbounded width forecasts past the memory budget a rung-6 build runs under.
+/// `crate::residency` charges this same width, and the forecast is what refuses a build.
+///
+/// Width buys little here. On the 64-part rung twelve workers derived one view in 6.6 s where the
+/// fold's single thread took 1.5 s for byte-identical output (measured 2026-09-17): the terms are
+/// small, so each projection is short beside the mutex over the scratch pool and the window's
+/// serial read. Stage 6 measures the stage at rung 6, where the terms are larger and the balance
+/// may differ.
+const TERM_IMAGE_BUILD_THREADS: usize = 4;
+
+/// Workers this build's derivation runs across: the machine's width, capped at
+/// [`TERM_IMAGE_BUILD_THREADS`].
+///
+/// One function, called by the pass and by the residency model, so the forecast and the pass
+/// cannot disagree about how many terms are held at once.
+pub(crate) fn derive_threads() -> usize {
+    rayon::current_num_threads().clamp(1, TERM_IMAGE_BUILD_THREADS)
+}
+
 /// What one view's derivation came to, for [`crate::ViewReport`].
 ///
 /// Reported per view rather than per bundle because a group's keys are separate views over one
@@ -148,7 +171,7 @@ pub fn run(
         Ok(())
     };
     let options = DeriveOptions {
-        threads: rayon::current_num_threads().max(1),
+        threads: derive_threads(),
     };
     let summary = derive_term_images(&space, dict_len, &walk, &stamp, &file.path, options)
         .map_err(|e| BuildError::io(&file.path, e))?;

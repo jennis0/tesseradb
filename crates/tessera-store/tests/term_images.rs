@@ -20,7 +20,8 @@ use rand::{Rng, SeedableRng};
 use tessera_store::derived::PostingSlice;
 use tessera_store::permutation::Permutation;
 use tessera_store::term_images::{
-    derive_term_images, DeriveOptions, TermImageStamp, TermImages, KEEP_ROWS_PER_CONTAINER,
+    chooser_inputs, derive_term_images, DeriveOptions, TermImageStamp, TermImages,
+    KEEP_ROWS_PER_CONTAINER,
 };
 use tessera_store::write::write_permutation;
 use tessera_store::RowSpace;
@@ -157,12 +158,26 @@ fn a_derived_file_carries_what_an_independent_projection_produces() {
     assert_eq!(images.stamp(), &stamp_of(&space));
 
     let mut kept = Vec::new();
+    let mut fewer_rows_than_entities = 0;
     for (term, posting) in postings.iter().enumerate() {
         let term = TermId::new(term as u32);
         let entry = images.entry(term).expect("within the dictionary");
         let mut expected = space.project_base(posting);
         expected.run_optimize();
         let stats = expected.statistics();
+
+        assert_eq!(
+            u64::from(entry.entities),
+            posting.cardinality(),
+            "term {term:?} entities is the posting's own cardinality"
+        );
+        assert!(
+            entry.rows <= u64::from(entry.entities),
+            "term {term:?} cannot hold more rows than its posting has entities"
+        );
+        if entry.rows < u64::from(entry.entities) {
+            fewer_rows_than_entities += 1;
+        }
 
         if posting.cardinality() <= KEEP_ROWS_PER_CONTAINER {
             assert_eq!(
@@ -209,6 +224,11 @@ fn a_derived_file_carries_what_an_independent_projection_produces() {
     }
 
     assert!(kept.len() >= 8, "the fixture must keep several images");
+    assert!(
+        fewer_rows_than_entities > 0,
+        "the fixture's permutation must leave some entities without a row, so that the two \
+         columns are distinguishable"
+    );
     let unioned = images.union(&kept);
     let projections: Vec<Bitmap> = kept
         .iter()
@@ -227,6 +247,43 @@ fn a_derived_file_carries_what_an_independent_projection_produces() {
     assert!(images.view(above).is_none());
     assert!(images.union(&[above]).is_empty());
     assert!(images.union(&[]).is_empty());
+}
+
+/// The chooser's residual is the unkept terms' **entities**, not their rows.
+///
+/// The walk reads one permutation slot per entity whether or not the slot holds a row, so a
+/// permutation that gives some entities no row makes the two columns differ and the sum must
+/// follow the larger one.
+#[test]
+fn the_chooser_prices_the_residual_in_entities() {
+    const BOUND: u64 = 3 << 16;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut rng = StdRng::seed_from_u64(11);
+    let entities = row_order(BOUND, 0.9, Some(1), &mut rng);
+    let space = space_of(dir.path(), &entities, BOUND);
+    let postings = mixed_postings(40, BOUND, &mut rng);
+
+    let out = dir.path().join("chooser.timg");
+    derive(&space, &postings, &out, 1).expect("derive");
+    let images = TermImages::open(&out, &stamp_of(&space), postings.len() as u32).expect("opens");
+
+    let satisfied: Vec<TermId> = (0..postings.len() as u32).map(TermId::new).collect();
+    let inputs = chooser_inputs(&images, &satisfied, 1_000, BOUND, false, 0);
+
+    let mut unkept_entities = 0u64;
+    let mut unkept_rows = 0u64;
+    for term in satisfied.iter().copied() {
+        let entry = images.entry(term).expect("within the dictionary");
+        if !entry.kept() {
+            unkept_entities += u64::from(entry.entities);
+            unkept_rows += entry.rows;
+        }
+    }
+    assert!(
+        unkept_rows < unkept_entities,
+        "the fixture must hold an unkept term whose posting has entities with no row"
+    );
+    assert_eq!(inputs.residual_entities, unkept_entities);
 }
 
 /// **A path that already holds a file is refused, and the file standing there is left alone.**
