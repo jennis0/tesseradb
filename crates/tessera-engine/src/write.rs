@@ -8520,11 +8520,16 @@ impl Executor {
             row_column_extents: Vec::new(),
             shape_rows_extents: Vec::new(),
             shape_held_extents: Vec::new(),
-            // **Empty**, because the paths are prefix-relative and the fold publishes a new
-            // prefix, so the live list names files this prefix does not contain. Not built yet:
-            // the fold derives no images of its own, and every session on a folded prefix builds
-            // its row projection by walking the permutation.
-            term_image_extents: Vec::new(),
+            // **Pass 2b's own output, not the live list.** The paths are prefix-relative and the
+            // fold publishes a new prefix, so what the fold thread wrote is the only list naming
+            // files this prefix contains. The images cover the new base alone, which is what a
+            // projection of the base is: a flush landing during the flight is carried forward as
+            // an extent, and an extent's rows are walked.
+            term_image_extents: completed
+                .term_images
+                .iter()
+                .map(|images| images.extent.clone())
+                .collect(),
             artifact_record_extents: self.artifact_record_extents.clone(),
             segments,
             deltas: carried_tiers.clone(),
@@ -9155,6 +9160,24 @@ impl Executor {
             .last_fold_attr_written
             .store(completed.attr_bytes_written, Ordering::Relaxed);
         *lock_recover(&self.health.last_fold_passes) = cost;
+        // **One line per view, beside the summary rather than inside it** (ruling G,
+        // `docs/evidence/memos/2026-09-17-term-images-handover.md`): a group's keys are separate
+        // views over one dictionary, each paying its own table and its own payload, and a total
+        // says nothing about which of them is expensive. The build reports the same four figures
+        // per view, so the two routes' reports read alike.
+        for images in &completed.term_images {
+            let summary = &images.summary;
+            tracing::info!(
+                prefix = %completed.prefix,
+                view = %images.extent.view,
+                kept = summary.kept,
+                terms = summary.terms,
+                payload_bytes = summary.payload_bytes,
+                table_bytes = summary.table_bytes,
+                wall_s = summary.wall.as_secs_f64(),
+                "a fold wrote a view's term images"
+            );
+        }
         tracing::info!(
             prefix = %completed.prefix,
             segments_version,
