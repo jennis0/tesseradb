@@ -713,6 +713,10 @@ pub struct AppState {
     /// nothing else, on `cors_origins`' rule. The session plane's bearer is the credential that
     /// mints tokens, and a loopback page is still a browser page.
     pub cors_loopback: bool,
+    /// `serve.visible_wait_max_secs`: the ceiling on a `wait=visible` write acknowledgement's
+    /// wait. The wait polls the publication counter and holds no lock and no executor, so this
+    /// bounds a client's latency and nothing else.
+    pub visible_wait_max_secs: u64,
     /// The write executor's fault switchboard — the faults build only (decision 0071), absent
     /// from the struct in a default build rather than present and inert. The same `Arc` the
     /// executor consults, so `/control/faults/*` arms the thread that actually pauses. Bearer

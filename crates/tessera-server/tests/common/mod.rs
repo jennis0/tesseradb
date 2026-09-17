@@ -323,6 +323,7 @@ pub async fn spawn_server_with_stream_flush(
         stream_flush_bytes,
         stream_write_stall_ms,
         Arc::new(FaultSwitchboard::new()),
+        DEFAULT_VISIBLE_WAIT_MAX_SECS,
     )
     .await
 }
@@ -479,6 +480,10 @@ pub async fn mount_server_with_ingest_limits(
     .await
 }
 
+/// `serve.visible_wait_max_secs`' shipped default, which every mount but the one that means to
+/// observe the bound takes.
+pub const DEFAULT_VISIBLE_WAIT_MAX_SECS: u64 = 30;
+
 /// The two CORS origin lists, named rather than positional.
 ///
 /// Two `Vec<String>` parameters side by side is exactly the shape a caller transposes, and
@@ -523,6 +528,35 @@ impl CorsOrigins {
             ..Self::default()
         }
     }
+}
+
+/// Like [`spawn_server`], with `serve.visible_wait_max_secs` chosen by the caller: the bound a
+/// `wait=visible` answer is held for (contracts §3.4). `0` answers without waiting at all.
+pub async fn spawn_server_with_visible_wait(
+    bundle_root: &Path,
+    cache_dir: &Path,
+    wal_path: &Path,
+    visible_wait_max_secs: u64,
+) -> TestServer {
+    let config = default_engine_config();
+    let max_k = config.max_k;
+    let mut engine = Engine::open(bundle_root, cache_dir, wal_path, Passthrough::new(), config)
+        .expect("engine should open against a freshly built bundle");
+    engine
+        .start_write_executor(1024)
+        .expect("the write executor starts once per engine");
+    mount_server_with_flush(
+        engine,
+        max_k,
+        generous_test_gate(),
+        generous_ingest_limits(),
+        CorsOrigins::none(),
+        1 << 20,
+        10_000,
+        Arc::new(FaultSwitchboard::new()),
+        visible_wait_max_secs,
+    )
+    .await
 }
 
 /// Like [`spawn_server`], but with the CORS origin lists set — `tests/cors.rs` only.
@@ -572,6 +606,7 @@ async fn mount_server_with(
         1 << 20,
         10_000,
         Arc::new(FaultSwitchboard::new()),
+        DEFAULT_VISIBLE_WAIT_MAX_SECS,
     )
     .await
 }
@@ -595,6 +630,7 @@ pub async fn mount_server_with_faults(
         1 << 20,
         10_000,
         faults,
+        DEFAULT_VISIBLE_WAIT_MAX_SECS,
     )
     .await
 }
@@ -612,6 +648,7 @@ async fn mount_server_with_flush(
     stream_flush_bytes: usize,
     stream_write_stall_ms: u64,
     faults: Arc<FaultSwitchboard>,
+    visible_wait_max_secs: u64,
 ) -> TestServer {
     let state = Arc::new(AppState {
         engine,
@@ -661,6 +698,7 @@ async fn mount_server_with_flush(
         dev_cors_origins: cors.dev,
         cors_origins: cors.production,
         cors_loopback: cors.loopback,
+        visible_wait_max_secs,
         faults,
     });
 
