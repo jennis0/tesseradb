@@ -2996,8 +2996,9 @@ impl Engine {
     /// itself, because the chooser picks the same one for the same principal every time.
     ///
     /// A forced route with nothing to run — a split where the view has no images or the session
-    /// holds no term with one, a complement while its arithmetic is unwritten, a whole-domain
-    /// answer over a grant that is not whole — walks instead, and
+    /// holds no term with one, a complement over a base that does not record the row count its
+    /// slots are a bijection onto, a whole-domain answer over a grant that is not whole — walks
+    /// instead, and
     /// [`Self::projection_builds_by_route`] records the walk. A caller asserting that its forced
     /// route ran reads the gauge.
     #[cfg(feature = "fault-injection")]

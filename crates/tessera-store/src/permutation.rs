@@ -523,10 +523,12 @@ pub struct Permutation {
     /// **What it is for:** a mask holding every entity in `[0, bound)` projects to every row this
     /// mapping has, and this value is what says those rows are the contiguous range
     /// `[0, dense_rows)` rather than some subset of it. With it, [`Self::project_with`] answers a
-    /// whole-domain mask as that range and reads no page; without it, it walks. Two routes set it,
-    /// and both are the same claim from a different source: [`Self::validate_rows`] counts the
-    /// slots and finds they number `row_count`, and [`Self::declare_dense_rows`] takes the writer's
-    /// word for the same count where the caller's premise is that this process wrote the file.
+    /// whole-domain mask as that range and reads no page, and [`Self::project_complement_with`]
+    /// answers any mask by walking the entities outside it; without it, every mask walks. Two
+    /// routes set it, and both are the same claim from a different source:
+    /// [`Self::validate_rows`] counts the slots and finds they number `row_count`, and
+    /// [`Self::declare_dense_rows`] takes the writer's word for the same count where the caller's
+    /// premise is that this process wrote the file.
     /// Unset means neither has spoken, and the walk answers everything.
     dense_rows: std::sync::OnceLock<u32>,
 }
@@ -782,8 +784,9 @@ impl Permutation {
     /// The checks below establish injectivity; counting the claims is what turns that into
     /// surjectivity, since `row_count` distinct claims below `row_count` are all of them. Only the
     /// surjective case is recorded, and only a recorded one enables [`Self::project_with`]'s
-    /// whole-domain answer — a file claiming fewer rows than the descriptor declares takes the
-    /// general path, where the image is read rather than assumed.
+    /// whole-domain answer and [`Self::project_complement_with`] at all — a file claiming fewer
+    /// rows than the descriptor declares takes the general path, where the image is read rather
+    /// than assumed.
     pub fn validate_rows(&self, row_count: u32) -> Result<()> {
         let row_count_usize = row_count as usize;
         let mut seen = RowsSeen::new(row_count_usize);
@@ -844,7 +847,9 @@ impl Permutation {
     /// established it.
     ///
     /// `Some` says the slots are onto `[0, rows)`, which is what [`Self::project_with`]'s
-    /// whole-domain answer rests on; it says nothing about any particular mask.
+    /// whole-domain answer rests on and what [`Self::project_complement_with`] requires; it says
+    /// nothing about any particular mask. A caller choosing a route reads it here: it is the whole
+    /// of the complement route's validity.
     pub fn dense_rows(&self) -> Option<u32> {
         self.dense_rows.get().copied()
     }
@@ -983,6 +988,13 @@ impl Permutation {
     /// decode-source choice. Appendix C's **C19** names this branch as one of its accepted
     /// widenings rather than giving it a row of its own (owner ruling, 2026-09-14).
     ///
+    /// **[`Self::project_complement_with`] is the same shape.** Whether a session takes it depends
+    /// on how large the principal's own grant is against the domain, which is a fact the principal
+    /// holds already, and the set it returns is the set this walk returns from the same mask. It
+    /// reads the slots of entities the principal does not hold, and what it does with them is
+    /// subtract their rows from the row range. Nothing read there is aggregated or served. C19
+    /// covers it on the same ruling.
+    ///
     /// The invariant this file carries is I4 — it is the only EntityId→RowId path — and both
     /// routes keep it, neither handing an entity id or a `tessera_id` to a caller, so I10 stands
     /// where it stood.
@@ -1008,13 +1020,77 @@ impl Permutation {
     ) -> croaring::Bitmap {
         if let Some(&rows) = self.dense_rows.get() {
             if self.covers_domain(mask) {
-                return match rows {
-                    0 => croaring::Bitmap::new(),
-                    rows => croaring::Bitmap::from_range(0..rows),
-                };
+                return Self::row_range(rows);
             }
         }
         self.project_windowed(mask, scratch, PROJECT_WINDOW_ROWS)
+    }
+
+    /// The image of `mask`, computed from the entities **outside** it:
+    /// `[0, rows) \ image([0, bound) \ mask)`. `None` where that route cannot answer, and then the
+    /// caller walks.
+    ///
+    /// **The same set [`Self::project_with`] returns**, reached by walking `bound − |mask|` slots
+    /// instead of `|mask|` of them. It is the route for a principal holding most of the domain: a
+    /// grant over 99% of it walks 1% of the entities. A session picks between this and the other
+    /// routes by cost, before any of them runs (`crate::term_images::choose`); this function
+    /// decides nothing but whether it has an answer at all.
+    ///
+    /// # Why it is the same set
+    ///
+    /// The route needs [`Self::dense_rows`], and that is the whole of its validity: with it the
+    /// slots are a bijection onto `[0, rows)`, so **every row is claimed by exactly one entity in
+    /// `[0, bound)`**, and that entity is either in the mask or in the complement. The rows of the
+    /// complement are therefore exactly the rows the mask does not reach, and subtracting them from
+    /// the whole range leaves the mask's own image. Without it nothing says the rows are `[0, rows)`
+    /// rather than some subset, the subtraction would remove rows no entity claims, and the answer
+    /// is `None`.
+    ///
+    /// An entity in the complement with no row, from an absent slot or an absent page, projects to
+    /// nothing and subtracts nothing. That is right: it claims no row the mask could be denied.
+    /// An entity at or above `bound` in the mask is not this permutation's. The walk skips it, and
+    /// the complement is taken over `[0, bound)`, so neither route lets it reach a row.
+    ///
+    /// # Transient memory
+    ///
+    /// ⊘ **Modelled.** The peak is two bitmaps: the complement of the mask, at most one bitset
+    /// container per 65 536 entities of `bound`, and the image of it the walk produces, at most one
+    /// per 65 536 rows. At `bound = rows = 3.5×10⁹` each is 53 407 containers of 8 KiB, **437 MB
+    /// each and 875 MB together**, on top of the walk's own transient, which is as
+    /// [`Self::project`] states (at most 82 MiB of buckets and a 512 KB stamp). The complement is
+    /// built in place, so that step holds one bitmap and the mask's own containers rather than a
+    /// second copy of the range, and it is dropped as soon as the walk over it returns. What
+    /// replaces it is the answer rather than a transient. A grant close to the whole domain, which
+    /// is what this route is for, holds far less than that on both counts, because its complement
+    /// is small.
+    pub fn project_complement_with(
+        &self,
+        mask: &croaring::Bitmap,
+        scratch: &mut ProjectScratch,
+    ) -> Option<croaring::Bitmap> {
+        let &rows = self.dense_rows.get()?;
+        // A bound of zero holds no entity, and one above the `u32` entity ceiling (I9) names
+        // entities no mask can hold, as `covers_domain` reads it. Neither has a complement to walk.
+        let hi = self
+            .bound
+            .checked_sub(1)
+            .and_then(|hi| u32::try_from(hi).ok())?;
+        let outside = {
+            let mut complement = croaring::Bitmap::from_range(0..=hi);
+            complement.andnot_inplace(mask);
+            self.project_windowed(&complement, scratch, PROJECT_WINDOW_ROWS)
+        };
+        let mut image = Self::row_range(rows);
+        image.andnot_inplace(&outside);
+        Some(image)
+    }
+
+    /// `[0, rows)` as a bitmap. Zero rows is the empty bitmap.
+    fn row_range(rows: u32) -> croaring::Bitmap {
+        match rows {
+            0 => croaring::Bitmap::new(),
+            rows => croaring::Bitmap::from_range(0..rows),
+        }
     }
 
     /// [`Self::project_with`]'s general path: the bucket walk, emitting and unioning every
@@ -1639,6 +1715,18 @@ impl RowSpace {
         self.base.project(mask)
     }
 
+    /// [`Self::project_base`] by the complement route: the base's contribution derived from the
+    /// entities outside `mask` ([`Permutation::project_complement_with`]). `None` where that route
+    /// has no answer, and then the caller projects as it otherwise would.
+    ///
+    /// **The extents are not in this**, as they are not in [`Self::project_base`]. A caller
+    /// building a whole-view projection adds `project_extents_from(mask, 0)` above it, which is the
+    /// term [`Self::project`] adds above the base's own contribution by any route.
+    pub fn project_complement_base(&self, mask: &croaring::Bitmap) -> Option<croaring::Bitmap> {
+        self.base
+            .project_complement_with(mask, &mut ProjectScratch::default())
+    }
+
     /// [`Self::project_base`], reusing a caller's scratch — see [`Permutation::project_with`].
     pub fn project_base_with(
         &self,
@@ -1938,7 +2026,8 @@ mod tests {
                 .count(),
         )
         .expect("fixture rows fit u32");
-        perm.validate_rows(rows).expect("the fixture is a bijection");
+        perm.validate_rows(rows)
+            .expect("the fixture is a bijection");
         assert_eq!(perm.dense_rows.get(), Some(&rows));
 
         let mask = croaring::Bitmap::from_range(0..BOUND as u32);
@@ -1963,15 +2052,16 @@ mod tests {
         }
         assert!(perm.covers_domain(&with_flushed));
         assert_eq!(
-            perm.project(&with_flushed)
-                .iter()
-                .collect::<Vec<u32>>(),
+            perm.project(&with_flushed).iter().collect::<Vec<u32>>(),
             perm.project_windowed(&with_flushed, &mut scratch, usize::MAX)
                 .iter()
                 .collect::<Vec<u32>>(),
             "entities above `bound` have no row here and must not change either route's answer"
         );
-        assert_eq!(perm.project(&with_flushed), croaring::Bitmap::from_range(0..rows));
+        assert_eq!(
+            perm.project(&with_flushed),
+            croaring::Bitmap::from_range(0..rows)
+        );
 
         // One entity short of the whole domain is not the whole domain, and takes the walk.
         let mut short = mask.clone();
@@ -2043,5 +2133,218 @@ mod tests {
             perm.project(&mask),
             perm.project_windowed(&mask, &mut scratch, usize::MAX)
         );
+    }
+
+    // ----------------------------------------------------------------------------------------
+    // The complement route
+    // ----------------------------------------------------------------------------------------
+
+    /// Each entity in `[0, bound)` with probability `share`, and nothing above `bound`.
+    fn share_of(bound: u64, share: f64, rng: &mut StdRng) -> croaring::Bitmap {
+        let mut mask = croaring::Bitmap::new();
+        for entity in 0..bound {
+            if rng.gen_bool(share) {
+                mask.add(entity as u32);
+            }
+        }
+        mask
+    }
+
+    /// How many entities in `[0, bound)` hold a row.
+    fn rows_held(perm: &Permutation, bound: u64) -> u32 {
+        u32::try_from(
+            (0..bound)
+                .filter(|&e| perm.row_of(EntityId::new(e)).is_some())
+                .count(),
+        )
+        .expect("fixture rows fit u32")
+    }
+
+    /// The projection as one `row_of` per entity of the mask, sorted: the definition every route
+    /// is checked against.
+    fn by_row_of(perm: &Permutation, mask: &croaring::Bitmap) -> Vec<u32> {
+        let mut rows: Vec<u32> = mask
+            .iter()
+            .filter_map(|e| perm.row_of(EntityId::new(u64::from(e))))
+            .map(RowId::raw)
+            .collect();
+        rows.sort_unstable();
+        rows
+    }
+
+    /// The complement route answers what the single-pass walk, a windowed walk and one `row_of`
+    /// per entity answer. One scratch across all of them, so each route leaves it as the next
+    /// expects.
+    fn assert_the_complement_agrees(perm: &Permutation, mask: &croaring::Bitmap, what: &str) {
+        let mut scratch = ProjectScratch::default();
+        let complement = perm
+            .project_complement_with(mask, &mut scratch)
+            .unwrap_or_else(|| panic!("{what}: the complement route has an answer here"))
+            .iter()
+            .collect::<Vec<u32>>();
+        let single = perm
+            .project_windowed(mask, &mut scratch, usize::MAX)
+            .iter()
+            .collect::<Vec<u32>>();
+        let windowed = perm
+            .project_windowed(mask, &mut scratch, 997)
+            .iter()
+            .collect::<Vec<u32>>();
+        assert_eq!(
+            complement, single,
+            "{what}: the complement against the single pass"
+        );
+        assert_eq!(
+            complement, windowed,
+            "{what}: the complement against a windowed pass"
+        );
+        assert_eq!(
+            complement,
+            by_row_of(perm, mask),
+            "{what}: the complement against row_of"
+        );
+    }
+
+    /// A mask over most of a bijection is answered through its complement, and that answer is the
+    /// one the walk produces from the mask itself.
+    #[test]
+    fn a_mask_over_a_bijection_is_answered_through_its_complement() {
+        const BOUND: u64 = 6_000;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut rng = StdRng::seed_from_u64(19);
+        let perm = fixture(dir.path(), BOUND, 1.0, &mut rng);
+        perm.validate_rows(BOUND as u32)
+            .expect("the fixture is a bijection onto [0, bound)");
+        assert_eq!(perm.dense_rows.get(), Some(&(BOUND as u32)));
+
+        let mask = share_of(BOUND, 0.9, &mut rng);
+        assert!(!perm.covers_domain(&mask));
+        assert_the_complement_agrees(&perm, &mask, "a 90% mask over a bijection");
+
+        // The whole domain, where the complement is empty and nothing is subtracted.
+        let whole = croaring::Bitmap::from_range(0..BOUND as u32);
+        assert_eq!(
+            perm.project_complement_with(&whole, &mut ProjectScratch::default()),
+            Some(croaring::Bitmap::from_range(0..BOUND as u32)),
+            "a whole-domain mask reaches every row by either route"
+        );
+        assert_the_complement_agrees(&perm, &whole, "a whole-domain mask");
+    }
+
+    /// Slack between `bound` and the row count: entities with no row, and a whole page with none,
+    /// sit in the complement and project to nothing, so the subtraction still lands on the rows
+    /// the mask reaches.
+    #[test]
+    fn the_complement_route_holds_with_absent_slots_and_an_absent_page() {
+        const BOUND: u64 = 3 * PAGE_ENTRIES as u64 - 1_000;
+        let absent_page = (PAGE_ENTRIES as u64)..(2 * PAGE_ENTRIES as u64);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut rng = StdRng::seed_from_u64(23);
+        let mut entities: Vec<EntityId> = (0..BOUND)
+            .filter(|e| !absent_page.contains(e))
+            .filter(|_| rng.gen_bool(0.7))
+            .map(EntityId::new)
+            .collect();
+        entities.shuffle(&mut rng);
+        let path = dir.path().join("permutation.bin");
+        crate::write::write_permutation(&path, &entities, BOUND).expect("write_permutation");
+        let perm = Permutation::load(&path).expect("load permutation");
+        assert_eq!(perm.present_pages(), 2, "the middle page is absent");
+
+        let rows = rows_held(&perm, BOUND);
+        assert!(u64::from(rows) < BOUND, "the mapping has slack");
+        perm.validate_rows(rows)
+            .expect("the fixture is a bijection onto [0, rows)");
+        assert_eq!(perm.dense_rows.get(), Some(&rows));
+
+        let mask = share_of(BOUND, 0.75, &mut rng);
+        assert_the_complement_agrees(&perm, &mask, "a 75% mask over a mapping with slack");
+    }
+
+    /// Entities at or above `bound` are not this permutation's. Both routes skip them, whether the
+    /// mask is mostly inside the domain or mostly outside it.
+    #[test]
+    fn entities_above_bound_reach_no_row_by_either_route() {
+        const BOUND: u64 = 8_000;
+        const ABOVE: u32 = 5_000;
+        let bound = BOUND as u32;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut rng = StdRng::seed_from_u64(29);
+        let perm = fixture(dir.path(), BOUND, 1.0, &mut rng);
+        perm.validate_rows(bound)
+            .expect("the fixture is a bijection onto [0, bound)");
+
+        // Most of the domain, plus a run of ids above `bound` that a later segment issued.
+        let mut mask = share_of(BOUND, 0.8, &mut rng);
+        mask.add_range(bound..bound + ABOVE);
+        assert_the_complement_agrees(&perm, &mask, "an 80% mask with ids above bound");
+
+        // A small share of the domain, with enough ids above `bound` that the mask's cardinality
+        // is the larger number. The complement is still taken over `[0, bound)` alone.
+        let mut mask = share_of(BOUND, 0.3, &mut rng);
+        mask.add_range(bound..bound + ABOVE);
+        assert!(mask.cardinality() > BOUND / 2);
+        assert_the_complement_agrees(&perm, &mask, "a 30% mask padded above bound");
+    }
+
+    /// Without a recorded row count nothing says the slots are onto `[0, rows)`, so the complement
+    /// route has no answer and the caller walks.
+    #[test]
+    fn the_complement_has_no_answer_where_no_row_count_is_recorded() {
+        const BOUND: u64 = 6_000;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut rng = StdRng::seed_from_u64(31);
+        let perm = fixture(dir.path(), BOUND, 0.9, &mut rng);
+        assert_eq!(perm.dense_rows.get(), None, "nothing has spoken");
+
+        let mut scratch = ProjectScratch::default();
+        for (mask, what) in [
+            (share_of(BOUND, 0.9, &mut rng), "a 90% mask"),
+            (
+                croaring::Bitmap::from_range(0..BOUND as u32),
+                "a whole-domain mask",
+            ),
+        ] {
+            assert!(
+                perm.project_complement_with(&mask, &mut scratch).is_none(),
+                "{what} must have no complement answer without a recorded row count"
+            );
+            assert_eq!(
+                perm.project(&mask),
+                perm.project_windowed(&mask, &mut scratch, usize::MAX),
+                "{what} is answered by the walk"
+            );
+        }
+    }
+
+    /// **The arithmetic does not turn on how much of the domain the mask holds.** The share decides
+    /// only which route costs less, and that decision is the session chooser's
+    /// (`crate::term_images::choose`); here the complement must agree with the walk at every share,
+    /// from an empty mask to one entity short of the domain, and at the three shares around half.
+    /// An even and an odd `bound`, so nothing rests on the halving being exact.
+    #[test]
+    fn the_complement_agrees_with_the_walk_at_every_share() {
+        for (seed, bound) in [(37u64, 4_096u64), (41, 4_097)] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let mut rng = StdRng::seed_from_u64(seed);
+            let perm = fixture(dir.path(), bound, 1.0, &mut rng);
+            perm.validate_rows(bound as u32)
+                .expect("the fixture is a bijection onto [0, bound)");
+
+            let mut ids: Vec<u32> = (0..bound as u32).collect();
+            ids.shuffle(&mut rng);
+            let half = (bound / 2) as usize;
+            for (count, what) in [
+                (0, "an empty mask"),
+                (1, "one entity"),
+                (half - 1, "one below half"),
+                (half, "exactly half"),
+                (half + 1, "one above half"),
+                (bound as usize - 1, "one short of the domain"),
+            ] {
+                let mask = croaring::Bitmap::of(&ids[..count]);
+                assert_the_complement_agrees(&perm, &mask, &format!("bound {bound}, {what}"));
+            }
+        }
     }
 }
