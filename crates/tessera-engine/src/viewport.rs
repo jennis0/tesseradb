@@ -5341,6 +5341,17 @@ impl Engine {
         if !layer.declaration.views.iter().any(|s| s == view) {
             return Ok(None);
         }
+        // **Which view the artifact is of, decided here and not by what a form happens to hold.**
+        // On a group-scoped layer an artifact belongs to one view of the group (`views.md` §3.5),
+        // so an identifier naming another view's artifact is refused at the point, and at the
+        // cost, of one naming nothing — the two 404s are the same answer. Deciding it beside
+        // `locate_artifact` rather than at the verdict closes this route whatever state a held row
+        // form is in, and builds no projection and no histogram to do it.
+        if !self.write.with_artifacts(|store| {
+            store.drawn_in_view(&name, level, ordinal, crate::artifacts::view_key(view))
+        }) {
+            return Ok(None);
+        }
         // Reachability, then the live suppression of the layer itself — the same two steps in the
         // same order `Engine::visible_layers` and `serve_artifacts` take.
         let reachable = self.write.resolve_layers(

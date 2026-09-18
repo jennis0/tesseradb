@@ -239,18 +239,17 @@ def test_a_scoped_layers_artifacts_are_keyed_per_view(grouped):
     rows_b = browse(grouped, "slices:b", "clusters")["artifacts"]
     on_a = {one["key"]: one["masked_count"] for one in rows_a}
     on_b = {one["key"]: one["masked_count"] for one in rows_b}
-    assert on_a["c0a"] == N and on_a.get("c0b", 0) == 0
-    assert on_b["c0b"] == N and on_b.get("c0a", 0) == 0
+    assert on_a["c0a"] == N and "c0b" not in on_a
+    assert on_b["c0b"] == N and "c0a" not in on_b
     # **`shared` is one key on two views, so it is two artifacts** (contracts §3.4 r84; issue
-    # #152) — two rows in the level's roster under one name, each holding its own members and
-    # counting zero on the view it does not belong to. Read as a list rather than as a map, a key
-    # no longer being unique within a level: each view's own row carries its own members, and the
-    # other view's row, where the roster reaches it, carries none of this view's.
+    # #152) — and each view serves its own, the other being an artifact of another view and absent
+    # here entire (views.md §3.5). Read as a list rather than as a map, a key no longer being
+    # unique within a level: one row per view, carrying that view's own members.
     counts = lambda rows: sorted(  # noqa: E731
         one["masked_count"] for one in rows if one["key"] == "shared"
     )
     assert counts(rows_a) == [60], counts(rows_a)
-    assert counts(rows_b) == [0, N - 60], counts(rows_b)
+    assert counts(rows_b) == [N - 60], counts(rows_b)
 
 
 def test_a_later_commit_pages_an_insert_into_one_view_fills_a_family_and_adds_a_view(grouped):

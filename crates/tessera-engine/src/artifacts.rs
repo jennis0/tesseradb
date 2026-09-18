@@ -7,6 +7,14 @@
 //!
 //! The order of the conjuncts is not cosmetic:
 //!
+//! 0. **There is an artifact at that ordinal, in this view.** A level's row form is built for one
+//!    view of one layer, so a hole, an ordinal past its end and a group-scoped layer's artifact
+//!    belonging to another view of the group are one answer: absent ([`ArtifactRows::holds`],
+//!    `views.md` §3.5). The ordinal is an address over the whole layer and the view is part of a
+//!    scoped artifact's identity, so this is where the two are reconciled. Without it a view of a
+//!    group-scoped layer serves the group's other views' artifacts — their keys, their
+//!    identifiers, and a masked count of zero, which a layer declaring no existence criterion has
+//!    nothing to withhold.
 //! 1. **The overlay, first and unconditional.** A suppression applies to every request the moment
 //!    it is accepted, whatever else is true, so an artifact reaches the same `deleted > suppressed`
 //!    composition a point does, by the same route.
@@ -687,6 +695,13 @@ impl MembershipRows {
         self.rows.iter().map(Option::is_some).collect()
     }
 
+    /// Whether this form holds an artifact at `ordinal`: the slot exists and is not a hole. A
+    /// column-only form answers this too, its live slots holding the one shared empty bitmap
+    /// ([`Self::hold_no_rows`]), which is why it reads the slot rather than [`Self::get`].
+    fn holds(&self, ordinal: u32) -> bool {
+        self.rows.get(ordinal as usize).is_some_and(Option::is_some)
+    }
+
     /// A row form given directly — the tests whose subject is the hierarchy over a row form rather
     /// than the projection into one. Not a route a stored membership takes: that goes through
     /// [`Self::put`] and the permutation, and the fold composes a spatial level's column from its
@@ -785,6 +800,32 @@ pub(crate) fn view_key(view: &str) -> &str {
         .last()
         .copied()
         .unwrap_or(view)
+}
+
+/// **One artifact's record, and only where this view draws it** — the single read every
+/// in-place amendment makes of the store, so that a held form takes a delta for its own view's
+/// artifacts alone (`views.md` §3.5).
+///
+/// `view` is the view's path, as the projections are keyed; what a record names is the view's own
+/// key ([`view_key`]). `None` for a hole, and for an artifact belonging to another view of the
+/// same group: putting such a record into this form would serve that view's key, its
+/// `tessera_id` and a live count to a principal of this one, and would label this view's rows
+/// with an ordinal it does not draw.
+///
+/// The projecting routes reach the same rule through
+/// [`tessera_lifecycle::membership::ArtifactStore::level_in_view`], which is this test over a
+/// whole level.
+fn drawn_record<'a>(
+    store: &'a ArtifactStore,
+    layer: &str,
+    level: u32,
+    ordinal: u32,
+    view: &str,
+) -> Option<&'a ArtifactRecord> {
+    store
+        .drawn_in_view(layer, level, ordinal, view_key(view))
+        .then(|| store.get(layer, level, ordinal))
+        .flatten()
 }
 
 /// The whole of a view's row space — base and every extent — as a row count.
@@ -1782,6 +1823,17 @@ impl ArtifactRows {
     /// How many ordinals this level covers, holes included.
     pub fn len(&self) -> usize {
         self.membership.len()
+    }
+
+    /// **Whether this level has an artifact at `ordinal` in the view this form was built for.**
+    ///
+    /// A form is built per `(view, layer, level)` from
+    /// [`tessera_lifecycle::membership::ArtifactStore::level_in_view`], so a group-scoped layer's
+    /// artifact belonging to another view of the group occupies no slot here, exactly as a hole
+    /// and an ordinal past the level's end occupy none. All three are the same answer and
+    /// [`ArtifactView::verdict`] reads it first.
+    pub fn holds(&self, ordinal: u32) -> bool {
+        self.membership.holds(ordinal)
     }
 
     pub fn is_empty(&self) -> bool {
@@ -2805,6 +2857,13 @@ impl ArtifactProjections {
     /// was never derived together. A fill re-derives the ordinal's records entry and its operators,
     /// the membership being untouched by one.
     ///
+    /// **Every arm takes the delta for this view's own artifacts alone.** One interval's deltas
+    /// are applied to every view of the generation, and on a group-scoped layer an ordinal belongs
+    /// to one of them (`views.md` §3.5), so each arm reads the store through [`drawn_record`] and
+    /// an ordinal this view does not draw is not amended into its form, its records, its column or
+    /// its tile index. Projecting a whole level reaches the same rule through
+    /// [`tessera_lifecycle::membership::ArtifactStore::level_in_view`].
+    ///
     /// **The stored cardinality is published with the operator it was derived with.** Every
     /// ordinal a page or a fill touched has its declared sizes read from the store here, in the
     /// same pass that writes its operators, so the pair a containment test reads is the pair one
@@ -2980,14 +3039,20 @@ impl ArtifactProjections {
             match &delta.kind {
                 DeltaKind::Grown { joins, pages } => {
                     for (ordinal, joining) in joins {
+                        if drawn_record(store, layer, level, *ordinal, view).is_none() {
+                            continue;
+                        }
                         let fresh = amended.grow_rows(*ordinal, joining, space);
                         unions += 1;
                         if row_major {
                             added.extend(fresh.iter().map(|row| (row, *ordinal)));
                         }
                     }
-                    sets_moved |= !pages.is_empty();
                     for page in pages {
+                        if drawn_record(store, layer, level, page.ordinal, view).is_none() {
+                            continue;
+                        }
+                        sets_moved = true;
                         refresh.insert(page.ordinal);
                         if page.whole {
                             rederive.insert(page.ordinal);
@@ -3013,7 +3078,9 @@ impl ArtifactProjections {
                             // re-placed from the resolution the caller made over every live
                             // segment, which is the arm a publication into such a level takes.
                             DeltaRows::Resolved(rows) => {
-                                if let Some(record) = store.get(layer, level, *ordinal) {
+                                if let Some(record) =
+                                    drawn_record(store, layer, level, *ordinal, view)
+                                {
                                     published += 1;
                                     let fresh = amended.publish_resolved(
                                         *ordinal,
@@ -3031,7 +3098,7 @@ impl ArtifactProjections {
                 }
                 DeltaKind::Published(ordinals) => {
                     for ordinal in ordinals {
-                        if let Some(record) = store.get(layer, level, *ordinal) {
+                        if let Some(record) = drawn_record(store, layer, level, *ordinal, view) {
                             published += 1;
                             let fresh = match source {
                                 DeltaRows::Projected => amended.publish_at(*ordinal, record, space),
@@ -3055,7 +3122,7 @@ impl ArtifactProjections {
         // sizes the pages moved. Both read the record as it stands now, which is what makes the
         // pair a containment test reads a pair one moment produced.
         for ordinal in &refresh {
-            if let Some(record) = store.get(layer, level, *ordinal) {
+            if let Some(record) = drawn_record(store, layer, level, *ordinal, view) {
                 amended.refresh_sets(*ordinal, record, space, rederive.contains(ordinal));
             }
         }
@@ -4186,6 +4253,9 @@ impl ArtifactProjections {
 /// exactly the facts the predicate exists to withhold.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Withheld {
+    /// The level holds no artifact at that ordinal in this view: a hole, an ordinal past the
+    /// level's end, or — on a group-scoped layer — an artifact of another view of the group.
+    NoArtifact,
     /// The artifact's own entity is deleted or suppressed.
     Verdict,
     /// The viewer may not know the layer exists.
@@ -4317,6 +4387,16 @@ impl<M: MaskedSet> ArtifactView<'_, M> {
         ordinal: u32,
         own_terms: Option<TermId>,
     ) -> ArtifactVerdict {
+        // 0. There is an artifact here, in this view. The form was built from this view's slice of
+        //    the level ([`ArtifactRows::holds`]), so a hole, an ordinal past the level's end and a
+        //    group-scoped artifact belonging to another view of the group are one answer. The
+        //    ordinal's address is the caller's — a level's runs map an ordinal to an entity for the
+        //    whole layer, not per view — so this is the conjunct that makes the address a fact
+        //    about *this* view.
+        if !self.rows.holds(ordinal) {
+            return ArtifactVerdict::Absent(Withheld::NoArtifact);
+        }
+
         // 1. The overlay, first and unconditional — the same composition a point goes through.
         //    Asked live on every call, never cached beside the reachability above it: a suppression
         //    takes effect at the ack, and a cache that baked in this answer would keep serving a
