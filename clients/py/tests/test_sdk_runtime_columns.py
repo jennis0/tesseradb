@@ -21,7 +21,7 @@ from test_sdk_pages import whole_frame
 pytest.importorskip("pyarrow")
 
 #: Entities the build wrote, which the values route fills. The notebook corpus names its rows by
-#: `entity_id`, so these are the ids the staged delta carries.
+#: `entity_id`, so these are the ids the inserted table carries.
 HELD = list(range(1, 41))
 
 
@@ -30,10 +30,12 @@ def notebook(served, corpus):
 
 
 def fill(db, column: str, values) -> None:
-    """A delta on the points source carrying ids and one column: no coordinates, so values."""
-    db.stage(
-        "points",
+    """An insert into the attribute itself: the ids it fills, and the column the values are in."""
+    db.insert(
+        column,
         pa.table({"entity_id": pa.array(HELD, pa.uint64()), column: values}),
+        id="entity_id",
+        value=column,
     )
 
 
@@ -61,7 +63,7 @@ def test_an_indexed_attribute_declared_after_the_first_commit_is_filled_and_filt
     # The declaration is step 1 and the values page is step 3: the column exists for resolution
     # from the answer, so the page that fills it may name it.
     assert plan.plan[0] == "declare attribute 'citations' (u32)"
-    assert any(line.startswith("values on existing entities") for line in plan.plan[1:])
+    assert any(line.startswith("values into 'citations'") for line in plan.plan[1:])
 
     report = db.commit()
     assert report.ok, report
@@ -137,23 +139,24 @@ def test_a_category_over_an_inline_closed_vocabulary_is_declared_filled_and_list
 
 
 def test_a_category_over_a_sourced_closed_vocabulary_pages_the_tables_rows(served, corpus):
-    """The emitter reports `values_source` rather than rows, so the SDK reads the table (§4.4).
+    """A closed set declared at a running service carries its keys inline (§3, §4.4).
 
-    A sourced value set's keys are rows and never travel in a declaration payload, so the pages
-    are the SDK's: `(key, title?)` from the staged table, through the same `PATCH` an inline set's
-    page takes.
+    The route refuses a closed value set declared with no values, so the keys the insert carries
+    travel in the declaration and the same values follow with their titles, through the `PATCH`
+    an inline set's page takes.
     """
     db = notebook(served, corpus)
-    # The declaration comes first: a delta names a source some block of the declaration reads.
-    db.declare_vocabulary("venue", source="venues", closed=True, width="u8", title="Venue")
-    db.stage(
-        "venues",
+    db.declare_vocabulary("venue", closed=True, width="u8", title="Venue")
+    db.insert(
+        "venue",
         pa.table(
             {
                 "key": pa.array(["neurips", "icml", "iclr"], pa.string()),
                 "title": pa.array(["NeurIPS", "ICML", "ICLR"], pa.string()),
             }
         ),
+        key="key",
+        title="title",
     )
     db.declare_attribute("venue", type="category", vocabulary="venue", index=True)
     keys = ["neurips", "icml", "iclr"]
@@ -161,8 +164,9 @@ def test_a_category_over_a_sourced_closed_vocabulary_pages_the_tables_rows(serve
 
     report = db.commit()
     assert report.ok, report
-    assert report.plan[:2] == [
+    assert report.plan[:3] == [
         "declare vocabulary 'venue' (closed)",
+        "page 3 value(s) into vocabulary 'venue'",
         "declare attribute 'venue' (category)",
     ]
     assert report.values_filled == len(HELD)
@@ -186,7 +190,7 @@ def test_a_declaration_the_database_already_holds_is_not_sent_again(served, corp
     db.declare_attribute("citations", type="u32", index=True)
     fill(db, "citations", pa.array([1] * len(HELD), pa.uint32()))
     assert db.commit().ok
-    # A second delta on the same column: the attribute is held now, so only the values page goes.
+    # A second insert into the same column: it is held now, so only the values page goes.
     fill(db, "citations", pa.array([2] * len(HELD), pa.uint32()))
     plan = db.check()
     assert [line for line in plan.plan if line.startswith("declare")] == []
@@ -200,15 +204,17 @@ def test_an_open_vocabulary_declared_after_the_first_commit_pages_its_titles(ser
     /control/vocabularies/{name}/values` is where one is given.
     """
     db = notebook(served, corpus)
-    db.declare_vocabulary("venue", source="venues", width="u8", title="Venue")
-    db.stage(
-        "venues",
+    db.declare_vocabulary("venue", width="u8", title="Venue")
+    db.insert(
+        "venue",
         pa.table(
             {
                 "key": pa.array(["neurips", "icml"], pa.string()),
                 "title": pa.array(["NeurIPS", "ICML"], pa.string()),
             }
         ),
+        key="key",
+        title="title",
     )
     db.declare_attribute("venue", type="category", vocabulary="venue", index=True)
     fill(db, "venue", pa.array(["neurips"] * len(HELD), pa.string()))
@@ -236,15 +242,17 @@ def test_a_value_set_over_the_bodys_cap_is_paged_by_bytes(served, corpus):
     """
     db = notebook(served, corpus)
     keys = [f"v{i:04d}" for i in range(600)]
-    db.declare_vocabulary("venue", source="venues", width="u16", title="Venue")
-    db.stage(
-        "venues",
+    db.declare_vocabulary("venue", width="u16", title="Venue")
+    db.insert(
+        "venue",
         pa.table(
             {
                 "key": pa.array(keys, pa.string()),
                 "title": pa.array([f"{key} " + "long " * 1200 for key in keys], pa.string()),
             }
         ),
+        key="key",
+        title="title",
     )
     db.declare_attribute("venue", type="category", vocabulary="venue", index=True)
     fill(db, "venue", pa.array([keys[i % len(keys)] for i in range(len(HELD))], pa.string()))

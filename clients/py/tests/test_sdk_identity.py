@@ -1,9 +1,9 @@
 """How a row is named, from the frame to the served answer (python-sdk.md §3).
 
-Two routes and no third. A source names its rows by an id column, whose bytes are the external id
-at the build and on every later route; or it names them by nothing, and a row is addressable by
-the `tessera_id` the server hands back. The SDK keeps no map between them: what is staged is what
-is written, and what is sent is what the column holds.
+Two routes and no third. An insert names its rows with `id=`, whose bytes are the external id at
+the build and on every later route; or it names none, and a row is addressable by the
+`tessera_id` the server hands back. The SDK keeps no map between them: what is inserted is what is
+written, and what is sent is what the column holds.
 """
 
 from __future__ import annotations
@@ -34,14 +34,20 @@ def papers(keys, x: float = 0.0) -> pa.Table:
 def string_ids(db) -> None:
     """A corpus named by a string column, with a clustering whose members name the same keys."""
     keys = [f"p{i}" for i in range(20)]
-    db.stage("points", papers(keys), id="paper", default=True)
-    db.stage(
+    db.declare_view("map", extent={"x": [-5, 40], "y": [-5, 40]})
+    db.declare_layer("clusters", kind="flat")
+    db.insert("map", papers(keys), id="paper", x="x", y="y", access="labels")
+    db.insert(
         "clusters",
-        pa.table({"level": pa.array([0], pa.uint32()), "key": pa.array(["c0"], pa.string())}),
+        artifacts=pa.table(
+            {"level": pa.array([0], pa.uint32()), "key": pa.array(["c0"], pa.string())}
+        ),
+        key="key",
+        level="level",
     )
-    db.stage(
-        "members",
-        pa.table(
+    db.insert(
+        "clusters",
+        members=pa.table(
             {
                 "level": pa.array([0] * len(keys), pa.uint32()),
                 "key": pa.array(["c0"] * len(keys), pa.string()),
@@ -49,9 +55,9 @@ def string_ids(db) -> None:
             }
         ),
         id="paper",
+        key="key",
+        level="level",
     )
-    db.declare_view("map", source="points", access="labels", extent={"x": [-5, 40], "y": [-5, 40]})
-    db.declare_layer("clusters", kind="flat", source="clusters", members="members")
 
 
 def test_a_string_id_column_names_the_rows_the_members_name_and_reaches_the_drill_down(
@@ -75,10 +81,10 @@ def test_a_delta_of_string_ids_is_ingested_and_a_second_page_of_them_is_refused(
     """A delta names its rows the same way, and a row the database holds is a `409` per page."""
     db = served(string_ids)
     fresh = [f"q{i}" for i in range(5)]
-    db.stage("points", papers(fresh, x=25.0), id="paper")
-    db.stage(
-        "members",
-        pa.table(
+    db.insert("map", papers(fresh, x=25.0), id="paper", x="x", y="y", access="labels")
+    db.insert(
+        "clusters",
+        members=pa.table(
             {
                 "level": pa.array([0] * len(fresh), pa.uint32()),
                 "key": pa.array(["c0"] * len(fresh), pa.string()),
@@ -86,6 +92,8 @@ def test_a_delta_of_string_ids_is_ingested_and_a_second_page_of_them_is_refused(
             }
         ),
         id="paper",
+        key="key",
+        level="level",
     )
     report = db.commit()
     assert report.ok, report
@@ -95,7 +103,7 @@ def test_a_delta_of_string_ids_is_ingested_and_a_second_page_of_them_is_refused(
     assert browse(db, "map", "clusters")["artifacts"][0]["masked_count"] == 25
 
     # The same keys again, moved a little so the bytes are a batch the server has not replayed.
-    db.stage("points", papers(fresh, x=26.0), id="paper")
+    db.insert("map", papers(fresh, x=26.0), id="paper", x="x", y="y", access="labels")
     again = db.commit()
     assert not again.ok
     assert [r["status"] for r in again.refusals] == [409]
@@ -105,11 +113,12 @@ def test_a_delta_of_string_ids_is_ingested_and_a_second_page_of_them_is_refused(
 
 
 def unnamed(db) -> None:
-    """A frame whose index names nothing: the Tessera-id route (§3)."""
+    """A frame inserted with no id column: the Tessera-id route (§3)."""
     import pandas as pd
 
-    db.stage(
-        "points",
+    db.declare_view("map", extent={"x": [-5, 40], "y": [-5, 40]})
+    db.insert(
+        "map",
         pd.DataFrame(
             {
                 "x": [float(i) for i in range(20)],
@@ -117,9 +126,10 @@ def unnamed(db) -> None:
                 "labels": [["public"]] * 20,
             }
         ),
-        default=True,
+        x="x",
+        y="y",
+        access="labels",
     )
-    db.declare_view("map", source="points", access="labels", extent={"x": [-5, 40], "y": [-5, 40]})
 
 
 def test_an_unnamed_index_is_the_tessera_id_route_and_remove_addresses_by_it(served, corpus):

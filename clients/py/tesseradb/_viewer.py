@@ -211,7 +211,7 @@ class Viewer:
 
         `external_id` is present only where the caller supplied one, and it is bytes here. The
         wire carries base64, an external id being bytes rather than text, and this decodes it. A
-        `Database` goes one step further and reads those bytes as the type its id column staged.
+        `Database` goes one step further and reads those bytes as the type its id column carried.
 
         `idset` is the partitioning the id was minted under (the `idset` of `meta()`). A
         `tessera_id` is durable only within one: omitting it accepts that an id from a past idset

@@ -16,7 +16,6 @@ import pytest
 
 from conftest import browse, viewport
 from tesseradb._database import create
-from tesseradb._refusal import Refusal
 
 pytest.importorskip("pyarrow")
 
@@ -34,8 +33,12 @@ STARTS = {
 }
 
 
-def points(ids, x0: float) -> pa.Table:
-    """One view's points: the same entities laid out elsewhere, with a per-view quality score."""
+def points(ids, x0: float, view: str) -> pa.Table:
+    """One view's points: the same entities laid out elsewhere, with a per-view quality score.
+
+    The group's rows are one table with the column that says which view each row belongs to
+    (§4.3), so a view's points are these rows carrying that view's key.
+    """
     return pa.table(
         {
             "entity_id": pa.array(ids, pa.uint64()),
@@ -45,13 +48,23 @@ def points(ids, x0: float) -> pa.Table:
                 [["alpha"] if i % 2 else ["beta"] for i in range(len(ids))],
                 pa.list_(pa.string()),
             ),
+            "slice": pa.array([view] * len(ids), pa.string()),
+        }
+    )
+
+
+def quality(ids, view: str) -> pa.Table:
+    """The scoped family: one row per (entity, view), inserted into the attribute itself."""
+    return pa.table(
+        {
+            "entity_id": pa.array(list(ids), pa.uint64()),
+            "slice": pa.array([view] * len(ids), pa.string()),
             "quality": pa.array([float(i % 10) for i in range(len(ids))], pa.float32()),
         }
     )
 
 
 def coverage(ids, view: str, value=None) -> pa.Table:
-    """The scoped family read through a source of its own: one row per (entity, view)."""
     return pa.table(
         {
             "entity_id": pa.array(list(ids), pa.uint64()),
@@ -59,6 +72,16 @@ def coverage(ids, view: str, value=None) -> pa.Table:
             "coverage": pa.array(
                 [float(i % 5) if value is None else value for i in range(len(ids))], pa.float32()
             ),
+        }
+    )
+
+
+def roster(keys) -> pa.Table:
+    return pa.table(
+        {
+            "key": pa.array(keys, pa.string()),
+            "label": pa.array([key.upper() for key in keys], pa.string()),
+            "starts": pa.array([STARTS[key] for key in keys], pa.timestamp("us", tz="UTC")),
         }
     )
 
@@ -92,45 +115,51 @@ def grouped(tmp_path, corpus):
     `corpus` is here for the binary it finds; no file of the notebook corpus is read.
     """
     db = create(tmp_path / "db")
-    db.stage("slice_a", points(IDS, 0.0))
-    db.stage("slice_b", points(IDS, 40.0))
-    db.stage("coverage_rows", coverage(IDS, "a"))
-    db.stage("clusters_t", artifacts(["c0a", "c0b"], ["a", "b"]))
-    db.stage(
-        "clusters_m",
-        pa.concat_tables([memberships("c0a", "a", IDS), memberships("c0b", "b", IDS)]),
-    )
     db.declare_view_group(
         "slices",
         title="Slices",
         extent=EXTENT,
-        access="access",
         metadata={"label": "text", "starts": "timestamp_us"},
-        views=[
-            {"key": "a", "source": "slice_a", "label": "A", "starts": STARTS["a"]},
-            {"key": "b", "source": "slice_b", "label": "B", "starts": STARTS["b"]},
-        ],
     )
-    # Read from each view's own points file: the family is one column per view of the group.
+    db.insert("slices", roster=roster(["a", "b"]), key="key", label="label", starts="starts")
+    db.insert(
+        "slices",
+        pa.concat_tables([points(IDS, 0.0, "a"), points(IDS, 40.0, "b")]),
+        id="entity_id",
+        x="x",
+        y="y",
+        access="access",
+        view="slice",
+    )
+    # A scoped family: one value per view of the group, so every insert names the view column.
     db.declare_attribute("quality", type="f32", scope={"group": "slices"}, index=True)
-    # Read through a source of its own, whose `slice` column says which view each value is for.
-    db.declare_attribute(
-        "coverage",
-        type="f32",
-        scope={"group": "slices"},
-        index=True,
-        source="coverage_rows",
-        fields={"view": "slice"},
+    db.insert(
+        "quality",
+        pa.concat_tables([quality(IDS, "a"), quality(IDS, "b")]),
+        id="entity_id",
+        value="quality",
+        view="slice",
     )
+    db.declare_attribute("coverage", type="f32", scope={"group": "slices"}, index=True)
+    db.insert("coverage", coverage(IDS, "a"), id="entity_id", value="coverage", view="slice")
     db.declare_layer(
         "clusters",
         kind="flat",
-        source="clusters_t",
-        members="clusters_m",
         scope={"group": "slices"},
-        fields={"view": "slice"},
         require_member_visibility="none",
         computed=(),
+    )
+    db.insert(
+        "clusters", artifacts=["c0a", "c0b"] and artifacts(["c0a", "c0b"], ["a", "b"]),
+        key="key", level="level", view="slice",
+    )
+    db.insert(
+        "clusters",
+        members=pa.concat_tables([memberships("c0a", "a", IDS), memberships("c0b", "b", IDS)]),
+        id="entity",
+        key="key",
+        level="level",
+        view="slice",
     )
     report = db.commit()
     assert report.ok, report.output
@@ -198,25 +227,37 @@ def test_a_scoped_layers_artifacts_are_keyed_per_view(grouped):
     assert on_b["c0b"] == N and on_b.get("c0a", 0) == 0
 
 
-def test_a_later_commit_pages_a_delta_into_one_view_fills_a_family_and_adds_a_view(grouped):
+def test_a_later_commit_pages_an_insert_into_one_view_fills_a_family_and_adds_a_view(grouped):
     """§6.2 over a group: the points of one view, a scoped family's values under the view header,
     a scoped layer's artifacts carrying their view, and a view created before the rows that name
     it (views.md §3.2)."""
     db = grouped
     fresh = list(range(9001, 9021))
     added = list(range(9101, 9131))
-    db.stage("slice_b", points(fresh, 40.0))
-    db.stage("coverage_rows", coverage(IDS[:50], "b", value=1.0))
-    db.add_view("slices", "c", source="slice_c", label="C", starts=STARTS["c"])
-    db.stage("slice_c", points(added, 20.0))
-    db.stage("clusters_t", artifacts(["c1"], ["b"]))
-    db.stage("clusters_m", memberships("c1", "b", fresh))
+    db.insert("slices", roster=roster(["c"]), key="key", label="label", starts="starts")
+    db.insert(
+        "slices",
+        pa.concat_tables([points(fresh, 40.0, "b"), points(added, 20.0, "c")]),
+        id="entity_id",
+        x="x",
+        y="y",
+        access="access",
+        view="slice",
+    )
+    db.insert(
+        "coverage", coverage(IDS[:50], "b", value=1.0), id="entity_id", value="coverage",
+        view="slice",
+    )
+    db.insert("clusters", artifacts=artifacts(["c1"], ["b"]), key="key", level="level",
+              view="slice")
+    db.insert("clusters", members=memberships("c1", "b", fresh), id="entity", key="key",
+              level="level", view="slice")
 
     plan = db.check()
     assert plan.ok, [str(finding) for finding in plan.findings]
     assert plan.plan[0] == "create view 'slices:c' of group 'slices'"
     assert any("points into view 'slices:b'" in line for line in plan.plan)
-    assert any("values on existing entities of view 'slices:b'" in line for line in plan.plan)
+    assert any("values into 'coverage' of view 'slices:b'" in line for line in plan.plan)
 
     report = db.commit()
     assert report.ok, report.refusals
@@ -244,14 +285,11 @@ def test_a_plain_view_declared_after_the_first_commit_is_created_and_served(grou
     view's own: there are no rows at a running service to fit one against, so `extent=` is
     written and an `auto` frame would be refused at the route."""
     db = grouped
-    db.declare_view("extra", source="slice_d", extent=EXTENT, access="access")
-    # A batch into a plain view may not carry a group-scoped family: there is no view of the
-    # group for the value to belong to (views.md §5), and the pre-flight refuses it by name.
-    staged = points(list(range(9201, 9216)), 10.0)
-    db.stage("slice_d", staged)
-    with pytest.raises(Refusal, match="no block of this declaration reads"):
-        db.check()
-    db.stage("slice_d", staged.drop_columns(["quality"]))
+    db.declare_view("extra", extent=EXTENT)
+    # A frame inserted into a plain view carries no group-scoped family: there is no view of the
+    # group for the value to belong to (views.md §5), and a column no target reads is ignored.
+    inserted = points(list(range(9201, 9216)), 10.0, "a")
+    db.insert("extra", inserted, id="entity_id", x="x", y="y", access="access")
     report = db.commit()
     assert report.ok, report.refusals
     assert report.plan[0] == "declare view 'extra'"

@@ -1,6 +1,6 @@
 """The paged commit, against a real served database (python-sdk.md §6, §10.3, §10.4).
 
-Every test here commits a database, stages a delta on it and reads the answer back through the
+Every test here commits a database, inserts into it again and reads the answer back through the
 viewer plane. What is under test is that the SDK's pages are what the control plane takes, so
 nothing here doubles the server: a fake control plane would check the SDK against the SDK's own
 reading of the contract.
@@ -41,7 +41,7 @@ def whole_frame(db, view: str = "s0") -> list[float]:
 
 
 def new_papers(db, ids=None, x_offset: float = 0.0) -> pa.Table:
-    """A week of new papers, as the frame §10.3 stages."""
+    """A week of new papers, as the frame §10.3 inserts."""
     ids = list(NEW_IDS if ids is None else ids)
     x, y = centre(db)
     return pa.table(
@@ -61,30 +61,47 @@ def new_papers(db, ids=None, x_offset: float = 0.0) -> pa.Table:
     )
 
 
-def stage_the_new_cluster(db, ids=None, key: str = "k-new", label: str = "Audio diffusion") -> None:
-    """§10.3's other four stagings: a cluster, its members, its label and its generating set."""
+def insert_the_new_papers(db, ids=None, x_offset: float = 0.0) -> None:
+    """The allocation view's own insert: geometry, labels, the id, and the columns by name."""
+    db.insert(
+        "s0",
+        new_papers(db, ids, x_offset),
+        id="entity_id",
+        x="x",
+        y="y",
+        access="categories",
+    )
+
+
+def insert_the_new_cluster(db, ids=None, key: str = "k-new", label: str = "Audio diffusion"):
+    """§10.3's other four inserts: a cluster, its members, its label and its generating set."""
     ids = list(NEW_IDS if ids is None else ids)
-    db.stage(
-        "kmeans",
-        pa.table(
+    db.insert(
+        "clusters/kmeans",
+        artifacts=pa.table(
             {
                 "level": pa.array([0], pa.uint32()),
                 "key": pa.array([key], pa.string()),
             }
         ),
+        key="key",
+        level="level",
     )
-    db.stage(
-        "kmeans_members",
-        pa.table(
+    db.insert(
+        "clusters/kmeans",
+        members=pa.table(
             {
                 "level": pa.array([0] * len(ids), pa.uint32()),
                 "key": pa.array([key] * len(ids), pa.string()),
                 "entity": pa.array(ids, pa.uint64()),
             }
         ),
+        id="entity",
+        key="key",
+        level="level",
     )
-    db.stage(
-        "kmeans_topics",
+    db.insert(
+        "topics/kmeans",
         pa.table(
             {
                 "level": pa.array([0], pa.uint32()),
@@ -94,12 +111,15 @@ def stage_the_new_cluster(db, ids=None, key: str = "k-new", label: str = "Audio 
                 "attached_key": pa.array([key], pa.string()),
             }
         ),
+        key="key",
+        level="level",
+        contents="contents",
     )
     # A label's member table carries two grains: a null rank is the membership, and rank *k* is
     # content *k*'s generating set (annotation-write-cycle §6.1).
-    db.stage(
-        "kmeans_topic_members",
-        pa.table(
+    db.insert(
+        "topics/kmeans",
+        members=pa.table(
             {
                 "level": pa.array([0] * (2 * len(ids)), pa.uint32()),
                 "key": pa.array([f"{key}-label"] * (2 * len(ids)), pa.string()),
@@ -107,6 +127,10 @@ def stage_the_new_cluster(db, ids=None, key: str = "k-new", label: str = "Audio 
                 "entity": pa.array(ids + ids, pa.uint64()),
             }
         ),
+        id="entity",
+        key="key",
+        level="level",
+        rank="rank",
     )
 
 
@@ -117,13 +141,13 @@ def notebook(served, corpus):
 # ---------------------------------------------------------------------------- §10.3
 
 
-def test_a_delta_of_new_papers_with_a_cluster_and_a_label_is_served(served, corpus):
+def test_new_papers_with_a_cluster_and_a_label_are_served(served, corpus):
     """python-sdk.md §10.3, through to the served answer."""
     db = notebook(served, corpus)
     before = viewport(db, "s0", whole_frame(db))["counts"]["visible"]
 
-    db.stage("points", new_papers(db))
-    stage_the_new_cluster(db)
+    insert_the_new_papers(db)
+    insert_the_new_cluster(db)
 
     plan = db.check()
     assert plan.ok, plan
@@ -177,8 +201,8 @@ def test_a_delta_of_new_papers_with_a_cluster_and_a_label_is_served(served, corp
 def test_the_new_label_is_served_over_the_rows_the_same_commit_ingested(served, corpus):
     """§10.3's last step: the label's own text, as the viewport's artifacts frame carries it."""
     db = notebook(served, corpus)
-    db.stage("points", new_papers(db))
-    stage_the_new_cluster(db)
+    insert_the_new_papers(db)
+    insert_the_new_cluster(db)
     assert db.commit().ok
     served_labels = [
         (layer, key, content)
@@ -188,10 +212,12 @@ def test_the_new_label_is_served_over_the_rows_the_same_commit_ingested(served, 
     assert served_labels == [("topics/kmeans", "k-new-label", ["Audio diffusion"])]
 
 
-def test_a_re_staged_frame_is_sent_again_and_the_database_answers_for_it(served, corpus):
+def test_the_same_frame_inserted_again_is_sent_again_and_the_database_answers_for_it(
+    served, corpus
+):
     """§3: a re-run of a cell is a re-run, and the database is what says the rows are there.
 
-    The SDK keeps no record of what it sent, so the same frame staged again is sent again. What
+    The SDK keeps no record of what it sent, so the same frame inserted again is sent again. What
     happens then is the server's to decide, and it is two different things: identical bytes under
     the batch id they were first sent under are a **replay** and land nothing (write-path §2.4),
     while a page naming ids the database holds is a `409` on the whole page, reported by the page
@@ -199,12 +225,12 @@ def test_a_re_staged_frame_is_sent_again_and_the_database_answers_for_it(served,
     """
     db = notebook(served, corpus)
     delta = new_papers(db)
-    db.stage("points", delta)
+    db.insert("s0", delta, id="entity_id", x="x", y="y", access="categories")
     first = db.commit()
     assert first.ok and first.rows_accepted == {"s0": len(NEW_IDS)}
     after = viewport(db, "s0", whole_frame(db))["counts"]["visible"]
 
-    db.stage("points", delta)
+    db.insert("s0", delta, id="entity_id", x="x", y="y", access="categories")
     plan = db.check()
     # One page, and the flush that publishes it.
     assert len(plan.plan) == 2 and plan.plan[0].startswith("points"), plan
@@ -216,12 +242,53 @@ def test_a_re_staged_frame_is_sent_again_and_the_database_answers_for_it(served,
 
     # The same rows moved a little: different bytes, so a batch the server has not seen, and
     # every id on it is one it holds.
-    db.stage("points", new_papers(db, x_offset=0.5))
+    insert_the_new_papers(db, x_offset=0.5)
     refused = db.commit()
     assert not refused.ok
     assert [r["status"] for r in refused.refusals] == [409]
     assert refused.rows_accepted == {}
     assert viewport(db, "s0", whole_frame(db))["counts"]["visible"] == after
+
+
+def test_a_commit_of_rows_and_values_flushes_between_them(served, corpus):
+    """§6.2 step 2: a value addresses a row the database holds, so the rows go visible first."""
+    db = served(small)
+    db.insert(
+        "map",
+        pa.table(
+            {
+                "id": pa.array(["p20", "p21"], pa.string()),
+                "x": pa.array([20.0, 21.0], pa.float64()),
+                "y": pa.array([0.0, 0.0], pa.float64()),
+                "labels": pa.array([["public"]] * 2, pa.list_(pa.string())),
+            }
+        ),
+        id="id",
+        x="x",
+        y="y",
+        access="labels",
+    )
+    db.insert(
+        "score",
+        pa.table(
+            {"id": pa.array(["p20", "p21"], pa.string()), "score": pa.array([2.0, 2.5], pa.float64())}
+        ),
+        id="id",
+        value="score",
+    )
+    plan = db.check()
+    lines = plan.plan
+    rows_at = next(i for i, line in enumerate(lines) if line.startswith("points"))
+    flush_at = next(i for i, line in enumerate(lines) if line.startswith("flush the rows"))
+    values_at = next(i for i, line in enumerate(lines) if line.startswith("values into"))
+    assert rows_at < flush_at < values_at, lines
+
+    report = db.commit()
+    assert report.ok, report
+    assert report.rows_accepted == {"map": 2} and report.values_filled == 2
+    answer = viewport(db, "map", [-5.0, -5.0, 40.0, 40.0],
+                      filters={"score": {"range": {"gte": 2.0}}})
+    assert answer["counts"]["matched"] == 2
 
 
 # ---------------------------------------------------------------------------- §10.4
@@ -230,27 +297,32 @@ def test_a_re_staged_frame_is_sent_again_and_the_database_answers_for_it(served,
 def test_a_second_clustering_over_held_rows_is_published_through_its_tables(served, corpus):
     """python-sdk.md §10.4, on §6.2 step 3's terms: a clustering over rows the database holds.
 
-    `from_column=` mints artifacts from the rows that carry the column, which happens at the build
-    and on the ingest route; rows that are already there carry nothing. So the layer is declared
-    over its own tables and the keys are published with their members.
+    A key column mints its artifacts from the rows that carry it, which happens at the build and
+    on the ingest route; rows that are already there carry nothing. So the layer's artifacts and
+    members are inserted as their own tables and the keys are published with their members.
     """
     db = notebook(served, corpus)
     held = [7, 8, 9, 10, 11]
-    db.declare_layer("clusters/second", kind="flat", source="second", members="second_members")
-    db.stage(
-        "second",
-        pa.table({"level": pa.array([0, 0], pa.uint32()),
-                  "key": pa.array(["c2-a", "c2-b"], pa.string())}),
+    db.declare_layer("clusters/second", kind="flat")
+    db.insert(
+        "clusters/second",
+        artifacts=pa.table({"level": pa.array([0, 0], pa.uint32()),
+                            "key": pa.array(["c2-a", "c2-b"], pa.string())}),
+        key="key",
+        level="level",
     )
-    db.stage(
-        "second_members",
-        pa.table(
+    db.insert(
+        "clusters/second",
+        members=pa.table(
             {
                 "level": pa.array([0] * len(held), pa.uint32()),
                 "key": pa.array(["c2-a", "c2-a", "c2-b", "c2-b", "c2-b"], pa.string()),
                 "entity": pa.array(held, pa.uint64()),
             }
         ),
+        id="entity",
+        key="key",
+        level="level",
     )
 
     report = db.commit()
@@ -263,20 +335,33 @@ def test_a_second_clustering_over_held_rows_is_published_through_its_tables(serv
     assert rows == {"c2-a": 2, "c2-b": 3}
 
 
-def test_a_from_column_layer_over_held_rows_is_refused_naming_the_tables(served, corpus):
-    """§6.2 step 3: the values route fills a column and mints no artifact."""
+def test_a_key_column_inserted_over_held_rows_is_refused_naming_the_two_tables(served, corpus):
+    """§6.2 step 3, §11.2 F: the values route fills a column and mints no artifact."""
     db = notebook(served, corpus)
-    with pytest.raises(Refusal, match="through its tables"):
-        db.declare_layer("clusters/third", kind="flat", from_column="cluster3")
+    db.declare_layer("clusters/third", kind="flat")
+    with pytest.raises(Refusal, match="Not built yet: the values route reads a layer column"):
+        db.insert(
+            "clusters/third",
+            pa.table(
+                {
+                    "entity_id": pa.array([7, 8], pa.uint64()),
+                    "cluster3": pa.array(["a", "b"], pa.string()),
+                }
+            ),
+            id="entity_id",
+            key="cluster3",
+        )
 
 
 # ---------------------------------------------------------------------------- values
 
 
 def small(db) -> None:
-    """A database whose attribute reads a source of its own, so a delta on it fills values."""
-    db.stage(
-        "points",
+    """A database with one indexed column, so an insert into it fills values."""
+    db.declare_view("map", extent={"x": [-5, 40], "y": [-5, 40]})
+    db.declare_attribute("score", type="f64", index=True, render=False)
+    db.insert(
+        "map",
         pa.table(
             {
                 "id": pa.array([f"p{i}" for i in range(20)], pa.string()),
@@ -286,31 +371,27 @@ def small(db) -> None:
             }
         ),
         id="id",
-        default=True,
+        x="x",
+        y="y",
+        access="labels",
     )
-    db.stage(
-        "scores",
-        pa.table(
-            {
-                "id": pa.array(["p0"], pa.string()),
-                "score": pa.array([0.5], pa.float64()),
-            }
-        ),
+    db.insert(
+        "score",
+        pa.table({"id": pa.array(["p0"], pa.string()), "score": pa.array([0.5], pa.float64())}),
         id="id",
+        value="score",
     )
-    db.declare_view("map", source="points", access="labels", extent={"x": [-5, 40], "y": [-5, 40]})
-    db.declare_attribute("score", type="f64", source="scores", index=True, render=False)
 
 
-def test_a_values_delta_fills_an_indexed_attribute_and_a_filter_finds_it(served, corpus):
+def test_an_insert_into_an_attribute_fills_it_and_a_filter_finds_it(served, corpus):
     db = served(small)
     frame = [-5.0, -5.0, 40.0, 40.0]
     assert viewport(db, "map", frame, filters={"score": {"range": {"gte": 0.0, "lte": 10.0}}})["counts"][
         "matched"
     ] == 1
 
-    db.stage(
-        "scores",
+    db.insert(
+        "score",
         pa.table(
             {
                 "id": pa.array(["p1", "p2", "p3"], pa.string()),
@@ -318,9 +399,10 @@ def test_a_values_delta_fills_an_indexed_attribute_and_a_filter_finds_it(served,
             }
         ),
         id="id",
+        value="score",
     )
     plan = db.check()
-    assert any("values on existing entities" in line for line in plan.plan), plan
+    assert any("values into 'score'" in line for line in plan.plan), plan
     report = db.commit()
     assert report.ok, report
     assert report.values_filled == 3
@@ -337,25 +419,24 @@ def test_a_values_cell_re_run_is_sent_again_and_lands_on_the_cells_it_landed_on(
     delta = pa.table(
         {"id": pa.array(["p4", "p5"], pa.string()), "score": pa.array([4.0, 5.0], pa.float64())}
     )
-    db.stage("scores", delta, id="id")
+    db.insert("score", delta, id="id", value="score")
     first = db.commit()
     assert first.ok and first.values_filled == 2
 
-    # The same frame staged again is sent again: a value that matches the cell it names is
+    # The same frame inserted again is sent again: a value that matches the cell it names is
     # accepted with no effect, which is the route's own dedupe rather than a log in the SDK.
-    db.stage("scores", delta, id="id")
+    db.insert("score", delta, id="id", value="score")
     again = db.commit()
     assert again.ok, again
     assert again.values_filled == 0
 
     # A changed value on a held cell is a `409` on that part, reported and not retried: an edit is
     # a delete and a re-ingest (decision 0047), and the SDK does not do that for the user.
-    db.stage(
-        "scores",
-        pa.table(
-            {"id": pa.array(["p4"], pa.string()), "score": pa.array([9.0], pa.float64())},
-        ),
+    db.insert(
+        "score",
+        pa.table({"id": pa.array(["p4"], pa.string()), "score": pa.array([9.0], pa.float64())}),
         id="id",
+        value="score",
     )
     conflicted = db.commit()
     assert not conflicted.ok
@@ -371,13 +452,14 @@ def test_a_values_only_commit_returns_with_its_effect_visible(served, corpus):
     """§6.2 step 5: the closing flush waits for the publication it arms, and a commit whose only
     work was filling cells reaches it like any other (decision 0144)."""
     db = served(small)
-    db.stage(
-        "scores",
+    db.insert(
+        "score",
         pa.table(
             {"id": pa.array(["p8", "p9"], pa.string()),
              "score": pa.array([8.0, 9.0], pa.float64())}
         ),
         id="id",
+        value="score",
     )
     report = db.commit()
     assert report.ok, report
@@ -395,19 +477,26 @@ def test_a_values_only_commit_returns_with_its_effect_visible(served, corpus):
 def test_an_artifacts_only_commit_returns_with_its_effect_visible(served, corpus):
     """The same wait, for a commit whose only work was publishing artifacts."""
     db = served(clustering)
-    db.stage(
-        "cl",
-        pa.table({"level": pa.array([0], pa.uint32()), "key": pa.array(["c1"], pa.string())}),
+    db.insert(
+        "clusters",
+        artifacts=pa.table(
+            {"level": pa.array([0], pa.uint32()), "key": pa.array(["c1"], pa.string())}
+        ),
+        key="key",
+        level="level",
     )
-    db.stage(
-        "clm",
-        pa.table(
+    db.insert(
+        "clusters",
+        members=pa.table(
             {
                 "level": pa.array([0] * 4, pa.uint32()),
                 "key": pa.array(["c1"] * 4, pa.string()),
                 "entity": pa.array([f"p{i}" for i in range(4)], pa.string()),
             }
         ),
+        id="entity",
+        key="key",
+        level="level",
     )
     report = db.commit()
     assert report.ok, report
@@ -420,7 +509,7 @@ def test_an_artifacts_only_commit_returns_with_its_effect_visible(served, corpus
 # ---------------------------------------------------------------------------- §6.5
 
 
-def test_remove_stops_a_row_being_served_and_a_removed_id_restages_as_a_point(served, corpus):
+def test_remove_stops_a_row_being_served_and_a_removed_id_is_inserted_as_a_point(served, corpus):
     db = notebook(served, corpus)
     frame = whole_frame(db)
     before = viewport(db, "s0", frame)["counts"]["visible"]
@@ -429,8 +518,8 @@ def test_remove_stops_a_row_being_served_and_a_removed_id_restages_as_a_point(se
     assert report.ok, report
     assert viewport(db, "s0", frame)["counts"]["visible"] == before - 1
 
-    # A removed id staged again goes as a point row, which decision 0047 allows.
-    db.stage("points", new_papers(db, ids=[7]))
+    # A removed id inserted again goes as a point row, which decision 0047 allows.
+    insert_the_new_papers(db, ids=[7])
     plan = db.check()
     assert any(line.startswith("points") for line in plan.plan), plan
     again = db.commit()
@@ -452,9 +541,11 @@ def test_suppress_hides_a_row_and_unsuppress_returns_it(served, corpus):
 def test_leave_shrinks_a_generating_set_and_emptying_it_withdraws_the_content(served, corpus):
     """The one set that may shrink (decision 0135, §6.5), read back from what is served."""
     db = served(clustering)
-    db.declare_labels("topics", of="clusters", source="lb", members="lbm", content_requires="all")
-    db.stage("lb", label_rows())
-    db.stage("lbm", label_members(n=5))
+    db.declare_labels("topics", of="clusters", content_requires="all")
+    db.insert("topics", label_rows(), key="key", level="level", contents="contents")
+    db.insert(
+        "topics", members=label_members(n=5), id="entity", key="key", level="level", rank="rank"
+    )
     assert db.commit().ok
     assert ("topics", "l0", ["A generated label"], 20) in artifact_rows_of(db)
 
@@ -474,8 +565,8 @@ def test_a_row_outside_the_frame_refuses_the_commit_and_nothing_is_sent(served, 
     """§6.3: the pre-flight reports and sends nothing, and drops no row to send the rest."""
     db = served(small)
     before = viewport(db, "map", [-5.0, -5.0, 40.0, 40.0])["counts"]["visible"]
-    db.stage(
-        "points",
+    db.insert(
+        "map",
         pa.table(
             {
                 "id": pa.array(["far", "near"], pa.string()),
@@ -485,6 +576,9 @@ def test_a_row_outside_the_frame_refuses_the_commit_and_nothing_is_sent(served, 
             }
         ),
         id="id",
+        x="x",
+        y="y",
+        access="labels",
     )
     plan = db.check()
     assert not plan.ok
@@ -492,91 +586,55 @@ def test_a_row_outside_the_frame_refuses_the_commit_and_nothing_is_sent(served, 
     report = db.commit()
     assert not report.ok, report
     assert report.rows_accepted == {} and not report.refusals
-    # Neither row was sent: the one inside the frame is not a commit the user staged on its own.
+    # Neither row was sent: the one inside the frame is not a commit the user asked for on its own.
     assert viewport(db, "map", [-5.0, -5.0, 40.0, 40.0])["counts"]["visible"] == before
 
-    # The remedy is the rows. With the far one moved inside, both go.
-    db.stage(
-        "points",
-        pa.table(
-            {
-                "id": pa.array(["far", "near"], pa.string()),
-                "x": pa.array([4.5, 3.5], pa.float64()),
-                "y": pa.array([0.0, 0.0], pa.float64()),
-                "labels": pa.array([["public"]] * 2, pa.list_(pa.string())),
-            }
-        ),
-        id="id",
-    )
-    again = db.commit()
-    assert again.ok, again
-    assert again.rows_accepted == {"map": 2}
 
-
-def test_a_delta_carrying_one_coordinate_column_is_refused_naming_both(served, corpus):
-    """§6.2 step 2: a row with half a position is not a point, and no other route takes one."""
+def test_a_row_with_no_id_where_the_insert_names_one_is_listed(served, corpus):
+    """§6.3: a row whose id is null is a row no member table and no value can reach."""
     db = served(small)
-    db.stage(
-        "points",
+    db.insert(
+        "score",
         pa.table(
-            {
-                "id": pa.array(["p10"], pa.string()),
-                "x": pa.array([3.0], pa.float64()),
-                "labels": pa.array([["public"]], pa.list_(pa.string())),
-            }
+            {"id": pa.array(["p6", None], pa.string()), "score": pa.array([6.0, 7.0], pa.float64())}
         ),
         id="id",
+        value="score",
     )
     plan = db.check()
     assert not plan.ok
-    assert any("coordinate column" in str(f) and "'y'" in str(f) for f in plan.findings), plan
-    assert plan.plan == []
+    assert any("rows with no id" in str(f) for f in plan.findings), plan
 
 
-def test_a_rendered_column_on_a_values_delta_refuses_the_commit(served, corpus):
-    """§6.3: the route refuses a rendered column, and the SDK does not send the delta without it."""
+def test_a_rendered_column_filled_after_the_first_commit_refuses_the_commit(served, corpus):
+    """§6.3: the route refuses a rendered column, and the SDK does not send the page without it."""
+
     def with_a_rendered_score(db) -> None:
-        db.stage(
-            "points",
+        db.declare_view("map", extent={"x": [-5, 40], "y": [-5, 40]})
+        db.declare_attribute("note", type="f64", render=True)
+        db.insert(
+            "map",
             pa.table(
                 {
                     "id": pa.array([f"p{i}" for i in range(20)], pa.string()),
                     "x": pa.array([float(i) for i in range(20)], pa.float64()),
                     "y": pa.array([0.0] * 20, pa.float64()),
                     "labels": pa.array([["public"]] * 20, pa.list_(pa.string())),
+                    "note": pa.array([0.5] * 20, pa.float64()),
                 }
             ),
             id="id",
-            default=True,
+            x="x",
+            y="y",
+            access="labels",
         )
-        db.stage(
-            "scores",
-            pa.table(
-                {
-                    "id": pa.array(["p0"], pa.string()),
-                    "score": pa.array([0.5], pa.float64()),
-                    "note": pa.array([0.5], pa.float64()),
-                }
-            ),
-            id="id",
-        )
-        db.declare_view(
-            "map", source="points", access="labels", extent={"x": [-5, 40], "y": [-5, 40]}
-        )
-        db.declare_attribute("score", type="f64", source="scores", index=True, render=False)
-        db.declare_attribute("note", type="f64", source="scores", render=True)
 
     db = served(with_a_rendered_score)
-    db.stage(
-        "scores",
-        pa.table(
-            {
-                "id": pa.array(["p1"], pa.string()),
-                "score": pa.array([1.0], pa.float64()),
-                "note": pa.array([1.0], pa.float64()),
-            }
-        ),
+    db.insert(
+        "note",
+        pa.table({"id": pa.array(["p1"], pa.string()), "note": pa.array([1.0], pa.float64())}),
         id="id",
+        value="note",
     )
     plan = db.check()
     assert not plan.ok
@@ -584,10 +642,11 @@ def test_a_rendered_column_on_a_values_delta_refuses_the_commit(served, corpus):
     assert plan.plan == []
 
 
-def test_the_pre_flight_refuses_a_column_no_block_declares(served, corpus):
+def test_a_column_no_target_reads_is_ignored_and_printed_as_ignored(served, corpus, capsys):
+    """§3: a frame with more columns than the target reads is the ordinary case."""
     db = served(small)
-    db.stage(
-        "scores",
+    insert = db.insert(
+        "score",
         pa.table(
             {
                 "id": pa.array(["p6"], pa.string()),
@@ -596,32 +655,22 @@ def test_the_pre_flight_refuses_a_column_no_block_declares(served, corpus):
             }
         ),
         id="id",
+        value="score",
     )
-    with pytest.raises(Refusal, match="sentiment"):
-        db.check()
+    assert insert.ignored == ["sentiment"]
+    assert "ignored: sentiment" in capsys.readouterr().out
+    report = db.commit()
+    assert report.ok, report
+    assert report.values_filled == 1
 
 
-def test_a_labels_delta_whose_clustering_is_neither_held_nor_staged_is_refused(served, corpus):
-    """§6.3: ordered after the clustering's pages, or refused where none are staged."""
+def test_a_labels_insert_whose_clustering_is_neither_held_nor_inserted_is_refused(served, corpus):
+    """§6.3: ordered after the clustering's pages, or refused where none are inserted."""
     db = served(small)
-    db.declare_layer("clusters/new", kind="flat", source="cl2", members="clm2")
-    empty = pa.table(
-        {"level": pa.array([], pa.uint32()), "key": pa.array([], pa.string())}
-    )
-    db.stage("cl2", empty)
-    db.stage(
-        "clm2",
-        pa.table(
-            {
-                "level": pa.array([], pa.uint32()),
-                "key": pa.array([], pa.string()),
-                "entity": pa.array([], pa.string()),
-            }
-        ),
-    )
-    db.declare_labels("topics/new", of="clusters/new", source="lb2", content_requires="inherited")
-    db.stage(
-        "lb2",
+    db.declare_layer("clusters/new", kind="flat")
+    db.declare_labels("topics/new", of="clusters/new", content_requires="all")
+    db.insert(
+        "topics/new",
         pa.table(
             {
                 "level": pa.array([0], pa.uint32()),
@@ -631,57 +680,41 @@ def test_a_labels_delta_whose_clustering_is_neither_held_nor_staged_is_refused(s
                 "attached_key": pa.array(["never-published"], pa.string()),
             }
         ),
+        key="key",
+        level="level",
+        contents="contents",
     )
     plan = db.check()
     assert not plan.ok
-    assert any("labels delta before its clustering" in str(f) for f in plan.findings), plan
+    assert any("labels insert before its clustering" in str(f) for f in plan.findings), plan
 
 
-def test_a_key_column_staged_for_a_layer_with_supplied_content_is_refused(served, corpus):
+def test_a_key_column_inserted_into_a_layer_with_supplied_content_is_refused(tmp_path, corpus):
     """§6.3: an artifact served without content its layer declares cannot be told from one whose
     content was withheld, so such a layer takes an artifacts table."""
+    from tesseradb._database import create
 
-    def with_a_supplied_layer(db) -> None:
-        db.stage(
-            "points",
-            pa.table(
-                {
-                    "id": pa.array([f"p{i}" for i in range(20)], pa.string()),
-                    "x": pa.array([float(i) for i in range(20)], pa.float64()),
-                    "y": pa.array([0.0] * 20, pa.float64()),
-                    "labels": pa.array([["public"]] * 20, pa.list_(pa.string())),
-                    "topic": pa.array(["t"] * 20, pa.string()),
-                }
-            ),
-            id="id",
-            default=True,
-        )
-        db.declare_view(
-            "map", source="points", access="labels", extent={"x": [-5, 40], "y": [-5, 40]}
-        )
-        db.declare_layer(
-            "topics/inline",
-            kind="flat",
-            from_column="topic",
-            supplied=[("topic", "text", "inherited")],
-        )
-
-    db = served(with_a_supplied_layer)
-    db.stage(
-        "points",
-        pa.table(
-            {
-                "id": pa.array(["p7"], pa.string()),
-                "x": pa.array([7.0], pa.float64()),
-                "y": pa.array([0.0], pa.float64()),
-                "labels": pa.array([["public"]], pa.list_(pa.string())),
-                "topic": pa.array(["t"], pa.string()),
-            }
-        ),
-        id="id",
+    db = create(tmp_path / "db")
+    db.declare_view("map", extent={"x": [-5, 40], "y": [-5, 40]})
+    db.declare_layer(
+        "topics/inline", kind="flat", supplied=[("topic", "text", "inherited")]
     )
-    with pytest.raises(Refusal, match="artifacts table"):
-        db.check()
+    points = pa.table(
+        {
+            "id": pa.array([f"p{i}" for i in range(20)], pa.string()),
+            "x": pa.array([float(i) for i in range(20)], pa.float64()),
+            "y": pa.array([0.0] * 20, pa.float64()),
+            "labels": pa.array([["public"]] * 20, pa.list_(pa.string())),
+            "topic": pa.array(["t"] * 20, pa.string()),
+        }
+    )
+    db.insert("map", points, id="id", x="x", y="y", access="labels")
+    db.insert("topics/inline", points, id="id", key="topic")
+    report = db.check()
+    assert not report.ok
+    assert any("supplied content" in str(f) for f in report.findings), report
+    with pytest.raises(Refusal, match="insert\\('topics/inline', artifacts="):
+        db.commit()
 
 
 # ---------------------------------------------------------------------------- declared after the
@@ -691,8 +724,10 @@ def test_a_key_column_staged_for_a_layer_with_supplied_content_is_refused(served
 def clustering(db) -> None:
     """A small database with one clustering, so a label set can be declared over it later."""
     n = 20
-    db.stage(
-        "points",
+    db.declare_view("map", extent={"x": [-5, 40], "y": [-5, 40]})
+    db.declare_layer("clusters", kind="flat")
+    db.insert(
+        "map",
         pa.table(
             {
                 "id": pa.array([f"p{i}" for i in range(n)], pa.string()),
@@ -702,24 +737,31 @@ def clustering(db) -> None:
             }
         ),
         id="id",
-        default=True,
+        x="x",
+        y="y",
+        access="labels",
     )
-    db.stage(
-        "cl",
-        pa.table({"level": pa.array([0], pa.uint32()), "key": pa.array(["c0"], pa.string())}),
+    db.insert(
+        "clusters",
+        artifacts=pa.table(
+            {"level": pa.array([0], pa.uint32()), "key": pa.array(["c0"], pa.string())}
+        ),
+        key="key",
+        level="level",
     )
-    db.stage(
-        "clm",
-        pa.table(
+    db.insert(
+        "clusters",
+        members=pa.table(
             {
                 "level": pa.array([0] * n, pa.uint32()),
                 "key": pa.array(["c0"] * n, pa.string()),
                 "entity": pa.array([f"p{i}" for i in range(n)], pa.string()),
             }
         ),
+        id="entity",
+        key="key",
+        level="level",
     )
-    db.declare_view("map", source="points", access="labels", extent={"x": [-5, 40], "y": [-5, 40]})
-    db.declare_layer("clusters", kind="flat", source="cl", members="clm")
 
 
 def label_rows(key: str = "l0", text: str = "A generated label") -> pa.Table:
@@ -785,9 +827,9 @@ def artifact_rows_of(db, view: str = "map", frame=None) -> list[tuple]:
 def test_a_label_set_declared_after_the_first_commit_is_declared_and_served(served, corpus):
     """§6.2 step 1: the runtime `PUT` body comes from `tessera check --payloads`."""
     db = served(clustering)
-    db.declare_labels("topics", of="clusters", source="lb", members="lbm", content_requires="all")
-    db.stage("lb", label_rows())
-    db.stage("lbm", label_members())
+    db.declare_labels("topics", of="clusters", content_requires="all")
+    db.insert("topics", label_rows(), key="key", level="level", contents="contents")
+    db.insert("topics", members=label_members(), id="entity", key="key", level="level", rank="rank")
 
     plan = db.check()
     assert plan.plan[0] == "declare layer 'topics' (flat)", plan
@@ -803,40 +845,45 @@ def test_a_label_set_declared_after_the_first_commit_is_declared_and_served(serv
 def test_a_label_set_from_a_mapping_builds_and_is_served_with_its_text(served, corpus):
     """§4.7's mapping form, through the build and out of the viewport.
 
-    `source={key: text}` is an artifacts table the SDK writes, and each row carries the attachment
-    as well as the text: a label set expands to a layer that depends on its clustering, so every
-    artifact it publishes attaches to one and a row naming none is refused at the build. The key
-    the mapping gives is the cluster's, which is what the label hangs from and what names the
-    label's own artifact.
+    `insert(labels, {key: text})` is an artifacts table the SDK writes, and each row carries the
+    attachment as well as the text: a label set expands to a layer that depends on its clustering,
+    so every artifact it publishes attaches to one and a row naming none is refused at the build.
+    The key the mapping gives is the cluster's, which is what the label hangs from and what names
+    the label's own artifact.
     """
     held = list(range(1, 200))
     keys = ["c2-a"] * 100 + ["c2-b"] * (len(held) - 100)
 
     def declare(db):
         declare_notebook(db, corpus)
-        db.stage(
-            "second",
-            pa.table({"level": pa.array([0, 0], pa.uint32()),
-                      "key": pa.array(["c2-a", "c2-b"], pa.string())}),
+        db.declare_layer("clusters/second", kind="flat")
+        db.declare_labels("topics/second", of="clusters/second", content_requires="all")
+        db.insert(
+            "clusters/second",
+            artifacts=pa.table({"level": pa.array([0, 0], pa.uint32()),
+                                "key": pa.array(["c2-a", "c2-b"], pa.string())}),
+            key="key",
+            level="level",
         )
-        db.stage(
-            "second_members",
-            pa.table(
+        db.insert(
+            "clusters/second",
+            members=pa.table(
                 {
                     "level": pa.array([0] * len(held), pa.uint32()),
                     "key": pa.array(keys, pa.string()),
                     "entity": pa.array(held, pa.uint64()),
                 }
             ),
+            id="entity",
+            key="key",
+            level="level",
         )
-        db.declare_layer(
-            "clusters/second", kind="flat", source="second", members="second_members"
-        )
+        db.insert("topics/second", {"c2-a": "Audio diffusion", "c2-b": "Graph learning"})
         # Both grains, as any label's member table carries them: a null rank is the membership the
         # label is drawn over, and rank 0 is content 0's generating set.
-        db.stage(
-            "topic_members",
-            pa.table(
+        db.insert(
+            "topics/second",
+            members=pa.table(
                 {
                     "level": pa.array([0] * (2 * len(held)), pa.uint32()),
                     "key": pa.array(keys + keys, pa.string()),
@@ -844,17 +891,16 @@ def test_a_label_set_from_a_mapping_builds_and_is_served_with_its_text(served, c
                     "entity": pa.array(held + held, pa.uint64()),
                 }
             ),
-        )
-        db.declare_labels(
-            "topics/second",
-            of="clusters/second",
-            source={"c2-a": "Audio diffusion", "c2-b": "Graph learning"},
-            members="topic_members",
+            id="entity",
+            key="key",
+            level="level",
+            rank="rank",
         )
 
     db = served(declare)
     # The table the mapping was written to: the text, and where each row attaches.
-    table = pq.read_table(db.sources["topics_second"].path)
+    written = next(one for one in db.inserts if one.target == "topics/second" and one.role == "text")
+    table = pq.read_table(written.path)
     assert table.column_names == ["level", "key", "contents", "attached_layer", "attached_key"]
     assert table["attached_layer"].to_pylist() == ["clusters/second"] * 2
     assert table["attached_key"].to_pylist() == ["c2-a", "c2-b"]

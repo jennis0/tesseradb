@@ -72,6 +72,11 @@ def _(mo):
         under two projections; and the whole thing is saved, reopened and handed to `tessera
         serve`.
 
+        Three verbs carry it, and each does one thing. `declare_*` says what exists and takes no
+        data. `insert(target, table, **columns)` hands a table to a declared thing and names every
+        column it reads. `commit()` sends what was inserted and forgets it, so adding more data is
+        the same `insert` calls again.
+
         Every map here is computed inside the viewer's own mask. `viewer(terms)` is another
         principal's map, computed inside that principal's mask.
         """
@@ -86,18 +91,21 @@ def _(mo):
         ## 1. A frame, a cluster column, a label for each cluster
 
         The starting point is a DataFrame: coordinates, a column of cluster keys and a title to
-        hover. `from_column=` mints one artifact per distinct key in the column, so the clustering
-        needs no table of its own.
+        hover. `declare_columns` declares every column of it that is not skipped, from its dtype;
+        `insert` hands the frame to the view and names the columns the view reads, and the title
+        is filled by name because this is the allocation view's own frame.
+
+        A layer given a table with an id column and a key column mints one artifact per distinct
+        key and joins the rows, so the clustering needs no table of its own.
 
         The cluster keys here come from the corpus's k-means membership file, joined onto the
         points so the frame carries one column of keys.
 
-        Each cluster gets a line of text. `declare_labels` takes it as a mapping from cluster key
-        to text and writes the table the declaration reads. The line is gated on the papers it
-        was written from (`content_requires="all"`), so it names its generating set, which is a
-        table of its own: a viewer reads the line only where they may read every paper in that
-        set. This database has one principal, who holds everything, so every line is served.
-        Section 2 is where that gate starts refusing.
+        Each cluster has a line of text. **Not built yet (§11.2 H):** a label with no members of
+        its own is the label of its cluster, and the engine still places an attached artifact by
+        its own member rows, so the insert below is refused naming the rule. The refusal is
+        printed rather than caught elsewhere: the walk goes on without the lines, and section 2's
+        label sets carry their generating sets, which is the spelling that serves today.
         """
     )
     return
@@ -115,51 +123,49 @@ def _(DATA, pq):
 
 
 @app.cell
-def _(DATA, mo, pa, pq):
-    # One line of text per cluster, keyed by the cluster it was written about. `declare_labels`
-    # takes the mapping and writes the table, attachment and all.
+def _(DATA, mo, pq):
+    # One line of text per cluster, keyed by the cluster it was written about.
     _topics = pq.read_table(DATA / "topics-kmeans.parquet").to_pandas()
     topic_names = {row.attached_key: row.contents[0][0] for row in _topics.itertuples()}
-
-    # The generating set: the papers each line was written from, keyed by the same cluster key.
-    # A null rank is the membership and rank 0 is the set content 0 came from, so each pair goes
-    # in twice.
-    _members = pq.read_table(DATA / "clusters-kmeans-members.parquet",
-                             columns=["key", "entity"])
-    _keys = _members.column("key").to_pylist()
-    _entities = _members.column("entity").to_pylist()
-    topic_members = pa.table(
-        {
-            "level": pa.array([0] * (2 * len(_keys)), pa.uint32()),
-            "key": pa.array(_keys + _keys, pa.string()),
-            "rank": pa.array([None] * len(_keys) + [0] * len(_keys), pa.uint32()),
-            "entity": pa.array(_entities + _entities, pa.uint64()),
-        }
-    )
     mo.md(f"{len(topic_names)} labels, one per cluster: {list(topic_names.values())[:3]}")
-    return topic_members, topic_names
+    return (topic_names,)
 
 
 @app.cell
-def _(frame, td, topic_members, topic_names):
+def _(frame, td, topic_names):
     simple = td.create()  # a temporary directory, on /dev/shm where the platform has one
-    simple.stage("points", frame, default=True)
-    simple.stage("topic_members", topic_members)
-    simple.declare_view("map", source="points")
-    simple.declare_layer("clusters", kind="flat", from_column="cluster")
-    simple.declare_labels("topics", of="clusters", source=topic_names,
-                          members="topic_members", content_requires="all")
+    simple.declare_view("map")
+    simple.declare_columns(frame, skip=["entity_id", "x", "y", "cluster"], index=["title"])
+    simple.declare_layer("clusters", kind="flat")
+    simple.declare_labels("topics", of="clusters")
+
+    simple.insert("map", frame, id="entity_id", x="x", y="y")  # title is read by name
+    simple.insert("clusters", frame, id="entity_id", key="cluster")
+    try:
+        simple.insert("topics", topic_names)  # {cluster_key: text}; Not built yet: H
+        label_refusal = ""
+    except td.Refusal as _why:
+        label_refusal = str(_why)
+    print(label_refusal)
+    return label_refusal, simple
+
+
+@app.cell
+def _(simple):
     print(simple.commit())  # tessera check, tessera build, tessera serve
-    return (simple,)
+    return
 
 
 @app.cell
 def _(mo):
     mo.md(
         """
-        The report above is the build's own: what each declaration read, what the frame did to the
-        coordinates, and the three addresses the server bound. No column was declared: `title`
-        was inferred from the frame as text, and the report says what was inferred and how.
+        Each call above printed what it did: `declare_columns` the table it declared, and each
+        `insert` the columns it read and the columns it ignored — `cluster` is ignored by the
+        view's insert and read by the layer's, and neither call guessed a name.
+
+        The report is the build's own: what each declaration read, what the frame did to the
+        coordinates, and the three addresses the server bound.
 
         **Try**: hover a point, then drag a box (shift-drag) or a lasso over one cluster and read
         the next cell.
@@ -199,45 +205,26 @@ def _(mo):
         """
         ## 2. The corpus from files, with terms and three clusterings
 
-        The same corpus as `data/notebook/schema.toml`, declared as calls. The files carry
-        `entity_id`, so they are staged as paths and read where they lie rather than copied.
+        The same corpus as `data/notebook/schema.toml`, declared as calls. A path is accepted
+        wherever a table is and is read where it lies rather than copied.
 
-        `access="categories"` makes each paper's arXiv categories its access terms. A viewer
-        holding `astro-ph` sees the papers filed under `astro-ph` and nothing else. Every count,
-        every cluster and every topic line is computed inside that mask.
+        `access="categories"` on the view's insert makes each paper's arXiv categories its access
+        terms. A viewer holding `astro-ph` sees the papers filed under `astro-ph` and nothing
+        else. Every count, every cluster and every topic line is computed inside that mask.
+
+        A layer takes two tables under their own keywords — `artifacts=` and `members=` — because
+        both carry `key` and `level`, so each insert names its own columns.
         """
     )
     return
 
 
 @app.cell
-def _(DATA, td):
+def _(td):
     db = td.create()
-    db.stage("points", str(DATA / "points.parquet"), default=True)
-    for _name, _file in [
-        ("archive", "archive"),
-        ("primary_category", "primary_category"),
-        ("kmeans", "clusters-kmeans"),
-        ("kmeans_members", "clusters-kmeans-members"),
-        ("kmeans_topics", "topics-kmeans"),
-        ("kmeans_topic_members", "topics-kmeans-members"),
-        ("hdbscan", "clusters-hdbscan"),
-        ("hdbscan_members", "clusters-hdbscan-members"),
-        ("hdbscan_topics", "topics-hdbscan"),
-        ("hdbscan_topic_members", "topics-hdbscan-members"),
-        ("taxonomy", "taxonomy-arxiv"),
-        ("taxonomy_members", "taxonomy-arxiv-members"),
-    ]:
-        db.stage(_name, str(DATA / f"{_file}.parquet"))
-    return (db,)
-
-
-@app.cell
-def _(db):
-    db.declare_view("s0", source="points", access="categories", title="arXiv, 50,000 papers")
-    db.declare_vocabulary("archive", source="archive", closed=True, width="u8",
-                          title="arXiv archive")
-    db.declare_vocabulary("primary_category", source="primary_category", closed=True, width="u16",
+    db.declare_view("s0", title="arXiv, 50,000 papers")
+    db.declare_vocabulary("archive", closed=True, width="u8", title="arXiv archive")
+    db.declare_vocabulary("primary_category", closed=True, width="u16",
                           title="arXiv subject class")
     db.declare_attribute("archive", type="category", vocabulary="archive", render=True, index=True,
                          title="Archive")
@@ -251,20 +238,41 @@ def _(db):
     # Three clusterings: flat, nested and tiered. Each states its `require_member_visibility`:
     # how much of a cluster a viewer must already see before that cluster is served to them, as a
     # floor on the count or a share of the cluster's own size.
-    db.declare_layer("clusters/kmeans", kind="flat", source="kmeans", members="kmeans_members",
-                     require_member_visibility={"count": 50}, title="k-means clusters")
-    db.declare_labels("topics/kmeans", of="clusters/kmeans", source="kmeans_topics",
-                      members="kmeans_topic_members", content_requires="all",
+    db.declare_layer("clusters/kmeans", kind="flat", require_member_visibility={"count": 50},
+                     title="k-means clusters")
+    db.declare_labels("topics/kmeans", of="clusters/kmeans", content_requires="all",
                       title="k-means topics")
-    db.declare_layer("clusters/hdbscan", kind="nested", source="hdbscan", members="hdbscan_members",
+    db.declare_layer("clusters/hdbscan", kind="nested",
                      require_member_visibility={"fraction": 0.05}, title="HDBSCAN clusters")
-    db.declare_labels("topics/hdbscan", of="clusters/hdbscan", source="hdbscan_topics",
-                      members="hdbscan_topic_members", content_requires="all",
+    db.declare_labels("topics/hdbscan", of="clusters/hdbscan", content_requires="all",
                       title="HDBSCAN topics")
-    db.declare_layer("taxonomy/arxiv", kind="tiered", source="taxonomy", members="taxonomy_members",
+    db.declare_layer("taxonomy/arxiv", kind="tiered",
                      levels=[(0, "archive"), (1, "subject class")],
                      require_member_visibility={"count": 1}, computed=("centroid", "box"),
                      title="arXiv classification")
+    return (db,)
+
+
+@app.cell
+def _(DATA, db):
+    db.insert("archive", str(DATA / "archive.parquet"), key="key", title="title", code="code")
+    db.insert("primary_category", str(DATA / "primary_category.parquet"), key="key",
+              title="title", code="code")
+    # The six attribute columns are read by name from the frame inserted into the allocation view.
+    db.insert("s0", str(DATA / "points.parquet"), id="entity_id", x="x", y="y",
+              access="categories")
+    for _layer, _name in [("clusters/kmeans", "clusters-kmeans"),
+                          ("clusters/hdbscan", "clusters-hdbscan"),
+                          ("taxonomy/arxiv", "taxonomy-arxiv")]:
+        db.insert(_layer, artifacts=str(DATA / f"{_name}.parquet"), key="key", level="level",
+                  parent="parent", contents="contents")
+        db.insert(_layer, members=str(DATA / f"{_name}-members.parquet"), id="entity", key="key",
+                  level="level")
+    for _labels, _name in [("topics/kmeans", "topics-kmeans"),
+                           ("topics/hdbscan", "topics-hdbscan")]:
+        db.insert(_labels, str(DATA / f"{_name}.parquet"), key="key", contents="contents")
+        db.insert(_labels, members=str(DATA / f"{_name}-members.parquet"), id="entity", key="key",
+                  rank="rank")
     return
 
 
@@ -285,7 +293,8 @@ def _(db):
 
 @app.cell
 def _(db):
-    # The declaration the SDK wrote, which is `schema.toml` in the database's directory.
+    # The declaration the SDK wrote, which is `schema.toml` in the database's directory. Every
+    # block names the source and the column names its inserts gave it.
     print(db.declaration)
     return
 
@@ -294,7 +303,7 @@ def _(db):
 def _(mo):
     mo.md(
         """
-        Three maps follow: the database's own principal, who holds every term the SDK staged,
+        Three maps follow: the database's own principal, who holds every term the SDK inserted,
         and two arXiv categories. `astro-ph` is 2,105 papers in one region of the projection, and
         14 of the 64 k-means clusters clear its member requirement. `cs.LG` with `stat.ML` is
         about twice as many papers, somewhere else, drawn over the HDBSCAN clustering rather than
@@ -350,15 +359,20 @@ def _(mo):
         """
         ## 3. A week of new papers, into the database that is already serving
 
-        The same verbs. `stage` on a source the declaration knows is a delta: rows to add to what
-        the source holds. The commit pages them through the control plane and waits for the
-        publication that makes them visible, so the cell after it sees them.
+        The same verbs: adding more data is the same `insert` calls again. The commit pages them
+        through the control plane and waits for the publication that makes them visible, so the
+        cell after it sees them.
 
         Sixty papers, one new cluster, one topic line over it and the generating set that line
         was written from. Sixty because `clusters/kmeans` requires 50 visible members, so a
         smaller cluster would exist for nobody. They land in a patch a few hundred units across
         at the middle of the frame, about a thousandth of its width, so the map below needs
         zooming in to see them apart.
+
+        **Not built yet (§11.2 F):** §10.3 writes the new cluster as one key column beside the
+        papers — `insert("clusters/kmeans", new_df, id=…, key=…)` — which the values route does
+        not yet read, so it is refused and the cluster is published through its two tables
+        instead. The refusal is printed below.
         """
     )
     return
@@ -392,6 +406,7 @@ def _(counts, db, pa):
                               pa.string()),
             "abstract": pa.array([f"An abstract about audio diffusion, {i}." for i in new_ids],
                                  pa.string()),
+            "cluster": pa.array(["km-audio"] * len(new_ids), pa.string()),
         }
     )
     (before_delta, new_papers.num_rows)
@@ -399,35 +414,61 @@ def _(counts, db, pa):
 
 
 @app.cell
-def _(db, new_ids, new_papers, pa):
-    db.stage("points", new_papers)
-    db.stage(
-        "kmeans",
-        pa.table({"level": pa.array([0], pa.uint32()),
-                  "key": pa.array(["km-audio"], pa.string())}),
+def _(db, new_papers, td):
+    db.insert("s0", new_papers, id="entity_id", x="x", y="y", access="categories")
+    try:
+        # §10.3 as written: one key column beside the papers. Not built yet: F.
+        db.insert("clusters/kmeans", new_papers, id="entity_id", key="cluster")
+        key_refusal = ""
+    except td.Refusal as _why:
+        key_refusal = str(_why)
+    print(key_refusal)
+    return (key_refusal,)
+
+
+@app.cell
+def _(db, new_ids, pa):
+    # The clustering through its two tables, which is what the refusal above names.
+    db.insert(
+        "clusters/kmeans",
+        artifacts=pa.table({"level": pa.array([0], pa.uint32()),
+                            "key": pa.array(["km-audio"], pa.string())}),
+        key="key",
+        level="level",
     )
-    db.stage(
-        "kmeans_members",
-        pa.table({"level": pa.array([0] * len(new_ids), pa.uint32()),
-                  "key": pa.array(["km-audio"] * len(new_ids), pa.string()),
-                  "entity": pa.array(new_ids, pa.uint64())}),
+    db.insert(
+        "clusters/kmeans",
+        members=pa.table({"level": pa.array([0] * len(new_ids), pa.uint32()),
+                          "key": pa.array(["km-audio"] * len(new_ids), pa.string()),
+                          "entity": pa.array(new_ids, pa.uint64())}),
+        id="entity",
+        key="key",
+        level="level",
     )
-    db.stage(
-        "kmeans_topics",
+    db.insert(
+        "topics/kmeans",
         pa.table({"level": pa.array([0], pa.uint32()),
                   "key": pa.array(["km-audio-label"], pa.string()),
                   "contents": pa.array([[["Audio diffusion"]]], pa.list_(pa.list_(pa.string()))),
                   "attached_layer": pa.array(["clusters/kmeans"], pa.string()),
                   "attached_key": pa.array(["km-audio"], pa.string())}),
+        key="key",
+        level="level",
+        contents="contents",
     )
     # A label's member table carries two grains: a null rank is the membership, and rank *k* is
     # the set content *k* was generated from.
-    db.stage(
-        "kmeans_topic_members",
-        pa.table({"level": pa.array([0] * (2 * len(new_ids)), pa.uint32()),
-                  "key": pa.array(["km-audio-label"] * (2 * len(new_ids)), pa.string()),
-                  "rank": pa.array([None] * len(new_ids) + [0] * len(new_ids), pa.uint32()),
-                  "entity": pa.array(new_ids + new_ids, pa.uint64())}),
+    db.insert(
+        "topics/kmeans",
+        members=pa.table({"level": pa.array([0] * (2 * len(new_ids)), pa.uint32()),
+                          "key": pa.array(["km-audio-label"] * (2 * len(new_ids)), pa.string()),
+                          "rank": pa.array([None] * len(new_ids) + [0] * len(new_ids),
+                                           pa.uint32()),
+                          "entity": pa.array(new_ids + new_ids, pa.uint64())}),
+        id="entity",
+        key="key",
+        level="level",
+        rank="rank",
     )
     # The plan: the pages this commit would send, in the order §6.2 fixes. Points come before the
     # artifacts that name them, and a clustering before its labels.
@@ -479,9 +520,10 @@ def _(mo):
         """
         ## 4. A second clustering over rows the database already holds
 
-        `from_column=` reads its keys from the rows being ingested, and these rows arrived at the
-        first commit. So a clustering over rows the database holds is declared over its own tables:
-        an artifacts table of keys and a members table of `(key, entity)` pairs.
+        §10.4 is one insert: a table with an id column and a key column, over rows the database
+        holds. **Not built yet (§11.2 F):** a key column mints its artifacts at the build and on
+        the ingest route, and the values route does not read one yet, so the same refusal stands
+        and the clustering goes in as an artifacts table and a members table.
 
         This one splits the corpus by decade of submission, which every principal can see some of.
 
@@ -493,29 +535,43 @@ def _(mo):
 
 
 @app.cell
-def _(DATA, db, pa, pc, pq):
+def _(DATA, db, pa, pc, pq, td):
     _points = pq.read_table(DATA / "points.parquet", columns=["entity_id", "submitted_at"])
     _years = pc.year(_points.column("submitted_at")).to_pylist()
     _entities = _points.column("entity_id").to_pylist()
     _keys = ["era-1990s" if y < 2000 else "era-2000s" if y < 2010 else "era-2010s"
              for y in _years]
+    _by_decade = pa.table({"entity_id": pa.array(_entities, pa.uint64()),
+                           "era": pa.array(_keys, pa.string())})
 
-    db.declare_layer("clusters/era", kind="flat", source="era", members="era_members",
-                     title="By decade")
-    db.stage(
-        "era",
-        pa.table({"level": pa.array([0, 0, 0], pa.uint32()),
-                  "key": pa.array(["era-1990s", "era-2000s", "era-2010s"], pa.string())}),
+    db.declare_layer("clusters/era", kind="flat", title="By decade")
+    try:
+        db.insert("clusters/era", _by_decade, id="entity_id", key="era")  # Not built yet: F
+        era_refusal = ""
+    except td.Refusal as _why:
+        era_refusal = str(_why)
+    print(era_refusal)
+
+    db.insert(
+        "clusters/era",
+        artifacts=pa.table({"level": pa.array([0, 0, 0], pa.uint32()),
+                            "key": pa.array(["era-1990s", "era-2000s", "era-2010s"],
+                                            pa.string())}),
+        key="key",
+        level="level",
     )
-    db.stage(
-        "era_members",
-        pa.table({"level": pa.array([0] * len(_entities), pa.uint32()),
-                  "key": pa.array(_keys, pa.string()),
-                  "entity": pa.array(_entities, pa.uint64())}),
+    db.insert(
+        "clusters/era",
+        members=pa.table({"level": pa.array([0] * len(_entities), pa.uint32()),
+                          "key": pa.array(_keys, pa.string()),
+                          "entity": pa.array(_entities, pa.uint64())}),
+        id="entity",
+        key="key",
+        level="level",
     )
     era_report = db.commit()
     print(era_report)
-    return (era_report,)
+    return era_refusal, era_report
 
 
 @app.cell
@@ -531,13 +587,17 @@ def _(mo):
         """
         ## 5. One set of points, two projections
 
-        A view is a frame and a projection. Two views over the same papers are two sources with the
-        same identity column, each carrying the access column: a view's mask is read from its own
-        points file, so a second view either carries that column or is refused.
+        A view is a frame and a projection. Two views over the same papers are two inserts with
+        the same id column, a second pair of coordinates, and the same access column: a view's
+        mask is read from the frame inserted into it, so a second view either names that column
+        or is refused.
 
         The second projection here is the first turned 30 degrees about its centre. It is cheap and
         deterministic, so the two maps are recognisably the same corpus in two arrangements. A
         real second view is a second embedding.
+
+        The clustering is one key column over the first view's frame, which is the build's own
+        route: a layer drawn on both views, over one set of members.
         """
     )
     return
@@ -552,32 +612,31 @@ def _(DATA, math, pa, pc, pq, td):
                            _members.column("key").to_pylist()))
     _keys = pa.array([_cluster_of.get(e) for e in _points.column("entity_id").to_pylist()],
                      pa.string())
+    _knn = _points.append_column("cluster", _keys)
 
     _angle = math.radians(30)
     _x, _y = _points.column("x"), _points.column("y")
     _cx, _cy = pc.mean(_x).as_py(), pc.mean(_y).as_py()
     _dx, _dy = pc.subtract(_x, _cx), pc.subtract(_y, _cy)
+    _rotated = pa.table(
+        {
+            "entity_id": _points.column("entity_id"),
+            "x": pc.add(pc.add(pc.multiply(_dx, math.cos(_angle)),
+                               pc.multiply(_dy, -math.sin(_angle))), _cx),
+            "y": pc.add(pc.add(pc.multiply(_dx, math.sin(_angle)),
+                               pc.multiply(_dy, math.cos(_angle))), _cy),
+            "categories": _points.column("categories"),
+        }
+    )
 
     turned = td.create()
-    turned.stage("points", _points.append_column("cluster", _keys), default=True)
-    turned.stage(
-        "points_rotated",
-        pa.table(
-            {
-                "entity_id": _points.column("entity_id"),
-                "x": pc.add(pc.add(pc.multiply(_dx, math.cos(_angle)),
-                                   pc.multiply(_dy, -math.sin(_angle))), _cx),
-                "y": pc.add(pc.add(pc.multiply(_dx, math.sin(_angle)),
-                                   pc.multiply(_dy, math.cos(_angle))), _cy),
-                "categories": _points.column("categories"),
-            }
-        ),
-    )
-    turned.declare_view("knn", source="points", access="categories", title="k-NN projection")
-    turned.declare_view("rotated", source="points_rotated", access="categories",
-                        title="the same points, turned 30 degrees")
-    turned.declare_layer("clusters/kmeans", kind="flat", from_column="cluster",
-                         views=["knn", "rotated"], title="k-means clusters")
+    turned.declare_view("knn", title="k-NN projection")
+    turned.declare_view("rotated", title="the same points, turned 30 degrees")
+    turned.declare_layer("clusters/kmeans", kind="flat", views=["knn", "rotated"],
+                         title="k-means clusters")
+    turned.insert("knn", _knn, id="entity_id", x="x", y="y", access="categories")
+    turned.insert("rotated", _rotated, id="entity_id", x="x", y="y", access="categories")
+    turned.insert("clusters/kmeans", _knn, id="entity_id", key="cluster")
     print(turned.commit())
     return (turned,)
 

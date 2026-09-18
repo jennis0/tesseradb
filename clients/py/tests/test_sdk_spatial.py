@@ -50,18 +50,20 @@ def test_a_spatial_layer_published_after_the_first_commit_carries_its_wkt_and_it
         kind="flat",
         membership="spatial",
         shape={"kind": "polygon"},
-        source="region_shapes",
         title="Regions",
     )
-    db.stage(
-        "region_shapes",
-        pa.table(
+    db.insert(
+        "regions",
+        artifacts=pa.table(
             {
                 "key": pa.array(["lower_left"], pa.string()),
                 "wkt": pa.array([REGION], pa.string()),
                 "space": pa.array(["view"], pa.string()),
             }
         ),
+        key="key",
+        wkt="wkt",
+        space="space",
     )
     plan = db.check()
     assert plan.ok, plan.output
@@ -92,7 +94,7 @@ def test_an_inline_roster_built_at_the_first_commit_is_not_offered_again(served,
         db.declare_layer(
             "cohorts",
             kind="flat",
-            artifacts=[{"key": "all_but_three", "excluding": [0, 1, 2]}],
+            artifacts=[{"key": "all_but_three", "excluding": [1, 2, 3]}],
             require_member_visibility={"count": 1},
             title="Cohorts",
         )
