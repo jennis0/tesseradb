@@ -763,31 +763,36 @@ pub async fn authorise(server: &TestServer, terms: &[&str]) -> serde_json::Value
     }
 }
 
-/// **Force a tick and wait for it** — the moment a level's row forms are published from the deltas
-/// accumulated since the last one (`ingest.md` §1.3, §10 ruling 6).
+/// Force a publication and wait for it to complete: the moment a level's row forms, and the rows
+/// of anything flushed with them, are what a viewer is served (`ingest.md` §1.3, §10 ruling 6).
 ///
-/// A write is durable at its acknowledgement and visible at the next publication, so a test that
+/// A write is durable at its acknowledgement and visible at a numbered publication, so a test that
 /// writes on the control plane and then reads what a viewer is served puts this between the two.
-/// `POST /control/flush` pulls the tick's deadline forward; a tick against an empty buffer
-/// publishes the row forms and flushes nothing.
+///
+/// The wait is the server's own (decision 0144): `POST /control/flush?wait=visible` holds the 202
+/// until the publication counter has reached the number that request armed. Waiting on the tick
+/// counter instead returns when a tick has begun, which is before the segment a tick flushed is
+/// published, so a test reading a count over rows ingested since the last publication could beat
+/// the flush it asked for and read the corpus without them.
+///
+/// `visible: false` is the server saying it waited `serve.visible_wait_max_secs` and the
+/// publication had not landed. A test that then read the served answer would be asserting against
+/// a corpus in an unknown state, so this fails there rather than sleeping and trying again.
 pub async fn tick(server: &TestServer) {
-    let before = server.state.engine.write_executor_stats().ticks;
     let resp = server
         .client
-        .post(server.control_url("/control/flush"))
+        .post(server.control_url("/control/flush?wait=visible"))
         .bearer_auth(OPERATOR_CREDENTIAL)
         .send()
         .await
         .unwrap();
     assert_eq!(resp.status().as_u16(), 202);
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-    while server.state.engine.write_executor_stats().ticks == before {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the tick that publishes the row forms never ran"
-        );
-        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-    }
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(
+        body["visible"],
+        serde_json::json!(true),
+        "the flush this asked for had not published within the server's visible wait: {body}"
+    );
 }
 
 /// `POST /v1/items/{tessera_id}` with no body fields set (no pin, no idset).
