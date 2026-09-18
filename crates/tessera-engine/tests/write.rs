@@ -1686,6 +1686,24 @@ fn a_duplicate_external_id_across_one_window_is_still_refused() {
     assert_eq!(stats.work_depth, 0);
 }
 
+/// A refused command that is not an ingest is counted completed once, as an accepted one is.
+#[test]
+fn a_refused_view_create_is_counted_completed_once() {
+    let tmp = TempDir::new().unwrap();
+    let (engine, _faults) = engine_with_faults(&tmp, 64);
+
+    let refused = engine.create_view(
+        "no-such-group".to_string(),
+        "k".to_string(),
+        None,
+        Default::default(),
+    );
+    assert!(refused.is_err());
+
+    let stats = engine.write_executor_stats();
+    assert_eq!((stats.work_submitted, stats.work_completed), (1, 1));
+}
+
 /// **An empty window is never opened**, and the in-flight gauge is armed at the first entry rather
 /// than at window construction.
 ///

@@ -14219,7 +14219,6 @@ impl Executor {
                      grow at a running service (views §3.1); there is no create that mints a group"
                 ),
             });
-            self.health.note_work_refused();
             return;
         };
         let facts = tessera_lifecycle::GroupFacts {
@@ -14234,7 +14233,6 @@ impl Executor {
             Ok(record) => record,
             Err(e) => {
                 respond.fail(roster_error(e));
-                self.health.note_work_refused();
                 return;
             }
         };
@@ -14309,7 +14307,6 @@ impl Executor {
                         batch_id: request.batch_id.clone(),
                     },
                 );
-                self.health.note_work_refused();
                 return;
             }
         }
@@ -14318,7 +14315,6 @@ impl Executor {
             Ok(planned) => planned,
             Err(e) => {
                 self.ack_failed(&respond, e);
-                self.health.note_work_refused();
                 return;
             }
         };
@@ -14332,7 +14328,6 @@ impl Executor {
             Ok(resolved) => resolved,
             Err(detail) => {
                 self.ack_failed(&respond, ExecError::LayerRefused { detail });
-                self.health.note_work_refused();
                 return;
             }
         };
@@ -14342,7 +14337,6 @@ impl Executor {
             Ok(wanted) => wanted,
             Err(detail) => {
                 self.ack_failed(&respond, ExecError::ValuesRefused { detail });
-                self.health.note_work_refused();
                 return;
             }
         };
@@ -14357,7 +14351,6 @@ impl Executor {
                 }
                 Err(detail) => {
                     self.ack_failed(&respond, ExecError::LayerRefused { detail });
-                    self.health.note_work_refused();
                     return;
                 }
             }
@@ -14369,7 +14362,6 @@ impl Executor {
             Ok(records) => records,
             Err(detail) => {
                 self.ack_failed(&respond, ExecError::ValuesRefused { detail });
-                self.health.note_work_refused();
                 return;
             }
         };
@@ -14441,7 +14433,6 @@ impl Executor {
                  artifact was created and no membership grew"
             );
             respond.fail(ExecError::Wal(e));
-            self.health.note_work_refused();
             return;
         }
         self.observe_wal();
@@ -14586,7 +14577,6 @@ impl Executor {
             Ok(crate::attributes::Resolution::New(compiled)) => compiled,
             Err(e) => {
                 respond.fail(e);
-                self.health.note_work_refused();
                 return;
             }
         };
@@ -14612,7 +14602,6 @@ impl Executor {
                         respond.fail(ExecError::AttributeRefused {
                             detail: format!("attribute '{}': {e}", request.name),
                         });
-                        self.health.note_work_refused();
                         return;
                     }
                 }
@@ -14706,7 +14695,6 @@ impl Executor {
             Ok(crate::view_declarations::Resolution::New(compiled)) => *compiled,
             Err(e) => {
                 respond.fail(e);
-                self.health.note_work_refused();
                 return;
             }
         };
@@ -14765,7 +14753,6 @@ impl Executor {
             Ok(crate::view_declarations::Resolution::New(compiled)) => *compiled,
             Err(e) => {
                 respond.fail(e);
-                self.health.note_work_refused();
                 return;
             }
         };
@@ -14847,7 +14834,6 @@ impl Executor {
             Ok(crate::vocabularies::Resolution::New(compiled)) => *compiled,
             Err(e) => {
                 respond.fail(e);
-                self.health.note_work_refused();
                 return;
             }
         };
@@ -14870,7 +14856,6 @@ impl Executor {
                     respond.fail(ExecError::VocabularyRefused {
                         detail: e.to_string(),
                     });
-                    self.health.note_work_refused();
                     return;
                 }
             }
@@ -14971,14 +14956,12 @@ impl Executor {
                      declaration's to state"
                 ),
             });
-            self.health.note_work_refused();
             return;
         };
         let titles = match crate::vocabularies::check_page(held, &vocabulary, &values) {
             Ok(titles) => titles,
             Err(e) => {
                 respond.fail(e);
-                self.health.note_work_refused();
                 return;
             }
         };
@@ -15000,7 +14983,6 @@ impl Executor {
                     respond.fail(ExecError::VocabularyRefused {
                         detail: e.to_string(),
                     });
-                    self.health.note_work_refused();
                     return;
                 }
             }
@@ -15135,7 +15117,6 @@ impl Executor {
             Ok(record) => record,
             Err(e) => {
                 respond.fail(roster_error(e));
-                self.health.note_work_refused();
                 return;
             }
         };
