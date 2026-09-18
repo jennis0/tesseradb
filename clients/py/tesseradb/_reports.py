@@ -1,10 +1,10 @@
-"""What `check()` and `commit()` hand back.
+"""What the SDK's verbs hand back.
 
-Both return an object that prints as a table. The binary's own output is carried through rather
-than re-formatted, `tessera check`'s disclosure table being what a reader of the declaration is
-meant to read. Beside it the SDK states what it decided for the user: what it inferred and
-under which thresholds, the frame each view got, the render columns the first commit froze, and
-the vocabularies it declared open.
+`check()` and `commit()` return an object that prints as a table. The binary's own output is
+carried through rather than re-formatted, `tessera check`'s disclosure table being what a reader
+of the declaration is meant to read. Beside it the SDK states what it decided for the user: what
+each insert read and ignored, the frame each view got, and the render columns the first commit
+froze. `declare_columns` prints the table it declared (§4.5).
 """
 
 from __future__ import annotations
@@ -12,25 +12,20 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Sequence
 
-from ._infer import FEW_DISTINCT, SHORT_MEDIAN, InferredColumn
+from ._columns import DeclaredColumn
 
 
 @dataclass
-class Inference:
-    """The table §4.5 asks the SDK to print once."""
+class Declared:
+    """The table `declare_columns` prints (§4.5)."""
 
-    source: str | None = None
-    columns: list[InferredColumn] = field(default_factory=list)
+    columns: list[DeclaredColumn] = field(default_factory=list)
     vocabularies: list[str] = field(default_factory=list)
 
     def lines(self) -> list[str]:
-        if not self.columns:
-            return []
         out = [
-            f"inferred from '{self.source}', the default source "
-            f"(at most {FEW_DISTINCT} distinct values is a category; a median length under "
-            f"{SHORT_MEDIAN} characters is a keyword. Both are assumed, and one "
-            f"declare_attribute call overrides either for one column)",
+            "declare_columns: every column below is declared as details, stored in the record "
+            "blob and shown at drill-down, with the flags render= and index= named",
             f"  {'column':<26} {'dtype':<16} {'declared as':<14} {'render':<7} {'index':<6} why",
         ]
         for column in self.columns:
@@ -40,12 +35,17 @@ class Inference:
             )
         if self.vocabularies:
             out.append(
-                "  vocabularies declared open and public, minted from the data: "
+                "  vocabularies declared open and public: "
                 + ", ".join(self.vocabularies)
-                + ". Every principal is told their value names, and on a local database the user is "
-                "the authority that choice asks for"
+                + ". Every principal is told their value names, and on a local database the user "
+                "is the authority that choice asks for"
             )
         return out
+
+    def __str__(self) -> str:
+        return "\n".join(self.lines())
+
+    __repr__ = __str__
 
 
 @dataclass
@@ -54,10 +54,10 @@ class Report:
 
     what: str
     ok: bool
-    inference: Inference
     frames: list[tuple[str, str]] = field(default_factory=list)
     render_columns: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
+    findings: list = field(default_factory=list)
     output: str = ""
 
     def lines(self) -> list[str]:
@@ -72,7 +72,9 @@ class Report:
                 "is refused; an indexed column can be added at any time)"
             )
             out.append("  " + ", ".join(self.render_columns))
-        out += self.inference.lines()
+        if self.findings:
+            out.append("pre-flight")
+            out += [f"  {finding}" for finding in self.findings]
         if self.output:
             out.append("")
             out.append(self.output.rstrip())
@@ -100,7 +102,7 @@ class CommitReport(Report):
             out.insert(1, f"  {self.identity}")
         out.insert(
             1,
-            "  the allocation is signature-sorted over the whole staged corpus, which affects "
+            "  the allocation is signature-sorted over the whole inserted corpus, which affects "
             "posting compression and latency and never what is served",
         )
         if self.viewer:

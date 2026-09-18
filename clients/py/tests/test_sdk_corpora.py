@@ -2,15 +2,15 @@
 
 The proof python-sdk.md §12 asks for is `tessera check` over the regenerated file printing what the
 committed file prints. The files these declarations name are not on this machine, so `check` cannot
-read them and the proof here is the declaration itself: each corpus is built through the typed
-verbs, written, parsed, and compared with the committed `corpus.toml` block by block and key by
-key. `test_sdk_corpus.py` carries the two corpora whose files can be present, where the comparison
-is the binary's own disclosure table.
+read them and the proof here is the declaration itself: each corpus is declared through the typed
+verbs, given its tables through `insert`, written, parsed, and compared with the committed
+`corpus.toml` block by block and key by key. `test_sdk_corpus.py` carries the two corpora whose
+files can be present, where the comparison is the binary's own disclosure table.
 
-Every source is staged as a placeholder parquet carrying the id column, a view's coordinate columns
-and its access column. That is what the SDK reads to see where identity is and to decide what to
-infer; no other column is staged, so nothing is inferred and every block compared is one a call
-below wrote.
+Every insert is a placeholder parquet carrying the columns its target reads: the id column, a
+view's coordinates and access column and one column per declared attribute, or an artifact
+table's `key` and a member table's `(key, entity)`. No value is in them; what is compared is the
+declaration each insert wrote.
 
 **The normalisations.** Four of them fill the committed document in with what §4.8 requires the
 SDK to write, so the test fails if the SDK stops writing one; the rest are applied to both
@@ -27,10 +27,14 @@ Filled into the committed document alone:
 
 Applied to both:
 
-5. `[sources]` is compared by its key set. The committed file names the corpus's own parquets and
-   this test names placeholders in a temporary directory.
+5. `[sources]` itself is not compared, and every `source` is compared by **which blocks read it
+   together** rather than by its key. The committed file names the corpus's own parquets and the
+   SDK names each source after the target its insert bound it to; and a corpus whose committed
+   file carries a `<marker>` names files for objects a run fills in, which are not declared here.
 6. `[defaults].entity_id_field` where it is `entity_id`, the surface's own default.
-7. A view's `fields` where each column carries its canonical name.
+7. A `fields` entry, on a view, a group or a `[layer.members]`, where the column carries its
+   canonical name: the SDK writes what its insert named and the surface reads the same column
+   under the same name with no map at all.
 8. `hierarchy.prune_children` where it is false, the surface's default.
 9. A layer's `default_space` where it is `view`, the surface's default.
 10. A layer's `[layer.content]` where it carries no computed property and no supplied kind, which
@@ -43,7 +47,7 @@ A corpus whose committed file carries a `<marker>` a run fills in names that mar
 normalisation in its own test.
 """
 
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import pytest
 
@@ -65,7 +69,7 @@ WORLD = {"lon": [-180.0, 180.0], "lat": [-85.0511287798066, 85.0511287798066]}
 
 
 def parquet(directory: Path, name: str, columns) -> str:
-    """A one-row source file. The SDK reads a source's schema; the corpus's values are not here."""
+    """A one-row table. The SDK reads a source's schema; the corpus's values are not here."""
     import pyarrow as pa
     import pyarrow.parquet as pq
 
@@ -83,15 +87,60 @@ def parquet(directory: Path, name: str, columns) -> str:
     return str(path)
 
 
-def database(tmp_path: Path, points: dict, tables) -> object:
-    """A database with every source of one corpus staged: the points files, then the tables."""
+def database(tmp_path: Path) -> object:
     db = create(tmp_path / "db")
-    files = tmp_path / "files"
-    for index, (name, columns) in enumerate(points.items()):
-        db.stage(name, parquet(files, name, columns), default=index == 0)
-    for name in tables:
-        db.stage(name, parquet(files, name, ("key",)))
+    db.files = tmp_path / "files"
     return db
+
+
+def points(db, view: str, columns, file: str | None = None) -> None:
+    """One view's own insert: its geometry, its labels, its id, and every column it fills.
+
+    The attribute columns are the declared attributes' own names, which a frame inserted into the
+    allocation view fills by name (§3), so the placeholder carries one column each.
+    """
+    attributes = [
+        block["name"]
+        for block in db.blocks.blocks["attribute"]
+        if not block.get("scope")
+    ]
+    named = {"id": "entity_id"}
+    named["lon" if "lon" in columns else "x"] = "lon" if "lon" in columns else "x"
+    named["lat" if "lat" in columns else "y"] = "lat" if "lat" in columns else "y"
+    access = [one for one in columns if one not in ("entity_id", "x", "y", "lon", "lat")]
+    if access:
+        named["access"] = access[0]
+    every = list(dict.fromkeys(list(columns) + attributes))
+    name = (file or f"{view}_points").replace("/", "_")
+    db.insert(view, parquet(db.files, name, every), **named)
+
+
+def artifacts(db, layer: str, columns=("key",), view: str | None = None) -> None:
+    named = {"key": "key"}
+    if view is not None:
+        named["view"] = view
+    db.insert(
+        layer,
+        artifacts=parquet(db.files, f"{layer}_artifacts".replace("/", "_"), columns),
+        **named,
+    )
+
+
+def members(db, layer: str) -> None:
+    db.insert(
+        layer,
+        members=parquet(db.files, f"{layer}_members".replace("/", "_"), ("key", "entity")),
+        id="entity",
+        key="key",
+    )
+
+
+def values(db, vocabulary: str) -> None:
+    db.insert(
+        vocabulary,
+        parquet(db.files, f"{vocabulary}_values", ("key",)),
+        key="key",
+    )
 
 
 # ---------------------------------------------------------------------------- the comparison
@@ -105,10 +154,54 @@ def generated(db) -> dict:
     return _toml.loads(db.declaration)
 
 
+def _readers(document: dict) -> dict[str, tuple]:
+    """Which blocks read each file, so a `source` can be compared by what reads it beside it.
+
+    Keyed by the file rather than by the `[sources]` key: the committed file names one key per
+    file and the SDK names one per target, so two blocks reading one file share a key there and
+    have one each here. What both say the same way is which blocks read the same file.
+    """
+    paths = {
+        key: PurePosixPath(str(path)).name
+        for key, path in (document.get("sources") or {}).items()
+    }
+    readers: dict[str, list[str]] = {}
+    for kind in ("view", "view_group", "vocabulary", "attribute", "layer"):
+        for block in document.get(kind, []):
+            for one, where in (
+                (block, f"{kind} {block.get('name')}"),
+                (block.get("members"), f"{kind} {block.get('name')} members"),
+                (block.get("views"), f"{kind} {block.get('name')} roster"),
+                (block.get("labels"), f"{kind} {block.get('name')} labels"),
+                *[
+                    (record, f"{kind} {block.get('name')} view {record.get('key')}")
+                    for record in (block.get("view") or [])
+                    if isinstance(record, dict)
+                ],
+                ((block.get("labels") or {}).get("members")
+                 if isinstance(block.get("labels"), dict) else None,
+                 f"{kind} {block.get('name')} labels members"),
+            ):
+                if isinstance(one, dict) and one.get("source"):
+                    readers.setdefault(paths.get(one["source"], one["source"]), []).append(where)
+    return {"": ()} | {key: tuple(sorted(names)) for key, names in readers.items()}
+
+
+def _by_readers(block: dict, readers: dict) -> dict:
+    """One block with its `source` replaced by the blocks that read the file it names."""
+    block = dict(block)
+    named = block.get("source")
+    if named is not None:
+        file = readers.get("paths", {}).get(named, named)
+        if file in readers:
+            block["source"] = readers[file]
+    return block
+
+
 def normalised(document: dict, filling: bool = False) -> dict:
     """One document ready to compare. `filling` adds what §4.8 requires the SDK to write."""
     out = dict(document)
-    out["sources"] = sorted(document.get("sources", {}))
+    out.pop("sources", None)
     defaults = dict(document.get("defaults", {}))
     if defaults.get("entity_id_field") == "entity_id":
         defaults.pop("entity_id_field")
@@ -116,12 +209,37 @@ def normalised(document: dict, filling: bool = False) -> dict:
     if filling and len(views) == 1:
         defaults.setdefault("allocation_view", views[0]["name"])
     out["defaults"] = defaults
-    out["view"] = [_view(block, defaults, filling) for block in views]
+    readers = _readers(document)
+    readers["paths"] = {
+        key: PurePosixPath(str(path)).name
+        for key, path in (document.get("sources") or {}).items()
+    }
+    if filling and defaults.get("source"):
+        # `[defaults].source` is resolved onto every block below before the keys are compared, so
+        # a block that names none reads the default's file with everything else that does.
+        for kind in ("view", "attribute"):
+            for block in document.get(kind, []):
+                if "source" not in block and not block.get("scope"):
+                    file = readers["paths"].get(defaults["source"], defaults["source"])
+                    readers.setdefault(file, ())
+                    readers[file] = tuple(
+                        sorted(readers[file] + (f"{kind} {block['name']}",))
+                    )
+    out["view"] = [_by_readers(_view(block, defaults, filling), readers) for block in views]
+    out["view_group"] = [
+        _group(block, readers) for block in document.get("view_group", [])
+    ]
     out["attribute"] = [
-        block if block.get("scope") else _sourced(block, defaults, filling)
+        # `[defaults].source` reaches an entity-scoped column and no other, so a scoped one is
+        # compared as written; both are compared by which blocks read their file.
+        _by_readers(_fields(block), readers) if block.get("scope")
+        else _by_readers(_fields(_sourced(block, defaults, filling)), readers)
         for block in document.get("attribute", [])
     ]
-    out["layer"] = [_layer(block, filling) for block in document.get("layer", [])]
+    out["vocabulary"] = [
+        _by_readers(block, readers) for block in document.get("vocabulary", [])
+    ]
+    out["layer"] = [_layer(block, filling, readers) for block in document.get("layer", [])]
     # `[defaults].source` is resolved onto every block above and compared there. The SDK writes it
     # nowhere: `default=True` fills the source onto each block that named none, which is what §4.8
     # asks for, so a default in the document would only bind a column declared at a running
@@ -138,17 +256,41 @@ def _sourced(block: dict, defaults: dict, filling: bool) -> dict:
 
 
 def _view(block: dict, defaults: dict, filling: bool) -> dict:
-    block = _sourced(block, defaults, filling)
-    fields = block.get("fields")
-    if fields and all(name == column for name, column in fields.items()):
-        block.pop("fields")
+    block = _fields(_sourced(block, defaults, filling))
     if filling:
         block.setdefault("visibility", "public")
     return block
 
 
-def _layer(block: dict, filling: bool) -> dict:
+def _fields(block: dict) -> dict:
+    """A `fields` entry naming the column its own canonical name says nothing (§4.8)."""
     block = dict(block)
+    fields = {
+        name: column
+        for name, column in (block.get("fields") or {}).items()
+        if name != column
+    }
+    if block.get("fields") is not None:
+        block["fields"] = fields
+    if not fields:
+        block.pop("fields", None)
+    return block
+
+
+def _group(block: dict, readers: dict) -> dict:
+    """One `[[view_group]]`: its own fields, and each inline roster record's own source."""
+    block = _by_readers(_fields(block), readers)
+    if block.get("view"):
+        block["view"] = [_by_readers(dict(record), readers) for record in block["view"]]
+    if isinstance(block.get("views"), dict):
+        block["views"] = _by_readers(_fields(block["views"]), readers)
+    return block
+
+
+def _layer(block: dict, filling: bool, readers: dict | None = None) -> dict:
+    block = _by_readers(block, readers or {})
+    if isinstance(block.get("members"), dict):
+        block["members"] = _by_readers(_fields(block["members"]), readers or {})
     hierarchy = dict(block.get("hierarchy", {}))
     if hierarchy.get("prune_children") is False:
         hierarchy.pop("prune_children")
@@ -161,6 +303,29 @@ def _layer(block: dict, filling: bool) -> dict:
     if content is not None and not content.get("computed") and not content.get("supplied"):
         block.pop("content")
     return block
+
+
+def bindings(db) -> None:
+    """Every source the SDK named is the file of the target and role its insert bound (§4.8).
+
+    The comparison below reads a `source` by which blocks name it, so a binding swapped between
+    two targets would compare equal. The key the SDK writes is the target's own name and the
+    role's, and the file under it is the one that insert wrote, which is what this asserts.
+    """
+    from pathlib import Path as _Path
+
+    for insert in db.inserts:
+        stem = insert.target.replace("/", "_")
+        if insert.view_key is not None:
+            stem = f"{stem}_{insert.view_key}".replace("-", "_")
+        expected = stem if insert.role in ("rows", "values", "text") else f"{stem}_{insert.role}"
+        # One name held by two kinds writes two files, the second named for its kind (§4.8).
+        assert insert.source in (expected, f"{expected}_{insert.kind}"), (
+            f"{insert.target} ({insert.role}): {insert.source}"
+        )
+        assert _Path(insert.path).exists(), insert.path
+    keys = set(_toml.loads(db.declaration).get("sources", {}))
+    assert keys == {insert.source for insert in db.inserts}
 
 
 def same(written: dict, holds: dict) -> None:
@@ -185,25 +350,11 @@ def same(written: dict, holds: dict) -> None:
 
 
 def test_arxiv(tmp_path):
-    db = database(
-        tmp_path,
-        {
-            "points": ("entity_id", "x", "y", "categories"),
-            "points_pca64": ("entity_id", "x", "y", "categories"),
-        },
-        ["archive", "primary_category", "kmeans", "kmeans_members", "hdbscan", "hdbscan_members"],
-    )
-    db.declare_view("knn", source="points", access="categories", extent="auto", title="Topic map")
-    db.declare_view(
-        "pca64",
-        source="points_pca64",
-        access="categories",
-        extent="auto",
-        title="Topic map (PCA-64)",
-    )
-    db.declare_vocabulary("archive", source="archive", closed=True, width="u8",
-                          title="arXiv archive")
-    db.declare_vocabulary("primary_category", source="primary_category", closed=True, width="u16",
+    db = database(tmp_path)
+    db.declare_view("knn", extent="auto", title="Topic map")
+    db.declare_view("pca64", extent="auto", title="Topic map (PCA-64)")
+    db.declare_vocabulary("archive", closed=True, width="u8", title="arXiv archive")
+    db.declare_vocabulary("primary_category", closed=True, width="u16",
                           title="arXiv subject class")
     db.declare_attribute("archive", type="category", vocabulary="archive", render=True,
                          index=True, title="Archive")
@@ -215,24 +366,30 @@ def test_arxiv(tmp_path):
     db.declare_attribute("abstract", type="text", index=True)
     db.declare_attribute("authors", type="text", index=True, title="Authors")
     db.declare_attribute("arxiv_id", type="keyword", index=True, title="arXiv ID")
-    for name, source, members, kind, requirement, title in [
-        ("clusters/kmeans", "kmeans", "kmeans_members", "flat", {"count": 50}, "k-means clusters"),
-        ("clusters/hdbscan", "hdbscan", "hdbscan_members", "nested", {"fraction": 0.05},
-         "HDBSCAN clusters"),
+    for name, kind, requirement, title in [
+        ("clusters/kmeans", "flat", {"count": 50}, "k-means clusters"),
+        ("clusters/hdbscan", "nested", {"fraction": 0.05}, "HDBSCAN clusters"),
     ]:
-        db.declare_layer(name, kind=kind, source=source, members=members, views=["knn", "pca64"],
+        db.declare_layer(name, kind=kind, views=["knn", "pca64"],
                          require_member_visibility=requirement,
                          supplied=[("topic", "text", "all")], title=title)
+
+    points(db, "knn", ("entity_id", "x", "y", "categories"))
+    points(db, "pca64", ("entity_id", "x", "y", "categories"))
+    values(db, "archive")
+    values(db, "primary_category")
+    for name in ("clusters/kmeans", "clusters/hdbscan"):
+        artifacts(db, name)
+        members(db, name)
+    bindings(db)
     same(generated(db), committed("arxiv"))
 
 
 def test_gbif(tmp_path):
     """`# <vocabulary>` is the `kingdom` value set, whose size the run sees: not declared here."""
-    db = database(tmp_path, {"points": ("entity_id", "lon", "lat", "countrycode")},
-                  ["kingdom", "taxonomy"])
-    db.declare_view("geo", source="points", projection="web_mercator", extent=WORLD,
-                    access="countrycode", default_label="UNRECORDED",
-                    title="Where it was recorded")
+    db = database(tmp_path)
+    db.declare_view("geo", projection="web_mercator", extent=WORLD,
+                    default_label="UNRECORDED", title="Where it was recorded")
     db.declare_attribute("kingdom", type="category", vocabulary="kingdom", render=True,
                          title="Kingdom")
     db.declare_attribute("specieskey", type="keyword", index=True, title="GBIF species key")
@@ -242,7 +399,6 @@ def test_gbif(tmp_path):
         "taxonomy/tree",
         kind="tiered",
         views=["geo"],
-        members="taxonomy",
         value_set="open",
         prune_children=True,
         require_member_visibility={"count": 1},
@@ -250,18 +406,15 @@ def test_gbif(tmp_path):
         computed=("centroid", "box"),
         title="Taxonomy",
     )
+    points(db, "geo", ("entity_id", "lon", "lat", "countrycode"))
+    members(db, "taxonomy/tree")
+    bindings(db)
     same(generated(db), committed("gbif"))
 
 
 def test_geonames(tmp_path):
-    db = database(
-        tmp_path,
-        {"points": ("entity_id", "lon", "lat", "country")},
-        ["feature_class", "feature_code", "country", "admin1", "admin2", "admin3", "admin4",
-         "timezone", "members_feature", "members_admin", "artifacts_admin"],
-    )
-    db.declare_view("world", projection="web_mercator", extent=WORLD, access="country",
-                    title="GeoNames")
+    db = database(tmp_path)
+    db.declare_view("world", projection="web_mercator", extent=WORLD, title="GeoNames")
     for name, width, visibility, title in [
         ("feature_class", "u8", "public", "Feature class"),
         ("feature_code", "u16", "public", "Feature code"),
@@ -272,8 +425,7 @@ def test_geonames(tmp_path):
         ("admin4", "u32", "derived", "Fourth-level administrative division"),
         ("timezone", "u16", "derived", "Time zone"),
     ]:
-        db.declare_vocabulary(name, source=name, closed=True, width=width, visibility=visibility,
-                              title=title)
+        db.declare_vocabulary(name, closed=True, width=width, visibility=visibility, title=title)
     for name, render in [
         ("feature_class", True), ("feature_code", True), ("country", True), ("admin1", False),
         ("admin2", False), ("admin3", False), ("admin4", False), ("timezone", False),
@@ -289,7 +441,6 @@ def test_geonames(tmp_path):
         "features/taxonomy",
         kind="tiered",
         views=["world"],
-        members="members_feature",
         value_set="open",
         prune_children=True,
         require_member_visibility={"count": 1},
@@ -300,8 +451,6 @@ def test_geonames(tmp_path):
     db.declare_layer(
         "admin/hierarchy",
         kind="tiered",
-        source="artifacts_admin",
-        members="members_admin",
         views=["world"],
         value_set="open",
         prune_children=True,
@@ -312,37 +461,41 @@ def test_geonames(tmp_path):
         supplied=[("name", "text", "inherited")],
         title="Administrative hierarchy",
     )
+    points(db, "world", ("entity_id", "lon", "lat", "country"))
+    for name in ("feature_class", "feature_code", "country", "admin1", "admin2", "admin3",
+                 "admin4", "timezone"):
+        values(db, name)
+    members(db, "features/taxonomy")
+    artifacts(db, "admin/hierarchy")
+    members(db, "admin/hierarchy")
+    bindings(db)
     same(generated(db), committed("geonames"))
 
 
 def test_medcpt(tmp_path):
     """`# <abstract-attribute>` and `# <mesh-layer>` are the run's: neither is declared here."""
-    db = database(tmp_path, {"points": ("entity_id", "x", "y", "branches")},
-                  ["branch", "kmeans", "kmeans_members", "mesh", "mesh_members"])
-    db.declare_view("knn", source="points", extent="auto", access="branches",
-                    title="Literature map")
-    db.declare_vocabulary("branch", source="branch", closed=True, width="u8", title="MeSH branch")
+    db = database(tmp_path)
+    db.declare_view("knn", extent="auto", title="Literature map")
+    db.declare_vocabulary("branch", closed=True, width="u8", title="MeSH branch")
     db.declare_attribute("published", type="timestamp_us", render=True, index=True,
                          title="Published")
     db.declare_attribute("title", type="text", index=True)
     db.declare_attribute("mesh_major", type="text", index=True, title="MeSH major topics")
     db.declare_attribute("pmid", type="keyword", index=True, title="PMID")
-    db.declare_layer("clusters/kmeans", kind="flat", source="kmeans", members="kmeans_members",
-                     views=["knn"], require_member_visibility={"count": 50},
+    db.declare_layer("clusters/kmeans", kind="flat", views=["knn"],
+                     require_member_visibility={"count": 50},
                      supplied=[("topic", "text", "all")], title="k-means clusters")
+    points(db, "knn", ("entity_id", "x", "y", "branches"))
+    values(db, "branch")
+    artifacts(db, "clusters/kmeans")
+    members(db, "clusters/kmeans")
+    bindings(db)
     same(generated(db), committed("medcpt"))
 
 
 def test_overture(tmp_path):
-    db = database(
-        tmp_path,
-        {"points": ("entity_id", "lon", "lat", "country")},
-        ["category_root", "category", "basic_category", "country", "source_dataset",
-         "operating_status", "division_country", "division_region", "division_county",
-         "artifacts_divisions"],
-    )
-    db.declare_view("world", projection="web_mercator", extent=WORLD, access="country",
-                    title="Overture places")
+    db = database(tmp_path)
+    db.declare_view("world", projection="web_mercator", extent=WORLD, title="Overture places")
     for name, width, visibility, title in [
         ("category_root", "u8", "public", "Category root"),
         ("category", "u16", "public", "Category"),
@@ -354,8 +507,7 @@ def test_overture(tmp_path):
         ("division_region", "u16", "derived", "Region"),
         ("division_county", "u32", "derived", "County"),
     ]:
-        db.declare_vocabulary(name, source=name, closed=True, width=width, visibility=visibility,
-                              title=title)
+        db.declare_vocabulary(name, closed=True, width=width, visibility=visibility, title=title)
     for name in ("category_root", "category", "basic_category", "country", "source_dataset",
                  "operating_status"):
         db.declare_attribute(name, type="category", vocabulary=name, render=True, index=True)
@@ -367,7 +519,6 @@ def test_overture(tmp_path):
     db.declare_layer(
         "boundaries/divisions",
         kind="nested",
-        source="artifacts_divisions",
         views=["world"],
         membership="spatial",
         shape={"kind": "polygon"},
@@ -386,6 +537,12 @@ def test_overture(tmp_path):
         require_member_visibility={"count": 1},
         title="Contributing dataset",
     )
+    points(db, "world", ("entity_id", "lon", "lat", "country"))
+    for name in ("category_root", "category", "basic_category", "country", "source_dataset",
+                 "operating_status", "division_country", "division_region", "division_county"):
+        values(db, name)
+    artifacts(db, "boundaries/divisions")
+    bindings(db)
     same(generated(db), committed("overture"))
 
 
@@ -394,11 +551,9 @@ def test_paperseek(tmp_path):
     on the view. The SDK cannot leave the third out, a view naming a label for every point, so it
     is declared here and dropped before the comparison.
     """
-    db = database(tmp_path, {"points": ("entity_id", "x", "y", "licence")},
-                  ["licence", "type", "kmeans", "kmeans_members", "topics", "topics_members"])
-    db.declare_view("knn", source="points", extent="auto", access="licence",
-                    default_label="unlicensed", title="Scholarly map")
-    db.declare_vocabulary("type", source="type", width="u8", title="Work type")
+    db = database(tmp_path)
+    db.declare_view("knn", extent="auto", default_label="unlicensed", title="Scholarly map")
+    db.declare_vocabulary("type", width="u8", title="Work type")
     db.declare_attribute("publication_year", type="i32", render=True, index=True,
                          title="Published")
     db.declare_attribute("type", type="category", vocabulary="type", render=True,
@@ -407,9 +562,14 @@ def test_paperseek(tmp_path):
     db.declare_attribute("openalex_id", type="keyword", index=True, title="OpenAlex id")
     db.declare_attribute("title", type="text", index=True)
     db.declare_attribute("abstract", type="text", index=True)
-    db.declare_layer("clusters/kmeans", kind="flat", source="kmeans", members="kmeans_members",
-                     views=["knn"], require_member_visibility={"count": 50},
+    db.declare_layer("clusters/kmeans", kind="flat", views=["knn"],
+                     require_member_visibility={"count": 50},
                      supplied=[("topic", "text", "all")], title="k-means clusters")
+    points(db, "knn", ("entity_id", "x", "y", "licence"))
+    values(db, "type")
+    artifacts(db, "clusters/kmeans")
+    members(db, "clusters/kmeans")
+    bindings(db)
     written = generated(db)
     written["view"][0].pop("point_visibility")
     same(written, committed("paperseek"))
@@ -417,20 +577,11 @@ def test_paperseek(tmp_path):
 
 def test_treeoflife(tmp_path):
     """`# <vocabularies>` and `# <kmeans-layer>` are the run's: neither is declared here."""
-    db = database(
-        tmp_path,
-        {
-            "points": ("entity_id", "x", "y", "publisher"),
-            "points_geo": ("entity_id", "lon", "lat", "publisher"),
-        },
-        ["publisher", "source_dataset", "basis", "img_type", "kingdom", "phylum", "class",
-         "order", "family", "genus", "species", "taxonomy", "kmeans", "kmeans_members"],
-    )
-    db.declare_view("bioclip", source="points", extent="auto", access="publisher",
-                    default_label="unpublished", title="Specimen map")
-    db.declare_view("geo", source="points_geo", projection="web_mercator", extent=WORLD,
-                    access="publisher", default_label="unpublished",
-                    title="Where it was recorded")
+    db = database(tmp_path)
+    db.declare_view("bioclip", extent="auto", default_label="unpublished",
+                    title="Specimen map")
+    db.declare_view("geo", projection="web_mercator", extent=WORLD,
+                    default_label="unpublished", title="Where it was recorded")
     for name, vocabulary, title in [
         ("kingdom", "kingdom", "Kingdom"), ("phylum", "phylum", "Phylum"),
         ("class", "class", "Class"), ("order", "order", "Order"),
@@ -454,7 +605,6 @@ def test_treeoflife(tmp_path):
         "taxonomy/tree",
         kind="tiered",
         views=["bioclip", "geo"],
-        members="taxonomy",
         value_set="open",
         prune_children=True,
         require_member_visibility={"count": 1},
@@ -472,52 +622,35 @@ def test_treeoflife(tmp_path):
         require_member_visibility={"count": 1},
         title="Publishing institution",
     )
+    points(db, "bioclip", ("entity_id", "x", "y", "publisher"))
+    points(db, "geo", ("entity_id", "lon", "lat", "publisher"))
+    members(db, "taxonomy/tree")
+    bindings(db)
     same(generated(db), committed("treeoflife"))
 
 
 def test_multiview(tmp_path):
     """Every block of this corpus through the typed verbs, the view groups included.
 
-    The two groups are the two rosters `declare_view_group` carries: `quarter` is form A, one
-    inline view per quarter naming its own file, and `quarter_alt` shares its keys and takes one
-    points file with a discriminator.
+    The two groups are views.md §3.2's two rosters. `quarter` gives each view its own file, so
+    each is inserted as its own table naming the one view it is for with `view_key=`, and the
+    roster insert carries the metadata each record holds. `quarter_alt` shares its keys and takes
+    one file with a discriminator column, named with `view=`.
     """
     import datetime as dt
 
-    db = database(
-        tmp_path,
-        {
-            "world": ("entity_id", "lon", "lat", "access"),
-            "quarter_2026_q1": ("entity_id", "x", "y", "access"),
-            "quarter_2026_q2": ("entity_id", "x", "y", "access"),
-            "quarter_2026_q3": ("entity_id", "x", "y", "access"),
-            "quarter_2026_q4": ("entity_id", "x", "y", "access"),
-            "quarter_alt_pts": ("entity_id", "lon", "lat", "access"),
-        },
-        ["attrs_constant", "attrs_scoped", "vocab_kind", "collections", "clusters_q"],
-    )
-    db.declare_view("world", projection="web_mercator", extent=WORLD, access="access",
-                    title="Whole corpus")
-    db.declare_view("world_flat", source="world", projection="equirectangular", extent=WORLD,
-                    access="access", title="Whole corpus, equirectangular")
+    import pyarrow as pa
+    import pyarrow.parquet as pq
 
-    def quarter(key: str, source: str, label: str, starts, ends) -> dict:
-        return {"key": key, "source": source, "label": label,
-                "starts": dt.datetime(*starts, tzinfo=dt.timezone.utc),
-                "ends": dt.datetime(*ends, tzinfo=dt.timezone.utc)}
-
+    db = database(tmp_path)
+    db.declare_view("world", projection="web_mercator", extent=WORLD, title="Whole corpus")
+    db.declare_view("world_flat", projection="equirectangular", extent=WORLD,
+                    title="Whole corpus, equirectangular")
     db.declare_view_group(
         "quarter",
         title="By quarter",
         extent={"x": [-40.0, 40.0], "y": [-40.0, 40.0]},
-        access="access",
         metadata={"label": "text", "starts": "timestamp_us", "ends": "timestamp_us"},
-        views=[
-            quarter("2026-Q1", "quarter_2026_q1", "Q1 2026", (2026, 1, 1), (2026, 4, 1)),
-            quarter("2026-Q2", "quarter_2026_q2", "Q2 2026", (2026, 4, 1), (2026, 7, 1)),
-            quarter("2026-Q3", "quarter_2026_q3", "Q3 2026", (2026, 7, 1), (2026, 10, 1)),
-            quarter("2026-Q4", "quarter_2026_q4", "Q4 2026", (2026, 10, 1), (2027, 1, 1)),
-        ],
     )
     db.declare_view_group(
         "quarter_alt",
@@ -525,16 +658,11 @@ def test_multiview(tmp_path):
         members="quarter",
         projection="web_mercator",
         extent=WORLD,
-        source="quarter_alt_pts",
-        view_field="quarter",
-        access="access",
     )
 
-    db.declare_vocabulary("kind", source="vocab_kind", closed=True, width="u8",
-                          title="Feature kind")
-    db.declare_attribute("importance", type="i64", index=True, source="attrs_constant")
-    db.declare_attribute("kind", type="category", vocabulary="kind", index=True, render=True,
-                         source="attrs_constant")
+    db.declare_vocabulary("kind", closed=True, width="u8", title="Feature kind")
+    db.declare_attribute("importance", type="i64", index=True)
+    db.declare_attribute("kind", type="category", vocabulary="kind", index=True, render=True)
     db.declare_attribute("sentiment", type="f32", scope={"group": "quarter"}, index=True,
                          render=True)
     db.declare_vocabulary("mood", closed=True, width="u8", visibility="derived",
@@ -542,13 +670,11 @@ def test_multiview(tmp_path):
     db.declare_attribute("mood", type="category", vocabulary="mood",
                          scope={"group": "quarter"}, index=True)
     db.declare_attribute("note", type="text", scope={"group": "quarter"}, index=True)
-    db.declare_attribute("coverage", type="f32", scope={"group": "quarter"}, index=True,
-                         source="attrs_scoped", fields={"view": "quarter"})
+    db.declare_attribute("coverage", type="f32", scope={"group": "quarter"}, index=True)
 
     db.declare_layer(
         "collections",
         kind="flat",
-        source="collections",
         views=["world", "quarter"],
         artifact_visibility={"field": "access", "default": "inherited"},
         require_member_visibility="all",
@@ -559,10 +685,8 @@ def test_multiview(tmp_path):
     db.declare_layer(
         "quarter_clusters",
         kind="flat",
-        source="clusters_q",
         views=["quarter"],
         scope={"group": "quarter"},
-        fields={"view": "quarter"},
         require_member_visibility="any",
         computed=(),
         supplied=[("tag", "text", "inherited")],
@@ -586,4 +710,64 @@ def test_multiview(tmp_path):
         ],
         title="Regions",
     )
+
+    # The two plain views, then each quarter's own file, then the shared group's one file.
+    # One file for the two plain views, as the corpus has it: a second projection over the same
+    # points is a second view reading the same rows.
+    points(db, "world", ("entity_id", "lon", "lat", "access"), file="world")
+    points(db, "world_flat", ("entity_id", "lon", "lat", "access"), file="world")
+    quarters = ["2026-Q1", "2026-Q2", "2026-Q3", "2026-Q4"]
+    starts = [dt.datetime(2026, q, 1, tzinfo=dt.timezone.utc) for q in (1, 4, 7, 10)]
+    ends = starts[1:] + [dt.datetime(2027, 1, 1, tzinfo=dt.timezone.utc)]
+    roster = tmp_path / "files" / "quarter_roster.parquet"
+    roster.parent.mkdir(parents=True, exist_ok=True)
+    pq.write_table(
+        pa.table(
+            {
+                "key": pa.array(quarters, pa.string()),
+                "label": pa.array([f"Q{i + 1} 2026" for i in range(4)], pa.string()),
+                "starts": pa.array(starts, pa.timestamp("us", tz="UTC")),
+                "ends": pa.array(ends, pa.timestamp("us", tz="UTC")),
+            }
+        ),
+        roster,
+    )
+    db.insert("quarter", roster=str(roster), key="key", label="label", starts="starts",
+              ends="ends")
+    for at, key in enumerate(quarters):
+        db.insert(
+            "quarter",
+            parquet(db.files, f"quarter_2026_q{at + 1}", ("entity_id", "x", "y", "access")),
+            id="entity_id",
+            x="x",
+            y="y",
+            access="access",
+            view_key=key,
+        )
+    db.insert(
+        "quarter_alt",
+        parquet(db.files, "quarter_alt_pts", ("entity_id", "lon", "lat", "access", "quarter")),
+        id="entity_id",
+        lon="lon",
+        lat="lat",
+        access="access",
+        view="quarter",
+    )
+    # `kind` reads its keys from a file; `mood` carries its four inline, so it takes no insert.
+    values(db, "kind")
+    constants = parquet(db.files, "attrs_constant", ("entity_id", "importance", "kind"))
+    for name in ("importance", "kind"):
+        db.insert(name, constants, id="entity_id", value=name)
+    # `coverage` is the one scoped column with a source of its own; the other three are read
+    # from each view's own points file, so they are declared and take no insert (views.md §5).
+    db.insert(
+        "coverage",
+        parquet(db.files, "attrs_scoped", ("entity_id", "quarter", "coverage")),
+        id="entity_id",
+        value="coverage",
+        view="quarter",
+    )
+    artifacts(db, "collections")
+    artifacts(db, "quarter_clusters", ("key", "quarter"), view="quarter")
+    bindings(db)
     same(generated(db), committed("multiview"))

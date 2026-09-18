@@ -111,8 +111,8 @@ def test_viewer_refuses_an_empty_term_set(db):
         db.viewer([])
 
 
-def test_the_union_is_every_access_label_the_sdk_staged(db):
-    """§8: the SDK records the distinct labels of every access column it staged."""
+def test_the_union_is_every_access_label_the_sdk_inserted(db):
+    """§8: the SDK records the distinct labels of every access column it inserted."""
     assert ONE_TERM in db.terms
     assert len(db.terms) > 1
 
@@ -175,7 +175,7 @@ def test_a_viewport_that_serves_no_point_still_has_the_two_fixed_columns(db):
     assert json.loads(empty.schema.metadata[b"tessera.counts"])["matched"] == 0
 
 
-def test_the_external_id_comes_back_as_the_column_that_staged_it(db):
+def test_the_external_id_comes_back_as_the_column_that_carried_it(db):
     """The wire says base64 bytes; the SDK knows which column those bytes came from.
 
     The notebook corpus names its rows by an integer column, so the database reads the eight
@@ -184,16 +184,16 @@ def test_the_external_id_comes_back_as_the_column_that_staged_it(db):
     """
     table = db.viewport(k=8)
     one = table.column("tessera_id")[0].as_py()
-    staged = db.item(one)["external_id"]
-    assert isinstance(staged, int)
+    carried = db.item(one)["external_id"]
+    assert isinstance(carried, int)
 
     token = authorise(db.session_url, db.session_credential, db.terms)
     raw = connect(db.viewer_url, token).item(one)["external_id"]
     assert isinstance(raw, bytes)
-    assert int.from_bytes(raw, "little") == staged
+    assert int.from_bytes(raw, "little") == carried
 
 
-def test_a_string_id_column_comes_back_as_the_string_it_staged(served):
+def test_a_string_id_column_comes_back_as_the_string_it_carried(served):
     """The other arm: a database whose rows are named by a string column."""
     from test_sdk_pages import small
 
@@ -220,7 +220,7 @@ def test_connect_has_no_way_to_mint_another_principal_and_no_way_to_write(db):
     """§1, §8: minting needs the session credential and writing needs the operator's."""
     v = connect(db.viewer_url, "a-token-this-test-never-uses")
     assert not hasattr(v, "viewer")
-    for verb in ("stage", "declare", "commit", "check", "remove", "suppress", "leave"):
+    for verb in ("insert", "declare", "commit", "check", "remove", "suppress", "leave"):
         assert not hasattr(v, verb)
 
 

@@ -25,34 +25,11 @@ pytest.importorskip("pyarrow")
 
 
 def declare_notebook(db, corpus: Path) -> None:
-    """python-sdk.md §10.2: `data/notebook/schema.toml` as calls, the files staged as paths."""
-    db.stage("points", str(corpus / "points.parquet"), default=True)
-    for name, file in [
-        ("archive", "archive"),
-        ("primary_category", "primary_category"),
-        ("kmeans", "clusters-kmeans"),
-        ("kmeans_members", "clusters-kmeans-members"),
-        ("kmeans_topics", "topics-kmeans"),
-        ("kmeans_topic_members", "topics-kmeans-members"),
-        ("hdbscan", "clusters-hdbscan"),
-        ("hdbscan_members", "clusters-hdbscan-members"),
-        ("hdbscan_topics", "topics-hdbscan"),
-        ("hdbscan_topic_members", "topics-hdbscan-members"),
-        ("taxonomy", "taxonomy-arxiv"),
-        ("taxonomy_members", "taxonomy-arxiv-members"),
-    ]:
-        db.stage(name, str(corpus / f"{file}.parquet"))
-
-    db.declare_view("s0", source="points", access="categories", title="arXiv, 50,000 papers")
+    """python-sdk.md §10.2: `data/notebook/schema.toml` as calls, the files read in place."""
+    db.declare_view("s0", title="arXiv, 50,000 papers")
+    db.declare_vocabulary("archive", closed=True, width="u8", title="arXiv archive")
     db.declare_vocabulary(
-        "archive", source="archive", closed=True, width="u8", title="arXiv archive"
-    )
-    db.declare_vocabulary(
-        "primary_category",
-        source="primary_category",
-        closed=True,
-        width="u16",
-        title="arXiv subject class",
+        "primary_category", closed=True, width="u16", title="arXiv subject class"
     )
     db.declare_attribute(
         "archive", type="category", vocabulary="archive", render=True, index=True, title="Archive"
@@ -73,45 +50,101 @@ def declare_notebook(db, corpus: Path) -> None:
     db.declare_layer(
         "clusters/kmeans",
         kind="flat",
-        source="kmeans",
-        members="kmeans_members",
         require_member_visibility={"count": 50},
         title="k-means clusters",
     )
     db.declare_labels(
         "topics/kmeans",
         of="clusters/kmeans",
-        source="kmeans_topics",
-        members="kmeans_topic_members",
         content_requires="all",
         title="k-means topics",
     )
     db.declare_layer(
         "clusters/hdbscan",
         kind="nested",
-        source="hdbscan",
-        members="hdbscan_members",
         require_member_visibility={"fraction": 0.05},
         title="HDBSCAN clusters",
     )
     db.declare_labels(
         "topics/hdbscan",
         of="clusters/hdbscan",
-        source="hdbscan_topics",
-        members="hdbscan_topic_members",
         content_requires="all",
         title="HDBSCAN topics",
     )
     db.declare_layer(
         "taxonomy/arxiv",
         kind="tiered",
-        source="taxonomy",
-        members="taxonomy_members",
         levels=[(0, "archive"), (1, "subject class")],
         require_member_visibility={"count": 1},
         computed=("centroid", "box"),
         title="arXiv classification",
     )
+
+    insert_notebook(db, corpus)
+
+
+def insert_notebook(db, corpus: Path) -> None:
+    """The tables, each naming the columns its target reads (§3, §10.2)."""
+    db.insert("archive", str(corpus / "archive.parquet"), key="key", title="title", code="code")
+    db.insert(
+        "primary_category",
+        str(corpus / "primary_category.parquet"),
+        key="key",
+        title="title",
+        code="code",
+    )
+    # The six attribute columns are read by name from the frame inserted into the allocation view.
+    db.insert(
+        "s0", str(corpus / "points.parquet"), id="entity_id", x="x", y="y", access="categories"
+    )
+    for layer, name in [
+        ("clusters/kmeans", "clusters-kmeans"),
+        ("clusters/hdbscan", "clusters-hdbscan"),
+        ("taxonomy/arxiv", "taxonomy-arxiv"),
+    ]:
+        # Every column these tables carry is named, canonical or not: the build reads a
+        # canonical column under its own name whatever the call says, so one passed over is
+        # refused rather than read silently (§3).
+        db.insert(
+            layer,
+            artifacts=str(corpus / f"{name}.parquet"),
+            key="key",
+            level="level",
+            parent="parent",
+            contents="contents",
+            attached_layer="attached_layer",
+            attached_key="attached_key",
+        )
+        db.insert(
+            layer,
+            members=str(corpus / f"{name}-members.parquet"),
+            id="entity",
+            key="key",
+            level="level",
+            rank="rank",
+        )
+    for labels, name in [
+        ("topics/kmeans", "topics-kmeans"),
+        ("topics/hdbscan", "topics-hdbscan"),
+    ]:
+        db.insert(
+            labels,
+            str(corpus / f"{name}.parquet"),
+            key="key",
+            level="level",
+            contents="contents",
+            parent="parent",
+            attached_layer="attached_layer",
+            attached_key="attached_key",
+        )
+        db.insert(
+            labels,
+            members=str(corpus / f"{name}-members.parquet"),
+            id="entity",
+            key="key",
+            level="level",
+            rank="rank",
+        )
 
 
 def read_schema_lines(stderr: str) -> list[str]:
@@ -120,12 +153,17 @@ def read_schema_lines(stderr: str) -> list[str]:
     The two declarations name one set of files by two paths, one relative to `data/notebook/` and
     one relative to a temporary directory, so the file name is what can be compared. What is being
     compared is which object reads which file, which the name carries.
+
+    A `[sources]` key is the caller's own name for a file and the SDK names each after the target
+    its insert bound it to, so the key is cut from the `source` lines and the file name compared.
     """
     lines = []
     for line in stderr.splitlines():
         if "read schema" not in line and "no source" not in line:
             continue
         head, _, path = line.rpartition(" ")
+        if head.lstrip().startswith("read schema  source"):
+            head = "read schema source"
         # The object column is padded to a width the longer object names overflow, so the spacing
         # is collapsed before the two runs are compared.
         lines.append(" ".join(head.split()) + "  " + Path(path.strip()).name)
@@ -209,36 +247,11 @@ def test_the_arxiv_declaration_regenerated_discloses_what_the_committed_one_disc
     if "clusters/toponymy" in declaration.read_text():
         pytest.skip("this rung's copy carries the spliced Toponymy layer, which §10.2 does not")
     db = create(tmp_path / "db")
-    db.stage("points", str(corpus / "points.parquet"), default=True)
-    db.stage("points_pca64", str(corpus / "points-pca64.parquet"))
-    for name, file in [
-        ("archive", "archive"),
-        ("primary_category", "primary_category"),
-        ("kmeans", "clusters-kmeans"),
-        ("kmeans_members", "clusters-kmeans-members"),
-        ("hdbscan", "clusters-hdbscan"),
-        ("hdbscan_members", "clusters-hdbscan-members"),
-    ]:
-        db.stage(name, str(corpus / f"{file}.parquet"))
-    db.declare_view(
-        "knn", source="points", access="categories", extent="auto", title="Topic map"
-    )
-    db.declare_view(
-        "pca64",
-        source="points_pca64",
-        access="categories",
-        extent="auto",
-        title="Topic map (PCA-64)",
-    )
+    db.declare_view("knn", extent="auto", title="Topic map")
+    db.declare_view("pca64", extent="auto", title="Topic map (PCA-64)")
+    db.declare_vocabulary("archive", closed=True, width="u8", title="arXiv archive")
     db.declare_vocabulary(
-        "archive", source="archive", closed=True, width="u8", title="arXiv archive"
-    )
-    db.declare_vocabulary(
-        "primary_category",
-        source="primary_category",
-        closed=True,
-        width="u16",
-        title="arXiv subject class",
+        "primary_category", closed=True, width="u16", title="arXiv subject class"
     )
     db.declare_attribute(
         "archive", type="category", vocabulary="archive", render=True, index=True, title="Archive"
@@ -258,19 +271,62 @@ def test_the_arxiv_declaration_regenerated_discloses_what_the_committed_one_disc
     db.declare_attribute("abstract", type="text", index=True)
     db.declare_attribute("authors", type="text", index=True, title="Authors")
     db.declare_attribute("arxiv_id", type="keyword", index=True, title="arXiv ID")
-    for name, source, members, kind, requirement in [
-        ("clusters/kmeans", "kmeans", "kmeans_members", "flat", {"count": 50}),
-        ("clusters/hdbscan", "hdbscan", "hdbscan_members", "nested", {"fraction": 0.05}),
+    for name, kind, requirement in [
+        ("clusters/kmeans", "flat", {"count": 50}),
+        ("clusters/hdbscan", "nested", {"fraction": 0.05}),
     ]:
         db.declare_layer(
             name,
             kind=kind,
-            source=source,
-            members=members,
             views=["knn", "pca64"],
             require_member_visibility=requirement,
             supplied=[("topic", "text", "all")],
             title="k-means clusters" if kind == "flat" else "HDBSCAN clusters",
+        )
+    db.insert(
+        "archive", str(corpus / "archive.parquet"), key="key", title="title", code="code"
+    )
+    db.insert(
+        "primary_category",
+        str(corpus / "primary_category.parquet"),
+        key="key",
+        title="title",
+        code="code",
+    )
+    db.insert(
+        "knn", str(corpus / "points.parquet"), id="entity_id", x="x", y="y", access="categories"
+    )
+    db.insert(
+        "pca64",
+        str(corpus / "points-pca64.parquet"),
+        id="entity_id",
+        x="x",
+        y="y",
+        access="categories",
+    )
+    for layer, name in [
+        ("clusters/kmeans", "clusters-kmeans"),
+        ("clusters/hdbscan", "clusters-hdbscan"),
+    ]:
+        # Every column these tables carry is named, canonical or not: the build reads a
+        # canonical column under its own name whatever the call says, so one passed over is
+        # refused rather than read silently (§3).
+        db.insert(
+            layer,
+            artifacts=str(corpus / f"{name}.parquet"),
+            key="key",
+            level="level",
+            parent="parent",
+            contents="contents",
+            attached_layer="attached_layer",
+            attached_key="attached_key",
+        )
+        db.insert(
+            layer,
+            members=str(corpus / f"{name}-members.parquet"),
+            id="entity",
+            key="key",
+            level="level",
         )
     report = db.check()
     assert report.ok, report.output
