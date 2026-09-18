@@ -10,9 +10,9 @@
 //! membership; a label that declares its own members keeps them; for every principal the label's
 //! masked count is the cluster's; and the same rule holds in a bundle the build wrote.
 //!
-//! The counts are read from the drill-down rather than from the viewport row. A dependent's
-//! viewport row carries its target's masked count whatever its own membership is (decision 0104's
-//! D13), so a number read there would be true before this rule as well.
+//! The counts are read from the drill-down as well as from the viewport row. The two agree since
+//! the owner's ruling of 2026-09-18 withdrew the copy a dependent's viewport row used to carry;
+//! before it, a number read on the wire would have been true whatever this rule decided.
 
 mod common;
 
@@ -220,10 +220,9 @@ async fn fixture(server: &TestServer, range: std::ops::Range<u64>, text: &str) -
 
 /// The drill-down's status and body for one artifact, as `terms` sees it.
 ///
-/// D13 does not reach this route. The viewport substitutes a dependent's target's masked count on
-/// the wire (decision 0104's D13), so a number read there says nothing about which membership the
-/// server counted. This route answers one artifact from its own verdict, so the number here is over
-/// the membership decision 0145 is about.
+/// This route answers one artifact from its own verdict, so the number here is over the membership
+/// decision 0145 is about — and since the owner's ruling of 2026-09-18 the viewport row carries the
+/// same number, the substitution that used to stand between them having been withdrawn.
 async fn drill(server: &TestServer, terms: &[&str], tessera_id: &str) -> (u16, serde_json::Value) {
     let auth = authorise(server, terms).await;
     let token = auth["token"].as_str().unwrap();
@@ -481,7 +480,9 @@ async fn a_cluster_that_grows_grows_its_labels_count() {
 /// A label that declares its own members keeps them. They are the caller's claim about where the
 /// text came from (decision 0135), and decision 0145 does not touch them: this label is counted
 /// over its own six, and the label beside it, attached to the same cluster and declaring none, is
-/// counted over the cluster's thirty.
+/// counted over the cluster's thirty. **The viewport row carries that same number** since the
+/// owner's ruling of 2026-09-18 withdrew the copy, and names the cluster it describes by
+/// identifier instead.
 #[tokio::test]
 async fn a_label_with_its_own_members_keeps_them() {
     let tmp = TempDir::new().unwrap();
@@ -528,15 +529,22 @@ async fn a_label_with_its_own_members_keeps_them() {
         30,
         "and the label beside it, declaring none, takes the cluster's"
     );
+    // **And the wire says the same thing the drill-down said** (owner ruling, 2026-09-18, which
+    // withdrew the copy a dependent's viewport row used to carry). The two labels differ on the
+    // wire exactly as they differ where the server counts: the one with six of its own reads six,
+    // the one borrowing reads the cluster's thirty. Which cluster each describes is `target`, and
+    // it is the same identifier for both — two labels on one cluster, which the join by count
+    // could not have separated at all.
     let rows = served(&server, &["0"]).await;
-    for key in ["own", "borrowed"] {
-        // Both carry the cluster's number on the wire. That is D13 rather than decision 0145: a
-        // dependent's viewport row takes its target's masked count whatever its own membership is
-        // (decision 0104's D13). The two labels differ where the server counts, above.
+    let cluster = row(&rows, CLUSTERS, "c").expect("the cluster is served");
+    assert_eq!(cluster.target, None, "a cluster is attached to nothing");
+    for (key, count) in [("own", 6), ("borrowed", 30)] {
+        let label = row(&rows, TOPICS, key).expect("served");
+        assert_eq!(label.masked_count, count, "{key}");
         assert_eq!(
-            row(&rows, TOPICS, key).expect("served").masked_count,
-            30,
-            "{key}"
+            label.target,
+            Some(cluster.tessera_id),
+            "{key}: the label names its cluster by the identifier this response served it under"
         );
     }
 

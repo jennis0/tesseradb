@@ -40,8 +40,8 @@ type Parts = number[][][] | null;
 
 /**
  * An artifacts-frame body over one row per pair of shape axes — the annotation channel's own
- * shape, `k = 0` and no points frame — in the r44 layout: the fourteen fixed columns `layer`
- * (dictionary u16/utf8) through `matched`, the two shape columns trailing. The axes are given
+ * shape, `k = 0` and no points frame: the fixed columns `layer` (dictionary u16/utf8) through
+ * `target`, the two shape columns trailing. The axes are given
  * separately so a test can make them disagree, which the server never does and which is exactly
  * why the decoder must not assume it.
  */
@@ -66,6 +66,8 @@ function body(rows: {x: Parts; y: Parts}[], type: {x: unknown; y: unknown} = {x:
       // hierarchy at its coarsest and look like data).
       rung: vectorFromArray(rows.map(() => 0), new Uint32()),
       matched: vectorFromArray(rows.map(() => null), new Bool()),
+      // Required too, and all-null here: these rows are a clustering, attached to nothing.
+      target: vectorFromArray(rows.map(() => null as bigint | null), new Uint64()),
       shape_x: vectorFromArray(rows.map((r) => r.x), type.x as never),
       shape_y: vectorFromArray(rows.map((r) => r.y), type.y as never)
     }),

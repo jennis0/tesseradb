@@ -787,6 +787,21 @@ export type Artifact = {
    * points in hand, which are a sample.
    */
   highlighted: boolean | null;
+  /**
+   * **The artifact this one is attached to, by its `tesseraId` in this same response** — a topic
+   * label's cluster (owner ruling, 2026-09-18). `null` where the artifact is attached to nothing,
+   * which is every row of a layer declaring no dependency.
+   *
+   * **It always names a row in the same response**, so the join is exact and total: a dependent
+   * whose target the response does not hold is absent entire. Attach by this and by nothing else.
+   * The client used to attach a label to its cluster by matching counts, which left the label
+   * unattached wherever two clusters of the layer shared a count — a count is not an identity.
+   *
+   * A dependent's own `maskedCount` is its own: the count of the membership it is served over,
+   * which is its target's where it declares no members of its own (decision 0145) and its own
+   * generating set otherwise. It is not the number to draw beside a label.
+   */
+  target: bigint | null;
 };
 
 /**

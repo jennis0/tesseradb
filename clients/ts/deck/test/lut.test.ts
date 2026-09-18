@@ -16,7 +16,8 @@ const artifact = (id: bigint, x: number, parent: bigint | null = null): Artifact
   parentIds: parent === null ? [] : [parent],
   rung: 0,
   matched: null,
-  highlighted: null
+  highlighted: null,
+  target: null
 });
 
 function band(tag: number, ordinals: number[], layer = 'l'): Band {

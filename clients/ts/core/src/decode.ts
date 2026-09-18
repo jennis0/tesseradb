@@ -460,7 +460,7 @@ export function decodeSubCells(payload: Uint8Array): SubCell[] {
  *
  * The projection is read off the frame's own schema, never off the request: the identity frame is
  * exactly the five columns `(layer, tessera_id, rung, matched, highlighted)` (contracts §3.2 r74 —
- * four until `highlighted` joined them), the full frame's fixed prefix is fifteen with the two
+ * four until `highlighted` joined them), the full frame's fixed prefix is sixteen with the two
  * shape columns trailing.
  */
 export function decodeArtifactsFrame(payload: Uint8Array): {
@@ -559,6 +559,10 @@ export function decodeArtifactsFrame(payload: Uint8Array): {
   // highlight. Read the same way and for the same reason — an absent column and an all-null one
   // are one state, *there was no question*.
   const highlighted = t.getChild('highlighted');
+  // **The attachment, sixteenth and last of the fixed prefix** (owner ruling, 2026-09-18): the
+  // `tessera_id` of the artifact this row is attached to, in this same frame, and null for a row
+  // attached to nothing. Read by name like everything else here.
+  const target = t.getChild('target');
   // **A loud refusal rather than a guessed zero.** There is no compatibility to keep here
   // (decision 0048) and the rung is what a client draws every layer's resolution from, so a
   // body without the column — an r41-or-earlier server's `level` included — is a server this
@@ -576,6 +580,15 @@ export function decodeArtifactsFrame(payload: Uint8Array): {
   if (parentIds == null) {
     throw new Error(
       'viewport artifacts frame carries no `parent_ids` column: this client requires a server that serves it (contracts §3.2 r71 replaced `parent_id`)'
+    );
+  }
+  // The same refusal for the attachment. A body without the column would read as a response in
+  // which no label is attached to anything, and a map drawn with every topic dropped looks like a
+  // corpus that publishes none. No shim reads the counts instead (decision 0048): that join is
+  // what this column replaced.
+  if (target == null) {
+    throw new Error(
+      'viewport artifacts frame carries no `target` column: this client requires a server that serves it (a dependent artifact names its target by `tessera_id`)'
     );
   }
   for (let i = 0; i < tesseraId.length; i++) {
@@ -640,7 +653,10 @@ export function decodeArtifactsFrame(payload: Uint8Array): {
       parentIds: Array.from(parentIds.get(i) ?? [], (v) => BigInt(v as bigint)),
       rung: Number(rung.get(i)),
       matched: matched == null || matched.get(i) === null ? null : Boolean(matched.get(i)),
-      highlighted: highlighted == null || highlighted.get(i) === null ? null : Boolean(highlighted.get(i))
+      highlighted: highlighted == null || highlighted.get(i) === null ? null : Boolean(highlighted.get(i)),
+      // Null is *attached to nothing*, and there is no second reading: a dependent whose target
+      // this response withheld is absent whole, never present with the attachment blanked.
+      target: target.get(i) === null ? null : BigInt(target.get(i) as bigint)
     });
   }
   return {artifacts, artifactsIdentity: null};

@@ -1375,6 +1375,7 @@ impl ViewportSink for WireSink {
                 rung: a.rung,
                 matched: a.matched,
                 highlighted: a.highlighted,
+                target: a.target.map(|id| id.raw()),
             })
             .collect();
         // The same rows either way — the projection changes which columns are written, never

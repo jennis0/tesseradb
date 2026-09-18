@@ -344,6 +344,21 @@ pub struct ArtifactRow<'a> {
     /// on the wire — where the request carried no `highlight`, which is *there was no question*
     /// rather than *no matches*.
     pub highlighted: Option<bool>,
+    /// **The artifact this row is attached to, by the `tessera_id` this same response served it
+    /// under** — a label's cluster (owner ruling, 2026-09-18), the sixteenth fixed column. `None`
+    /// — a null on the wire — for an artifact attached to nothing, which is every row of the
+    /// ordinary response.
+    ///
+    /// **It always names a row in this frame.** A dependent whose target the response does not
+    /// hold is absent entire, so the join is total: a client attaches a label to its cluster
+    /// exactly, where before it guessed by matching the label's copied count against the served
+    /// counts of the generating layer and left the label unattached wherever two clusters shared
+    /// one.
+    ///
+    /// It is a `tessera_id` already in this frame, so it publishes no address and discloses
+    /// nothing the response did not already carry (**I10**;
+    /// [decision 0023](../../../docs/decisions/0023-derivable-quantities-are-not-disclosures.md)).
+    pub target: Option<u64>,
 }
 
 /// The `layer` column, dictionary-encoded — one utf8 value per distinct layer, a `u16` key per
@@ -389,8 +404,8 @@ fn layer_field() -> Field {
 /// column so a client's decoder has one identifier type across the response.
 ///
 /// **Column positions are contract for the fixed prefix; optional columns trail.** Decoders that
-/// index this batch positionally exist, so the fifteen fixed columns — `layer` through
-/// `highlighted` — sit at fixed positions, and the only columns whose presence varies,
+/// index this batch positionally exist, so the sixteen fixed columns — `layer` through `target` —
+/// sit at fixed positions, and the only columns whose presence varies,
 /// `shape_x`/`shape_y`, come
 /// after all of them (`artifact-fetch-protocol.md` §8; this superseded the earlier
 /// appended-last-per-revision rule when the shape columns moved to the tail). The frame kinds are
@@ -398,6 +413,13 @@ fn layer_field() -> Field {
 /// every in-repo reader moves in lockstep, decision 0048) — the reordering is the loud break, a
 /// positional decoder finding `content` where `shape_x` sat rather than one column's values under
 /// another's meaning of the same type.
+///
+/// **`target` is sixteenth and last of the fixed prefix** (owner ruling, 2026-09-18), rather than
+/// beside `tessera_id` where it reads most naturally: the prefix's positions are contract, and
+/// putting it there would move fourteen columns to buy an ordering nothing reads. A positional
+/// decoder written against the fifteen finds a `UInt64` where the `List` of `shape_x` sat, which
+/// is the same loud break the shape columns' move relied on. The frame carries no version of its
+/// own to bump and `api_version` does not move, for the reason above.
 ///
 /// **`layer` is dictionary-encoded** — see [`layer_dictionary`].
 ///
@@ -480,6 +502,12 @@ pub fn artifacts_frame(rows: &[ArtifactRow<'_>]) -> Vec<u8> {
         // `highlight` asked no question, and a `false` would answer one. So the column is all-null
         // on every response without one, rather than absent (`highlight-and-hierarchy.md` §2).
         Field::new("highlighted", DataType::Boolean, true),
+        // Sixteenth, last of the fixed prefix, and **nullable because attached to nothing is the
+        // ordinary state**: every artifact of a layer declaring no dependency carries a null
+        // here, and a dependent carries the `tessera_id` of its target's row in this same frame
+        // (owner ruling, 2026-09-18). There is no *withheld* reading — a dependent whose target
+        // this response does not hold is absent whole (decision 0089).
+        Field::new("target", DataType::UInt64, true),
     ];
     if shapes {
         fields.push(Field::new("shape_x", DataType::List(part()), true));
@@ -542,6 +570,7 @@ pub fn artifacts_frame(rows: &[ArtifactRow<'_>]) -> Vec<u8> {
         Arc::new(UInt32Array::from_iter_values(rows.iter().map(|r| r.rung))),
         Arc::new(BooleanArray::from_iter(rows.iter().map(|r| r.matched))),
         Arc::new(BooleanArray::from_iter(rows.iter().map(|r| r.highlighted))),
+        Arc::new(UInt64Array::from_iter(rows.iter().map(|r| r.target))),
     ];
     if shapes {
         let builder = || {
@@ -600,6 +629,11 @@ pub fn artifacts_frame(rows: &[ArtifactRow<'_>]) -> Vec<u8> {
 /// was dropped — and the response is a column subset of what the same caller's identical request
 /// would have been served, which is why the projection discloses nothing. The payload columns are
 /// **absent from the schema, not null**, so decision 0076's null rule gains no third reading.
+///
+/// **`target` is not here, exactly as `parent_ids` is not.** Both are response-local structure
+/// rather than a fact about the artifact, so neither can be carried in a client's artifact cache
+/// across requests, and a projection that answered one of them and not the other would invite a
+/// client to hold it. A client that needs the attachment asks for the full projection.
 ///
 /// Measured at 13.6 B/row against 125 for the pre-dictionary full row (§8 of the design; the
 /// size-regression test in `tests/wire.rs` holds the bounds).

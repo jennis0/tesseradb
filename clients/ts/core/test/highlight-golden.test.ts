@@ -3,6 +3,7 @@ import {join} from 'node:path';
 import {describe, expect, it} from 'vitest';
 import {decodeViewport} from '../src/decode.js';
 import type {BrowsePage} from '../src/types.js';
+import {liftArtifactTarget} from './old-shape-columns.js';
 
 /**
  * **The highlight's three columns and the browse verb, against real bytes.**
@@ -19,7 +20,7 @@ import type {BrowsePage} from '../src/types.js';
  * reading the wrong column would be caught.
  */
 
-const fixture = (name: string) => new Uint8Array(readFileSync(join(import.meta.dirname, 'fixtures', name)));
+const fixture = (name: string) => liftArtifactTarget(new Uint8Array(readFileSync(join(import.meta.dirname, 'fixtures', name))));
 const page = (name: string) => JSON.parse(readFileSync(join(import.meta.dirname, 'fixtures', name), 'utf8')) as Record<string, unknown>;
 const sum = (tiles: readonly {visible: bigint; matched: bigint; highlighted: bigint; served: bigint}[], f: 'visible' | 'matched' | 'highlighted' | 'served') =>
   tiles.reduce((n, t) => n + Number(t[f]), 0);

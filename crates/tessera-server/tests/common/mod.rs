@@ -871,6 +871,10 @@ pub struct ArtifactRow {
     pub matched: Option<bool>,
     /// The same bit for `all_of[filters, highlight]` (`highlight-and-hierarchy.md` §2).
     pub highlighted: Option<bool>,
+    /// **The artifact this row is attached to**, by the `tessera_id` this same response served it
+    /// under (owner ruling, 2026-09-18). `None` for an artifact attached to nothing, which is
+    /// every row of a layer declaring no dependency. It always names a row of the same frame.
+    pub target: Option<u64>,
 }
 
 /// The identity projection's four columns (`artifact_rows: "identity"`), read back by a test.
@@ -1055,15 +1059,15 @@ pub fn decode_viewport_frames(bytes: &[u8]) -> DecodedViewport {
                     // The two shape columns TRAIL the fixed prefix and are present only when a
                     // served layer declares a drawn geometry — an absent column, distinguishable
                     // from a null one, so 0076's null rule gains no third reading.
-                    let shapes = batch.num_columns() > 15;
+                    let shapes = batch.num_columns() > 16;
                     if shapes {
                         assert_eq!(
                             batch.num_columns(),
-                            17,
+                            18,
                             "shape_x and shape_y travel together"
                         );
-                        assert_eq!(batch.schema().field(15).name(), "shape_x");
-                        assert_eq!(batch.schema().field(16).name(), "shape_y");
+                        assert_eq!(batch.schema().field(16).name(), "shape_x");
+                        assert_eq!(batch.schema().field(17).name(), "shape_y");
                     }
                     // One axis of the shape, as **parts of rings**. The three levels are the
                     // schema's, not a convention: a decoder written against the two-level hull
@@ -1107,7 +1111,7 @@ pub fn decode_viewport_frames(bytes: &[u8]) -> DecodedViewport {
                         let shape = if !shapes {
                             None
                         } else {
-                            match (shape_axis(15, i), shape_axis(16, i)) {
+                            match (shape_axis(16, i), shape_axis(17, i)) {
                                 (Some(xs), Some(ys)) => {
                                     assert_eq!(xs.len(), ys.len(), "the axes disagree on parts");
                                     Some(
@@ -1173,6 +1177,16 @@ pub fn decode_viewport_frames(bytes: &[u8]) -> DecodedViewport {
                             // reason, and nullable: null is *the request carried no filter*.
                             matched: bool_at(13, i, "matched"),
                             highlighted: bool_at(14, i, "highlighted"),
+                            // Column 15, sixteenth and last of the fixed prefix — positionally
+                            // for the same reason, and nullable: null is *attached to nothing*.
+                            target: {
+                                let a = batch
+                                    .column(15)
+                                    .as_any()
+                                    .downcast_ref::<arrow::array::UInt64Array>()
+                                    .expect("`target` is a nullable UInt64");
+                                a.is_valid(i).then(|| a.value(i))
+                            },
                         });
                     }
                 }

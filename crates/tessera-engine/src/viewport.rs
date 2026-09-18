@@ -852,7 +852,7 @@ pub struct ViewCoordinates {
 
 /// An artifact's two filter answers — `(matched, highlighted)`, each `None` where the request
 /// asked no such question. They are named as a pair because a dependent inherits both or neither
-/// (`highlight-and-hierarchy.md` §2; decision 0104's D13 argument for the first).
+/// (`highlight-and-hierarchy.md` §2; decision 0104's argument for the first).
 type FilterBits = (Option<bool>, Option<bool>);
 
 /// One artifact, as a viewport serves it.
@@ -893,6 +893,19 @@ pub struct ArtifactOut {
     /// and a parent that exists but was withheld from this viewer (C29, per entry). Distinguishing
     /// them would disclose that a coarser grouping exists which they are not cleared to see.
     pub parent_ids: Vec<TesseraId>,
+    /// **The artifact this one is attached to, named by the identifier this same response served
+    /// it under** — a label's cluster (owner ruling, 2026-09-18). `None` where the artifact is
+    /// attached to nothing, and `None` on the identifier route, whose response is one artifact
+    /// and so holds no row for a target to name.
+    ///
+    /// **It always names a row in the same response.** A dependent whose target this response
+    /// does not hold is dropped entire before this is filled ([decision 0089] and
+    /// `orphaned_dependents`), so this field never reaches past the served set — the rule
+    /// [`Self::parent_ids`] follows, for the same reason. It is a `tessera_id` and never an entity
+    /// id or a stored address (**I10**).
+    ///
+    /// [decision 0089]: ../../../docs/decisions/0089-a-dependency-edge-carries-deletion-and-visibility.md
+    pub target: Option<TesseraId>,
     /// **This is one content, entire.** Where an artifact carries several ranked descriptions,
     /// this is the first whose generating set the viewer contains completely; a viewer containing
     /// none receives no artifact at all rather than this list empty. Empty means the layer declares
@@ -941,8 +954,8 @@ pub struct ArtifactOut {
     /// extent every filter-crossing route can answer over rather than the extent one of them can.
     /// So an artifact whose only matches sit just off screen reads `false` until the viewer pans.
     ///
-    /// **A dependent artifact carries its target's**, as its [`Self::masked_count`] does (D13): a
-    /// label describes its cluster, and its own membership is a slice of that cluster at best.
+    /// **A dependent artifact carries its target's** ([decision 0104](../../../docs/decisions/0104-a-filter-answers-a-boolean-per-served-artifact.md)):
+    /// a label describes its cluster, and its own membership is a slice of that cluster at best.
     pub matched: Option<bool>,
     /// **The same bit for `all_of[filters, highlight]`** (`highlight-and-hierarchy.md` §2):
     /// whether a member this principal may see, inside the request's tiles, satisfies **both**
@@ -5824,6 +5837,12 @@ impl Engine {
             // for it to name. Resolving the parents here anyway would hand a caller who holds one
             // identifier the existence of a coarser artifact they were never served.
             parent_ids: Vec::new(),
+            // **Always absent on this route, and for `parent_ids`' reason.** A target is named
+            // only where it is also in the response, and this response is one artifact — so
+            // there is nothing for it to name. Resolving the attachment here anyway would hand a
+            // caller who holds one identifier the existence of an artifact they were never
+            // served.
+            target: None,
             // The identifier route carries no filter to answer about (decision 0104), and there is
             // no viewport for the answer to be scoped to either.
             matched: None,
@@ -6744,8 +6763,9 @@ impl Engine {
                         // level 0 and the rung is the response-local chain depth — this is
                         // recomputed below, once the response's row set is final.
                         rung: level,
-                        // Filled in below, once the response's own membership is settled.
+                        // Both filled in below, once the response's own membership is settled.
                         parent_ids: Vec::new(),
+                        target: None,
                         // Asked only of the artifacts that survived the cut: the bit describes what
                         // is served, and an artifact the response drops has no row to carry one.
                         matched: matched.as_ref().map(|m| rows.matches(m, ordinal)),
@@ -6768,29 +6788,15 @@ impl Engine {
         // response from describing a cluster it does not contain (decision 0089).
         let dropped = orphaned_dependents(&placed, &in_request, &mut served_at);
 
-        // **A dependent carries its target's masked count** (D13; owner ruling 2026-08-25): a
-        // label describes its cluster, so the number beside it is the cluster's — how many of
-        // *that* artifact's members this principal can see — and not the label's own membership,
-        // which a publisher may leave empty. The target is in this response with that very count
-        // (the drop above guarantees it), so the value is derivable from the artifacts frame and
-        // discloses nothing new (decision 0023). Filter-blind, as every masked count is
-        // (`MaskedSet::count_intersection`, I12): the request's filter never moves it.
-        let count_at: std::collections::BTreeMap<&(String, u32, u32), u64> = placed
-            .iter()
-            .zip(&out)
-            .map(|(place, artifact)| (&place.at, artifact.masked_count))
-            .collect();
-        let target_counts: Vec<Option<u64>> = placed
-            .iter()
-            .map(|place| {
-                place
-                    .attached_to
-                    .as_ref()
-                    .filter(|target| in_request.contains(&target.0))
-                    .and_then(|target| count_at.get(target).copied())
-            })
-            .collect();
-        // **And its target's two filter bits, on D13's own argument** (decision 0104;
+        // **A dependent's masked count is its own** (owner ruling, 2026-09-18): the count of the
+        // membership it is served over, which by
+        // [decision 0145](../../../docs/decisions/0145-an-attached-artifact-with-no-members-of-its-own-is-served-over-its-targets-membership.md)
+        // is its target's membership where it declares none of its own and its own generating set
+        // otherwise. The copy this pass used to make — a label's row carrying its cluster's
+        // number — is gone with the client's join by count: a label names its target by
+        // identifier now, and a count beside a label is not a feature.
+        //
+        // **The two filter bits are still copied** (decision 0104;
         // `highlight-and-hierarchy.md` §2 for the second). A label describes its cluster, so *does
         // anything here match* is a question about the cluster; the label's own membership is often
         // empty, and a bit over it would read `false` for every label under every filter — the same
@@ -6826,20 +6832,28 @@ impl Engine {
         // cleared to see, which is a disclosure the rest of this pass takes care to avoid making.
         // Ascending by identifier, so a client that wants one parent takes the first and gets the
         // same one every time.
+        //
+        // **A target is named on exactly the same terms** (owner ruling, 2026-09-18): the
+        // identifier this response served the target under, and nothing where the response holds
+        // no row for it. `served_at` is the resolved set the drop above already pruned, so a
+        // dependent that survived finds its target there and one whose target's layer was never
+        // in the request finds nothing — the second being the *give me just the labels* request,
+        // which is answered as it always was.
         let mut served = Vec::with_capacity(out.len());
-        for ((((mut artifact, place), dropped), target_count), target_bit) in out
+        for (((mut artifact, place), dropped), target_bit) in out
             .into_iter()
             .zip(&placed)
             .zip(dropped)
-            .zip(target_counts)
             .zip(target_bits)
         {
             if dropped {
                 continue;
             }
-            if let Some(count) = target_count {
-                artifact.masked_count = count;
-            }
+            artifact.target = place
+                .attached_to
+                .as_ref()
+                .and_then(|target| served_at.get(target))
+                .copied();
             if let Some((matched, highlighted)) = target_bit {
                 artifact.matched = matched;
                 artifact.highlighted = highlighted;
@@ -6990,10 +7004,11 @@ struct Placement {
 /// layer, alongside a layer depending on it, would otherwise be answered with labels describing
 /// clusters that same response does not hold. One response never contradicts itself.
 ///
-/// **Server-side, and the attachment identifier never reaches the wire.** Publishing it so a client
-/// could filter for itself was declined for the reason `parent_ids` omits a withheld parent rather
-/// than naming it: handing over the identifier names an artifact the response does not
-/// contain. A client never told the relationship cannot notice what is missing from it.
+/// **This pass is what makes the wire's `target` total.** The attachment does reach the wire since
+/// the owner's ruling of 2026-09-18 — as the `tessera_id` of the target's row in the same response
+/// — and the objection the earlier rule answered was never to publishing it but to naming an
+/// artifact the response does not contain. Dropping the dependent here removes that case: what is
+/// left to name is always a row this response carries, which is the rule `parent_ids` follows.
 ///
 /// **The target's layer must be in this request.** A request naming the dependent layer *alone* —
 /// "give me just the labels" — finds no target here, and a naive lookup would drop every label.

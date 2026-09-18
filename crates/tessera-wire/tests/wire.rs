@@ -488,8 +488,9 @@ fn the_artifacts_frame_carries_a_shape_as_parts_of_rings() {
 }
 
 /// **`matched` is nullable because null is a value**: an unfiltered request asked no question, and
-/// a `false` would answer one. Its position — last of the fixed columns, after `rung` — is
-/// contract: decoders index this batch positionally, and only the shape columns may trail it.
+/// a `false` would answer one. Its position — after `rung`, with `highlighted` and `target`
+/// behind it — is contract: decoders index this batch positionally, and only the shape columns
+/// may trail the fixed prefix.
 #[test]
 fn the_artifacts_frame_carries_the_filter_bit_with_null_meaning_no_filter() {
     let rows = vec![
@@ -527,14 +528,19 @@ fn the_artifacts_frame_carries_the_filter_bit_with_null_meaning_no_filter() {
 
     let schema = batch.schema();
     assert_eq!(
-        schema.fields().len() - 2,
+        schema.fields().len() - 3,
         schema.index_of("matched").expect("column present"),
-        "`matched` is the second-last fixed column, and its position is contract"
+        "`matched` is the third-last fixed column, and its position is contract"
+    );
+    assert_eq!(
+        schema.fields().len() - 2,
+        schema.index_of("highlighted").expect("column present"),
+        "`highlighted` is next, immediately after it"
     );
     assert_eq!(
         schema.fields().len() - 1,
-        schema.index_of("highlighted").expect("column present"),
-        "`highlighted` is the last, immediately after it"
+        schema.index_of("target").expect("column present"),
+        "and `target` is last of the fixed prefix (owner ruling, 2026-09-18)"
     );
     let field = schema.field_with_name("matched").unwrap();
     assert_eq!(field.data_type(), &DataType::Boolean);
@@ -553,6 +559,64 @@ fn the_artifacts_frame_carries_the_filter_bit_with_null_meaning_no_filter() {
         .map(|i| column.is_valid(i).then(|| column.value(i)))
         .collect();
     assert_eq!(read, vec![Some(true), Some(false), None]);
+}
+
+/// **`target` names a row of this same frame, and null is *attached to nothing*** (owner ruling,
+/// 2026-09-18). Sixteenth and last of the fixed prefix, nullable, `UInt64` — the same type as
+/// `tessera_id`, which is what it carries, so a client's decoder has one identifier type across
+/// the response. There is no *withheld* reading: a dependent whose target the response does not
+/// hold is absent whole, so the engine never emits a value naming a row that is not here.
+#[test]
+fn the_artifacts_frame_names_a_dependents_target_by_identifier() {
+    let rows = vec![
+        ArtifactRow {
+            layer: "clusters/a",
+            tessera_id: 7,
+            masked_count: 12,
+            ..Default::default()
+        },
+        // Two clusters with the same masked count — the case the join by count could not tell
+        // apart, and the reason this column exists.
+        ArtifactRow {
+            layer: "clusters/a",
+            tessera_id: 8,
+            masked_count: 12,
+            ..Default::default()
+        },
+        ArtifactRow {
+            layer: "labels/a",
+            tessera_id: 9,
+            // Its own count, over the membership it is served over, and nothing beside it names
+            // which cluster it describes.
+            masked_count: 4,
+            target: Some(8),
+            ..Default::default()
+        },
+    ];
+
+    let batch = artifact_batch(&artifacts_frame(&rows));
+    let field = batch.schema().field_with_name("target").unwrap().clone();
+    assert_eq!(field.data_type(), &DataType::UInt64);
+    assert!(field.is_nullable(), "null is *attached to nothing*");
+    let column = batch
+        .column_by_name("target")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<arrow::array::UInt64Array>()
+        .expect("a nullable UInt64");
+    let read: Vec<Option<u64>> = (0..column.len())
+        .map(|i| column.is_valid(i).then(|| column.value(i)))
+        .collect();
+    assert_eq!(read, vec![None, None, Some(8)]);
+
+    // The property the client's join rests on: the value is an identifier this frame carries.
+    let ids = batch
+        .column_by_name("tessera_id")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<arrow::array::UInt64Array>()
+        .expect("a UInt64");
+    assert!(ids.values().contains(&column.value(2)));
 }
 
 /// Decode a kind-5 payload into its one batch.
@@ -636,6 +700,7 @@ fn the_artifacts_frame_fixes_its_column_order_and_dictionary_encodes_the_layer()
             "rung",
             "matched",
             "highlighted",
+            "target",
         ],
         "no row carries a shape, so the two trailing shape columns are ABSENT from the schema"
     );
@@ -742,6 +807,9 @@ fn artifact_frame_bytes_per_row_hold_the_measured_bounds() {
             rung: (i % 3) as u32,
             matched: Some(i % 2 == 0),
             highlighted: Some(i % 3 == 0),
+            // A clustering: nothing here is attached to anything, which is the ordinary row and
+            // so the one the bound is measured over.
+            target: None,
         })
         .collect();
 

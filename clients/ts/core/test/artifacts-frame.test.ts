@@ -4,8 +4,8 @@ import {decodeViewport} from '../src/decode.js';
 import {splitFramedStreams} from '../src/frame.js';
 
 /**
- * The artifacts frame as contracts §3.2 r44 cuts it: `layer` dictionary-encoded, the fourteen
- * fixed columns `layer` through `matched` at their positions, the two hull columns trailing and
+ * The artifacts frame as contracts §3.2 r44 cuts it: `layer` dictionary-encoded, the fixed
+ * columns `layer` through `target` at their positions, the two hull columns trailing and
  * **absent from the schema** when no served layer declares a hull, `level` renamed and re-meant as
  * `rung`, and the identity projection (`artifact_rows: "identity"`) — the same rows in five
  * columns. Every body here is assembled with apache-arrow's own writer, so what these tests pin is
@@ -28,6 +28,8 @@ function frame(parts: {kind: number; payload: Uint8Array}[]): Uint8Array {
 }
 
 const u64 = (values: bigint[]) => makeVector(makeData({type: new Uint64(), data: BigUint64Array.from(values)}));
+/** A nullable `uint64` column — the shape `target` travels in. */
+const u64Nullable = (values: (bigint | null)[]) => vectorFromArray(values, new Uint64());
 const RINGS = new List(new Field('item', new List(new Field('item', new Uint32(), false)), true));
 const PARTS = new List(new Field('item', RINGS, true));
 const TEXTS = new List(new Field('item', new Utf8(), true));
@@ -35,12 +37,12 @@ const TEXTS = new List(new Field('item', new Utf8(), true));
 const PARENTS = new List(new Field('item', new Uint64(), false));
 const LAYER = new Dictionary(new Utf8(), new Uint16());
 
-type Row = {layer: string; id: bigint; rung: number; matched: boolean | null; highlighted?: boolean | null; parentIds?: bigint[]; shape?: number[][][] | null};
+type Row = {layer: string; id: bigint; rung: number; matched: boolean | null; highlighted?: boolean | null; parentIds?: bigint[]; shape?: number[][][] | null; target?: bigint | null};
 
 const TILES = tableToIPC(new Table({tile: u64([0n]), visible: u64([1n]), matched: u64([1n]), served: u64([0n]), highlighted: u64([1n])}), 'stream');
 const TRAILER = new TextEncoder().encode(JSON.stringify({arrow_serialise_ns: 0, flushes: 0, points: 0, stream_us: 0}));
 
-/** The fixed fourteen columns, `layer` through `matched`, in contract order. */
+/** The fixed columns, `layer` through `target`, in contract order. */
 function fixedColumns(rows: Row[], layerType: unknown = LAYER) {
   return {
     layer: vectorFromArray(rows.map((r) => r.layer), layerType as never),
@@ -56,17 +58,21 @@ function fixedColumns(rows: Row[], layerType: unknown = LAYER) {
     content: vectorFromArray(rows.map(() => [] as string[]), TEXTS),
     parent_ids: vectorFromArray(rows.map((r) => r.parentIds ?? []), PARENTS),
     rung: vectorFromArray(rows.map((r) => r.rung), new Uint32()),
-    matched: vectorFromArray(rows.map((r) => r.matched), new Bool())
+    matched: vectorFromArray(rows.map((r) => r.matched), new Bool()),
+    // The attachment, last of the fixed prefix: the `tessera_id` of the row this one hangs from,
+    // null for an artifact attached to nothing (owner ruling, 2026-09-18).
+    target: u64Nullable(rows.map((r) => r.target ?? null))
   };
 }
 
 /** A full-projection body; the shape columns trail, and only when `shapes` says a layer draws one. */
-function fullBody(rows: Row[], opts: {shapes?: boolean; layerType?: unknown; oneAxis?: boolean; renameRung?: string; oldParent?: boolean; oldNames?: boolean} = {}): Uint8Array {
+function fullBody(rows: Row[], opts: {shapes?: boolean; layerType?: unknown; oneAxis?: boolean; renameRung?: string; oldParent?: boolean; oldNames?: boolean; noTarget?: boolean} = {}): Uint8Array {
   const columns: Record<string, unknown> = fixedColumns(rows, opts.layerType);
   if (opts.renameRung) {
     columns[opts.renameRung] = columns['rung'];
     delete columns['rung'];
   }
+  if (opts.noTarget) delete columns['target'];
   if (opts.oldParent) {
     // The scalar r70 column in the list's place.
     columns['parent_id'] = vectorFromArray(rows.map((r) => r.parentIds?.[0] ?? null), new Uint64());
@@ -144,9 +150,11 @@ describe('the shape columns trail, and are absent when no served layer draws a s
     ];
     const body = fullBody(rows, {shapes: true});
     const fields = tableFromIPC(splitFramedStreams(body).artifacts!).schema.fields.map((f) => f.name);
-    // The layout the body carries is the contract's: fourteen fixed, then the two shape columns.
-    expect(fields.slice(0, 14)).toEqual(['layer', 'tessera_id', 'key', 'masked_count', 'centroid_x', 'centroid_y', 'box_min_x', 'box_min_y', 'box_max_x', 'box_max_y', 'content', 'parent_ids', 'rung', 'matched']);
-    expect(fields.slice(14)).toEqual(['shape_x', 'shape_y']);
+    // The layout the body carries is the contract's: the fixed prefix, then the two shape
+    // columns. (`highlighted` is the one fixed column these bodies leave out, so the decoder's
+    // tolerance of an absent bit column is exercised by every case here.)
+    expect(fields.slice(0, 15)).toEqual(['layer', 'tessera_id', 'key', 'masked_count', 'centroid_x', 'centroid_y', 'box_min_x', 'box_min_y', 'box_max_x', 'box_max_y', 'content', 'parent_ids', 'rung', 'matched', 'target']);
+    expect(fields.slice(15)).toEqual(['shape_x', 'shape_y']);
 
     const r = decodeViewport(body);
     expect(r.artifacts[0]!.shape).toEqual([
@@ -222,6 +230,22 @@ describe('the parent list (contracts §3.2 r71; decision 0117)', () => {
   it('reads the filter bit beside it: true, false, and null where there was no question', () => {
     const r = decodeViewport(fullBody(ROWS));
     expect(r.artifacts.map((a) => a.matched)).toEqual([true, false, null]);
+  });
+});
+
+describe('the target column (owner ruling, 2026-09-18)', () => {
+  it('reads the attachment as an identifier in the same frame, and null for an artifact attached to nothing', () => {
+    const r = decodeViewport(fullBody([ROWS[0]!, ROWS[1]!, {...ROWS[2]!, target: 2n}]));
+    expect(r.artifacts.map((a) => a.target)).toEqual([null, null, 2n]);
+    // The value names a row this response carries — the property the join rests on.
+    expect(r.artifacts.map((a) => a.tesseraId)).toContain(r.artifacts[2]!.target);
+    expect(r.artifacts[2]!.target).toBeTypeOf('bigint');
+  });
+
+  it('refuses a body carrying no `target` column — a server older than the attachment', () => {
+    // Read as *nothing is attached*, such a body would drop every topic label from the map and
+    // look like a corpus that publishes none. There is no fallback to the old join by count.
+    expect(() => decodeViewport(fullBody(ROWS, {noTarget: true}))).toThrow(/no `target` column/);
   });
 });
 

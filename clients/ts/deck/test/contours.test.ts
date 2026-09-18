@@ -17,7 +17,8 @@ const artifact = (id: bigint, parent: bigint | null, count = 10n): Artifact => (
   parentIds: parent === null ? [] : [parent],
   rung: 0,
   matched: null,
-  highlighted: null
+  highlighted: null,
+  target: null
 });
 
 /**
@@ -176,7 +177,7 @@ describe('contourShapes — what may be hovered', () => {
   it('leaves a dependent layer’s artifacts out — they have no shape, and their box is not one', () => {
     // A clustering's topic labels carry no shape, so `outlineOf` would fall back to their box and
     // put a rectangle over the map with nothing drawn on it, hoverable and pointing at a thing
-    // the viewer cannot see. Their text is drawn beneath the name they attach to (§5.10, D13).
+    // the viewer cannot see. Their text is drawn beneath the name they attach to (§5.10).
     const topic: Artifact = {...artifact(9n, null), layer: 'topics', shape: null};
     const p = projection([artifact(1n, null), topic]);
     expect(ids(p, {meta: meta([{name: 'clusters'}, {name: 'topics', depsOn: ['clusters']}])})).toEqual(['1']);
