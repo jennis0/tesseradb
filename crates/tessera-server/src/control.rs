@@ -6440,7 +6440,7 @@ mod tests {
                     name: "departments".to_string(),
                     kind,
                     visibility: tessera_engine::Visibility::Derived,
-                    width: tessera_engine::ScalarType::U32,
+                    width: tessera_engine::ScalarType::U16,
                     values: vec![tessera_engine::ManifestVocabularyValue {
                         key: "ops".to_string(),
                         code: CODE_OPS,
