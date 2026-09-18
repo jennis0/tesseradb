@@ -117,3 +117,15 @@ paths = [
   "conformance/tests/*",
   "clients/py/tests/*",
 ]
+
+# Issue #150, owner ruling (a), 2026-09-18: a generating set is projected over the whole row space and
+# maintained at flush, merge and growth as a membership is; the containment partition declines an
+# ordinal whose set reaches above the base rows. The write-cycle document's §4.1 is the controller's.
+[track.fix-generating]
+paths = [
+  "crates/tessera-engine/src/*",
+  "crates/tessera-engine/tests/*",
+  "crates/tessera-server/tests/*",
+  "conformance/tests/*",
+  "clients/py/tests/*",
+]
