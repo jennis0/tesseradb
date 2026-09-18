@@ -15,23 +15,13 @@
 //! at the commit window's close and at the flush ([`absent_scalar`]), so one flush writes one
 //! schema.
 //!
-//! **`render` is not accepted here** (decision 0136's amendment, 2026-09-08). A rendered value
-//! lives in the hot column of the row that carries it, and this route addresses entities rather
-//! than rows, so a column declared here has nowhere to put one. The refusal is an interim: what a
-//! rendered column arriving at a running service should mean has not been worked through, and no
-//! invariant forbids it. [`resolve`] carries the reason at the site.
-//!
-//! **The rules are the build's, transcribed.** `tessera_build::config::compile_attributes` is
-//! the other statement of what a declaration may say, over the config's own types; the engine
-//! does not depend on the build crate, so the rules are restated here and a change to one is a
-//! change to both. Decision 0091 is the reason they must agree: a declaration a build accepts and
-//! ingest refuses, or the reverse, is a feature that works at one door and not the other.
+//! `render` is not supported on this route yet.
 
 use tessera_lifecycle::wal::{AttributeDeclaration, WalScalar};
 use tessera_lifecycle::{AttributeRequest, ExecError};
 use tessera_spatial::tiler::ScalarType;
+use tessera_store::declaration::{check_attribute, AttributeSpec};
 use tessera_store::manifest::{DeclaredScalar, Manifest, ScopedScalar};
-use tessera_store::vocabulary::Vocabularies;
 use tessera_types::layer::LayerScope;
 
 /// A declaration compiled to the manifest entry it becomes: one of the flat bundle-wide columns,
@@ -122,25 +112,8 @@ impl RuntimeAttributes {
 pub(crate) enum Resolution {
     /// A column of this name already carries exactly this identity: nothing to append.
     Existing,
-    /// A new column, with the width a vocabulary no column named before must narrow to.
-    New {
-        compiled: CompiledAttribute,
-        narrow: Option<(String, ScalarType)>,
-    },
+    New(CompiledAttribute),
 }
-
-/// The names the segment writer and the ingest batch reserve, and the request surface's own
-/// (`tessera_build::config::RESERVED_COLUMN_NAMES` and `check_column_name`, transcribed).
-const FIXED_COLUMNS: [&str; 2] = ["tessera_id", "residual"];
-const INGEST_RESERVED: [&str; 5] = ["external_id", "x", "y", "access", "node_id"];
-const REQUEST_RESERVED: [&str; 6] = [
-    "all_of",
-    "any_of",
-    "none_of",
-    "region",
-    "member_of",
-    "highlighted",
-];
 
 /// Resolve a request against the served schema: refuse it, recognise it as a column already
 /// held, or compile the column it declares.
@@ -151,49 +124,29 @@ const REQUEST_RESERVED: [&str; 6] = [
 pub(crate) fn resolve(
     request: &AttributeRequest,
     manifest: &Manifest,
-    vocabularies: &Vocabularies,
     is_layer: impl Fn(&str) -> bool,
 ) -> Result<Resolution, ExecError> {
     let refused = |detail: String| ExecError::AttributeRefused { detail };
     let name = request.name.as_str();
-    check_name(name).map_err(refused)?;
+    // An ingest batch's columns are attributes or layer names, so one name cannot be both.
     if is_layer(name) {
         return Err(refused(format!(
-            "attribute '{name}': a registered layer holds that name, and an ingest batch's \
-             columns are declared scalars or layer names (contracts §3.4), so a column under it \
-             would make a batch mean two things"
+            "attribute '{name}': a layer already has that name"
         )));
     }
-
-    // **`render` is not accepted on this route** (decision 0136's amendment, 2026-09-08). A
-    // rendered value is served from the hot column of the row that carries it, and this route
-    // declares a column against entities rather than rows, so a declaration made here has nowhere
-    // to put one. What a rendered column arriving at a running service should mean has not been
-    // worked through: where the value lands for an entity that already holds rows, what a view
-    // drawn before the declaration shows, and how the fold closes the gap. The refusal is an
-    // interim that keeps a half-working path out of a deployment. There is no invariant against a
-    // rendered column declared at a running service, and nothing here settles the question.
-    //
-    // It covers the flag and not the column, so a build column declared `render` cannot be
-    // restated through this route either: the request carries `render = true` and is refused
-    // before the held-name comparison. Restating a column changes nothing, so a caller who does
-    // it loses nothing by being told to stop.
+    // Not built: a rendered value lives in a row's hot column, and a column declared here has no
+    // rows written for it yet.
     if request.render {
         return Err(refused(format!(
-            "attribute '{name}': `render` is not accepted at a running service. A rendered \
-             value is served from the hot column of the row that carries it, and this route \
-             declares a column against entities rather than rows, so there is nowhere to put \
-             one. What a rendered column declared at a running service should mean has not been \
-             worked through, and this refusal is an interim rather than a rule about rendered \
-             columns (decision 0136's amendment). Declare the column without `render`, or \
-             declare it at a build"
+            "attribute '{name}': `render` is not supported for a column declared at a running \
+             service; declare it without `render`, or at a build"
         )));
     }
 
-    let compiled = compile(request, manifest, vocabularies).map_err(refused)?;
+    let compiled = compile(request, manifest).map_err(refused)?;
 
-    // A name the schema holds is a held part (`ingest.md` §1.1): identical is accepted with no
-    // effect, different is a conflict.
+    // Declaring a held column again is accepted if nothing differs. Type and placement are
+    // written into every row, so a difference is a conflict.
     if let Some(held) = held_by_name(manifest, name) {
         return if held == compiled {
             Ok(Resolution::Existing)
@@ -201,39 +154,13 @@ pub(crate) fn resolve(
             Err(ExecError::AttributeConflict {
                 detail: format!(
                     "attribute '{name}' is already declared with a different type, vocabulary, \
-                     analyser, flags or scope. A column's width and placement are baked into every \
-                     row (per-point-attributes §2.2), so a name cannot change identity; declare \
-                     the new column under another name"
+                     analyser, flags or scope; declare the new column under another name"
                 ),
             })
         };
     }
 
-    // A vocabulary named by no column is seeded at the widest width; the first column to name it
-    // fixes the width, and a code already bound past it is refused here rather than truncated.
-    let narrow = match compiled.category() {
-        Some((vocabulary, width)) if width_named_by_columns(manifest, vocabulary).is_none() => {
-            let minter = vocabularies.get(vocabulary).ok_or_else(|| {
-                refused(format!(
-                    "attribute '{name}': `vocabulary = \"{vocabulary}\"` names no vocabulary this \
-                     deployment carries. Declared: {}",
-                    declared_vocabularies(manifest)
-                ))
-            })?;
-            let mut probe = minter.clone();
-            if let Err(code) = probe.narrow_to(width) {
-                return Err(refused(format!(
-                    "attribute '{name}': vocabulary '{vocabulary}' already binds code {code}, \
-                     which a {} column cannot hold; declare the column at a width that holds \
-                     every bound code",
-                    width.arrow_type_name()
-                )));
-            }
-            Some((vocabulary.to_string(), width))
-        }
-        _ => None,
-    };
-    Ok(Resolution::New { compiled, narrow })
+    Ok(Resolution::New(compiled))
 }
 
 /// A replayed record's column, at the width it recorded. The door validated the declaration
@@ -282,287 +209,61 @@ pub(crate) fn held_by_name(manifest: &Manifest, name: &str) -> Option<CompiledAt
         })
 }
 
-/// The width the columns already naming `vocabulary` store it at, or `None` where none does.
-/// Every column over one vocabulary stores one width (`Vocabularies::seed` refuses otherwise),
-/// so the first found is the answer.
-fn width_named_by_columns(manifest: &Manifest, vocabulary: &str) -> Option<ScalarType> {
-    manifest
-        .declared_scalars
-        .iter()
-        .find(|d| d.vocabulary.as_deref() == Some(vocabulary))
-        .map(|d| d.arrow_type)
-        .or_else(|| {
-            manifest
-                .groups
-                .iter()
-                .flat_map(|g| g.scoped_scalars.iter())
-                .find(|f| f.vocabulary.as_deref() == Some(vocabulary))
-                .map(|f| f.arrow_type)
-        })
-}
-
-fn declared_vocabularies(manifest: &Manifest) -> String {
-    let names: Vec<&str> = manifest
-        .vocabularies
-        .iter()
-        .map(|v| v.name.as_str())
-        .collect();
-    if names.is_empty() {
-        "none".to_string()
-    } else {
-        names.join(", ")
-    }
-}
-
-fn check_name(name: &str) -> Result<(), String> {
-    if name.is_empty() {
-        return Err("an attribute with an empty name".to_string());
-    }
-    if !name
-        .bytes()
-        .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
-    {
-        return Err(format!(
-            "attribute '{name}': a column name is its identifier on the wire \
-             (`/v1/categories/{{column}}`, contracts §3.2), so it is limited to ASCII letters, \
-             digits, `_` and `-`"
-        ));
-    }
-    if FIXED_COLUMNS.contains(&name) {
-        return Err(format!(
-            "attribute '{name}': that name is a fixed column of every segment (contracts §2.6)"
-        ));
-    }
-    if INGEST_RESERVED.contains(&name) {
-        return Err(format!(
-            "attribute '{name}': that name is reserved on the ingest batch (contracts §3.4), so a \
-             declared column could not be carried under it"
-        ));
-    }
-    if REQUEST_RESERVED.contains(&name) {
-        return Err(format!(
-            "attribute '{name}': that name is a filter combinator, a filter leaf or a frame \
-             column of the request surface (decision 0062; `highlight-and-hierarchy.md` §2), and \
-             a filter expression names columns directly, so a column may not take it. Reserved: {}",
-            REQUEST_RESERVED.join(", ")
-        ));
-    }
-    Ok(())
-}
-
-/// The build's `compile_attributes`, over a request: the type, its vocabulary or analyser, the
-/// flag combinations the schema refuses, and the scope.
-fn compile(
-    request: &AttributeRequest,
-    manifest: &Manifest,
-    vocabularies: &Vocabularies,
-) -> Result<CompiledAttribute, String> {
+fn compile(request: &AttributeRequest, manifest: &Manifest) -> Result<CompiledAttribute, String> {
     let name = request.name.as_str();
-    let (arrow_type, vocabulary, analyser) = match request.ty.as_str() {
-        "category" => {
-            let vocabulary = request.vocabulary.as_deref().ok_or_else(|| {
-                format!(
-                    "attribute '{name}': `vocabulary` is required for a category and has no \
-                     default (configuration.md §6)"
-                )
-            })?;
-            if !manifest.vocabularies.iter().any(|v| v.name == vocabulary)
-                || vocabularies.get(vocabulary).is_none()
-            {
-                return Err(format!(
-                    "attribute '{name}': `vocabulary = \"{vocabulary}\"` names no vocabulary this \
-                     deployment carries. Declared: {}. A missing vocabulary is refused rather than \
-                     minted: an implicit one would take a width, a value set and a visibility \
-                     nobody declared",
-                    declared_vocabularies(manifest)
-                ));
-            }
-            if let Some(analyser) = &request.analyser {
-                return Err(format!(
-                    "attribute '{name}' is a category, not `text`, so `analyser = \"{analyser}\"` \
-                     has no meaning for it. Refused rather than ignored"
-                ));
-            }
-            let width = category_width(request, manifest, vocabulary)?;
-            (width, Some(vocabulary.to_string()), None)
-        }
-        "utf8" => {
-            return Err(format!(
-                "attribute '{name}': `utf8` is retired as a declared type. A short string matched \
-                 whole is `keyword`; prose searched by word is `text` (records-and-search §4.3, \
-                 §4.4)"
-            ));
-        }
-        other => {
-            let ty = ScalarType::parse(other).ok_or_else(|| {
-                format!(
-                    "attribute '{name}': unknown type '{other}'. Declarable types are bool, u8, \
-                     u16, u32, u64, i8, i16, i32, i64, f32, f64, timestamp_us, keyword, text and \
-                     category"
-                )
-            })?;
-            // A category-width type naming a vocabulary is the record's own spelling of a
-            // category (`AttributeDeclaration::ty`), accepted at the door as well so a caller
-            // may say the width where the block says `category` and the vocabulary says the width.
-            if let Some(vocabulary) = request.vocabulary.as_deref() {
-                if !ty.is_category_width() {
-                    return Err(format!(
-                        "attribute '{name}' is type '{other}', not a category, so `vocabulary` \
-                         has no meaning for it. Refused rather than ignored: a value set on a \
-                         column that has none is a disclosure control its author believes is set"
-                    ));
-                }
-                let explicit = AttributeRequest {
-                    ty: "category".to_string(),
-                    width: Some(other.to_string()),
-                    ..request.clone()
-                };
-                return compile(&explicit, manifest, vocabularies).and_then(|compiled| {
-                    match compiled.category() {
-                        Some((_, width)) if width == ty => Ok(compiled),
-                        _ => Err(format!(
-                            "attribute '{name}': vocabulary '{vocabulary}' is stored at another \
-                             width by the columns that already name it"
-                        )),
-                    }
-                });
-            }
-            if request.width.is_some() {
-                return Err(format!(
-                    "attribute '{name}' is type '{other}', not a category, so `width` has no \
-                     meaning for it; the type is the width"
-                ));
-            }
-            let analyser = match (ty, request.analyser.as_deref()) {
-                (ScalarType::Text, analyser) => {
-                    let analyser = analyser.unwrap_or(tessera_analyse::UNICODE);
-                    let resolved = tessera_analyse::analyser(analyser).ok_or_else(|| {
-                        format!(
-                            "attribute '{name}': '{analyser}' is not an analyser this binary \
-                             carries. Available: {}",
-                            tessera_analyse::ANALYSER_NAMES.join(", ")
-                        )
-                    })?;
-                    Some(resolved.identity())
-                }
-                (_, Some(analyser)) => {
-                    return Err(format!(
-                        "attribute '{name}' is type '{other}', not `text`, so `analyser = \
-                         \"{analyser}\"` has no meaning for it. Refused rather than ignored"
-                    ));
-                }
-                (_, None) => None,
-            };
-            // The two `render` refusals below state the build's rules over a request that
-            // `resolve` has already refused for carrying `render` at all, so neither is reached
-            // from this door. They are kept because this function is the engine's transcription
-            // of `tessera_build::config::compile_attributes` (decision 0091): the build accepts
-            // `render` and refuses these two types, and a transcription missing them would read
-            // as a build rule that does not exist.
-            if ty == ScalarType::Text && request.render {
-                return Err(format!(
-                    "attribute '{name}': `render` on `text` is refused; the hot column is a \
-                     fixed-width slot in every row and prose is not one (records-and-search §3, \
-                     §4.4). `index = true` gives it a token index"
-                ));
-            }
-            if ty == ScalarType::Keyword && request.render {
-                return Err(format!(
-                    "attribute '{name}': `render` on `keyword` is refused (configuration.md §6); \
-                     a keyword's value is not a fixed-width slot. Declare a category, or \
-                     `index = true`"
-                ));
-            }
-            (ty, None, analyser)
-        }
+    let group = match &request.scope {
+        LayerScope::Entity => None,
+        LayerScope::Group(group) => Some(group),
     };
-
-    match &request.scope {
-        LayerScope::Entity => Ok(CompiledAttribute::Entity(DeclaredScalar {
-            name: name.to_string(),
-            arrow_type,
-            vocabulary,
-            analyser,
+    let column = check_attribute(
+        &AttributeSpec {
+            name,
+            ty: &request.ty,
+            vocabulary: request.vocabulary.as_deref(),
+            analyser: request.analyser.as_deref(),
             index: request.index,
             render: request.render,
-        })),
-        LayerScope::Group(group) => {
-            let descriptor = manifest
-                .groups
+            group_scoped: group.is_some(),
+        },
+        |vocabulary| {
+            manifest
+                .vocabularies
                 .iter()
-                .find(|g| &g.name == group)
-                .ok_or_else(|| {
-                    format!(
-                        "attribute '{name}': `scope` names view group '{group}', which this \
-                         deployment does not declare"
-                    )
-                })?;
-            if let Some(owner) = &descriptor.members_of {
-                return Err(format!(
-                    "attribute '{name}': `scope` names '{group}', which declares `members` of \
-                     '{owner}'; a family belongs to the group that owns the keys, so scope it to \
-                     '{owner}' (views §3.3)"
-                ));
-            }
-            if arrow_type == ScalarType::Text && !request.index {
-                return Err(format!(
-                    "attribute '{name}': a group-scoped `text` column requires `index = true`; \
-                     the record blob is bundle-wide and a family has no slot in it, so the token \
-                     index is its only home (configuration.md §6)"
-                ));
-            }
-            Ok(CompiledAttribute::Scoped(ScopedScalar {
-                name: name.to_string(),
-                group: group.clone(),
-                arrow_type,
-                vocabulary,
-                analyser,
-                index: request.index,
-                render: request.render,
-                views: Vec::new(),
-            }))
-        }
+                .find(|v| v.name == vocabulary)
+                .map(|v| v.width)
+        },
+    )?;
+    let Some(group) = group else {
+        return Ok(CompiledAttribute::Entity(DeclaredScalar {
+            name: name.to_string(),
+            arrow_type: column.ty,
+            vocabulary: column.vocabulary,
+            analyser: column.analyser,
+            index: request.index,
+            render: request.render,
+        }));
+    };
+    let descriptor = manifest
+        .groups
+        .iter()
+        .find(|g| &g.name == group)
+        .ok_or_else(|| format!("attribute '{name}': no view group named '{group}'"))?;
+    if let Some(owner) = &descriptor.members_of {
+        return Err(format!(
+            "attribute '{name}': group '{group}' takes its members from '{owner}'; scope the \
+             column to '{owner}'"
+        ));
     }
-}
-
-/// A category's width: the width the columns already naming its vocabulary store, which a
-/// supplied `width` must agree with, or the supplied `width` where no column names it yet.
-fn category_width(
-    request: &AttributeRequest,
-    manifest: &Manifest,
-    vocabulary: &str,
-) -> Result<ScalarType, String> {
-    let name = request.name.as_str();
-    let supplied = request
-        .width
-        .as_deref()
-        .map(|w| {
-            ScalarType::parse(w)
-                .filter(|t| t.is_category_width())
-                .ok_or_else(|| {
-                    format!(
-                        "attribute '{name}': `width = \"{w}\"` is not a code width; a vocabulary's \
-                         width is `u8`, `u16` or `u32` (per-point-attributes §3.6)"
-                    )
-                })
-        })
-        .transpose()?;
-    match (width_named_by_columns(manifest, vocabulary), supplied) {
-        (Some(held), Some(width)) if held != width => Err(format!(
-            "attribute '{name}': vocabulary '{vocabulary}' is stored at {} by the columns that \
-             already name it, and a vocabulary is one code space whichever columns draw on it \
-             (per-point-attributes §3.9); omit `width` or say {}",
-            held.arrow_type_name(),
-            held.arrow_type_name()
-        )),
-        (Some(held), _) => Ok(held),
-        (None, Some(width)) => Ok(width),
-        (None, None) => Err(format!(
-            "attribute '{name}': no column names vocabulary '{vocabulary}' yet, so its code width \
-             is not recorded; say `width` (`u8`, `u16` or `u32`), which fixes it for every column \
-             that names the vocabulary after this one"
-        )),
-    }
+    Ok(CompiledAttribute::Scoped(ScopedScalar {
+        name: name.to_string(),
+        group: group.clone(),
+        arrow_type: column.ty,
+        vocabulary: column.vocabulary,
+        analyser: column.analyser,
+        index: request.index,
+        render: request.render,
+        views: Vec::new(),
+    }))
 }
 
 /// The value a row carries for a declared column it was buffered without (`ingest.md` §6.3,

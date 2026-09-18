@@ -340,7 +340,7 @@ fn sentiment() -> Value {
 }
 
 fn tag() -> Value {
-    json!({ "name": "tag", "type": "category", "vocabulary": "dept", "width": "u8", "index": true })
+    json!({ "name": "tag", "type": "category", "vocabulary": "dept", "index": true })
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -378,52 +378,16 @@ async fn the_route_declares_answers_redeclarations_and_refuses_what_the_schema_r
     let (status, body) = declare(&served, json!({ "name": "score", "type": "i32" })).await;
     assert_eq!(status, 409, "the build's column is a held name too: {body}");
 
-    for (bad, reason) in [
-        (json!({ "name": "weird", "type": "utf8" }), "retired"),
-        (json!({ "name": "region", "type": "u8" }), "may not take it"),
-        (
-            json!({ "name": "tag", "type": "category", "vocabulary": "nothing", "width": "u8" }),
-            "names no vocabulary",
-        ),
-        (
-            json!({ "name": "tag", "type": "category", "vocabulary": "dept" }),
-            "say `width`",
-        ),
-        // **`render` is refused for every type, as an interim** (decision 0136's amendment): the
-        // route declares a column against entities rather than rows, so there is nowhere for a
-        // rendered value to land, and what a rendered column declared at a running service should
-        // mean has not been worked through.
-        (
-            json!({ "name": "drawn", "type": "f32", "index": true, "render": true }),
-            "`render` is not accepted at a running service",
-        ),
-        (
-            json!({
-                "name": "shade",
-                "type": "category",
-                "vocabulary": "dept",
-                "width": "u8",
-                "render": true
-            }),
-            "interim",
-        ),
-        (
-            json!({ "name": "blurb", "type": "text", "render": true }),
-            "`render` is not accepted at a running service",
-        ),
-        // The build's own rendered column cannot be restated through this route either: the flag
-        // is refused before the held-name comparison.
-        (
-            json!({ "name": "score", "type": "f32", "index": true, "render": true }),
-            "`render` is not accepted at a running service",
-        ),
+    // What is refused is tested in `tessera_store::declaration` and the engine; here, that a
+    // refusal is a 422 with a `detail`.
+    for bad in [
+        json!({ "name": "region", "type": "u8" }),
+        json!({ "name": "tag", "type": "category", "vocabulary": "nothing" }),
+        json!({ "name": "drawn", "type": "f32", "index": true, "render": true }),
     ] {
         let (status, body) = declare(&served, bad.clone()).await;
         assert_eq!(status, 422, "{bad}: {body}");
-        assert!(
-            body["detail"].as_str().unwrap().contains(reason),
-            "{bad}: {body}"
-        );
+        assert!(body["detail"].is_string(), "{bad}: {body}");
     }
     let (status, _) = declare(&served, tag()).await;
     assert_eq!(status, 201);

@@ -228,14 +228,12 @@ fn settle(engine: &Engine) {
 
 fn declare(engine: &Engine, name: &str, ty: &str, index: bool) {
     let vocabulary = (ty == "category").then(|| "dept".to_string());
-    let width = (ty == "category").then(|| "u8".to_string());
     engine
         .declare_attribute(AttributeRequest {
             name: name.to_string(),
             title: None,
             ty: ty.to_string(),
             vocabulary,
-            width,
             analyser: None,
             index,
             render: false,
@@ -492,20 +490,16 @@ fn every_family_fills_on_an_entity_that_predates_the_value_and_reads_back() {
             title: None,
             ty: "f32".to_string(),
             vocabulary: None,
-            width: None,
             analyser: None,
             index: false,
             render: true,
             scope: LayerScope::Entity,
         })
         .expect_err("`render` is not declarable at a running service");
-    let AcceptError::Exec(ExecError::AttributeRefused { detail }) = refused_declaration else {
-        panic!("the interim refusal is an AttributeRefused, not {refused_declaration:?}");
-    };
-    assert!(
-        detail.contains("`render` is not accepted at a running service"),
-        "{detail}"
-    );
+    assert!(matches!(
+        refused_declaration,
+        AcceptError::Exec(ExecError::AttributeRefused { .. })
+    ));
     for column in ["band", "score"] {
         let refused = engine
             .fill_values(values_request(

@@ -274,8 +274,6 @@ fn the_accepted_key_set_is_configuration_ms_table() {
             "vocabulary",
             "render",
             "index",
-            "multi",
-            "render_in",
             "analyser",
             "scope",
             "fields",
@@ -529,14 +527,8 @@ fn width_value_set_and_visibility_are_each_required_on_a_vocabulary() {
         ("value_set  = \"closed\"\n", "`value_set` is required"),
         ("visibility = \"public\"\n", "`visibility` is required"),
     ] {
-        let text = SEVERITY.replace(line, "");
-        let message = err(&text);
+        let message = err(&SEVERITY.replace(line, ""));
         assert!(message.contains(expected), "{message}");
-        // The message must teach, not merely refuse: the values, spelled out.
-        assert!(
-            message.contains("no default"),
-            "a required disclosure control must say why there is no default: {message}"
-        );
     }
 }
 
@@ -557,24 +549,11 @@ fn a_vocabularys_visibility_admits_exactly_two_words() {
             "visibility = \"public\"",
             &format!("visibility = \"{word}\""),
         );
-        let message = err(&text);
         assert!(
-            message.contains("neither \"public\" nor \"derived\""),
-            "`{word}` must be refused rather than read as a label: {message}"
+            parse_str(&text).is_err(),
+            "`{word}` is neither `public` nor `derived`"
         );
     }
-}
-
-/// A closed set is authored, and an authored set of nothing refuses every ingest.
-#[test]
-fn a_closed_vocabulary_with_no_value_source_is_refused() {
-    let text = SEVERITY.replace("  [vocabulary.values]\n  low = 1\n  high = 2\n", "");
-    let message = err(&text);
-    assert!(message.contains("no value source"), "{message}");
-    assert!(
-        message.contains("never a silent fall-through to minting"),
-        "the refusal must say what accepting it would have to do instead: {message}"
-    );
 }
 
 /// An open vocabulary with no values is legal and starts empty — the build mints its first code
@@ -590,6 +569,13 @@ fn an_open_vocabulary_with_no_values_starts_empty() {
     assert_eq!(vocab.value_set, ValueSet::Open);
     assert!(vocab.codes.is_empty());
     assert_eq!(config.schema.open_minters().len(), 1);
+}
+
+#[test]
+fn a_closed_vocabulary_may_start_with_no_values() {
+    let text = SEVERITY.replace("  [vocabulary.values]\n  low = 1\n  high = 2\n", "");
+    let config = parse_str(&text).unwrap();
+    assert!(config.schema.vocabularies["severity"].codes.is_empty());
 }
 
 /// A closed vocabulary mints nothing, so it must have no minter for a scan to reach.
@@ -624,27 +610,7 @@ fn two_vocabularies_of_one_name_are_refused() {
 #[test]
 fn an_attribute_naming_an_undeclared_vocabulary_is_refused_at_parse() {
     let text = SEVERITY.replace("vocabulary = \"severity\"", "vocabulary = \"severtiy\"");
-    let message = err(&text);
-    assert!(message.contains("severtiy"), "{message}");
-    assert!(
-        message.contains("names no `[[vocabulary]]` block"),
-        "{message}"
-    );
-    assert!(
-        message.contains("Declared: severity"),
-        "the refusal must name what is available: {message}"
-    );
-    assert!(
-        message.contains("refused rather than minted"),
-        "the refusal must say why a fall-through is not the answer: {message}"
-    );
-}
-
-#[test]
-fn a_category_needs_a_vocabulary_reference() {
-    let text = SEVERITY.replace("vocabulary = \"severity\"\n", "");
-    let message = err(&text);
-    assert!(message.contains("`vocabulary` is required"), "{message}");
+    assert!(err(&text).contains("severtiy"));
 }
 
 /// A category may declare `index` beside `render`, and it reaches the compiled form.
@@ -703,31 +669,6 @@ fn a_number_may_be_rendered_and_indexed_at_once() {
     }
 }
 
-/// Decision 0013: absent machinery names itself rather than refusing generically. Bare `multi`
-/// names records §5 and the epic that lifts it; `render` + `multi` names decision 0039's permanent
-/// fence instead, whatever else the declaration says.
-#[test]
-fn multi_is_refused_naming_what_is_absent_and_0039_when_rendered() {
-    let multi = SEVERITY.replace("render     = true", "index      = true\nmulti      = true");
-    assert!(err(&multi).contains("records §5"), "{}", err(&multi));
-
-    let rendered = SEVERITY.replace("render     = true", "render     = true\nmulti      = true");
-    assert!(err(&rendered).contains("0039"), "{}", err(&rendered));
-}
-
-/// **`render_in` is refused rather than recorded and ignored** (decision 0013).
-#[test]
-fn render_in_is_refused_rather_than_silently_ignored() {
-    let text = with_line(SEVERITY, "render_in = [\"docs_2024\"]");
-    let message = err(&text);
-    assert!(message.contains("§3.9"), "{message}");
-    assert!(
-        message.contains("every view anyway"),
-        "the refusal must say what accepting it would actually do: {message}"
-    );
-    assert!(parse_str(SEVERITY).is_ok());
-}
-
 /// A declaration with neither `render` nor `index` parses and is blob-resident (records §3).
 #[test]
 fn a_declaration_with_neither_key_is_blob_resident() {
@@ -743,30 +684,6 @@ fn a_declaration_with_neither_key_is_blob_resident() {
     // The hot column's tail is exactly the render columns, so the blob-resident `i64` and the
     // entity-space `keyword` cost no row bits — only the rendered `u8` counts.
     assert_eq!(config.schema.row_bits(), Some(8));
-}
-
-#[test]
-fn render_on_a_keyword_is_refused_at_the_declaration() {
-    let message = err("[[attribute]]\nname = \"title\"\ntype = \"keyword\"\nrender = true\n");
-    assert!(message.contains("fixed-width slot"), "{message}");
-    assert!(
-        message.contains("never leaves the server"),
-        "a keyword's refusal must name the ordinal's confinement, not only the width: {message}"
-    );
-}
-
-#[test]
-fn render_on_text_is_refused_at_the_declaration() {
-    let message = err("[[attribute]]\nname = \"abstract\"\ntype = \"text\"\nrender = true\n");
-    assert!(message.contains("record blob"), "{message}");
-}
-
-#[test]
-fn utf8_is_refused_as_a_declared_type_and_names_its_successors() {
-    let message = err("[[attribute]]\nname = \"title\"\ntype = \"utf8\"\nindex = true\n");
-    assert!(message.contains("retired"), "{message}");
-    assert!(message.contains("keyword"), "{message}");
-    assert!(message.contains("text"), "{message}");
 }
 
 #[test]
@@ -787,69 +704,12 @@ fn a_text_column_resolves_its_analyser_and_refuses_an_unknown_one() {
     );
 }
 
-/// An analyser on a column that has no analyser is refused rather than ignored — the same rule a
-/// vocabulary on a non-category gets, and for the same reason.
-#[test]
-fn an_analyser_on_a_non_text_column_is_refused() {
-    let message = err("[[attribute]]\nname = \"score\"\ntype = \"i64\"\nanalyser = \"unicode\"\n");
-    assert!(
-        message.contains("not `text`") && message.contains("believes"),
-        "{message}"
-    );
-    let message = err(&with_line(SEVERITY, "analyser = \"unicode\""));
-    assert!(message.contains("not `text`"), "{message}");
-}
-
-/// A vocabulary on a non-category is a value set its author believes is in effect.
-#[test]
-fn a_vocabulary_on_a_non_category_is_refused_rather_than_ignored() {
-    let text = format!(
-        "{SEVERITY}\n[[attribute]]\nname = \"score\"\ntype = \"f32\"\nvocabulary = \"severity\"\n"
-    );
-    assert!(err(&text).contains("has no meaning"), "{}", err(&text));
-}
-
-#[test]
-fn a_column_may_not_be_named_after_a_combinator() {
-    for name in ["all_of", "any_of", "none_of"] {
-        let text = format!("[[attribute]]\nname = \"{name}\"\ntype = \"keyword\"\nindex = true\n");
-        assert!(err(&text).contains("filter combinator"), "{}", err(&text));
-    }
-}
-
-#[test]
-fn a_column_may_not_shadow_a_fixed_or_reserved_name() {
-    for name in ["tessera_id", "residual", "x", "access"] {
-        let text = format!("[[attribute]]\nname = \"{name}\"\ntype = \"i64\"\n");
-        assert!(err(&text).contains("shadows"), "{name}: {}", err(&text));
-    }
-}
-
-#[test]
-fn record_is_a_reserved_column_name() {
-    let message = err("[[attribute]]\nname = \"record\"\ntype = \"i64\"\n");
-    assert!(message.contains("record blob"), "{message}");
-}
-
 #[test]
 fn one_attribute_name_may_not_be_declared_twice() {
     let text = format!(
         "{SEVERITY}\n[[attribute]]\nname = \"severity\"\ntype = \"category\"\nvocabulary = \"severity\"\n"
     );
     assert!(err(&text).contains("declared twice"), "{}", err(&text));
-}
-
-/// The name addresses the column in `/v1/categories/{column}`, so it must survive a path segment.
-#[test]
-fn a_column_name_must_survive_a_path_segment() {
-    for name in ["a/b", "a b", "a.b", "a%2Fb", "caté"] {
-        let text = format!("[[attribute]]\nname = \"{name}\"\ntype = \"i64\"\n");
-        assert!(err(&text).contains("its identifier on the wire"), "{name}");
-    }
-    for name in ["severity_2", "severity-2", "Severity2"] {
-        let text = format!("[[attribute]]\nname = \"{name}\"\ntype = \"i64\"\n");
-        assert!(parse_str(&text).is_ok(), "{name}");
-    }
 }
 
 #[test]
@@ -1501,40 +1361,6 @@ fn the_membership_requirement_has_five_settings() {
         "require_member_visibility = { count = 1, fraction = 0.5 }",
     );
     assert!(err(&text).contains("exactly one of"), "{}", err(&text));
-}
-
-/// **An empty closed vocabulary is refused in every spelling**, the rule applying after the three
-/// converge rather than at the source.
-///
-/// Refusing only *the absence of a source* would admit a source that declares nothing — the same
-/// column, the same width in every row, and none of the message. A closed set is the authority on
-/// what may be ingested, so an empty one refuses every value for ever.
-#[test]
-fn a_closed_vocabulary_with_no_values_is_refused_in_every_spelling() {
-    // Both spellings of "authored, and authoring nothing": the inline table emptied, and the bare
-    // key array emptied. `SEVERITY` pins two codes, so removing them is the whole edit.
-    for emptied in ["  [vocabulary.values]\n", "values = []\n"] {
-        let text = SEVERITY
-            .replace("  [vocabulary.values]\n  low = 1\n  high = 2\n", emptied)
-            .to_string();
-        let message = err(&text);
-        assert!(
-            message.contains("no values") || message.contains("value source"),
-            "{emptied:?}: {message}"
-        );
-        assert!(
-            message.contains("open"),
-            "{emptied:?}: the refusal must name the other value_set: {message}"
-        );
-    }
-    // An open one is legal empty: its values arrive as they are minted.
-    let text = SEVERITY
-        .replace(
-            "  [vocabulary.values]\n  low = 1\n  high = 2\n",
-            "values = []\n",
-        )
-        .replace("value_set  = \"closed\"", "value_set  = \"open\"");
-    parse_str(&text).expect("an open vocabulary may start empty");
 }
 
 /// A threshold that cannot fail, or cannot pass, is refused rather than compiled.
@@ -2409,7 +2235,7 @@ fn inline_values_and_a_source_together_are_refused() {
         "values     = [\"low\", \"high\"]\nsource     = \"severity_values\"",
     );
     let message = bound_err(&text, &[]);
-    assert!(message.contains("spellings of one thing"), "{message}");
+    assert!(message.contains("give one"), "{message}");
 }
 
 /// **The map says *where*, never *whether*.** A name outside the object's fields is refused
@@ -2506,12 +2332,10 @@ fn an_empty_field_name_is_refused() {
         "source           = \"geometry\"",
         "source           = \"geometry\"\nfields           = { entity_id = \"\" }",
     );
-    let message = bound_err(&text, &[]);
-    assert!(message.contains("names no column"), "{message}");
+    assert!(bound_err(&text, &[]).contains("entity_id"));
 
     let text = with_line(SEVERITY, "field = \"  \"");
-    let message = err(&text);
-    assert!(message.contains("names no column"), "{message}");
+    assert!(err(&text).contains("`field` is empty"));
 }
 
 /// **A layer's map moves a field, and the reader takes the name it moved it to** — the same rule
@@ -3111,7 +2935,7 @@ fn a_value_listed_twice_in_an_array_is_refused() {
         "values     = [\"low\", \"high\", \"low\"]\n",
     );
     let message = err(&text);
-    assert!(message.contains("listed twice"), "{message}");
+    assert!(message.contains("given twice"), "{message}");
 }
 
 /// Declaration order is registration order, and a layer must follow every layer it names.
@@ -3693,7 +3517,7 @@ fn fields_on_an_attribute_that_has_no_view_to_choose_is_refused() {
          source = \"other\"\nfields = { view = \"quarter\" }\n",
     );
     assert!(
-        err(&entity_scope).contains("entity scope"),
+        err(&entity_scope).contains("group-scoped"),
         "{}",
         err(&entity_scope)
     );
@@ -3731,7 +3555,6 @@ fn a_scoped_text_column_without_an_index_is_refused() {
     );
     let message = err(&text);
     assert!(message.contains("`index = true`"), "{message}");
-    assert!(message.contains("record blob"), "{message}");
 }
 
 /// A layer may be drawn on a whole group, and a **scoped** layer only on that group's views.

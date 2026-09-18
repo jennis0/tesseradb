@@ -460,44 +460,27 @@ async fn the_route_declares_answers_redeclarations_and_refuses_what_the_schema_r
     let (status, _) = declare(&served, "severity", opened).await;
     assert_eq!(status, 409, "and under another value set");
 
-    for (bad, reason) in [
-        (
-            json!({ "value_set": "closed", "visibility": "public", "width": "f32",
-                    "values": [{ "key": "a" }] }),
-            "is not a code space",
-        ),
-        (
-            json!({ "value_set": "closed", "visibility": "public", "width": "u8" }),
-            "with no values",
-        ),
-        (
-            json!({ "value_set": "open", "visibility": "derived", "width": "u8",
-                    "reserved": [0] }),
-            "code 0",
-        ),
-        (
-            json!({ "value_set": "open", "visibility": "derived", "width": "u8",
-                    "reserved": [900] }),
-            "cannot hold",
-        ),
-        (
-            json!({ "value_set": "open", "visibility": "derived", "width": "u8",
-                    "values": [{ "key": "" }] }),
-            "empty key",
-        ),
-        (
-            json!({ "value_set": "open", "visibility": "derived", "width": "u8",
-                    "values": [{ "key": "a" }, { "key": "a" }] }),
-            "named twice",
-        ),
+    // What is refused is tested in `tessera_store::declaration`; here, that a refusal is a 422
+    // with a `detail`.
+    for bad in [
+        json!({ "value_set": "closed", "visibility": "public", "width": "f32" }),
+        json!({ "value_set": "open", "visibility": "derived", "width": "u8", "reserved": [0] }),
+        json!({ "value_set": "open", "visibility": "derived", "width": "u8",
+                "values": [{ "key": "a" }, { "key": "a" }] }),
     ] {
         let (status, body) = declare(&served, "other", bad.clone()).await;
         assert_eq!(status, 422, "{bad}: {body}");
-        assert!(
-            body["detail"].as_str().unwrap().contains(reason),
-            "{bad}: {body}"
-        );
+        assert!(body["detail"].is_string(), "{bad}: {body}");
     }
+
+    // A closed vocabulary may be declared empty and given its values afterwards.
+    let (status, body) = declare(
+        &served,
+        "later",
+        json!({ "value_set": "closed", "visibility": "public", "width": "u8" }),
+    )
+    .await;
+    assert_eq!(status, 201, "{body}");
 
     // **A code is never the caller's** (per-point-attributes §3.1): the body has no field for one,
     // so a request naming one is refused by the shape rather than read with the code dropped.
@@ -528,7 +511,7 @@ async fn a_value_page_adds_values_and_a_held_title_upserts() {
         declare_attribute(
             &served,
             json!({ "name": "severity", "type": "category", "vocabulary": "severity",
-                    "width": "u8", "index": true }),
+ "index": true }),
         )
         .await
         .0,
@@ -623,7 +606,7 @@ async fn a_declared_category_column_uses_a_runtime_vocabularys_values() {
     let (status, body) = declare_attribute(
         &served,
         json!({ "name": "severity", "type": "category", "vocabulary": "severity",
-                "width": "u8", "index": true }),
+ "index": true }),
     )
     .await;
     assert_eq!(status, 201, "{body}");
@@ -695,7 +678,7 @@ async fn a_page_onto_a_build_declared_vocabulary_keeps_its_titles_past_a_fold() 
         declare_attribute(
             &served,
             json!({ "name": "built", "type": "category", "vocabulary": "built",
-                    "width": "u8", "index": true }),
+ "index": true }),
         )
         .await
         .0,
@@ -769,7 +752,7 @@ async fn an_upserted_title_survives_a_flush_a_fold_and_a_restart() {
         declare_attribute(
             &served,
             json!({ "name": "built", "type": "category", "vocabulary": "built",
-                    "width": "u8", "index": true }),
+ "index": true }),
         )
         .await
         .0,
@@ -780,7 +763,7 @@ async fn an_upserted_title_survives_a_flush_a_fold_and_a_restart() {
         declare_attribute(
             &served,
             json!({ "name": "severity", "type": "category", "vocabulary": "severity",
-                    "width": "u8", "index": true }),
+ "index": true }),
         )
         .await
         .0,
@@ -912,7 +895,7 @@ async fn a_declaration_and_its_values_survive_a_restart_and_a_fold() {
         declare_attribute(
             &served,
             json!({ "name": "severity", "type": "category", "vocabulary": "severity",
-                    "width": "u8", "index": true }),
+ "index": true }),
         )
         .await
         .0,

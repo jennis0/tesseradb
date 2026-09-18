@@ -1466,41 +1466,11 @@ impl Engine {
             },
         )?;
 
-        // **The declarations the log holds past the last publication**, appended on the side
-        // manifests' rule above, and each category's vocabulary bound to the width the column
-        // stores. The seed fixed the widths the manifests' columns name; a column only the log
-        // names is bound here, on the door's rule (`VocabularyMinter::narrow_to`), and a bound
-        // code past the width is a log that disagrees with the bindings.
-        // **And the vocabularies the log holds past the last publication**, before the widths
-        // below are read off the columns that name them.
+        // The vocabularies and attributes the log holds past the last publication.
         let runtime_vocabularies = write_state.vocabularies.snapshot(&vocabularies);
         bundle.manifest = bundle.manifest.with_vocabularies(&runtime_vocabularies);
         let (runtime_attributes, runtime_scoped_attributes) = write_state.attributes.snapshot();
         let unfolded_attributes = write_state.attributes.entity_names();
-        let runtime_categories = runtime_attributes
-            .iter()
-            .filter_map(|d| d.vocabulary.as_deref().map(|v| (v, d.arrow_type)))
-            .chain(
-                runtime_scoped_attributes
-                    .iter()
-                    .filter_map(|f| f.vocabulary.as_deref().map(|v| (v, f.arrow_type))),
-            );
-        for (vocabulary, width) in runtime_categories {
-            let minter = vocabularies.get_mut(vocabulary).ok_or_else(|| {
-                EngineError::Malformed(format!(
-                    "a runtime attribute names vocabulary '{vocabulary}', which this bundle does \
-                     not declare; this node does not open"
-                ))
-            })?;
-            if let Err(code) = minter.narrow_to(width) {
-                return Err(EngineError::Malformed(format!(
-                    "vocabulary '{vocabulary}' binds code {code}, past the {} width a runtime \
-                     attribute stores it at; this node does not open",
-                    width.arrow_type_name()
-                )));
-            }
-        }
-
         let plugin: Arc<dyn Plugin> = Arc::new(plugin);
         let auth_plugin_hash = hex_decode_32(&plugin.auth_plugin_hash()).ok_or_else(|| {
             EngineError::Malformed("plugin auth_plugin_hash is not 64 hex characters".to_string())

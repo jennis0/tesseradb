@@ -4,6 +4,7 @@
 
 pub mod coalesce;
 pub mod columns;
+pub mod declaration;
 pub mod derived;
 pub mod entity_terms;
 pub mod error;
