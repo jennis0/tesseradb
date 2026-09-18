@@ -214,3 +214,29 @@ fn a_batch_older_than_the_retained_wal_is_no_longer_recognised_as_a_duplicate() 
          weakening is an observable rather than something a client discovers"
     );
 }
+
+/// **The running process forgets a batch id at the rotation that deletes its record**, so the
+/// horizon is the retained log whether or not a restart happened (#154).
+///
+/// The index is a cache of the WAL. Left untrimmed it answered a retry as a replay while the
+/// record behind it was gone, and the same node after a restart would have called that id unknown
+/// and re-ingested the rows: one client, one id, two answers, decided by whether the process had
+/// been restarted since.
+#[test]
+fn an_accepted_batch_leaves_the_live_index_when_its_wal_member_is_rotated_away() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = fixture(tmp.path());
+    let engine = engine_at(tmp.path(), &root, 1);
+    ingest(&engine, "ext-1");
+    assert!(
+        engine.accepted_batch("ext-1").is_some(),
+        "the batch was just accepted, so its id is held"
+    );
+    wait_until("the flush", || engine.write_executor_stats().flushes >= 1);
+    wait_until("member 1 to be reclaimed", || {
+        !wal_members(tmp.path()).contains(&"wal-000001.log".to_string())
+    });
+    wait_until("the index to follow the log", || {
+        engine.accepted_batch("ext-1").is_none()
+    });
+}

@@ -134,11 +134,13 @@ from __future__ import annotations
 
 import base64
 import io
+import json
 from pathlib import Path
 
 import pyarrow as pa
 import pyarrow.ipc as ipc
 import pytest
+import requests
 
 from oracle import catalogue
 from oracle import mask as mask_mod
@@ -154,6 +156,7 @@ from oracle.wire import decode_viewport
 VIEW = "s0"
 GRID_MAX = 65536.0
 BATCH_ID = "conformance-restart-replay-batch-1"
+VALUES_BATCH_ID = "conformance-restart-replay-values-1"
 
 
 def _build_ingest_batch(*, access: str = "999002") -> bytes:
@@ -545,6 +548,94 @@ def test_deny_ops_and_ingest_survive_a_sigkill_restart(catalogue_bundle_root: Pa
             status_after_conflict = srv2.status()
             assert status_after_conflict["entity_id_high_water"] == high_water_after_ingest, (
                 "a rejected (409) conflicting re-post must not allocate anything either"
+            )
+        finally:
+            stop_server(proc2)
+    finally:
+        if proc is not None:
+            stop_server(proc)
+
+
+def _values_body(external_id: int) -> bytes:
+    """One `POST /control/values` page in JSON: one row, addressed by external id, carrying the
+    value that row was ingested with.
+
+    A cell holding the identical value is accepted with no effect (contracts §3.4), so the page
+    fills nothing whether or not the row has flushed, and the only thing that varies between two
+    such pages is the entity they name."""
+    row = {
+        "external_id": base64.b64encode(external_id.to_bytes(8, "little")).decode(),
+        "department": "alpha",
+    }
+    return json.dumps([row]).encode()
+
+
+def _post_values(srv, body: bytes, batch_id: str) -> requests.Response:
+    return requests.post(
+        f"{srv.control_base}/control/values",
+        headers={
+            "Authorization": f"Bearer {srv.operator_credential}",
+            "x-tessera-batch-id": batch_id,
+            "Content-Type": "application/json",
+        },
+        data=body,
+        timeout=10,
+    )
+
+
+def test_a_values_batch_id_is_recognised_after_a_sigkill_restart(restart_paths):
+    """**A values batch id inside the retention window survives a restart** (#154).
+
+    The accepted-batch index is a cache of the WAL, and its rebuild used to match ingest records
+    alone: a values id inside the window came back *unknown* after a restart, so identical bytes
+    were applied a second time rather than answered as a replay, and differing bytes under a held
+    id were accepted rather than refused. The two arms below are those two answers.
+
+    The differing page names a **different entity**, not a different value for the same cell: a
+    conflicting value is a `409` of its own under the fill rule, and a test that used one would
+    pass with the batch-id check absent entirely."""
+    tmp_dir = restart_paths["root"]
+    srv, proc = spawn_server(
+        restart_paths["bundle"],
+        tmp_dir,
+        cache_dir=restart_paths["cache"],
+        wal_path=restart_paths["wal"],
+    )
+    try:
+        # The entities the values page addresses: a values row fills a cell on an entity that
+        # already exists, so this test makes its own rather than borrowing the fixture's.
+        resp = srv.ingest(_build_ingest_batch(), BATCH_ID)
+        assert resp.status_code == 200, resp.text
+
+        body = _values_body(900_000_001)
+        first = _post_values(srv, body, VALUES_BATCH_ID)
+        assert first.status_code == 200, first.text
+        # The flag is omitted where it is false, so a first submission carries no `replayed` at all.
+        assert first.json().get("replayed", False) is False, first.text
+
+        kill_server(proc)
+        proc = None
+
+        srv2, proc2 = spawn_server(
+            restart_paths["bundle"],
+            tmp_dir,
+            cache_dir=restart_paths["cache"],
+            wal_path=restart_paths["wal"],
+        )
+        try:
+            replay = _post_values(srv2, body, VALUES_BATCH_ID)
+            assert replay.status_code == 200, replay.text
+            replayed = replay.json()
+            assert replayed["replayed"] is True, replayed
+            assert replayed["filled"] == 0, replayed
+
+            differing = _values_body(900_000_002)
+            assert differing != body
+            conflict = _post_values(srv2, differing, VALUES_BATCH_ID)
+            assert conflict.status_code == 409, (
+                f"same batch id + different body must be refused — a 200 here means replay did "
+                f"not recover the values batch's body hash (got {conflict.status_code}: "
+                f"{conflict.text})"
             )
         finally:
             stop_server(proc2)

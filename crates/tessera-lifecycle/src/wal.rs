@@ -584,6 +584,71 @@ pub fn unbuilt_track(record: &WalRecord) -> Option<(&'static str, &'static str)>
     }
 }
 
+/// What a record carries of the request that produced it: the id the client chose, the hash of the
+/// bytes it sent, and the entity ids that request was allocated.
+///
+/// The allocation is empty where the route allocates nothing — a values batch fills cells on
+/// entities that already exist — which is a different statement from a record carrying no batch at
+/// all, and [`batch_identity`] draws that line by returning `None` for the second.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BatchIdentity<'a> {
+    pub batch_id: &'a str,
+    pub body_hash: [u8; 32],
+    pub allocation: Vec<EntityId>,
+}
+
+/// The batch a record was written for, if it was written for one — **the one rule the accepted-batch
+/// index is built by**, at restart and at every accept.
+///
+/// The index that answers `x-tessera-batch-id` is a cache of this log: what it holds after a
+/// restart is whatever the retained members say, so anything that decides "does this record carry
+/// a batch id" twice can forget a kind of batch on one of the two paths and not the other. That is
+/// exactly what happened to `/control/values` (#154): the rebuild matched [`WalRecord::IngestBatch`]
+/// alone and a values id inside the retention window came back unknown.
+///
+/// **A `match` with no wildcard arm**, on [`unbuilt_track`]'s rule: a record kind added later is a
+/// decision taken here, and the compiler asks for it rather than a default answering "carries no
+/// batch" for something that does.
+pub fn batch_identity(record: &WalRecord) -> Option<BatchIdentity<'_>> {
+    match record {
+        WalRecord::IngestBatch {
+            batch_id,
+            body_hash,
+            rows,
+        } => Some(BatchIdentity {
+            batch_id,
+            body_hash: *body_hash,
+            allocation: rows.iter().map(|row| row.entity_id).collect(),
+        }),
+        WalRecord::ValuesBatch {
+            batch_id,
+            body_hash,
+            ..
+        } => Some(BatchIdentity {
+            batch_id,
+            body_hash: *body_hash,
+            // A values row fills cells on an entity that already exists, so the batch was allocated
+            // nothing and a replay of it answers with `filled: 0` and no ids.
+            allocation: Vec::new(),
+        }),
+        // Listed rather than caught by a wildcard, for this function's whole reason.
+        WalRecord::VocabularyMint { .. }
+        | WalRecord::OverlaySnapshot { .. }
+        | WalRecord::ChangeByEntity { .. }
+        | WalRecord::LayerCreate { .. }
+        | WalRecord::LayerDrop { .. }
+        | WalRecord::ViewCreate { .. }
+        | WalRecord::ViewDrop { .. }
+        | WalRecord::PlainViewCreate { .. }
+        | WalRecord::ViewGroupCreate { .. }
+        | WalRecord::AttributeDeclare { .. }
+        | WalRecord::VocabularyDeclare { .. }
+        | WalRecord::ArtifactPublish { .. }
+        | WalRecord::ArtifactGrow { .. }
+        | WalRecord::ArtifactFill { .. } => None,
+    }
+}
+
 /// One artifact's growth inside a [`WalRecord::ArtifactGrow`]: a delta to one of its sets, the
 /// membership or one content's generating set (`ingest.md` §1.1).
 ///
@@ -1150,6 +1215,10 @@ impl WalFile {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct SealedSpan {
     number: u64,
+    /// The sequence-global position of this member's first record. Carried so that the log can say
+    /// where its retained records begin ([`Wal::retained_from`]), which is what an in-memory index
+    /// of the log's contents is trimmed against.
+    start_pos: u64,
     end_pos: u64,
 }
 
@@ -1519,6 +1588,7 @@ impl Wal {
             } else {
                 sealed.push(SealedSpan {
                     number,
+                    start_pos: base_pos,
                     end_pos: base_pos + (len - HEADER_LEN),
                 });
             }
@@ -1565,6 +1635,20 @@ impl Wal {
     /// The sequence-global position below which everything is durable and acknowledged.
     pub fn durable_position(&self) -> u64 {
         self.active.end_pos()
+    }
+
+    /// The sequence-global position of the oldest record the log still holds: everything below it
+    /// lived in a member reclamation has deleted.
+    ///
+    /// **What a restart would find, said while the process is still running.** A replay-derived
+    /// index — the accepted-batch index of `/control/ingest` and `/control/values` — knows only
+    /// what the surviving members carry, so a live process holding entries below this figure
+    /// answers a replay one a restart would not. `Executor::rotate_wal` reads this after every
+    /// rotation and forgets what fell below it, which is what makes the two agree.
+    pub fn retained_from(&self) -> u64 {
+        self.sealed
+            .first()
+            .map_or(self.active.base_pos, |span| span.start_pos)
     }
 
     /// Every surviving member's number, ascending — the active one last.
@@ -1670,6 +1754,7 @@ impl Wal {
         let previous = std::mem::replace(&mut self.active, next);
         self.sealed.push(SealedSpan {
             number: previous.number,
+            start_pos: previous.base_pos,
             end_pos: sealed_end,
         });
         drop(previous);
@@ -2085,6 +2170,11 @@ impl ExecutorWal {
     /// Read *before* an append to learn where that record will land.
     pub fn position(&self) -> u64 {
         self.wal.position()
+    }
+
+    /// The oldest record position the log still holds — see [`Wal::retained_from`].
+    pub fn retained_from(&self) -> u64 {
+        self.wal.retained_from()
     }
 
     /// Seal the active member, carry `snapshot` forward and reclaim below `reclaim_below` — see
