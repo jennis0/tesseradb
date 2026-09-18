@@ -83,7 +83,6 @@ paths = [
 # The values route reads a layer column (python-sdk §11.2 F, owner ruling 2026-09-18). Engine and server.
 [track.sdk-values]
 paths = [
-  "crates/tessera-lifecycle/src/command.rs",
   "crates/tessera-engine/src/*",
   "crates/tessera-engine/tests/*",
   "crates/tessera-server/src/*",

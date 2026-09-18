@@ -404,10 +404,8 @@ the order is fixed:
    are flushed with `wait=visible` here, so the values that follow address rows the database
    holds.
 3. **Values**: an insert into an attribute, or into a layer by key column, on rows the database
-   holds, through `POST /control/values`. Not built yet: the values route fills attribute cells
-   and mints no artifact, so a layer insert by key after the first commit is refused naming the
-   artifacts-table spelling until the route reads a layer column as the ingest route does
-   (§11.2 F).
+   holds, through `POST /control/values`, which fills the cells and mints or joins the artifacts
+   a key column names as the other two doors do (contracts §3.4).
 4. **Artifacts**, per layer in dependency order: a clustering before its labels, a target before
    a layer attached to it, a layer before one that depends on it. Within a layer, `PUT` pages
    carry members, parent, shape and content; a nested batch resolves parents that are its own
@@ -593,7 +591,7 @@ The same calls as the first load, on the new tables.
 
 ```python
 db.insert("s0", new_df, id="entity_id", x="x", y="y", access="categories")
-db.insert("clusters/kmeans", new_df, id="entity_id", key="cluster")   # held keys join, new keys mint; Not built yet: F
+db.insert("clusters/kmeans", new_df, id="entity_id", key="cluster")   # held keys join, new keys mint
 db.insert("topics/kmeans", {"k-new": "Diffusion models for audio"})
 db.insert("topics/kmeans", members=generating_rows, id="entity_id", key="key", rank="rank")
 print(db.check())     # the plan and the pre-flight
@@ -604,7 +602,7 @@ db.commit()           # the report
 
 ```python
 db.declare_layer("clusters/second", kind="flat")
-db.insert("clusters/second", df, id="entity_id", key="cluster2")  # held rows; one column and an id; Not built yet: F
+db.insert("clusters/second", df, id="entity_id", key="cluster2")  # held rows; one column and an id
 db.commit()
 db.map(colour_by="cluster:clusters/second")
 ```
@@ -692,8 +690,6 @@ Rulings of 2026-09-18:
 
 - **E. The binary at release.** Platform wheels carrying it. Until then `PATH`, `TESSERA_BIN`
   or the checkout.
-- **F. The values route reads a layer column** (ruled; not built): `POST /control/values`
-  mints and joins artifacts from a key column as the ingest route does (decision 0128).
 - **H. An attached artifact with no members takes its target's membership** (ruled; not
   built): the engine's placement, counting and gating of a label read the cluster's rows.
 - **G. Issues #150 to #153**, engine and build defects the SDK's tests found.
