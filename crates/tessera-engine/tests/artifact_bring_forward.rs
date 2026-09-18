@@ -1033,3 +1033,235 @@ fn a_paged_generating_set_is_maintained_into_the_form_a_build_produces() {
         maintained[1]
     );
 }
+
+// ---- a merge under a generating set ----------------------------------------------------------
+
+/// The merge policy's shipped width: how many adjacent same-tier extents select a merge.
+const TIER_WIDTH: usize = 4;
+/// Points per interleaved segment. Above [`TIER_WIDTH`], so the merged order cycles through every
+/// segment more than once and no row's position is a coincidence of the first cycle.
+const ROWS_EACH: usize = 8;
+
+/// Flush [`TIER_WIDTH`] segments of [`ROWS_EACH`] points each, laid out so that the segments
+/// **interleave in Morton order**, and return the entities by `[segment][t]`.
+///
+/// Segment `s` takes the x positions congruent to `s` modulo [`TIER_WIDTH`], at one y. Morton
+/// order over a constant y is monotone in x, so the merged extent orders the rows
+/// `s0t0, s1t0, s2t0, s3t0, s0t1, …`: point `(s, t)` holds row `ROWS_EACH·s + t` inside the span
+/// before the merge and `TIER_WIDTH·t + s` after it. A point per flush at ascending x would give
+/// extents already in Morton order, which the merged segment concatenates unchanged, and every
+/// assertion about a moved row is then true of the identity.
+///
+/// `descriptors_of` gives each point its access descriptors by `(s, t)`.
+fn flush_interleaved(
+    engine: &Engine,
+    descriptors_of: impl Fn(usize, usize) -> Vec<Vec<u8>>,
+) -> Vec<Vec<EntityId>> {
+    let mut by_segment = Vec::new();
+    for s in 0..TIER_WIDTH {
+        let rows: Vec<_> = (0..ROWS_EACH)
+            .map(|t| {
+                let descriptors = descriptors_of(s, t);
+                tessera_lifecycle::command::UnallocatedRow {
+                    external_id: Some(format!("interleaved-{s}-{t}").into_bytes()),
+                    view: "s0".to_string(),
+                    join: None,
+                    x: ((t * TIER_WIDTH + s) * 20) as f64,
+                    y: 5.0,
+                    scalars: Vec::new(),
+                    terms: engine.resolve_terms(&descriptors),
+                    descriptors,
+                    scoped: Vec::new(),
+                }
+            })
+            .collect();
+        by_segment.push(
+            engine
+                .accept_ingest(rows, format!("interleaved-{s}"), [s as u8 + 1; 32])
+                .expect("the ingest is accepted"),
+        );
+        flush(engine);
+    }
+    by_segment
+}
+
+/// One entity's row, or `None` while it is buffered.
+fn row_of(engine: &Engine, entity: EntityId) -> Option<u32> {
+    engine.generation().bundle.partitions["default"].views["s0"]
+        .row_space
+        .row_of(entity)
+        .map(|row| row.raw())
+}
+
+/// Let one merge publish over the extents [`flush_interleaved`] wrote, and return each watched
+/// entity's row before and after it. Merge is turned off again on the way out, so the ticks that
+/// follow do not take the policy's next chance and move the rows an assertion holds fixed.
+fn run_merge(engine: &Engine, watched: &[EntityId]) -> (Vec<Option<u32>>, Vec<Option<u32>>) {
+    let before: Vec<Option<u32>> = watched.iter().map(|e| row_of(engine, *e)).collect();
+    let merges = engine.write_executor_stats().merges;
+    engine.set_merge_for_test(true);
+    engine.request_flush();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while engine.write_executor_stats().merges == merges {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the merge never published"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    engine.set_merge_for_test(false);
+    let after: Vec<Option<u32>> = watched.iter().map(|e| row_of(engine, *e)).collect();
+    (before, after)
+}
+
+/// Every artifact key this principal is served, ascending. A viewer who contains no content's
+/// generating set entirely receives no artifact at all rather than one with the content dropped
+/// (`ArtifactOut::content`), so a key absent here is a content withheld.
+fn served_to(engine: &Engine, credential: &[u8]) -> Vec<String> {
+    let session = engine.authorise(credential).unwrap();
+    let mut keys: Vec<String> = engine
+        .viewport(
+            &session,
+            ViewportRequest::new("s0", 0, WHOLE_MAP, N_ITEMS as usize),
+        )
+        .expect("a viewport over the whole map")
+        .artifacts
+        .into_iter()
+        .filter_map(|a| a.key)
+        .collect();
+    keys.sort();
+    keys
+}
+
+/// Publish one artifact of `LABELS` whose one content is generated from `generated_from`, and tick.
+fn publish_generated_from(
+    engine: &Engine,
+    key: &str,
+    members: Vec<EntityId>,
+    generated_from: Vec<EntityId>,
+) {
+    engine
+        .publish_artifacts(
+            LABELS.into(),
+            0,
+            vec![IncomingArtifact::with_content(
+                Some(key.into()),
+                members,
+                vec![tessera_lifecycle::membership::IncomingContent::new(
+                    vec![format!("{key} label 0")],
+                    generated_from,
+                )],
+            )],
+        )
+        .expect("a publication carrying a content and its set");
+    tick(engine);
+}
+
+/// **A merge that moves a generating set's member gives the set the row the member now holds.**
+///
+/// A generating set is a set of *rows*, and a merge renumbers the rows inside the span it
+/// collapses. The rebase clears each set over the span and re-projects it from the record's
+/// entities, so the set names the same entities afterwards. Carry the rows across instead and the
+/// set keeps its cardinality while naming whatever the merge put at those rows — which serves an
+/// all-gated content to a principal who holds the new occupant and not the member, and withholds
+/// it from the principal who holds the member.
+///
+/// So this asserts both directions at the serving level, over a span whose merged order is
+/// **provably** not the concatenation: the member's row before the merge is the successor's row
+/// after it, asserted here rather than assumed of the fixture.
+#[test]
+fn a_merge_that_moves_a_generating_sets_member_re_projects_the_set() {
+    let fx = fixture();
+    let engine = fx.open();
+    engine.register_layer(label_declaration(LABELS)).unwrap();
+    engine.set_merge_for_test(false);
+
+    // The content's one member, and the point that takes its row: `(1, 1)` holds row `8·1 + 1`
+    // inside the span before the merge and `4·1 + 1` after it, and `(1, 2)` holds `4·2 + 1`
+    // after — the row `(1, 1)` gave up. See [`flush_interleaved`] for the layout.
+    const MEMBER: (usize, usize) = (1, 1);
+    const SUCCESSOR: (usize, usize) = (1, 2);
+    let segments = flush_interleaved(&engine, |s, t| match (s, t) {
+        // The member is visible to the broad principal alone, its successor to the narrow
+        // principal alone; every other point to both.
+        MEMBER => vec![b"0".to_vec()],
+        SUCCESSOR => vec![b"1".to_vec()],
+        _ => vec![b"0".to_vec(), b"1".to_vec()],
+    });
+    let member = segments[MEMBER.0][MEMBER.1];
+    let successor = segments[SUCCESSOR.0][SUCCESSOR.1];
+
+    // Thirty built members, of which the narrow principal sees ten, so this artifact has a
+    // non-zero masked count for both principals and an absence below is the content's gate rather
+    // than an empty membership.
+    publish_generated_from(&engine, "m0", fx.members(0..30), vec![member]);
+
+    assert_eq!(
+        served_to(&engine, &full_coverage_credential()),
+        vec!["m0".to_string()],
+        "the broad principal holds the set's one member and is served the content"
+    );
+    assert_eq!(
+        served_to(&engine, &subset_credential()),
+        Vec::<String>::new(),
+        "the narrow principal lacks that member and is served nothing"
+    );
+
+    let builds = engine.artifact_cache_builds().0;
+    let (before, after) = run_merge(&engine, &[member, successor]);
+
+    assert!(
+        before.iter().chain(&after).all(Option::is_some),
+        "both watched points must hold a row on each side of the merge: {before:?} -> {after:?}"
+    );
+    assert_ne!(
+        before[0], after[0],
+        "the merge left the member where it was, so the rest of this case is about the identity \
+         permutation — see flush_interleaved"
+    );
+    assert_eq!(
+        before[0], after[1],
+        "the successor must occupy the member's old row, or the two principals below are not \
+         separated by the rebase: {before:?} -> {after:?}"
+    );
+
+    assert_eq!(
+        served_to(&engine, &full_coverage_credential()),
+        vec!["m0".to_string()],
+        "the set holds the member at the row it now holds, so the principal who holds the member \
+         is still served"
+    );
+    assert_eq!(
+        served_to(&engine, &subset_credential()),
+        Vec::<String>::new(),
+        "the narrow principal holds the point that now occupies the member's old row and not the \
+         member itself, and must be served nothing"
+    );
+    assert_eq!(
+        engine.artifact_cache_builds().0,
+        builds,
+        "the merge was taken by the held form, so those two answers are the maintained form's \
+         rather than a rebuild's"
+    );
+
+    // And the maintained form is the built form, generating set for generating set.
+    let maintained = form_of(&engine, LABELS);
+    engine.forget_artifact_forms_for_test(LABELS);
+    assert_eq!(
+        served_to(&engine, &full_coverage_credential()),
+        vec!["m0".to_string()],
+        "the form built from scratch over the merged row space agrees"
+    );
+    let rebuilt = form_of(&engine, LABELS);
+    assert_eq!(
+        maintained.len(),
+        rebuilt.len(),
+        "the two forms cover the same ordinals"
+    );
+    for (amended, built) in maintained.iter().zip(&rebuilt) {
+        assert_eq!(
+            amended, built,
+            "the rebased form and the built one describe different levels"
+        );
+    }
+}
