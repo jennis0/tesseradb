@@ -6096,7 +6096,8 @@ fn stored_membership(declaration: &tessera_types::layer::LayerDeclaration) -> bo
 fn artifact_level_of(record: &WalRecord) -> Option<(&str, u32)> {
     match record {
         WalRecord::ArtifactPublish { layer, level, .. }
-        | WalRecord::ArtifactGrow { layer, level, .. } => Some((layer.as_str(), *level)),
+        | WalRecord::ArtifactGrow { layer, level, .. }
+        | WalRecord::ArtifactFill { layer, level, .. } => Some((layer.as_str(), *level)),
         _ => None,
     }
 }
@@ -12546,7 +12547,15 @@ impl Executor {
             // Nothing has been appended yet, so — exactly as a failed allocation — the window has
             // no effect: the mutated `vocabularies` copy is dropped with it, and every waiter gets
             // the same refusal.
-            self.fail_window_mint(closed, e, entries, started);
+            let detail = e.to_string();
+            self.fail_window(
+                closed,
+                || ExecError::VocabularyRefused {
+                    detail: detail.clone(),
+                },
+                entries,
+                started,
+            );
             return;
         }
 
@@ -12557,7 +12566,14 @@ impl Executor {
         let (mut mint_records, minted_per_entry) = match self.mint_records(&mut closed) {
             Ok(minted) => minted,
             Err(detail) => {
-                self.fail_window_layer(closed, detail, entries, started);
+                self.fail_window(
+                    closed,
+                    || ExecError::LayerRefused {
+                        detail: detail.clone(),
+                    },
+                    entries,
+                    started,
+                );
                 return;
             }
         };
@@ -12568,7 +12584,14 @@ impl Executor {
         match self.derive_records(&closed, &vocabularies) {
             Ok(records) => mint_records.extend(records),
             Err(detail) => {
-                self.fail_window_layer(closed, detail, entries, started);
+                self.fail_window(
+                    closed,
+                    || ExecError::LayerRefused {
+                        detail: detail.clone(),
+                    },
+                    entries,
+                    started,
+                );
                 return;
             }
         }
@@ -12679,74 +12702,12 @@ impl Executor {
         // a store that held the join while the generation still lacked the row would describe an
         // artifact by a point nothing could yet see. The reverse order costs nothing: both are
         // durable by this line, and the log is what a restart reads.
-        if !minted.is_empty() || !growth.is_empty() {
-            // **The level versions these records are about to move, read in the order they move
-            // them** — what each record's held row form must be at for that record's delta to be
-            // the one it is missing (`Executor::bring_artifacts_forward`). Two records of one
-            // window may name the same level, so the version is carried forward across the
-            // sequence rather than read once: every publication and every growth bumps exactly one
-            // level exactly once.
-            let mut befores: Vec<u64> = Vec::with_capacity(minted.len() + growth.len());
-            self.live.with_artifacts(|store| {
-                let mut seen: std::collections::BTreeMap<(&str, u32), u64> =
-                    std::collections::BTreeMap::new();
-                for (record, _) in minted.iter().chain(growth.iter()) {
-                    let Some((layer, level)) = artifact_level_of(record) else {
-                        befores.push(0);
-                        continue;
-                    };
-                    let at = seen
-                        .entry((layer, level))
-                        .or_insert_with(|| store.level_version(layer, level));
-                    befores.push(*at);
-                    *at += 1;
-                }
-            });
-            // **What the store refused, per record**, so the tick's row forms take only what the
-            // records took (`ArtifactStore::apply_reporting`).
-            let mut refused_per_record: Vec<Vec<usize>> =
-                vec![Vec::new(); minted.len() + growth.len()];
-            let undecodable = self.live.with_publication_state(|registry, store, _| {
-                let mut undecodable = 0;
-                // The registry half first, per record: a mint may have extended its level's
-                // reserved runs, and the store's own apply resolves ordinals against them.
-                for ((record, position), refused) in minted.iter().zip(&mut refused_per_record) {
-                    registry.apply(record);
-                    undecodable += store.apply_reporting(record, *position, refused);
-                }
-                for ((record, position), refused) in growth
-                    .iter()
-                    .zip(refused_per_record.iter_mut().skip(minted.len()))
-                {
-                    undecodable += store.apply_reporting(record, *position, refused);
-                }
-                undecodable
-            });
-            if undecodable > 0 {
-                // Unreachable in practice — these bytes were serialised from a live bitmap moments
-                // ago — and alarmed rather than asserted, because the alternative to noticing is an
-                // artifact that is quietly the size it was before.
-                tracing::error!(
-                    count = undecodable,
-                    "ALARM: a membership growth did not survive its own round trip"
-                );
-            }
-            // **And every delta the records just took is held for the tick**, in the order they
-            // took it, rather than being applied to the row forms here — the ingest twin of
-            // `commit_growth`'s own accumulation (`ingest.md` §1.3).
-            for (((record, _), before), refused) in minted
-                .iter()
-                .chain(growth.iter())
-                .zip(befores)
-                .zip(&refused_per_record)
-            {
-                self.hold_delta(record, before, refused);
-            }
-            // A growth against an artifact **above** its level's high-water is carried by the next
-            // tail pack like any other unpublished record; one below it waits for the fold, held in
-            // the log by the pin. Marking the manifest dirty is what gets the first case published.
-            self.deny_dirty = true;
-        }
+        let (artifact_records, artifact_positions): (Vec<&WalRecord>, Vec<u64>) = minted
+            .iter()
+            .chain(growth.iter())
+            .map(|(record, position)| (record, *position))
+            .unzip();
+        self.apply_artifact_records(&artifact_records, &artifact_positions);
 
         // Recorded after the swap, so a concurrent replay of a batch id can never observe a window
         // where the generation has swapped but the idempotency index has not caught up.
@@ -12876,60 +12837,17 @@ impl Executor {
             .record_window_service(entries, started.elapsed().as_nanos() as u64);
     }
 
-    /// A category key could not acquire a code: **nothing was appended, nothing applied**, exactly
-    /// as a failed allocation — the mutated `vocabularies` copy is dropped with `closed`, and the
-    /// live bindings are untouched. Unlike a WAL failure, the refusal is uniform: no waiter's own
-    /// append was closer to the fault than any other's, so every one gets the same error.
-    ///
-    /// ## Why the detail is rendered here
-    ///
-    /// `MintError` lives in `tessera_store::vocabulary` and `ExecError` in `tessera-lifecycle`,
-    /// which deliberately carries no `tessera-store` dependency, so the error cannot cross as
-    /// itself. It is rendered to text on this thread and travels in
-    /// [`ExecError::VocabularyRefused`], which `map_accept_error` answers as the `422` §3.6
-    /// requires — naming the vocabulary and its width, both the deployment's own schema. Mapping it
-    /// to a WAL or allocator failure instead would answer a bodyless 500 for a refusal the caller
-    /// can act on, and would tell an operator the log was at fault when it was not.
-    /// A window whose **artifact** mint could not be prepared: nothing was appended, nothing
-    /// applied. Every waiter gets the same refusal, which is the cost of a decision that can only be
-    /// made once the window's batches are together — see `Executor::mint_records`.
-    fn fail_window_layer(
+    /// Answers every waiter of a window that was refused after allocation with the same error.
+    fn fail_window(
         &self,
         closed: Vec<ClosedEntry<Responder>>,
-        detail: String,
+        error: impl Fn() -> ExecError,
         entries: u64,
         started: std::time::Instant,
     ) {
         for entry in closed {
             for waiter in entry.waiters {
-                self.ack_failed(
-                    &waiter,
-                    ExecError::LayerRefused {
-                        detail: detail.clone(),
-                    },
-                );
-            }
-        }
-        self.health
-            .record_window_service(entries, started.elapsed().as_nanos() as u64);
-    }
-
-    fn fail_window_mint(
-        &self,
-        closed: Vec<ClosedEntry<Responder>>,
-        error: MintError,
-        entries: u64,
-        started: std::time::Instant,
-    ) {
-        let detail = error.to_string();
-        for entry in closed {
-            for waiter in entry.waiters {
-                self.ack_failed(
-                    &waiter,
-                    ExecError::VocabularyRefused {
-                        detail: detail.clone(),
-                    },
-                );
+                self.ack_failed(&waiter, error());
             }
         }
         self.health
@@ -13343,9 +13261,6 @@ impl Executor {
     ) {
         // Read before the record is applied, because it is what says a held row form is the form
         // this publication follows — see [`Self::bring_artifacts_forward`].
-        let before = self
-            .live
-            .with_artifacts(|store| store.level_version(&layer, level));
         // **Partitioned before any ordinal is claimed** (`ingest.md` §1.5, R3): a key the level
         // holds is compared under the fill rule and resolves to its existing ordinal, and only the
         // keys it does not hold are published. The answer is up to three kinds of record, in the
@@ -13395,62 +13310,14 @@ impl Executor {
             return;
         }
 
-        // The position each record will occupy — read **before** its append, because that is the
-        // bound rotation must not reclaim past, and after the append it names the next record
-        // instead. Several records, one fsync: the batch is the commit unit, as a window's is.
-        let mut positions = Vec::with_capacity(records.len());
-        let appended = records.iter().try_for_each(|record| {
-            positions.push(self.wal.position());
-            self.wal.append(record)
-        });
-        if let Err(e) = appended.and_then(|()| self.wal.fsync()) {
-            // The ordinals and any extension block this preparation spent are not returned, on
-            // `commit_registry`'s argument: a torn append that replays would otherwise land these
-            // artifacts on entities a later batch also holds.
-            tracing::error!(
-                error = %e,
-                "ALARM: an artifact publication could not be made durable; the artifacts do not \
-                 exist and their reserved ids are spent"
-            );
-            respond.fail(ExecError::Wal(e));
-            return;
-        }
-
-        let mut refused_per_record: Vec<Vec<usize>> = vec![Vec::new(); records.len()];
-        let undecodable = self.live.with_publication_state(|registry, store, _| {
-            let mut undecodable = 0;
-            for ((record, position), refused) in
-                records.iter().zip(&positions).zip(&mut refused_per_record)
-            {
-                registry.apply(record);
-                undecodable += store.apply_reporting(record, *position, refused);
+        let positions = match self.make_durable(&records, "an artifact publication") {
+            Ok(positions) => positions,
+            Err(e) => {
+                respond.fail(e);
+                return;
             }
-            undecodable
-        });
-        if undecodable > 0 {
-            // Unreachable in practice — these bytes were serialised from a live bitmap moments ago
-            // — and alarmed rather than asserted because the alternative to noticing is an artifact
-            // that is silently absent.
-            tracing::error!(
-                count = undecodable,
-                "ALARM: an artifact record did not survive its own round trip"
-            );
-        }
-        // **Every delta the store just took is held for the tick, in the same order**
-        // (`Self::hold_delta`): the publication's ordinals, the growth's joins and pages, and the
-        // ordinals a fill changed. Each record moved the level's version by one, so `before` walks
-        // with them.
-        for ((at, record), refused) in (before..).zip(records.iter()).zip(&refused_per_record) {
-            self.hold_delta(record, at, refused);
-        }
-        // A shape layer's held shapes are rebuilt at the tick's publication, at the version these
-        // records moved the level to, and the new shapes resolved over every segment the
-        // generation serves (`polygon-membership.md` §6.3: built at publication and at open, never
-        // on a request).
-        // Durable in the log, not yet in a manifest. The registry half of this record reaches
-        // `SEGMENTS-<n>.json` at the next flush on the deny lane's mechanism; the membership half
-        // has nowhere to reach, which is what the rotation pin holds the log for.
-        self.deny_dirty = true;
+        };
+        self.apply_artifact_records(&records, &positions);
         respond.ack(
             Ack::ArtifactsPublished {
                 entities: prepared.entities,
@@ -13596,9 +13463,6 @@ impl Executor {
     ) {
         // `commit_artifacts`' reason: the version a held row form must be at for this delta to be
         // the one it is missing.
-        let before = self
-            .live
-            .with_artifacts(|store| store.level_version(&layer, level));
         // The receipt is read beside the preparation, under the same lock and **before** the
         // record is applied: afterwards every joining member is a member, and how many were new
         // is gone.
@@ -13630,53 +13494,85 @@ impl Executor {
             return;
         }
 
-        // The position each record will occupy, read **before** its append — `commit_artifacts`'s
-        // reason, and here it is the bound that holds the log until the fold rewrites the level
-        // whole, since a grown or filled record sits below the high-water the tail pack starts
-        // from. Several records, one fsync: the batch is the commit unit.
+        let positions = match self.make_durable(&records, "a membership growth") {
+            Ok(positions) => positions,
+            Err(e) => {
+                respond.fail(e);
+                return;
+            }
+        };
+        self.apply_artifact_records(&records, &positions);
+        respond.ack(Ack::MembershipsGrown { grown });
+    }
+
+    /// Appends the records and fsyncs once, and returns the position each record took. The
+    /// position is read before the append, because it is the bound rotation must not reclaim past.
+    /// On failure nothing the command prepared is in force; ids it reserved stay spent, so a torn
+    /// append that replays cannot land them on entities a later command also holds.
+    fn make_durable(&mut self, records: &[&WalRecord], what: &str) -> Result<Vec<u64>, ExecError> {
         let mut positions = Vec::with_capacity(records.len());
         let appended = records.iter().try_for_each(|record| {
             positions.push(self.wal.position());
             self.wal.append(record)
         });
-        if let Err(e) = appended.and_then(|()| self.wal.fsync()) {
-            tracing::error!(
-                error = %e,
-                "ALARM: a membership growth could not be made durable; the entities did not join \
-                 and no part was filled"
-            );
-            respond.fail(ExecError::Wal(e));
+        let durable = appended.and_then(|()| self.wal.fsync());
+        self.observe_wal();
+        match durable {
+            Ok(_) => Ok(positions),
+            Err(e) => {
+                tracing::error!(error = %e, "ALARM: {what} could not be made durable; none of it is in force");
+                Err(ExecError::Wal(e))
+            }
+        }
+    }
+
+    /// Applies durable artifact records to the registry and the store, and holds the delta each
+    /// made for the tick that brings the level's row forms forward. Each record moves its level's
+    /// version by one, so the version a delta starts from walks with the records.
+    fn apply_artifact_records(&mut self, records: &[&WalRecord], positions: &[u64]) {
+        if records.is_empty() {
             return;
         }
-
-        let mut refused_per_record: Vec<Vec<usize>> = vec![Vec::new(); records.len()];
-        let undecodable = self.live.with_publication_state(|_, store, _| {
+        let befores: Vec<u64> = self.live.with_artifacts(|store| {
+            let mut seen: std::collections::BTreeMap<(&str, u32), u64> = Default::default();
             records
                 .iter()
-                .zip(&positions)
-                .zip(&mut refused_per_record)
+                .map(|record| {
+                    let Some((layer, level)) = artifact_level_of(record) else {
+                        return 0;
+                    };
+                    let at = seen
+                        .entry((layer, level))
+                        .or_insert_with(|| store.level_version(layer, level));
+                    let version = *at;
+                    *at += 1;
+                    version
+                })
+                .collect()
+        });
+        let mut refused_per_record: Vec<Vec<usize>> = vec![Vec::new(); records.len()];
+        let undecodable = self.live.with_publication_state(|registry, store, _| {
+            records
+                .iter()
+                .zip(positions)
+                .zip(refused_per_record.iter_mut())
                 .map(|((record, position), refused)| {
+                    registry.apply(record);
                     store.apply_reporting(record, *position, refused)
                 })
                 .sum::<usize>()
         });
         if undecodable > 0 {
-            // Unreachable in practice — these bytes were serialised from a live bitmap moments ago
-            // — and alarmed rather than asserted, because the alternative to noticing is an
-            // artifact that is quietly the size it was before.
             tracing::error!(
                 count = undecodable,
-                "ALARM: a membership growth did not survive its own round trip"
+                "ALARM: artifact records did not survive their own round trip; those artifacts are absent"
             );
         }
-        for ((at, record), refused) in (before..).zip(records.iter()).zip(&refused_per_record) {
-            self.hold_delta(record, at, refused);
+        for ((record, before), refused) in records.iter().zip(befores).zip(&refused_per_record) {
+            self.hold_delta(record, before, refused);
         }
-        // A growth against an artifact **above** its level's high-water is carried by the next
-        // tail pack like any other unpublished record; one below it waits for the fold, held in the
-        // log by the pin. Marking the manifest dirty is what gets the first case published.
+        // Durable in the log and not yet in a manifest.
         self.deny_dirty = true;
-        respond.ack(Ack::MembershipsGrown { grown });
     }
 
     /// Validate, allocate, append, sync, apply — in that order, which is the whole of the
@@ -13710,17 +13606,8 @@ impl Executor {
             }
         };
 
-        if let Err(e) = self.wal.append(&record).and_then(|()| self.wal.fsync()) {
-            // The ids the preparation spent are **not** returned. The allocator is monotone with no
-            // free list, and re-issuing a run whose `LayerCreate` may or may not have reached the
-            // disk is the one outcome worse than losing 65 536 ids out of four billion: a torn
-            // append that replays would land a layer on entities a later registration also holds.
-            tracing::error!(
-                error = %e,
-                "ALARM: a layer registration could not be made durable; the layer does not exist \
-                 and its reserved ids are spent"
-            );
-            respond.fail(ExecError::Wal(e));
+        if let Err(e) = self.make_durable(&[&record], "a layer registration") {
+            respond.fail(e);
             return;
         }
 
@@ -13806,13 +13693,8 @@ impl Executor {
                 return;
             }
         };
-        if let Err(e) = self.wal.append(&record).and_then(|()| self.wal.fsync()) {
-            tracing::error!(
-                error = %e,
-                view = %format!("{group}:{key}"),
-                "ALARM: a view creation could not be made durable; the view does not exist"
-            );
-            respond.fail(ExecError::Wal(e));
+        if let Err(e) = self.make_durable(&[&record], "a view creation") {
+            respond.fail(e);
             return;
         }
         self.live.with_roster(|roster| roster.apply(&record));
@@ -13969,79 +13851,17 @@ impl Executor {
         // The level version each record is the delta against, read before the apply moves it —
         // `commit_growth`'s rule, carried forward across the sequence because a mint and a growth
         // of this batch may name one level and each moves it exactly once.
-        let before: Vec<u64> = self.live.with_artifacts(|store| {
-            let mut seen: std::collections::BTreeMap<(&str, u32), u64> = Default::default();
-            artifact_records
-                .iter()
-                .map(|record| {
-                    let Some((layer, level)) = artifact_level_of(record) else {
-                        return 0;
-                    };
-                    let at = seen
-                        .entry((layer, level))
-                        .or_insert_with(|| store.level_version(layer, level));
-                    let version = *at;
-                    *at += 1;
-                    version
-                })
-                .collect()
-        });
-        // The position **before** each append is where the record lands, and the values record's
-        // is what pins the log until the flush writes its cells (`ingest.md` §1.4).
-        let values_position = self.wal.position();
-        let mut positions = Vec::with_capacity(artifact_records.len());
-        let appended = self.wal.append(&values_record).and_then(|()| {
-            artifact_records.iter().try_for_each(|record| {
-                positions.push(self.wal.position());
-                self.wal.append(record)
-            })
-        });
-        if let Err(e) = appended.and_then(|()| self.wal.fsync()) {
-            tracing::error!(
-                error = %e,
-                "ALARM: a values batch could not be made durable; no cell was filled, no \
-                 artifact was created and no membership grew"
-            );
-            respond.fail(ExecError::Wal(e));
-            return;
-        }
-        self.observe_wal();
-
-        // The mints and the growths apply through the artifact store's own path, exactly as a
-        // publication and a page on the growth route do, and are held in the log at their records
-        // until the fold rewrites the level. **The registry half of a mint runs first, per
-        // record**: a publication may have extended its level's reserved runs, and the store's own
-        // apply resolves ordinals against them.
-        let mut refused_per_record: Vec<Vec<usize>> = vec![Vec::new(); artifact_records.len()];
-        let undecodable = self.live.with_publication_state(|registry, store, _| {
-            artifact_records
-                .iter()
-                .zip(&positions)
-                .zip(refused_per_record.iter_mut())
-                .map(|((record, position), refused)| {
-                    if matches!(record, WalRecord::ArtifactPublish { .. }) {
-                        registry.apply(record);
-                    }
-                    store.apply_reporting(record, *position, refused)
-                })
-                .sum::<usize>()
-        });
-        if undecodable > 0 {
-            // Unreachable in practice — these bytes were serialised from a live bitmap moments ago
-            // — and alarmed rather than asserted, on `commit_growth`'s rule.
-            tracing::error!(
-                count = undecodable,
-                "ALARM: a values batch's artifact publications and membership growths did not \
-                 survive their own round trip"
-            );
-        }
-        for ((record, at), refused) in artifact_records
-            .iter()
-            .zip(&before)
-            .zip(&refused_per_record)
-        {
-            self.hold_delta(record, *at, refused);
-        }
+        let mut durable: Vec<&WalRecord> = vec![&values_record];
+        durable.extend(&artifact_records);
+        let positions = match self.make_durable(&durable, "a values batch") {
+            Ok(positions) => positions,
+            Err(e) => {
+                respond.fail(e);
+                return;
+            }
+        };
+        let values_position = positions[0];
+        self.apply_artifact_records(&artifact_records, &positions[1..]);
 
         // **The cells reach the buffer's fill map**, which is what the next flush writes into the
         // family's entity-space extent and the record blob (`ingest.md` §6.3). The map is cloned
@@ -14085,11 +13905,6 @@ impl Executor {
             Vec::new(),
             values_position,
         );
-        // A growth above its level's high-water is published by the next tail pack, on
-        // `commit_growth`'s mechanism, and so is an artifact this batch minted.
-        if !artifact_records.is_empty() {
-            self.deny_dirty = true;
-        }
         // **What a batch minted is reported to the batch that minted it**, and to the operator —
         // the window close's own line, for its own reason: under `value_set = "open"` a typo
         // creates a permanent object rather than being refused, and the mitigation is that it is
@@ -14180,14 +13995,8 @@ impl Executor {
         let record = WalRecord::AttributeDeclare {
             declaration: Box::new(compiled.declaration(request.title.clone())),
         };
-        if let Err(e) = self.wal.append(&record).and_then(|()| self.wal.fsync()) {
-            tracing::error!(
-                error = %e,
-                attribute = %request.name,
-                "ALARM: an attribute declaration could not be made durable; the column does not \
-                 exist"
-            );
-            respond.fail(ExecError::Wal(e));
+        if let Err(e) = self.make_durable(&[&record], "an attribute declaration") {
+            respond.fail(e);
             return;
         }
 
@@ -14266,14 +14075,8 @@ impl Executor {
         let record = WalRecord::ViewGroupCreate {
             declaration: Box::new(declaration),
         };
-        if let Err(e) = self.wal.append(&record).and_then(|()| self.wal.fsync()) {
-            tracing::error!(
-                error = %e,
-                group = %compiled.name,
-                "ALARM: a view group declaration could not be made durable; the group does not \
-                 exist"
-            );
-            respond.fail(ExecError::Wal(e));
+        if let Err(e) = self.make_durable(&[&record], "a view group declaration") {
+            respond.fail(e);
             return;
         }
         self.live
@@ -14322,13 +14125,8 @@ impl Executor {
         let record = WalRecord::PlainViewCreate {
             declaration: Box::new(declaration),
         };
-        if let Err(e) = self.wal.append(&record).and_then(|()| self.wal.fsync()) {
-            tracing::error!(
-                error = %e,
-                view = %compiled.id,
-                "ALARM: a plain view creation could not be made durable; the view does not exist"
-            );
-            respond.fail(ExecError::Wal(e));
+        if let Err(e) = self.make_durable(&[&record], "a plain view creation") {
+            respond.fail(e);
             return;
         }
         self.live
@@ -14431,14 +14229,8 @@ impl Executor {
                 &request, &compiled, &codes,
             )),
         };
-        if let Err(e) = self.wal.append(&record).and_then(|()| self.wal.fsync()) {
-            tracing::error!(
-                error = %e,
-                vocabulary = %compiled.name,
-                "ALARM: a vocabulary declaration could not be made durable; the vocabulary does \
-                 not exist"
-            );
-            respond.fail(ExecError::Wal(e));
+        if let Err(e) = self.make_durable(&[&record], "a vocabulary declaration") {
+            respond.fail(e);
             return;
         }
 
@@ -14595,14 +14387,8 @@ impl Executor {
         let record = WalRecord::VocabularyDeclare {
             declaration: Box::new(declaration),
         };
-        if let Err(e) = self.wal.append(&record).and_then(|()| self.wal.fsync()) {
-            tracing::error!(
-                error = %e,
-                vocabulary = %vocabulary,
-                "ALARM: a page of vocabulary values could not be made durable; none of them is \
-                 bound"
-            );
-            respond.fail(ExecError::Wal(e));
+        if let Err(e) = self.make_durable(&[&record], "a page of vocabulary values") {
+            respond.fail(e);
             return;
         }
         let mut vocabularies: Vocabularies = (*generation.vocabularies).clone();
@@ -14668,7 +14454,6 @@ impl Executor {
         // spelling alone leaves the other's buffered rows to be flushed into whatever takes the
         // key next ([decision 0115](../../../docs/decisions/0115-a-dropped-view-key-is-reusable.md)).
         let ids = generation.bundle.manifest.view_ids_for_key(&owner, &key);
-        let id = format!("{owner}{}{key}", tessera_store::GROUP_SEPARATOR);
         let prepared = self
             .live
             .with_roster(|roster| roster.prepare_drop(&owner, &key));
@@ -14686,13 +14471,8 @@ impl Executor {
         } else {
             Vec::new()
         };
-        if let Err(e) = self.wal.append(&record).and_then(|()| self.wal.fsync()) {
-            tracing::error!(
-                error = %e,
-                view = %id,
-                "ALARM: a view drop could not be made durable; the view still exists"
-            );
-            respond.fail(ExecError::Wal(e));
+        if let Err(e) = self.make_durable(&[&record], "a view drop") {
+            respond.fail(e);
             return;
         }
         self.live.with_roster(|roster| roster.apply(&record));
