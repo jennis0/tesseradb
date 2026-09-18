@@ -593,6 +593,89 @@ async fn a_created_view_is_served_ingested_flushed_and_survives_a_restart() {
     );
 }
 
+/// **A created view stays on `/v1/meta` through a flush that writes no file for it** (issue #151;
+/// contracts §3.4 r55: the view is listed and answers a viewer verb, empty, from its
+/// acknowledgement).
+///
+/// The test above creates a view and then *populates* it, so its descriptor is rebuilt by the
+/// flush that gives it a row space. This one never puts a row in it, which is the state a client
+/// that lists views from meta actually meets: the view was created for rows that have not arrived,
+/// and a flush of the rows of *other* views must not take it off the list. A view listed at the
+/// acknowledgement and gone one flush later is worse than one never listed — the SDK reads meta to
+/// know what exists, and would create it again and take the 409.
+#[tokio::test]
+async fn a_created_view_with_no_rows_survives_a_flush_and_is_listed_once() {
+    let mut served = serve().await;
+
+    let resp = create(
+        &served,
+        "quarter",
+        "2026-Q5",
+        q_record("Q5 2026", 1_800_000_000_000_000),
+    )
+    .await;
+    assert_eq!(resp.status(), 201, "a free key on a declared group creates");
+    reauthorise(&mut served).await;
+
+    let listed = |document: &Value| {
+        view_ids(document)
+            .into_iter()
+            .filter(|id| id == "quarter:2026-Q5")
+            .count()
+    };
+    let document = meta(&served).await;
+    assert_eq!(
+        listed(&document),
+        1,
+        "the created view is listed from its acknowledgement: {:?}",
+        view_ids(&document)
+    );
+    assert_eq!(
+        document["groups"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|g| g["name"] == "quarter")
+            .unwrap()["views"],
+        json!(["quarter:2026-Q1", "quarter:2026-Q5"]),
+        "and on its group's roster, in creation order"
+    );
+
+    // A flush carrying rows for another view, so the created one gets no file of its own.
+    let resp = ingest(
+        &served,
+        "world-batch",
+        "world",
+        &[(b"w-0".to_vec(), 10.0, 20.0, &["0"][..], Some(0))],
+    )
+    .await;
+    assert_eq!(resp.status(), 200);
+    flush(&served).await;
+    reauthorise(&mut served).await;
+
+    let document = meta(&served).await;
+    assert_eq!(
+        listed(&document),
+        1,
+        "and is still listed exactly once after a flush that wrote no file for it: {:?}",
+        view_ids(&document)
+    );
+    assert!(
+        points(&served, "quarter:2026-Q5").await.is_empty(),
+        "it still answers a viewer verb, empty"
+    );
+
+    let mut served = restart(served).await;
+    reauthorise(&mut served).await;
+    let document = meta(&served).await;
+    assert_eq!(
+        listed(&document),
+        1,
+        "and comes back from the segments manifest: {:?}",
+        view_ids(&document)
+    );
+}
+
 /// Every arm the create refuses, and the status each takes (`views.md` §3.2). They are told apart
 /// because the caller's remedy differs: a refused record is one to correct, a taken or burnt key
 /// is one to replace, and an unknown group is not a view at all.

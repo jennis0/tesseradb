@@ -276,11 +276,39 @@ def test_a_later_commit_pages_an_insert_into_one_view_fills_a_family_and_adds_a_
     assert filtered["counts"]["matched"] == 50
     # The view created in this commit answers, with the rows staged for it.
     assert viewport(db, "slices:c", FRAME)["counts"]["visible"] == len(added)
+    # And it is on `/v1/meta`, which is what a client lists views from: a session's visible view
+    # set is fixed when it is authorised (views.md §6), so the commit that created the view drops
+    # the token held before it (issue #151).
+    assert [view["id"] for view in db.meta()["views"]] == ["slices:a", "slices:b", "slices:c"]
+    assert db.meta()["groups"][0]["views"] == ["slices:a", "slices:b", "slices:c"]
     # The new artifact is drawn on the view its row named and on no other.
     on_b = {one["key"]: one["masked_count"] for one in browse(db, "slices:b", "clusters")["artifacts"]}
     assert on_b["c1"] == len(fresh)
     on_a = {one["key"]: one["masked_count"] for one in browse(db, "slices:a", "clusters")["artifacts"]}
     assert on_a.get("c1", 0) == 0
+
+
+def test_a_view_created_with_no_rows_is_listed_on_meta_and_is_not_created_twice(grouped):
+    """A roster record and nothing else: the view exists, `/v1/meta` says so, and a second commit
+    plans no create for it (views.md §3.2, contracts §3.4 r55; issue #151).
+
+    The commit that creates it sends no rows, so nothing flushes — which is the state a client
+    meets when it declares the views a producer is about to fill.
+    """
+    db = grouped
+    db.insert("slices", roster=roster(["c"]), key="key", label="label", starts="starts")
+    report = db.commit()
+    assert report.ok, report.refusals
+    assert report.plan[0] == "create view 'slices:c' of group 'slices'"
+
+
+    assert [view["id"] for view in db.meta()["views"]] == ["slices:a", "slices:b", "slices:c"]
+    assert viewport(db, "slices:c", FRAME)["counts"]["visible"] == 0
+
+    # The next commit reads the same document and plans nothing: a create of a key the group holds
+    # is a 409, so a stale view list is a commit that cannot run.
+    db.insert("slices", roster=roster(["c"]), key="key", label="label", starts="starts")
+    assert db.check().plan == []
 
 
 def test_a_plain_view_declared_after_the_first_commit_is_created_and_served(grouped):
