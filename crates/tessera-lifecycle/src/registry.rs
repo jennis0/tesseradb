@@ -2164,9 +2164,22 @@ impl LayerRegistry {
             if join.joining.is_empty() {
                 continue;
             }
+            // **What the artifact already holds is not a join.** A page restating a membership the
+            // store carries would otherwise append a delta that changes nothing and pin the log at
+            // it — the log is reclaimed up to the oldest record a generation still needs, and a
+            // growth pin is released by the compaction fold alone. Taken against the membership as
+            // it stands before the batch, which is the state every row of the batch is prepared
+            // against and the state `growth_receipt` counts `joined` over.
+            let mut joining = join.joining.clone();
+            if let Some(record) = store.get(layer_name, level, ordinal) {
+                joining.andnot_inplace(&record.members);
+            }
+            if joining.is_empty() {
+                continue;
+            }
             growth.push(crate::wal::MembershipGrowth {
                 ordinal,
-                joining: crate::membership::serialise_members(&join.joining),
+                joining: crate::membership::serialise_members(&joining),
                 leaving: Vec::new(),
                 set: crate::wal::GrownSet::Membership,
             });
