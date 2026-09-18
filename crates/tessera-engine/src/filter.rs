@@ -2017,6 +2017,7 @@ impl FilterColumns {
                     hasrow: prefix_dir.join(&e.hasrow),
                     offsets: prefix_dir.join(&e.offsets),
                     terms: prefix_dir.join(&e.terms),
+                    bases: prefix_dir.join(&e.bases),
                 })
                 .collect::<Vec<_>>(),
         )

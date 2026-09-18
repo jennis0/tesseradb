@@ -1098,6 +1098,7 @@ fn execute_flush_stages(
         &entity_terms_extent.hasrow,
         &entity_terms_extent.offsets,
         &entity_terms_extent.terms,
+        &entity_terms_extent.bases,
     ] {
         to_digest.push(rel.clone());
     }
@@ -2353,7 +2354,7 @@ fn empty_codes(ty: ScalarType, category: bool) -> tessera_filter::Codes {
 /// This flush's slice of `entities/terms/` — the term lists of the entities it minted, in the
 /// promoted ordinals (contracts §2.4, `tessera_store::entity_terms`).
 ///
-/// **Always written, even for a flush that minted nothing.** An empty layer costs three tiny files
+/// **Always written, even for a flush that minted nothing.** An empty layer costs four tiny files
 /// and keeps the manifest's list a complete record of what each flush published; a conditional
 /// write would make "no extent" mean either "no entities" or "an older writer", which is the
 /// ambiguity the record blob avoids by making its own absence a function of the schema alone.
@@ -2369,11 +2370,13 @@ fn write_entity_terms_extent(
         hasrow: format!("{extents_rel}/{}.hasrow.roaring", ctx.seg_id),
         offsets: format!("{extents_rel}/{}.offsets.u32", ctx.seg_id),
         terms: format!("{extents_rel}/{}.terms.u32", ctx.seg_id),
+        bases: format!("{extents_rel}/{}.bases.u64", ctx.seg_id),
     };
     let mut writer = tessera_store::EntityTermsWriter::create_at(
         &ctx.prefix_dir.join(&extent.hasrow),
         &ctx.prefix_dir.join(&extent.offsets),
         &ctx.prefix_dir.join(&extent.terms),
+        &ctx.prefix_dir.join(&extent.bases),
     )
     .map_err(|e| FlushFailed(format!("entity-terms extent: {e}")))?;
     for (entity, terms) in per_entity {
