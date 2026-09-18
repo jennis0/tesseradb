@@ -4257,10 +4257,12 @@ impl WritePath {
                 filled,
                 held,
                 joined,
+                minted,
             }) => Ok(ValuesReceipt {
                 filled,
                 held,
                 joined,
+                minted,
             }),
             Ok(other) => unreachable!("a Values command answers ValuesFilled, not {other:?}"),
             Err(e) => Err(AcceptError::Exec(e)),
@@ -6439,6 +6441,18 @@ fn mint_plan<W>(
 /// What one window is about to mint: `(layer, level, key)` → the entry that first named it, and the
 /// entities joining it.
 type MintPlan = std::collections::BTreeMap<(String, u32, String), (usize, croaring::Bitmap)>;
+
+/// What [`Executor::prepare_mints`] answers: the publication records to append in order, the keys
+/// that turned out to be held after all and the ordinal each resolved to, and the keys this run
+/// created. `Err` is the refusal text the caller's waiters are answered with.
+type PreparedMints = Result<
+    (
+        Vec<WalRecord>,
+        std::collections::BTreeMap<(String, u32, String), u32>,
+        std::collections::BTreeSet<(String, u32, String)>,
+    ),
+    String,
+>;
 
 /// A second is short against the interval an operator or an orchestrator would take to notice, and
 /// long enough that a genuinely dead device is retried sixty times a minute rather than continuously.
@@ -11514,6 +11528,11 @@ pub struct ValuesReceipt {
     pub filled: u64,
     pub held: u64,
     pub joined: u64,
+    /// How many artifacts this batch's layer columns **created** — a key no artifact held, on a
+    /// layer whose value set is open (`ingest.md` §1.4). Reported for `/control/ingest`'s reason:
+    /// under `open` a typo creates a permanent object rather than being refused, and the
+    /// mitigation is that the caller who made it is told the number in its own `200`.
+    pub minted: u64,
 }
 
 /// What one values batch's fill rule produced: the cells to hold until the flush writes them, and
@@ -11836,8 +11855,12 @@ fn plan_fills(
 
 /// The growth records one values batch's layer columns produce (`ingest.md` §1.4).
 ///
-/// **A key no artifact holds refuses the batch.** A values batch allocates nothing and creates
-/// nothing, so there is no minting arm here: the caller publishes the artifact and then names it.
+/// **A key with no ordinal was minted at this batch's own commit** and the publication carried
+/// these rows as its first members, so it is skipped here exactly as [`growth_records`] skips one
+/// — one record instead of a publication and a growth against it. Every other reason a key could
+/// have no ordinal was refused before this: a `closed` value set and a layer with supplied content
+/// are `LayerRegistry::resolve_or_mint`'s own refusals, made at [`Executor::resolve_memberships`]
+/// with the batch still without effect.
 fn values_growth_records(
     memberships: &[tessera_lifecycle::ResolvedMembership],
     rows: &[tessera_lifecycle::IncomingValues],
@@ -11848,11 +11871,7 @@ fn values_growth_records(
     let mut by_level: BTreeMap<(&str, u32), BTreeMap<u32, croaring::Bitmap>> = BTreeMap::new();
     for join in memberships {
         let Some(ordinal) = join.ordinal else {
-            return Err(format!(
-                "column '{}' names the key '{}', which no artifact of level {} holds. A values \
-                 batch creates nothing (`ingest.md` §1.4): publish the artifact, then name it",
-                join.layer, join.key, join.level
-            ));
+            continue;
         };
         let joining = by_level
             .entry((join.layer.as_str(), join.level))
@@ -11882,6 +11901,45 @@ fn values_growth_records(
             )
         })
         .collect())
+}
+
+/// **The artifacts one values batch's layer columns named and no artifact holds** —
+/// [`mint_plan`]'s twin for the values door (`ingest.md` §1.4; python-sdk §11.2 F).
+///
+/// A table with an id column and a key column is insertable whatever the source's history, so an
+/// unknown key here means what it means at `/control/ingest`: on an `open` layer it creates the
+/// artifact it names, carrying the batch's own rows as its first members. The two plans are the
+/// same map and are consumed by the same [`Executor::prepare_mints`]; what differs is only where
+/// the entities come from — a window's fresh allocation there, and rows resolved at the boundary
+/// here, a values batch creating no member of its own.
+///
+/// **One artifact per key per level for the whole batch**, on `mint_plan`'s rule: two rows naming
+/// one unknown key mint once and both join it. The entry index every mint is charged to is `0`,
+/// there being one batch and one caller to report to.
+fn values_mint_plan(
+    memberships: &[tessera_lifecycle::ResolvedMembership],
+    rows: &[tessera_lifecycle::IncomingValues],
+) -> Result<MintPlan, String> {
+    let mut wanted: MintPlan = std::collections::BTreeMap::new();
+    for join in memberships {
+        if join.ordinal.is_some() {
+            continue;
+        }
+        let (_, members) = wanted
+            .entry((join.layer.clone(), join.level, join.key.clone()))
+            .or_insert_with(|| (0, croaring::Bitmap::new()));
+        for row in &join.rows {
+            let Some(entity) = rows.get(*row as usize) else {
+                return Err(format!(
+                    "column '{}' names row {row}, which this batch does not carry",
+                    join.layer
+                ));
+            };
+            // Entity space is `u32` by I9, so the narrowing is total.
+            members.add(entity.entity.raw() as u32);
+        }
+    }
+    Ok(wanted)
 }
 
 /// How many of one growth record's joining members the artifacts do not already hold — read
@@ -12530,21 +12588,55 @@ impl Executor {
         &mut self,
         closed: &mut [tessera_lifecycle::ClosedEntry<Responder>],
     ) -> Result<(Vec<WalRecord>, Vec<u64>), String> {
-        use std::collections::BTreeMap;
         let mut minted_per_entry = vec![0u64; closed.len()];
         let Some((wanted, edges)) = mint_plan(closed) else {
             return Ok((Vec::new(), minted_per_entry));
         };
+        let (records, resolved, minted) = self.prepare_mints(&wanted, &edges)?;
 
-        type Prepared = Result<
-            (
-                Vec<WalRecord>,
-                std::collections::BTreeMap<(String, u32, String), u32>,
-                std::collections::BTreeSet<(String, u32, String)>,
-            ),
-            String,
-        >;
-        let prepared: Prepared = self.live.with_publication_state(|registry, store, alloc| {
+        // A key that acquired an artifact between its batch's admission and this close is an
+        // ordinary growth, and `growth_records` takes it from there. Usually none did — that needs
+        // a publication to have executed inside the window — so the pass is skipped rather than
+        // walked.
+        if !resolved.is_empty() {
+            for entry in closed.iter_mut() {
+                for join in entry.memberships.iter_mut() {
+                    if join.ordinal.is_some() {
+                        continue;
+                    }
+                    let at = (join.layer.clone(), join.level, join.key.clone());
+                    join.ordinal = resolved.get(&at).copied();
+                }
+            }
+        }
+        for ((layer, level, key), (index, _)) in &wanted {
+            if minted.contains(&(layer.clone(), *level, key.clone())) {
+                minted_per_entry[*index] += 1;
+            }
+        }
+        Ok((records, minted_per_entry))
+    }
+
+    /// **Prepare one set of mints** — the publications that create the artifacts a caller's keys
+    /// named and no artifact holds.
+    ///
+    /// **One implementation across the doors** (decision 0139): `/control/ingest` reaches it
+    /// through [`Executor::mint_records`] at its window's close, and `POST /control/values`
+    /// through [`values_mint_plan`] at its own commit, so a key arriving at either door creates
+    /// the same artifact, with the same lineage and the same refusals. Nothing here reads which
+    /// door it was called from.
+    ///
+    /// The three answers: the records to append **in the order given** — ascending level, coarse
+    /// first, so a tiered chain's parent is fixed by the record before its child's — the keys
+    /// that turned out to be held after all, which their caller grows into instead, and the keys
+    /// this run minted.
+    fn prepare_mints(
+        &self,
+        wanted: &MintPlan,
+        edges: &[tessera_lifecycle::BatchEdge],
+    ) -> PreparedMints {
+        use std::collections::BTreeMap;
+        self.live.with_publication_state(|registry, store, alloc| {
             // **A child named under two parents refuses**, across the window as it does within a
             // batch: two entries naming different parents for one artifact are two hierarchies,
             // and there is no correct output. Checked before anything is prepared, so a refusal
@@ -12556,7 +12648,7 @@ impl Executor {
             // growth never adds lineage, so the window's minted edges are every edge a cycle
             // could run through.
             let mut parents: BTreeMap<(String, u32, String), Vec<String>> = BTreeMap::new();
-            for edge in &edges {
+            for edge in edges {
                 let at = (edge.layer.clone(), edge.level, edge.child.clone());
                 let named = parents.entry(at).or_default();
                 if named.contains(&edge.parent) {
@@ -12580,7 +12672,7 @@ impl Executor {
             let mut resolved: BTreeMap<(String, u32, String), u32> = BTreeMap::new();
             let mut to_mint: BTreeMap<(&str, u32), Vec<(&str, &croaring::Bitmap)>> =
                 BTreeMap::new();
-            for ((layer, level, key), (_, members)) in &wanted {
+            for ((layer, level, key), (_, members)) in wanted {
                 // The ingest route carries no artifact view; `resolve_or_mint` refuses a
                 // group-scoped layer there (`ingest.md` §1.5), so the key sits in the one set.
                 match store.ordinal_of_key(layer, *level, None, key) {
@@ -12659,30 +12751,7 @@ impl Executor {
                 .map(|(layer, level, key)| ((*layer).to_string(), *level, (*key).to_string()))
                 .collect();
             Ok((records, resolved, minted))
-        });
-        let (records, resolved, minted) = prepared?;
-
-        // A key that acquired an artifact between its batch's admission and this close is an
-        // ordinary growth, and `growth_records` takes it from there. Usually none did — that needs
-        // a publication to have executed inside the window — so the pass is skipped rather than
-        // walked.
-        if !resolved.is_empty() {
-            for entry in closed.iter_mut() {
-                for join in entry.memberships.iter_mut() {
-                    if join.ordinal.is_some() {
-                        continue;
-                    }
-                    let at = (join.layer.clone(), join.level, join.key.clone());
-                    join.ordinal = resolved.get(&at).copied();
-                }
-            }
-        }
-        for ((layer, level, key), (index, _)) in &wanted {
-            if minted.contains(&(layer.clone(), *level, key.clone())) {
-                minted_per_entry[*index] += 1;
-            }
-        }
-        Ok((records, minted_per_entry))
+        })
     }
 
     /// **Close a commit window**: one signature-sorted allocation run, one WAL record per entry, one
@@ -14155,9 +14224,12 @@ impl Executor {
     /// `POST /control/values` — fill attribute values on entities that already exist
     /// (`ingest.md` §1.4).
     ///
-    /// **It allocates nothing and creates no row.** Every entity was resolved at the boundary, so
-    /// this pass adds cells to entities that have them and members to artifacts that hold them; a
-    /// subject that does not exist refused the batch before it was submitted (`ingest.md` §1.6).
+    /// **It creates no point and no row.** Every entity a row names was resolved at the boundary,
+    /// so this pass adds cells to entities that have them and members to artifacts; a subject that
+    /// does not exist refused the batch before it was submitted (`ingest.md` §1.6). What it does
+    /// create is an **artifact** a layer column named and no artifact held, on an `open` layer —
+    /// python-sdk §11.2 F — through the same [`Executor::prepare_mints`]
+    /// the ingest door's window close uses.
     ///
     /// **The fill rule is evaluated here and nowhere else** (`ingest.md` §1.1), beside the join
     /// arm and for its reason (decision 0116): the sources are the commit-window buffer, the
@@ -14197,11 +14269,13 @@ impl Executor {
                 return;
             }
         };
-        // **A layer column on a values row is a membership join** (`ingest.md` §1.4), taking the
-        // growth route's own record. A key no artifact holds is refused rather than minted: a
-        // values batch creates nothing, and minting from one would make a typo a permanent object
-        // on the one route whose rule is that it allocates nothing.
-        let (memberships, _) = match self.resolve_memberships(&request.artifacts) {
+        // **A layer column on a values row is a membership join, and mints what it names**
+        // (`ingest.md` §1.4; python-sdk §11.2 F). A held key joins the entity to
+        // the artifact; a key no artifact holds mints it here, on an `open` layer, with the
+        // batch's rows as its first members and its lineage from a list column's own adjacency.
+        // The refusals are `resolve_or_mint`'s and are made below with the batch still without
+        // effect: a `closed` value set, and a layer declaring supplied content or a dependency.
+        let (mut memberships, mint_edges) = match self.resolve_memberships(&request.artifacts) {
             Ok(resolved) => resolved,
             Err(detail) => {
                 self.ack_failed(&respond, ExecError::LayerRefused { detail });
@@ -14209,6 +14283,50 @@ impl Executor {
                 return;
             }
         };
+        // **Through the one implementation the ingest door's window close uses** (decision 0139),
+        // so a key arriving here creates the artifact the same key would have created there.
+        let wanted = match values_mint_plan(&memberships, &request.rows) {
+            Ok(wanted) => wanted,
+            Err(detail) => {
+                self.ack_failed(&respond, ExecError::ValuesRefused { detail });
+                self.health.note_work_refused();
+                return;
+            }
+        };
+        let mut mints: Vec<WalRecord> = Vec::new();
+        let mut minted_count = 0u64;
+        let mut minted_members = 0u64;
+        if !wanted.is_empty() {
+            match self.prepare_mints(&wanted, &mint_edges) {
+                Ok((records, resolved, minted)) => {
+                    // A key that acquired an artifact between the resolution above and this
+                    // preparation grows into it instead — `mint_records`' own patch, for the same
+                    // reason: a publication may have executed in between.
+                    for join in memberships.iter_mut() {
+                        if join.ordinal.is_some() {
+                            continue;
+                        }
+                        let at = (join.layer.clone(), join.level, join.key.clone());
+                        join.ordinal = resolved.get(&at).copied();
+                    }
+                    for (at, (_, members)) in &wanted {
+                        if minted.contains(at) {
+                            minted_count += 1;
+                            // Every member of a minted artifact is a new member: the artifact did
+                            // not exist a statement ago. Counted here because the publication
+                            // carries them and `new_members_of` reads growth records alone.
+                            minted_members += members.cardinality();
+                        }
+                    }
+                    mints = records;
+                }
+                Err(detail) => {
+                    self.ack_failed(&respond, ExecError::LayerRefused { detail });
+                    self.health.note_work_refused();
+                    return;
+                }
+            }
+        }
         let growth = match values_growth_records(&memberships, &request.rows) {
             Ok(records) => records,
             Err(detail) => {
@@ -14219,12 +14337,13 @@ impl Executor {
         };
         // Read beside the preparation and **before** the apply, on `growth_receipt`'s rule:
         // afterwards every joining member is a member and how many were new is gone.
-        let joined = self.live.with_artifacts(|store| {
-            growth
-                .iter()
-                .map(|record| new_members_of(record, store))
-                .sum::<u64>()
-        });
+        let joined = minted_members
+            + self.live.with_artifacts(|store| {
+                growth
+                    .iter()
+                    .map(|record| new_members_of(record, store))
+                    .sum::<u64>()
+            });
 
         let values_record = WalRecord::ValuesBatch {
             batch_id: request.batch_id.clone(),
@@ -14240,23 +14359,37 @@ impl Executor {
                 })
                 .collect(),
         };
-        // The level version each growth record is the delta against, read before the apply moves
-        // it — `commit_growth`'s rule.
-        let before: Vec<u64> = growth
-            .iter()
-            .map(|record| match record {
-                WalRecord::ArtifactGrow { layer, level, .. } => self
-                    .live
-                    .with_artifacts(|store| store.level_version(layer, *level)),
-                _ => 0,
-            })
-            .collect();
+        // **The publications that minted come first, then the growths** — the window close's own
+        // order, and for its reason: a growth of this batch may name an ordinal one of them
+        // claimed, and replay applies the sequence in order, so an artifact must exist before
+        // anything addresses it.
+        let artifact_records: Vec<&WalRecord> = mints.iter().chain(growth.iter()).collect();
+        // The level version each record is the delta against, read before the apply moves it —
+        // `commit_growth`'s rule, carried forward across the sequence because a mint and a growth
+        // of this batch may name one level and each moves it exactly once.
+        let before: Vec<u64> = self.live.with_artifacts(|store| {
+            let mut seen: std::collections::BTreeMap<(&str, u32), u64> = Default::default();
+            artifact_records
+                .iter()
+                .map(|record| {
+                    let Some((layer, level)) = artifact_level_of(record) else {
+                        return 0;
+                    };
+                    let at = seen
+                        .entry((layer, level))
+                        .or_insert_with(|| store.level_version(layer, level));
+                    let version = *at;
+                    *at += 1;
+                    version
+                })
+                .collect()
+        });
         // The position **before** each append is where the record lands, and the values record's
         // is what pins the log until the flush writes its cells (`ingest.md` §1.4).
         let values_position = self.wal.position();
-        let mut positions = Vec::with_capacity(growth.len());
+        let mut positions = Vec::with_capacity(artifact_records.len());
         let appended = self.wal.append(&values_record).and_then(|()| {
-            growth.iter().try_for_each(|record| {
+            artifact_records.iter().try_for_each(|record| {
                 positions.push(self.wal.position());
                 self.wal.append(record)
             })
@@ -14264,8 +14397,8 @@ impl Executor {
         if let Err(e) = appended.and_then(|()| self.wal.fsync()) {
             tracing::error!(
                 error = %e,
-                "ALARM: a values batch could not be made durable; no cell was filled and no \
-                 membership grew"
+                "ALARM: a values batch could not be made durable; no cell was filled, no \
+                 artifact was created and no membership grew"
             );
             respond.fail(ExecError::Wal(e));
             self.health.note_work_refused();
@@ -14273,16 +14406,21 @@ impl Executor {
         }
         self.observe_wal();
 
-        // The growth applies through the artifact store's own path, exactly as a page on the
-        // growth route does, and is held in the log at its record until the fold rewrites the
-        // level.
-        let mut refused_per_record: Vec<Vec<usize>> = vec![Vec::new(); growth.len()];
-        let undecodable = self.live.with_publication_state(|_, store, _| {
-            growth
+        // The mints and the growths apply through the artifact store's own path, exactly as a
+        // publication and a page on the growth route do, and are held in the log at their records
+        // until the fold rewrites the level. **The registry half of a mint runs first, per
+        // record**: a publication may have extended its level's reserved runs, and the store's own
+        // apply resolves ordinals against them.
+        let mut refused_per_record: Vec<Vec<usize>> = vec![Vec::new(); artifact_records.len()];
+        let undecodable = self.live.with_publication_state(|registry, store, _| {
+            artifact_records
                 .iter()
                 .zip(&positions)
                 .zip(refused_per_record.iter_mut())
                 .map(|((record, position), refused)| {
+                    if matches!(record, WalRecord::ArtifactPublish { .. }) {
+                        registry.apply(record);
+                    }
                     store.apply_reporting(record, *position, refused)
                 })
                 .sum::<usize>()
@@ -14295,7 +14433,11 @@ impl Executor {
                 "ALARM: a values batch's membership growth did not survive its own round trip"
             );
         }
-        for ((record, at), refused) in growth.iter().zip(&before).zip(&refused_per_record) {
+        for ((record, at), refused) in artifact_records
+            .iter()
+            .zip(&before)
+            .zip(&refused_per_record)
+        {
             self.hold_delta(record, *at, refused);
         }
 
@@ -14342,15 +14484,27 @@ impl Executor {
         self.live
             .record_accepted_batch(request.batch_id.clone(), request.body_hash, Vec::new());
         // A growth above its level's high-water is published by the next tail pack, on
-        // `commit_growth`'s mechanism.
-        if !growth.is_empty() {
+        // `commit_growth`'s mechanism, and so is an artifact this batch minted.
+        if !artifact_records.is_empty() {
             self.deny_dirty = true;
+        }
+        // **What a batch minted is reported to the batch that minted it**, and to the operator —
+        // the window close's own line, for its own reason: under `value_set = "open"` a typo
+        // creates a permanent object rather than being refused, and the mitigation is that it is
+        // visible.
+        if minted_count > 0 {
+            tracing::info!(
+                minted = minted_count,
+                "a values batch named keys no artifact held, and these layers' value sets are \
+                 open, so the artifacts were created"
+            );
         }
         respond.ack(
             Ack::ValuesFilled {
                 filled: planned.filled,
                 held: planned.held,
                 joined,
+                minted: minted_count,
             },
             &published,
         );

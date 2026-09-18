@@ -642,12 +642,14 @@ pub enum Ack {
         /// effect. Reported so a pipeline resending a page sees that it changed nothing.
         held: u64,
         /// Members this batch's layer columns added to artifacts that did not already hold them,
-        /// on [`MembershipGrown::joined`]'s terms.
-        ///
-        /// **No count of artifacts created sits beside it**, unlike [`Ack::Ingested`]'s `minted`:
-        /// a values batch creates nothing, and a layer key no artifact holds refuses it
-        /// (`ingest.md` §1.4).
+        /// on [`MembershipGrown::joined`]'s terms — including the first members of an artifact
+        /// this batch minted, every one of which is new by construction.
         joined: u64,
+        /// Artifacts this batch's layer columns **created**: a key no artifact held, on a layer
+        /// whose value set is open (python-sdk §11.2 F). [`Ack::Ingested`]'s
+        /// `minted` for the values door, and reported for its reason — under `open` a typo
+        /// creates a permanent object rather than being refused, so the caller is told the count.
+        minted: u64,
     },
 }
 
