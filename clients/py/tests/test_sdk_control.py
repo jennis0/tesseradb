@@ -57,7 +57,7 @@ def test_a_429_is_retried_after_its_retry_after_with_identical_bytes():
     try:
         control = Control(f"http://127.0.0.1:{server.server_port}", "credential")
         body = b"one page of rows"
-        answer = control.ingest(body, batch_id("points", 0, body), view="s0")
+        answer = control.ingest(body, batch_id("points", 0), view="s0")
     finally:
         server.shutdown()
         server.server_close()
@@ -67,12 +67,12 @@ def test_a_429_is_retried_after_its_retry_after_with_identical_bytes():
     assert len(set(_Backpressure.batches)) == 1
 
 
-def test_a_batch_id_is_stable_across_runs_and_moves_with_the_bytes():
-    body = b"the same bytes"
-    assert batch_id("points", 0, body) == batch_id("points", 0, body)
-    assert batch_id("points", 0, body) != batch_id("points", 1, body)
-    assert batch_id("points", 0, body) != batch_id("points", 0, b"other bytes")
-    assert batch_id("points", 0, body).startswith("points-0-")
+def test_a_batch_id_is_fresh_per_request_and_never_derived_from_the_body():
+    """Owner ruling, 2026-09-18: a request is identified by an id the client chose, and identity
+    is never inferred from what the request contains. Two pages carrying the same bytes are two
+    requests, so the same frame committed twice is loaded twice."""
+    assert batch_id("points", 0) != batch_id("points", 0)
+    assert batch_id("points", 0).startswith("points-0-")
 
 
 def test_an_external_id_is_the_bytes_the_id_column_holds():

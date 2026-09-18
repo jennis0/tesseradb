@@ -143,9 +143,9 @@ addressed by the `tessera_id` a pick or the ingest route hands back, which is wh
 sends.
 
 The SDK holds nothing about what the database contains. A re-run of a cell is a re-run: the same
-frame is inserted again and sent again, and what happens then is the database's answer: a replay
-where the bytes and the batch id are the ones first sent, a `409` on the page where the ids are
-ones it holds. Databases are stateful, and this one says so rather than guessing.
+frame is inserted again and sent again, and what happens then is the database's answer: a `409` on
+the page where the ids are ones it holds, and rows with no id loaded a second time. Databases are
+stateful, and this one says so rather than guessing.
 
 Every declaration is made at any commit, and the next commit sends it to the running service: a
 vocabulary, an attribute, a layer, a label set, a plain view and a view group. Two of them are
@@ -202,13 +202,16 @@ durable and reaches the served forms at the next cycle either way.
 
 A page the server answers as a replay — the same bytes under the batch id they were first sent
 under — says so, and the report prints "replayed, nothing landed" for it rather than counting rows
-it did not land.
+it did not land. That is what a retry inside one commit gets.
 
-A page's batch id is derived from the source name, the page index and a hash of the bytes, which is
-what the `429` retry and the resend of a lost acknowledgement carry. A `429` is backpressure and is
-retried after its `Retry-After` with identical bytes; a request that reached no server is reported
-as a refusal rather than raised. A value that changed is a `409` on that part, reported and not
-retried, because an edit is a delete and a re-ingest.
+A page carries a fresh random batch id, made once when the request is built, and a retry of that
+request carries it again: a `429` is backpressure and is retried after its `Retry-After` with the
+same id and identical bytes. Nothing is kept beyond the commit, and no id is derived from what a
+page contains, so the same frame inserted and committed five times is five loads — rows carrying an
+id column are refused as duplicates on the second, and rows without one are loaded again. A request
+that reached no server is reported as a refusal rather than raised; whether it landed is the
+database's to say. A value that changed is a `409` on that part, reported and not retried, because
+an edit is a delete and a re-ingest.
 
 The pre-flight runs before a byte is sent and it sends nothing while a finding stands: it reports,
 names the finding, and drops or rewrites no row. Rows outside a view's frame are listed with the

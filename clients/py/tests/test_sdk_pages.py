@@ -13,6 +13,7 @@ import pyarrow.parquet as pq
 import pytest
 
 from conftest import browse, item, viewport
+from tesseradb import _commit as commit_module
 from tesseradb._refusal import Refusal
 
 from test_sdk_corpus import declare_notebook
@@ -219,11 +220,10 @@ def test_the_same_frame_inserted_again_is_sent_again_and_the_database_answers_fo
 ):
     """§3: a re-run of a cell is a re-run, and the database is what says the rows are there.
 
-    The SDK keeps no record of what it sent, so the same frame inserted again is sent again. What
-    happens then is the server's to decide, and it is two different things: identical bytes under
-    the batch id they were first sent under are a **replay** and land nothing (write-path §2.4),
-    while a page naming ids the database holds is a `409` on the whole page, reported by the page
-    it refused and applied nowhere.
+    The SDK keeps no record of what it sent, so the same frame inserted again is sent again — as a
+    **new request**, under a fresh batch id (§6.4, owner ruling 2026-09-18). What happens then is
+    the server's to decide, and here every id on the page is one the database holds, so the page is
+    a `409` on the whole of it, reported by the page it refused and applied nowhere.
     """
     db = notebook(served, corpus)
     delta = new_papers(db)
@@ -236,20 +236,71 @@ def test_the_same_frame_inserted_again_is_sent_again_and_the_database_answers_fo
     plan = db.check()
     # One page, and the flush that publishes it.
     assert len(plan.plan) == 2 and plan.plan[0].startswith("points"), plan
-    replayed = db.commit()
-    assert replayed.ok, replayed
-    # The server says it applied nothing rather than the SDK inferring it from a count.
-    assert len(replayed.replayed) == 1 and replayed.rows_accepted == {}
-    assert viewport(db, "s0", whole_frame(db))["counts"]["visible"] == after
-
-    # The same rows moved a little: different bytes, so a batch the server has not seen, and
-    # every id on it is one it holds.
-    insert_the_new_papers(db, x_offset=0.5)
     refused = db.commit()
     assert not refused.ok
     assert [r["status"] for r in refused.refusals] == [409]
     assert refused.rows_accepted == {}
+    assert not refused.replayed, refused
     assert viewport(db, "s0", whole_frame(db))["counts"]["visible"] == after
+
+    # The same rows moved a little: the ids are still ones the database holds, and the answer is
+    # the same refusal. Nothing about the bytes decides it.
+    insert_the_new_papers(db, x_offset=0.5)
+    again = db.commit()
+    assert not again.ok
+    assert [r["status"] for r in again.refusals] == [409]
+    assert viewport(db, "s0", whole_frame(db))["counts"]["visible"] == after
+
+
+def test_the_same_id_less_frame_committed_three_times_lands_three_times(served, corpus):
+    """**Five loads for five commits** (owner ruling, 2026-09-18).
+
+    A request's identity is an id the client chose, never a hash of what it carries, so committing
+    the same id-less frame again is a second load and not a replay. The SDK's id used to be derived
+    from the page's bytes, which answered the second commit `replayed: true, accepted: 0` and
+    inserted nothing — a user testing a loader by running the cell again saw one load.
+    """
+    db = notebook(served, corpus)
+    before = viewport(db, "s0", whole_frame(db))["counts"]["visible"]
+    frame = new_papers(db).drop_columns(["entity_id"])
+
+    for run in range(3):
+        db.insert("s0", frame, x="x", y="y", access="categories")
+        report = db.commit()
+        assert report.ok, report
+        assert report.rows_accepted == {"s0": len(NEW_IDS)}, report
+        assert not report.replayed, report
+        assert viewport(db, "s0", whole_frame(db))["counts"]["visible"] == before + len(
+            NEW_IDS
+        ) * (run + 1)
+
+
+def test_a_retried_request_inside_one_commit_is_a_replay_and_lands_nothing(served, corpus):
+    """The other half of the ruling: **a retry is the same request sent again**.
+
+    A `429`, a timeout or a lost answer is resent under the id the first attempt carried, and the
+    server answers it as a replay (write-path §2.4). Simulated here by sending one page through the
+    control client twice with its own id, which is exactly what `Control._send`'s `429` loop does.
+    """
+    db = notebook(served, corpus)
+    before = viewport(db, "s0", whole_frame(db))["counts"]["visible"]
+    db.insert("s0", new_papers(db).drop_columns(["entity_id"]), x="x", y="y", access="categories")
+
+    db.serve()
+    control = db.control
+    pages, findings = commit_module.Planner(db, control, db.meta()).plan()
+    assert not findings, findings
+    page = next(p for p in pages if p.kind == "points")
+    first = control.ingest(page.body, page.batch, page.view)
+    assert first.ok and first.body["accepted"] == len(NEW_IDS), first
+    retry = control.ingest(page.body, page.batch, page.view)
+    assert retry.ok, retry
+    assert retry.body["replayed"] is True, retry.body
+    assert retry.body["accepted"] == 0, retry.body
+    assert retry.body["tessera_ids"] == first.body["tessera_ids"], retry.body
+
+    control.flush(wait=True)
+    assert viewport(db, "s0", whole_frame(db))["counts"]["visible"] == before + len(NEW_IDS)
 
 
 def test_a_commit_of_rows_and_values_flushes_between_them(served, corpus):
