@@ -43,7 +43,7 @@ its label, filtered or not (I3, I12). No leak-register row is added.
 
 annotations.md §2.2's "a label carries its own membership" now reads "its own membership where it
 declares one, and its target's where it does not"; §3's per-artifact test against "its own
-declared membership" reads the membership the artifact is served over. Decision 0104's D13, which
-gives a dependent's viewport row its target's masked count, agrees with the counted membership for
-a label without members of its own and still differs for one with a generating set; whether D13
-narrows to the former is open.
+declared membership" reads the membership the artifact is served over. The viewport row of a label
+carries that count. The rule that gave a dependent's row its target's masked count is withdrawn (owner ruling 2026-09-18; contracts
+§3.2, r96), and the row names its target by `tessera_id`, so the viewport and the drill-down agree
+for every label.

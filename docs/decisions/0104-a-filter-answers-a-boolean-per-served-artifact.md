@@ -20,12 +20,17 @@ filter-dependent thing in the artifacts frame.
 **Absent when the request carries no filter** — not `false`. There was no question, and a `false`
 would say there were no matches.
 
-**A dependent artifact carries its target's bit**, exactly as it carries its target's masked count
-(D13, owner ruling 2026-08-25). A label describes its cluster, so *does anything here match* is a
+**A dependent artifact carries its target's bit.** A label describes its cluster, so *does anything here match* is a
 question about the cluster; a label's own membership is a slice of it at best, and answering from
 that would print `false` beside a cluster reading `true`. The target is in the same response — a
 dependent whose target was not served is absent entire — so the value is derivable from the frame
 and discloses nothing new ([decision 0023](0023-derivable-quantities-are-not-disclosures.md)).
+
+*Amended 2026-09-18 (owner ruling).* This rule was first written beside a second one, that a
+dependent's row carried its target's masked count. That rule is withdrawn: a dependent's row names
+its target by `tessera_id` (contracts §3.2, r96) and carries its own count. The bit rule rests on
+the argument above and not on the count. Whether the copied bits stay, a client now being able to
+read them from the target's own row, is open.
 
 ## Why a bit at all
 

@@ -695,9 +695,9 @@ Rulings of 2026-09-18:
 - A table with an id column and a value column is insertable whatever the source's history: a
   layer's key column mints and joins at the values route as at the other two doors (F).
 - The verb names follow the industry's: `insert`, not `write` or `stage`.
-- A label shows no count. Decision 0104's D13 gave a dependent's row its target's masked count
-  so a label could print its cluster's size; the number is not useful beside a label and goes.
-  The amendment to client-components and 0104 is the controller's. Not built yet.
+- A label shows no count, and names its cluster by id. A dependent's row carried its target's
+  masked count and the client found a label's cluster by matching counts. The row carries
+  `target`, the target's `tessera_id`, and its own count (contracts §3.2, r96; C29 widened).
 - An attached record at the publish route may omit `members` and `excluding`; an unattached one
   keeps the requirement. The SDK omits the field for a memberless label.
 - Issues #151, #152, #153 and #155 are fixed as found; #153 was already fixed on main by
@@ -708,8 +708,6 @@ Rulings of 2026-09-18:
 - A generating set is projected and maintained over the whole row space as a membership is, and
   the containment partition declines a set that reaches above the base rows (#150, option (a)).
   Not built yet: on a branch under review.
-- A label names its target by the target's id on the wire. The copied count and the client's
-  join by count go. Not built yet: on a branch.
 
 ### 11.2 Needed
 

@@ -642,8 +642,9 @@ The status strip's hover carries it: *colours exact* when every band on screen i
 - **Names and counts** at each artifact's `centroid` from its `content` and `maskedCount`, sized
   by masked count within a narrow band, placed by priority into a spatial hash (10⁴ labels is
   O(K) that way; a few hundred fit a viewport and the rest wait for zoom), with a leader line
-  when a label moves. A dependent artifact (a clustering's labels) draws its text at its own
-  declared `centroid` and shows no count until the wire names its target (D13). Free text is
+  when a label moves. A dependent artifact (a clustering's labels) is not a candidate of its
+  own: the wire names its target (`target`, contracts §3.2), its text is drawn beneath that
+  artifact's name, and it draws no count. Free text is
   deck's `TextLayer` with `characterSet: 'auto'` and an SDF halo.
 - **The palette** is positional — hue from the artifact's angle about the corpus extent's
   centre, lightness from its distance; stable under pan, converging when zoomed in — or, at
@@ -934,9 +935,10 @@ step in it. The C2 example is the check that the store is usable with none of ou
   with no geometric guess between. Needs a leak-register pass. Still open in it: the palette's
   centre — the corpus extent (stable under pan, converges when zoomed in) or hues spread over
   the served set at each settle (never converges, recolours when the set changes).
-- **D13 — a dependent artifact's target on the wire** (§5.10), so a label can show its
-  cluster's count and be placed by its cluster's centroid. Until then label layers declare
-  `centroid` and show no count. Asked for.
+- **D13 — a dependent artifact's target on the wire** (§5.10), so a label attaches to its
+  cluster exactly and is placed with it. **Ruled and built** (owner, 2026-09-18): the artifacts
+  frame carries `target`, the `tessera_id` of the row the artifact is attached to in the same
+  response. A label carries its own count and draws none.
 - **D14 — a verified-assertion auth plugin** (client-interaction §7's documented default),
   without which every C1 host's server is the claim-minting proxy. Server-side, outside this
   design, named here because §5.3 has to tell C1 the truth about the example it ships.
