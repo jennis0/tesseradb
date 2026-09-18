@@ -297,6 +297,17 @@ pub fn run(
         };
         // One membership at a time, exactly as the fold observes it: the figure is the same either
         // way and what differs is what is held while it runs.
+        //
+        // A borrowing level is observed over the membership it is served on, because
+        // `members_of` answers with the target's where the record declares none (decision 0145).
+        // The report and the layout pick are then about the level as served. What this pass then
+        // files for such a level is true when it is written and the engine does not read it: the
+        // borrowed set moves with the target's level version, the file is keyed on this level's,
+        // so the engine serves a borrowing level artifact-major and derives its tile index from
+        // the form it has just resolved (`ArtifactRows::inherit`). Two directions would change
+        // that. Observe a borrowing level as artifact-major here, so no column is written for one;
+        // or carry the borrowed versions in the extent's manifest entry, so a reader can claim a
+        // filed index while they still match.
         let shape = derived::observe_shape(space.base_rows(), &|visit| {
             if let Some(rows) = resolved.get(&(layer.clone(), *level)) {
                 walk_resolved(rows, visit);
@@ -308,7 +319,7 @@ pub fn run(
                 }
                 visit(
                     ordinal,
-                    &space.project_base_with(&record.members, &mut scratch.borrow_mut()),
+                    &space.project_base_with(store.members_of(record), &mut scratch.borrow_mut()),
                 );
             }
         });
@@ -374,19 +385,22 @@ pub fn run(
                 ordinals,
                 space.base_rows(),
                 &|visit| {
-                if let Some(rows) = resolved.get(&(layer.clone(), *level)) {
-                    walk_resolved(rows, visit);
-                    return;
-                }
-                for (ordinal, record) in store.level(layer, *level) {
-                    if elsewhere(layer, *level, ordinal) {
-                        continue;
+                    if let Some(rows) = resolved.get(&(layer.clone(), *level)) {
+                        walk_resolved(rows, visit);
+                        return;
                     }
-                    visit(
-                        ordinal,
-                        &space.project_base_with(&record.members, &mut scratch.borrow_mut()),
-                    );
-                }
+                    for (ordinal, record) in store.level(layer, *level) {
+                        if elsewhere(layer, *level, ordinal) {
+                            continue;
+                        }
+                        visit(
+                            ordinal,
+                            &space.project_base_with(
+                                store.members_of(record),
+                                &mut scratch.borrow_mut(),
+                            ),
+                        );
+                    }
                 },
             )),
         });
@@ -432,7 +446,8 @@ pub fn run(
                     }
                     visit(
                         ordinal,
-                        &space.project_base_with(&record.members, &mut scratch.borrow_mut()),
+                        &space
+                            .project_base_with(store.members_of(record), &mut scratch.borrow_mut()),
                     );
                 }
             },
@@ -532,7 +547,10 @@ pub fn run(
                 level: *level,
                 level_version,
                 layout: ServingLayout::ArtifactMajor,
-                bytes: derived::FiledBytes::InHand(derived::shape_held_bytes(level_version, &entries)),
+                bytes: derived::FiledBytes::InHand(derived::shape_held_bytes(
+                    level_version,
+                    &entries,
+                )),
             }
         })
         .collect();
@@ -688,7 +706,10 @@ pub fn containment(
             level: *level,
             level_version: store.level_version(layer, *level),
             layout: ServingLayout::ArtifactMajor,
-            bytes: derived::FiledBytes::InHand(derived::compose_containment(&contents, &signatures)),
+            bytes: derived::FiledBytes::InHand(derived::compose_containment(
+                &contents,
+                &signatures,
+            )),
         });
     }
     derived::file_containment(prefix_dir, partition, MANIFEST_N, index, composed)
