@@ -495,15 +495,16 @@ impl MembershipRows {
         self.generating[idx] = record
             .contents
             .iter()
-            // **Base rows, unlike the membership above**, and the consequence is sharper than a
-            // low count: a generating set that lost members in projection can never be contained,
-            // so a label whose sample includes documents ingested since the last fold is withheld
-            // from **everyone** until that fold. Fail-closed, and the direction this must fail in —
-            // the alternative is serving content on a set that no longer names what the text was
-            // derived from. Left base-only when the membership stopped being so (2026-09-03),
-            // because the containment partition beside it is composed at a level version and knows
-            // nothing of the geometry: widening one half alone is how the two come apart.
-            .map(|v| space.project_base(&v.generated_from))
+            // **The whole row space, as the membership above is.** A member's row is a member's
+            // row wherever it lies, so a member that arrived by ingest counts from the flush that
+            // gives it one. A member still in the commit buffer has no row, the set projects short
+            // of its declared size, and [`ArtifactRows::satisfied_rank`] withholds the content
+            // from everyone until the flush — the direction this must fail in.
+            //
+            // The containment partition is composed from the build's postings, which describe base
+            // rows alone, so it declines an ordinal whose set reaches above them
+            // ([`ArtifactRows::satisfied_rank_via`]) and the exact masked-count route answers.
+            .map(|v| space.project(&v.generated_from))
             .collect();
         rows
     }
@@ -525,7 +526,7 @@ impl MembershipRows {
         self.generating[idx] = record
             .contents
             .iter()
-            .map(|v| space.project_base(&v.generated_from))
+            .map(|v| space.project(&v.generated_from))
             .collect();
     }
 
@@ -539,7 +540,7 @@ impl MembershipRows {
         self.generating[idx] = record
             .contents
             .iter()
-            .map(|v| space.project_base(&v.generated_from))
+            .map(|v| space.project(&v.generated_from))
             .collect();
     }
 
@@ -599,7 +600,7 @@ impl MembershipRows {
         self.generating[idx] = record
             .contents
             .iter()
-            .map(|v| space.project_base(&v.generated_from))
+            .map(|v| space.project(&v.generated_from))
             .collect();
         rows
     }
@@ -662,6 +663,40 @@ impl MembershipRows {
             }
             None => false,
         }
+    }
+
+    /// Union `rows` into the generating set at `(idx, rank)` — the generating half of
+    /// [`Self::or_rows`], and the only way a held set grows.
+    ///
+    /// A slot with no sets is a hole or an ordinal the form does not reach, and takes nothing.
+    /// A set is held whether or not the memberships are ([`Self::rows_held`]): the column holds
+    /// membership and nothing else.
+    fn or_generating(&mut self, idx: usize, rank: usize, rows: &Bitmap) {
+        if let Some(set) = self.generating.get_mut(idx).and_then(|s| s.get_mut(rank)) {
+            set.or_inplace(rows);
+        }
+    }
+
+    /// Replace the generating set at `(idx, rank)` inside `lo..hi` with `rows` — the generating
+    /// half of [`Self::rebase_rows`], for the one operation that renumbers rows a set holds.
+    fn rebase_generating(&mut self, idx: usize, rank: usize, lo: u32, hi: u32, rows: &Bitmap) {
+        if let Some(set) = self.generating.get_mut(idx).and_then(|s| s.get_mut(rank)) {
+            if rows.is_empty() && set.range_cardinality(lo..hi) == 0 {
+                return;
+            }
+            set.remove_range(lo..hi);
+            set.or_inplace(rows);
+        }
+    }
+
+    /// Whether any of this ordinal's generating sets holds a row at or above `base_rows`.
+    ///
+    /// **One `maximum` a rank**, which is the last container's largest value: O(1) a set, and the
+    /// question is per ordinal because the containment partition is addressed per ordinal.
+    fn generating_above(&self, ordinal: u32, base_rows: u32) -> bool {
+        self.generating(ordinal)
+            .iter()
+            .any(|set| set.maximum().is_some_and(|row| row >= base_rows))
     }
 
     /// One artifact's rows, or `None` where this form does not hold them — a hole, an ordinal
@@ -1176,9 +1211,9 @@ impl ArtifactRows {
     /// **One generating set unioned with the entities a page joined to it** — the fast arm of the
     /// tick's publication, for a page holding no leave (`ingest.md` §1.1, §4.1).
     ///
-    /// Base rows, as a generating set's are (`MembershipRows::put`): a set whose members reach
-    /// outside the base projects short and can never be contained, which is the direction this
-    /// must fail in and is unchanged by a join arriving here rather than at a build.
+    /// The whole row space, as a generating set's projection is (`MembershipRows::put`). A joining
+    /// entity still in the commit buffer has no row and adds nothing; it reaches the set at its
+    /// flush, through [`Self::extend_by`].
     ///
     /// `false` where the ordinal is a hole or holds no content at that rank — neither is damage: a
     /// fold retires an artifact and withdraws a content, and a page prepared before one is a page
@@ -1196,7 +1231,7 @@ impl ArtifactRows {
         let Some(set) = sets.get_mut(rank as usize) else {
             return false;
         };
-        set.or_inplace(&space.project_base(joining));
+        set.or_inplace(&space.project(joining));
         true
     }
 
@@ -1245,6 +1280,7 @@ impl ArtifactRows {
         let mut added = Vec::new();
         let mut taken = 0u64;
         for (ordinal, record) in artifacts {
+            self.extend_generating_of(ordinal, record, space, from);
             let rows = space.project_extents_from(&record.members, from);
             if rows.is_empty() {
                 continue;
@@ -1257,6 +1293,40 @@ impl ArtifactRows {
             }
         }
         (added, taken)
+    }
+
+    /// **Every artifact's generating sets extended by the extents this form does not yet cover** —
+    /// [`Self::extend_by`]'s generating half, for the routes whose memberships come from a
+    /// segment's resolution rather than from the records ([`Self::extend_by_resolved`]).
+    ///
+    /// A generating set is an entity set whatever a level's memberships are, so it is projected
+    /// here on every route. The cost is the level's ordinals and `Σ|G|` over its contents, which is
+    /// a sample per content rather than a corpus.
+    fn extend_generating<'a>(
+        &mut self,
+        artifacts: impl Iterator<Item = (u32, &'a ArtifactRecord)>,
+        space: &RowSpace,
+    ) {
+        let from = self.covered.len();
+        for (ordinal, record) in artifacts {
+            self.extend_generating_of(ordinal, record, space, from);
+        }
+    }
+
+    /// One artifact's generating sets extended by the extents at or after `from`.
+    fn extend_generating_of(
+        &mut self,
+        ordinal: u32,
+        record: &ArtifactRecord,
+        space: &RowSpace,
+        from: usize,
+    ) {
+        for (rank, content) in record.contents.iter().enumerate() {
+            let rows = space.project_extents_from(&content.generated_from, from);
+            if !rows.is_empty() {
+                self.membership.or_generating(ordinal as usize, rank, &rows);
+            }
+        }
     }
 
     /// [`Self::extend_by`] for a spatial level: `piece` is the new segment's resolution, one
@@ -1380,6 +1450,7 @@ impl ArtifactRows {
         let mut added = Vec::new();
         let mut taken = 0u64;
         for (ordinal, record) in artifacts {
+            Self::rebase_generating_of(&mut self.membership, ordinal, record, space, start, lo, hi);
             let rows = space.project_extent(&record.members, start);
             if self.membership.rebase_rows(ordinal as usize, lo, hi, &rows) {
                 taken += rows.cardinality();
@@ -1389,6 +1460,39 @@ impl ArtifactRows {
             }
         }
         (lo, hi, added, taken)
+    }
+
+    /// **Every artifact's generating sets rebased over the extent at `start`** —
+    /// [`Self::rebase_span`]'s generating half, for the route whose memberships come from a
+    /// segment's resolution ([`Self::rebase_span_resolved`]). [`Self::extend_generating`]'s rule.
+    fn rebase_generating<'a>(
+        &mut self,
+        artifacts: impl Iterator<Item = (u32, &'a ArtifactRecord)>,
+        space: &RowSpace,
+        start: usize,
+    ) {
+        let extent = &space.extents()[start];
+        let lo = extent.row_base;
+        let hi = lo.saturating_add(extent.row_count());
+        for (ordinal, record) in artifacts {
+            Self::rebase_generating_of(&mut self.membership, ordinal, record, space, start, lo, hi);
+        }
+    }
+
+    /// One artifact's generating sets rebased over the merged extent at `start`.
+    fn rebase_generating_of(
+        membership: &mut MembershipRows,
+        ordinal: u32,
+        record: &ArtifactRecord,
+        space: &RowSpace,
+        start: usize,
+        lo: u32,
+        hi: u32,
+    ) {
+        for (rank, content) in record.contents.iter().enumerate() {
+            let rows = space.project_extent(&content.generated_from, start);
+            membership.rebase_generating(ordinal as usize, rank, lo, hi, &rows);
+        }
     }
 
     /// [`Self::amend_derived`] for a rebase: the tile index re-derived, the column's labels in
@@ -1951,6 +2055,13 @@ impl ArtifactRows {
     /// partition that does not cover this ordinal, or whose ranks disagree with the row form's,
     /// sends the caller to the route that asks `M_auth` itself rather than answering from a
     /// structure that does not describe the artifact in front of it.
+    ///
+    /// **An ordinal whose generating sets reach above the base rows declines here.** The partition
+    /// is composed from the prefix's `terms/postings.arrow`, which holds the signatures of the
+    /// entities the build read; an entity that arrived by ingest owns an extent row and carries its
+    /// terms in a delta tier the composer does not read, so its clause would be empty and the
+    /// expression unsatisfiable for everyone. The test is one `maximum` a rank
+    /// ([`MembershipRows::generating_above`]), and the masked-count route answers instead.
     pub fn satisfied_rank_via(
         &self,
         ordinal: u32,
@@ -1959,6 +2070,9 @@ impl ArtifactRows {
         layer_declares_content: bool,
     ) -> Option<Containment> {
         if !answers.covers(ordinal) {
+            return None;
+        }
+        if self.membership.generating_above(ordinal, self.base_rows) {
             return None;
         }
         let declared = self.records.declared(ordinal);
@@ -1981,9 +2095,11 @@ impl ArtifactRows {
             // a deletion or a suppression removes one whatever the terms say, and this is where
             // that is asked — live, against the generation's own deny mask.
             //
-            // Row space rather than entity space, and exact for the same reason the expression is:
-            // every member of a set that cleared the projection check above has a base row, and
-            // `row_of` is injective, so `projected ∩ denied_rows = ∅` iff `G ∩ denied = ∅`.
+            // Row space rather than entity space, and exact because `row_of` is injective and
+            // `denied` is derived over the whole row space (`crate::compose::denied_rows_of`): a
+            // member of a set that cleared the projection check above has a row, so
+            // `projected ∩ denied_rows = ∅` iff `G ∩ denied = ∅`. Sets reaching above the base rows
+            // never arrive here, having declined at the head of this function.
             if denied.intersect(rows) {
                 continue;
             }
@@ -3216,6 +3332,10 @@ impl ArtifactProjections {
                         self.drop_disagreeing(&address, view);
                         continue;
                     };
+                    // The memberships come from the resolution; the generating sets are entity
+                    // sets and are projected from the records either way.
+                    amended
+                        .extend_generating(store.level_in_view(layer, *level, view_key(view)), next);
                     amended.extend_by_resolved(&piece, extent.row_base)
                 }
             };
@@ -3346,7 +3466,15 @@ impl ArtifactProjections {
                     next,
                     start,
                 ),
-                SegmentRows::Resolved(piece) => amended.rebase_span_resolved(&piece, next, start),
+                SegmentRows::Resolved(piece) => {
+                    // [`ArtifactRows::extend_generating`]'s rule at a merge.
+                    amended.rebase_generating(
+                        store.level_in_view(layer, *level, view_key(view)),
+                        next,
+                        start,
+                    );
+                    amended.rebase_span_resolved(&piece, next, start)
+                }
             };
             let lost = amended.rebase_derived(lo, hi, &added, total_rows(next));
             amended.covering(next);
@@ -4504,7 +4632,10 @@ mod tests {
             partition: None,
             layout: ServingLayout::ArtifactMajor,
             column: None,
-            base_rows: 0,
+            // Every row these fixtures name is a base row, so the partition answers for all of
+            // them. A generating set reaching above the base rows is `tests/artifact_containment.rs`,
+            // against a row space that has an extent.
+            base_rows: u32::MAX,
             covered: Vec::new(),
             inherited: Vec::new(),
         }
