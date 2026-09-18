@@ -7,10 +7,10 @@ verbs, written, parsed, and compared with the committed `corpus.toml` block by b
 key. `test_sdk_corpus.py` carries the two corpora whose files can be present, where the comparison
 is the binary's own disclosure table.
 
-Every source is staged as a placeholder parquet carrying the entity id, a view's coordinate columns
-and its access column. That is what the SDK reads to settle the id map and to decide what to infer;
-no other column is staged, so nothing is inferred and every block compared is one a call below
-wrote.
+Every source is staged as a placeholder parquet carrying the id column, a view's coordinate columns
+and its access column. That is what the SDK reads to see where identity is and to decide what to
+infer; no other column is staged, so nothing is inferred and every block compared is one a call
+below wrote.
 
 **The normalisations.** Four of them fill the committed document in with what §4.8 requires the
 SDK to write, so the test fails if the SDK stops writing one; the rest are applied to both
@@ -122,6 +122,11 @@ def normalised(document: dict, filling: bool = False) -> dict:
         for block in document.get("attribute", [])
     ]
     out["layer"] = [_layer(block, filling) for block in document.get("layer", [])]
+    # `[defaults].source` is resolved onto every block above and compared there. The SDK writes it
+    # nowhere: `default=True` fills the source onto each block that named none, which is what §4.8
+    # asks for, so a default in the document would only bind a column declared at a running
+    # service to the file the first commit built from.
+    defaults.pop("source", None)
     return {key: value for key, value in out.items() if value not in ({}, [])}
 
 

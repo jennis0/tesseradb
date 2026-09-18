@@ -48,6 +48,7 @@ paths = [
   "crates/tessera-engine/src/write.rs",
   "crates/tessera-engine/src/session.rs",
   "crates/tessera-engine/tests/*",
+  "conformance/tests/test_restart_replay.py",
 ]
 
 # The build's supplied id column and the check note (python-sdk §11.2 A and §11.1).
@@ -63,4 +64,28 @@ paths = [
 [track.sdk-py]
 paths = [
   "clients/py/*",
+]
+
+# The label-membership rule (python-sdk §11.2 H, owner ruling 2026-09-18): an attached artifact with no
+# members of its own is served over its target's membership. Types, build, engine and server.
+[track.sdk-labels]
+paths = [
+  "crates/tessera-lifecycle/src/membership.rs",
+  "crates/tessera-types/src/*",
+  "crates/tessera-build/src/*",
+  "crates/tessera-build/tests/*",
+  "crates/tessera-engine/src/*",
+  "crates/tessera-engine/tests/*",
+  "crates/tessera-server/src/*",
+  "crates/tessera-server/tests/*",
+  "crates/tessera-cli/tests/*",
+]
+
+# The values route reads a layer column (python-sdk §11.2 F, owner ruling 2026-09-18). Engine and server.
+[track.sdk-values]
+paths = [
+  "crates/tessera-engine/src/*",
+  "crates/tessera-engine/tests/*",
+  "crates/tessera-server/src/*",
+  "crates/tessera-server/tests/*",
 ]

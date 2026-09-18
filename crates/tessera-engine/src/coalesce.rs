@@ -513,11 +513,16 @@ pub(crate) fn plan_coalesce(
     // is, so the selection is the record axis's verbatim. No build guard, for the attribute axis's
     // reason: a built bundle's list is empty, the base layer living under `entities/terms/` and
     // named in `MANIFEST.files`. The same cap-narrowing too, so a window that outgrows the input
-    // cap stalls itself and nothing else — though at three small files per flush that is the
+    // cap stalls itself and nothing else — though at four small files per flush that is the
     // unusual case rather than the expected one.
     {
         let size = |extent: &EntityTermsExtent| {
-            Some(size_of(&extent.hasrow) + size_of(&extent.offsets) + size_of(&extent.terms))
+            Some(
+                size_of(&extent.hasrow)
+                    + size_of(&extent.offsets)
+                    + size_of(&extent.terms)
+                    + size_of(&extent.bases),
+            )
         };
         let uncapped = CoalescePolicy {
             max_input_bytes: u64::MAX,
@@ -1088,6 +1093,7 @@ pub(crate) fn execute_coalesce(
                     &ctx.prefix_dir.join(&extent.hasrow),
                     &ctx.prefix_dir.join(&extent.offsets),
                     &ctx.prefix_dir.join(&extent.terms),
+                    &ctx.prefix_dir.join(&extent.bases),
                 )
             })
             .collect::<Result<_, _>>()
@@ -1099,12 +1105,14 @@ pub(crate) fn execute_coalesce(
             hasrow: format!("{terms_rel}/{}", tessera_store::ENTITY_TERMS_HASROW_FILE),
             offsets: format!("{terms_rel}/{}", tessera_store::ENTITY_TERMS_OFFSETS_FILE),
             terms: format!("{terms_rel}/{}", tessera_store::ENTITY_TERMS_TERMS_FILE),
+            bases: format!("{terms_rel}/{}", tessera_store::ENTITY_TERMS_BASES_FILE),
         };
         let written = tessera_store::coalesce_entity_terms_extents(
             &refs,
             &ctx.prefix_dir.join(&extent.hasrow),
             &ctx.prefix_dir.join(&extent.offsets),
             &ctx.prefix_dir.join(&extent.terms),
+            &ctx.prefix_dir.join(&extent.bases),
         )
         .map_err(|e| CoalesceFailed(format!("entity-terms coalesce: {e}")))?;
         // **The entity count is checked, not trusted** — the dictionary axis's posture, and the
@@ -1118,7 +1126,12 @@ pub(crate) fn execute_coalesce(
                  {expected}"
             )));
         }
-        for rel in [&extent.hasrow, &extent.offsets, &extent.terms] {
+        for rel in [
+            &extent.hasrow,
+            &extent.offsets,
+            &extent.terms,
+            &extent.bases,
+        ] {
             files.insert(rel.clone(), digest_of(&ctx.prefix_dir.join(rel))?);
         }
         // Reopened before the manifest can name it, the record axis's posture: a merge defect
@@ -1130,6 +1143,7 @@ pub(crate) fn execute_coalesce(
             &ctx.prefix_dir.join(&extent.hasrow),
             &ctx.prefix_dir.join(&extent.offsets),
             &ctx.prefix_dir.join(&extent.terms),
+            &ctx.prefix_dir.join(&extent.bases),
         )
         .map_err(|e| {
             CoalesceFailed(format!(
@@ -1283,7 +1297,14 @@ pub(crate) fn rebase_into(manifest: &mut SegmentsManifest, completed: &Completed
     let terms_files: Vec<String> = plan
         .terms
         .iter()
-        .flat_map(|e| [e.hasrow.clone(), e.offsets.clone(), e.terms.clone()])
+        .flat_map(|e| {
+            [
+                e.hasrow.clone(),
+                e.offsets.clone(),
+                e.terms.clone(),
+                e.bases.clone(),
+            ]
+        })
         .collect();
     for rel in plan
         .tiers
@@ -2692,10 +2713,12 @@ mod tests {
                 hasrow: format!("{dir}/flush-{i}-1.hasrow.roaring"),
                 offsets: format!("{dir}/flush-{i}-1.offsets.u32"),
                 terms: format!("{dir}/flush-{i}-1.terms.u32"),
+                bases: format!("{dir}/flush-{i}-1.bases.u64"),
             };
             manifest.files.insert(extent.hasrow.clone(), digest(64));
             manifest.files.insert(extent.offsets.clone(), digest(128));
             manifest.files.insert(extent.terms.clone(), digest(1024));
+            manifest.files.insert(extent.bases.clone(), digest(8));
             manifest.entity_terms_extents.push(extent);
         }
         let plan =
@@ -2704,13 +2727,21 @@ mod tests {
         let consumed: Vec<String> = plan
             .terms
             .iter()
-            .flat_map(|e| [e.hasrow.clone(), e.offsets.clone(), e.terms.clone()])
+            .flat_map(|e| {
+                [
+                    e.hasrow.clone(),
+                    e.offsets.clone(),
+                    e.terms.clone(),
+                    e.bases.clone(),
+                ]
+            })
             .collect();
 
         let coalesced = EntityTermsExtent {
             hasrow: "c/entities/terms/hasrow.roaring".to_string(),
             offsets: "c/entities/terms/offsets.u32".to_string(),
             terms: "c/entities/terms/terms.u32".to_string(),
+            bases: "c/entities/terms/bases.u64".to_string(),
         };
         let dir = tempfile::TempDir::new().unwrap();
         let attrs = completed_attrs(&plan, "c");

@@ -208,7 +208,45 @@ pub struct ExecutorHealth {
     /// A `POST /control/flush` awaiting the tick it pulls forward (contracts §3.4). A flag, not a
     /// count: the endpoint's 202 means "accepted, not yet done", and two requests before one tick
     /// are satisfied by that tick together.
+    ///
+    /// Written under [`Self::publication`] by [`ExecutorHealth::request_flush`] and read at the
+    /// tick, so a request and the publication number it is answered with cannot straddle a tick.
     pub(crate) flush_requested: AtomicBool,
+    /// **The publication counter a client waits on** (contracts §3.4's `publication`).
+    ///
+    /// A cycle is one tick plus the flush it dispatched, and `completed` moves when that cycle
+    /// **published**: a segment, a values-only substitution, artifact row forms, or, on a tick
+    /// with nothing to publish, the empty publication that leaves nothing behind. It does not
+    /// move for a cycle whose gates were shut, whose flush failed on the pool, or whose
+    /// publication was discarded at its final check. Such a cycle stays open and its request
+    /// stays armed, so the number is reached by the retry that succeeds and never by the attempt
+    /// that did not. `segments_version` moves only where a segment was written, so a tick that
+    /// only filled values or only published artifacts is invisible on it; this is what a caller
+    /// that wrote either of those waits on instead.
+    ///
+    /// **The counter moves when the cycle's work is visible.** A fill and a row's geometry are
+    /// both published by the flush unit, which executes on the pool and is applied at a later
+    /// loop iteration. A counter incremented inside the tick would therefore name work that is
+    /// still being written.
+    pub(crate) publication: Mutex<PublicationCycle>,
+    /// A tick dispatched one view's plan and left another view's rows buffered (§4.1's one plan
+    /// per dispatch).
+    ///
+    /// The cycle stays open over it. A client waiting on the publication number asked for its
+    /// buffered work to be published, and rows in a view whose plan was deferred are part of that
+    /// work, so a cycle that closed here would release the caller with a view still buffered.
+    /// Set before the spawn, cleared by the tick that dispatches with nothing left over.
+    pub(crate) deferred_plans: AtomicBool,
+    /// When the last cycle failed to publish, as an offset from [`Self::base`] plus one; `0`
+    /// where none has since the last success.
+    ///
+    /// A failed cycle re-arms its request, and `wait_for_work` polls while one is armed, so
+    /// without a floor a node whose gate is shut would re-plan fifty times a second. The floor is
+    /// [`FAILED_CYCLE_RETRY`]; a period or a row trip is never held back by it.
+    failed_cycle_nanos: AtomicU64,
+    /// The last publication refusal that was logged, on the same footing, so a held-open cycle's
+    /// retry does not turn one operator condition into a line a second.
+    refusal_logged_nanos: AtomicU64,
     /// Whether a flush is executing on the pool. A tick arriving while it is set is skipped, never
     /// queued: two concurrent flushes would double-consume the buffer range (§1.1). Set by the
     /// executor before the spawn, cleared by the pool after its sends, and read by
@@ -992,6 +1030,10 @@ impl ExecutorHealth {
             deny_submitted: AtomicU64::new(0),
             ticks: AtomicU64::new(0),
             flush_requested: AtomicBool::new(false),
+            publication: Mutex::new(PublicationCycle::default()),
+            deferred_plans: AtomicBool::new(false),
+            failed_cycle_nanos: AtomicU64::new(0),
+            refusal_logged_nanos: AtomicU64::new(0),
             flush_in_flight: AtomicBool::new(false),
             flush_completed_pending: AtomicBool::new(false),
             overlay_diverged: AtomicBool::new(false),
@@ -1096,6 +1138,128 @@ impl ExecutorHealth {
             _ if self.wal_poisoned.load(Ordering::SeqCst) => ExecutorPosture::WalPoisoned,
             other => other,
         }
+    }
+
+    /// Publication cycles completed since the executor started (contracts §3.4's `publication`).
+    pub fn publication(&self) -> u64 {
+        lock_recover(&self.publication).completed
+    }
+
+    /// Record a `POST /control/flush` and answer the publication number the cycle that honours it
+    /// will carry.
+    ///
+    /// # Why the answer is exact
+    ///
+    /// The request's rows, fills and artifact records are durable and buffered before this is
+    /// called, the route that wrote them having answered first. What has to be ruled out is a
+    /// cycle that publishes without having seen them. A cycle takes its plan from the buffer
+    /// after it opens, so the question is only whether a cycle was already open when the flag
+    /// went up, and the flag goes up under the lock that answers it:
+    ///
+    /// - **No cycle open.** The next cycle opens after this call, so it plans over a buffer that
+    ///   already holds this request's work and publishes it. That cycle is `completed + 1`.
+    /// - **A cycle open.** It may have planned before this request's work was buffered, so it is
+    ///   not promised anything; the cycle after it opens after this call and is `completed + 2`.
+    ///   The open cycle closes first, so nothing skips over the number.
+    ///
+    /// A tick that finds a flush already on the pool opens no cycle and consumes no flag: it
+    /// publishes its row forms into the cycle the running flush belongs to and returns, so no
+    /// number is spent on a tick that skipped this request's work. The count moves at the
+    /// publication and not at the tick, which is what makes "the number is reached" and "the work
+    /// is visible" one event; a cycle that deferred a second view's plan stays open until a tick
+    /// dispatches with nothing left over ([`Self::deferred_plans`]); and a cycle that failed
+    /// stays open until one succeeds ([`Self::fail_publication_cycle`]).
+    pub(crate) fn request_flush(&self) -> u64 {
+        let cycle = lock_recover(&self.publication);
+        self.flush_requested.store(true, Ordering::SeqCst);
+        cycle.target()
+    }
+
+    /// The number of the cycle work buffered by now becomes visible in, asking for no tick.
+    ///
+    /// The same two answers [`Self::request_flush`] gives, on the same argument, for a write
+    /// acknowledgement that names the number without pulling the cadence forward: the work is
+    /// durable and buffered before this is read, so the next cycle to open carries it, and a
+    /// cycle already open may have planned first.
+    pub(crate) fn publication_target(&self) -> u64 {
+        lock_recover(&self.publication).target()
+    }
+
+    /// Open a cycle and consume the flush request it honours, under one lock.
+    ///
+    /// Taking both together is what makes [`Self::request_flush`]'s two answers exhaustive. A
+    /// request either takes the lock first, in which case it reads a closed cycle, is answered
+    /// `completed + 1`, and is consumed by the cycle this opens, whose plan is taken afterwards;
+    /// or it takes the lock second, in which case it reads an open cycle, is answered
+    /// `completed + 2`, and its flag survives for the cycle after. There is no third order in
+    /// which a request is both answered against a cycle that will not carry it and stripped of
+    /// the flag that would have brought the next one forward.
+    pub(crate) fn open_publication_cycle(&self) {
+        let mut cycle = lock_recover(&self.publication);
+        self.flush_requested.store(false, Ordering::SeqCst);
+        cycle.open = true;
+    }
+
+    /// Close the open cycle: a publication swapped and its work is being served.
+    ///
+    /// Called from the publication itself, where the generation the work is in becomes the live
+    /// one, so reaching the number and reading the work are one event. A cycle that deferred a
+    /// second view's plan is not closed here: its caller asked for its buffered rows to be
+    /// published and one of its views still holds some ([`Self::deferred_plans`]).
+    pub(crate) fn close_publication_cycle(&self) {
+        if self.deferred_plans.load(Ordering::SeqCst) {
+            return;
+        }
+        let mut cycle = lock_recover(&self.publication);
+        if cycle.open {
+            cycle.completed += 1;
+            cycle.open = false;
+        }
+        self.failed_cycle_nanos.store(0, Ordering::Relaxed);
+        self.refusal_logged_nanos.store(0, Ordering::Relaxed);
+    }
+
+    /// The cycle published nothing it was asked to publish: hold it open and re-arm the request.
+    ///
+    /// The three ways this happens are a node whose gates are shut (a poisoned WAL, an overlay
+    /// diverged from it), a flush that failed on the pool, and a publication discarded at its
+    /// final check. Each leaves the inputs standing and the files orphaned, so the work is still
+    /// unpublished, and the number a caller is waiting on must not be reached. Re-arming is what
+    /// makes the next tick retry rather than the next period; [`Executor::tick_if_due`] floors
+    /// how fast that retry can come round.
+    pub(crate) fn fail_publication_cycle(&self) {
+        self.set_marker(&self.failed_cycle_nanos, std::time::Instant::now());
+        self.flush_requested.store(true, Ordering::SeqCst);
+    }
+
+    /// How long a re-armed retry must still wait, or `None` where nothing is owed one.
+    pub(crate) fn failed_cycle_backoff(&self) -> Option<std::time::Duration> {
+        if self.failed_cycle_nanos.load(Ordering::Relaxed) == 0 {
+            return None;
+        }
+        FAILED_CYCLE_RETRY
+            .checked_sub(std::time::Duration::from_nanos(
+                self.elapsed_since_marker(&self.failed_cycle_nanos),
+            ))
+            .filter(|remaining| !remaining.is_zero())
+    }
+
+    /// Whether a publication refusal is due to be logged, at most one per tick period.
+    ///
+    /// Every condition this throttles stands until an operator acts: a poisoned WAL, a diverged
+    /// overlay, an analyser this binary does not carry, a view the manifest does not declare, a
+    /// row space at the `u32` ceiling. A failed cycle re-arms its request and retries at [`FAILED_CYCLE_RETRY`], so
+    /// logging each one where it is found would turn one condition into a line a second. The
+    /// counters beside them (`flush_failures`) move every time, which is what an operator alarms
+    /// on; the line is what says which condition it is.
+    pub(crate) fn refusal_log_due(&self) -> bool {
+        let period = self.flush_period_nanos.load(Ordering::Relaxed);
+        let marker = self.refusal_logged_nanos.load(Ordering::Relaxed);
+        if marker != 0 && self.elapsed_since_marker(&self.refusal_logged_nanos) < period {
+            return false;
+        }
+        self.set_marker(&self.refusal_logged_nanos, std::time::Instant::now());
+        true
     }
 
     /// Times an undurable WAL region was discarded and the executor returned to service.
@@ -1736,6 +1900,66 @@ use ack::{Published, Responder};
 // =================================================================================================
 // Live state
 // =================================================================================================
+
+/// The publication counter's surface on the engine (contracts §3.4).
+///
+/// Both live here, away from the rest of [`Engine`]'s methods, because both read the write
+/// executor's state and the argument for their exactness is this module's.
+impl crate::session::Engine {
+    /// Publication cycles completed since this engine's executor started. `GET /control/status`
+    /// publishes it as `publication`, and a client compares it against the number its flush
+    /// request was answered with.
+    pub fn publication(&self) -> u64 {
+        self.write.health().publication()
+    }
+
+    /// `POST /control/flush`'s form: request the flush **and** answer the publication number the
+    /// cycle honouring it will carry.
+    ///
+    /// A caller reads `/control/status` until its `publication` has reached that number, and is
+    /// then promised that a cycle which saw this request's buffered work has published. That
+    /// covers a values-only or artifacts-only cycle, which writes no point rows and moves no
+    /// `segments_version`. [`ExecutorHealth::request_flush`] argues why the number is exact and
+    /// cannot name a cycle that skipped the work.
+    ///
+    /// [`Engine::request_flush`] calls this and drops the number.
+    pub fn request_flush_publication(&self) -> u64 {
+        let publication = self.write.health().request_flush();
+        self.write.wake();
+        publication
+    }
+
+    /// The number of the cycle work acknowledged by now becomes visible in, asking for no tick.
+    ///
+    /// Every write acknowledgement carries this (contracts §3.4). It is read after the route's
+    /// own call returned, so the work it names is already buffered, and it is computed under the
+    /// lock [`Engine::request_flush_publication`] uses, so the two cannot disagree about which
+    /// cycle is open.
+    pub fn publication_target(&self) -> u64 {
+        self.write.health().publication_target()
+    }
+}
+
+/// The publication counter and whether a cycle is open ([`ExecutorHealth::publication`]).
+///
+/// The two travel under one lock because the answer `POST /control/flush` gives is a statement
+/// about both: what a request is promised depends on whether a cycle was already under way when
+/// it arrived.
+#[derive(Debug, Default)]
+pub(crate) struct PublicationCycle {
+    /// Cycles completed since the executor started. Monotonic, and never reset.
+    pub(crate) completed: u64,
+    /// A tick is executing, or a flush it dispatched has not been applied.
+    pub(crate) open: bool,
+}
+
+impl PublicationCycle {
+    /// The cycle that carries work buffered as of this read: the next one to open, or the one
+    /// after an open one, which may have planned before that work arrived.
+    fn target(&self) -> u64 {
+        self.completed + if self.open { 2 } else { 1 }
+    }
+}
 
 /// Take a lock, recovering rather than panicking if a previous holder panicked.
 ///
@@ -4033,10 +4257,12 @@ impl WritePath {
                 filled,
                 held,
                 joined,
+                minted,
             }) => Ok(ValuesReceipt {
                 filled,
                 held,
                 joined,
+                minted,
             }),
             Ok(other) => unreachable!("a Values command answers ValuesFilled, not {other:?}"),
             Err(e) => Err(AcceptError::Exec(e)),
@@ -4810,6 +5036,16 @@ const OVERLAY_PUBLICATION_MAX_WINDOWS: u64 = 64;
 /// durable rather than at the next tick — which is what keeps `POST /control/flush` "prompt" on
 /// an idle node, and the ack→visibility bound at one tick rather than two.
 const FLUSH_COMPLETION_POLL: std::time::Duration = std::time::Duration::from_millis(20);
+
+/// How long after a cycle failed to publish the next retry may come.
+///
+/// A failed cycle stays open and re-arms its request (`ExecutorHealth::fail_publication_cycle`),
+/// and an armed request puts [`Executor::wait_for_work`] on the completion poll, so the retry
+/// would otherwise come fifty times a second for as long as an operator condition stands. One
+/// second keeps a `wait=visible` caller's bounded wait worth making while leaving a shut gate
+/// costing one plan and one log line a second at most. A period tick and a row trip are not held
+/// back by it.
+const FAILED_CYCLE_RETRY: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// How often the executor looks for a **completed fold** while one is running.
 ///
@@ -6206,6 +6442,49 @@ fn mint_plan<W>(
 /// entities joining it.
 type MintPlan = std::collections::BTreeMap<(String, u32, String), (usize, croaring::Bitmap)>;
 
+/// **A key that acquired an artifact between its resolution and its preparation grows into it**,
+/// rather than minting a second artifact for a key a live one already holds.
+///
+/// [`Executor::prepare_mints`] re-resolves every key it is given against the store, and answers
+/// the ones that turned out to be held; this writes those ordinals back onto the memberships, so
+/// [`growth_records`] and [`values_growth_records`] carry them as ordinary joins. A membership
+/// left with no ordinal is one the preparation is about to mint, and its publication carries the
+/// rows.
+///
+/// **It can only find something at the ingest door.** There, a window stays open across a
+/// `PublishArtifacts` command, which takes the work lane between an entry's admission and the
+/// window's close. At the values door the resolution and the preparation are two statements of one
+/// executor call with nothing between them, so `resolved` is always empty and this is a no-op —
+/// kept rather than elided because the two doors settle a batch the same way, and a door that
+/// skipped it would be the one to get this wrong if the call ever grew a yield.
+fn settle_resolved_ordinals(
+    memberships: &mut [tessera_lifecycle::ResolvedMembership],
+    resolved: &std::collections::BTreeMap<(String, u32, String), u32>,
+) {
+    if resolved.is_empty() {
+        return;
+    }
+    for join in memberships.iter_mut() {
+        if join.ordinal.is_some() {
+            continue;
+        }
+        let at = (join.layer.clone(), join.level, join.key.clone());
+        join.ordinal = resolved.get(&at).copied();
+    }
+}
+
+/// What [`Executor::prepare_mints`] answers: the publication records to append in order, the keys
+/// that turned out to be held after all and the ordinal each resolved to, and the keys this run
+/// created. `Err` is the refusal text the caller's waiters are answered with.
+type PreparedMints = Result<
+    (
+        Vec<WalRecord>,
+        std::collections::BTreeMap<(String, u32, String), u32>,
+        std::collections::BTreeSet<(String, u32, String)>,
+    ),
+    String,
+>;
+
 /// A second is short against the interval an operator or an orchestrator would take to notice, and
 /// long enough that a genuinely dead device is retried sixty times a minute rather than continuously.
 ///
@@ -6636,9 +6915,14 @@ impl Executor {
         // `POST /control/flush` sets the flag and rings the doorbell, and the tick fires here, on
         // this one path, at the next loop iteration — so everything a tick guarantees (one flush
         // in flight, plan gates, rebase, retention) holds for an operator-triggered flush exactly
-        // as for a scheduled one. The publish-on-trip hazard that killed `flush_max_items`
-        // (a publication period proportional to ingest rate) does not apply: this trigger is an
-        // operator action, rate-decoupled from ingest by construction.
+        // as for a scheduled one. **What keeps the publish-on-trip hazard that killed
+        // `flush_max_items` away is now the caller.** An operator's `POST /control/flush` has a
+        // rate of its own, unrelated to ingest. A write sent with `wait=visible` (contracts §3.4)
+        // requests a tick too, so a loader that set the parameter on every page would publish
+        // once per page, which is the publication period proportional to ingest rate that
+        // decision 0045 removed, and would rotate every session's projection key at its own send
+        // rate. The parameter is for a single writer reading back what it just wrote; a loader
+        // sends its pages without it and one flush at the end.
         // **The occupancy the executor itself maintains**, not a count derived from a generation
         // this thread would have to load: `apply_window` and every flush publication store it, so
         // the trigger reads the same figure `/control/ingest`'s 429 is checked against.
@@ -6653,6 +6937,29 @@ impl Executor {
         let fold_requested = self.health.fold_requested.load(Ordering::SeqCst);
         if !due && !requested && !fold_requested {
             return;
+        }
+        // **A re-armed retry is floored** ([`FAILED_CYCLE_RETRY`]). The request an unpublished
+        // cycle re-armed is the same flag a caller sets, so a tick fired by one while a failure
+        // is outstanding is a retry, and retrying at the completion poll's rate would re-plan the
+        // buffer fifty times a second for as long as the condition stands. A period tick and a
+        // row trip come through regardless, which is what stops the floor from delaying ordinary
+        // publication.
+        if !due && self.health.failed_cycle_backoff().is_some() {
+            return;
+        }
+        // **At most one flush in flight**, read once here and not again below, because the
+        // publication cycle turns on it: a tick that will skip publishes into the cycle the
+        // running flush already opened, and a tick that will go on to dispatch opens one of its
+        // own before it publishes anything. Two reads could disagree. The value goes stale only
+        // in the direction of a flush having landed, which costs the skipped tick nothing it did
+        // not already risk.
+        let flush_in_flight = self.health.flush_in_flight.load(Ordering::SeqCst);
+        if !flush_in_flight {
+            // **The cycle opens before anything is published**, and consumes the flush request it
+            // honours in the same lock (`ExecutorHealth::open_publication_cycle`). Everything
+            // below, the row forms and a flush that lands on the pool alike, belongs to this
+            // cycle, and its number is not reached until the last of it is applied.
+            self.health.open_publication_cycle();
         }
         // **The WAL's size and its rotation bound, sampled here because nothing off this thread
         // can read them.** The log is owned by the executor and a status request has no route to
@@ -6696,7 +7003,7 @@ impl Executor {
         // first iteration after the in-flight flush lands — which `FLUSH_COMPLETION_POLL` bounds
         // to within ~20 ms of its publication. Consuming it here would silently drop an
         // operator's "drain now" whenever it raced a scheduled flush.
-        if self.health.flush_in_flight.load(Ordering::SeqCst) {
+        if flush_in_flight {
             if due {
                 self.last_tick = std::time::Instant::now();
                 self.health.mark_tick(self.last_tick);
@@ -6733,10 +7040,9 @@ impl Executor {
         self.last_tick = std::time::Instant::now();
         self.health.mark_tick(self.last_tick);
         self.health.ticks.fetch_add(1, Ordering::Relaxed);
-        // Requested flushes are consumed by the tick whether or not there is anything to flush: a
-        // `POST /control/flush` against an empty buffer is satisfied by the tick it triggered, not
-        // held until something arrives.
-        self.health.flush_requested.store(false, Ordering::SeqCst);
+        // A requested flush was consumed at the open above, whether or not there is anything to
+        // flush: a `POST /control/flush` against an empty buffer is satisfied by the tick it
+        // triggered rather than held until something arrives.
 
         // **Planned on this thread, executed on the pool.** The plan — which buffered items
         // acquire geometry and what the three dispositions do to them (§3.5) — is the
@@ -6746,6 +7052,7 @@ impl Executor {
         // this tick, which stays at zero on a gated node and grows on one whose flush is failing.
         let mark = StageMark::now();
         let mut flushable = 0usize;
+        let mut gated = false;
         let mut plans: Vec<(String, crate::flush::FlushPlan)> = Vec::new();
         for view in views_of(&generation) {
             match crate::flush::plan_flush(
@@ -6759,14 +7066,18 @@ impl Executor {
                     plans.push((view, plan));
                 }
                 Err(crate::flush::NoFlush::NothingToFlush) => {}
-                Err(gate) => {
-                    // Per tick, and deliberately: a gated node is gated until an operator acts, and
-                    // the tick is the interval at which that is worth repeating.
-                    tracing::warn!(
-                        view = %view,
-                        gate = ?gate,
-                        "flush skipped: this node publishes no geometry in this state"
-                    );
+                Err(refusal) => {
+                    gated = true;
+                    // Once per period. The refusal stands until an operator acts, and the cycle
+                    // it holds open re-arms its request, so the tick comes round at the retry
+                    // floor.
+                    if self.health.refusal_log_due() {
+                        tracing::warn!(
+                            view = %view,
+                            gate = ?refusal,
+                            "flush skipped: this node publishes no geometry in this state"
+                        );
+                    }
                 }
             }
         }
@@ -6776,11 +7087,28 @@ impl Executor {
             .store(flushable, Ordering::SeqCst);
 
         if plans.is_empty() {
+            // Nothing to flush, so nothing is left over either: a view whose rows stopped being
+            // flushable takes its plan out of the running, and a flag left standing would hold
+            // the cycle open with nothing coming to close it.
+            self.health.deferred_plans.store(false, Ordering::SeqCst);
             // Nothing to flush, so no publication is coming to rotate the log — the deny-only
             // regime. See `rotate_if_grown`.
             self.rotate_if_grown();
-        } else {
-            self.dispatch_flushes(&generation, plans);
+            if gated {
+                // **A refused plan leaves an unpublished cycle.** The rows are still buffered and
+                // the overlay still holds what a publication would have carried, so the counter
+                // must not move past them: the cycle stays open and the request stays armed until
+                // the refusal clears (`ExecutorHealth::fail_publication_cycle`).
+                self.note_publication_failure();
+            } else {
+                // Every view answered "nothing buffered", so this cycle's publication is the
+                // empty one and everything it was asked to publish is served.
+                self.health.close_publication_cycle();
+            }
+        } else if !self.dispatch_flushes(&generation, plans) {
+            // Every plan was dropped before it reached the pool, so this cycle published nothing
+            // it was asked to: it stays open and its request stays armed.
+            self.note_publication_failure();
         }
         // **The fold is dispatched before the two it suspends**, so a tick that starts one does not
         // also start a merge that the flip would orphan (compaction §1).
@@ -6792,6 +7120,14 @@ impl Executor {
         self.dispatch_coalesce(&generation);
         self.dispatch_merge(&generation);
         drop(generation);
+    }
+
+    /// Record that this cycle published nothing it was asked to publish.
+    ///
+    /// A thin wrapper so every site that drops a plan reads the same, and so the one rule stays
+    /// in one place: the cycle stays open, the request is re-armed, and the retry is floored.
+    fn note_publication_failure(&self) {
+        self.health.fail_publication_cycle();
     }
 
     /// Whether a fold is **outstanding**: running, or completed and not yet published.
@@ -8717,13 +9053,15 @@ impl Executor {
             carried_rels.insert(extent.postings.clone());
             carried_rels.insert(extent.presence.clone());
         }
-        // All three files of every carried transpose extent, under the same rule: the offsets
-        // address the terms and the has-row bitmap ranks them, so any one missing is a refusal at
-        // open rather than a shorter label set (`tessera_store::entity_terms`).
+        // All four files of every carried transpose extent, under the same rule: the offsets and
+        // their block bases address the terms and the has-row bitmap ranks them, so any one
+        // missing is a refusal at open rather than a shorter label set
+        // (`tessera_store::entity_terms`).
         for extent in &carried_entity_terms {
             carried_rels.insert(extent.hasrow.clone());
             carried_rels.insert(extent.offsets.clone());
             carried_rels.insert(extent.terms.clone());
+            carried_rels.insert(extent.bases.clone());
         }
         carried_rels.extend(live_manifest.dict_extents.iter().map(|e| e.path.clone()));
         for rel in &carried_rels {
@@ -9447,6 +9785,7 @@ impl Executor {
                     hasrow: prefix_dir.join(&e.hasrow),
                     offsets: prefix_dir.join(&e.offsets),
                     terms: prefix_dir.join(&e.terms),
+                    bases: prefix_dir.join(&e.bases),
                 })
                 .collect();
             match tessera_store::EntityTermsStack::open(
@@ -9744,15 +10083,18 @@ impl Executor {
     ///
     /// Every input is taken here, on this thread, against the live generation and then moved: the
     /// pool holds no reference to live state, which is what makes "over immutable inputs" true.
+    ///
+    /// Answers whether a unit reached the pool. Every other way out of here drops the plan and
+    /// leaves the buffer standing, which is an unpublished cycle, and the caller holds it open.
     fn dispatch_flushes(
         &mut self,
         generation: &Arc<Generation>,
         plans: Vec<(String, crate::flush::FlushPlan)>,
-    ) {
+    ) -> bool {
         let mark = StageMark::now();
         let submit = self.flush_submit.clone();
         let Some((partition, partition_data)) = generation.bundle.partitions.iter().next() else {
-            return;
+            return false;
         };
         let manifest = &generation.bundle.manifest;
         let scalar_schema = scalar_schema_of(manifest);
@@ -9766,12 +10108,16 @@ impl Executor {
             Ok(schema) => schema,
             Err(e) => {
                 self.health.flush_failures.fetch_add(1, Ordering::Relaxed);
-                tracing::error!(
-                    error = %e.0,
-                    "ALARM: a text column's analyser is not one this binary carries; no flush is \
-                     dispatched, and the buffer is retained"
-                );
-                return;
+                // Once per period: the condition stands until the binary changes, and a failed
+                // cycle retries at `FAILED_CYCLE_RETRY` (`ExecutorHealth::refusal_log_due`).
+                if self.health.refusal_log_due() {
+                    tracing::error!(
+                        error = %e.0,
+                        "ALARM: a text column's analyser is not one this binary carries; no flush \
+                         is dispatched, and the buffer is retained"
+                    );
+                }
+                return false;
             }
         };
         let render_indices: Vec<usize> = manifest.render_indices().collect();
@@ -9796,25 +10142,22 @@ impl Executor {
         // `items.first()` is an age key needing no cursor state — which turns starvation into a
         // bound: with `s` views, ack→visibility is at most `s × flush_max_age_secs`.
         //
-        // **Unreachable today**: `tessera build` emits one view, and a plan naming a view this
-        // bundle does not carry is dropped just below.
+        // **A deferred plan holds the publication cycle open** (`ExecutorHealth::deferred_plans`).
+        // A caller waiting on a publication number asked for its buffered rows to be published,
+        // and rows in a view whose plan was deferred are still buffered, so the number is not
+        // reached until a tick dispatches with nothing left over. The flag is cleared on every
+        // path out of this function that dispatches nothing, so a cycle cannot be held open by a
+        // plan that was never taken.
+        self.health.deferred_plans.store(false, Ordering::SeqCst);
         let deferred = plans.len().saturating_sub(1);
         let Some((view, plan)) = plan_to_dispatch(plans) else {
-            return;
+            return false;
         };
-        if deferred > 0 {
-            tracing::warn!(
-                deferred,
-                dispatched = %view,
-                "a flush unit is per view and a second unit in flight would be discarded at its \
-                 rebase, so one view publishes per tick; the rest re-plan at the next one"
-            );
-        }
 
         let mut contexts = Vec::with_capacity(1);
         {
             let Some(view_data) = partition_data.views.get(&view) else {
-                return;
+                return false;
             };
             // **This view's frame** (decision 0040): the flush quantises against the extent the
             // view's own positions were placed in, and a bundle-wide one would put a second
@@ -9827,32 +10170,38 @@ impl Executor {
             // scoped column this flush writes, and on every extent — which is what stops a key
             // created again from adopting them.
             let Some(incarnation) = manifest.incarnation_of(&view) else {
-                tracing::error!(
-                    view = %view,
-                    "a flush plan names a view this bundle's manifest does not declare, so its \
-                     incarnation cannot be resolved; the plan is dropped and the buffer is \
-                     retained"
-                );
-                return;
+                if self.health.refusal_log_due() {
+                    tracing::error!(
+                        view = %view,
+                        "a flush plan names a view this bundle's manifest does not declare, so \
+                         its incarnation cannot be resolved; the plan is dropped and the buffer \
+                         is retained"
+                    );
+                }
+                return false;
             };
             let Some(quantisation) = manifest.quantisation_of(&view) else {
-                tracing::error!(
-                    view = %view,
-                    "a flush plan names a view this bundle's manifest does not declare, so \
-                     there is no frame to quantise its rows against; the plan is dropped \
-                     and the buffer is retained"
-                );
-                return;
+                if self.health.refusal_log_due() {
+                    tracing::error!(
+                        view = %view,
+                        "a flush plan names a view this bundle's manifest does not declare, so \
+                         there is no frame to quantise its rows against; the plan is dropped \
+                         and the buffer is retained"
+                    );
+                }
+                return false;
             };
             let Ok(row_base) = u32::try_from(view_data.row_space.total_rows()) else {
                 // Row ids are `u32` (bundle_format 1). A view that has crossed 2^32 rows cannot
                 // take another segment, and saying so is better than wrapping into row 0.
-                tracing::error!(
-                    view = %view,
-                    "ALARM: this view's row space has reached the u32 ceiling; no further flush \
-                     can address it. The deployment must be compacted or re-sharded"
-                );
-                return;
+                if self.health.refusal_log_due() {
+                    tracing::error!(
+                        view = %view,
+                        "ALARM: this view's row space has reached the u32 ceiling; no further \
+                         flush can address it. The deployment must be compacted or re-sharded"
+                    );
+                }
+                return false;
             };
 
             // **The descriptor bytes behind this plan's extension term ids** (§3.2), and the whole
@@ -9891,11 +10240,13 @@ impl Executor {
                 // Fail closed (decision 0115): an owner view the manifest cannot place is a
                 // bundle whose halves disagree, and flushing under a guessed incarnation is how
                 // a dropped view's predecessor adopts rows.
-                tracing::error!(
-                    view = %scoped_view,
-                    "ALARM: no incarnation for the owner view; no flush is planned this tick"
-                );
-                return;
+                if self.health.refusal_log_due() {
+                    tracing::error!(
+                        view = %scoped_view,
+                        "ALARM: no incarnation for the owner view; no flush is planned this tick"
+                    );
+                }
+                return false;
             };
             let scoped_schema: Vec<crate::flush::ScopedColumnSpec> = match families
                 .iter()
@@ -9927,12 +10278,14 @@ impl Executor {
                     // indexed prose with a pipeline the base was not built by leaves one column
                     // whose two layers disagree about what a word is.
                     self.health.flush_failures.fetch_add(1, Ordering::Relaxed);
-                    tracing::error!(
-                        error = %e,
-                        "ALARM: a group-scoped text family's analyser is not one this binary \
-                         carries; no flush is dispatched, and the buffer is retained"
-                    );
-                    return;
+                    if self.health.refusal_log_due() {
+                        tracing::error!(
+                            error = %e,
+                            "ALARM: a group-scoped text family's analyser is not one this binary \
+                             carries; no flush is dispatched, and the buffer is retained"
+                        );
+                    }
+                    return false;
                 }
             };
             // **The lanes this view's rows carry.** Two cases, and the split is which side of the
@@ -10022,11 +10375,25 @@ impl Executor {
             ));
         }
         if contexts.is_empty() {
-            return;
+            return false;
         }
         self.health
             .flush_lap(crate::flush::FlushStage::Dispatch, mark);
 
+        if deferred > 0 {
+            // Re-armed, so `wait_for_work` polls at `FLUSH_COMPLETION_POLL` and the tick that
+            // takes the next view comes at the completion of this flush rather than at the next
+            // period. Set before the flag below, since a reader that saw the dispatch first and
+            // this second could close the cycle in between.
+            self.health.deferred_plans.store(true, Ordering::SeqCst);
+            self.health.flush_requested.store(true, Ordering::SeqCst);
+            tracing::warn!(
+                deferred,
+                dispatched = %view,
+                "a flush unit is per view and a second unit in flight would be discarded at its \
+                 rebase, so one view publishes per tick; the rest re-plan at the next one"
+            );
+        }
         self.health.flush_in_flight.store(true, Ordering::SeqCst);
         self.health.mark_flush_started(std::time::Instant::now());
         let health = Arc::clone(&self.health);
@@ -10049,6 +10416,10 @@ impl Executor {
                         // only commit point, so a failure before it leaves orphan files nothing
                         // references and the buffer intact.
                         health.flush_failures.fetch_add(1, Ordering::Relaxed);
+                        // Nothing was published, so the cycle stays open and its request is
+                        // re-armed: a caller waiting on the number waits for the retry that
+                        // succeeds (`ExecutorHealth::fail_publication_cycle`).
+                        health.fail_publication_cycle();
                         tracing::error!(
                             error = %e,
                             "ALARM: a flush failed; the buffer is retained and it will be retried \
@@ -10061,6 +10432,7 @@ impl Executor {
             }
             health.flush_in_flight.store(false, Ordering::SeqCst);
         });
+        true
     }
 
     /// If the WAL is degraded and the degradation is one a discard can end, end it.
@@ -10152,7 +10524,12 @@ impl Executor {
             .saturating_sub(self.last_tick.elapsed());
         let wait = if self.wal.is_poisoned() {
             until_tick.min(WAL_RECOVERY_POLL_INTERVAL)
-        } else if self.health.flush_in_flight.load(Ordering::SeqCst)
+        } else if let Some(backoff) = self.health.failed_cycle_backoff() {
+            // A cycle is open and unpublished, its request is armed, and the retry is not due
+            // yet. Waiting out the floor costs one wake instead of fifty a second.
+            until_tick.min(backoff)
+        } else if self.health.flush_requested.load(Ordering::SeqCst)
+            || self.health.flush_in_flight.load(Ordering::SeqCst)
             || self.health.flush_completed_pending.load(Ordering::SeqCst)
             || self.coalesce_in_flight.load(Ordering::SeqCst)
             || self
@@ -10164,7 +10541,10 @@ impl Executor {
             || self.health.fold_completed_pending.load(Ordering::SeqCst)
         {
             // A flush or a coalesce is executing on the pool, or its completed unit is waiting in
-            // the corresponding channel. The pool cannot ring the doorbell (see `flush_submit`),
+            // the corresponding channel, or a `POST /control/flush` is still unconsumed. A
+            // request that arrived during a tick keeps its flag, and the doorbell token it rang
+            // may have been spent waking the loop for the tick that did not read it.
+            // The pool cannot ring the doorbell (see `flush_submit`),
             // so this poll is what bounds publication latency on an idle node — see
             // `FLUSH_COMPLETION_POLL`. Without the coalesce arm an idle node's completed coalesce
             // waits for the next *tick*, which at a 90 s period is 90 s of a pass that has already
@@ -11182,6 +11562,11 @@ pub struct ValuesReceipt {
     pub filled: u64,
     pub held: u64,
     pub joined: u64,
+    /// How many artifacts this batch's layer columns **created** — a key no artifact held, on a
+    /// layer whose value set is open (`ingest.md` §1.4). Reported for `/control/ingest`'s reason:
+    /// under `open` a typo creates a permanent object rather than being refused, and the
+    /// mitigation is that the caller who made it is told the number in its own `200`.
+    pub minted: u64,
 }
 
 /// What one values batch's fill rule produced: the cells to hold until the flush writes them, and
@@ -11504,8 +11889,12 @@ fn plan_fills(
 
 /// The growth records one values batch's layer columns produce (`ingest.md` §1.4).
 ///
-/// **A key no artifact holds refuses the batch.** A values batch allocates nothing and creates
-/// nothing, so there is no minting arm here: the caller publishes the artifact and then names it.
+/// **A key with no ordinal was minted at this batch's own commit** and the publication carried
+/// these rows as its first members, so it is skipped here exactly as [`growth_records`] skips one
+/// — one record instead of a publication and a growth against it. Every other reason a key could
+/// have no ordinal was refused before this: a `closed` value set and a layer with supplied content
+/// are `LayerRegistry::resolve_or_mint`'s own refusals, made at [`Executor::resolve_memberships`]
+/// with the batch still without effect.
 fn values_growth_records(
     memberships: &[tessera_lifecycle::ResolvedMembership],
     rows: &[tessera_lifecycle::IncomingValues],
@@ -11516,11 +11905,7 @@ fn values_growth_records(
     let mut by_level: BTreeMap<(&str, u32), BTreeMap<u32, croaring::Bitmap>> = BTreeMap::new();
     for join in memberships {
         let Some(ordinal) = join.ordinal else {
-            return Err(format!(
-                "column '{}' names the key '{}', which no artifact of level {} holds. A values \
-                 batch creates nothing (`ingest.md` §1.4): publish the artifact, then name it",
-                join.layer, join.key, join.level
-            ));
+            continue;
         };
         let joining = by_level
             .entry((join.layer.as_str(), join.level))
@@ -11550,6 +11935,45 @@ fn values_growth_records(
             )
         })
         .collect())
+}
+
+/// **The artifacts one values batch's layer columns named and no artifact holds** —
+/// [`mint_plan`]'s twin for the values door (`ingest.md` §1.4; python-sdk §11.2 F).
+///
+/// A table with an id column and a key column is insertable whatever the source's history, so an
+/// unknown key here means what it means at `/control/ingest`: on an `open` layer it creates the
+/// artifact it names, carrying the batch's own rows as its first members. The two plans are the
+/// same map and are consumed by the same [`Executor::prepare_mints`]; what differs is only where
+/// the entities come from — a window's fresh allocation there, and rows resolved at the boundary
+/// here, a values batch creating no member of its own.
+///
+/// **One artifact per key per level for the whole batch**, on `mint_plan`'s rule: two rows naming
+/// one unknown key mint once and both join it. The entry index every mint is charged to is `0`,
+/// there being one batch and one caller to report to.
+fn values_mint_plan(
+    memberships: &[tessera_lifecycle::ResolvedMembership],
+    rows: &[tessera_lifecycle::IncomingValues],
+) -> Result<MintPlan, String> {
+    let mut wanted: MintPlan = std::collections::BTreeMap::new();
+    for join in memberships {
+        if join.ordinal.is_some() {
+            continue;
+        }
+        let (_, members) = wanted
+            .entry((join.layer.clone(), join.level, join.key.clone()))
+            .or_insert_with(|| (0, croaring::Bitmap::new()));
+        for row in &join.rows {
+            let Some(entity) = rows.get(*row as usize) else {
+                return Err(format!(
+                    "column '{}' names row {row}, which this batch does not carry",
+                    join.layer
+                ));
+            };
+            // Entity space is `u32` by I9, so the narrowing is total.
+            members.add(entity.entity.raw() as u32);
+        }
+    }
+    Ok(wanted)
 }
 
 /// How many of one growth record's joining members the artifacts do not already hold — read
@@ -12198,21 +12622,46 @@ impl Executor {
         &mut self,
         closed: &mut [tessera_lifecycle::ClosedEntry<Responder>],
     ) -> Result<(Vec<WalRecord>, Vec<u64>), String> {
-        use std::collections::BTreeMap;
         let mut minted_per_entry = vec![0u64; closed.len()];
         let Some((wanted, edges)) = mint_plan(closed) else {
             return Ok((Vec::new(), minted_per_entry));
         };
+        let (records, resolved, minted) = self.prepare_mints(&wanted, &edges)?;
 
-        type Prepared = Result<
-            (
-                Vec<WalRecord>,
-                std::collections::BTreeMap<(String, u32, String), u32>,
-                std::collections::BTreeSet<(String, u32, String)>,
-            ),
-            String,
-        >;
-        let prepared: Prepared = self.live.with_publication_state(|registry, store, alloc| {
+        // A key that acquired an artifact between its batch's admission and this close is an
+        // ordinary growth, and `growth_records` takes it from there — see
+        // [`settle_resolved_ordinals`], which the values door settles by too.
+        for entry in closed.iter_mut() {
+            settle_resolved_ordinals(&mut entry.memberships, &resolved);
+        }
+        for ((layer, level, key), (index, _)) in &wanted {
+            if minted.contains(&(layer.clone(), *level, key.clone())) {
+                minted_per_entry[*index] += 1;
+            }
+        }
+        Ok((records, minted_per_entry))
+    }
+
+    /// **Prepare one set of mints** — the publications that create the artifacts a caller's keys
+    /// named and no artifact holds.
+    ///
+    /// **One implementation across the doors** (decision 0139): `/control/ingest` reaches it
+    /// through [`Executor::mint_records`] at its window's close, and `POST /control/values`
+    /// through [`values_mint_plan`] at its own commit, so a key arriving at either door creates
+    /// the same artifact, with the same lineage and the same refusals. Nothing here reads which
+    /// door it was called from.
+    ///
+    /// The three answers: the records to append **in the order given** — ascending level, coarse
+    /// first, so a tiered chain's parent is fixed by the record before its child's — the keys
+    /// that turned out to be held after all, which their caller grows into instead, and the keys
+    /// this run minted.
+    fn prepare_mints(
+        &self,
+        wanted: &MintPlan,
+        edges: &[tessera_lifecycle::BatchEdge],
+    ) -> PreparedMints {
+        use std::collections::BTreeMap;
+        self.live.with_publication_state(|registry, store, alloc| {
             // **A child named under two parents refuses**, across the window as it does within a
             // batch: two entries naming different parents for one artifact are two hierarchies,
             // and there is no correct output. Checked before anything is prepared, so a refusal
@@ -12224,7 +12673,7 @@ impl Executor {
             // growth never adds lineage, so the window's minted edges are every edge a cycle
             // could run through.
             let mut parents: BTreeMap<(String, u32, String), Vec<String>> = BTreeMap::new();
-            for edge in &edges {
+            for edge in edges {
                 let at = (edge.layer.clone(), edge.level, edge.child.clone());
                 let named = parents.entry(at).or_default();
                 if named.contains(&edge.parent) {
@@ -12248,7 +12697,7 @@ impl Executor {
             let mut resolved: BTreeMap<(String, u32, String), u32> = BTreeMap::new();
             let mut to_mint: BTreeMap<(&str, u32), Vec<(&str, &croaring::Bitmap)>> =
                 BTreeMap::new();
-            for ((layer, level, key), (_, members)) in &wanted {
+            for ((layer, level, key), (_, members)) in wanted {
                 // The ingest route carries no artifact view; `resolve_or_mint` refuses a
                 // group-scoped layer there (`ingest.md` §1.5), so the key sits in the one set.
                 match store.ordinal_of_key(layer, *level, None, key) {
@@ -12327,30 +12776,7 @@ impl Executor {
                 .map(|(layer, level, key)| ((*layer).to_string(), *level, (*key).to_string()))
                 .collect();
             Ok((records, resolved, minted))
-        });
-        let (records, resolved, minted) = prepared?;
-
-        // A key that acquired an artifact between its batch's admission and this close is an
-        // ordinary growth, and `growth_records` takes it from there. Usually none did — that needs
-        // a publication to have executed inside the window — so the pass is skipped rather than
-        // walked.
-        if !resolved.is_empty() {
-            for entry in closed.iter_mut() {
-                for join in entry.memberships.iter_mut() {
-                    if join.ordinal.is_some() {
-                        continue;
-                    }
-                    let at = (join.layer.clone(), join.level, join.key.clone());
-                    join.ordinal = resolved.get(&at).copied();
-                }
-            }
-        }
-        for ((layer, level, key), (index, _)) in &wanted {
-            if minted.contains(&(layer.clone(), *level, key.clone())) {
-                minted_per_entry[*index] += 1;
-            }
-        }
-        Ok((records, minted_per_entry))
+        })
     }
 
     /// **Close a commit window**: one signature-sorted allocation run, one WAL record per entry, one
@@ -13823,9 +14249,12 @@ impl Executor {
     /// `POST /control/values` — fill attribute values on entities that already exist
     /// (`ingest.md` §1.4).
     ///
-    /// **It allocates nothing and creates no row.** Every entity was resolved at the boundary, so
-    /// this pass adds cells to entities that have them and members to artifacts that hold them; a
-    /// subject that does not exist refused the batch before it was submitted (`ingest.md` §1.6).
+    /// **It creates no point and no row.** Every entity a row names was resolved at the boundary,
+    /// so this pass adds cells to entities that have them and members to artifacts; a subject that
+    /// does not exist refused the batch before it was submitted (`ingest.md` §1.6). What it does
+    /// create is an **artifact** a layer column named and no artifact held, on an `open` layer —
+    /// python-sdk §11.2 F — through the same [`Executor::prepare_mints`]
+    /// the ingest door's window close uses.
     ///
     /// **The fill rule is evaluated here and nowhere else** (`ingest.md` §1.1), beside the join
     /// arm and for its reason (decision 0116): the sources are the commit-window buffer, the
@@ -13865,11 +14294,13 @@ impl Executor {
                 return;
             }
         };
-        // **A layer column on a values row is a membership join** (`ingest.md` §1.4), taking the
-        // growth route's own record. A key no artifact holds is refused rather than minted: a
-        // values batch creates nothing, and minting from one would make a typo a permanent object
-        // on the one route whose rule is that it allocates nothing.
-        let (memberships, _) = match self.resolve_memberships(&request.artifacts) {
+        // **A layer column on a values row is a membership join, and mints what it names**
+        // (`ingest.md` §1.4; python-sdk §11.2 F). A held key joins the entity to
+        // the artifact; a key no artifact holds mints it here, on an `open` layer, with the
+        // batch's rows as its first members and its lineage from a list column's own adjacency.
+        // The refusals are `resolve_or_mint`'s and are made below with the batch still without
+        // effect: a `closed` value set, and a layer declaring supplied content or a dependency.
+        let (mut memberships, mint_edges) = match self.resolve_memberships(&request.artifacts) {
             Ok(resolved) => resolved,
             Err(detail) => {
                 self.ack_failed(&respond, ExecError::LayerRefused { detail });
@@ -13877,6 +14308,32 @@ impl Executor {
                 return;
             }
         };
+        // **Through the one implementation the ingest door's window close uses** (decision 0139),
+        // so a key arriving here creates the artifact the same key would have created there.
+        let wanted = match values_mint_plan(&memberships, &request.rows) {
+            Ok(wanted) => wanted,
+            Err(detail) => {
+                self.ack_failed(&respond, ExecError::ValuesRefused { detail });
+                self.health.note_work_refused();
+                return;
+            }
+        };
+        let mut mints: Vec<WalRecord> = Vec::new();
+        let mut minted_count = 0u64;
+        if !wanted.is_empty() {
+            match self.prepare_mints(&wanted, &mint_edges) {
+                Ok((records, resolved, minted)) => {
+                    settle_resolved_ordinals(&mut memberships, &resolved);
+                    minted_count = wanted.keys().filter(|at| minted.contains(*at)).count() as u64;
+                    mints = records;
+                }
+                Err(detail) => {
+                    self.ack_failed(&respond, ExecError::LayerRefused { detail });
+                    self.health.note_work_refused();
+                    return;
+                }
+            }
+        }
         let growth = match values_growth_records(&memberships, &request.rows) {
             Ok(records) => records,
             Err(detail) => {
@@ -13887,6 +14344,9 @@ impl Executor {
         };
         // Read beside the preparation and **before** the apply, on `growth_receipt`'s rule:
         // afterwards every joining member is a member and how many were new is gone.
+        // **`joined` counts members of artifacts that already existed**, at this door as at
+        // `PUT /control/layers/{name}/artifacts`: an artifact this batch created is reported under
+        // `minted`, and its first members are what creating it means rather than a second number.
         let joined = self.live.with_artifacts(|store| {
             growth
                 .iter()
@@ -13908,23 +14368,37 @@ impl Executor {
                 })
                 .collect(),
         };
-        // The level version each growth record is the delta against, read before the apply moves
-        // it — `commit_growth`'s rule.
-        let before: Vec<u64> = growth
-            .iter()
-            .map(|record| match record {
-                WalRecord::ArtifactGrow { layer, level, .. } => self
-                    .live
-                    .with_artifacts(|store| store.level_version(layer, *level)),
-                _ => 0,
-            })
-            .collect();
+        // **The publications that minted come first, then the growths** — the window close's own
+        // order, and for its reason: a growth of this batch may name an ordinal one of them
+        // claimed, and replay applies the sequence in order, so an artifact must exist before
+        // anything addresses it.
+        let artifact_records: Vec<&WalRecord> = mints.iter().chain(growth.iter()).collect();
+        // The level version each record is the delta against, read before the apply moves it —
+        // `commit_growth`'s rule, carried forward across the sequence because a mint and a growth
+        // of this batch may name one level and each moves it exactly once.
+        let before: Vec<u64> = self.live.with_artifacts(|store| {
+            let mut seen: std::collections::BTreeMap<(&str, u32), u64> = Default::default();
+            artifact_records
+                .iter()
+                .map(|record| {
+                    let Some((layer, level)) = artifact_level_of(record) else {
+                        return 0;
+                    };
+                    let at = seen
+                        .entry((layer, level))
+                        .or_insert_with(|| store.level_version(layer, level));
+                    let version = *at;
+                    *at += 1;
+                    version
+                })
+                .collect()
+        });
         // The position **before** each append is where the record lands, and the values record's
         // is what pins the log until the flush writes its cells (`ingest.md` §1.4).
         let values_position = self.wal.position();
-        let mut positions = Vec::with_capacity(growth.len());
+        let mut positions = Vec::with_capacity(artifact_records.len());
         let appended = self.wal.append(&values_record).and_then(|()| {
-            growth.iter().try_for_each(|record| {
+            artifact_records.iter().try_for_each(|record| {
                 positions.push(self.wal.position());
                 self.wal.append(record)
             })
@@ -13932,8 +14406,8 @@ impl Executor {
         if let Err(e) = appended.and_then(|()| self.wal.fsync()) {
             tracing::error!(
                 error = %e,
-                "ALARM: a values batch could not be made durable; no cell was filled and no \
-                 membership grew"
+                "ALARM: a values batch could not be made durable; no cell was filled, no \
+                 artifact was created and no membership grew"
             );
             respond.fail(ExecError::Wal(e));
             self.health.note_work_refused();
@@ -13941,16 +14415,21 @@ impl Executor {
         }
         self.observe_wal();
 
-        // The growth applies through the artifact store's own path, exactly as a page on the
-        // growth route does, and is held in the log at its record until the fold rewrites the
-        // level.
-        let mut refused_per_record: Vec<Vec<usize>> = vec![Vec::new(); growth.len()];
-        let undecodable = self.live.with_publication_state(|_, store, _| {
-            growth
+        // The mints and the growths apply through the artifact store's own path, exactly as a
+        // publication and a page on the growth route do, and are held in the log at their records
+        // until the fold rewrites the level. **The registry half of a mint runs first, per
+        // record**: a publication may have extended its level's reserved runs, and the store's own
+        // apply resolves ordinals against them.
+        let mut refused_per_record: Vec<Vec<usize>> = vec![Vec::new(); artifact_records.len()];
+        let undecodable = self.live.with_publication_state(|registry, store, _| {
+            artifact_records
                 .iter()
                 .zip(&positions)
                 .zip(refused_per_record.iter_mut())
                 .map(|((record, position), refused)| {
+                    if matches!(record, WalRecord::ArtifactPublish { .. }) {
+                        registry.apply(record);
+                    }
                     store.apply_reporting(record, *position, refused)
                 })
                 .sum::<usize>()
@@ -13960,10 +14439,15 @@ impl Executor {
             // — and alarmed rather than asserted, on `commit_growth`'s rule.
             tracing::error!(
                 count = undecodable,
-                "ALARM: a values batch's membership growth did not survive its own round trip"
+                "ALARM: a values batch's artifact publications and membership growths did not \
+                 survive their own round trip"
             );
         }
-        for ((record, at), refused) in growth.iter().zip(&before).zip(&refused_per_record) {
+        for ((record, at), refused) in artifact_records
+            .iter()
+            .zip(&before)
+            .zip(&refused_per_record)
+        {
             self.hold_delta(record, *at, refused);
         }
 
@@ -14010,15 +14494,39 @@ impl Executor {
         self.live
             .record_accepted_batch(request.batch_id.clone(), request.body_hash, Vec::new());
         // A growth above its level's high-water is published by the next tail pack, on
-        // `commit_growth`'s mechanism.
-        if !growth.is_empty() {
+        // `commit_growth`'s mechanism, and so is an artifact this batch minted.
+        if !artifact_records.is_empty() {
             self.deny_dirty = true;
+        }
+        // **What a batch minted is reported to the batch that minted it**, and to the operator —
+        // the window close's own line, for its own reason: under `value_set = "open"` a typo
+        // creates a permanent object rather than being refused, and the mitigation is that it is
+        // visible.
+        if minted_count > 0 {
+            tracing::info!(
+                minted = minted_count,
+                artifacts = ?mints
+                    .iter()
+                    .flat_map(|record| match record {
+                        WalRecord::ArtifactPublish { layer, level, artifacts, .. } => artifacts
+                            .iter()
+                            .filter_map(|a| a.key.as_ref())
+                            .map(|key| format!("{key} in level {level} of {layer}"))
+                            .take(8)
+                            .collect::<Vec<_>>(),
+                        _ => Vec::new(),
+                    })
+                    .collect::<Vec<_>>(),
+                "a values batch named keys no artifact held, and these layers' value sets are \
+                 open, so the artifacts were created"
+            );
         }
         respond.ack(
             Ack::ValuesFilled {
                 filled: planned.filled,
                 held: planned.held,
                 joined,
+                minted: minted_count,
             },
             &published,
         );
@@ -16508,7 +17016,15 @@ impl Executor {
     /// next tick re-plans.
     fn publish_flush(&mut self, completed: crate::flush::CompletedFlush) {
         let mut mark = StageMark::now();
-        if !self.publish_flush_stages(completed, &mut mark) {
+        if self.publish_flush_stages(completed, &mut mark) {
+            // **The publication cycle closes at the swap** (`ExecutorHealth::publication`): the
+            // generation carrying this unit's rows, fills and extents is the live one from here,
+            // so the number being reached and the work being served are one event.
+            self.health.close_publication_cycle();
+        } else {
+            // A discard leaves the unit's files orphaned and its inputs standing, so the cycle is
+            // unpublished: it stays open, its request stays armed, and the next tick re-plans.
+            self.health.fail_publication_cycle();
             // A discarded flush's time since its last lap, so `PublishWall` stays partitioned
             // whichever way the publication ends.
             self.health
@@ -16614,6 +17130,7 @@ impl Executor {
             hasrow: record_dir.join(&completed.entity_terms_extent.hasrow),
             offsets: record_dir.join(&completed.entity_terms_extent.offsets),
             terms: record_dir.join(&completed.entity_terms_extent.terms),
+            bases: record_dir.join(&completed.entity_terms_extent.bases),
         }];
         let text_paths: Vec<crate::filter::TextExtentPaths> = completed
             .text_extents

@@ -10,12 +10,12 @@ pub mod error;
 pub mod flush;
 pub mod fold;
 mod locator;
-pub mod partition;
 pub mod manifest;
 pub mod manifest_write;
 pub mod membership;
 pub mod merge;
 pub mod pairs;
+pub mod partition;
 pub mod permutation;
 pub mod read;
 pub mod reclaim;
@@ -32,8 +32,8 @@ pub use coalesce::coalesce_external_id_runs;
 pub use coalesce::fold_external_id_runs;
 pub use entity_terms::{
     coalesce_entity_terms_extents, EntityTerms, EntityTermsExtentPaths, EntityTermsStack,
-    EntityTermsWriter, ENTITY_TERMS_DIR, ENTITY_TERMS_HASROW_FILE, ENTITY_TERMS_OFFSETS_FILE,
-    ENTITY_TERMS_TERMS_FILE,
+    EntityTermsWriter, ENTITY_TERMS_BASES_FILE, ENTITY_TERMS_BLOCK_SHIFT, ENTITY_TERMS_DIR,
+    ENTITY_TERMS_HASROW_FILE, ENTITY_TERMS_OFFSETS_FILE, ENTITY_TERMS_TERMS_FILE,
 };
 pub use error::{Result, StoreError};
 pub use flush::{digest_of, write_flush_segment, FlushInput, FlushOutput, FlushRow};

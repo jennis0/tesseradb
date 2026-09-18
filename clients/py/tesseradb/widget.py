@@ -29,12 +29,12 @@ from __future__ import annotations
 
 import pathlib
 import warnings
-from typing import Any, Callable, Optional, Sequence, Union
+from typing import Any, Optional, Sequence
 
 import anywidget
 import traitlets
 
-from ._auth import Token
+from ._auth import Token, TokenSource, minted
 
 _HERE = pathlib.Path(__file__).parent
 _BUNDLE = "tessera-components.js"
@@ -50,8 +50,6 @@ def bundle_path() -> Optional[pathlib.Path]:
         return checkout
     return None
 
-
-TokenSource = Union[str, Token, Callable[[], Union[str, Token]]]
 
 U64_MAX = 2**64 - 1
 
@@ -170,20 +168,11 @@ class Map(anywidget.AnyWidget):
     # ---- the token ---------------------------------------------------------------------------
 
     def _current_token(self, *, renew: bool) -> Token:
-        source = self._token_source
         if renew and self._token is not None and self._token.renew is not None:
             self._token = self._token.renew()
             return self._token
-        if callable(source) and not isinstance(source, Token):
-            got = source()
-        else:
-            got = source
-        if isinstance(got, str):
-            got = Token(got)
-        if not isinstance(got, Token) or not got.token:
-            raise TypeError(f"token must be a string, a Token or a callable returning one; got {got!r}")
-        self._token = got
-        return got
+        self._token = minted(self._token_source)
+        return self._token
 
     def _token_message(self, *, renew: bool) -> dict:
         token = self._current_token(renew=renew)

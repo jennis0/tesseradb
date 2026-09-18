@@ -1,9 +1,12 @@
 # The Python SDK: a Tessera database in a notebook
 
 **Status:** Provisional — under review. Reviewed once under the user-experience and capability
-lenses and re-reviewed on §3, §4, §6 and §12 after the rulings of §11.1. Before this becomes
-normative: the owner's rulings on §11.2, and the examples in §10 run against the arXiv corpus. Nothing in this document is built except the
-widget `Map` (client-components §7), which it uses unchanged.
+lenses, re-reviewed on §3, §4, §6 and §12 after the rulings of §11.1, and built through S1 to
+S8 of §12 by 2026-09-17, each stage refereed before merge. The verbs were re-cut on 2026-09-18
+(§11.1: declaring and inserting are different verbs, no guessed names, no inference by
+default), and that cut, S9, and the two engine rules it leans on, F and H, are not built: the
+examples of §10 are written to the new verbs and run only where marked otherwise. Before this
+becomes normative: S9, F and H built and the examples run as the demo notebooks.
 
 **Owns:** the `tesseradb` package's verbs for creating, filling and reading a Tessera database,
 and the shape of a local instance. It does not own the wire (contracts §3), the ingest model
@@ -60,7 +63,7 @@ A database is a directory:
 <dir>/
   tessera.toml        the deployment file (system-architecture §7), written by the SDK
   schema.toml         the declaration (configuration.md), written by the SDK
-  sources/            parquet files the SDK wrote from frames; paths staged from files are read in place
+  sources/            parquet files the SDK wrote from frames; paths inserted from files are read in place
   bundle/             what the build wrote
   .tessera/           cache, WAL, the SDK's JSON copy of the declaration
 ```
@@ -91,65 +94,93 @@ One lifecycle:
 ```mermaid
 stateDiagram-v2
     [*] --> Declared: create()
-    Declared --> Declared: stage(), declare_*()
+    Declared --> Declared: declare_*(), insert()
     Declared --> Built: commit()  [check, build, serve]
-    Built --> Built: stage(), declare_*(), commit()  [pages through the control plane, flush]
+    Built --> Built: declare_*(), insert(), commit()  [pages through the control plane, flush]
     Built --> [*]: close()
     [*] --> Built: open()
 ```
 
 *The first commit builds; every later one ingests. The verbs before and after are the same.*
 
-Three verbs carry the model. `stage(name, data)` binds a named source to a frame or a file.
-`declare_*` adds a block to the declaration and names the sources it reads. `commit()` makes the
-staged data part of the database: through the build the first time, through the control plane
-after. `check()` is `commit()` with nothing sent.
+Three verbs carry the model, and each does one thing. `declare_*` says what exists: a view, an
+attribute, a layer, a label set, a vocabulary, with its types and its gates, and takes no data.
+`insert(target, table, ...)` hands a table to a declared thing and names the columns it needs.
+`commit()` sends what has been inserted since the last commit and forgets it: the first time
+through the build, after that through the control plane. A user who wants more data runs the
+same `insert` calls again. `check()` is `commit()` with nothing sent.
 
-## 3. Sources and identity
+## 3. Inserting, and identity
 
 ```python
-db.stage(name, data, id=None, default=False)
+db.insert(target, table, **columns)
 ```
 
-`name` is a key in the declaration's `[sources]` table, and every declaration block that reads
-data names one. `data` is a pandas or polars frame, a pyarrow table, or a path. A frame is
-written to `sources/<name>.parquet`; a path is recorded and read in place, so a large file is
-not copied. Staging a name twice before the first commit replaces the earlier data.
+`target` is the name of a declared view, view group, attribute, layer, label set or vocabulary;
+`table` is a pandas or polars frame, a pyarrow table, or a path to a parquet file, which is
+read in place. Every column the target needs is named on the call, as the notebook-widget
+libraries name `x=` and `y=`, and a column the call does not name is ignored, so a frame with
+more columns than the target reads is the ordinary case. The SDK guesses no column name and
+rewrites no data: a frame is written to `sources/` as it was given and the declaration names
+the columns. Every insert prints two lists, the columns it read and the columns it ignored.
 
-`default=True` makes this source the declaration's `[defaults].source`: a declaration block
-that names no source reads it. Without a default the SDK writes no `source` under `[defaults]`
-(the block still carries `allocation_view`, §4.2), and a block with no source is refused at
-`check()` naming the block. A second `default=True` replaces
-the first and the call says so.
+| Target | Columns named on the call |
+|---|---|
+| a view | `id=`; `x=`, `y=` (or `lon=`, `lat=` under a projection); `access=`, a list-of-strings column, absent meaning every row takes the view's default label. Attribute value columns are read by name (below) |
+| a view group | as a view, plus `view=`, the column naming which view of the group each row belongs to; a roster of views with their metadata is `insert(group, roster=table, key=, **metadata_columns)` |
+| an attribute | `id=`, `value=`; on a group-scoped attribute also `view=` |
+| a layer, by key | `id=`, `key=`: one key per row, or a list of one key per level on a tiered layer; on a group-scoped layer also `view=` |
+| a layer, artifacts | `insert(layer, artifacts=table, key=, level=, parent=, contents=, attached_layer=, attached_level=, attached_key=, members=, excluding=, space=, bbox=|circle=|ellipse=|wkt=)`, each named where the table carries it |
+| a layer, members | `insert(layer, members=table, id=, key=, level=, rank=)` |
+| a label set | a mapping `{key: text}`, or a table with `key=` and `text=` (a plain string column) or `contents=` (a layer's ranked contents column); a generating set is `insert(labels, members=table, id=, key=, rank=)` |
+| a vocabulary | `key=`, `title=`, `code=` |
+
+An artifacts table and a members table are two inserts on the same layer, each with its own
+column names, since both carry `key` and `level`. Several inserts on one target before a commit
+accumulate: the build reads them all and ingest pages each, so a corpus in parts is loaded by
+the same calls as one file.
+
+The columns that carry identity or disclosure are named on every call and never matched: the
+id, the coordinates, the access labels, a layer's key, a group's view column. An attribute's
+value column is the one place a name match is what the user meant, as SQL's `INSERT BY NAME`
+is: the attribute was declared, and a column of its name in the frame inserted into the
+**allocation view** fills it; on any other view's insert attribute-named columns are ignored,
+so a frame inserted for its coordinates alone carries nothing it was not meant to. A frame with
+no column of that name fills nothing. `columns={attribute: column}` on the allocation view's
+insert names one explicitly.
 
 **Identity.** A row is named one of two ways, and the SDK keeps no map between them.
 
-- **An explicit id column** (`id=` on `stage`, or a column named `id`) is the external id at both
-  doors: the build takes it as supplied, in any type, mints its own entity ids, writes the
-  external-id index from it and joins members tables on it; the ingest route takes the same
-  bytes as `external_id`. Members tables and attribute sources name rows by the same column.
-  The SDK writes the column under the name `[defaults].entity_id_field` declares and names it
-  on a members table through `[layer.members].fields = { entity = <column> }`.
-- **No id column** means Tessera ids. The build mints no external id; rows are addressable only
-  by the `tessera_id` a viewer gets back from a pick or a drill-down, the ingest route returns
-  the ids it assigned, and `remove()` and a members table name them with `addressing: tessera`.
+- **`id=` names a column**, and its values are the external id at both doors: the build takes
+  the column as supplied, in any type, mints its own entity ids, writes the external-id index
+  from it and joins every other insert on it (configuration.md §8); the ingest route takes the
+  same bytes as `external_id`. Every insert that names rows names the same column, under
+  whatever name it has in that table.
+- **No `id=`** on a view's insert means Tessera ids. The build mints no external id; rows are
+  addressable only by the `tessera_id` a viewer gets back from a pick or a drill-down, the
+  ingest route returns the ids it assigned, and a later insert or `remove()` names them with
+  `addressing: tessera`.
 
-The SDK holds nothing about which rows the database has. A commit sends what was staged; a row
-whose id the database holds is refused by the server, whole page, and the report says so. A
+The SDK holds nothing about which rows the database has. A commit sends what was inserted; a
+row whose id the database holds is refused by the server, whole page, and the report says so. A
 re-run of a cell is a re-run: databases are stateful, and the SDK does not make a second
-`commit()` of the same frame silent.
+`commit()` of the same table silent.
 
-After the first commit, `stage(name, data)` binds a delta: rows to add to what the source
-already holds. The declaration says what the source feeds, so the SDK knows that a delta on the
-points source feeds the view, the attributes and every layer minted from one of its columns,
-and that a delta on a members source feeds one layer's memberships. A name the declaration
-does not know is refused.
+**Before the first commit** an insert binds the table to its target for the build: the SDK
+writes the table under `sources/` (or records the path) and names it and its columns on the
+target's block. **After the first commit** the same insert is sent at the next `commit()` to
+the route its target owns (§6.2), and nothing is written under `sources/`: the declaration's
+`source` on a block names the first load alone, a block declared later names none, and a
+closed vocabulary declared later carries its inserted values inline so `tessera check
+--payloads` can emit its body.
 
 ## 4. Declarations
 
-Each `declare_*` verb adds one block of configuration.md's declaration. The SDK writes the
-TOML and keeps it as `db.declaration`, and `tessera check` reads that file, so the mapping from
-verb to block is checked by the binary rather than mirrored in Python.
+A `declare_*` verb adds one block of configuration.md's declaration and takes no data: no
+source, no table, no column. What a block reads comes from `insert` (§3), and until something
+is inserted a declared thing is declared and empty, which configuration.md §2 allows. The SDK
+writes the TOML and keeps it as `db.declaration`, and `tessera check` reads that file, so the
+mapping from verb to block is checked by the binary rather than mirrored in Python.
 
 ### 4.1 The generic form
 
@@ -166,107 +197,96 @@ key whose verb has not landed.
 ### 4.2 Views
 
 ```python
-db.declare_view(name, source, x="x", y="y", access=None, default_label="public",
-                extent=None, projection="none", visibility="public", anchor=False,
-                title=None)
+db.declare_view(name, extent=None, default_label="public", projection="none",
+                visibility="public", anchor=False, title=None)
 ```
 
-`x` and `y` name the coordinate columns on `source` (`lon` and `lat` under a projection);
-`access` names a list-of-strings column of labels, one list per row, and `default_label` is
-what a row with no labels takes (decision 0133). With no `access` column every row takes
-`default_label`. `extent` is the frame: a box, a projection's domain, or `None`, which lets the
-first commit fit one (§6.1). `visibility` is the view's own gate.
+`default_label` is what a row with no labels takes (decision 0133). `extent` is the frame: a
+box, a projection's domain, or `None`, which lets the first commit fit one (§6.1). `visibility`
+is the view's own gate. The first declared view is the allocation view (decision 0112) unless
+another says `anchor=True`; the SDK writes `allocation_view` into the TOML in either case.
 
-The first declared view is the allocation view (decision 0112) unless another says
-`anchor=True`. The SDK writes `allocation_view` into the TOML in either case, so a rebuild
-that reorders the blocks cannot re-key the corpus.
-
-A second plain view over the same entities names a source carrying the same ids, a second
-pair of coordinates, and the same access column: the build refuses an entity whose labels
-disagree between views, and the ingest route refuses a join row whose labels differ from the
-held ones (views.md §4). A frame for a second view that lacks the column is refused naming it;
-the SDK copies nothing. A declaration form under which a second view's file needs only ids and
-coordinates, its labels being the entity's, is a views.md question for later.
+A second plain view over the same entities takes its own insert with the same id column, a
+second pair of coordinates, and the same access column: the build refuses an entity whose
+labels disagree between views and the ingest route refuses a join row whose labels differ from
+the held ones (views.md §4). An insert for a second view without `access=` is refused naming
+it; the SDK copies nothing.
 
 ### 4.3 View groups
 
 ```python
-db.declare_view_group(name, views=None, source=None, view_field=None, members=None,
-                      metadata=None, access=None, default_label="public", extent=None,
-                      projection=None, visibility="public", title=None)
+db.declare_view_group(name, metadata=None, members=None, default_label="public",
+                      extent=None, projection=None, visibility="public", title=None)
 ```
 
-`views` is form A, a list of `{key, source, visibility?, ...metadata}`, each view its own
-source. `source` with `view_field` is one points source for every view, the column naming which
-view a row belongs to; `members` names another group whose views this group shares. `metadata`
-is the per-view values as `{name: type}`; `access` and `default_label` are the group's
-`point_visibility`. Form B's roster as a table (`[view_group.views]`) has no parameter and is
-declared through the generic form. A group-scoped attribute or layer names the group in
-`scope` (§4.5, §4.6). views.md owns the semantics.
+`metadata` is the per-view values as `{name: type}`; `members` names another group whose views
+this group shares; `default_label` is the group's `point_visibility` default. The group's views
+and their metadata come from `insert(group, roster=table, key=, ...)`, and its rows from
+`insert(group, table, id=, x=, y=, access=, view=)` with `view=` naming the column that says
+which view each row belongs to (§3). A group-scoped attribute or layer names the group in
+`scope` (§4.5, §4.6) and its view column on the insert. views.md owns the semantics.
 
 ### 4.4 Vocabularies
 
 ```python
-db.declare_vocabulary(name, width=None, closed=False, visibility="public", source=None,
-                      values=None, reserved=None, fields=None, title=None)
+db.declare_vocabulary(name, width="u16", closed=False, visibility="public", values=None,
+                      reserved=None, title=None)
 ```
 
-A closed vocabulary names a `source` of `(key, title?)` rows or gives `values` inline; an open
-one minted from the data needs neither and may name a source for titles. `width` is the code
-space's width and is fixed at the first commit, so when not given the SDK takes one width above
-what the distinct count needs, `u16` at least, and prints it: an open vocabulary at the width
-its first values fill has no code for the next one. `visibility` is `public` or `derived`.
+A closed vocabulary gives `values` inline or takes an `insert(name, table, key=, title=,
+code=)`; an open one minted from the data needs neither and may take an insert for titles.
+`width` is the code space's width, fixed at the first commit, and defaults to `u16`, a stated
+default rather than one read from the data. `visibility` is `public` or `derived`.
 
-### 4.5 Attributes and inference
+### 4.5 Attributes, and the helper that declares them from a frame
 
 ```python
-db.declare_attribute(name, type, source=None, field=None, vocabulary=None, render=None,
-                     index=None, analyser=None, scope="entity", fields=None, title=None)
+db.declare_attribute(name, type, render=False, index=False, vocabulary=None, analyser=None,
+                     scope="entity", title=None)
 ```
 
-An attribute joins by entity id and belongs to no view, so it reads the source it names or the
-default source. `declare_view` claims id, x, y and access on its source, and a layer's
-`from_column` claims its column; if that source is the default, every column not claimed
-becomes an attribute by the rules below, and the SDK
-prints the table once, stating each vocabulary it declared as open and public. An explicit
-`declare_attribute` on the same name overrides the inferred block. On a source that is not the
-default nothing is inferred.
+An attribute is declared with its type and its two flags and nothing else. It is filled by an
+`insert(name, table, id=, value=)`, or by name from a frame inserted into a view (§3).
 
-| Column dtype | Declared as | `render` | `index` |
-|---|---|---|---|
-| integer, float, bool | the matching width | yes | yes |
-| datetime | `timestamp_us` | yes | yes |
-| string, few distinct values | `category` over an open, public vocabulary of the same name, width one above the count (§4.4) | yes | yes |
-| string, many distinct values, short | `keyword` | no | yes |
-| string, long | `text` | no (the build refuses it) | yes |
-| list of strings | not inferred; declare it, or name it as `access` | | |
-| anything else | not inferred; declare it | | |
+Nothing is inferred by default. The helper that reads a frame is explicit and never picks the
+irreversible choice:
 
-"Few" and "short" are thresholds the SDK states in the printed table (assumed: at most 4,096
-distinct values, and a median length under 64 characters). They decide a default; the user
-overrides one column with one call.
+```python
+db.declare_columns(frame, skip=[...], render=[...], index=[...], keyword=[...], category=[...])
+```
+
+declares every column of the frame not in `skip` and not already declared, typed from its
+dtype by the table below, as details only: stored in the record blob, shown at drill-down,
+neither rendered nor indexed. `render` and `index` apply their flags to the columns named;
+`keyword` and `category` choose those families for string columns, which are `text` otherwise.
+The id and coordinate columns are columns like any other, so `skip` names them. The helper
+prints the table it declared. A column not in `render` can be indexed later at any commit;
+`render` is fixed at the first commit (decision 0136's amendment) and is why the helper never
+chooses it.
+
+| Column dtype | Declared as |
+|---|---|
+| integer, float, bool | the matching width |
+| datetime | `timestamp_us` |
+| string | `text`; `keyword` or `category` (over an open public vocabulary) where the call names it |
+| list of strings | not declared; name it as `access=` on the view's insert, or declare it |
+| anything else | not declared, and listed |
 
 An open public vocabulary publishes value names minted from the data to every principal, and
 `tessera check` prints a warning per such vocabulary. On a local database the user is the
-authority the warning asks for, so the SDK's table states the choice once and the build's
-warning is not repeated per column. Issue #83 is open on serving `derived` visibility, under
-which a value exists for a viewer only if they can see a point carrying it; when it serves,
-`derived` becomes the inferred default.
-
-`render` is decided here because it cannot be added later: a render column lives in the hot row
-and a running service refuses to declare one (decision 0136's amendment). The commit report
-lists the render columns it froze.
+authority the warning asks for, so the helper's table states the choice once. Issue #83 is open
+on serving `derived` visibility, under which a value exists for a viewer only if they can see a
+point carrying it; when it serves, `derived` becomes the helper's default.
 
 ### 4.6 Layers
 
 ```python
-db.declare_layer(name, kind, views=None, source=None, members=None, from_column=None,
-                 artifacts=None, membership="enumerated", value_set=None, levels=None,
+db.declare_layer(name, kind, views=None, membership="enumerated", value_set=None, levels=None,
                  prune_children=False, shape=None, default_space="view", layout=None,
                  visibility="public", artifact_visibility="inherited",
                  require_member_visibility="none", withdraw_on_member_deletion=False,
                  depends_on=None, computed=("centroid", "box", "hull"), supplied=None,
-                 scope="entity", fields=None, title=None)
+                 scope="entity", title=None)
 ```
 
 `kind` is `flat`, `nested`, `stacked` or `tiered` (annotations.md), or `dag`
@@ -275,58 +295,59 @@ them. `views` defaults to every view. `membership` is `enumerated`, `spatial` (w
 naming the kind and `default_space` the space) or `{"attribute": field}`. On a spatial layer
 `computed` defaults to `("centroid", "box")` and `hull` is refused at the call: an artifact has
 one drawn geometry, and a membership shape is it (polygon-membership.md §7.1). A group-scoped
-layer takes `scope={"group": name}` with `fields={"view": column}`.
+layer takes `scope={"group": name}` and names its view column on the insert.
 
-An enumerated layer's membership comes one of two ways, and the declaration fixes which:
+An enumerated layer's membership comes from its inserts, in either spelling, at any commit:
 
-- **From a column** (`from_column`): a column on the points source holding one key per row, or
-  a list of one key per level for a tiered layer. The build and the ingest route both mint the
-  artifacts from it (decision 0128). Such a layer has computed content only, and the SDK writes
-  `value_set = "open"`, without which a key the layer's artifacts do not declare is refused. At
-  the first commit it compiles to `[layer.members]` reading the points source with the column
-  as `key`; declared after it, the SDK writes the column as a members table under `sources/`,
-  since `tessera check` reads the declaration against the files each time and a file read in
-  place does not carry the new column.
-- **From tables** (`source` and `members`, or `artifacts` inline): an artifacts table
-  `(level, key, parent?, contents?, attached_layer?, attached_level?, attached_key?, space?,
-  a shape column?, excluding?)` and a members table `(level, key, rank?, entity)`, the shapes
-  under `data/notebook/`. `members` with no `source` and no `artifacts` declares a layer whose
-  artifacts are exactly the keys the members carry, and the SDK writes `open`. This is the only
-  way for a layer with supplied content, since an artifact served without content its layer
-  declares cannot be told from one whose content was withheld.
+- **A key column**: `insert(layer, table, id=, key=)`, one key per row. The build, the ingest
+  route and the values route all mint the artifacts from it and join the rows (decision 0128,
+  and the F ruling of 2026-09-18 for the values route), so a table with an id and a key column
+  is enough whether the rows are new or held. Such a layer has computed content only and the
+  SDK writes `value_set = "open"`, without which a key the layer's artifacts do not declare is
+  refused; the report prints it, since under `open` a mistyped key is a permanent artifact.
+- **An artifacts table and a members table**: `insert(layer, artifacts=..., members=...)` with
+  the columns named per §3's table. This is the only way for a layer with supplied content,
+  since an artifact served without content its layer declares cannot be told from one whose
+  content was withheld.
 
-`supplied` lists the content kinds an artifacts table's `contents` column carries, as
+`supplied` lists the content kinds an artifacts table's contents column carries, as
 `(name, type, gate)` with `gate` `all` or `inherited`; `computed` lists what the engine derives
 per viewer. `visibility`, `artifact_visibility` and `require_member_visibility` are the layer's
 disclosure controls (configuration.md); `artifact_visibility` is a default, or `{"field":
-column, "default": label}` reading a column of the artifacts table. The local defaults are public, inherited and none, and
-the commit report prints them, because a local user holds every term and a deployment author
-sets them. `value_set` is printed whenever the SDK chose it, since under `open` a mistyped key
-is a permanent artifact.
+column, "default": label}` reading a column of the artifacts table. The local defaults are
+public, inherited and none, and the commit report prints them, because a local user holds every
+term and a deployment author sets them.
 
 ### 4.7 Labels
 
 ```python
-db.declare_labels(name, of, source, members=None, content_requires=None, type="text",
+db.declare_labels(name, of, content_requires="inherited", type="text",
                   require_member_visibility="none", artifact_visibility="inherited",
                   title=None)
 ```
 
 A label set over a clustering: the `[layer.labels]` block, which expands to a flat layer of
-supplied content depending on `of`. `source` is `(key, contents)` rows or a mapping from
-cluster key to text. `content_requires` is the content-grain gate and takes `all` or
-`inherited`: `all` means the text was generated from the members in `members`, the generating
-set `(key, rank, entity)`, and is served only to a viewer who can see every one of them;
-`inherited` means the label is served wherever its cluster is and declares no generating set.
-The default follows `members`: `all` when given, `inherited` when not, and the other pairings
-are refused at the call. `require_member_visibility` is the layer grain, how much of a label's
-membership a viewer must see before the label exists for them.
+supplied content attached to `of`. Its text comes from `insert(name, {key: text})` or
+`insert(name, table, key=, text=)`.
+
+**A label with no members of its own is the label of its cluster** (the H ruling of
+2026-09-18): it is drawn where the cluster is drawn, counted over the cluster's members, and
+served to whoever is served the cluster. That is the default and needs no declaration key. Not
+built yet: the engine places an attached artifact by its own member rows and a label with none
+is served to nobody; until the rule lands, `insert` on a label set without `members=` is
+refused naming it.
+
+`content_requires="all"` is the exception that narrows: the text was generated from a specific
+set of documents, given as `members=` on the insert with `key=`, `id=` and `rank=`, and is read
+only by a viewer who can see every one of them. `require_member_visibility` is the layer grain,
+how much of a label's membership a viewer must see before the label exists for them.
 
 ### 4.8 What the TOML always says
 
-The SDK writes every source name on every block, the allocation view, `value_set` on every
-layer, and the disclosure controls on every layer and vocabulary, whether the user said them or
-the defaults did. A reader of `schema.toml` sees the whole declaration without knowing the SDK's
+The SDK writes on every block the source and the column names its inserts gave it, the
+allocation view, `value_set` on every layer, and the disclosure controls on every layer and
+vocabulary, whether the user said them or the defaults did, and never writes `source` under
+`[defaults]`. A reader of `schema.toml` sees the whole declaration without knowing the SDK's
 defaults.
 
 ## 5. `check()`
@@ -347,7 +368,7 @@ Runs `tessera check`, then `tessera build --mint-external-ids`, then starts `tes
 (§7), and returns the build's report. Three things happen at the first commit and at no later
 one, and the report says each:
 
-- **The frame is fixed.** A view with `extent=None` has its frame fitted to its staged rows,
+- **The frame is fixed.** A view with `extent=None` has its frame fitted to its inserted rows,
   widened by half the fitted box's width on each side (assumed default; the report prints the
   frame). A frame is index configuration and does not change for the life of the view. The
   build clamps a row outside the frame and reports the count (configuration.md §1); ingest
@@ -355,10 +376,10 @@ one, and the report says each:
   the refusal message names `extent=`.
 - **The column types and render flags are fixed.** A later `declare_attribute(render=True)`
   is refused with decision 0136's wording; an indexed column can be added at any time.
-- **The allocation is signature-sorted** over the whole staged corpus, which ingest does not do.
+- **The allocation is signature-sorted** over the whole inserted corpus, which ingest does not do.
   This affects posting compression and latency (ingest.md §5), never what is served.
 
-A first commit with no points staged builds an empty database, which needs an explicit
+A first commit with no rows inserted builds an empty database, which needs an explicit
 `extent` on every view; the SDK refuses it otherwise, naming the view.
 
 ### 6.2 Later commits: the plan
@@ -368,22 +389,23 @@ set grows by the delta (ingest.md §1.1). Ordering therefore matters only for ex
 the order is fixed:
 
 1. **Declarations** added since the last commit, as the runtime `PUT`s (ingest.md §1.3): view
-   groups, then a `members` group after the group it names, roster views, plain views, layers
-   and label sets, each body from `tessera check --payloads` (configuration.md §2) except the
-   roster record, which the SDK builds. Not built yet: an attribute or a vocabulary declared
-   after the first commit is refused naming the first commit as the place to declare it, because
-   `tessera check` refuses a declaration whose attribute names no source (§11.2 G4).
-2. **Points**, per view, the allocation view first, in pages under the limits `/control/status`
-   publishes, with `x-tessera-view` on each. A from-column layer's key travels with a new row
-   and mints its artifact at the window close. A delta on a second view's source carries ids,
-   coordinates and the entity's held labels, which the SDK staged (§4.2), and joins existing
-   entities; a join row with different labels is refused as a re-label.
-3. **Values** on existing entities, one page sequence per staged attribute delta
-   (`POST /control/values`). A from-column layer declared after the first commit is refused
-   naming the artifacts-table route, because the values route fills a column and mints no
-   artifact; the SDK does not turn a column into publish requests. Whether the values route
-   should read a layer column as the ingest route does (decision 0128) is an engine question,
-   §11.2.
+   groups, then a `members` group after the group it names, roster views, plain views,
+   vocabularies before the attributes that name them, layers and label sets, each body from
+   `tessera check --payloads` (configuration.md §2) except the roster record, which the SDK
+   builds. A closed vocabulary's body carries its first page of values, since the route refuses
+   a closed set with none, and the rest follow as `PATCH` pages sized by rows and by the route's
+   body cap. A vocabulary no column names yet is not on `/v1/meta`, so it is redeclared at each
+   commit and the route answers it as held. A `render` column is refused at the verb after the
+   first commit (decision 0136's amendment).
+2. **Rows**: an insert into a view, per view, the allocation view first, in pages under the
+   limits `/control/status` publishes, with `x-tessera-view` on each; the allocation view's
+   attribute columns matched by name travel with its rows. A second view's insert carries ids,
+   coordinates and the held labels, and joins existing entities. When step 3 has work, the rows
+   are flushed with `wait=visible` here, so the values that follow address rows the database
+   holds.
+3. **Values**: an insert into an attribute, or into a layer by key column, on rows the database
+   holds, through `POST /control/values`, which fills the cells and mints or joins the artifacts
+   a key column names as the other two doors do (contracts §3.4).
 4. **Artifacts**, per layer in dependency order: a clustering before its labels, a target before
    a layer attached to it, a layer before one that depends on it. Within a layer, `PUT` pages
    carry members, parent, shape and content; a nested batch resolves parents that are its own
@@ -393,12 +415,13 @@ the order is fixed:
    fill rule: a members delta is a `PATCH` join, and content gated `inherited` is filled by
    `PATCH`. Not built yet: filling `all`-gated content onto an artifact published without it has
    no route; the plan refuses that case and names the artifact.
-5. **Flush** (`POST /control/flush`), which is accepted and runs at the next executor tick.
-   `commit()` then reads `/control/status` until the publication after its last acknowledgement,
-   so the next cell sees the rows; the report's flush time is that wait.
+5. **Flush** (`POST /control/flush?wait=visible`): the pages went unwaited, and one flush carrying
+   the wait returns once the publication its number names has happened (decision 0144), so the
+   next cell sees the rows; the report's flush time is that wait, and `visible: false` past the
+   server's bound is a finding.
 
-The commit returns a report: rows accepted per view, artifacts minted, memberships joined, parts
-refusals by row and part, and the flush time.
+The commit returns a report: rows accepted per view, artifacts minted, memberships joined,
+refusals by row and part, and the flush time; then the inserts are forgotten.
 
 ### 6.3 Pre-flight
 
@@ -407,10 +430,9 @@ Before a byte is sent, against the declaration and `/v1/meta`, `check()` and `co
 | Finding | Report |
 |---|---|
 | rows outside a view's frame | listed with the frame; the server refuses the page |
-| rows with no id where the declaration names an id column | listed |
-| a column no block declares | named |
-| a key column staged for a layer that declares supplied content | named, with the artifacts-table route as the remedy |
-| a labels delta whose clustering is neither held nor staged | named |
+| rows with no id where the insert names an id column | listed |
+| a key column inserted into a layer that declares supplied content | named, with the artifacts-table route as the remedy |
+| a label insert whose clustering is neither held nor inserted | named |
 
 `check()` reports and sends nothing. `commit()` reports and refuses to send while a finding
 stands, naming it; nothing is dropped or rewritten. The user corrects the data or the
@@ -442,12 +464,9 @@ which the SDK writes with:
 - A session credential and an identity key, generated per database and stored in the directory
   with owner-only permissions, named by the `_file` and `env` keys the deployment file takes.
 - `[disclosure] token_max_lifetime`, required, at one hour.
-- The viewer plane's origin list. The notebook page's origin is the front end's, unknown at
-  start and not enumerable for a webview. Not built yet: a `serve.cors_loopback = true` rule
-  admitting any page served from a loopback address, which is a bounded statement about which
-  pages may present a token and a ruling under configuration.md's closure argument (§11.2 B).
-  Until it exists the SDK writes `cors_origins` from `TESSERA_NOTEBOOK_ORIGIN`, and a widget
-  from an unlisted origin is refused by the browser.
+- `serve.cors_loopback = true` (configuration.md): the notebook page's origin is a port the
+  front end chose, which no list can name, and the rule admits any page served from a loopback
+  address to present a token on the viewer plane.
 
 The binary is `TESSERA_BIN` when set, else the first `tessera` on `PATH`, else a checkout's
 target directory, release before debug; the create report names the one used. At release a
@@ -468,16 +487,29 @@ v = td.connect(url, token); v.map(...)
 kernel boundary, data does not. On a local database the token is minted by the SDK from the
 directory's session credential through the passthrough plugin, which grants the terms listed.
 The SDK lists every term it has seen: at each commit it records the distinct labels of every
-access column it staged, plus each view's default label, in its log, and `map()` mints with
+access column it inserted, plus each view's default label, in its log, and `map()` mints with
 that set. A database with no access column has one term, the default label, and the union is
 that. This is Python asserting the local principal's authority, which is admissible on a
 single-operator database and nowhere else. `viewer(terms)` mints for the named terms, so the
 map of any principal is one call. `connect(url, token)` takes a token the deployment issued and
 has no `viewer(terms)`.
 
-Query verbs (`meta()`, `viewport(...)`, `item(id)`, `artifacts(...)`) are issue #47's and follow
-the same rule: a local handle and a hosted one answer through the viewer plane with a token,
-never by reading the bundle. Their signatures are not fixed here.
+`viewer(terms)` refuses a term outside the union the SDK recorded, naming it and listing the
+union, and refuses an empty set, since either is the blank map the verb exists to prevent. A
+`Token` carries the terms it was minted for and never prints its bearer string. `close()` stops
+the child and invalidates nothing on the server; a token stays valid for its lifetime.
+
+The read verbs, a first cut of issue #47, on a `Viewer` and so on a `Database` through its
+all-terms viewer, each through the viewer plane with a token and never by reading the bundle:
+
+- `meta()`: the parsed `/v1/meta`.
+- `item(tessera_id, idset=None)`: the drill-down record, its `external_id` decoded to the
+  inserted id column's type on a `Database` and to bytes on a `connect()` viewer, which knows no
+  declaration.
+- `viewport(bbox=None, view=None, filters=None, k=None, zoom=0)`: the served points frames as one
+  pyarrow table whose schema metadata carries the tiles frame's `visible`, `matched` and `served`
+  counts, the trailer and the request, so a served set is never mistaken for the whole. `zoom` is a
+  coordinate of the request that `map()` chooses and a verb cannot. `artifacts(...)` is not built.
 
 ## 9. What the first commit fixes, and what it does not
 
@@ -498,30 +530,26 @@ never by reading the bundle. Their signatures are not fixed here.
 import tesseradb as td
 
 db = td.create()
-db.stage("points", df, default=True)          # index as id; x, y, title, year, cluster
-db.declare_view("map", source="points")
-db.declare_layer("clusters", kind="flat", from_column="cluster")
-db.declare_labels("topics", of="clusters", source=topic_names)   # {cluster_key: text}; inherited
+db.declare_view("map")
+db.declare_columns(df, skip=["paper", "x", "y", "cluster"], render=["year"], index=["year"])
+db.declare_layer("clusters", kind="flat")
+db.declare_labels("topics", of="clusters")
+db.insert("map", df, id="paper", x="x", y="y")          # title and year read by name
+db.insert("clusters", df, id="paper", key="cluster")
+db.insert("topics", topic_names)                        # {cluster_key: text}; Not built yet: H
 db.commit()
 db.map(colour_by="cluster:clusters")
 ```
 
 ### 10.2 The arXiv corpus from files, with terms and three layers
 
-The declaration under `data/notebook/schema.toml`, as calls. The files carry `entity_id`, so
-they are read in place.
+The declaration under `data/notebook/schema.toml`, as calls; the files are read in place.
 
 ```python
 db = td.create(path="~/tessera/arxiv")
-db.stage("points", "points.parquet", default=True)
-for name in ["kmeans", "kmeans_members", "kmeans_topics", "kmeans_topic_members",
-             "hdbscan", "hdbscan_members", "hdbscan_topics", "hdbscan_topic_members",
-             "taxonomy", "taxonomy_members", "archive", "primary_category"]:
-    db.stage(name, f"{name}.parquet")
-
-db.declare_view("s0", source="points", access="categories", title="arXiv, 50,000 papers")
-db.declare_vocabulary("archive", source="archive", closed=True, width="u8")
-db.declare_vocabulary("primary_category", source="primary_category", closed=True, width="u16")
+db.declare_view("s0", title="arXiv, 50,000 papers")
+db.declare_vocabulary("archive", closed=True, width="u8")
+db.declare_vocabulary("primary_category", closed=True, width="u16")
 db.declare_attribute("archive", type="category", vocabulary="archive", render=True, index=True)
 db.declare_attribute("primary_category", type="category", vocabulary="primary_category",
                      render=True, index=True)
@@ -529,37 +557,43 @@ db.declare_attribute("submitted_at", type="timestamp_us", render=True)
 db.declare_attribute("title", type="text", index=True)
 db.declare_attribute("abstract", type="text", index=True)
 db.declare_attribute("arxiv_id", type="keyword", index=True)
-
-db.declare_layer("clusters/kmeans", kind="flat", source="kmeans", members="kmeans_members",
-                 require_member_visibility={"count": 50})
-db.declare_labels("topics/kmeans", of="clusters/kmeans", source="kmeans_topics",
-                  members="kmeans_topic_members", content_requires="all")
-db.declare_layer("clusters/hdbscan", kind="nested", source="hdbscan", members="hdbscan_members",
-                 require_member_visibility={"fraction": 0.05})
-db.declare_labels("topics/hdbscan", of="clusters/hdbscan", source="hdbscan_topics",
-                  members="hdbscan_topic_members", content_requires="all")
-db.declare_layer("taxonomy/arxiv", kind="tiered", source="taxonomy", members="taxonomy_members",
-                 levels=[(0, "archive"), (1, "subject class")],
+db.declare_layer("clusters/kmeans", kind="flat", require_member_visibility={"count": 50})
+db.declare_labels("topics/kmeans", of="clusters/kmeans", content_requires="all")
+db.declare_layer("clusters/hdbscan", kind="nested", require_member_visibility={"fraction": 0.05})
+db.declare_labels("topics/hdbscan", of="clusters/hdbscan", content_requires="all")
+db.declare_layer("taxonomy/arxiv", kind="tiered", levels=[(0, "archive"), (1, "subject class")],
                  require_member_visibility={"count": 1}, computed=("centroid", "box"))
+
+db.insert("archive", "archive.parquet", key="key", title="title", code="code")
+db.insert("primary_category", "primary_category.parquet", key="key", title="title", code="code")
+db.insert("s0", "points.parquet", id="entity_id", x="x", y="y", access="categories")
+for layer, name in [("clusters/kmeans", "clusters-kmeans"), ("clusters/hdbscan", "clusters-hdbscan"),
+                    ("taxonomy/arxiv", "taxonomy-arxiv")]:
+    db.insert(layer, artifacts=f"{name}.parquet", key="key", level="level", parent="parent",
+              contents="contents")
+    db.insert(layer, members=f"{name}-members.parquet", id="entity", key="key", level="level")
+for labels, name in [("topics/kmeans", "topics-kmeans"), ("topics/hdbscan", "topics-hdbscan")]:
+    db.insert(labels, f"{name}.parquet", key="key", contents="contents")
+    db.insert(labels, members=f"{name}-members.parquet", id="entity", key="key", rank="rank")
 
 print(db.check())
 db.commit()
 print(db.declaration)
 
 db.map()
-db.viewer(terms=["math.AG"]).map()
+db.viewer(terms=["astro-ph"]).map()
 db.viewer(terms=["cs.LG", "stat.ML"]).map(layers=["clusters/hdbscan"])
 ```
 
 ### 10.3 A week of new papers into the running database
 
+The same calls as the first load, on the new tables.
+
 ```python
-db.stage("points", new_df)                       # a delta of papers
-db.stage("kmeans", pd.DataFrame({"level": [0], "key": ["k-new"]}))
-db.stage("kmeans_members", members_of_k_new)     # (level, key, entity)
-db.stage("kmeans_topics", pd.DataFrame({"level": [0], "key": ["k-new"],
-                                        "contents": [["Diffusion models for audio"]]}))
-db.stage("kmeans_topic_members", generating_rows)   # (level, key, rank, entity)
+db.insert("s0", new_df, id="entity_id", x="x", y="y", access="categories")
+db.insert("clusters/kmeans", new_df, id="entity_id", key="cluster")   # held keys join, new keys mint
+db.insert("topics/kmeans", {"k-new": "Diffusion models for audio"})
+db.insert("topics/kmeans", members=generating_rows, id="entity_id", key="key", rank="rank")
 print(db.check())     # the plan and the pre-flight
 db.commit()           # the report
 ```
@@ -567,20 +601,21 @@ db.commit()           # the report
 ### 10.4 A second clustering over the same points
 
 ```python
-db.stage("points", df.assign(cluster2=labels2)[["id", "cluster2"]], id="id")   # held ids, one new column
-db.declare_layer("clusters/second", kind="flat", from_column="cluster2")
-db.commit()           # published as artifacts with members, one per key
+db.declare_layer("clusters/second", kind="flat")
+db.insert("clusters/second", df, id="entity_id", key="cluster2")  # held rows; one column and an id
+db.commit()
 db.map(colour_by="cluster:clusters/second")
 ```
 
 ### 10.5 Two projections over one set of papers
 
 ```python
-db.stage("points", df_knn, id="arxiv_id", default=True)
-db.stage("points_pca", df_pca, id="arxiv_id")    # arxiv_id, x, y; the SDK copies `categories` by id
-db.declare_view("knn",   source="points",     access="categories")
-db.declare_view("pca64", source="points_pca", access="categories")
-db.declare_layer("clusters/kmeans", kind="flat", from_column="cluster", views=["knn", "pca64"])
+db.declare_view("knn")
+db.declare_view("pca64")
+db.declare_layer("clusters/kmeans", kind="flat", views=["knn", "pca64"])
+db.insert("knn",   df_knn, id="arxiv_id", x="x", y="y", access="categories")
+db.insert("pca64", df_pca, id="arxiv_id", x="x", y="y", access="categories")
+db.insert("clusters/kmeans", df_knn, id="arxiv_id", key="cluster")
 db.commit()
 db.map(view="pca64")
 ```
@@ -606,8 +641,6 @@ db = td.open("~/tessera/arxiv")
 
 Owner rulings on the first review's findings, 2026-09-16:
 
-- The SDK assigns entity ids and mints external ids at the first commit; the user's id is an
-  indexed keyword attribute (§3).
 - `create(path)` refuses a non-empty directory; `replace=True` and `open()` are the two ways in
   (§2).
 - A label's content gate is `all` or `inherited`; `none` at that grain would mean `inherited`
@@ -633,23 +666,33 @@ Rulings of 2026-09-17, on the first stages' review findings:
 - A second view's frame carries the access column or is refused (§4.2).
 - `serve.cors_loopback` is granted (§7); `tessera check` accepts a declaration whose attribute
   or view group names no source, as a note (§6.2 step 1).
-- A general client needs a signal that a flush has published: a monotonic publication counter
-  on `/control/status` that moves at every tick whatever it published, and a flush response
-  naming the publication its tick will carry. Through the design process as a contracts
-  amendment.
+- A write is visible at a numbered publication, every acknowledgement names it, and a client may
+  wait for it (decision 0144).
+
+Rulings of 2026-09-18:
+
+- Declaring and inserting are different verbs. A `declare_*` verb takes no data; `insert(target,
+  table, ...)` hands a table to a declared thing and names its columns; `commit()` sends what
+  was inserted and forgets it; adding data is the same `insert` calls again. `stage` goes.
+- No column name is guessed. The id, the coordinates, the access labels and a layer's key are
+  named on every call; an attribute's value column is matched by the attribute's name from a
+  frame inserted into a view, as SQL's `INSERT BY NAME`. A column no target reads is ignored.
+- Nothing is inferred by default. `declare_columns(frame, render=, index=)` is the explicit
+  helper; it declares every column as details, applies the two lists, and never chooses
+  `render` on its own.
+- A label with no members of its own is the label of its cluster: drawn where it is drawn,
+  served to whoever is served the cluster. The default; an engine rule (H).
+- A table with an id column and a value column is insertable whatever the source's history: a
+  layer's key column mints and joins at the values route as at the other two doors (F).
+- The verb names follow the industry's: `insert`, not `write` or `stage`.
 
 ### 11.2 Needed
 
-- **D. The demo.** A marimo notebook and a Jupyter twin over the arXiv 50k corpus running
-  §10.1 to §10.5 and §10.7, in `clients/py/examples/`. A headless test in `clients/py/check.sh`
-  that creates, commits and queries a database with no browser.
 - **E. The binary at release.** Platform wheels carrying it. Until then `PATH`, `TESSERA_BIN`
   or the checkout.
-- **F. The values route and layer columns.** Whether `POST /control/values` reads a layer
-  column and mints artifacts as the ingest route does (decision 0128), so a new clustering
-  over held rows can be staged as a column after the first commit. Until ruled, refused (§6.2).
-- **G. Issues #150 to #153**, engine and build defects the SDK's tests found; the SDK's second
-  publication wait comes out with #153.
+- **H. An attached artifact with no members takes its target's membership** (ruled; not
+  built): the engine's placement, counting and gating of a label read the cluster's rows.
+- **G. Issues #150 to #153**, engine and build defects the SDK's tests found.
 
 ## 12. Order of work
 
@@ -664,8 +707,9 @@ prints. The stages order the building; the goal is all of them.
 | S3 pages | later commits: the plan, the pre-flight, batch ids, the flush wait, the report, layers and labels declared after the first commit; `remove`, `suppress`, `unsuppress`, `leave` | §10.3 and §10.4 against the served answers | S1 |
 | S4 the rest of the layer surface | spatial and attribute membership, shapes and spaces, per-level zoom, prune, attached and dependent layers, inline artifacts and values, exclusion | `overture`, `geonames`, `gbif`, `treeoflife`, `medcpt`, `paperseek` | S1 |
 | S5 groups | `declare_view_group`, `add_view`, scoped attributes and layers, `view` on the record; views and groups after the first commit | `multiview` | S1, S3 |
-| S6 runtime declarations | attributes and vocabularies declared after the first commit | | S3, G4 |
+| S6 runtime declarations | attributes and vocabularies declared after the first commit | the served filter and category listing | S3 |
 | S7 demo | the two notebooks and the headless test | | S2, S3 |
 | S8 simplification | the id map, the commit log and its digests, the access-column copy, the from-column publish and the held-row logic removed; the pre-flight reports and sends nothing; the wait on the publication counter | every existing test, rewritten to the stateful reading | A, the publication signal |
+| S9 declare and insert | `declare_*` takes no data; `insert(target, table, **columns)`; `commit()` forgets; `stage` removed; `declare_columns`; no guessed names; undeclared columns ignored; the examples and the demo rewritten | every served test and the demo's headless walk | F, H |
 
 The Rust changes (A, B, C) are small and sit in the server and the CLI; the engine is untouched.

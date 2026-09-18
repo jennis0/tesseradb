@@ -964,6 +964,24 @@ struct RawServe {
     /// statement. Unlike `dev_cors_origins` this is silent at startup. See [`crate::cors`].
     #[serde(default)]
     cors_origins: Option<Vec<String>>,
+    /// Admit any page served from a loopback address on the **viewer plane**.
+    ///
+    /// The origin of a notebook front end is a port the kernel chose, so no operator can
+    /// enumerate it (`python-sdk.md` §7) and `cors_origins` cannot state it. This key states the
+    /// set instead: `http` or `https` on `localhost`, `127.0.0.1` or `[::1]`, any port. It is a
+    /// disclosure control and absent by default; what it admits is a page that may present a
+    /// **token**, on decision 0102's argument, and never one that may present the session
+    /// credential. See [`crate::cors`].
+    #[serde(default)]
+    cors_loopback: Option<bool>,
+    /// The longest a `wait=visible` write acknowledgement is held for its publication.
+    ///
+    /// Tuning, not a disclosure control: the wait changes when an answer is sent and nothing
+    /// about what it contains. Past the bound the route answers as it would have without the
+    /// wait, saying `visible: false`, so the ceiling costs a caller a poll of `/control/status`
+    /// and never an error.
+    #[serde(default)]
+    visible_wait_max_secs: Option<u64>,
 }
 
 /// The control plane's listen target: a real unix socket, or (tests, and the documented Windows
@@ -1076,6 +1094,14 @@ pub struct Config {
     /// Empty is the default and mounts nothing. Both lists may be set; a duplicate origin across
     /// the two is not an error. See [`crate::cors`].
     pub cors_origins: Vec<String>,
+    /// `serve.visible_wait_max_secs` (contracts §3.4): the ceiling on a `wait=visible` wait,
+    /// 30 seconds by default. Zero means a route answers without waiting at all, which reports
+    /// `visible: false` on every write whose cycle has not already published.
+    pub visible_wait_max_secs: u64,
+    /// `serve.cors_loopback`, viewer plane only and `false` by default. A page served from
+    /// `localhost`, `127.0.0.1` or `[::1]` on any port is admitted as a listed origin is. See
+    /// [`crate::cors`].
+    pub cors_loopback: bool,
     /// **Where** the session bearer secret comes from, not what it is. Read at
     /// [`crate::prepare`], never at parse: `tessera build` reads this same file and has no
     /// business requiring a serving secret to be exported before it will write a bundle. What
@@ -1278,6 +1304,11 @@ const _: () = assert!(DEFAULT_MAX_K >= DEFAULT_K_MAX_MARKS);
 const DEFAULT_THETA_TARGET_MARKS: u64 = 16;
 
 /// The largest `underlay_offset` a request may ask for (§3.3): sub-cell depth is `zoom + offset`.
+/// `serve.visible_wait_max_secs`. Long enough that a page and the tick it pulls forward complete
+/// on a loaded machine, short enough that a caller who set the parameter by mistake is not held
+/// for a tick period.
+const DEFAULT_VISIBLE_WAIT_MAX_SECS: u64 = 30;
+
 const DEFAULT_MAX_UNDERLAY_OFFSET: u8 = 4;
 
 /// The ceiling on sub-cells in one response. `tiles_for_bbox` is itself uncapped and the underlay
@@ -2293,6 +2324,11 @@ fn parse(text: &str) -> Result<Config> {
     // with a *working* server and no CORS, which is a worse answer than a refusal naming the key.
     let dev_cors_origins = raw.serve.dev_cors_origins.unwrap_or_default();
     let cors_origins = raw.serve.cors_origins.unwrap_or_default();
+    let cors_loopback = raw.serve.cors_loopback.unwrap_or(false);
+    let visible_wait_max_secs = raw
+        .serve
+        .visible_wait_max_secs
+        .unwrap_or(DEFAULT_VISIBLE_WAIT_MAX_SECS);
     for (key, origins) in [
         ("dev_cors_origins", &dev_cors_origins),
         ("cors_origins", &cors_origins),
@@ -2834,6 +2870,8 @@ fn parse(text: &str) -> Result<Config> {
         stage_timing: raw.serve.stage_timing.unwrap_or(false),
         dev_cors_origins,
         cors_origins,
+        cors_loopback,
+        visible_wait_max_secs,
         session_credential,
         operator_credential,
         compute_threads,
@@ -3748,6 +3786,23 @@ compaction_after_deletions = 9000
             config.cors_origins.is_empty(),
             "the dev key must not populate the production list — they are two postures, not one \
              list with two spellings"
+        );
+    }
+
+    /// `serve.cors_loopback` is absent by default, on `cors_origins`' reasoning: a disclosure
+    /// control a deployment has not written down is one it has not decided.
+    #[test]
+    fn cors_loopback_defaults_to_false_and_round_trips() {
+        std::env::set_var("TESSERA_TEST_SESSION_CRED", "s");
+        std::env::set_var("TESSERA_TEST_OPERATOR_CRED", "o");
+        let config = parse(&valid_toml("")).expect("a config naming no CORS keys must load");
+        assert!(!config.cors_loopback);
+
+        let config = parse(&valid_toml("cors_loopback = true")).expect("the key must load");
+        assert!(config.cors_loopback);
+        assert!(
+            config.cors_origins.is_empty() && config.dev_cors_origins.is_empty(),
+            "the rule is not a list and must populate neither"
         );
     }
 

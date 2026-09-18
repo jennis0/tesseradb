@@ -1940,8 +1940,14 @@ pub(crate) fn execute(plan: FoldPlan, ctx: FoldContext) -> Result<CompletedFold,
                 hasrow: ctx.from_prefix_dir.join(&extent.hasrow),
                 offsets: ctx.from_prefix_dir.join(&extent.offsets),
                 terms: ctx.from_prefix_dir.join(&extent.terms),
+                bases: ctx.from_prefix_dir.join(&extent.bases),
             });
-            for rel in [&extent.hasrow, &extent.offsets, &extent.terms] {
+            for rel in [
+                &extent.hasrow,
+                &extent.offsets,
+                &extent.terms,
+                &extent.bases,
+            ] {
                 attr_read += file_len(&ctx.from_prefix_dir.join(rel));
             }
         }
@@ -1949,6 +1955,7 @@ pub(crate) fn execute(plan: FoldPlan, ctx: FoldContext) -> Result<CompletedFold,
             tessera_store::ENTITY_TERMS_HASROW_FILE,
             tessera_store::ENTITY_TERMS_OFFSETS_FILE,
             tessera_store::ENTITY_TERMS_TERMS_FILE,
+            tessera_store::ENTITY_TERMS_BASES_FILE,
         ] {
             attr_read += file_len(&from_dir.join(name));
         }

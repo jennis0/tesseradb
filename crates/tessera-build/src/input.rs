@@ -148,7 +148,11 @@ fn selected_rows(
         let Some(value) = value else {
             return Err(stray(None));
         };
-        if select.keys.binary_search_by(|k| k.as_str().cmp(value)).is_err() {
+        if select
+            .keys
+            .binary_search_by(|k| k.as_str().cmp(value))
+            .is_err()
+        {
             return Err(stray(Some(value)));
         }
         keep[i] = value == select.value;
@@ -1143,7 +1147,7 @@ fn open_access_reader(
             .fields()
             .iter()
             .map(|f| {
-                if f.name() == field && matches!(f.data_type(), DataType::Utf8) {
+                if f.name() == field && crate::utf8::is_utf8(f.data_type()) {
                     Arc::new(Field::new(
                         f.name(),
                         DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8)),
@@ -1218,14 +1222,17 @@ impl<'a> AccessBatch<'a> {
 ///
 /// **A `list<string>`, or a plain `string` where a point carries one term** (`configuration.md`
 /// §1) — and a dictionary of either, which is what [`scan_access_column`] asks the reader for.
-/// Any other type is refused rather than coerced: a column of integers or of a nested struct is
-/// not a term list, and guessing what its rows meant would mint access terms nobody wrote.
+/// The list width and the string width are the writer's choice and say nothing about the terms,
+/// so `list` and `large_list` of `utf8` and `large_utf8` are all read. Any other type is refused
+/// rather than coerced: a column of integers or of a nested struct is not a term list, and
+/// guessing what its rows meant would mint access terms nobody wrote.
 fn read_access_column<'a>(
     path: &Path,
     column: &'a arrow::array::ArrayRef,
     name: &str,
 ) -> Result<AccessBatch<'a>> {
-    use arrow::array::{Array as _, DictionaryArray, LargeStringArray, ListArray, StringArray};
+    use crate::utf8::Utf8Column;
+    use arrow::array::{Array as _, DictionaryArray, LargeListArray, ListArray};
     use arrow::datatypes::Int32Type;
 
     let rows = column.len();
@@ -1235,15 +1242,9 @@ fn read_access_column<'a>(
     // **The dictionary route.** The keys are the indices already; all this pass does is trim each
     // distinct value once and renumber, because a dictionary page may carry values no row uses
     // and a trim may make two of them one.
-    if let Some(dictionary) = column
-        .as_any()
-        .downcast_ref::<DictionaryArray<Int32Type>>()
-    {
-        let values = dictionary
-            .values()
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .ok_or_else(|| BuildError::Schema {
+    if let Some(dictionary) = column.as_any().downcast_ref::<DictionaryArray<Int32Type>>() {
+        let values =
+            Utf8Column::new(dictionary.values().as_ref()).ok_or_else(|| BuildError::Schema {
                 path: path.to_path_buf(),
                 detail: format!(
                     "the access column '{name}' is a dictionary of {:?}, and an access term is a \
@@ -1283,7 +1284,8 @@ fn read_access_column<'a>(
         return Ok(batch);
     }
 
-    if let Some(values) = column.as_any().downcast_ref::<StringArray>() {
+    // A scalar column: one term per row, at either offset width.
+    if let Some(values) = Utf8Column::new(column.as_ref()) {
         for i in 0..rows {
             if !values.is_null(i) {
                 batch.push(&mut seen, values.value(i));
@@ -1292,40 +1294,41 @@ fn read_access_column<'a>(
         }
         return Ok(batch);
     }
-    if let Some(values) = column.as_any().downcast_ref::<LargeStringArray>() {
-        for i in 0..rows {
-            if !values.is_null(i) {
-                batch.push(&mut seen, values.value(i));
-            }
-            batch.end_row();
-        }
-        return Ok(batch);
-    }
-    if let Some(list) = column.as_any().downcast_ref::<ListArray>() {
+    // A list column: the row's terms, at either list width over either string width.
+    fn lists<'v, O: arrow::array::OffsetSizeTrait>(
+        path: &Path,
+        name: &str,
+        list: &'v arrow::array::GenericListArray<O>,
+        batch: &mut AccessBatch<'v>,
+        seen: &mut HashMap<&'v str, u32>,
+    ) -> Result<()> {
         let values = list.values();
-        let strings = values
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .ok_or_else(|| BuildError::Schema {
-                path: path.to_path_buf(),
-                detail: format!(
-                    "the access column '{name}' is a list of {:?}, and an access term is a \
-                     string",
-                    values.data_type()
-                ),
-            })?;
+        let strings = Utf8Column::new(values.as_ref()).ok_or_else(|| BuildError::Schema {
+            path: path.to_path_buf(),
+            detail: format!(
+                "the access column '{name}' is a list of {:?}, and an access term is a string",
+                values.data_type()
+            ),
+        })?;
         let offsets = list.value_offsets();
-        for i in 0..rows {
+        for i in 0..list.len() {
             if !list.is_null(i) {
-                for j in offsets[i]..offsets[i + 1] {
-                    let j = j as usize;
+                for j in offsets[i].as_usize()..offsets[i + 1].as_usize() {
                     if !strings.is_null(j) {
-                        batch.push(&mut seen, strings.value(j));
+                        batch.push(seen, strings.value(j));
                     }
                 }
             }
             batch.end_row();
         }
+        Ok(())
+    }
+    if let Some(list) = column.as_any().downcast_ref::<ListArray>() {
+        lists(path, name, list, &mut batch, &mut seen)?;
+        return Ok(batch);
+    }
+    if let Some(list) = column.as_any().downcast_ref::<LargeListArray>() {
+        lists(path, name, list, &mut batch, &mut seen)?;
         return Ok(batch);
     }
     Err(BuildError::Schema {
@@ -2121,8 +2124,6 @@ pub fn read_vocabulary_file(
     vocabulary: &str,
     fields: &Fields,
 ) -> Result<crate::config::DeclaredValues> {
-    use arrow::array::StringArray;
-
     let file = File::open(path).map_err(|e| BuildError::io(path, e))?;
     let builder =
         ParquetRecordBatchReaderBuilder::try_new(file).map_err(|e| BuildError::parquet(path, e))?;
@@ -2156,13 +2157,12 @@ pub fn read_vocabulary_file(
     let mut set = crate::config::DeclaredValues::default();
     for batch in reader {
         let batch = batch.map_err(|e| BuildError::arrow(path, e))?;
-        let keys = batch
-            .column(key_idx)
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .ok_or_else(|| BuildError::Schema {
-                path: path.to_path_buf(),
-                detail: format!("vocabulary column '{}' must be utf8", fields.of("key")),
+        let keys =
+            crate::utf8::Utf8Column::new(batch.column(key_idx).as_ref()).ok_or_else(|| {
+                BuildError::Schema {
+                    path: path.to_path_buf(),
+                    detail: format!("vocabulary column '{}' must be utf8", fields.of("key")),
+                }
             })?;
         let code_values = match code_idx {
             Some(idx) => Some(read_u64_column(path, &batch, idx, fields.of("code"))?),
@@ -2170,15 +2170,12 @@ pub fn read_vocabulary_file(
         };
         let title_values = match title_idx {
             Some(idx) => Some(
-                batch
-                    .column(idx)
-                    .as_any()
-                    .downcast_ref::<StringArray>()
-                    .ok_or_else(|| BuildError::Schema {
+                crate::utf8::Utf8Column::new(batch.column(idx).as_ref()).ok_or_else(|| {
+                    BuildError::Schema {
                         path: path.to_path_buf(),
                         detail: format!("vocabulary column '{}' must be utf8", fields.of("title")),
-                    })?
-                    .clone(),
+                    }
+                })?,
             ),
             None => None,
         };
@@ -2419,7 +2416,7 @@ pub struct BatchColumn {
 enum BatchValues {
     /// Category keys under a **declared** vocabulary, resolved per row: `value` looks each key up
     /// against `schema_decl` and refuses an unknown one (§5's declare-then-use).
-    Keys(arrow::array::StringArray),
+    Keys(crate::utf8::Utf8Values),
     /// Category codes under a **discovered** vocabulary, already resolved by the batch-level mint
     /// pre-pass in `decode` — every key this batch carries was minted or found bound before this
     /// variant exists, so `value` is a pure index, exactly as every other variant's is.
@@ -2445,7 +2442,7 @@ enum BatchValues {
     /// existing independently of any row; a string is row data whose visibility is the visibility
     /// of the rows carrying it. So this variant resolves nothing against a vocabulary and mints
     /// nothing — the bytes are the value (per-point-attributes; filter-index §2.3).
-    Text(arrow::array::StringArray),
+    Text(crate::utf8::Utf8Values),
 }
 
 impl BatchColumn {
@@ -2495,18 +2492,16 @@ impl BatchColumn {
             // A category arrives as its *key*, never as a code: §3.1 — the key in the row is not
             // the display name, and the code is assigned once and pinned, so a data file
             // supplying codes directly would be a second place codes are decided.
-            let keys = any
-                .downcast_ref::<arrow::array::StringArray>()
-                .ok_or_else(|| BuildError::Schema {
-                    path: path.to_path_buf(),
-                    detail: format!(
-                        "attribute '{}' is a category, so its column must hold value keys (utf8); \
-                         this file holds {:?}. A category's code is assigned once from the \
-                         vocabulary and never re-derived from the data (per-point-attributes §3.4)",
-                        attribute.name,
-                        column.data_type()
-                    ),
-                })?;
+            let keys = crate::utf8::Utf8Values::new(column).ok_or_else(|| BuildError::Schema {
+                path: path.to_path_buf(),
+                detail: format!(
+                    "attribute '{}' is a category, so its column must hold value keys (utf8); \
+                     this file holds {:?}. A category's code is assigned once from the \
+                     vocabulary and never re-derived from the data (per-point-attributes §3.4)",
+                    attribute.name,
+                    column.data_type()
+                ),
+            })?;
             return match attribute.value_set {
                 Some(crate::config::ValueSet::Open) => {
                     let minter = minters.get_mut(vocabulary).unwrap_or_else(|| {
@@ -2516,12 +2511,14 @@ impl BatchColumn {
                         )
                     });
                     Ok(BatchValues::Discovered(mint_batch(
-                        keys, minter, attribute,
+                        keys.column(),
+                        minter,
+                        attribute,
                     )?))
                 }
                 // Declared (or a vocabulary shared by naming it): resolved per row in `value`,
                 // unchanged from the declare-then-use rule.
-                _ => Ok(BatchValues::Keys(keys.clone())),
+                _ => Ok(BatchValues::Keys(keys)),
             };
         }
         Ok(match attribute.ty {
@@ -2566,11 +2563,9 @@ impl BatchColumn {
             // by an analyser at index time and its prose goes to the record blob, so what a points
             // file carries is the prose and nothing else — there is no term column to supply and
             // no analyser to run this side of the declaration (records §4.4).
-            ScalarType::Utf8 | ScalarType::Keyword | ScalarType::Text => BatchValues::Text(
-                any.downcast_ref::<arrow::array::StringArray>()
-                    .ok_or_else(mismatch)?
-                    .clone(),
-            ),
+            ScalarType::Utf8 | ScalarType::Keyword | ScalarType::Text => {
+                BatchValues::Text(crate::utf8::Utf8Values::new(column).ok_or_else(mismatch)?)
+            }
             // A `u64` declaration over a `u64` source keeps the full range; every other
             // combination widens, which is lossless for it.
             ScalarType::U64 if any.is::<UInt64Array>() => BatchValues::U64(
@@ -2595,7 +2590,7 @@ impl BatchColumn {
     fn carries(attribute: &crate::config::Attribute, found: &DataType) -> bool {
         if attribute.vocabulary.is_some() {
             // A category arrives as its *key*, never as a code.
-            return matches!(found, DataType::Utf8);
+            return crate::utf8::is_utf8(found);
         }
         match attribute.ty {
             ScalarType::Bool => matches!(found, DataType::Boolean),
@@ -2604,7 +2599,7 @@ impl BatchColumn {
                 matches!(found, DataType::Float32 | DataType::Float64)
             }
             ScalarType::Utf8 | ScalarType::Keyword | ScalarType::Text => {
-                matches!(found, DataType::Utf8)
+                crate::utf8::is_utf8(found)
             }
             // Every integer family widens to `i64` and is range-checked per row, which a schema
             // cannot anticipate — so this is presence and family, never fit.
@@ -2745,7 +2740,7 @@ fn code_as(ty: ScalarType, code: u32) -> ScalarValue {
 /// An empty key is refused, never minted as [`crate::config::ABSENT_CODE`] — the same typo trap
 /// [`VocabularyMinter::mint`] itself enforces for a declared vocabulary's row-time lookup.
 fn mint_batch(
-    keys: &arrow::array::StringArray,
+    keys: crate::utf8::Utf8Column<'_>,
     minter: &mut VocabularyMinter,
     attribute: &crate::config::Attribute,
 ) -> Result<Vec<u32>> {
@@ -2857,8 +2852,8 @@ mod tests {
     fn column_carries_agrees_with_the_decoder() {
         use arrow::array::{
             ArrayRef, BooleanArray, Float32Array, Float64Array, Int16Array, Int32Array, Int64Array,
-            Int8Array, StringArray, TimestampMicrosecondArray, UInt16Array, UInt32Array,
-            UInt64Array, UInt8Array,
+            Int8Array, LargeStringArray, StringArray, TimestampMicrosecondArray, UInt16Array,
+            UInt32Array, UInt64Array, UInt8Array,
         };
         use arrow::datatypes::TimeUnit;
         use std::sync::Arc;
@@ -2890,11 +2885,11 @@ mod tests {
             Arc::new(Float32Array::from(vec![1.0f32])),
             Arc::new(Float64Array::from(vec![1.0f64])),
             Arc::new(StringArray::from(vec!["k"])),
+            // The same bytes at 64-bit offsets, which is what pandas 3 writes.
+            Arc::new(LargeStringArray::from(vec!["k"])),
             Arc::new(TimestampMicrosecondArray::from(vec![1i64])),
             // The near miss the decoder names outright: a timestamp in the wrong unit.
-            Arc::new(
-                arrow::array::TimestampMillisecondArray::from(vec![1i64]),
-            ),
+            Arc::new(arrow::array::TimestampMillisecondArray::from(vec![1i64])),
         ];
         let declared = [
             ScalarType::Bool,
@@ -2917,7 +2912,9 @@ mod tests {
         for ty in declared {
             for vocabulary in [None, Some("v")] {
                 // A category's width is the vocabulary's, so only the integer widths pair with one.
-                if vocabulary.is_some() && !matches!(ty, ScalarType::U8 | ScalarType::U16 | ScalarType::U32) {
+                if vocabulary.is_some()
+                    && !matches!(ty, ScalarType::U8 | ScalarType::U16 | ScalarType::U32)
+                {
                     continue;
                 }
                 let attribute = attribute(ty, vocabulary);
@@ -3039,7 +3036,11 @@ pub fn read_roster_table(
         .collect::<Result<_>>()?;
 
     /// One column's rows as strings, or a refusal naming the column's type.
-    fn strings(path: &Path, column: &arrow::array::ArrayRef, name: &str) -> Result<Vec<Option<String>>> {
+    fn strings(
+        path: &Path,
+        column: &arrow::array::ArrayRef,
+        name: &str,
+    ) -> Result<Vec<Option<String>>> {
         if let Some(values) = column.as_any().downcast_ref::<StringArray>() {
             return Ok((0..values.len())
                 .map(|i| (!values.is_null(i)).then(|| values.value(i).to_string()))
@@ -3105,8 +3106,13 @@ pub fn read_roster_table(
             return (0..list.len())
                 .map(|i| match list.is_null(i) {
                     true => Ok(None),
-                    false => row(list.values(), i, offsets[i] as usize, offsets[i + 1] as usize)
-                        .map(Some),
+                    false => row(
+                        list.values(),
+                        i,
+                        offsets[i] as usize,
+                        offsets[i + 1] as usize,
+                    )
+                    .map(Some),
                 })
                 .collect();
         }
@@ -3115,8 +3121,13 @@ pub fn read_roster_table(
             return (0..list.len())
                 .map(|i| match list.is_null(i) {
                     true => Ok(None),
-                    false => row(list.values(), i, offsets[i] as usize, offsets[i + 1] as usize)
-                        .map(Some),
+                    false => row(
+                        list.values(),
+                        i,
+                        offsets[i] as usize,
+                        offsets[i + 1] as usize,
+                    )
+                    .map(Some),
                 })
                 .collect();
         }
@@ -3160,17 +3171,18 @@ pub fn read_roster_table(
             } else {
                 match declared.ty {
                     ScalarType::Bool => {
-                        let values = column
-                            .as_any()
-                            .downcast_ref::<BooleanArray>()
-                            .ok_or_else(|| BuildError::Schema {
-                                path: path.to_path_buf(),
-                                detail: format!(
-                                    "the roster column '{name}' has type {:?}, and this group \
+                        let values =
+                            column
+                                .as_any()
+                                .downcast_ref::<BooleanArray>()
+                                .ok_or_else(|| BuildError::Schema {
+                                    path: path.to_path_buf(),
+                                    detail: format!(
+                                        "the roster column '{name}' has type {:?}, and this group \
                                      declares it 'bool'",
-                                    column.data_type()
-                                ),
-                            })?;
+                                        column.data_type()
+                                    ),
+                                })?;
                         (0..values.len())
                             .map(|row| match values.is_null(row) {
                                 true => Err(missing(row)),
@@ -3201,19 +3213,17 @@ pub fn read_roster_table(
                             .collect::<Result<_>>()?
                     }
                     ty => {
-                        let widened =
-                            read_integer(column.as_any(), column.data_type()).ok_or_else(|| {
-                                BuildError::Schema {
-                                    path: path.to_path_buf(),
-                                    detail: format!(
-                                        "the roster column '{name}' has type {:?}, and this group \
+                        let widened = read_integer(column.as_any(), column.data_type())
+                            .ok_or_else(|| BuildError::Schema {
+                                path: path.to_path_buf(),
+                                detail: format!(
+                                    "the roster column '{name}' has type {:?}, and this group \
                                          declares it '{}'. A `timestamp_us` reads a microsecond \
                                          timestamp or an `i64`, and nothing else — a millisecond \
                                          column read here would be a date a thousandfold wrong",
-                                        column.data_type(),
-                                        ty.arrow_type_name()
-                                    ),
-                                }
+                                    column.data_type(),
+                                    ty.arrow_type_name()
+                                ),
                             })?;
                         let nulls = column.nulls().cloned();
                         widened

@@ -27,6 +27,11 @@ VIEWS_ALL = "__views_all__"
 #: `allocation_view` instead.
 ANCHOR = "__anchor__"
 
+#: An attribute declared at a running service, kept beside the block and never written. Such a
+#: column has no acquisition half: it is filled by `POST /control/values` rather than read from a
+#: file, so the block names no source and the default source is not written onto it (§6.2 step 1).
+FILLED = "__filled__"
+
 HIERARCHY_KINDS = ("flat", "nested", "dag", "stacked", "tiered")
 LEVELLED = ("stacked", "tiered")
 SHAPE_KINDS = ("bbox", "circle", "ellipse", "polygon")
@@ -110,16 +115,21 @@ class Declaration:
     def document(
         self,
         sources: dict[str, str],
-        default_source: str | None,
         inferred_attributes: Sequence[dict] = (),
         inferred_vocabularies: Sequence[dict] = (),
     ) -> dict[str, Any]:
+        """The declaration as TOML's own shape (§4.8).
+
+        **`[defaults].source` is never written.** `default=True` is the SDK's own convenience: the
+        source it names is filled onto every block that names none, which §4.8 asks for anyway, so
+        the file each object reads is on the object. A default in the document would additionally
+        bind an attribute declared at a running service, whose column is filled rather than read,
+        to the file the first commit built from.
+        """
         document: dict[str, Any] = {}
         if sources:
             document["sources"] = dict(sources)
         defaults: dict[str, Any] = {}
-        if default_source is not None:
-            defaults["source"] = default_source
         allocation_view = self.allocation_view()
         if allocation_view is not None:
             defaults["allocation_view"] = allocation_view
@@ -623,8 +633,8 @@ def layer_block(
     if rows is not None:
         block["artifacts"] = rows
     if from_column is not None:
-        # At the first commit a from-column layer compiles to `[layer.members]` reading the points
-        # source with the column as `key` (§4.6).
+        # A from-column layer compiles to `[layer.members]` reading the points source with the
+        # column as `key` and the points file's own id column as `entity` (§4.6).
         block["members"] = {
             "source": points_source,
             "fields": Inline({"key": from_column, "entity": entity_field or "entity_id"}),
@@ -944,3 +954,62 @@ def _level(entry: Any) -> dict:
     if rest and rest[0] is not None:
         block["zoom"] = list(rest[0])
     return block
+
+
+# ------------------------------------------------------------------ naming identity
+
+
+#: What configuration.md's own defaults call the identity column in each place one is read: a
+#: view's `fields.entity_id` and an attribute's `entity_id_field` (§1), and a member row's
+#: `fields.entity`.
+CANONICAL_ENTITY_ID = "entity_id"
+CANONICAL_MEMBER_ENTITY = "entity"
+
+
+def name_identity(document: dict, id_of) -> None:
+    """Write each block's id column into the declaration, where it is not the canonical name.
+
+    `id_of` takes a source name and gives the column that source names its rows by, or `None`.
+    The SDK rewrites no file, so a frame keeps whatever column the user staged it with and the
+    declaration is what says where identity is (§3, configuration.md §1).
+    """
+    for block in document.get("view", []) + document.get("view_group", []):
+        _named(block, "fields", "entity_id", id_of(_points_of(block)), CANONICAL_ENTITY_ID)
+    for block in document.get("attribute", []):
+        column = id_of(block.get("source"))
+        if column is not None and column != CANONICAL_ENTITY_ID:
+            block["entity_id_field"] = column
+    for block in document.get("layer", []):
+        for one in (block, block.get("labels")):
+            if not isinstance(one, dict):
+                continue
+            members = one.get("members")
+            if isinstance(members, dict):
+                _named(
+                    members,
+                    "fields",
+                    "entity",
+                    id_of(members.get("source")),
+                    CANONICAL_MEMBER_ENTITY,
+                )
+
+
+def _points_of(block: dict) -> str | None:
+    """Where a view or a group reads its points: its own source, or its roster's first."""
+    if block.get("source"):
+        return block["source"]
+    for record in block.get("view") or []:
+        if record.get("source"):
+            return record["source"]
+    return None
+
+
+def _named(block: dict, where: str, key: str, column: str | None, canonical: str) -> None:
+    if column is None or column == canonical:
+        return
+    fields = block.get(where)
+    if fields is None:
+        block[where] = Inline({key: column})
+        return
+    if fields.get(key) != column:
+        block[where] = Inline({**dict(fields), key: column})

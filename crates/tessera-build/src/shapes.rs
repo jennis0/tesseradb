@@ -20,7 +20,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use arrow::array::{Array, BinaryArray, Float64Array, LargeBinaryArray, StringArray};
+use arrow::array::{Array, BinaryArray, Float64Array, LargeBinaryArray};
 use arrow::record_batch::RecordBatch;
 use tessera_lifecycle::membership::ArtifactShapes;
 use tessera_store::derived::{
@@ -333,13 +333,13 @@ pub fn space_column<'a>(
     path: &Path,
     batch: &'a RecordBatch,
     fields: &Fields,
-) -> Result<Option<&'a StringArray>> {
+) -> Result<Option<crate::utf8::Utf8Column<'a>>> {
     optional_utf8(path, batch, fields, "space")
 }
 
 /// The row's own `space` from that column, `None` where the row leaves it null.
-pub fn space_at(column: Option<&StringArray>, row: usize) -> Option<&str> {
-    column.filter(|c| !c.is_null(row)).map(|c| c.value(row))
+pub fn space_at<'a>(column: Option<crate::utf8::Utf8Column<'a>>, row: usize) -> Option<&'a str> {
+    column.and_then(|c| c.at(row))
 }
 
 /// An inline row's geometry, in its layer's kind's field.
@@ -759,9 +759,20 @@ fn optional_utf8<'a>(
     batch: &'a RecordBatch,
     fields: &Fields,
     canonical: &str,
-) -> Result<Option<&'a StringArray>> {
+) -> Result<Option<crate::utf8::Utf8Column<'a>>> {
     match optional(path, batch, fields, canonical)? {
         None => Ok(None),
-        Some(array) => typed(path, array, fields.of(canonical)).map(Some),
+        Some(array) => {
+            let name = fields.of(canonical);
+            crate::utf8::Utf8Column::new(array.as_ref())
+                .ok_or_else(|| {
+                    BuildError::Invalid(format!(
+                        "{}: column {name} is {:?}, which this reader cannot take",
+                        path.display(),
+                        array.data_type()
+                    ))
+                })
+                .map(Some)
+        }
     }
 }

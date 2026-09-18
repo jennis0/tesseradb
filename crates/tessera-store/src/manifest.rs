@@ -1466,7 +1466,7 @@ pub struct RecordExtent {
 /// One entry of `entity_terms_extents`: one flush's slice of the entity→term transpose
 /// (`entities/terms/`, contracts §2.4; `crate::entity_terms` for the format).
 ///
-/// The same shape and the same argument as [`RecordExtent`]: three files named explicitly rather
+/// The same shape and the same argument as [`RecordExtent`]: every file named explicitly rather
 /// than recovered from a path convention, layers disjoint in entity space by **I9**, and a
 /// missing or short file refusing the open rather than reading as "those entities carry no
 /// terms". The stakes differ from the blob's by direction, not by degree — a record read short
@@ -1478,10 +1478,14 @@ pub struct EntityTermsExtent {
     /// Prefix-relative path of the extent's has-row Roaring bitmap — the entities this flush
     /// minted a term list for. Rank in it addresses `offsets`.
     pub hasrow: String,
-    /// Prefix-relative path of the extent's `(cardinality + 1)` ascending `u32` offsets.
+    /// Prefix-relative path of the extent's `(cardinality + 1)` `u32` offsets, each relative to
+    /// its own block's base.
     pub offsets: String,
     /// Prefix-relative path of the extent's concatenated `u32` term ordinals.
     pub terms: String,
+    /// Prefix-relative path of the extent's `u64` block bases, one per 65,536 ranks of
+    /// `offsets`, which is what keeps a layer's pair count off a `u32` ceiling.
+    pub bases: String,
 }
 
 /// One entry of `membership_extents`: one publication's packed artifact memberships for one level

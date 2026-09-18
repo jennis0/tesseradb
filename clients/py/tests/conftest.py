@@ -131,8 +131,8 @@ def viewport(db, view: str, bbox, zoom: int = 0, k: int = 512, filters: dict | N
                     counts[name] = sum(int(v) for v in table.column(name).to_pylist())
         elif kind == 3:
             table = ipc.open_stream(io.BytesIO(payload)).read_all()
-            if "id" in table.column_names:
-                ids += [str(v) for v in table.column("id").to_pylist()]
+            if "tessera_id" in table.column_names:
+                ids += [str(v) for v in table.column("tessera_id").to_pylist()]
         elif kind == 4:
             trailer = _json.loads(payload.decode())
     return {"counts": counts, "trailer": trailer, "ids": ids, "complete": bool(trailer)}
@@ -151,3 +151,23 @@ def browse(db, view: str, layer: str, terms=None, **extra) -> dict:
 
     body = {"view": view, "layer": layer, **extra}
     return _json.loads(post(db.viewer_url + "/v1/artifacts/browse", db.token(terms).token, body))
+
+
+def categories(db, column: str, terms=None, **query) -> dict:
+    """`GET /v1/categories/{column}`: what this column's codes stand for (contracts §3.2).
+
+    The bare form pages the value set, which is how a vocabulary declared at a running service is
+    read back: `/v1/meta` names the vocabulary a category reads and carries none of its values.
+    """
+    import json as _json
+    import urllib.parse
+    import urllib.request
+
+    url = f"{db.viewer_url}/v1/categories/{urllib.parse.quote(column, safe='')}"
+    if query:
+        url += "?" + urllib.parse.urlencode(query)
+    request = urllib.request.Request(
+        url, headers={"authorization": f"Bearer {db.token(terms).token}"}
+    )
+    with urllib.request.urlopen(request, timeout=120) as response:
+        return _json.loads(response.read())

@@ -559,6 +559,8 @@ compute_admission = 32
 compute_queue = 64
 admission_timeout_ms = 250            # queueing for a permit; not the wait below
 single_flight_wait_ms = 6000          # waiting for a build already running (§6.3)
+visible_wait_max_secs = 30            # the longest a `wait=visible` write is held for its publication
+                                      # (contracts §3.4, decision 0144); 0 answers at once; tuning, not disclosure
 # caches and pins
 row_projection_cache_bytes = 2_147_483_648
 fragment_cache_bytes = 1_073_741_824

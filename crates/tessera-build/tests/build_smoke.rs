@@ -276,6 +276,9 @@ fn build_produces_a_verifiable_signature_sorted_bundle() {
         "partitions/default/entities/terms/hasrow.roaring",
         "partitions/default/entities/terms/offsets.u32",
         "partitions/default/entities/terms/terms.u32",
+        // The offsets' block bases: one u64 per 65,536 has-row ranks, which is what takes the
+        // layer's pair count off a u32 ceiling.
+        "partitions/default/entities/terms/bases.u64",
         "partitions/default/views/s0/permutation.bin",
         "partitions/default/views/s0/row-entity.u32",
         "partitions/default/views/s0/segments/seg-0/columns.arrow",
@@ -294,7 +297,7 @@ fn build_produces_a_verifiable_signature_sorted_bundle() {
     }
     assert_eq!(
         bundle.manifest.files.len(),
-        14,
+        15,
         "MANIFEST.json must list every build-written file and nothing else"
     );
 

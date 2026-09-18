@@ -6,7 +6,7 @@ directly, the other reads it through a relative path from a temporary directory.
 compared whole, and stderr by its file names.** That is the whole normalisation: the disclosure table carries no
 path, which is what makes it the thing to compare.
 
-Beside it, the first commit through `tessera build --mint-external-ids`.
+Beside it, the first commit through `tessera build`.
 """
 
 import json
@@ -293,8 +293,9 @@ def test_the_first_commit_builds_a_bundle_and_mints_every_external_id(tmp_path):
     bundle = db.path / "bundle"
     assert (bundle / "CURRENT").exists()
     entities = bundle / "v00000" / "partitions" / "default" / "entities"
-    # `--mint-external-ids`: every built row is addressable afterwards, on the ingest and values
-    # routes and in `remove()`.
+    # The points file names its rows by an integer `entity_id`, which the build writes the
+    # external-id sidecar from when it is asked to: so every built row is addressable afterwards,
+    # on the ingest and values routes and in `remove()` (§3, configuration.md §8).
     assert (entities / "ext-locator.u32").exists()
     assert list(entities.glob("external-ids-*.arrow"))
     # The regeneration proved through the build: the bundle's own disclosure report, which carries
