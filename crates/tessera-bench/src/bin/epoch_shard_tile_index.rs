@@ -49,7 +49,7 @@ use serde::Serialize;
 use tessera_engine::artifacts::MembershipRows;
 use tessera_engine::row_column::RowColumn;
 use tessera_engine::tile_index::{Extent, TileIndex};
-use tessera_lifecycle::membership::{decode_record, ArtifactRecord, Members};
+use tessera_lifecycle::membership::{decode_record, ArtifactRecord, ArtifactStore, Members};
 use tessera_store::derived::tile_index_shifts;
 use tessera_store::manifest::SegmentsManifest;
 use tessera_store::membership::{row_column_width, MembershipPack};
@@ -461,10 +461,13 @@ fn build_shard(fixture: &Fixture, sharding: &Sharding, shard: u32, scratch: &Pat
 
 fn project_index(fixture: &Fixture, shard: &ShardBuild) -> TileIndex {
     let records = shard.records(fixture);
+    // No bench record is an attachment, so the store consulted for a borrowed membership
+    // (decision 0145) is never read; an empty one states that.
     TileIndex::project(
         fixture.ordinals,
         || records.iter().map(|(o, r)| (*o, r)),
         &shard.space,
+        &ArtifactStore::new(),
     )
 }
 
