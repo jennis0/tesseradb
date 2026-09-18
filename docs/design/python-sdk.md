@@ -330,12 +330,9 @@ A label set over a clustering: the `[layer.labels]` block, which expands to a fl
 supplied content attached to `of`. Its text comes from `insert(name, {key: text})` or
 `insert(name, table, key=, text=)`.
 
-**A label with no members of its own is the label of its cluster** (the H ruling of
-2026-09-18): it is drawn where the cluster is drawn, counted over the cluster's members, and
-served to whoever is served the cluster. That is the default and needs no declaration key. Not
-built yet: the engine places an attached artifact by its own member rows and a label with none
-is served to nobody; until the rule lands, `insert` on a label set without `members=` is
-refused naming it.
+**A label with no members of its own is the label of its cluster** (decision 0145): it is drawn
+where the cluster is drawn, counted over the cluster's members, and served to whoever is served
+the cluster. That is the default and needs no declaration key.
 
 `content_requires="all"` is the exception that narrows: the text was generated from a specific
 set of documents, given as `members=` on the insert with `key=`, `id=` and `rank=`, and is read
@@ -536,7 +533,7 @@ db.declare_layer("clusters", kind="flat")
 db.declare_labels("topics", of="clusters")
 db.insert("map", df, id="paper", x="x", y="y")          # title and year read by name
 db.insert("clusters", df, id="paper", key="cluster")
-db.insert("topics", topic_names)                        # {cluster_key: text}; Not built yet: H
+db.insert("topics", topic_names)                        # {cluster_key: text}
 db.commit()
 db.map(colour_by="cluster:clusters")
 ```
@@ -690,8 +687,6 @@ Rulings of 2026-09-18:
 
 - **E. The binary at release.** Platform wheels carrying it. Until then `PATH`, `TESSERA_BIN`
   or the checkout.
-- **H. An attached artifact with no members takes its target's membership** (ruled; not
-  built): the engine's placement, counting and gating of a label read the cluster's rows.
 - **G. Issues #150 to #153**, engine and build defects the SDK's tests found.
 
 ## 12. Order of work
