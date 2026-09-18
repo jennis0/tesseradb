@@ -127,12 +127,12 @@ the columns. Every insert prints two lists, the columns it read and the columns 
 | Target | Columns named on the call |
 |---|---|
 | a view | `id=`; `x=`, `y=` (or `lon=`, `lat=` under a projection); `access=`, a list-of-strings column, absent meaning every row takes the view's default label. Attribute value columns are read by name (below) |
-| a view group | as a view, plus `view=`, the column naming which view of the group each row belongs to; a roster of views with their metadata is `insert(group, roster=table, key=, **metadata_columns)` |
+| a view group | as a view, plus either `view=`, the column naming which view of the group each row belongs to, or `view_key=`, one view for the whole table (a group whose views each have their own file inserts one table per view); a roster of views with their metadata is `insert(group, roster=table, key=, **metadata_columns)` |
 | an attribute | `id=`, `value=`; on a group-scoped attribute also `view=` |
 | a layer, by key | `id=`, `key=`: one key per row, or a list of one key per level on a tiered layer; on a group-scoped layer also `view=` |
 | a layer, artifacts | `insert(layer, artifacts=table, key=, parent=, contents=, attached_layer=, attached_key=, members=, excluding=, space=, level=, attached_level=, shape=)`, each named where the table carries it. `level` and `attached_level` are read by the build only under their own names, so those two take the canonical name or the column is renamed in the table; `shape=` takes the kind word and the shape columns (`min_x`…, `cx, cy, r`, `geometry`) are read under their canonical names |
 | a layer, members | `insert(layer, members=table, id=, key=, rank=, level=)`, `level` under its own name as above |
-| a label set | a mapping `{key: text}`, or a table with `key=` and `text=` (a plain string column) or `contents=` (a layer's ranked contents column), with `attached_layer=`, `attached_key=` and `level=` where the table carries them; a generating set is `insert(labels, members=table, id=, key=, rank=)` |
+| a label set | a mapping `{key: text}`, or a table with `key=` and `text=` (a plain string column) or `contents=` (a layer's ranked contents column). Where the SDK writes the table (a mapping, or `text=`) it writes the attachment from `of` and the label's own key; where it reads the table as given (`contents=`) the attachment columns are in it and named, and the table may carry the rest of an artifacts table's columns, a label set being a layer. A generating set is `insert(labels, members=table, id=, key=, rank=)` |
 | a vocabulary | `key=`, `title=`, `code=` |
 
 An artifacts table and a members table are two inserts on the same layer, each with its own
@@ -408,7 +408,12 @@ the order is fixed:
    holds, through `POST /control/values`, which fills the cells and mints or joins the artifacts
    a key column names as the other two doors do (contracts §3.4).
 4. **Artifacts**, per layer in dependency order: a clustering before its labels, a target before
-   a layer attached to it, a layer before one that depends on it. Within a layer, `PUT` pages
+   a layer attached to it, a layer before one that depends on it. Where a publication attaches to
+   or grows a key that step 3 mints in this same commit, the rows and values are flushed with
+   `wait=visible` first, since a minted artifact is resolvable only from its publication. A
+   polygon has two encodings: the build reads a `geometry` column as WKB, and the publication
+   record takes `wkt` text, so a WKB geometry inserted after the first commit is a pre-flight
+   finding naming both. Within a layer, `PUT` pages
    carry members, parent, shape and content; a nested batch resolves parents that are its own
    siblings, and a tiered chain goes coarse level first. Content gated `all` travels on the
    publish record with the first page of its generating set, since the route refuses a content
@@ -558,7 +563,8 @@ db.declare_attribute("submitted_at", type="timestamp_us", render=True)
 db.declare_attribute("title", type="text", index=True)
 db.declare_attribute("abstract", type="text", index=True)
 db.declare_attribute("arxiv_id", type="keyword", index=True)
-db.declare_layer("clusters/kmeans", kind="flat", require_member_visibility={"count": 50})
+db.declare_layer("clusters/kmeans", kind="flat", value_set="open",     # §10.3 mints into it
+                 require_member_visibility={"count": 50})
 db.declare_labels("topics/kmeans", of="clusters/kmeans", content_requires="all")
 db.declare_layer("clusters/hdbscan", kind="nested", require_member_visibility={"fraction": 0.05})
 db.declare_labels("topics/hdbscan", of="clusters/hdbscan", content_requires="all")
