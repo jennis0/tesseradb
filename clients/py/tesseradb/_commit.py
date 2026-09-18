@@ -66,10 +66,12 @@ class Finding:
 
 @dataclass
 class Page:
-    """One request the plan will make, with its body already built.
+    """One request the plan will make, with its body and its batch id already made.
 
-    The body is built here rather than at send time because a batch id is a hash of the bytes
-    (§6.4): a body re-serialised before the retry would be a new batch rather than a replay.
+    Both are made here rather than at send time, and for the same reason: a retry is the *same*
+    request sent again, so it carries the id the first attempt carried and the bytes the first
+    attempt carried (§6.4). A page built afresh would be a new request — which is what a second
+    `commit()` of the same frame is, and is meant to be.
     """
 
     kind: str
@@ -660,7 +662,7 @@ class Planner:
                         view=view,
                         line=f"{line}: {count} row(s)",
                         body=body,
-                        batch=batch_id(name, first, body),
+                        batch=batch_id(name, first),
                         rows=count,
                     )
                 )

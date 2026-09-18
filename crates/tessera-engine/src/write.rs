@@ -1978,10 +1978,25 @@ fn lock_recover<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// The `/control/ingest` idempotency index: batch id -> `(body hash, the ids its rows were given)`.
+/// One accepted batch, as the idempotency index holds it.
+///
 /// The ids ride along so a byte-identical replay answers with the same `tessera_id`s without
-/// re-deriving them from `external_id` — which a null-external-id row has none of.
-type AcceptedBatches = FxHashMap<String, ([u8; 32], Vec<EntityId>)>;
+/// re-deriving them from `external_id` — which a null-external-id row has none of. An accepted
+/// values batch was allocated nothing and carries an empty vector.
+#[derive(Clone)]
+struct AcceptedBatch {
+    body_hash: [u8; 32],
+    entity_ids: Vec<EntityId>,
+    /// Where the record carrying this batch lies in the log. **The index is a cache of the WAL**
+    /// ([`tessera_lifecycle::batch_identity`]), so an entry outlives its record only until the
+    /// rotation that deletes the member holding it: `Executor::rotate_wal` forgets everything
+    /// below [`ExecutorWal::retained_from`], which is the horizon a restart would rebuild.
+    wal_pos: u64,
+}
+
+/// The `/control/ingest` and `/control/values` idempotency index: batch id -> what was accepted
+/// under it.
+type AcceptedBatches = FxHashMap<String, AcceptedBatch>;
 
 /// The descriptor resolver's detached extension state: interned novel descriptors, plus the next
 /// extension id to hand out.
@@ -2431,7 +2446,9 @@ impl LiveState {
     }
 
     fn accepted_batch(&self, batch_id: &str) -> Option<([u8; 32], Vec<EntityId>)> {
-        lock_recover(&self.accepted_batches).get(batch_id).cloned()
+        lock_recover(&self.accepted_batches)
+            .get(batch_id)
+            .map(|held| (held.body_hash, held.entity_ids.clone()))
     }
 
     /// The descriptor bytes behind `terms`, read out of the resolver's extension map (§3.2).
@@ -2579,8 +2596,39 @@ impl LiveState {
         f(&mut alloc)
     }
 
-    fn record_accepted_batch(&self, batch_id: String, body_hash: [u8; 32], ids: Vec<EntityId>) {
-        lock_recover(&self.accepted_batches).insert(batch_id, (body_hash, ids));
+    /// Index one accepted batch, at the position of the record that carries it.
+    ///
+    /// The three arguments are [`tessera_lifecycle::BatchIdentity`]'s three fields plus that
+    /// position, and both accept sites check them against what the record they appended says.
+    fn record_accepted_batch(
+        &self,
+        batch_id: String,
+        body_hash: [u8; 32],
+        ids: Vec<EntityId>,
+        wal_pos: u64,
+    ) {
+        lock_recover(&self.accepted_batches).insert(
+            batch_id,
+            AcceptedBatch {
+                body_hash,
+                entity_ids: ids,
+                wal_pos,
+            },
+        );
+    }
+
+    /// Forget every batch whose record lay below `retained_from` — **the rotation half of the
+    /// horizon** (write-path §2.4).
+    ///
+    /// A restart rebuilds this index from the members that survive, so a live process that went on
+    /// answering a replay from a record rotation has deleted would answer differently on either
+    /// side of a restart. Dropping the entries here is what makes the horizon the retained log in
+    /// both cases. Returns how many entries went, for the rotation's own line.
+    fn forget_batches_below(&self, retained_from: u64) -> usize {
+        let mut index = lock_recover(&self.accepted_batches);
+        let before = index.len();
+        index.retain(|_, held| held.wal_pos >= retained_from);
+        before - index.len()
     }
 }
 
@@ -3696,16 +3744,23 @@ impl WritePath {
             .collect();
         let resolver_state = resolver.into_state();
 
+        // **Every batch-carrying record, by the one rule both accept sites use**
+        // ([`tessera_lifecycle::batch_identity`]). Matching a record kind here is what was wrong
+        // with the rebuild before: it knew `IngestBatch` and forgot that a values batch is held
+        // under an id too, so a values id inside the retention window came back unknown after a
+        // restart (#154). A batch id is an opaque client-chosen id and the newest record naming
+        // one wins, replay order being append order.
         let mut accepted_batches: AcceptedBatches = FxHashMap::default();
-        for record in &records {
-            if let WalRecord::IngestBatch {
-                batch_id,
-                body_hash,
-                rows,
-            } = record
-            {
-                let entity_ids = rows.iter().map(|row| row.entity_id).collect();
-                accepted_batches.insert(batch_id.clone(), (*body_hash, entity_ids));
+        for (record, position) in records.iter().zip(wal.replayed_positions()) {
+            if let Some(identity) = tessera_lifecycle::batch_identity(record) {
+                accepted_batches.insert(
+                    identity.batch_id.to_string(),
+                    AcceptedBatch {
+                        body_hash: identity.body_hash,
+                        entity_ids: identity.allocation,
+                        wal_pos: *position,
+                    },
+                );
             }
         }
 
@@ -4933,15 +4988,17 @@ enum BatchState {
     /// Never seen. A new entry.
     ///
     /// **This state is reachable for a batch that was in fact accepted, and that is a live
-    /// caveat.** `accepted_batches` is rebuilt from WAL replay ([`WritePath::reconstruct`]), so
-    /// once a WAL segment is retired an old `batch_id` regresses to `Unknown` and a retry is
-    /// re-ingested. Rows carrying an `external_id` are then caught by the duplicate check and the
-    /// batch 409s; **rows without one are re-ingested silently as new entities**, leaving a second
-    /// copy that no external id names and no deny can reach — the same unreachable duplicate the
-    /// window's conflict check exists for, arrived at by retention rather than by a race. Nothing
-    /// prunes the WAL today (there is **no `wal_retention` config key**), so the
-    /// caveat is latent rather than live; whoever adds retention inherits it, and the bound on
-    /// the exposure is the idempotency window an operator's clients actually retry within.
+    /// caveat.** `accepted_batches` is a cache of the WAL: it is rebuilt from replay
+    /// ([`WritePath::reconstruct`]) and trimmed at rotation (`Executor::rotate_wal`), so once the
+    /// member holding a batch's record is reclaimed its `batch_id` regresses to `Unknown` and a
+    /// retry is re-ingested. Rows carrying an `external_id` are then caught by the duplicate check
+    /// and the batch 409s; **rows without one are re-ingested silently as new entities**, leaving a
+    /// second copy that no external id names and no deny can reach — the same unreachable duplicate
+    /// the window's conflict check exists for, arrived at by retention rather than by a race.
+    ///
+    /// The horizon is therefore the retained log — about one flush, rotation reclaiming below the
+    /// oldest unconsumed row — with or without a restart, which is the statement contracts §3.4
+    /// makes to a client: a client that needs a longer horizon carries its own id column.
     Unknown,
 }
 
@@ -13178,12 +13235,26 @@ impl Executor {
         // Recorded after the swap, so a concurrent replay of a batch id can never observe a window
         // where the generation has swapped but the idempotency index has not caught up.
         let m = StageMark::now();
-        for entry in &closed {
+        for (entry, wal_pos) in closed.iter().zip(&positions) {
             let (batch_id, body_hash) = entry.batch_key();
+            // The index is a cache of the record just appended, so what goes in is what the record
+            // says. Asserted rather than read from the record, the entry already holding both in
+            // the form the ack needs; a record kind whose identity this function could not derive
+            // would fail `batch_identity`'s own exhaustive match first.
+            debug_assert_eq!(
+                tessera_lifecycle::batch_identity(&entry.record),
+                Some(tessera_lifecycle::BatchIdentity {
+                    batch_id,
+                    body_hash,
+                    allocation: entry.entity_ids.clone(),
+                }),
+                "the accepted-batch index disagrees with the record it caches"
+            );
             self.live.record_accepted_batch(
                 batch_id.to_string(),
                 body_hash,
                 entry.entity_ids.clone(),
+                *wal_pos,
             );
         }
         self.health.lap(WriteStage::RecordBatch, m);
@@ -14511,9 +14582,25 @@ impl Executor {
         };
         let published = self.publish(next, started);
         // A values batch allocates no entity, so the index records none: the batch id and the
-        // body hash are the whole of what a retry is answered off.
-        self.live
-            .record_accepted_batch(request.batch_id.clone(), request.body_hash, Vec::new());
+        // body hash are the whole of what a retry is answered off. Indexed at the values record's
+        // own position, so the rotation that reclaims that record forgets the id with it — the
+        // horizon a restart rebuilds (§2.4).
+        let identity = tessera_lifecycle::batch_identity(&values_record);
+        debug_assert_eq!(
+            identity,
+            Some(tessera_lifecycle::BatchIdentity {
+                batch_id: &request.batch_id,
+                body_hash: request.body_hash,
+                allocation: Vec::new(),
+            }),
+            "the accepted-batch index disagrees with the record it caches"
+        );
+        self.live.record_accepted_batch(
+            request.batch_id.clone(),
+            request.body_hash,
+            Vec::new(),
+            values_position,
+        );
         // A growth above its level's high-water is published by the next tail pack, on
         // `commit_growth`'s mechanism, and so is an artifact this batch minted.
         if !artifact_records.is_empty() {
@@ -17776,9 +17863,15 @@ impl Executor {
                 // after the snapshot this rotation just wrote.
                 self.wal_position_at_last_rotation = self.wal.position();
                 if !deleted.is_empty() {
+                    // **The idempotency index follows the log it caches.** A restart rebuilds it
+                    // from the surviving members, so the entries whose records lay in the members
+                    // just deleted go now — otherwise this process would answer a batch id as a
+                    // replay that the same node would call unknown after a restart (§2.4).
+                    let forgotten = self.live.forget_batches_below(self.wal.retained_from());
                     tracing::info!(
                         members = ?self.wal.members(),
                         reclaimed = ?deleted,
+                        forgotten_batch_ids = forgotten,
                         "WAL members reclaimed below the oldest unconsumed row"
                     );
                 }

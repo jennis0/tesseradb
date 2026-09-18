@@ -3,11 +3,12 @@
 `Control` is the routes and nothing else: the SDK keeps no record of what it sent, so what a
 database holds is asked of the database (§6.4).
 
-**A retry resends identical bytes.** A batch id maps to the SHA-256 of the raw request body, so a
-retry that re-serialised its table would be a new batch rather than a replay (contracts §3.4). The
-bodies are therefore built once, by the plan, and this module sends the bytes it was given. The id
-is derived from the page rather than remembered, so the `429` retry and the resend of a lost
-acknowledgement within one `commit()` carry the id the first attempt carried.
+**A batch id is a fresh id per request, and a retry resends both the id and the bytes.** The id is
+the client's choice and says which request this is; the server holds it against the SHA-256 of the
+body, so a retry that re-serialised its table would be refused as a different body under a held id
+(contracts §3.4). The bodies are therefore built once, by the plan, and this module sends the bytes
+it was given. Two requests carrying the same rows are two requests: nothing derives an id from what
+a page contains, so a frame inserted and committed twice lands twice.
 
 **A `429` is backpressure.** The buffer-occupancy refusal carries `Retry-After`, and the caller
 waits that long and sends the same bytes again. Every other status is an answer: a `409` on a
@@ -21,13 +22,13 @@ pyarrow.
 from __future__ import annotations
 
 import base64
-import hashlib
 import json
 import numbers
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -69,15 +70,20 @@ def addressed(value: Any) -> str:
     return base64.b64encode(external_id(value)).decode()
 
 
-def batch_id(source: str, index: int, body: bytes) -> str:
-    """A page's batch id: the source name, the page index and a hash of the bytes (§6.4).
+def batch_id(source: str, index: int) -> str:
+    """A page's batch id: a fresh random id, made once when the request is built (§6.4).
 
-    Stable across runs, so a page re-sent after a `429` or a lost acknowledgement carries the id
-    the first attempt carried and the server answers it as a replay. The hash is of the body that
-    is sent, so two pages that differ in one row differ here.
+    **A request's identity is the client's to choose, and it is never inferred from what the
+    request contains** (owner ruling, 2026-09-18). The id an attempt carries is reused for the
+    retries of that same attempt — after a `429`, a timeout or a lost answer, inside one
+    `commit()` — and for nothing else. Nothing is kept across commits or sessions, so the same
+    frame inserted and committed five times is five loads, which is what a user testing a loader
+    asks for and used to get one of.
+
+    The source name and the page index ride in front of the random half so that an operator
+    reading a server log can tell which page a line is about; nothing reads them.
     """
-    digest = hashlib.sha256(body).hexdigest()[:16]
-    return f"{source}-{index}-{digest}"
+    return f"{source}-{index}-{uuid.uuid4().hex}"
 
 
 @dataclass
@@ -143,7 +149,9 @@ class Control:
             except (urllib.error.URLError, OSError) as unreachable:
                 # A connection that never answered is a refusal the report carries, not an
                 # exception out of `commit()`: the pages already acknowledged stay acknowledged,
-                # and an unanswered request is resent with identical bytes at the next commit.
+                # and the report names the one that was not. **A commit after it is a new
+                # request**, under a new id: whether the unanswered page landed is the database's
+                # to say, and a client that needs to ask carries an id column (§6.4).
                 return Answer(
                     UNANSWERED,
                     {},
