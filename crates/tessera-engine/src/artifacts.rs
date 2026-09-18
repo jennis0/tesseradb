@@ -7,6 +7,14 @@
 //!
 //! The order of the conjuncts is not cosmetic:
 //!
+//! 0. **There is an artifact at that ordinal, in this view.** A level's row form is built for one
+//!    view of one layer, so a hole, an ordinal past its end and a group-scoped layer's artifact
+//!    belonging to another view of the group are one answer: absent ([`ArtifactRows::holds`],
+//!    `views.md` §3.5). The ordinal is an address over the whole layer and the view is part of a
+//!    scoped artifact's identity, so this is where the two are reconciled. Without it a view of a
+//!    group-scoped layer serves the group's other views' artifacts — their keys, their
+//!    identifiers, and a masked count of zero, which a layer declaring no existence criterion has
+//!    nothing to withhold.
 //! 1. **The overlay, first and unconditional.** A suppression applies to every request the moment
 //!    it is accepted, whatever else is true, so an artifact reaches the same `deleted > suppressed`
 //!    composition a point does, by the same route.
@@ -685,6 +693,13 @@ impl MembershipRows {
     /// [`RowColumn::extents`], which cannot tell a hole from an artifact no row labels.
     fn live_slots(&self) -> Vec<bool> {
         self.rows.iter().map(Option::is_some).collect()
+    }
+
+    /// Whether this form holds an artifact at `ordinal`: the slot exists and is not a hole. A
+    /// column-only form answers this too, its live slots holding the one shared empty bitmap
+    /// ([`Self::hold_no_rows`]), which is why it reads the slot rather than [`Self::get`].
+    fn holds(&self, ordinal: u32) -> bool {
+        self.rows.get(ordinal as usize).is_some_and(Option::is_some)
     }
 
     /// A row form given directly — the tests whose subject is the hierarchy over a row form rather
@@ -1782,6 +1797,17 @@ impl ArtifactRows {
     /// How many ordinals this level covers, holes included.
     pub fn len(&self) -> usize {
         self.membership.len()
+    }
+
+    /// **Whether this level has an artifact at `ordinal` in the view this form was built for.**
+    ///
+    /// A form is built per `(view, layer, level)` from
+    /// [`tessera_lifecycle::membership::ArtifactStore::level_in_view`], so a group-scoped layer's
+    /// artifact belonging to another view of the group occupies no slot here, exactly as a hole
+    /// and an ordinal past the level's end occupy none. All three are the same answer and
+    /// [`ArtifactView::verdict`] reads it first.
+    pub fn holds(&self, ordinal: u32) -> bool {
+        self.membership.holds(ordinal)
     }
 
     pub fn is_empty(&self) -> bool {
@@ -4186,6 +4212,9 @@ impl ArtifactProjections {
 /// exactly the facts the predicate exists to withhold.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Withheld {
+    /// The level holds no artifact at that ordinal in this view: a hole, an ordinal past the
+    /// level's end, or — on a group-scoped layer — an artifact of another view of the group.
+    NoArtifact,
     /// The artifact's own entity is deleted or suppressed.
     Verdict,
     /// The viewer may not know the layer exists.
@@ -4317,6 +4346,16 @@ impl<M: MaskedSet> ArtifactView<'_, M> {
         ordinal: u32,
         own_terms: Option<TermId>,
     ) -> ArtifactVerdict {
+        // 0. There is an artifact here, in this view. The form was built from this view's slice of
+        //    the level ([`ArtifactRows::holds`]), so a hole, an ordinal past the level's end and a
+        //    group-scoped artifact belonging to another view of the group are one answer. The
+        //    ordinal's address is the caller's — a level's runs map an ordinal to an entity for the
+        //    whole layer, not per view — so this is the conjunct that makes the address a fact
+        //    about *this* view.
+        if !self.rows.holds(ordinal) {
+            return ArtifactVerdict::Absent(Withheld::NoArtifact);
+        }
+
         // 1. The overlay, first and unconditional — the same composition a point goes through.
         //    Asked live on every call, never cached beside the reachability above it: a suppression
         //    takes effect at the ack, and a cache that baked in this answer would keep serving a

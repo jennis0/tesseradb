@@ -286,7 +286,10 @@ fn one_key_on_two_views_of_a_group_is_two_artifacts() {
         .filter(|level| level.layer == "clusters")
         .collect();
     assert_eq!(
-        levels.iter().map(|level| level.view.as_str()).collect::<Vec<_>>(),
+        levels
+            .iter()
+            .map(|level| level.view.as_str())
+            .collect::<Vec<_>>(),
         ["slices:a", "slices:b"],
         "the layer is drawn on both views of the group"
     );
@@ -322,6 +325,7 @@ fn each_view_serves_its_own_copy_of_the_key() {
     let session = engine
         .authorise(br#"{"terms": ["1"]}"#)
         .expect("the credential covers every entity");
+    let mut served: Vec<(&str, tessera_types::TesseraId)> = Vec::new();
     for view in ["slices:a", "slices:b"] {
         let out = engine
             .browse(
@@ -349,13 +353,26 @@ fn each_view_serves_its_own_copy_of_the_key() {
                 row.masked_count
             })
             .collect();
-        // One artifact on this view holds members, and it holds this view's half of them. The
-        // level's roster spans both views of the group, so the other view's artifact is reached
-        // here as well, holding none of this view's rows.
+        // **One row, not two.** The other view's copy of the key is an artifact of that view and
+        // is absent here entire — not a row with a count of zero beside it (`views.md` §3.5).
         assert_eq!(
-            counts.iter().filter(|count| **count > 0).collect::<Vec<_>>(),
-            vec![&12],
-            "{view} serves its own half of the members and no more: {counts:?}"
+            counts,
+            [12],
+            "{view} serves its own copy of the key and nothing of the other view's: {counts:?}"
+        );
+        served.push((view, out.artifacts[0].tessera_id));
+    }
+
+    // **And not by the identifier either.** Browse withholding a row while the drill-down answered
+    // for the identifier beside it would be the same disclosure reached one verb along, so each
+    // view is asked for the other's artifact by the id that view's own page handed out.
+    for (view, other) in [(served[0].0, served[1].1), (served[1].0, served[0].1)] {
+        let answer = engine
+            .artifact(&session, other, None, view, None)
+            .expect("the identifier route answers");
+        assert!(
+            answer.is_none(),
+            "{view} resolved an artifact of the other view of the group by identifier"
         );
     }
 }
@@ -406,4 +423,3 @@ fn one_key_twice_on_one_view_is_still_refused() {
         "the refusal names the view the collision is in: {message}"
     );
 }
-
