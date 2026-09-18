@@ -655,8 +655,8 @@ export function labelCandidates(a: ArtifactsProjection, meta: Meta | null, level
 function namedCandidates(a: ArtifactsProjection, meta: Meta | null, level: number | undefined, budget: number): {candidates: LabelCandidate[]; byId: Map<bigint, LabelText>} {
   const placed = a.served.filter((x) => x.centroid !== null);
   // A dependent layer's artifacts — a clustering's topic labels — draw their text beneath the
-  // name of whatever they sit on, italic and small, and are placed with it: they are not
-  // candidates of their own (§5.10, D13).
+  // name of the artifact their `target` names, italic and small, and are placed with it: they
+  // are not candidates of their own (§5.10).
   const dependent = new Set(meta?.layers.filter((l) => l.depsOn.length > 0).map((l) => l.name) ?? []);
   const topicOf = attachedTopics(a, meta);
   const front = frontier(a, level);
@@ -778,29 +778,26 @@ export function outlineOf(a: Artifact, fetched?: Shape | null): Outline | null {
 
 /**
  * The text a dependent layer's artifacts (a clustering's topic labels) attach to the served
- * artifacts of their generating layer. A dependent artifact carries its target's masked count
- * and no id (D13), and no centroid on this wire: it is attached to the served artifact of its
- * generating layer with the same count, and left unattached where two share one — a count is
- * not an identity. A target id on the wire (S4's drill-down route, awaiting a ruling) would make
- * this exact.
+ * artifacts of their generating layer, keyed by the **target's** `tesseraId`.
+ *
+ * **The join is the wire's `target` column and nothing else** (owner ruling, 2026-09-18). It
+ * names a row in the same response by construction — a dependent whose target the response does
+ * not hold is absent entire — so every served label attaches, exactly, and two clusters that
+ * happen to hold the same number of visible members are no longer a case. Until that column
+ * existed this matched a label's copied count against the served counts of its generating layer
+ * and dropped the label wherever a count was not unique, which on a real clustering is the small
+ * clusters.
+ *
+ * A label has no centroid on this wire and is not a candidate of its own: the text is drawn
+ * beneath its target's name (§5.10).
  */
 export function attachedTopics(a: ArtifactsProjection, meta: Meta | null): Map<bigint, string> {
   const topicOf = new Map<bigint, string>();
   if (!meta) return topicOf;
   const dependent = new Set(meta.layers.filter((l) => l.depsOn.length > 0).map((l) => l.name));
-  const byCount = new Map<string, Artifact[]>();
-  for (const x of a.served) {
-    if (dependent.has(x.layer)) continue;
-    const k = `${x.layer}|${x.maskedCount}`;
-    (byCount.get(k) ?? byCount.set(k, []).get(k)!).push(x);
-  }
   for (const t of a.served) {
-    if (!dependent.has(t.layer) || t.content.length === 0) continue;
-    const generating = meta.layers.find((l) => l.name === t.layer)?.depsOn ?? [];
-    for (const g of generating) {
-      const targets = byCount.get(`${g}|${t.maskedCount}`);
-      if (targets && targets.length === 1) topicOf.set(targets[0]!.tesseraId, t.content[0]!);
-    }
+    if (!dependent.has(t.layer) || t.content.length === 0 || t.target === null) continue;
+    topicOf.set(t.target, t.content[0]!);
   }
   return topicOf;
 }
@@ -1329,9 +1326,10 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
   /**
    * Names and counts at each artifact's `centroid`, sized by masked count on a logarithmic band,
    * placed by priority into a spatial hash — a few hundred fit a viewport and the rest wait for
-   * a zoom — with a leader line where a label moved. A dependent artifact draws at its own
-   * declared centroid with the count the wire carries for it (its target's, D13). Free text is
-   * deck's `TextLayer` with `characterSet: 'auto'` and an SDF halo.
+   * a zoom — with a leader line where a label moved. A dependent artifact draws no count and no
+   * name of its own: it is text beneath the name of the artifact its `target` names (§5.10; the
+   * owner's ruling of 2026-09-18, which withdrew the count the wire used to copy onto it). Free
+   * text is deck's `TextLayer` with `characterSet: 'auto'` and an SDF halo.
    */
   private labelLayers(r: Resolved, timings: {labelsMs: number; labels: number}): Layer[] {
     const a = this.props.labels ? r.artifacts : null;

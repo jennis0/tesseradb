@@ -139,6 +139,7 @@ function result(tiles: number[], local: number[], ids: bigint[], artifacts: Arti
     scalars: {},
     membership: {l: {index: Uint16Array.from(local), ids: BigUint64Array.from(ids)}},
     highlighted: null,
+    target: null,
     subCells: null,
     artifacts,
     artifactsIdentity: null

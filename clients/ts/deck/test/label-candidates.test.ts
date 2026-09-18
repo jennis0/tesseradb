@@ -22,7 +22,18 @@ const artifact = (id: bigint, count: bigint, content: string[] = [], layer = 'cl
   parentIds: parent === null ? [] : [parent],
   rung: 0,
   matched: null,
-  highlighted: null
+  highlighted: null,
+  target: null
+});
+
+/**
+ * A dependent layer's artifact — a topic label — naming its target by identifier, which is the
+ * whole of the attachment on the wire (owner ruling, 2026-09-18). Its own count is its own: the
+ * membership it is served over, which is nothing the map draws beside it.
+ */
+const topic = (id: bigint, target: bigint, text: string, count = 1n): Artifact => ({
+  ...artifact(id, count, [text], 'topics'),
+  target
 });
 
 /**
@@ -124,11 +135,28 @@ describe('labelCandidates', () => {
   });
 
   it('a nameless cluster with a topic attached takes the topic as its name', () => {
-    const p = projection([artifact(1n, 100n), artifact(2n, 40n), artifact(9n, 100n, ['decoders, thresholds'], 'topics')]);
+    const p = projection([artifact(1n, 100n), artifact(2n, 40n), topic(9n, 1n, 'decoders, thresholds')]);
     const {candidates, byId} = labelCandidates(p, META, undefined, 0, 10);
     expect(candidates.map((c) => String(c.id))).toEqual(['1']);
     expect(byId.get(1n)!.lines.join(' ')).toBe('decoders, thresholds');
     expect(byId.get(1n)!.topic).toBeNull();
+  });
+
+  it('attaches each topic to the cluster its `target` names, where two clusters hold the same count', () => {
+    // The defect the `target` column closed (owner ruling, 2026-09-18). Both clusters are served
+    // with 100 visible members, and the client used to attach a label by matching its copied
+    // count against the served counts of the generating layer: two rows shared the count, the
+    // match was not unique, and **both** labels were dropped — the map drew two nameless
+    // clusters. The join is by identifier now, so the count is not consulted and the tie is not
+    // a case.
+    const p = projection([artifact(1n, 100n), artifact(2n, 100n), topic(8n, 1n, 'left topic'), topic(9n, 2n, 'right topic')]);
+    const {byId} = labelCandidates(p, META, undefined, 0, 10);
+    expect(byId.get(1n)!.lines.join(' ')).toBe('left topic');
+    expect(byId.get(2n)!.lines.join(' ')).toBe('right topic');
+    // And a topic naming nothing this response holds attaches to nothing rather than to whichever
+    // row happens to share its count.
+    const orphan = projection([artifact(1n, 100n), {...topic(7n, 1n, 'unattached'), target: null}]);
+    expect(labelCandidates(orphan, META, undefined, 0, 10).byId.get(1n)).toBeUndefined();
   });
 
   it('size is the masked count, and level says nothing: the deeper, larger name draws larger', () => {

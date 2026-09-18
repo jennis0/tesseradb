@@ -6,9 +6,10 @@ const PARENTS = new List(new Field('item', new Uint64(), false));
 
 /**
  * An r44 golden with its `hull_x`/`hull_y` columns removed — the r45 body the same capture would
- * produce for a request that did not ask for the shape — and its scalar `parent_id` lifted into
+ * produce for a request that did not ask for the shape — its scalar `parent_id` lifted into
  * the `parent_ids` list r71 serves (a null becomes the empty list, a value a list of one — the
- * tree these goldens were captured from serves at most one parent). So the claims about the rest
+ * tree these goldens were captured from serves at most one parent), and the `target` column
+ * appended all-null. So the claims about the rest
  * of the row can still be made against real bytes until the goldens are recaptured
  * (`artifacts.client.test.ts` says why the decoder refuses the old names outright). This is a
  * rewrite of a stale recording, in test code only: the decoder keeps no such shim (decision 0048).
@@ -27,6 +28,33 @@ export function stripOldShapeColumns(body: Uint8Array): Uint8Array {
       );
     } else columns[field.name] = column;
   }
+  return liftArtifactTarget(reframe(body, FRAME_ARTIFACTS, tableToIPC(new Table(columns), 'stream')));
+}
+
+/**
+ * The same golden's **artifacts** frame given its `target` column, last of the fixed prefix (owner
+ * ruling, 2026-09-18).
+ *
+ * The value is null on every row, which is what the server serves for a clustering layer nothing
+ * depends on — and every captured golden in this directory was taken over clustering layers
+ * alone. So this recreates the body the same capture would produce against a server that serves
+ * the column, and the tests' claims still stand against real bytes. A rewrite of a stale
+ * recording, in test code only: the decoder keeps no shim (decision 0048) and refuses a body
+ * without the column.
+ */
+export function liftArtifactTarget(body: Uint8Array): Uint8Array {
+  const streams = splitFramedStreams(body);
+  if (!streams.artifacts) return body;
+  const table = tableFromIPC(streams.artifacts);
+  if (table.schema.fields.some((f) => f.name === 'target')) return body;
+  // The identity projection has no payload columns and carries no `target` either.
+  if (table.schema.fields.length === 5) return body;
+  const columns: Record<string, Vector> = {};
+  for (const field of table.schema.fields) columns[field.name] = table.getChild(field.name)!;
+  columns['target'] = vectorFromArray(
+    Array.from({length: table.numRows}, () => null as bigint | null),
+    new Uint64()
+  );
   return reframe(body, FRAME_ARTIFACTS, tableToIPC(new Table(columns), 'stream'));
 }
 
