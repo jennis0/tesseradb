@@ -802,6 +802,32 @@ pub(crate) fn view_key(view: &str) -> &str {
         .unwrap_or(view)
 }
 
+/// **One artifact's record, and only where this view draws it** — the single read every
+/// in-place amendment makes of the store, so that a held form takes a delta for its own view's
+/// artifacts alone (`views.md` §3.5).
+///
+/// `view` is the view's path, as the projections are keyed; what a record names is the view's own
+/// key ([`view_key`]). `None` for a hole, and for an artifact belonging to another view of the
+/// same group: putting such a record into this form would serve that view's key, its
+/// `tessera_id` and a live count to a principal of this one, and would label this view's rows
+/// with an ordinal it does not draw.
+///
+/// The projecting routes reach the same rule through
+/// [`tessera_lifecycle::membership::ArtifactStore::level_in_view`], which is this test over a
+/// whole level.
+fn drawn_record<'a>(
+    store: &'a ArtifactStore,
+    layer: &str,
+    level: u32,
+    ordinal: u32,
+    view: &str,
+) -> Option<&'a ArtifactRecord> {
+    store
+        .drawn_in_view(layer, level, ordinal, view_key(view))
+        .then(|| store.get(layer, level, ordinal))
+        .flatten()
+}
+
 /// The whole of a view's row space — base and every extent — as a row count.
 fn total_rows(space: &RowSpace) -> u32 {
     u32::try_from(space.total_rows()).unwrap_or(u32::MAX)
@@ -2831,6 +2857,13 @@ impl ArtifactProjections {
     /// was never derived together. A fill re-derives the ordinal's records entry and its operators,
     /// the membership being untouched by one.
     ///
+    /// **Every arm takes the delta for this view's own artifacts alone.** One interval's deltas
+    /// are applied to every view of the generation, and on a group-scoped layer an ordinal belongs
+    /// to one of them (`views.md` §3.5), so each arm reads the store through [`drawn_record`] and
+    /// an ordinal this view does not draw is not amended into its form, its records, its column or
+    /// its tile index. Projecting a whole level reaches the same rule through
+    /// [`tessera_lifecycle::membership::ArtifactStore::level_in_view`].
+    ///
     /// **The stored cardinality is published with the operator it was derived with.** Every
     /// ordinal a page or a fill touched has its declared sizes read from the store here, in the
     /// same pass that writes its operators, so the pair a containment test reads is the pair one
@@ -3006,14 +3039,20 @@ impl ArtifactProjections {
             match &delta.kind {
                 DeltaKind::Grown { joins, pages } => {
                     for (ordinal, joining) in joins {
+                        if drawn_record(store, layer, level, *ordinal, view).is_none() {
+                            continue;
+                        }
                         let fresh = amended.grow_rows(*ordinal, joining, space);
                         unions += 1;
                         if row_major {
                             added.extend(fresh.iter().map(|row| (row, *ordinal)));
                         }
                     }
-                    sets_moved |= !pages.is_empty();
                     for page in pages {
+                        if drawn_record(store, layer, level, page.ordinal, view).is_none() {
+                            continue;
+                        }
+                        sets_moved = true;
                         refresh.insert(page.ordinal);
                         if page.whole {
                             rederive.insert(page.ordinal);
@@ -3039,7 +3078,9 @@ impl ArtifactProjections {
                             // re-placed from the resolution the caller made over every live
                             // segment, which is the arm a publication into such a level takes.
                             DeltaRows::Resolved(rows) => {
-                                if let Some(record) = store.get(layer, level, *ordinal) {
+                                if let Some(record) =
+                                    drawn_record(store, layer, level, *ordinal, view)
+                                {
                                     published += 1;
                                     let fresh = amended.publish_resolved(
                                         *ordinal,
@@ -3057,7 +3098,7 @@ impl ArtifactProjections {
                 }
                 DeltaKind::Published(ordinals) => {
                     for ordinal in ordinals {
-                        if let Some(record) = store.get(layer, level, *ordinal) {
+                        if let Some(record) = drawn_record(store, layer, level, *ordinal, view) {
                             published += 1;
                             let fresh = match source {
                                 DeltaRows::Projected => amended.publish_at(*ordinal, record, space),
@@ -3081,7 +3122,7 @@ impl ArtifactProjections {
         // sizes the pages moved. Both read the record as it stands now, which is what makes the
         // pair a containment test reads a pair one moment produced.
         for ordinal in &refresh {
-            if let Some(record) = store.get(layer, level, *ordinal) {
+            if let Some(record) = drawn_record(store, layer, level, *ordinal, view) {
                 amended.refresh_sets(*ordinal, record, space, rederive.contains(ordinal));
             }
         }
