@@ -3078,3 +3078,126 @@ async fn a_drop_prunes_every_spelling_of_the_key_on_the_live_path_and_at_replay(
         "and the surviving record is the recreate's"
     );
 }
+
+/// `GET /control/status`'s publication counter.
+async fn publication(served: &Served) -> u64 {
+    let resp = served
+        .server
+        .client
+        .get(served.server.control_url("/control/status"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 200);
+    let body: Value = resp.json().await.unwrap();
+    body["publication"].as_u64().expect("status carries it")
+}
+
+/// One `POST /control/flush?wait=visible`, answering when its cycle has completed.
+async fn flush_waiting(served: &Served) -> Value {
+    let resp = served
+        .server
+        .client
+        .post(served.server.control_url("/control/flush?wait=visible"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 202);
+    resp.json().await.unwrap()
+}
+
+/// **A view created and fed in one commit publishes in one cycle** (issue #153; decision 0144).
+/// The ingest acknowledgement names the cycle its rows become visible in, so a client that waits
+/// for that number and reads the views must find every row the commit sent — including the rows
+/// of a view this same commit created. `held` is a view the bundle already carried, fed in the
+/// same commit: a flush unit is one view, so the two together are what makes the cycle span more
+/// than one publication.
+async fn a_view_created_and_fed_publishes_in_one_cycle(
+    served: &mut Served,
+    created: &str,
+    held: &str,
+) {
+    // The held view already carries rows; what this asserts is the four this commit adds.
+    let held_before = points(served, held).await.len();
+    let mut promised = 0;
+    for (view, base) in [(created, 0u64), (held, 100)] {
+        let rows: Vec<Row<'_>> = (0..4)
+            .map(|i| {
+                (
+                    format!("{view}-{}", base + i).into_bytes(),
+                    100.0 + i as f32,
+                    200.0,
+                    &["0"][..],
+                    Some(i as i32),
+                )
+            })
+            .collect();
+        let resp = ingest(served, &format!("{view}-batch"), view, &rows).await;
+        assert_eq!(resp.status(), 200, "{view} accepts rows");
+        let body: Value = resp.json().await.unwrap();
+        promised = body["publication"]
+            .as_u64()
+            .unwrap_or_else(|| panic!("the ingest acknowledgement carries the number: {body}"));
+    }
+
+    let answer = flush_waiting(served).await;
+    assert_eq!(answer["visible"], json!(true), "the wait completed: {answer}");
+    assert_eq!(
+        publication(served).await,
+        promised,
+        "{created}: the counter names the cycle the rows are visible in and passes it no earlier"
+    );
+    reauthorise(served).await;
+    for (view, wanted) in [(created, 4), (held, held_before + 4)] {
+        assert_eq!(
+            points(served, view).await.len(),
+            wanted,
+            "{view}: the rows the acknowledgement promised at {promised} are served there"
+        );
+    }
+    assert_eq!(
+        served.server.state.engine.buffered_items(),
+        0,
+        "the number was not reached with rows still buffered"
+    );
+}
+
+/// **The group case issue #153 reported**: the view is created on a declared group, and the
+/// commit that creates it feeds it and a view the bundle already carried.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_group_view_created_in_a_commit_serves_its_rows_at_the_number_it_was_promised() {
+    let mut served = serve().await;
+    let resp = create(
+        &served,
+        "quarter",
+        "2026-Q7",
+        q_record("Q7 2026", 1_800_000_000_000_000),
+    )
+    .await;
+    assert_eq!(resp.status(), 201, "a free key on a declared group creates");
+    a_view_created_and_fed_publishes_in_one_cycle(&mut served, "quarter:2026-Q7", "quarter:2026-Q1")
+        .await;
+}
+
+/// The plain case beside it, in the same shape. The kind of view is not what decides this — how
+/// many views one commit feeds is — and these two are here to hold that true for both kinds.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_plain_view_created_in_a_commit_serves_its_rows_at_the_number_it_was_promised() {
+    let mut served = serve().await;
+    let resp = served
+        .server
+        .client
+        .put(served.server.control_url("/control/views/extra"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .json(&json!({
+            "extent": { "x": [0.0, 1000.0], "y": [0.0, 1000.0] },
+            "point_visibility": { "default": "public" }
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201, "a plain view is created");
+    a_view_created_and_fed_publishes_in_one_cycle(&mut served, "extra", "world").await;
+}
