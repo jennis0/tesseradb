@@ -156,3 +156,15 @@ paths = [
   "clients/py/tesseradb/static/*",
   "clients/py/tests/*",
 ]
+
+# Found by the fix-wire round, 2026-09-18: on a group-scoped layer a view's browse returns another
+# view's artifact (key and tessera_id, count zero). A view of a scoped layer serves its own artifacts only.
+[track.fix-scoped-roster]
+paths = [
+  "crates/tessera-engine/src/*",
+  "crates/tessera-engine/tests/*",
+  "crates/tessera-build/tests/*",
+  "crates/tessera-server/tests/*",
+  "conformance/tests/*",
+  "clients/py/tests/*",
+]
