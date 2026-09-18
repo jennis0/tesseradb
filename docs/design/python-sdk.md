@@ -130,15 +130,19 @@ the columns. Every insert prints two lists, the columns it read and the columns 
 | a view group | as a view, plus `view=`, the column naming which view of the group each row belongs to; a roster of views with their metadata is `insert(group, roster=table, key=, **metadata_columns)` |
 | an attribute | `id=`, `value=`; on a group-scoped attribute also `view=` |
 | a layer, by key | `id=`, `key=`: one key per row, or a list of one key per level on a tiered layer; on a group-scoped layer also `view=` |
-| a layer, artifacts | `insert(layer, artifacts=table, key=, level=, parent=, contents=, attached_layer=, attached_level=, attached_key=, members=, excluding=, space=, bbox=|circle=|ellipse=|wkt=)`, each named where the table carries it |
-| a layer, members | `insert(layer, members=table, id=, key=, level=, rank=)` |
-| a label set | a mapping `{key: text}`, or a table with `key=` and `text=` (a plain string column) or `contents=` (a layer's ranked contents column); a generating set is `insert(labels, members=table, id=, key=, rank=)` |
+| a layer, artifacts | `insert(layer, artifacts=table, key=, parent=, contents=, attached_layer=, attached_key=, members=, excluding=, space=, level=, attached_level=, shape=)`, each named where the table carries it. `level` and `attached_level` are read by the build only under their own names, so those two take the canonical name or the column is renamed in the table; `shape=` takes the kind word and the shape columns (`min_x`…, `cx, cy, r`, `geometry`) are read under their canonical names |
+| a layer, members | `insert(layer, members=table, id=, key=, rank=, level=)`, `level` under its own name as above |
+| a label set | a mapping `{key: text}`, or a table with `key=` and `text=` (a plain string column) or `contents=` (a layer's ranked contents column), with `attached_layer=`, `attached_key=` and `level=` where the table carries them; a generating set is `insert(labels, members=table, id=, key=, rank=)` |
 | a vocabulary | `key=`, `title=`, `code=` |
 
 An artifacts table and a members table are two inserts on the same layer, each with its own
-column names, since both carry `key` and `level`. Several inserts on one target before a commit
-accumulate: the build reads them all and ingest pages each, so a corpus in parts is loaded by
-the same calls as one file.
+column names, since both carry `key` and `level`. A table in Tessera's own shape is no exception
+to the rule: a canonical column the call did not name (`members`, `excluding`, `rank`, `parent`,
+`contents`, `attached_layer`, `attached_key`, `space`, `code`) is refused naming the column and
+the two remedies, name it or drop it, so nothing is read silently at either door. Several inserts
+on one target before a commit accumulate: the build reads them all and ingest pages each, so a
+corpus in parts is loaded by the same calls as one file; a second part whose schema differs from
+the first is refused naming the two types.
 
 The columns that carry identity or disclosure are named on every call and never matched: the
 id, the coordinates, the access labels, a layer's key, a group's view column. An attribute's
