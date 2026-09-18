@@ -101,7 +101,6 @@ pub(crate) fn resolve_group(
     check_name_free(name, manifest, NameKind::Group).map_err(refused)?;
     let projection = parse_projection(name, &declaration.projection).map_err(refused)?;
     let quantisation = compile_frame(name, &declaration.frame).map_err(refused)?;
-    check_gate(name, declaration.visibility.as_deref()).map_err(refused)?;
 
     // **A `members` group takes another group's keys** (`views.md` §3.3), so the owner must exist
     // and must own its own keys — chains are refused at the declaration, which is what lets every
@@ -175,7 +174,6 @@ pub(crate) fn resolve_plain(
     check_name_free(name, manifest, NameKind::View).map_err(refused)?;
     let projection = parse_projection(name, &declaration.projection).map_err(refused)?;
     let quantisation = compile_frame(name, &declaration.frame).map_err(refused)?;
-    check_gate(name, declaration.visibility.as_deref()).map_err(refused)?;
 
     let compiled = ViewDescriptor {
         display_name: declaration
@@ -279,34 +277,10 @@ fn compile_frame(name: &str, frame: &DeclaredFrame) -> Result<Quantisation, Stri
     })
 }
 
-/// The gate as the manifest stores it: `public` is the absence of a gate (decision 0088), and the
-/// list is stored as written (decision 0132). Whether the plugin can read a label is asked at the
-/// door, where the plugin is.
+/// The gate as the manifest stores it: a public view has none. The labels were checked against
+/// the plugin before the declaration reached the executor.
 fn gate_of(visibility: Option<Vec<String>>) -> Option<Vec<String>> {
     visibility.filter(|labels| labels.as_slice() != ["public"])
-}
-
-/// What the door cannot ask the plugin about: the shapes a gate may not take
-/// (`views.md` §6, decision 0132). The plugin half is `Engine::check_gate_labels`.
-fn check_gate(name: &str, visibility: Option<&[String]>) -> Result<(), String> {
-    let Some(labels) = visibility else {
-        return Ok(());
-    };
-    if labels.is_empty() {
-        return Err(format!(
-            "'{name}': `visibility = []` names no terms. A gate is satisfied where its term set \
-             meets the principal's, so an empty one is satisfied by nobody and the view would be \
-             reachable by no principal at all. Write `public`, or the labels the gate names, one \
-             per element (views §6)"
-        ));
-    }
-    if labels.iter().any(|l| l.is_empty()) {
-        return Err(format!(
-            "'{name}': `visibility` names an empty label, which is no label. Each element is one \
-             label taken verbatim (decision 0132)"
-        ));
-    }
-    Ok(())
 }
 
 /// The names a roster record already uses, which a metadata name may not take

@@ -827,20 +827,9 @@ fn a_views_own_visibility_is_a_label_the_plugin_can_read() {
             &format!("name             = \"s0\"\nvisibility       = {declared}"),
         ))
     };
-    let message = refusal("[]");
-    assert!(message.contains("names no terms"), "{message}");
-    let message = refusal("[\"finance\", \"\"]");
-    assert!(
-        message.contains("element 1") && message.contains("is empty"),
-        "an empty element is refused naming its position: {message}"
-    );
-    let message = refusal("\"\"");
-    assert!(message.contains("is empty"), "{message}");
-    let message = refusal("[\"public\", \"finance\"]");
-    assert!(
-        message.contains("`public` beside another label"),
-        "`public` beside a label is a gate everybody passes, and is refused: {message}"
-    );
+    // The rules are tested in `tessera_plugin::check_gate`; here, that the build applies them.
+    refusal("[]");
+    refusal("[\"public\", \"finance\"]");
 }
 
 /// `public` is the documented default and the current behaviour, so writing it records nothing

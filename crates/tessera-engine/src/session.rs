@@ -3962,45 +3962,11 @@ impl Engine {
         &self,
         visibility: Option<&[String]>,
     ) -> std::result::Result<(), crate::write::AcceptError> {
-        let public = std::str::from_utf8(tessera_authz::PUBLIC_LABEL).expect("the label is ASCII");
-        let Some(labels) = visibility.filter(|l| *l != [public]) else {
-            return Ok(());
-        };
-        let refused = |detail: String| {
-            crate::write::AcceptError::Exec(tessera_lifecycle::ExecError::ViewRefused { detail })
-        };
-        if labels.is_empty() {
-            return Err(refused(
-                "visibility = [] names no terms. A gate is satisfied where its term set meets the \
-                 principal's, so an empty one is satisfied by nobody and the view would be \
-                 reachable by no principal at all. Write `public`, or the labels the gate names, \
-                 one per element (views §6)"
-                    .to_string(),
-            ));
-        }
-        if labels.iter().any(|l| l == public) {
-            return Err(refused(format!(
-                "visibility = {labels:?} lists `public` beside another label. `public` is the \
-                 label every principal holds, so a gate naming it is satisfied by everybody; \
-                 write `public` alone, or leave it out of the list (views §6)"
-            )));
-        }
-        let descriptors: Vec<Vec<u8>> = labels.iter().map(|l| l.as_bytes().to_vec()).collect();
-        let descriptors = self.plugin.terms_of_labels(&descriptors).map_err(|e| {
-            refused(format!(
-                "visibility = {labels:?} is not a label list the plugin can read ({e}). A view's \
-                 gate is satisfied by the item-visibility predicate (views §6), so a label the \
-                 plugin cannot turn into a term is one no principal could satisfy"
-            ))
-        })?;
-        if descriptors.is_empty() {
-            return Err(refused(format!(
-                "visibility = {labels:?} names no terms. A gate is satisfied where its term set \
-                 meets the principal's, so an empty one is satisfied by nobody and the view would \
-                 be reachable by no principal at all. Write `public`, or labels naming terms"
-            )));
-        }
-        Ok(())
+        tessera_plugin::check_gate(self.plugin.as_ref(), visibility)
+            .map(|_| ())
+            .map_err(|detail| {
+                crate::write::AcceptError::Exec(tessera_lifecycle::ExecError::ViewRefused { detail })
+            })
     }
 
     /// Create a view of a view group while the service runs (`views.md` §3.2, decision 0108).

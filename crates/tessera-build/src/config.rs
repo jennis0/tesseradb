@@ -154,7 +154,6 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
-use tessera_plugin::Plugin;
 use tessera_spatial::frame::{snap_outward, Snap};
 use tessera_spatial::tiler::ScalarType;
 use tessera_spatial::{cell, Bounds, Projection};
@@ -3361,56 +3360,8 @@ fn check_view_name(object: &str, name: &str) -> Result<()> {
 /// (`tessera_build::build`); a deployment serving the bundle under a different plugin is a
 /// mismatch the gate fails closed on rather than one this check could anticipate.
 fn compile_view_gate(object: &str, declared: Option<&[String]>) -> Result<Option<Vec<String>>> {
-    let Some(labels) = declared else {
-        return Ok(None);
-    };
-    if labels == [PUBLIC] {
-        return Ok(None);
-    }
-    if labels.is_empty() {
-        return Err(declaration_error(format!(
-            "{object}: `visibility = []` names no terms. A gate is satisfied where its term set \
-             meets the principal's, so an empty one is satisfied by nobody and the view would be \
-             reachable by no principal at all — including this build's author. Write `public`, \
-             or the labels the gate names, one per element"
-        )));
-    }
-    if labels.iter().any(|l| l == PUBLIC) {
-        return Err(declaration_error(format!(
-            "{object}: `visibility = {labels:?}` lists `public` beside another label. `public` \
-             is the label every principal holds, so a gate naming it is satisfied by everybody; \
-             write `public` alone, or leave it out of the list"
-        )));
-    }
-    for (i, label) in labels.iter().enumerate() {
-        if label.is_empty() {
-            return Err(declaration_error(format!(
-                "{object}: element {i} of `visibility = {labels:?}` is empty. Each element is \
-                 one label a principal holds, taken as written, and an empty one is no label. \
-                 Write `public`, or the labels the gate names, one per element"
-            )));
-        }
-        check_label(object, "visibility", label)?;
-    }
-    let descriptors: Vec<Vec<u8>> = labels.iter().map(|l| l.as_bytes().to_vec()).collect();
-    let descriptors = tessera_plugin::Passthrough::new()
-        .terms_of_labels(&descriptors)
-        .map_err(|e| {
-            declaration_error(format!(
-                "{object}: `visibility = {labels:?}` is not a label list the plugin can read \
-                 ({e}). A view's gate is satisfied by the item-visibility predicate (views §6), \
-                 so a label the plugin cannot turn into a term is one no principal could satisfy"
-            ))
-        })?;
-    if descriptors.is_empty() {
-        return Err(declaration_error(format!(
-            "{object}: `visibility = {labels:?}` names no terms. A gate is satisfied where its \
-             term set meets the principal's, so an empty one is satisfied by nobody and the view \
-             would be reachable by no principal at all — including this build's author. Write \
-             `public`, or labels naming terms"
-        )));
-    }
-    Ok(Some(labels.to_vec()))
+    tessera_plugin::check_gate(&tessera_plugin::Passthrough::new(), declared)
+        .map_err(|detail| declaration_error(format!("{object}: {detail}")))
 }
 
 /// Compile every `[[view_group]]` (`views.md` §3, decision 0108).
