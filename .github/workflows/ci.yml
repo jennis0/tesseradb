@@ -108,16 +108,6 @@ jobs:
       # from an opt-in pre-commit hook that is skipped in any worktree without a track marker,
       # which is not a gate.
       - run: bash scripts/check-layers.sh
-      - run: python3 scripts/check-doc-links.py
-      # Prose register: files already rewritten to docs/agents/writing.md's Register section fail
-      # on any forbidden construction; the rest are counted until their rewrite lands.
-      - run: bash scripts/check-register.sh
-      # Keeps `inventory.md`'s per-document revision and ⊘-marker counts true. It regenerates the
-      # file and exits 1 when that changed anything, which is the behaviour wanted here: the
-      # regenerated copy is discarded with the runner, and the failure is the signal. Added because
-      # this branch revised a design document and left the inventory reading the old revision, and
-      # nothing noticed until a review did.
-      - run: python3 scripts/check-corpus-integrity.py
 
   conformance:
     runs-on: ubuntu-latest

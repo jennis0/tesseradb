@@ -4,7 +4,7 @@ This governs everything in `docs/` and every code comment. Write for a competent
 
 ## Rules
 
-1. **Describe the system, not its history.** Say what it is and why. Do not say which revision changed it, who found it in review, or what it used to be. History lives in git and in `docs/decisions/`. Do not use phase or task numbers, "currently" or "for now".
+1. **Describe the system, not its history.** Say what it is and why. Do not say which revision changed it, who found it in review, or what it used to be. History lives in git. Do not use phase or task numbers, "currently" or "for now".
 
    > ✗ "r3 replaced r1's retirement stamp, because for suppressions that was fail-open."
    >
@@ -43,4 +43,4 @@ Plain technical English: subject, verb, object. Short sentences, one idea each. 
 
 ## Code comments
 
-The same rules. A module doc carries the design argument when the module upholds an invariant the code does not show, rejects an obvious construction for a non-obvious reason, or has a shape a measurement drove; otherwise a few lines on what the module is for. State a rule once, where it belongs, and refer to it elsewhere. Cite `§4` or `contracts §2.5`, not `file.rs:184`. No `TODO` or `FIXME`; open work is an issue.
+The same rules. A module doc carries the design argument when the module upholds an invariant the code does not show, rejects an obvious construction for a non-obvious reason, or has a shape a measurement drove; otherwise a few lines on what the module is for. State a rule once, where it belongs, and refer to it elsewhere. No `TODO` or `FIXME`; open work is an issue.

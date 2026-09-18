@@ -2,60 +2,55 @@
 
 ## What this is
 
-Tessera serves an interactive map over billions of documents or records from one machine, to many viewers, while the corpus changes underneath it. Each viewer sees the map computed over exactly the items they may see: every count, density, cluster, label and sample, not only which items they can retrieve. A viewer's visible set is computed once per session as a Roaring bitmap. Geometry is stored in Morton order, so a tile is a contiguous row-id range and a masked count is bitmap arithmetic.
+Tessera serves an interactive map over billions of documents or records from one machine, to many viewers, while the corpus changes underneath it. Each viewer sees the map computed over exactly the items they may see: every count, density, cluster, label and sample, not only which items they can retrieve.
 
-## Where to look
+A viewer's visible set is computed once per session as a Roaring bitmap. Geometry is stored in Morton order, so a tile is a contiguous range of row ids and a masked count is bitmap arithmetic.
 
-| | |
-|---|---|
-| [docs/design/](docs/design/) | The specification. Start at its [README](docs/design/README.md). `architecture.md` wins any conflict; §n with no prefix means that document |
-| [docs/decisions/](docs/decisions/) | Settled decisions, one per file. Read before reopening one |
-| [docs/agents/](docs/agents/) | How work is done here, and [writing.md](docs/agents/writing.md), the house style |
-| [docs/roadmap.md](docs/roadmap.md) | What constrains the order of work. Not a status record |
-| [docs/evidence/](docs/evidence/), [probes/](probes/) | Measurements and investigations. Not normative; re-run a figure before relying on it. Superseded material is in git history, not in the tree |
-| GitHub issues | What is being worked on. [`docs/ingest-campaign.md`](docs/ingest-campaign.md) records the test corpora and their build figures |
+[docs/system/](docs/system/) describes the system; start at [overview.md](docs/system/overview.md). [docs/openapi/](docs/openapi/) is the HTTP contract. The code is the authority on everything else. If a comment cites a document or a decision number that is not in the tree, ignore the citation and read the code.
 
-A document's `Status:` line says whether it is normative or provisional. The directory does not.
+## What it must do
 
-## Invariants
+The capabilities are listed in [overview.md](docs/system/overview.md): a map over any records with a 2D layout, several coordinate systems over one corpus, composable filters and search, annotation layers with access-controlled labels, highlight, item cards, live ingest with deletion and suppression, and embeddable clients. These hold across all of them:
 
-The thirteen invariants are in architecture §4. Read them there. The ones most often broken by a plausible change:
+- **Correct for each viewer.** Everything a viewer receives is computed over what that viewer may see. The next section says what that rules out.
+- **Billions of points on one machine.** A build streams within a memory budget; a server runs under a memory cap; a viewport answers at interactive speed. Keep the number of points drawn as high as possible. When something is slow, remove work before adding threads, caches or disk.
+- **A build is an ingest into an empty database.** Anything that can be declared, stored or changed at a build can be done at a running service, and the reverse, and it survives a restart. One that works on one path only is unfinished. A rule about what may be declared or stored is written once, below both paths, and called by both.
+- **Four surfaces, one set of core capabilities.** The HTTP API, the TypeScript client, the Python client and the CLI each reach every core capability: declare, insert, delete and suppress, query, filter, annotate. Each may add what suits it (components in the browser, dataframes and a notebook widget in Python, files and scripts at the CLI). A capability added to one is added to all, and the HTTP API comes first because the others are built on it.
+- **The user's data and decisions are the user's.** A client holds no hidden state and infers nothing: no guessed column names, no chosen defaults for what to declare or render. Every write call stands alone. Declaring and inserting are separate verbs, with the names a database user expects.
 
-- **I2.** Every aggregate is computed from inside the viewer's mask. Computing over the full dataset and then gating is a disclosure. Appendix C lists the accepted exceptions; anything not in that table is a bug.
-- **I7.** Sampling happens after masking. Direct evaluation is the only selection route ([decision 0008](docs/decisions/0008-candidate-list-route-declined.md)); `check-layers.sh` fails if its marker is removed. Do not remove it to simplify: sparse principals' maps go blank with no error.
-- **I3 / I12.** Labels gate on the authorised mask, never on the filtered one. Filters can hide, never reveal.
-- **I10.** Entity ids never reach a client. The `tessera_id` is a blinding permutation, not encryption ([decision 0014](docs/decisions/0014-i10-weakened-to-construction.md)); do not describe it as a cryptographic guarantee or as a defence against a bundle-holder.
-- **Two deny removal rules** (write-path §5.4). A suppression leaves the overlay only on unsuppress. A deletion leaves it only at the compaction that removes its rows. Any other removal route re-exposes items.
-- **Geometry stamps are advisory** (decision 0041). A suppression applies to every request from the moment it is accepted.
+## Layout
 
-Coverage of the invariants is stated in `conformance.md` §4.6 and nowhere else.
+One Rust workspace under [crates/](crates/), one binary (`tessera`).
 
-## How strict to be
+- `tessera-build` turns source files into a bundle. `tessera-engine` opens a bundle, answers requests and takes writes. `tessera-server` is the HTTP layer over the engine. `tessera-store` is the on-disk formats. `tessera-lifecycle` is the write-ahead log and the write commands.
+- [clients/py/](clients/py/) is the Python SDK and [clients/ts/](clients/ts/) the browser client. Python is a consumer and is never in a request path. [conformance/](conformance/) is a Python suite that checks a running server against an independent oracle.
+- [probes/](probes/) and `tessera-bench` are measurements. Re-run a figure before relying on it.
 
-Refuse only where a change leaks (anything a principal can observe) or is irreversible (entity ids, term ids, a published identity). Everything else is recoverable: report it, print the numbers with a meaningful denominator, and let the operator decide. Do not block a build because a result might be wrong. For joins and inputs, ignore and report rather than refuse.
+Nothing is deployed, so there is no backwards compatibility: change a format and rebuild the bundles. Bump the format version when you do, so a stale bundle is refused.
 
-## Working method
+## The security boundary
 
-- **Rust throughout**, one binary. Python is a consumer (SDK, supervisor, the test-only oracle), never in a request path, artifact production, or the trusted computing base. TypeScript is the frontend.
-- **No backwards compatibility before release** ([decision 0048](docs/decisions/0048-no-deployments-exist-so-delete-rather-than-support.md)). Change formats freely and recreate the artifacts. No `#[serde(default)]` for old bundles, no appended variants to keep a discriminant. Bump the version when a discriminant changes so a stale artifact is refused. Keep the contracts a second reader depends on (the Python oracle, the conformance suite) and the rules of a running process (`seg_id` never reused, dictionary extents positional).
-- **Build is ingest into an empty database** ([decision 0091](docs/decisions/0091-build-is-ingest-into-an-empty-database.md)). A feature that works at build and not at ingest is unfinished. Internals may differ.
-- **Audit before performance.** Prefer the construction that is obviously correct; keep the query surface narrow (the leak register is exhaustive because the surface is enumerable); add capability through the filter contract (§8.2). Cost model: bitmap operations cost by containers touched, not by cardinality.
-- **Stop and report** when an answer would set an invariant, a guarantee, or something Joe has not decided.
+[docs/system/security.md](docs/system/security.md) is the threat model. The mistakes a reasonable-looking change most often makes:
 
-## Pace
+- Computing an aggregate over the whole dataset and then filtering it. Every count, histogram and cluster is computed from inside the viewer's visible set.
+- Sampling before masking. A viewer with few visible items then gets a blank map and no error.
+- Gating a label on the filtered set. Labels gate on the authorised set; a filter can hide things and can never reveal them.
+- Sending an entity id to a client, these are internal and cannot be shared as they leak invisible points. Clients see `tessera_id`, a blinding permutation. It is not encryption.
+- Removing a deny early. A suppression is removed only when it is lifted; a deletion only by the compaction that removes its rows. A suppression applies to every request from the moment it is accepted.
 
-- Fix it now. An issue is for large work, a deferral, or an owner ruling, not for a loose end.
-- Review once, when a design becomes binding. Re-review only if the fixes changed its shape.
-- Delegate for breadth, not assurance. One agent where one will do. Verify a subagent's work; do not accept its summary.
-- Deliver the scope asked for. Mention a better approach in a sentence and continue.
+Refuse or withhold only where something would leak to a viewer or cannot be undone (entity ids, term ids, a published identity). Everywhere else the user decides: do what they asked, report what happened with numbers, and do not add a refusal, a warning or a default on their behalf.
+
+## Working here
+
+- Fix the cause where it is. If the server lacks something a client needs, change the server.
+- Prefer deleting to adding. Before writing a helper, a check or a type, look for the one that exists.
+- Comments say what the code does not. No history, no citations, no argument for the design. An error message says what is wrong and what to write instead, in a sentence.
+- Test behaviour through the public surface: what is stored, what is served, what survives a restart. Do not assert message text or the shape of internals. A rule's tests live beside the rule.
+- [docs/writing.md](docs/writing.md) is the style for prose. British spelling.
 
 ## Talking to Joe
 
-He knows the system better than you do and is usually thinking out loud. Answer what he asked and leave the decision with him. Agreement is a complete reply. Do not comment on your own earlier messages; say the right thing now. No filler that announces importance. No rules generalised from one conversation. Save "fail-open", "silent" and "breaks" for cases that are. State uncertainty once. Use lettered options when he needs to decide. Identifiers go in brackets or not at all.
-
-## House style
-
-Read [docs/agents/writing.md](docs/agents/writing.md) before writing prose into the repository. Mark anything specified but not built at the point you claim it. Say whether a figure is measured, modelled or assumed. No `TODO` or `FIXME`; open work is an issue. British spelling.
+He knows the system better than you do and is usually thinking out loud. Answer what he asked, in ordinary English, and leave the decision with him. When a change alters what a user can do, ask him with short lettered options. Agreement is a complete reply.
 
 ## Checks before finishing
 
@@ -66,8 +61,6 @@ bash scripts/check-layers.sh
 bash scripts/check-test-reachability.sh --quick
 bash scripts/check-clients.sh
 bash clients/py/check.sh
-python3 scripts/check-doc-links.py
-bash scripts/check-register.sh
 ```
 
-Read the output before claiming a pass. Keep `--no-fail-fast` and check the test count: without it cargo stops at the first failing binary and a smaller passing total looks green. The TypeScript check is in the gate because the Rust build cannot see a broken client.
+Keep `--no-fail-fast` and read the totals: without it cargo stops at the first failing binary and a smaller passing count looks green. Build with `CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0` in a worktree; debug targets are tens of gigabytes each.
