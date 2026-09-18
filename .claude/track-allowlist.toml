@@ -89,3 +89,31 @@ paths = [
   "crates/tessera-server/src/*",
   "crates/tessera-server/tests/*",
 ]
+
+# Owner rulings 2026-09-18 on the SDK campaign's findings. `fix-wire` is four small fixes (#151 a
+# runtime view on /v1/meta, #152 the build's per-(layer, view) key, #155 the restated values page's
+# no-op record) and the publish route letting an attached record omit `members`/`excluding`; the
+# contracts sentence is the controller's. `fix-group-cycle` is #153: a group view created in a
+# commit window publishes its buffered rows in the same cycle.
+[track.fix-wire]
+paths = [
+  "crates/tessera-engine/src/*",
+  "crates/tessera-engine/tests/*",
+  "crates/tessera-build/src/*",
+  "crates/tessera-build/tests/*",
+  "crates/tessera-server/src/*",
+  "crates/tessera-server/tests/*",
+  "crates/tessera-lifecycle/src/*",
+  "conformance/tests/*",
+  "clients/py/*",
+]
+
+[track.fix-group-cycle]
+paths = [
+  "crates/tessera-engine/src/*",
+  "crates/tessera-engine/tests/*",
+  "crates/tessera-server/src/*",
+  "crates/tessera-server/tests/*",
+  "conformance/tests/*",
+  "clients/py/tests/*",
+]
