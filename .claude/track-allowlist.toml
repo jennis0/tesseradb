@@ -129,3 +129,30 @@ paths = [
   "conformance/tests/*",
   "clients/py/tests/*",
 ]
+
+# Owner rulings 2026-09-18. `fix-batch-id`: the SDK's batch id is a fresh id per request (never derived
+# from the body); the server indexes every batch-carrying record by one exhaustive rule and trims the
+# index at WAL rotation (#154). `fix-label-target`: a dependent's row names its target by tessera id;
+# the copied masked count and the client's join by count go. Contracts and decisions are the controller's.
+[track.fix-batch-id]
+paths = [
+  "clients/py/*",
+  "crates/tessera-engine/src/write.rs",
+  "crates/tessera-engine/tests/*",
+  "crates/tessera-lifecycle/src/*",
+  "crates/tessera-server/tests/*",
+  "conformance/tests/*",
+]
+
+[track.fix-label-target]
+paths = [
+  "crates/tessera-engine/src/viewport.rs",
+  "crates/tessera-engine/tests/*",
+  "crates/tessera-wire/*",
+  "crates/tessera-server/src/*",
+  "crates/tessera-server/tests/*",
+  "conformance/*",
+  "clients/ts/*",
+  "clients/py/tesseradb/static/*",
+  "clients/py/tests/*",
+]
