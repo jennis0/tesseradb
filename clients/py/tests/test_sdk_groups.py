@@ -244,12 +244,13 @@ def test_a_scoped_layers_artifacts_are_keyed_per_view(grouped):
     # **`shared` is one key on two views, so it is two artifacts** (contracts §3.4 r84; issue
     # #152) — two rows in the level's roster under one name, each holding its own members and
     # counting zero on the view it does not belong to. Read as a list rather than as a map, a key
-    # no longer being unique within a level.
+    # no longer being unique within a level: each view's own row carries its own members, and the
+    # other view's row, where the roster reaches it, carries none of this view's.
     counts = lambda rows: sorted(  # noqa: E731
         one["masked_count"] for one in rows if one["key"] == "shared"
     )
-    assert counts(rows_a)[-1] == 60, counts(rows_a)
-    assert counts(rows_b)[-1] == N - 60, counts(rows_b)
+    assert counts(rows_a) == [60], counts(rows_a)
+    assert counts(rows_b) == [0, N - 60], counts(rows_b)
 
 
 def test_a_later_commit_pages_an_insert_into_one_view_fills_a_family_and_adds_a_view(grouped):
