@@ -101,7 +101,11 @@
 //! attribute predicate's form is the exception: its membership is the value column, evaluated per
 //! request, so it takes no delta and is keyed on the geometry ([`ProjectionKey::live`]).
 //!
-//! **What stays base-only is the generating sets**, deliberately — see [`MembershipRows::put`].
+//! **A content's generating set is projected over the whole row space**, as a membership is, and
+//! the same three amendments maintain it: a flush extends it by the segment's extent, a merge
+//! rebases it over the merged span, and a growth unions the entities a page joined. A member still
+//! in the commit buffer has no row, so the set is short until the flush that gives it one and the
+//! content is withheld meanwhile — [`MembershipRows::put`] has the argument.
 //!
 //! **[`ArtifactRows::covers`] is read at every cache hit** because a request may hold the older of
 //! two live generations; on the executor every publication brings the held forms with it, so a
@@ -3121,8 +3125,7 @@ impl ArtifactProjections {
                             continue;
                         }
                         // A join alone: the same set the projection would have produced, reached
-                        // by one union over the page's own members. Base rows, as a generating
-                        // set's are (`MembershipRows::put`).
+                        // by one union over the page's own members.
                         if amended.grow_generating(page.ordinal, page.rank, &page.joining, space) {
                             unions += 1;
                         }
