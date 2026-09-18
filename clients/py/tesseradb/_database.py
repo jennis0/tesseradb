@@ -281,7 +281,8 @@ class Database:
 
         A table in Tessera's own shape is no exception: a canonical column the call did not name
         is refused naming the column and the two remedies, so nothing is read silently at one
-        door and ignored at the other.
+        door and ignored at the other. A group's rows name the column saying which view each
+        belongs to with `view=`, or the one view the whole table is for with `view_key=`.
 
         Before the first commit the table is bound to its target for the build. After it, the same
         call is sent at the next `commit()` by the route its target owns. Several inserts on one
@@ -308,7 +309,7 @@ class Database:
             data=data,
             named=named,
             directory=self.path,
-            source=self._source_key(target, role),
+            source=self._source_key(target, kind, role, named.get("view_key")),
             at_build=not self.built,
             projected=projected,
             metadata=metadata,
@@ -480,14 +481,24 @@ class Database:
                 )
         return matched
 
-    def _source_key(self, target: str, role: str) -> str:
-        """The `[sources]` key one insert writes under: the target's name, and its role."""
+    def _source_key(self, target: str, kind: str, role: str, view_key: str | None = None) -> str:
+        """The `[sources]` key one insert writes under: the target's name, and its role.
+
+        A group whose views each have their own file inserts one table per view, so the view's
+        own key names its file: the roster the SDK writes is one record per source.
+        """
         stem = target.replace("/", "_").replace(":", "_")
+        if view_key is not None:
+            stem = f"{stem}_{view_key}".replace("-", "_").replace("/", "_")
         key = stem if role in ("rows", "values", "text") else f"{stem}_{role}"
         # Never a key another insert holds: a second part of one target is written beside the
         # first and the two are read and written as one below.
         taken = {insert.source for insert in self.inserts + self.pending}
+        # One name may be held by two kinds, a category column and its value set, and each has
+        # its own file: the second is named for its kind rather than numbered.
         candidate, at = key, 1
+        if candidate in taken:
+            candidate = f"{key}_{kind}"
         while candidate in taken:
             at += 1
             candidate = f"{key}_{at}"
@@ -512,6 +523,9 @@ class Database:
                 if one.target == insert.target
                 and one.kind == insert.kind
                 and one.role == insert.role
+                # A group whose views each have their own file inserts one table per view, and
+                # the parts of one view are the parts that name it.
+                and one.view_key == insert.view_key
             ),
             None,
         )
@@ -688,6 +702,9 @@ class Database:
         if defaults.get("allocation_view") or not document.get("view_group"):
             return
         for group in document["view_group"]:
+            for record in group.get("view") or []:
+                defaults["allocation_view"] = f"{group['name']}:{record['key']}"
+                return
             for insert in self.inserts + self.pending:
                 if insert.target != group["name"] or insert.role != "roster":
                     continue
@@ -817,7 +834,6 @@ class Database:
         findings: list[C.Finding] = []
         C.rows_with_no_id(self.inserts, findings)
         C.keys_into_supplied_content(document, self.inserts, findings)
-        C.labels_without_members(self.inserts, findings)
         return findings
 
     def _refuse_an_empty_build(self, document: dict) -> None:
@@ -1403,6 +1419,7 @@ def _stored(insert: Insert) -> dict:
         "ignored": list(insert.ignored),
         "shape": insert.shape,
         "shape_columns": list(insert.shape_columns),
+        "view_key": insert.view_key,
     }
 
 
@@ -1424,6 +1441,7 @@ def _restored(stored: dict) -> Insert:
         ignored=list(stored["ignored"]),
         shape=stored["shape"],
         shape_columns=list(stored["shape_columns"]),
+        view_key=stored["view_key"],
     )
 
 

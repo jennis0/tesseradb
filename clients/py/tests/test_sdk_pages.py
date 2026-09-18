@@ -908,6 +908,45 @@ def test_one_members_insert_means_the_same_at_the_first_commit_and_at_the_second
     assert built == ingested == {"c0": n}
 
 
+def test_a_label_attached_to_a_cluster_minted_in_the_same_commit_is_served(served, corpus):
+    """§6.2 step 4: a publication naming a key step 3 mints waits for the mint to be visible.
+
+    The clustering is one key column, which the values route mints the artifact from; the label
+    attaches to that key in the same commit, and a minted artifact is resolvable only from its
+    publication, so the commit flushes between the two. The label carries no members of its own
+    and is served over the cluster's (decision 0145).
+    """
+    db = served(clustering)
+    keys = pa.table(
+        {
+            "id": pa.array([f"p{i}" for i in range(8)], pa.string()),
+            "cluster": pa.array(["c-new"] * 8, pa.string()),
+        }
+    )
+    db.declare_layer("clusters/fresh", kind="flat", title="Minted here")
+    db.declare_labels("topics/fresh", of="clusters/fresh")
+    db.insert("clusters/fresh", keys, id="id", key="cluster")
+    db.insert("topics/fresh", {"c-new": "A cluster minted at the values route"})
+
+    plan = db.check()
+    assert plan.ok, plan
+    lines = plan.plan
+    values_at = next(i for i, line in enumerate(lines) if line.startswith("values into"))
+    flush_at = next(i for i, line in enumerate(lines) if line.startswith("flush the values"))
+    publish_at = next(i for i, line in enumerate(lines) if line.startswith("publish"))
+    assert values_at < flush_at < publish_at, lines
+
+    report = db.commit()
+    assert report.ok, report
+    # One artifact minted by the values page, and one published by the labels page.
+    assert report.artifacts_minted == 2
+    rows = {(row[0], row[1]): row for row in artifact_rows_of(db)}
+    assert rows[("clusters/fresh", "c-new")][3] == 8
+    # The label is served with its text, over the members its cluster holds and none of its own.
+    assert rows[("topics/fresh", "c-new")][2] == ["A cluster minted at the values route"]
+    assert rows[("topics/fresh", "c-new")][3] == 8
+
+
 def test_a_label_set_declared_after_the_first_commit_is_declared_and_served(served, corpus):
     """§6.2 step 1: the runtime `PUT` body comes from `tessera check --payloads`."""
     db = served(clustering)

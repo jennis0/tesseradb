@@ -32,7 +32,9 @@ Applied to both:
    SDK names each source after the target its insert bound it to; and a corpus whose committed
    file carries a `<marker>` names files for objects a run fills in, which are not declared here.
 6. `[defaults].entity_id_field` where it is `entity_id`, the surface's own default.
-7. A view's `fields`, and a `[layer.members]`'s, where each column carries its canonical name.
+7. A `fields` entry, on a view, a group or a `[layer.members]`, where the column carries its
+   canonical name: the SDK writes what its insert named and the surface reads the same column
+   under the same name with no map at all.
 8. `hierarchy.prune_children` where it is false, the surface's default.
 9. A layer's `default_space` where it is `view`, the surface's default.
 10. A layer's `[layer.content]` where it carries no computed property and no supplied kind, which
@@ -45,7 +47,7 @@ A corpus whose committed file carries a `<marker>` a run fills in names that mar
 normalisation in its own test.
 """
 
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import pytest
 
@@ -91,7 +93,7 @@ def database(tmp_path: Path) -> object:
     return db
 
 
-def points(db, view: str, columns) -> None:
+def points(db, view: str, columns, file: str | None = None) -> None:
     """One view's own insert: its geometry, its labels, its id, and every column it fills.
 
     The attribute columns are the declared attributes' own names, which a frame inserted into the
@@ -109,14 +111,18 @@ def points(db, view: str, columns) -> None:
     if access:
         named["access"] = access[0]
     every = list(dict.fromkeys(list(columns) + attributes))
-    db.insert(view, parquet(db.files, f"{view}_points".replace("/", "_"), every), **named)
+    name = (file or f"{view}_points").replace("/", "_")
+    db.insert(view, parquet(db.files, name, every), **named)
 
 
-def artifacts(db, layer: str, columns=("key",)) -> None:
+def artifacts(db, layer: str, columns=("key",), view: str | None = None) -> None:
+    named = {"key": "key"}
+    if view is not None:
+        named["view"] = view
     db.insert(
         layer,
         artifacts=parquet(db.files, f"{layer}_artifacts".replace("/", "_"), columns),
-        key="key",
+        **named,
     )
 
 
@@ -149,7 +155,16 @@ def generated(db) -> dict:
 
 
 def _readers(document: dict) -> dict[str, tuple]:
-    """Which blocks name each source key, so a key can be compared by what reads it."""
+    """Which blocks read each file, so a `source` can be compared by what reads it beside it.
+
+    Keyed by the file rather than by the `[sources]` key: the committed file names one key per
+    file and the SDK names one per target, so two blocks reading one file share a key there and
+    have one each here. What both say the same way is which blocks read the same file.
+    """
+    paths = {
+        key: PurePosixPath(str(path)).name
+        for key, path in (document.get("sources") or {}).items()
+    }
     readers: dict[str, list[str]] = {}
     for kind in ("view", "view_group", "vocabulary", "attribute", "layer"):
         for block in document.get(kind, []):
@@ -158,19 +173,28 @@ def _readers(document: dict) -> dict[str, tuple]:
                 (block.get("members"), f"{kind} {block.get('name')} members"),
                 (block.get("views"), f"{kind} {block.get('name')} roster"),
                 (block.get("labels"), f"{kind} {block.get('name')} labels"),
+                *[
+                    (record, f"{kind} {block.get('name')} view {record.get('key')}")
+                    for record in (block.get("view") or [])
+                    if isinstance(record, dict)
+                ],
                 ((block.get("labels") or {}).get("members")
                  if isinstance(block.get("labels"), dict) else None,
                  f"{kind} {block.get('name')} labels members"),
             ):
                 if isinstance(one, dict) and one.get("source"):
-                    readers.setdefault(one["source"], []).append(where)
-    return {key: tuple(sorted(names)) for key, names in readers.items()}
+                    readers.setdefault(paths.get(one["source"], one["source"]), []).append(where)
+    return {"": ()} | {key: tuple(sorted(names)) for key, names in readers.items()}
 
 
 def _by_readers(block: dict, readers: dict) -> dict:
+    """One block with its `source` replaced by the blocks that read the file it names."""
     block = dict(block)
-    if block.get("source") in readers:
-        block["source"] = readers[block["source"]]
+    named = block.get("source")
+    if named is not None:
+        file = readers.get("paths", {}).get(named, named)
+        if file in readers:
+            block["source"] = readers[file]
     return block
 
 
@@ -186,20 +210,30 @@ def normalised(document: dict, filling: bool = False) -> dict:
         defaults.setdefault("allocation_view", views[0]["name"])
     out["defaults"] = defaults
     readers = _readers(document)
+    readers["paths"] = {
+        key: PurePosixPath(str(path)).name
+        for key, path in (document.get("sources") or {}).items()
+    }
     if filling and defaults.get("source"):
         # `[defaults].source` is resolved onto every block below before the keys are compared, so
         # a block that names none reads the default's file with everything else that does.
         for kind in ("view", "attribute"):
             for block in document.get(kind, []):
                 if "source" not in block and not block.get("scope"):
-                    readers.setdefault(defaults["source"], ())
-                    readers[defaults["source"]] = tuple(
-                        sorted(readers[defaults["source"]] + (f"{kind} {block['name']}",))
+                    file = readers["paths"].get(defaults["source"], defaults["source"])
+                    readers.setdefault(file, ())
+                    readers[file] = tuple(
+                        sorted(readers[file] + (f"{kind} {block['name']}",))
                     )
     out["view"] = [_by_readers(_view(block, defaults, filling), readers) for block in views]
+    out["view_group"] = [
+        _group(block, readers) for block in document.get("view_group", [])
+    ]
     out["attribute"] = [
-        block if block.get("scope")
-        else _by_readers(_sourced(block, defaults, filling), readers)
+        # `[defaults].source` reaches an entity-scoped column and no other, so a scoped one is
+        # compared as written; both are compared by which blocks read their file.
+        _by_readers(_fields(block), readers) if block.get("scope")
+        else _by_readers(_fields(_sourced(block, defaults, filling)), readers)
         for block in document.get("attribute", [])
     ]
     out["vocabulary"] = [
@@ -229,11 +263,27 @@ def _view(block: dict, defaults: dict, filling: bool) -> dict:
 
 
 def _fields(block: dict) -> dict:
-    """A `fields` map where every column carries its canonical name says nothing (§4.8)."""
+    """A `fields` entry naming the column its own canonical name says nothing (§4.8)."""
     block = dict(block)
-    fields = block.get("fields")
-    if fields and all(name == column for name, column in fields.items()):
-        block.pop("fields")
+    fields = {
+        name: column
+        for name, column in (block.get("fields") or {}).items()
+        if name != column
+    }
+    if block.get("fields") is not None:
+        block["fields"] = fields
+    if not fields:
+        block.pop("fields", None)
+    return block
+
+
+def _group(block: dict, readers: dict) -> dict:
+    """One `[[view_group]]`: its own fields, and each inline roster record's own source."""
+    block = _by_readers(_fields(block), readers)
+    if block.get("view"):
+        block["view"] = [_by_readers(dict(record), readers) for record in block["view"]]
+    if isinstance(block.get("views"), dict):
+        block["views"] = _by_readers(_fields(block["views"]), readers)
     return block
 
 
@@ -266,8 +316,13 @@ def bindings(db) -> None:
 
     for insert in db.inserts:
         stem = insert.target.replace("/", "_")
+        if insert.view_key is not None:
+            stem = f"{stem}_{insert.view_key}".replace("-", "_")
         expected = stem if insert.role in ("rows", "values", "text") else f"{stem}_{insert.role}"
-        assert insert.source == expected, f"{insert.target} ({insert.role}): {insert.source}"
+        # One name held by two kinds writes two files, the second named for its kind (§4.8).
+        assert insert.source in (expected, f"{expected}_{insert.kind}"), (
+            f"{insert.target} ({insert.role}): {insert.source}"
+        )
         assert _Path(insert.path).exists(), insert.path
     keys = set(_toml.loads(db.declaration).get("sources", {}))
     assert keys == {insert.source for insert in db.inserts}
@@ -574,19 +629,145 @@ def test_treeoflife(tmp_path):
     same(generated(db), committed("treeoflife"))
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="the insert surface has no spelling for a roster of inline views (one "
-    "`[[view_group.view]]` per view, each naming its own points file), which this corpus's "
-    "`quarter` group uses. A group's views and their metadata come from one roster insert beside "
-    "one points table with a discriminator (python-sdk.md §4.3), which is the corpus's other "
-    "group. Reported against §4.3",
-)
 def test_multiview(tmp_path):
-    """Every block of this corpus through the typed verbs, the view groups included."""
+    """Every block of this corpus through the typed verbs, the view groups included.
+
+    The two groups are views.md §3.2's two rosters. `quarter` gives each view its own file, so
+    each is inserted as its own table naming the one view it is for with `view_key=`, and the
+    roster insert carries the metadata each record holds. `quarter_alt` shares its keys and takes
+    one file with a discriminator column, named with `view=`.
+    """
+    import datetime as dt
+
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
     db = database(tmp_path)
-    db.declare_view_group("quarter", title="By quarter",
-                          extent={"x": [-40.0, 40.0], "y": [-40.0, 40.0]},
-                          metadata={"label": "text", "starts": "timestamp_us",
-                                    "ends": "timestamp_us"})
-    raise AssertionError("form A is not expressible through insert")
+    db.declare_view("world", projection="web_mercator", extent=WORLD, title="Whole corpus")
+    db.declare_view("world_flat", projection="equirectangular", extent=WORLD,
+                    title="Whole corpus, equirectangular")
+    db.declare_view_group(
+        "quarter",
+        title="By quarter",
+        extent={"x": [-40.0, 40.0], "y": [-40.0, 40.0]},
+        metadata={"label": "text", "starts": "timestamp_us", "ends": "timestamp_us"},
+    )
+    db.declare_view_group(
+        "quarter_alt",
+        title="By quarter, geographic",
+        members="quarter",
+        projection="web_mercator",
+        extent=WORLD,
+    )
+
+    db.declare_vocabulary("kind", closed=True, width="u8", title="Feature kind")
+    db.declare_attribute("importance", type="i64", index=True)
+    db.declare_attribute("kind", type="category", vocabulary="kind", index=True, render=True)
+    db.declare_attribute("sentiment", type="f32", scope={"group": "quarter"}, index=True,
+                         render=True)
+    db.declare_vocabulary("mood", closed=True, width="u8", visibility="derived",
+                          values=["calm", "tense", "wild", "still"], title="Mood")
+    db.declare_attribute("mood", type="category", vocabulary="mood",
+                         scope={"group": "quarter"}, index=True)
+    db.declare_attribute("note", type="text", scope={"group": "quarter"}, index=True)
+    db.declare_attribute("coverage", type="f32", scope={"group": "quarter"}, index=True)
+
+    db.declare_layer(
+        "collections",
+        kind="flat",
+        views=["world", "quarter"],
+        artifact_visibility={"field": "access", "default": "inherited"},
+        require_member_visibility="all",
+        computed=(),
+        supplied=[("tag", "text", "inherited")],
+        title="Curated collections",
+    )
+    db.declare_layer(
+        "quarter_clusters",
+        kind="flat",
+        views=["quarter"],
+        scope={"group": "quarter"},
+        require_member_visibility="any",
+        computed=(),
+        supplied=[("tag", "text", "inherited")],
+        title="Clusters by quarter",
+    )
+    db.declare_layer(
+        "regions",
+        kind="flat",
+        views=["world", "world_flat"],
+        membership="spatial",
+        shape={"kind": "polygon"},
+        require_member_visibility="none",
+        computed=(),
+        artifacts=[
+            {"key": "europe_nw", "wkt": "POLYGON ((-11 49, 3 49, 3 61, -11 61, -11 49))",
+             "space": "wgs84"},
+            {"key": "iberia", "wkt": "POLYGON ((-10 36, 3 36, 3 44, -10 44, -10 36))",
+             "space": "wgs84"},
+            {"key": "japan", "wkt": "POLYGON ((129 31, 146 31, 146 46, 129 46, 129 31))",
+             "space": "wgs84"},
+        ],
+        title="Regions",
+    )
+
+    # The two plain views, then each quarter's own file, then the shared group's one file.
+    # One file for the two plain views, as the corpus has it: a second projection over the same
+    # points is a second view reading the same rows.
+    points(db, "world", ("entity_id", "lon", "lat", "access"), file="world")
+    points(db, "world_flat", ("entity_id", "lon", "lat", "access"), file="world")
+    quarters = ["2026-Q1", "2026-Q2", "2026-Q3", "2026-Q4"]
+    starts = [dt.datetime(2026, q, 1, tzinfo=dt.timezone.utc) for q in (1, 4, 7, 10)]
+    ends = starts[1:] + [dt.datetime(2027, 1, 1, tzinfo=dt.timezone.utc)]
+    roster = tmp_path / "files" / "quarter_roster.parquet"
+    roster.parent.mkdir(parents=True, exist_ok=True)
+    pq.write_table(
+        pa.table(
+            {
+                "key": pa.array(quarters, pa.string()),
+                "label": pa.array([f"Q{i + 1} 2026" for i in range(4)], pa.string()),
+                "starts": pa.array(starts, pa.timestamp("us", tz="UTC")),
+                "ends": pa.array(ends, pa.timestamp("us", tz="UTC")),
+            }
+        ),
+        roster,
+    )
+    db.insert("quarter", roster=str(roster), key="key", label="label", starts="starts",
+              ends="ends")
+    for at, key in enumerate(quarters):
+        db.insert(
+            "quarter",
+            parquet(db.files, f"quarter_2026_q{at + 1}", ("entity_id", "x", "y", "access")),
+            id="entity_id",
+            x="x",
+            y="y",
+            access="access",
+            view_key=key,
+        )
+    db.insert(
+        "quarter_alt",
+        parquet(db.files, "quarter_alt_pts", ("entity_id", "lon", "lat", "access", "quarter")),
+        id="entity_id",
+        lon="lon",
+        lat="lat",
+        access="access",
+        view="quarter",
+    )
+    # `kind` reads its keys from a file; `mood` carries its four inline, so it takes no insert.
+    values(db, "kind")
+    constants = parquet(db.files, "attrs_constant", ("entity_id", "importance", "kind"))
+    for name in ("importance", "kind"):
+        db.insert(name, constants, id="entity_id", value=name)
+    # `coverage` is the one scoped column with a source of its own; the other three are read
+    # from each view's own points file, so they are declared and take no insert (views.md §5).
+    db.insert(
+        "coverage",
+        parquet(db.files, "attrs_scoped", ("entity_id", "quarter", "coverage")),
+        id="entity_id",
+        value="coverage",
+        view="quarter",
+    )
+    artifacts(db, "collections")
+    artifacts(db, "quarter_clusters", ("key", "quarter"), view="quarter")
+    bindings(db)
+    same(generated(db), committed("multiview"))

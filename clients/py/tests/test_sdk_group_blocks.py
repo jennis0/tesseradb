@@ -186,3 +186,30 @@ def test_a_roster_column_the_call_did_not_name_is_refused(db):
         "quarter", roster=table, key="key", label="label", visibility="visibility"
     )
     assert insert.ignored == []
+
+
+def test_a_group_whose_views_each_have_their_own_file_inserts_one_table_per_view(db):
+    """views.md §3.2's other roster: `view_key=` names the one view a whole table is for."""
+    db.declare_view_group("quarter", extent=BOX, metadata={"label": "text"})
+    db.insert("quarter", roster=roster(["q1", "q2"]), key="quarter", label="label")
+    for key in ("q1", "q2"):
+        db.insert("quarter", rows([key]), id="entity_id", x="x", y="y", access="access",
+                  view_key=key)
+    text = db.declaration
+    # One record per table, each naming its own file and carrying that key's metadata.
+    assert text.count("[[view_group.view]]") == 2
+    assert 'key = "q1"' in text and 'source = "quarter_q1"' in text
+    assert 'label = "Q1"' in text
+    # Form A and form B are two rosters, and this group declares one: no `[view_group.views]`
+    # table and no source of its own (configuration.md §1).
+    assert "[view_group.views]" not in text
+    assert 'allocation_view = "quarter:q1"' in text
+
+
+def test_a_groups_rows_name_the_view_one_way_or_the_other(db):
+    db.declare_view_group("quarter", extent=BOX)
+    with pytest.raises(Refusal, match="view=, or the one view this whole table is for"):
+        db.insert("quarter", rows(["q1"]), id="entity_id", x="x", y="y", access="access")
+    with pytest.raises(Refusal, match="A table is one or the other"):
+        db.insert("quarter", rows(["q1"]), id="entity_id", x="x", y="y", access="access",
+                  view="quarter", view_key="q1")

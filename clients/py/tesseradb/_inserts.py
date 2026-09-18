@@ -91,13 +91,17 @@ class Contract:
     canonical: tuple[str, ...] = ()
     #: The keywords whose column the build reads under its own name alone.
     canonical_only: tuple[str, ...] = ()
+    #: The keywords whose value is a key rather than a column: one view for a whole table.
+    values: tuple[str, ...] = ()
     #: Whether this table carries a membership shape, which `shape=` names by its kind.
     shaped: bool = False
 
 
 CONTRACTS: dict[tuple[str, str], Contract] = {
     ("view", "rows"): Contract(required=("x", "y"), optional=("id", "access")),
-    ("view_group", "rows"): Contract(required=("x", "y", "view"), optional=("id", "access")),
+    ("view_group", "rows"): Contract(
+        required=("x", "y"), optional=("id", "access", "view"), values=("view_key",)
+    ),
     ("view_group", "roster"): Contract(
         required=("key",), optional=("visibility",), canonical=ROSTER_FIELDS
     ),
@@ -166,6 +170,9 @@ class Insert:
     #: The membership shape kind this table's rows carry, and the columns it is written in.
     shape: str | None = None
     shape_columns: list[str] = field(default_factory=list)
+    #: The one view of its group every row of this table belongs to, where `view_key=` named it
+    #: rather than `view=` naming a column.
+    view_key: str | None = None
     #: The source key this insert writes into `[sources]`, before the first commit.
     source: str | None = None
     path: Path | None = None
@@ -193,8 +200,11 @@ class Insert:
         """What this insert prints: the columns it read, and the columns it ignored (§3)."""
         where = "read in place" if self.in_place else "written to " + str(self.declared_path)
         named = ", ".join(f"{role}={column!r}" for role, column in self.columns.items())
+        into = f"{self.kind} {self.target!r}"
+        if self.view_key is not None:
+            into += f", view {self.view_key!r}"
         out = [
-            f"insert into {self.kind} {self.target!r} ({self.role}): {self.rows} row(s), {where}",
+            f"insert into {into} ({self.role}): {self.rows} row(s), {where}",
             f"  read:    {', '.join(self.read) or 'nothing'}",
             f"  ignored: {', '.join(self.ignored) or 'nothing'}",
         ]
@@ -303,6 +313,7 @@ def _check(
         for role in contract.optional
     )
     known = set(required) | set(optional) | set(contract.either) | set(metadata)
+    known |= set(contract.values)
     if contract.shaped:
         known.add("shape")
     unknown = sorted(set(named) - known)
@@ -326,6 +337,21 @@ def _check(
             f"insert into {insert.kind} {insert.target!r}: name the column the text is in, "
             + " or ".join(f"{role}=" for role in contract.either)
         )
+    if "view" in contract.optional and "view_key" in contract.values:
+        named_view = [one for one in ("view", "view_key") if one in named]
+        if not named_view:
+            raise Refusal(
+                f"insert into {insert.kind} {insert.target!r}: a group's rows say which of its "
+                f"views each belongs to. Name the column that says which with view=, or the one "
+                f"view this whole table is for with view_key="
+            )
+        if len(named_view) == 2:
+            raise Refusal(
+                f"insert into {insert.kind} {insert.target!r}: view= names the column that says "
+                f"which view each row belongs to and view_key= names one view for the whole "
+                f"table. A table is one or the other, so name one of them"
+            )
+    insert.view_key = named.pop("view_key", None)
     shape = named.pop("shape", None) if contract.shaped else None
     shaped = _shape_columns(insert, shape)
     for role, column in named.items():

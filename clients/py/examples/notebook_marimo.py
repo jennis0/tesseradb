@@ -102,9 +102,9 @@ def _(mo):
         points so the frame carries one column of keys.
 
         Each cluster has a line of text, inserted as a mapping from cluster key to text. A label
-        with no members of its own is the label of its cluster (decision 0145), and the engine
-        does not place one that way yet, so the label's own membership goes in beside its text:
-        one row per (key, entity), which is the interim until that lands.
+        with no members of its own is the label of its cluster (decision 0145): it is drawn where
+        the cluster is drawn, counted over the cluster's members and served to whoever is served
+        the cluster, so the mapping is the whole of it.
         """
     )
     return
@@ -126,17 +126,12 @@ def _(DATA, mo, pq):
     # One line of text per cluster, keyed by the cluster it was written about.
     _topics = pq.read_table(DATA / "topics-kmeans.parquet").to_pandas()
     topic_names = {row.attached_key: row.contents[0][0] for row in _topics.itertuples()}
-
-    # The label's own membership: the rows its cluster holds, keyed by the label's own key, which
-    # here is the cluster's. The engine will read the cluster's rows when decision 0145 lands.
-    topic_members = pq.read_table(DATA / "clusters-kmeans-members.parquet",
-                                  columns=["key", "entity"])
     mo.md(f"{len(topic_names)} labels, one per cluster: {list(topic_names.values())[:3]}")
-    return topic_members, topic_names
+    return (topic_names,)
 
 
 @app.cell
-def _(frame, td, topic_members, topic_names):
+def _(frame, td, topic_names):
     simple = td.create()  # a temporary directory, on /dev/shm where the platform has one
     simple.declare_view("map")
     simple.declare_columns(frame, skip=["entity_id", "x", "y", "cluster"], index=["title"])
@@ -146,7 +141,6 @@ def _(frame, td, topic_members, topic_names):
     simple.insert("map", frame, id="entity_id", x="x", y="y")  # title is read by name
     simple.insert("clusters", frame, id="entity_id", key="cluster")
     simple.insert("topics", topic_names)  # {cluster_key: text}
-    simple.insert("topics", members=topic_members, id="entity", key="key")
     return (simple,)
 
 
@@ -238,8 +232,8 @@ def _(td):
     # Three clusterings: flat, nested and tiered. Each states its `require_member_visibility`:
     # how much of a cluster a viewer must already see before that cluster is served to them, as a
     # floor on the count or a share of the cluster's own size.
-    db.declare_layer("clusters/kmeans", kind="flat", require_member_visibility={"count": 50},
-                     title="k-means clusters")
+    db.declare_layer("clusters/kmeans", kind="flat", value_set="open",  # §3 mints into it
+                     require_member_visibility={"count": 50}, title="k-means clusters")
     db.declare_labels("topics/kmeans", of="clusters/kmeans", content_requires="all",
                       title="k-means topics")
     db.declare_layer("clusters/hdbscan", kind="nested",
@@ -375,11 +369,11 @@ def _(mo):
         at the middle of the frame, about a thousandth of its width, so the map below needs
         zooming in to see them apart.
 
-        `clusters/kmeans` was declared in section 2 with an artifacts table, so its value set is
-        `closed` and that table is its roster: a key nothing declares is a refusal rather than a
-        new cluster. The new cluster is published the way a closed layer takes one, an artifacts
-        row and its members; section 4's layer declares no roster, and there one key column is the
-        whole clustering.
+        The new cluster is one key column beside the papers: `clusters/kmeans` was declared
+        `value_set = "open"` in section 2, so a key its artifacts do not declare mints the cluster
+        it names, with the batch's rows as its first members. The topic line over it attaches to
+        that key in the same commit, so the commit flushes between the two: an artifact is
+        resolvable from its publication, and this one is published by the values page.
         """
     )
     return
@@ -423,22 +417,7 @@ def _(counts, db, pa):
 @app.cell
 def _(db, new_ids, new_papers, pa):
     db.insert("s0", new_papers, id="entity_id", x="x", y="y", access="categories")
-    db.insert(
-        "clusters/kmeans",
-        artifacts=pa.table({"level": pa.array([0], pa.uint32()),
-                            "key": pa.array(["km-audio"], pa.string())}),
-        key="key",
-        level="level",
-    )
-    db.insert(
-        "clusters/kmeans",
-        members=pa.table({"level": pa.array([0] * len(new_ids), pa.uint32()),
-                          "key": pa.array(["km-audio"] * len(new_ids), pa.string()),
-                          "entity": pa.array(new_ids, pa.uint64())}),
-        id="entity",
-        key="key",
-        level="level",
-    )
+    db.insert("clusters/kmeans", new_papers, id="entity_id", key="cluster")
     db.insert(
         "topics/kmeans",
         pa.table({"level": pa.array([0], pa.uint32()),

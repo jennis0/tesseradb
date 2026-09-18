@@ -169,9 +169,9 @@ def test_the_notebook_runs_and_serves_what_each_section_prints(walk):
     assert walk["simple_counts"]["visible"] == PAPERS
     assert isinstance(walk["simple_map"], Held)
     assert len(browse(simple, "map", "clusters")["artifacts"]) == 64
-    # The label set: one line per cluster, each served over the members the section gave it.
-    # Decision 0145 will read the cluster's own rows; until the engine places it that way, the
-    # label carries its own membership, which is what the section inserts.
+    # The label set: one line per cluster, from the mapping alone. A label with no members of its
+    # own is the label of its cluster, drawn where it is drawn and served to whoever is served it
+    # (decision 0145), so nothing beside the text was inserted.
     assert len(served_labels(simple, "map", "topics")) == 64
 
     # §10.2: the corpus from files, and two principals beside the union. Each count is computed

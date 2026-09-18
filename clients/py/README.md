@@ -71,10 +71,12 @@ and the column names its inserts gave it. The directory is everything the binary
 machine serve the same database.
 
 `declare_view_group` is the group surface: its views and their metadata come from
-`insert(group, roster=table, key=, **metadata_columns)`, and its rows from `insert(group, table,
-id=, x=, y=, access=, view=)` with `view=` naming the column that says which view each row belongs
-to. An attribute or a layer scoped to a group takes `scope={"group": name}`, and every insert into
-one names its view column.
+`insert(group, roster=table, key=, **metadata_columns)`, and its rows from one of views.md §3.2's
+two rosters. One file for every view names the column that says which with `view=`; a group whose
+views each have their own file inserts one table per view, naming the one view it is for with
+`view_key=`, and the SDK writes a roster record per table with the metadata that key carries. An
+attribute or a layer scoped to a group takes `scope={"group": name}`, and every insert into one
+names its view column.
 
 `declare_layer` carries the whole layer surface: spatial and attribute membership, shapes and
 spaces, per-level zoom, pruning, the serving-layout pin, attached and dependent layers, and an
@@ -92,7 +94,7 @@ case rather than a surprise.
 | Target | Columns named on the call |
 |---|---|
 | a view | `id=`; `x=`, `y=` (or `lon=`, `lat=` under a projection); `access=`, a list-of-strings column |
-| a view group | as a view, plus `view=`; its roster is `insert(group, roster=table, key=, **metadata)` |
+| a view group | as a view, plus `view=`, the column saying which view each row belongs to, or `view_key=`, one view for the whole table; its roster is `insert(group, roster=table, key=, **metadata)` |
 | an attribute | `id=`, `value=`; on a group-scoped attribute also `view=` |
 | a layer, by key | `id=`, `key=`: one key per row |
 | a layer, artifacts | `insert(layer, artifacts=table, key=, parent=, contents=, attached_layer=, attached_key=, members=, excluding=, space=, level=, attached_level=, shape=)` |
@@ -156,10 +158,10 @@ narrower after the first commit than before it:
   already exist, so `render=True` is refused at the verb (decision 0136's amendment). An indexed
   column is added at any time, and an insert into it fills it.
 
-One rule the engine does not carry yet shows as a pre-flight finding: a label with no members of
-its own is the label of its cluster (decision 0145), and until the engine places one that way such
-a label is served to nobody, so a label set given text and no members of its own is named and the
-commit is refused.
+A label set takes its text and needs nothing else: a label with no members of its own is the label
+of its cluster (decision 0145), drawn where the cluster is drawn, counted over its members and
+served to whoever is served it. `insert(labels, members=…)` is for a generating set, the documents
+a content gated `all` was written from.
 
 Which declarations are new is read from `/v1/meta`, and a vocabulary reaches it through the column
 that names it. A vocabulary no attribute names yet is therefore declared again at each commit; the
@@ -187,8 +189,9 @@ present, refusals by row and part, and how long the wait for its publication too
 The order is fixed: declarations, then points per view with the allocation view first, then values
 on entities that already exist, then artifacts per layer in dependency order. Where a commit
 carries both rows and values, the rows are flushed between the two, so a value addresses a row the
-database holds. Which declarations are new is read from `/v1/meta`, so the database is what says
-what it holds.
+database holds; and where a publication attaches to or grows a key the values step mints, the
+values are flushed before it, a minted artifact being resolvable only from its publication. Which
+declarations are new is read from `/v1/meta`, so the database is what says what it holds.
 
 Every acknowledgement names the publication its work becomes visible in. The pages all go
 unwaited and one `POST /control/flush?wait=visible` closes the commit: the flush arms a cycle and
@@ -210,8 +213,10 @@ retried, because an edit is a delete and a re-ingest.
 The pre-flight runs before a byte is sent and it sends nothing while a finding stands: it reports,
 names the finding, and drops or rewrites no row. Rows outside a view's frame are listed with the
 frame, rows with no id where the insert names an id column are listed, a key column inserted into a
-layer that declares supplied content is named with the artifacts-table route as the remedy, and a
-label insert whose clustering is neither held nor inserted is named.
+layer that declares supplied content is named with the artifacts-table route as the remedy, a label
+insert whose clustering is neither held nor inserted is named, and a polygon inserted after the
+first commit as WKB is named with both encodings: the build reads a `geometry` column as WKB and
+the publication route takes WKT text.
 
 `remove(ids)`, `suppress(ids)` and `unsuppress(ids)` take the ids the id column holds, or the
 `tessera_id`s where no insert named one; a removed id inserted again goes as a point row.

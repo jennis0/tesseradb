@@ -285,8 +285,8 @@ def test_a_key_column_is_inserted_into_a_layer_at_any_commit(tmp_path):
     assert [one.target for one in db.pending] == ["clusters"]
 
 
-def test_a_label_set_with_no_members_of_its_own_is_a_finding(tmp_path):
-    """§4.7, decision 0145: such a label is served to nobody until the engine places it."""
+def test_a_label_set_takes_its_text_and_needs_no_members_of_its_own(tmp_path):
+    """§4.7, decision 0145: such a label is the label of its cluster, and the engine places it."""
     db = mapped(tmp_path)
     db.declare_layer("clusters", kind="flat")
     db.declare_labels("topics", of="clusters")
@@ -294,10 +294,6 @@ def test_a_label_set_with_no_members_of_its_own_is_a_finding(tmp_path):
     db.insert("clusters", members=pd.DataFrame({"key": ["a"], "entity": ["p"]}),
               id="entity", key="key")
     db.insert("topics", {"a": "Diffusion models"})
-    findings = db._preflight(db._document())
-    assert [f.what for f in findings] == ["a label set with no members of its own"]
-    db.insert("topics", members=pd.DataFrame({"key": ["a"], "entity": ["p"]}),
-              id="entity", key="key")
     assert db._preflight(db._document()) == []
 
 

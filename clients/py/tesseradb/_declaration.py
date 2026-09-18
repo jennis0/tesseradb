@@ -750,7 +750,14 @@ def bind(document: dict, inserts: Sequence[Any]) -> None:
     The SDK rewrites no file, so a column keeps whatever name it has in the user's own table and
     the declaration is what says where each one is (§3, configuration.md §1).
     """
+    for block in document.get("view_group", []):
+        _bind_group(
+            block,
+            [one for one in inserts if one.kind == "view_group" and one.target == block["name"]],
+        )
     for insert in inserts:
+        if insert.kind == "view_group":
+            continue
         block = _block_for(document, insert)
         if block is None:
             continue
@@ -784,6 +791,54 @@ def _fields(block: dict, named: dict) -> None:
     if not named:
         return
     block["fields"] = Inline({**dict(block.get("fields") or {}), **named})
+
+
+def _bind_group(block: dict, inserts: Sequence[Any]) -> None:
+    """What a group's inserts write onto its block: one of views.md §3.2's two rosters.
+
+    A group whose views each have their own file inserts one table per view, naming the view with
+    `view_key=`, and the group's roster is those records: one `[[view_group.view]]` each, with
+    the file it was given and the metadata the roster insert carries for that key. A group with
+    one file for every view names the column that says which with `view=`, and its roster is the
+    table itself, `[view_group.views]` beside the group's own source.
+    """
+    rows = [one for one in inserts if one.role == "rows"]
+    roster = next((one for one in inserts if one.role == "roster"), None)
+    keyed = [one for one in rows if one.view_key is not None]
+    if keyed:
+        metadata = _roster_rows(roster)
+        block["view"] = [
+            {
+                "key": insert.view_key,
+                "source": insert.source,
+                **metadata.get(insert.view_key, {}),
+            }
+            for insert in keyed
+        ]
+        for insert in keyed:
+            _Bind._points(block, insert)
+        return
+    for insert in rows:
+        _Bind.view_group_rows(block, insert)
+    if roster is not None:
+        _Bind.view_group_roster(block, roster)
+
+
+def _roster_rows(roster: Any) -> dict:
+    """A roster table's metadata values by key, for the records an inline roster writes."""
+    if roster is None:
+        return {}
+    table = roster.table()
+    keys = table[roster.columns["key"]].to_pylist()
+    values: dict[str, dict] = {}
+    for at, key in enumerate(keys):
+        record = {}
+        if roster.columns.get("visibility"):
+            record["visibility"] = table[roster.columns["visibility"]][at].as_py()
+        for name, column in roster.metadata_columns.items():
+            record[name] = table[column][at].as_py()
+        values[str(key)] = record
+    return values
 
 
 class _Bind:
@@ -826,7 +881,8 @@ class _Bind:
     @staticmethod
     def attribute_values(block: dict, insert: Any) -> None:
         block["source"] = insert.source
-        block["field"] = insert.columns["value"]
+        if insert.columns["value"] != block["name"]:
+            block["field"] = insert.columns["value"]
         if insert.columns["id"] != CANONICAL_ENTITY_ID:
             block["entity_id_field"] = insert.columns["id"]
         if insert.columns.get("view"):

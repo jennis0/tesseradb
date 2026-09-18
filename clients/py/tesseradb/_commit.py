@@ -181,30 +181,6 @@ def keys_into_supplied_content(
         )
 
 
-def labels_without_members(inserts: Sequence[Any], findings: list[Finding]) -> None:
-    """A label set given text and no members of its own (decision 0145; §11.2 H).
-
-    A label with no members of its own is the label of its cluster: drawn where the cluster is
-    drawn, counted over the cluster's members and served to whoever is served it. Not built yet:
-    the engine places an attached artifact by its own member rows, so such a label is served to
-    nobody. The interim is the label's own membership, one row per (key, entity) with no rank,
-    and this finding goes when the engine's placement lands.
-    """
-    written = {one.target for one in inserts if one.kind == "labels" and one.role != "members"}
-    members = {one.target for one in inserts if one.kind == "labels" and one.role == "members"}
-    for target in sorted(written - members):
-        findings.append(
-            Finding(
-                "a label set with no members of its own",
-                f"'{target}' was given its text and no members. A label with no members of its "
-                f"own is the label of its cluster (decision 0145), and the engine does not place "
-                f"one that way yet, so it would be served to nobody. Insert the label's own "
-                f"membership beside its text: insert('{target}', members=table, id=…, key=…), a "
-                f"row per (key, entity) with no rank",
-            )
-        )
-
-
 class Planner:
     """§6.2's plan and §6.3's pre-flight over what was inserted since the last commit."""
 
@@ -220,6 +196,11 @@ class Planner:
         self.held_views = {str(view.get("id")) for view in meta.get("views", [])}
         self.held_views |= {str(group.get("name")) for group in meta.get("groups", [])}
         self.held_layers = {str(layer.get("name")) for layer in meta.get("layers", [])}
+        #: The layers this commit mints artifacts into at the values route, and the layers its
+        #: publications attach to or publish into: where the two meet, the mint is flushed first.
+        self._minted: set[str] = set()
+        self._attached_to: set[str] = set()
+        self._published: set[str] = set()
         #: The columns `/v1/meta` publishes, entity-scoped and group-scoped alike, and the
         #: vocabularies their categories name. `/v1/meta` carries no vocabulary list of its own: a
         #: value set is published through the column that reads it, so a vocabulary declared with
@@ -250,23 +231,25 @@ class Planner:
         document = self.db._document()
         rows_with_no_id(self.inserts, self.findings)
         keys_into_supplied_content(document, self.inserts, self.findings)
-        labels_without_members(self.inserts, self.findings)
         self._declarations(document)
         rows = self._phase(self._rows, document)
         values = self._phase(self._values, document)
+        artifacts = self._phase(self._artifacts, document)
         self.pages += rows
         if rows and values:
             # A value addresses a row the database holds, so the rows this commit sent are made
             # visible before the values that fill them (§6.2 step 2).
-            self.pages.append(
-                Page(
-                    kind="flush",
-                    name="rows",
-                    line="flush the rows, and wait for the publication that makes them visible",
-                )
-            )
+            self.pages.append(_flush("the rows", "makes them visible"))
         self.pages += values
-        self._artifacts(document)
+        if artifacts and (self._minted & (self._attached_to | self._published)):
+            # A publication attaching to or growing a key this commit's values step mints: a
+            # minted artifact is resolvable only from its publication, so the mint goes first
+            # (§6.2 step 4).
+            named = ", ".join(sorted(self._minted & (self._attached_to | self._published)))
+            self.pages.append(
+                _flush("the values", f"makes the artifacts they mint into {named} resolvable")
+            )
+        self.pages += artifacts
         return self.pages, self.findings
 
     def _phase(self, step, document: dict) -> list[Page]:
@@ -477,6 +460,10 @@ class Planner:
             if insert.kind == "view":
                 self._points_of(insert, block, table, insert.target)
                 continue
+            if insert.view_key is not None:
+                # One view for the whole table: a group whose views each have their own file.
+                self._points_of(insert, block, table, f"{insert.target}:{insert.view_key}")
+                continue
             # A group's rows say which view each belongs to, so the table is split by that column
             # and each part is a page into the view it names. A key the group does not hold is a
             # 404 at the route, which is the refusal a mistyped key must be (views.md §3.2).
@@ -600,6 +587,7 @@ class Planner:
             self._values_per_view(insert, _scoped_to(block), insert.columns["value"])
         for insert in self._for("layer", "key"):
             block = _block(document, "layer", insert.target)
+            self._minted.add(insert.target)
             self._values_per_view(insert, _scoped_to(block), insert.columns["key"])
 
     def _values_per_view(self, insert, group: str | None, column: str) -> None:
@@ -700,13 +688,19 @@ class Planner:
                 Finding(
                     "a labels insert before its clustering",
                     f"'{layer}' labels '{parent}', which this commit neither holds nor inserts. "
-                    f"Insert the clustering's artifacts beside the labels",
+                    f"Insert the clustering beside the labels: its artifacts and members, or its "
+                    f"key column",
                 )
             )
             return
         rows = _artifact_rows(artifacts, members, inline)
         if not rows:
             return
+        self._published.add(layer)
+        for row in rows:
+            attached = row.get("attached")
+            if attached:
+                self._attached_to.add(attached["layer"])
         wkb = [row["key"] for row in rows if row.get("geometry_wkb")]
         if wkb:
             self.findings.append(
@@ -730,6 +724,10 @@ class Planner:
         case where the clustering is new in this commit, where a label can only attach to a key
         this commit inserts.
         """
+        if layer in self._minted:
+            # A key column this commit sends mints its artifacts at the values route, which is
+            # the other door a clustering arrives by (contracts §3.4).
+            return True
         return any(page.name == layer and page.kind == "publish" for page in self.pages)
 
     def _publish(self, block: dict, rows: list[dict]) -> None:
@@ -1089,6 +1087,11 @@ def _publish_body(level: int, blocks: list[bytes]) -> bytes:
         + b",".join(blocks)
         + b"]}"
     )
+
+
+def _flush(what: str, why: str) -> Page:
+    """One `POST /control/flush?wait=visible` inside a commit, where a step needs the last one."""
+    return Page(kind="flush", name=what, line=f"flush {what}, and wait for the publication that {why}")
 
 
 def _blank(key: str, level: int, view: str | None = None) -> dict:
