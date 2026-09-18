@@ -3893,11 +3893,7 @@ fn compile_metadata_type(
         })?;
         let declared = vocabularies.get(vocabulary).ok_or_else(|| {
             declaration_error(format!(
-                "{object}: `metadata.{name}` names vocabulary '{vocabulary}', which no \
-                 `[[vocabulary]]` block declares. Declared: {}. A missing block is refused rather \
-                 than minted as an open vocabulary — a typo would otherwise create a value set \
-                 nobody authored, at whatever width and visibility the fall-through picked",
-                declared_names(vocabularies)
+                "{object}: `metadata.{name}`: no vocabulary named '{vocabulary}'"
             ))
         })?;
         return Ok(ViewMetadata {

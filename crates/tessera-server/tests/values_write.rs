@@ -136,7 +136,7 @@ async fn serve() -> Served {
     declare(&served, json!({"name": "tag", "type": "keyword", "index": true})).await;
     declare(
         &served,
-        json!({"name": "dept", "type": "category", "vocabulary": "dept", "width": "u8", "index": true}),
+        json!({"name": "dept", "type": "category", "vocabulary": "dept", "index": true}),
     )
     .await;
     served

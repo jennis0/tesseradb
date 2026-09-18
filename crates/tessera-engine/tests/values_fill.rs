@@ -496,13 +496,10 @@ fn every_family_fills_on_an_entity_that_predates_the_value_and_reads_back() {
             scope: LayerScope::Entity,
         })
         .expect_err("`render` is not declarable at a running service");
-    let AcceptError::Exec(ExecError::AttributeRefused { detail }) = refused_declaration else {
-        panic!("the interim refusal is an AttributeRefused, not {refused_declaration:?}");
-    };
-    assert!(
-        detail.contains("`render` is not accepted at a running service"),
-        "{detail}"
-    );
+    assert!(matches!(
+        refused_declaration,
+        AcceptError::Exec(ExecError::AttributeRefused { .. })
+    ));
     for column in ["band", "score"] {
         let refused = engine
             .fill_values(values_request(

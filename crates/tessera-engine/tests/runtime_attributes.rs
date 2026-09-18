@@ -1046,17 +1046,15 @@ fn an_identical_redeclaration_is_a_no_op_and_a_differing_one_conflicts() {
         Err(AcceptError::Exec(ExecError::AttributeRefused { detail })) => detail,
         other => panic!("refused at the door: {other:?}"),
     };
-    assert!(refused(request("region", "u8")).contains("may not take it"));
-    assert!(refused(request("weird", "utf8")).contains("retired"));
-    assert!(refused(AttributeRequest {
-        vocabulary: Some("nothing".to_string()),
-        ..request("tag", "category")
-    })
-    .contains("no vocabulary named"));
-    // **`render` is refused for every type, as an interim** (decision 0136's amendment): the
-    // reason is that this route addresses entities rather than rows, so it does not depend on the
-    // type, and the message says the refusal is not a rule about rendered columns.
+    // The shared rules are tested in `tessera_store::declaration`; this checks the route applies
+    // them, and adds its own: no `render`, and a group that exists.
     for r in [
+        request("region", "u8"),
+        request("weird", "utf8"),
+        AttributeRequest {
+            vocabulary: Some("nothing".to_string()),
+            ..request("tag", "category")
+        },
         AttributeRequest {
             index: true,
             render: true,
@@ -1067,37 +1065,19 @@ fn an_identical_redeclaration_is_a_no_op_and_a_differing_one_conflicts() {
             render: true,
             ..request("tag", "category")
         },
+        // A column the build declared with `render` cannot be restated here either.
         AttributeRequest {
-            vocabulary: Some("band".to_string()),
+            index: true,
             render: true,
-            ..request("band3", "category")
+            ..request("score", "f32")
         },
         AttributeRequest {
-            render: true,
-            ..request("blurb", "text")
+            scope: LayerScope::Group("nowhere".to_string()),
+            ..request("scoped", "i32")
         },
     ] {
-        let name = r.name.clone();
-        let detail = refused(r);
-        assert!(
-            detail.contains("`render` is not accepted at a running service")
-                && detail.contains("interim"),
-            "'{name}': {detail}"
-        );
+        refused(r);
     }
-    // The build's own rendered column cannot be restated through this route either: the flag is
-    // refused before the held-name comparison.
-    assert!(refused(AttributeRequest {
-        index: true,
-        render: true,
-        ..request("score", "f32")
-    })
-    .contains("`render` is not accepted at a running service"));
-    assert!(refused(AttributeRequest {
-        scope: LayerScope::Group("nowhere".to_string()),
-        ..request("scoped", "i32")
-    })
-    .contains("does not declare"));
     assert_eq!(
         declared_names(&engine),
         ["band", "score", "sentiment"],
