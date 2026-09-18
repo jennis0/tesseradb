@@ -3156,12 +3156,8 @@ fn compile_projection(object: &str, declared: Option<&str>) -> Result<Projection
     };
     Projection::from_name(name).ok_or_else(|| {
         declaration_error(format!(
-            "{object}: `projection = \"{name}\"` is not one of the projections this service \
-             transforms with. They are: web_mercator, equirectangular, plate_carree, \
-             gall_isographic, none (projections.md §5). The set is closed and stays cylindrical — \
-             a conic or azimuthal entry would stop a longitude/latitude rectangle being a \
-             rectangle, which is what lets an extent be written in degrees — and no datum shift, \
-             national grid or caller-supplied projection is accepted"
+            "{object}: no projection named '{name}'. They are web_mercator, equirectangular, \
+             plate_carree, gall_isographic and none"
         ))
     })
 }
@@ -3723,7 +3719,7 @@ fn compile_point_visibility(
 }
 
 /// The roster's own key set, which no metadata name may take (`views.md` §3.2).
-const ROSTER_KEYS: [&str; 3] = ["key", "source", "visibility"];
+use tessera_types::view::ROSTER_KEYS;
 
 /// The keys a group declares and a view of it may not (`views.md` §3.1).
 const GROUP_LEVEL_KEYS: [&str; 8] = [
@@ -3755,16 +3751,8 @@ fn compile_metadata_types(
     };
     let mut metadata = Vec::with_capacity(declared.len());
     for (name, value) in declared {
-        check_metadata_name(object, name)?;
-        if ROSTER_KEYS.contains(&name.as_str()) {
-            return Err(declaration_error(format!(
-                "{object}: `metadata.{name}` takes a name the roster already uses. `key`, `source` \
-                 and `visibility` are the roster's own keys (views §3.2), and a \
-                 `[[view_group.view]]` block mixes them with the metadata names — so a name in \
-                 both is a key with two readings, on the block and as a column of \
-                 `[view_group.views]`"
-            )));
-        }
+        tessera_types::view::check_metadata_name(name)
+            .map_err(|detail| declaration_error(format!("{object}: {detail}")))?;
         if discriminator == Some(name.as_str()) {
             return Err(declaration_error(format!(
                 "{object}: `metadata.{name}` takes the name of this group's discriminator column, \
@@ -3777,26 +3765,6 @@ fn compile_metadata_types(
     Ok(metadata)
 }
 
-/// A metadata name is a field name on the wire — `/v1/meta` serves it inside each roster entry —
-/// so it takes the column charset, on [`check_column_name`]'s argument.
-fn check_metadata_name(object: &str, name: &str) -> Result<()> {
-    if name.trim().is_empty() {
-        return Err(declaration_error(format!(
-            "{object}: a metadata name is empty. It is the name a view's value is served under"
-        )));
-    }
-    if !name
-        .bytes()
-        .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
-    {
-        return Err(declaration_error(format!(
-            "{object}: `metadata.{name}` is limited to ASCII letters, digits, `_` and `-`. It is a \
-             field name on the wire — `/v1/meta` serves it inside the roster entry for each view — \
-             on the same argument a column name is (contracts §3.2)"
-        )));
-    }
-    Ok(())
-}
 
 /// One metadata declaration: `name = "<type>"`, or `name = { type = "category", vocabulary = … }`.
 fn compile_metadata_type(

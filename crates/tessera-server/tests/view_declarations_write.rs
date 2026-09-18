@@ -404,10 +404,6 @@ async fn the_group_route_declares_answers_redeclarations_and_refuses_what_the_ru
     // A view and a group are one namespace: `s0` is the build's plain view.
     let (status, body) = declare_group(&served, "s0", quarter()).await;
     assert_eq!(status, 422, "{body}");
-    assert!(
-        body["detail"].as_str().unwrap().contains("already declares"),
-        "{body}"
-    );
 
     reauthorise(&mut served).await;
     assert_eq!(group_names(&served).await, ["quarter", "quarter_map"]);

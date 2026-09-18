@@ -158,6 +158,29 @@ pub struct GroupMetadataField {
     pub vocabulary: Option<String>,
 }
 
+/// The keys a roster record has of its own, which a metadata name may not take.
+pub const ROSTER_KEYS: [&str; 3] = ["key", "source", "visibility"];
+
+/// A metadata name is a field of each view's entry on `/v1/meta`.
+pub fn check_metadata_name(name: &str) -> Result<(), String> {
+    if name.is_empty()
+        || !name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+    {
+        return Err(format!(
+            "metadata '{name}': a name is ASCII letters, digits, `_` and `-`"
+        ));
+    }
+    if ROSTER_KEYS.contains(&name) {
+        return Err(format!(
+            "metadata '{name}': that name is one of the roster's own keys ({})",
+            ROSTER_KEYS.join(", ")
+        ));
+    }
+    Ok(())
+}
+
 /// One view created while the service runs — the roster record `PUT /control/views/{group}/{key}`
 /// carries, made durable first by the WAL and then, for ever, by the segments manifest
 /// (`views.md` §3.2, decision 0108).
@@ -292,5 +315,13 @@ mod tests {
         assert!(ViewMetadataType::I8.admits(&ViewMetadataValue::Int(-128)));
         assert!(!ViewMetadataType::Float.admits(&ViewMetadataValue::Int(1)));
         assert!(!ViewMetadataType::I32.admits(&ViewMetadataValue::Text("1".to_string())));
+    }
+
+    #[test]
+    fn a_metadata_name_is_an_identifier_and_not_a_roster_key() {
+        assert!(check_metadata_name("starts").is_ok());
+        for bad in ["", "a b", "a/b", "key", "visibility"] {
+            assert!(check_metadata_name(bad).is_err(), "{bad:?}");
+        }
     }
 }
