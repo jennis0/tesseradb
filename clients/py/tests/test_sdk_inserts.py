@@ -120,6 +120,17 @@ def test_a_second_part_naming_its_columns_differently_is_refused(tmp_path):
         db.insert("map", frame(2, paper=["r", "s"]), id="paper", x="x", y="y")
 
 
+def test_a_second_part_whose_schema_differs_is_refused_naming_the_two_types(tmp_path):
+    """§3: the parts are written as one file, so a promoted column would be a type neither
+    part was written in."""
+    db = mapped(tmp_path)
+    db.insert("map", frame(2, id=["p", "q"]), id="id", x="x", y="y")
+    with pytest.raises(Refusal, match="schema differs from the one already inserted, at column"):
+        db.insert("map", frame(2, id=[1, 2]), id="id", x="x", y="y")
+    with pytest.raises(Refusal, match="schema differs"):
+        db.insert("map", frame(2, id=["r", "s"], extra=[1, 2]), id="id", x="x", y="y")
+
+
 def test_two_tables_in_one_call_are_refused_naming_the_two_calls(tmp_path):
     db = create(tmp_path / "db")
     db.declare_view("map")
@@ -138,21 +149,51 @@ def test_a_layers_two_tables_are_two_inserts_with_their_own_column_names(tmp_pat
     db.declare_view("map")
     db.declare_layer("clusters", kind="flat")
     db.insert("map", frame(id=["p", "q", "r"]), id="id", x="x", y="y")
-    db.insert(
-        "clusters",
-        artifacts=pd.DataFrame({"k": ["a"], "lvl": [0]}),
-        key="k",
-        level="lvl",
-    )
-    db.insert(
-        "clusters",
-        members=pd.DataFrame({"k": ["a"], "e": ["p"]}),
-        id="e",
-        key="k",
-    )
+    db.insert("clusters", artifacts=pd.DataFrame({"k": ["a"]}), key="k")
+    db.insert("clusters", members=pd.DataFrame({"k": ["a"], "e": ["p"]}), id="e", key="k")
     text = db.declaration
-    assert 'fields = { key = "k", level = "lvl" }' in text
+    assert 'fields = { key = "k" }' in text
     assert 'fields = { key = "k", entity = "e" }' in text
+
+
+def test_a_column_the_build_reads_under_its_own_name_takes_no_other(tmp_path):
+    """§3: `level` and `attached_level` are in no `fields` map, so the table is what renames."""
+    db = create(tmp_path / "db")
+    db.declare_layer("clusters", kind="tiered", levels=[(0, "a"), (1, "b")])
+    with pytest.raises(Refusal, match="read by the build under its own name"):
+        db.insert("clusters", artifacts=pd.DataFrame({"k": ["a"], "lvl": [0]}),
+                  key="k", level="lvl")
+    insert = db.insert(
+        "clusters", artifacts=pd.DataFrame({"k": ["a"], "level": [0]}), key="k", level="level"
+    )
+    assert insert.read == ["k", "level"]
+
+
+def test_a_canonical_column_the_call_did_not_name_is_refused_with_its_two_remedies(tmp_path):
+    """§3: a table in Tessera's own shape is no exception to the rule that names are named."""
+    db = create(tmp_path / "db")
+    db.declare_layer("clusters", kind="flat")
+    table = pd.DataFrame({"k": ["a"], "parent": ["b"]})
+    with pytest.raises(Refusal, match="'parent'.*Name it on the call \(parent=\).*drop"):
+        db.insert("clusters", artifacts=table, key="k")
+    insert = db.insert("clusters", artifacts=table, key="k", parent="parent")
+    assert insert.read == ["k", "parent"] and insert.ignored == []
+
+
+def test_a_shape_is_named_by_its_kind_and_read_under_its_own_columns(tmp_path):
+    db = create(tmp_path / "db")
+    db.declare_layer("regions", kind="flat", membership="spatial", shape="bbox")
+    table = pd.DataFrame(
+        {"k": ["a"], "min_x": [0.0], "min_y": [0.0], "max_x": [1.0], "max_y": [1.0]}
+    )
+    with pytest.raises(Refusal, match="shape='bbox'"):
+        db.insert("regions", artifacts=table, key="k")
+    with pytest.raises(Refusal, match="not a shape kind"):
+        db.insert("regions", artifacts=table, key="k", shape="hexagon")
+    with pytest.raises(Refusal, match="carries no geometry"):
+        db.insert("regions", artifacts=table, key="k", shape="polygon")
+    insert = db.insert("regions", artifacts=table, key="k", shape="bbox")
+    assert insert.shape == "bbox" and insert.ignored == []
 
 
 def test_create_refuses_a_directory_that_is_not_empty(tmp_path):
@@ -232,23 +273,32 @@ def test_a_built_database_takes_every_declaration_but_a_render_column(tmp_path):
             call()
 
 
-def test_a_key_column_inserted_into_a_layer_after_the_first_commit_is_refused(tmp_path):
-    """§6.2 step 3: the column mints at the build and on the ingest route, and nowhere else."""
+def test_a_key_column_is_inserted_into_a_layer_at_any_commit(tmp_path):
+    """§6.2 step 3: the values route mints and joins from a key column as the other doors do."""
     db = mapped(tmp_path)
     db.declare_layer("clusters", kind="flat")
     db.built = True
-    with pytest.raises(Refusal, match="Not built yet: the values route reads a layer column"):
-        db.insert("clusters", frame(id=["p", "q", "r"], cluster=["a", "a", "b"]),
-                  id="id", key="cluster")
+    insert = db.insert(
+        "clusters", frame(id=["p", "q", "r"], cluster=["a", "a", "b"]), id="id", key="cluster"
+    )
+    assert insert.columns == {"id": "id", "key": "cluster"}
+    assert [one.target for one in db.pending] == ["clusters"]
 
 
-def test_a_label_set_with_no_generating_set_is_refused_naming_the_rule_it_needs(tmp_path):
-    """§4.7: a label with no members of its own is served to nobody until H lands."""
+def test_a_label_set_with_no_members_of_its_own_is_a_finding(tmp_path):
+    """§4.7, decision 0145: such a label is served to nobody until the engine places it."""
     db = mapped(tmp_path)
     db.declare_layer("clusters", kind="flat")
     db.declare_labels("topics", of="clusters")
-    with pytest.raises(Refusal, match="Not built yet: the engine places an attached artifact"):
-        db.insert("topics", {"a": "Diffusion models"})
+    db.insert("map", frame(id=["p", "q", "r"]), id="id", x="x", y="y")
+    db.insert("clusters", members=pd.DataFrame({"key": ["a"], "entity": ["p"]}),
+              id="entity", key="key")
+    db.insert("topics", {"a": "Diffusion models"})
+    findings = db._preflight(db._document())
+    assert [f.what for f in findings] == ["a label set with no members of its own"]
+    db.insert("topics", members=pd.DataFrame({"key": ["a"], "entity": ["p"]}),
+              id="entity", key="key")
+    assert db._preflight(db._document()) == []
 
 
 def test_a_second_views_insert_without_the_access_column_is_refused_naming_it(tmp_path):

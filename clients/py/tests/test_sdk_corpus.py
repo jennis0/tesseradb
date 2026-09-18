@@ -102,6 +102,9 @@ def insert_notebook(db, corpus: Path) -> None:
         ("clusters/hdbscan", "clusters-hdbscan"),
         ("taxonomy/arxiv", "taxonomy-arxiv"),
     ]:
+        # Every column these tables carry is named, canonical or not: the build reads a
+        # canonical column under its own name whatever the call says, so one passed over is
+        # refused rather than read silently (§3).
         db.insert(
             layer,
             artifacts=str(corpus / f"{name}.parquet"),
@@ -109,6 +112,8 @@ def insert_notebook(db, corpus: Path) -> None:
             level="level",
             parent="parent",
             contents="contents",
+            attached_layer="attached_layer",
+            attached_key="attached_key",
         )
         db.insert(
             layer,
@@ -116,17 +121,28 @@ def insert_notebook(db, corpus: Path) -> None:
             id="entity",
             key="key",
             level="level",
+            rank="rank",
         )
     for labels, name in [
         ("topics/kmeans", "topics-kmeans"),
         ("topics/hdbscan", "topics-hdbscan"),
     ]:
-        db.insert(labels, str(corpus / f"{name}.parquet"), key="key", contents="contents")
+        db.insert(
+            labels,
+            str(corpus / f"{name}.parquet"),
+            key="key",
+            level="level",
+            contents="contents",
+            parent="parent",
+            attached_layer="attached_layer",
+            attached_key="attached_key",
+        )
         db.insert(
             labels,
             members=str(corpus / f"{name}-members.parquet"),
             id="entity",
             key="key",
+            level="level",
             rank="rank",
         )
 
@@ -292,6 +308,9 @@ def test_the_arxiv_declaration_regenerated_discloses_what_the_committed_one_disc
         ("clusters/kmeans", "clusters-kmeans"),
         ("clusters/hdbscan", "clusters-hdbscan"),
     ]:
+        # Every column these tables carry is named, canonical or not: the build reads a
+        # canonical column under its own name whatever the call says, so one passed over is
+        # refused rather than read silently (§3).
         db.insert(
             layer,
             artifacts=str(corpus / f"{name}.parquet"),
@@ -299,6 +318,8 @@ def test_the_arxiv_declaration_regenerated_discloses_what_the_committed_one_disc
             level="level",
             parent="parent",
             contents="contents",
+            attached_layer="attached_layer",
+            attached_key="attached_key",
         )
         db.insert(
             layer,

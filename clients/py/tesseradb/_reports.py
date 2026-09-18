@@ -24,8 +24,8 @@ class Declared:
 
     def lines(self) -> list[str]:
         out = [
-            "declare_columns: every column below is declared as details — stored in the record "
-            "blob, shown at drill-down — with the flags render= and index= named",
+            "declare_columns: every column below is declared as details, stored in the record "
+            "blob and shown at drill-down, with the flags render= and index= named",
             f"  {'column':<26} {'dtype':<16} {'declared as':<14} {'render':<7} {'index':<6} why",
         ]
         for column in self.columns:

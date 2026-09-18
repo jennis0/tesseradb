@@ -16,8 +16,9 @@ record of what it sent: a table goes as it was inserted, and a row the database 
 cell is a re-run.
 
 **The target decides the route.** An insert into a view is a page of points, one into an attribute
-fills cells on entities the database holds, and a layer's two tables are publications. Nothing is
-inferred from the columns a table carries: the target was declared and the call named its columns.
+or a layer by key fills cells on entities the database holds, and a layer's two tables are
+publications. Nothing is inferred from the columns a table carries: the target was declared and
+the call named its columns.
 
 **Nothing is dropped or rewritten.** What the call named is what is sent, and a finding stops the
 plan rather than trimming it (§6.3). The user corrects the data or the declaration and commits
@@ -180,6 +181,30 @@ def keys_into_supplied_content(
         )
 
 
+def labels_without_members(inserts: Sequence[Any], findings: list[Finding]) -> None:
+    """A label set given text and no members of its own (decision 0145; §11.2 H).
+
+    A label with no members of its own is the label of its cluster: drawn where the cluster is
+    drawn, counted over the cluster's members and served to whoever is served it. Not built yet:
+    the engine places an attached artifact by its own member rows, so such a label is served to
+    nobody. The interim is the label's own membership, one row per (key, entity) with no rank,
+    and this finding goes when the engine's placement lands.
+    """
+    written = {one.target for one in inserts if one.kind == "labels" and one.role != "members"}
+    members = {one.target for one in inserts if one.kind == "labels" and one.role == "members"}
+    for target in sorted(written - members):
+        findings.append(
+            Finding(
+                "a label set with no members of its own",
+                f"'{target}' was given its text and no members. A label with no members of its "
+                f"own is the label of its cluster (decision 0145), and the engine does not place "
+                f"one that way yet, so it would be served to nobody. Insert the label's own "
+                f"membership beside its text: insert('{target}', members=table, id=…, key=…), a "
+                f"row per (key, entity) with no rank",
+            )
+        )
+
+
 class Planner:
     """§6.2's plan and §6.3's pre-flight over what was inserted since the last commit."""
 
@@ -225,6 +250,7 @@ class Planner:
         document = self.db._document()
         rows_with_no_id(self.inserts, self.findings)
         keys_into_supplied_content(document, self.inserts, self.findings)
+        labels_without_members(self.inserts, self.findings)
         self._declarations(document)
         rows = self._phase(self._rows, document)
         values = self._phase(self._values, document)
@@ -485,7 +511,7 @@ class Planner:
 
         A frame is fixed at the first commit and the ingest route refuses a whole page carrying a
         row outside it. The rows stand as they were inserted: dropping them would commit a corpus
-        the user did not insert, and the remedy is theirs — move the rows, or rebuild the database
+        the user did not insert, and the remedy is theirs: move the rows, or rebuild the database
         with an `extent=` that holds them.
         """
         frame = next(
@@ -547,11 +573,16 @@ class Planner:
     # ------------------------------------------------------------------ 3. values
 
     def _values(self, document: dict) -> None:
-        """An insert into an attribute: cells on rows the database holds (§6.2 step 3).
+        """What `POST /control/values` carries: cells on rows the database holds (§6.2 step 3).
 
-        A group-scoped family is paged per view: the insert's `view=` column says which view each
-        row's value belongs to, and the page carries that view in `x-tessera-view`, without which
-        no family may be named (contracts §3.4).
+        An insert into an attribute fills that column's cells. An insert into a layer by key is a
+        column named for the layer, which the route reads by `/control/ingest`'s own rule: a key
+        an artifact holds joins the entity to it, and a key no artifact holds mints the artifact
+        it names on a layer whose value set is `open` (contracts §3.4).
+
+        A group-scoped family and a scoped layer are paged per view: the insert's `view=` column
+        says which view each row's value belongs to, and the page carries that view in
+        `x-tessera-view`, without which no family may be named.
         """
         for insert in self._for("attribute", "values"):
             block = _block(document, "attribute", insert.target)
@@ -566,34 +597,42 @@ class Planner:
                     )
                 )
                 continue
-            table = insert.table()
-            group = _scoped_to(block)
-            if group is None:
-                self._values_of(insert, table, list(range(table.num_rows)), None)
-                continue
-            column = insert.columns.get("view")
-            if column is None:
-                self.findings.append(
-                    Finding(
-                        "a scoped family with no view column",
-                        f"attribute '{insert.target}' is scoped to group '{group}', and a value "
-                        f"belongs to one view. The values route names the view in a header, so "
-                        f"the insert names the column that says which: view=",
-                    )
-                )
-                continue
-            keys = table[column].to_pylist()
-            for key in dict.fromkeys(value for value in keys if value is not None):
-                rows = [i for i, value in enumerate(keys) if value == key]
-                self._values_of(insert, table, rows, f"{group}:{key}")
+            self._values_per_view(insert, _scoped_to(block), insert.columns["value"])
+        for insert in self._for("layer", "key"):
+            block = _block(document, "layer", insert.target)
+            self._values_per_view(insert, _scoped_to(block), insert.columns["key"])
 
-    def _values_of(self, insert, table: pa.Table, rows: list[int], view: str | None) -> None:
+    def _values_per_view(self, insert, group: str | None, column: str) -> None:
+        """One insert's pages, whole where it is entity-scoped and per view where it is not."""
+        table = insert.table()
+        if group is None:
+            self._values_of(insert, table, list(range(table.num_rows)), None, column)
+            return
+        view_column = insert.columns.get("view")
+        if view_column is None:
+            self.findings.append(
+                Finding(
+                    "a scoped insert with no view column",
+                    f"'{insert.target}' is scoped to group '{group}', and a value belongs to one "
+                    f"view. The values route names the view in a header, so the insert names the "
+                    f"column that says which: view=",
+                )
+            )
+            return
+        keys = table[view_column].to_pylist()
+        for key in dict.fromkeys(value for value in keys if value is not None):
+            rows = [i for i, value in enumerate(keys) if value == key]
+            self._values_of(insert, table, rows, f"{group}:{key}", column)
+
+    def _values_of(
+        self, insert, table: pa.Table, rows: list[int], view: str | None, column: str
+    ) -> None:
         """One page sequence of `POST /control/values`, over the rows this insert named."""
         if not rows:
             return
         columns = [
             ("external_id", _external_ids(table[insert.columns["id"]])),
-            (insert.target, table[insert.columns["value"]]),
+            (insert.target, table[column]),
         ]
         where = "" if view is None else f" of view '{view}'"
         self._page_rows(
@@ -649,7 +688,6 @@ class Planner:
 
     def _artifacts_of(self, block: dict, kind: str, parent: str | None = None) -> None:
         layer = block["name"]
-        view_field = _view_field(block)
         artifacts = self._for(kind, "artifacts", layer) + self._for(kind, "text", layer)
         members = self._for(kind, "members", layer)
         # An inline roster stays in the declaration, so it is offered once: with the layer it
@@ -666,8 +704,20 @@ class Planner:
                 )
             )
             return
-        rows = _artifact_rows(artifacts, members, inline, view_field)
+        rows = _artifact_rows(artifacts, members, inline)
         if not rows:
+            return
+        wkb = [row["key"] for row in rows if row.get("geometry_wkb")]
+        if wkb:
+            self.findings.append(
+                Finding(
+                    "a polygon written in WKB at the publication route",
+                    f"layer '{layer}': {len(wkb)} artifact(s), the first '{wkb[0]}', carry a "
+                    f"'geometry' column of WKB, which is what the build reads. The publication "
+                    f"route takes a polygon as WKT text, so a layer published at a running "
+                    f"service writes its geometry as text",
+                )
+            )
             return
         self._publish(block, rows)
 
@@ -1046,7 +1096,7 @@ def _blank(key: str, level: int, view: str | None = None) -> dict:
             "parent": [], "attached": None, "excluding": None, "space": None}
 
 
-def _artifact_rows(artifacts, members, inline=None, view_field=None) -> list[dict]:
+def _artifact_rows(artifacts, members, inline=None) -> list[dict]:
     """One layer's inserted tables as artifact records: the key, its parts and its sets.
 
     A member table's grain is `(key, entity, rank)`: a null rank is the membership and rank *k* is
@@ -1075,7 +1125,6 @@ def _artifact_rows(artifacts, members, inline=None, view_field=None) -> list[dic
     for insert in members or []:
         table = insert.table()
         columns = insert.columns
-        fields = table.column_names
         entity_column = columns["id"]
         key_column = columns["key"]
         level_column = columns.get("level")
@@ -1084,8 +1133,6 @@ def _artifact_rows(artifacts, members, inline=None, view_field=None) -> list[dic
         levels = table[level_column].to_pylist() if level_column else [0] * table.num_rows
         ranks = table[rank_column].to_pylist() if rank_column else [None] * table.num_rows
         views = table[view_column].to_pylist() if view_column else [None] * table.num_rows
-        if view_field is not None and view_column is None and view_field in fields:
-            views = table[view_field].to_pylist()
         keys = table[key_column].to_pylist()
         entities = table[entity_column].to_pylist()
         for level, key, rank, entity, view in zip(levels, keys, ranks, entities, views):
@@ -1101,8 +1148,33 @@ def _artifact_rows(artifacts, members, inline=None, view_field=None) -> list[dic
     return list(rows.values())
 
 
+#: How a shape written in a table's own columns reaches the publication record, whose fields are
+#: the record's own (contracts §3.4): `bbox = [min_x, min_y, max_x, max_y]`, `circle = [cx, cy, r]`,
+#: `ellipse = [cx, cy, a, b, angle]`. A polygon's `geometry` column is WKB at the build and the
+#: record's `wkt` is text, so the two doors read one column two ways and the plan says so.
+SHAPE_RECORD = {
+    "bbox": ("min_x", "min_y", "max_x", "max_y"),
+    "circle": ("cx", "cy", "r"),
+    "ellipse": ("cx", "cy", "a", "b", "angle"),
+}
+
+
+def _shape_of(row: dict, record: dict) -> None:
+    """The publication record's shape, from the columns the table wrote it in."""
+    for field, columns in SHAPE_RECORD.items():
+        if all(record.get(column) is not None for column in columns):
+            row[field] = [float(record[column]) for column in columns]
+    geometry = record.get("geometry")
+    if isinstance(geometry, str):
+        row["wkt"] = geometry
+    elif geometry is not None:
+        # WKB, which the build reads and the publication route does not take.
+        row["geometry_wkb"] = True
+
+
 def _artifact_parts(row: dict, record: dict) -> None:
     """The parts one artifact row carries, folded onto the record being built."""
+    _shape_of(row, record)
     contents = record.get("contents")
     if contents:
         row["content"] = [list(values) for values in contents]
@@ -1131,26 +1203,19 @@ def _artifact_parts(row: dict, record: dict) -> None:
 def _records(table: pa.Table, insert) -> list[dict]:
     """One table's rows under the artifact table's own names, as the insert named its columns.
 
-    A column the insert renamed is read under the name the call gave it; a column it named
-    nothing for is read under its own name where the table carries one, an artifacts table, a
-    members table and a roster being tables in Tessera's own shape (§3).
+    What is read is what the call named, and the shape columns `shape=` named, and nothing else:
+    a canonical column the call passed over is refused at the verb (§3), so the pages this plan
+    sends carry exactly what the build would have read from the same table.
     """
     named = {column: role for role, column in insert.columns.items()}
     named.update({column: role for role, column in insert.metadata_columns.items()})
+    for column in insert.shape_columns:
+        named.setdefault(column, column)
     out = []
     for row in rows_of(table):
-        record = {}
-        for column, value in row.items():
-            record[named.get(column, column)] = value
+        record = {name: row[column] for column, name in named.items() if column in row}
         out.append(record)
     return out
-
-
-def _view_field(block: dict) -> str | None:
-    """The column a scoped layer's rows carry their view in, and `None` on an entity-scoped one."""
-    if not _scoped_to(block):
-        return None
-    return dict(block.get("fields", {})).get("view") or "view"
 
 
 # ---------------------------------------------------------------------------- the run

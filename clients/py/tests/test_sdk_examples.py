@@ -169,11 +169,10 @@ def test_the_notebook_runs_and_serves_what_each_section_prints(walk):
     assert walk["simple_counts"]["visible"] == PAPERS
     assert isinstance(walk["simple_map"], Held)
     assert len(browse(simple, "map", "clusters")["artifacts"]) == 64
-    # §10.1's label insert, refused until the H rule lands (§11.2): a label with no members of
-    # its own is served to nobody, so the SDK refuses the insert rather than building a label set
-    # no principal can read. The section prints the refusal, and no line is served.
-    assert "Not built yet: the engine places an attached artifact" in walk["label_refusal"]
-    assert served_labels(simple, "map", "topics") == []
+    # The label set: one line per cluster, each served over the members the section gave it.
+    # Decision 0145 will read the cluster's own rows; until the engine places it that way, the
+    # label carries its own membership, which is what the section inserts.
+    assert len(served_labels(simple, "map", "topics")) == 64
 
     # §10.2: the corpus from files, and two principals beside the union. Each count is computed
     # inside its own mask.
@@ -192,9 +191,7 @@ def test_the_notebook_runs_and_serves_what_each_section_prints(walk):
     assert served_labels(db, "s0", "topics/kmeans", terms=["astro-ph"]) == []
 
     # §10.3: the new papers, their cluster and its label, and the count before and after. The
-    # key-column insert §10.3 is written with is refused until F lands (§11.2), and the section
-    # publishes the cluster through its two tables instead.
-    assert "Not built yet: the values route reads a layer column" in walk["key_refusal"]
+    # cluster is one key column, which the values route mints from.
     report = walk["delta_report"]
     assert report.ok, report
     assert report.rows_accepted == {"s0": NEW_PAPERS}
@@ -209,9 +206,7 @@ def test_the_notebook_runs_and_serves_what_each_section_prints(walk):
     assert not [row for row in artifact_rows(db, "s0", terms=["cs.LG"]) if row[1] == "km-audio"
                 and row[0].startswith("topics/") and row[2]]
 
-    # §10.4: a clustering over rows the database already holds, drawn for the union. The same
-    # refusal stands over held rows, and the same two tables are the remedy.
-    assert "Not built yet: the values route reads a layer column" in walk["era_refusal"]
+    # §10.4: a clustering over rows the database already holds, one key column and an id.
     era = walk["era_report"]
     assert era.ok, era
     assert era.artifacts_minted == 3

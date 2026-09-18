@@ -101,11 +101,10 @@ def _(mo):
         The cluster keys here come from the corpus's k-means membership file, joined onto the
         points so the frame carries one column of keys.
 
-        Each cluster has a line of text. **Not built yet (§11.2 H):** a label with no members of
-        its own is the label of its cluster, and the engine still places an attached artifact by
-        its own member rows, so the insert below is refused naming the rule. The refusal is
-        printed rather than caught elsewhere: the walk goes on without the lines, and section 2's
-        label sets carry their generating sets, which is the spelling that serves today.
+        Each cluster has a line of text, inserted as a mapping from cluster key to text. A label
+        with no members of its own is the label of its cluster (decision 0145), and the engine
+        does not place one that way yet, so the label's own membership goes in beside its text:
+        one row per (key, entity), which is the interim until that lands.
         """
     )
     return
@@ -127,12 +126,17 @@ def _(DATA, mo, pq):
     # One line of text per cluster, keyed by the cluster it was written about.
     _topics = pq.read_table(DATA / "topics-kmeans.parquet").to_pandas()
     topic_names = {row.attached_key: row.contents[0][0] for row in _topics.itertuples()}
+
+    # The label's own membership: the rows its cluster holds, keyed by the label's own key, which
+    # here is the cluster's. The engine will read the cluster's rows when decision 0145 lands.
+    topic_members = pq.read_table(DATA / "clusters-kmeans-members.parquet",
+                                  columns=["key", "entity"])
     mo.md(f"{len(topic_names)} labels, one per cluster: {list(topic_names.values())[:3]}")
-    return (topic_names,)
+    return topic_members, topic_names
 
 
 @app.cell
-def _(frame, td, topic_names):
+def _(frame, td, topic_members, topic_names):
     simple = td.create()  # a temporary directory, on /dev/shm where the platform has one
     simple.declare_view("map")
     simple.declare_columns(frame, skip=["entity_id", "x", "y", "cluster"], index=["title"])
@@ -141,13 +145,9 @@ def _(frame, td, topic_names):
 
     simple.insert("map", frame, id="entity_id", x="x", y="y")  # title is read by name
     simple.insert("clusters", frame, id="entity_id", key="cluster")
-    try:
-        simple.insert("topics", topic_names)  # {cluster_key: text}; Not built yet: H
-        label_refusal = ""
-    except td.Refusal as _why:
-        label_refusal = str(_why)
-    print(label_refusal)
-    return label_refusal, simple
+    simple.insert("topics", topic_names)  # {cluster_key: text}
+    simple.insert("topics", members=topic_members, id="entity", key="key")
+    return (simple,)
 
 
 @app.cell
@@ -161,7 +161,7 @@ def _(mo):
     mo.md(
         """
         Each call above printed what it did: `declare_columns` the table it declared, and each
-        `insert` the columns it read and the columns it ignored — `cluster` is ignored by the
+        `insert` the columns it read and the columns it ignored. `cluster` is ignored by the
         view's insert and read by the layer's, and neither call guessed a name.
 
         The report is the build's own: what each declaration read, what the frame did to the
@@ -212,7 +212,7 @@ def _(mo):
         terms. A viewer holding `astro-ph` sees the papers filed under `astro-ph` and nothing
         else. Every count, every cluster and every topic line is computed inside that mask.
 
-        A layer takes two tables under their own keywords — `artifacts=` and `members=` — because
+        A layer takes two tables under their own keywords, `artifacts=` and `members=`, because
         both carry `key` and `level`, so each insert names its own columns.
         """
     )
@@ -264,15 +264,21 @@ def _(DATA, db):
     for _layer, _name in [("clusters/kmeans", "clusters-kmeans"),
                           ("clusters/hdbscan", "clusters-hdbscan"),
                           ("taxonomy/arxiv", "taxonomy-arxiv")]:
+        # Every column these tables carry is named, canonical or not: the build reads a
+        # canonical column under its own name whatever the call says, so one passed over is
+        # refused rather than read silently.
         db.insert(_layer, artifacts=str(DATA / f"{_name}.parquet"), key="key", level="level",
-                  parent="parent", contents="contents")
+                  parent="parent", contents="contents", attached_layer="attached_layer",
+                  attached_key="attached_key")
         db.insert(_layer, members=str(DATA / f"{_name}-members.parquet"), id="entity", key="key",
-                  level="level")
+                  level="level", rank="rank")
     for _labels, _name in [("topics/kmeans", "topics-kmeans"),
                            ("topics/hdbscan", "topics-hdbscan")]:
-        db.insert(_labels, str(DATA / f"{_name}.parquet"), key="key", contents="contents")
+        db.insert(_labels, str(DATA / f"{_name}.parquet"), key="key", level="level",
+                  contents="contents", parent="parent", attached_layer="attached_layer",
+                  attached_key="attached_key")
         db.insert(_labels, members=str(DATA / f"{_name}-members.parquet"), id="entity", key="key",
-                  rank="rank")
+                  level="level", rank="rank")
     return
 
 
@@ -369,10 +375,11 @@ def _(mo):
         at the middle of the frame, about a thousandth of its width, so the map below needs
         zooming in to see them apart.
 
-        **Not built yet (§11.2 F):** §10.3 writes the new cluster as one key column beside the
-        papers — `insert("clusters/kmeans", new_df, id=…, key=…)` — which the values route does
-        not yet read, so it is refused and the cluster is published through its two tables
-        instead. The refusal is printed below.
+        `clusters/kmeans` was declared in section 2 with an artifacts table, so its value set is
+        `closed` and that table is its roster: a key nothing declares is a refusal rather than a
+        new cluster. The new cluster is published the way a closed layer takes one, an artifacts
+        row and its members; section 4's layer declares no roster, and there one key column is the
+        whole clustering.
         """
     )
     return
@@ -414,21 +421,8 @@ def _(counts, db, pa):
 
 
 @app.cell
-def _(db, new_papers, td):
+def _(db, new_ids, new_papers, pa):
     db.insert("s0", new_papers, id="entity_id", x="x", y="y", access="categories")
-    try:
-        # §10.3 as written: one key column beside the papers. Not built yet: F.
-        db.insert("clusters/kmeans", new_papers, id="entity_id", key="cluster")
-        key_refusal = ""
-    except td.Refusal as _why:
-        key_refusal = str(_why)
-    print(key_refusal)
-    return (key_refusal,)
-
-
-@app.cell
-def _(db, new_ids, pa):
-    # The clustering through its two tables, which is what the refusal above names.
     db.insert(
         "clusters/kmeans",
         artifacts=pa.table({"level": pa.array([0], pa.uint32()),
@@ -455,6 +449,8 @@ def _(db, new_ids, pa):
         key="key",
         level="level",
         contents="contents",
+        attached_layer="attached_layer",
+        attached_key="attached_key",
     )
     # A label's member table carries two grains: a null rank is the membership, and rank *k* is
     # the set content *k* was generated from.
@@ -521,9 +517,9 @@ def _(mo):
         ## 4. A second clustering over rows the database already holds
 
         §10.4 is one insert: a table with an id column and a key column, over rows the database
-        holds. **Not built yet (§11.2 F):** a key column mints its artifacts at the build and on
-        the ingest route, and the values route does not read one yet, so the same refusal stands
-        and the clustering goes in as an artifacts table and a members table.
+        holds. This layer declares no artifacts table, so its value set is `open`, and the values
+        route mints one artifact per key the column names and joins the rows that name it, which
+        is what the build and the ingest route do with the same column.
 
         This one splits the corpus by decade of submission, which every principal can see some of.
 
@@ -535,7 +531,7 @@ def _(mo):
 
 
 @app.cell
-def _(DATA, db, pa, pc, pq, td):
+def _(DATA, db, pa, pc, pq):
     _points = pq.read_table(DATA / "points.parquet", columns=["entity_id", "submitted_at"])
     _years = pc.year(_points.column("submitted_at")).to_pylist()
     _entities = _points.column("entity_id").to_pylist()
@@ -545,33 +541,10 @@ def _(DATA, db, pa, pc, pq, td):
                            "era": pa.array(_keys, pa.string())})
 
     db.declare_layer("clusters/era", kind="flat", title="By decade")
-    try:
-        db.insert("clusters/era", _by_decade, id="entity_id", key="era")  # Not built yet: F
-        era_refusal = ""
-    except td.Refusal as _why:
-        era_refusal = str(_why)
-    print(era_refusal)
-
-    db.insert(
-        "clusters/era",
-        artifacts=pa.table({"level": pa.array([0, 0, 0], pa.uint32()),
-                            "key": pa.array(["era-1990s", "era-2000s", "era-2010s"],
-                                            pa.string())}),
-        key="key",
-        level="level",
-    )
-    db.insert(
-        "clusters/era",
-        members=pa.table({"level": pa.array([0] * len(_entities), pa.uint32()),
-                          "key": pa.array(_keys, pa.string()),
-                          "entity": pa.array(_entities, pa.uint64())}),
-        id="entity",
-        key="key",
-        level="level",
-    )
+    db.insert("clusters/era", _by_decade, id="entity_id", key="era")
     era_report = db.commit()
     print(era_report)
-    return era_refusal, era_report
+    return (era_report,)
 
 
 @app.cell

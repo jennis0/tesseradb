@@ -114,6 +114,8 @@ def insert_the_new_cluster(db, ids=None, key: str = "k-new", label: str = "Audio
         key="key",
         level="level",
         contents="contents",
+        attached_layer="attached_layer",
+        attached_key="attached_key",
     )
     # A label's member table carries two grains: a null rank is the membership, and rank *k* is
     # content *k*'s generating set (annotation-write-cycle §6.1).
@@ -294,40 +296,35 @@ def test_a_commit_of_rows_and_values_flushes_between_them(served, corpus):
 # ---------------------------------------------------------------------------- §10.4
 
 
-def test_a_second_clustering_over_held_rows_is_published_through_its_tables(served, corpus):
-    """python-sdk.md §10.4, on §6.2 step 3's terms: a clustering over rows the database holds.
+def test_a_second_clustering_over_held_rows_is_one_key_column(served, corpus):
+    """python-sdk.md §10.4: a table with an id column and a key column, over rows it holds.
 
-    A key column mints its artifacts from the rows that carry it, which happens at the build and
-    on the ingest route; rows that are already there carry nothing. So the layer's artifacts and
-    members are inserted as their own tables and the keys are published with their members.
+    The values route reads a layer column by the ingest route's own rule: a key an artifact holds
+    joins the entity to it, and a key no artifact holds mints the artifact it names on a layer
+    whose value set is `open` (contracts §3.4). So the clustering is one insert.
     """
     db = notebook(served, corpus)
     held = [7, 8, 9, 10, 11]
     db.declare_layer("clusters/second", kind="flat")
     db.insert(
         "clusters/second",
-        artifacts=pa.table({"level": pa.array([0, 0], pa.uint32()),
-                            "key": pa.array(["c2-a", "c2-b"], pa.string())}),
-        key="key",
-        level="level",
-    )
-    db.insert(
-        "clusters/second",
-        members=pa.table(
+        pa.table(
             {
-                "level": pa.array([0] * len(held), pa.uint32()),
-                "key": pa.array(["c2-a", "c2-a", "c2-b", "c2-b", "c2-b"], pa.string()),
-                "entity": pa.array(held, pa.uint64()),
+                "entity_id": pa.array(held, pa.uint64()),
+                "cluster2": pa.array(["c2-a", "c2-a", "c2-b", "c2-b", "c2-b"], pa.string()),
             }
         ),
-        id="entity",
-        key="key",
-        level="level",
+        id="entity_id",
+        key="cluster2",
     )
+    plan = db.check()
+    assert plan.ok, plan
+    assert any("values into 'clusters/second'" in line for line in plan.plan), plan.plan
 
     report = db.commit()
     assert report.ok, report
     assert report.rows_accepted == {}
+    # The two keys no artifact held were minted at this commit, and the five rows joined them.
     assert report.artifacts_minted == 2
 
     rows = {row["key"]: row["masked_count"]
@@ -335,22 +332,36 @@ def test_a_second_clustering_over_held_rows_is_published_through_its_tables(serv
     assert rows == {"c2-a": 2, "c2-b": 3}
 
 
-def test_a_key_column_inserted_over_held_rows_is_refused_naming_the_two_tables(served, corpus):
-    """§6.2 step 3, §11.2 F: the values route fills a column and mints no artifact."""
+def test_a_key_column_into_a_layer_the_database_holds_joins_its_artifacts(served, corpus):
+    """The other arm of the same route: a key the layer's artifacts already declare."""
     db = notebook(served, corpus)
-    db.declare_layer("clusters/third", kind="flat")
-    with pytest.raises(Refusal, match="Not built yet: the values route reads a layer column"):
-        db.insert(
-            "clusters/third",
-            pa.table(
-                {
-                    "entity_id": pa.array([7, 8], pa.uint64()),
-                    "cluster3": pa.array(["a", "b"], pa.string()),
-                }
-            ),
-            id="entity_id",
-            key="cluster3",
-        )
+    key = browse(db, "s0", "clusters/kmeans")["artifacts"][0]["key"]
+    before = browse(db, "s0", "clusters/kmeans", q=key)["artifacts"][0]["masked_count"]
+    fresh = list(range(910_001, 910_011))
+    db.insert(
+        "s0",
+        new_papers(db, ids=fresh, x_offset=1.5),
+        id="entity_id",
+        x="x",
+        y="y",
+        access="categories",
+    )
+    db.insert(
+        "clusters/kmeans",
+        pa.table(
+            {
+                "entity_id": pa.array(fresh, pa.uint64()),
+                "cluster": pa.array([key] * len(fresh), pa.string()),
+            }
+        ),
+        id="entity_id",
+        key="cluster",
+    )
+    report = db.commit()
+    assert report.ok, report
+    assert report.memberships_joined == len(fresh)
+    after = browse(db, "s0", "clusters/kmeans", q=key)["artifacts"][0]["masked_count"]
+    assert after == before + len(fresh)
 
 
 # ---------------------------------------------------------------------------- values
@@ -542,7 +553,15 @@ def test_leave_shrinks_a_generating_set_and_emptying_it_withdraws_the_content(se
     """The one set that may shrink (decision 0135, §6.5), read back from what is served."""
     db = served(clustering)
     db.declare_labels("topics", of="clusters", content_requires="all")
-    db.insert("topics", label_rows(), key="key", level="level", contents="contents")
+    db.insert(
+        "topics",
+        label_rows(),
+        key="key",
+        level="level",
+        contents="contents",
+        attached_layer="attached_layer",
+        attached_key="attached_key",
+    )
     db.insert(
         "topics", members=label_members(n=5), id="entity", key="key", level="level", rank="rank"
     )
@@ -683,6 +702,19 @@ def test_a_labels_insert_whose_clustering_is_neither_held_nor_inserted_is_refuse
         key="key",
         level="level",
         contents="contents",
+        attached_layer="attached_layer",
+        attached_key="attached_key",
+    )
+    db.insert(
+        "topics/new",
+        members=pa.table(
+            {
+                "key": pa.array(["orphan"], pa.string()),
+                "entity": pa.array(["p0"], pa.string()),
+            }
+        ),
+        id="entity",
+        key="key",
     )
     plan = db.check()
     assert not plan.ok
@@ -824,12 +856,74 @@ def artifact_rows_of(db, view: str = "map", frame=None) -> list[tuple]:
     return rows
 
 
+def test_one_members_insert_means_the_same_at_the_first_commit_and_at_the_second(served, corpus):
+    """§3: what the call named is what both doors read, so the same table is the same membership.
+
+    The same `(level, key, rank, entity)` table is inserted into one layer at the first commit and
+    into another at a later one, with the same column names on the call. The masked counts the two
+    layers serve are equal: the build and the publication route read the columns the call named
+    and nothing else.
+    """
+    n = 20
+    table = pa.table(
+        {
+            "level": pa.array([0] * n, pa.uint32()),
+            "key": pa.array(["c0"] * n, pa.string()),
+            "rank": pa.array([None] * n, pa.uint32()),
+            "entity": pa.array([f"p{i}" for i in range(n)], pa.string()),
+        }
+    )
+
+    def declare(db):
+        clustering(db)
+        db.declare_layer("at_build", kind="flat")
+        db.insert(
+            "at_build",
+            artifacts=pa.table(
+                {"level": pa.array([0], pa.uint32()), "key": pa.array(["c0"], pa.string())}
+            ),
+            key="key",
+            level="level",
+        )
+        db.insert("at_build", members=table, id="entity", key="key", level="level", rank="rank")
+
+    db = served(declare)
+    db.declare_layer("at_ingest", kind="flat")
+    db.insert(
+        "at_ingest",
+        artifacts=pa.table(
+            {"level": pa.array([0], pa.uint32()), "key": pa.array(["c0"], pa.string())}
+        ),
+        key="key",
+        level="level",
+    )
+    db.insert("at_ingest", members=table, id="entity", key="key", level="level", rank="rank")
+    report = db.commit()
+    assert report.ok, report
+
+    built = {row["key"]: row["masked_count"] for row in browse(db, "map", "at_build")["artifacts"]}
+    ingested = {
+        row["key"]: row["masked_count"] for row in browse(db, "map", "at_ingest")["artifacts"]
+    }
+    assert built == ingested == {"c0": n}
+
+
 def test_a_label_set_declared_after_the_first_commit_is_declared_and_served(served, corpus):
     """§6.2 step 1: the runtime `PUT` body comes from `tessera check --payloads`."""
     db = served(clustering)
     db.declare_labels("topics", of="clusters", content_requires="all")
-    db.insert("topics", label_rows(), key="key", level="level", contents="contents")
-    db.insert("topics", members=label_members(), id="entity", key="key", level="level", rank="rank")
+    db.insert(
+        "topics",
+        label_rows(),
+        key="key",
+        level="level",
+        contents="contents",
+        attached_layer="attached_layer",
+        attached_key="attached_key",
+    )
+    db.insert(
+        "topics", members=label_members(), id="entity", key="key", level="level", rank="rank"
+    )
 
     plan = db.check()
     assert plan.plan[0] == "declare layer 'topics' (flat)", plan

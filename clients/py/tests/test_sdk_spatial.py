@@ -52,17 +52,20 @@ def test_a_spatial_layer_published_after_the_first_commit_carries_its_wkt_and_it
         shape={"kind": "polygon"},
         title="Regions",
     )
+    # The shape is named by its kind, and its column is read under the name the build reads it
+    # under (§3). A polygon published at a running service is WKT text, which is what the
+    # publication route takes; the build reads the same column as WKB.
     db.insert(
         "regions",
         artifacts=pa.table(
             {
                 "key": pa.array(["lower_left"], pa.string()),
-                "wkt": pa.array([REGION], pa.string()),
+                "geometry": pa.array([REGION], pa.string()),
                 "space": pa.array(["view"], pa.string()),
             }
         ),
         key="key",
-        wkt="wkt",
+        shape="polygon",
         space="space",
     )
     plan = db.check()
@@ -78,6 +81,32 @@ def test_a_spatial_layer_published_after_the_first_commit_carries_its_wkt_and_it
     rows = browse(db, "s0", "regions")["artifacts"]
     assert [row["key"] for row in rows] == ["lower_left"]
     assert 0 < rows[0]["masked_count"] < 50_000
+
+
+def test_a_polygon_in_wkb_at_the_publication_route_is_a_finding(served, corpus):
+    """The two doors read one column two ways: the build takes WKB, the route takes WKT."""
+    db = served(lambda db: declare_notebook(db, corpus))
+    db.declare_layer(
+        "regions/wkb",
+        kind="flat",
+        membership="spatial",
+        shape={"kind": "polygon"},
+        title="Regions",
+    )
+    db.insert(
+        "regions/wkb",
+        artifacts=pa.table(
+            {
+                "key": pa.array(["lower_left"], pa.string()),
+                "geometry": pa.array([b"\x01\x03"], pa.binary()),
+            }
+        ),
+        key="key",
+        shape="polygon",
+    )
+    plan = db.check()
+    assert not plan.ok
+    assert any("WKB at the publication route" in str(f) for f in plan.findings), plan
 
 
 def test_an_inline_roster_built_at_the_first_commit_is_not_offered_again(served, corpus):

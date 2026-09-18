@@ -150,8 +150,11 @@ def grouped(tmp_path, corpus):
         computed=(),
     )
     db.insert(
-        "clusters", artifacts=["c0a", "c0b"] and artifacts(["c0a", "c0b"], ["a", "b"]),
-        key="key", level="level", view="slice",
+        "clusters",
+        artifacts=artifacts(["c0a", "c0b"], ["a", "b"]),
+        key="key",
+        level="level",
+        view="slice",
     )
     db.insert(
         "clusters",

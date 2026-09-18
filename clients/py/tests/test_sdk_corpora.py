@@ -255,6 +255,24 @@ def _layer(block: dict, filling: bool, readers: dict | None = None) -> dict:
     return block
 
 
+def bindings(db) -> None:
+    """Every source the SDK named is the file of the target and role its insert bound (§4.8).
+
+    The comparison below reads a `source` by which blocks name it, so a binding swapped between
+    two targets would compare equal. The key the SDK writes is the target's own name and the
+    role's, and the file under it is the one that insert wrote, which is what this asserts.
+    """
+    from pathlib import Path as _Path
+
+    for insert in db.inserts:
+        stem = insert.target.replace("/", "_")
+        expected = stem if insert.role in ("rows", "values", "text") else f"{stem}_{insert.role}"
+        assert insert.source == expected, f"{insert.target} ({insert.role}): {insert.source}"
+        assert _Path(insert.path).exists(), insert.path
+    keys = set(_toml.loads(db.declaration).get("sources", {}))
+    assert keys == {insert.source for insert in db.inserts}
+
+
 def same(written: dict, holds: dict) -> None:
     """Block by block, key by key, so a failure names the block and the key that differ."""
     left, right = normalised(written), normalised(holds, filling=True)
@@ -308,6 +326,7 @@ def test_arxiv(tmp_path):
     for name in ("clusters/kmeans", "clusters/hdbscan"):
         artifacts(db, name)
         members(db, name)
+    bindings(db)
     same(generated(db), committed("arxiv"))
 
 
@@ -334,6 +353,7 @@ def test_gbif(tmp_path):
     )
     points(db, "geo", ("entity_id", "lon", "lat", "countrycode"))
     members(db, "taxonomy/tree")
+    bindings(db)
     same(generated(db), committed("gbif"))
 
 
@@ -393,6 +413,7 @@ def test_geonames(tmp_path):
     members(db, "features/taxonomy")
     artifacts(db, "admin/hierarchy")
     members(db, "admin/hierarchy")
+    bindings(db)
     same(generated(db), committed("geonames"))
 
 
@@ -413,6 +434,7 @@ def test_medcpt(tmp_path):
     values(db, "branch")
     artifacts(db, "clusters/kmeans")
     members(db, "clusters/kmeans")
+    bindings(db)
     same(generated(db), committed("medcpt"))
 
 
@@ -465,6 +487,7 @@ def test_overture(tmp_path):
                  "operating_status", "division_country", "division_region", "division_county"):
         values(db, name)
     artifacts(db, "boundaries/divisions")
+    bindings(db)
     same(generated(db), committed("overture"))
 
 
@@ -491,6 +514,7 @@ def test_paperseek(tmp_path):
     values(db, "type")
     artifacts(db, "clusters/kmeans")
     members(db, "clusters/kmeans")
+    bindings(db)
     written = generated(db)
     written["view"][0].pop("point_visibility")
     same(written, committed("paperseek"))
@@ -546,13 +570,14 @@ def test_treeoflife(tmp_path):
     points(db, "bioclip", ("entity_id", "x", "y", "publisher"))
     points(db, "geo", ("entity_id", "lon", "lat", "publisher"))
     members(db, "taxonomy/tree")
+    bindings(db)
     same(generated(db), committed("treeoflife"))
 
 
 @pytest.mark.xfail(
     strict=True,
-    reason="the insert surface has no spelling for a roster of inline views — one "
-    "`[[view_group.view]]` per view, each naming its own points file — which this corpus's "
+    reason="the insert surface has no spelling for a roster of inline views (one "
+    "`[[view_group.view]]` per view, each naming its own points file), which this corpus's "
     "`quarter` group uses. A group's views and their metadata come from one roster insert beside "
     "one points table with a discriminator (python-sdk.md §4.3), which is the corpus's other "
     "group. Reported against §4.3",

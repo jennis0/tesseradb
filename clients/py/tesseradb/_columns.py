@@ -2,14 +2,12 @@
 
 Nothing is inferred by default. The helper that reads a frame is explicit: it declares every
 column not in `skip` and not already declared, typed from its dtype by §4.5's table, as details
-only — stored in the record blob, shown at drill-down, neither rendered nor indexed. `render` and
+only: stored in the record blob, shown at drill-down, neither rendered nor indexed. `render` and
 `index` apply their flags to the columns named; `keyword` and `category` choose those families for
 string columns, which are `text` otherwise.
 
-Only the frame's schema is read. A column's values decide nothing here: the two thresholds an
-earlier cut measured — how many distinct values made a category, how short a median made a
-keyword — were a default chosen for the user, and `render` in particular is fixed at the first
-commit, which is why this helper never chooses it.
+Only the frame's schema is read, and a column's values decide nothing. `render` is fixed at the
+first commit (decision 0136's amendment), which is why this helper never chooses it.
 """
 
 from __future__ import annotations

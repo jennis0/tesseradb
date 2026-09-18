@@ -277,7 +277,11 @@ class Database:
         `table` is a pandas or polars frame, a pyarrow table, or a path to a parquet file, which
         is read in place. Every column the target needs is named on the call; a column the call
         does not name is ignored, and the two lists are printed. A layer takes two tables under
-        their own keywords — `artifacts=` and `members=` — since both carry `key` and `level`.
+        their own keywords, `artifacts=` and `members=`, since both carry `key` and `level`.
+
+        A table in Tessera's own shape is no exception: a canonical column the call did not name
+        is refused naming the column and the two remedies, so nothing is read silently at one
+        door and ignored at the other.
 
         Before the first commit the table is bound to its target for the build. After it, the same
         call is sent at the next `commit()` by the route its target owns. Several inserts on one
@@ -322,8 +326,8 @@ class Database:
     ) -> tuple[str, dict]:
         """The declared thing this name is, or a refusal naming the verb that declares one.
 
-        One name may be held by two kinds — a category column and the vocabulary it reads are
-        each declared under the value set's own name, which configuration.md allows — and the
+        One name may be held by two kinds: a category column and the vocabulary it reads are
+        each declared under the value set's own name, which configuration.md allows, and the
         columns the call names are what say which is meant: an attribute reads `id=` and
         `value=`, a value set reads `key=`, `title=` and `code=`.
         """
@@ -395,7 +399,7 @@ class Database:
     def _refuse_an_insert_the_target_cannot_take(
         self, target: str, kind: str, role: str, block: dict, named: dict
     ) -> None:
-        """What this target cannot be given: the scope's own column, and the two unbuilt rules."""
+        """What this target cannot be given: the scope's own column, and the rule not built yet."""
         scope = block.get("scope")
         group = scope.get("group") if isinstance(scope, dict) else None
         if group is not None and role in ("artifacts", "members", "key") and "view" not in named:
@@ -404,27 +408,6 @@ class Database:
                 f"its artifacts per view, one key in two views being two artifacts, so every row "
                 f"carries the view it belongs to. Name the column that says which with view="
             )
-        if kind == "layer" and role == "key" and self.built:
-            raise Refusal(
-                f"insert into layer {target!r}: a key column mints its artifacts from the rows "
-                f"that carry it, at the build and on the ingest route, and the rows this database "
-                f"holds were read at an earlier commit. Not built yet: the values route reads a "
-                f"layer column (python-sdk.md §11.2 F). Publish the clustering through its two "
-                f"tables: insert({target!r}, artifacts=…, key=…) and "
-                f"insert({target!r}, members=…, id=…, key=…)"
-            )
-        if kind == "labels" and role != "members":
-            gate = dict(block.get("content") or {}).get("require_member_visibility")
-            if gate != "all":
-                raise Refusal(
-                    f"insert into labels {target!r}: a label with no members of its own is the "
-                    f"label of its cluster, drawn where the cluster is drawn and served to "
-                    f"whoever is served it. Not built yet: the engine places an attached artifact "
-                    f"by its own member rows, so such a label is served to nobody (python-sdk.md "
-                    f"§11.2 H). Until it lands, give the label set a generating set: declare it "
-                    f"with content_requires='all' and insert({target!r}, members=…, id=…, key=…, "
-                    f"rank=…) beside its text"
-                )
 
     def _refuse_a_second_view_without_its_labels(
         self, kind: str, role: str, target: str, insert: Insert
@@ -515,8 +498,10 @@ class Database:
 
         A block names one file, so where a target's role is inserted twice before the first commit
         the tables are read and written as one under `sources/`. The columns each call named must
-        be the same: the declaration names them once, and a second insert naming a column
-        something else would be a second declaration.
+        be the same, the declaration naming them once, and so must the types: a second part whose
+        schema differs from the first is refused naming the two, rather than promoted to a type
+        neither part was written in. The first part is copied where it was a path read in place,
+        there being one file for the block to name.
         """
         if self.built:
             return insert
@@ -539,7 +524,22 @@ class Database:
                 f"{insert.columns}). A block names its columns once, so a corpus in parts names "
                 f"them the same way in every part"
             )
-        table = pa.concat_tables([held.table(), insert.table()], promote_options="permissive")
+        differs = [
+            (name, held.schema[name], insert.schema[name])
+            for name in held.schema
+            if name in insert.schema and str(held.schema[name]) != str(insert.schema[name])
+        ]
+        if differs or set(held.schema) != set(insert.schema):
+            name, one, other = differs[0] if differs else (
+                sorted(set(held.schema) ^ set(insert.schema))[0], "present", "absent"
+            )
+            raise Refusal(
+                f"insert into {insert.kind} {insert.target!r}: this part's schema differs from "
+                f"the one already inserted, at column {name!r}: {one} against {other}. A block "
+                f"reads one file, and the parts are written as one, so a promoted column would "
+                f"be a type neither part was written in. Write the parts in one schema"
+            )
+        table = pa.concat_tables([held.table(), insert.table()])
         path = self.path / "sources" / f"{held.source}.parquet"
         path.parent.mkdir(parents=True, exist_ok=True)
         pq.write_table(table, path)
@@ -559,11 +559,15 @@ class Database:
     ) -> tuple[Any, dict]:
         """A label set's text as the artifacts table its layer reads (§4.7).
 
-        A mapping from cluster key to text, or a table with a plain string column, is written as
-        the `(level, key, contents, attached_layer, attached_key)` rows a publication takes: a
-        label attaches to the cluster its key names, and the attachment is the label set's own
-        declaration rather than anything read from the user's table. A table naming `contents=`
-        is a table in that shape already and is read as it stands.
+        Two paths, and which one it is decides where the attachment comes from. **Where the SDK
+        writes the table**, for a mapping from cluster key to text or a table naming `text=`, a
+        plain string column no route reads as a ranked content, it writes the attachment too:
+        `attached_layer` is the layer the label set was declared `of`, and `attached_key` is the
+        label's own key, which is the cluster's, unless the call named a column for either. Every
+        other column the call named travels as it stands, `level=` included. **Where the table is
+        read as it stands**, under `contents=`, the attachment is in the table and named on the call,
+        and a table carrying none is refused: a label set expands to a layer that depends on its
+        clustering, and every artifact it publishes attaches to one.
         """
         of = next(
             one["name"]
@@ -571,31 +575,85 @@ class Database:
             if isinstance(one.get("labels"), dict) and one["labels"]["name"] == target
         )
         if isinstance(data, dict):
+            if named:
+                raise Refusal(
+                    f"insert into labels {target!r}: a mapping from key to text carries no "
+                    f"columns, so {', '.join(f'{one}=' for one in sorted(named))} names nothing. "
+                    f"Insert a table to name columns on it"
+                )
             keys = [str(key) for key in data]
             texts = [[[value]] if isinstance(value, str) else [list(value)]
                      for value in data.values()]
+            levels = [0] * len(keys)
+            attached_keys = list(keys)
+            attached_layers = [of] * len(keys)
         elif "text" in named:
             table = _inserts.as_table(data) if not _inserts.is_path(data) else pq.read_table(data)
-            if named["key"] not in table.column_names or named["text"] not in table.column_names:
+            missing = [
+                name for name, column in named.items() if column not in table.column_names
+            ]
+            if missing:
                 raise Refusal(
-                    f"insert into labels {target!r}: key={named['key']!r} and "
-                    f"text={named['text']!r} name columns of this table. Its columns are "
+                    f"insert into labels {target!r}: "
+                    + ", ".join(f"{name}={named[name]!r}" for name in missing)
+                    + f" names no column of this table. Its columns are "
                     f"{', '.join(table.column_names)}"
                 )
             keys = [str(key) for key in table[named["key"]].to_pylist()]
             texts = [[[value]] for value in table[named["text"]].to_pylist()]
+            levels = (
+                [int(one or 0) for one in table[named["level"]].to_pylist()]
+                if "level" in named
+                else [0] * len(keys)
+            )
+            attached_keys = (
+                [str(one) for one in table[named["attached_key"]].to_pylist()]
+                if "attached_key" in named
+                else list(keys)
+            )
+            attached_layers = (
+                [str(one) for one in table[named["attached_layer"]].to_pylist()]
+                if "attached_layer" in named
+                else [of] * len(keys)
+            )
+            carried = {"key", "text", "level", "attached_key", "attached_layer"}
+            beyond = sorted(set(named) - carried)
+            if beyond:
+                raise Refusal(
+                    f"insert into labels {target!r}: "
+                    + ", ".join(f"{one}=" for one in beyond)
+                    + " names a column the table the SDK writes from text= does not carry. That "
+                    "table is the key, the text as one ranked content, the level and the "
+                    "attachment. Write the table in the publication's own shape and insert it "
+                    "with contents=, which is read as it stands"
+                )
         else:
+            if "attached_key" not in named:
+                raise Refusal(
+                    f"insert into labels {target!r}: a label set expands to a layer that depends "
+                    f"on its clustering, so every artifact it publishes attaches to one, and a "
+                    f"table read as it stands carries the attachment. Name it with "
+                    f"attached_key= (and attached_layer= where the table says which layer), or "
+                    f"insert the text as a mapping or with text=, which attaches each label to "
+                    f"the cluster its key names"
+                )
             return data, named
         written = pa.table(
             {
-                "level": pa.array([0] * len(keys), type=pa.uint32()),
+                "level": pa.array(levels, type=pa.uint32()),
                 "key": pa.array(keys, type=pa.string()),
                 "contents": pa.array(texts, type=pa.list_(pa.list_(pa.string()))),
-                "attached_layer": pa.array([of] * len(keys), type=pa.string()),
-                "attached_key": pa.array(keys, type=pa.string()),
+                "attached_layer": pa.array(attached_layers, type=pa.string()),
+                "attached_key": pa.array(attached_keys, type=pa.string()),
             }
         )
-        return written, {"key": "key", "contents": "contents"}
+        return written, {
+            "key": "key",
+            "contents": "contents",
+            "level": "level",
+            "attached_layer": "attached_layer",
+            "attached_key": "attached_key",
+        }
 
     # ------------------------------------------------------------------ the document
 
@@ -759,6 +817,7 @@ class Database:
         findings: list[C.Finding] = []
         C.rows_with_no_id(self.inserts, findings)
         C.keys_into_supplied_content(document, self.inserts, findings)
+        C.labels_without_members(self.inserts, findings)
         return findings
 
     def _refuse_an_empty_build(self, document: dict) -> None:
@@ -1141,15 +1200,52 @@ class Database:
                 f"{', '.join(insert.ignored) or 'nothing'}"
             )
         filled = {insert.target for insert in self.inserts + self.pending}
+        anchor = self.blocks.allocation_view()
+        rows = next(
+            (
+                one
+                for one in self.inserts + self.pending
+                if one.role == "rows" and one.target == anchor
+            ),
+            None,
+        )
         for block in self.blocks.blocks["attribute"]:
-            if block["name"] in filled or block.get(D.FILLED):
+            name = block["name"]
+            if name in filled or any(name in one.named_attributes for one in self.inserts):
                 continue
-            if not any(block["name"] in one.named_attributes for one in self.inserts):
-                notes.append(
-                    f"attribute '{block['name']}' is declared and empty: no insert names a column "
-                    f"for it"
-                )
+            notes.append(f"attribute '{name}' is declared and empty: " + self._why_empty(name, rows, block))
         return notes
+
+    def _why_empty(self, name: str, rows: Insert | None, block: dict) -> str:
+        """Why no column filled this attribute, which is what the reader needs to act on (§3)."""
+        if block.get(D.FILLED):
+            return (
+                "it was declared after the first commit, so no frame the build read carries it; "
+                f"insert({name!r}, table, id=…, value=…) fills it at the next commit"
+            )
+        if block.get("scope"):
+            return (
+                "a group-scoped column belongs to one view, so it is filled by an insert of its "
+                f"own: insert({name!r}, table, id=…, value=…, view=…)"
+            )
+        if rows is None:
+            return "no frame has been inserted into the allocation view"
+        if rows.columns.get("id") == name:
+            return (
+                f"the frame inserted into '{rows.target}' carries a column of that name and it is "
+                f"the id column, which is that frame's identity rather than one of its values"
+            )
+        if name in rows.schema:
+            return (
+                f"the frame inserted into '{rows.target}' carries a column of that name, and the "
+                f"attribute was declared after that insert: the match is made where the frame is "
+                f"handed over. Declare it first, or insert the values with "
+                f"insert({name!r}, table, id=…, value=…)"
+            )
+        return (
+            f"the frame inserted into '{rows.target}' carries no column of that name, and no "
+            f"insert names one for it"
+        )
 
     # ------------------------------------------------------------------ the directory
 
@@ -1305,7 +1401,8 @@ def _stored(insert: Insert) -> dict:
         "schema": {c: str(t) for c, t in insert.schema.items()},
         "read": list(insert.read),
         "ignored": list(insert.ignored),
-        "at_build": insert.at_build,
+        "shape": insert.shape,
+        "shape_columns": list(insert.shape_columns),
     }
 
 
@@ -1325,7 +1422,8 @@ def _restored(stored: dict) -> Insert:
         schema={c: _arrow_type(t) for c, t in stored["schema"].items()},
         read=list(stored["read"]),
         ignored=list(stored["ignored"]),
-        at_build=stored["at_build"],
+        shape=stored["shape"],
+        shape_columns=list(stored["shape_columns"]),
     )
 
 

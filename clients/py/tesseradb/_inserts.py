@@ -9,15 +9,18 @@ columns it ignored.
 **What is named and what is not.** The id, the coordinates, the access labels, a layer's key and
 a group's view column are named on every call and never matched (§3). An artifacts table, a
 members table, a roster and a value set are tables in Tessera's own shape, so a column of theirs
-carrying its canonical name — `level`, `parent`, `attached_key` and the rest — is read under that
-name where the call does not rename it, and is printed as read rather than as ignored, because
-the build and the publication routes read it either way.
+carrying its canonical name is named on the call like any other, and one the call passed over
+is refused rather than read silently: the build and the publication routes read such a column
+under its own name whatever this package prints. Two of them are read under their own names
+alone, `level` and `attached_level`, neither being in the build's `fields` map: those keywords
+take the canonical name and a column called anything else is renamed in the table. A membership
+shape is named by its kind, `shape="polygon"`, its columns being read under theirs.
 
 **Where the table goes.** Before the first commit an insert binds the table to its target for the
 build: a frame is written under `sources/` and a path is recorded, and the declaration names the
 file and the columns. After the first commit the same insert is sent at the next `commit()` by the
-route its target owns, so its frame goes under `.tessera/inserts/` — out of `[sources]`, which
-`tessera check` reads as the whole corpus — and nothing is written under `sources/`.
+route its target owns, so its frame goes under `.tessera/inserts/`, out of `[sources]`, which
+`tessera check` reads as the whole corpus, and nothing is written under `sources/`.
 """
 
 from __future__ import annotations
@@ -36,18 +39,41 @@ from ._refusal import Refusal
 #: every key of `[sources]` as a file the declaration is built from.
 INSERT_FOLDER = ".tessera/inserts"
 
-#: An artifacts table's own columns, in Tessera's own spelling (configuration.md §1). A column of
-#: one of these names is read under it where the call renames nothing.
-ARTIFACT_COLUMNS = (
-    "level", "key", "parent", "contents", "attached_layer", "attached_level", "attached_key",
-    "space", "excluding", "members", "bbox", "circle", "ellipse", "wkt",
+#: An artifacts table's columns, in the build's own field set (`tessera-build`'s `config.rs`,
+#: configuration.md §1): the ones a declaration's `fields` map can move, so the call may name a
+#: column of any name for each.
+ARTIFACT_FIELDS = (
+    "key", "view", "space", "contents", "parent", "attached_layer", "attached_key", "members",
+    "excluding",
 )
 
-#: A members table's own columns, likewise.
-MEMBER_COLUMNS = ("level", "key", "rank", "entity")
+#: The artifact columns the build reads under their own names alone: neither is in its `fields`
+#: map, so the keyword takes the canonical name and a column called anything else is renamed in
+#: the table rather than mapped here.
+ARTIFACT_CANONICAL_ONLY = ("level", "attached_level")
 
-#: A value set's own columns.
-VOCABULARY_COLUMNS = ("key", "title", "code")
+#: A membership shape's own columns, by the kind `shape=` names. Read under their own names, the
+#: build's `fields` map moving none of them (polygon-membership.md §6.1).
+SHAPE_COLUMNS = {
+    "bbox": ("min_x", "min_y", "max_x", "max_y"),
+    "circle": ("cx", "cy", "r"),
+    "ellipse": ("cx", "cy", "a", "b", "angle"),
+    "polygon": ("geometry",),
+}
+
+#: A members table's columns, likewise: `entity` is what `id=` names, and `level` is canonical.
+MEMBER_FIELDS = ("key", "entity", "rank")
+MEMBER_CANONICAL_ONLY = ("level",)
+
+#: A value set's columns, and a roster's own two beside the metadata names its group declared.
+VOCABULARY_FIELDS = ("key", "title", "code")
+ROSTER_FIELDS = ("key", "visibility")
+
+
+def _artifact_columns() -> tuple[str, ...]:
+    """Every column name an artifacts table carries meaning under (§3)."""
+    shapes = tuple(dict.fromkeys(one for kind in SHAPE_COLUMNS for one in SHAPE_COLUMNS[kind]))
+    return ARTIFACT_FIELDS + ARTIFACT_CANONICAL_ONLY + shapes
 
 
 @dataclass
@@ -58,17 +84,22 @@ class Contract:
     optional: tuple[str, ...] = ()
     #: One of these must be named, where the contract names a pair.
     either: tuple[str, ...] = ()
-    #: The canonical columns of a table in Tessera's own shape, read under their own names.
+    #: The column names this kind of table carries meaning under. A table in Tessera's own shape
+    #: is no exception to the rule that every column a target reads is named on the call: one of
+    #: these the call did not name is refused, naming the column and the two remedies, so nothing
+    #: is read silently at either door.
     canonical: tuple[str, ...] = ()
-    #: Whether the call may name metadata columns beyond the contract (a group's roster).
-    free: bool = False
+    #: The keywords whose column the build reads under its own name alone.
+    canonical_only: tuple[str, ...] = ()
+    #: Whether this table carries a membership shape, which `shape=` names by its kind.
+    shaped: bool = False
 
 
 CONTRACTS: dict[tuple[str, str], Contract] = {
     ("view", "rows"): Contract(required=("x", "y"), optional=("id", "access")),
     ("view_group", "rows"): Contract(required=("x", "y", "view"), optional=("id", "access")),
     ("view_group", "roster"): Contract(
-        required=("key",), optional=("visibility",), free=True
+        required=("key",), optional=("visibility",), canonical=ROSTER_FIELDS
     ),
     ("attribute", "values"): Contract(required=("id", "value"), optional=("view",)),
     ("layer", "key"): Contract(required=("id", "key"), optional=("view",)),
@@ -76,25 +107,36 @@ CONTRACTS: dict[tuple[str, str], Contract] = {
         required=("key",),
         optional=(
             "level", "parent", "contents", "attached_layer", "attached_level", "attached_key",
-            "members", "excluding", "space", "bbox", "circle", "ellipse", "wkt", "view",
-            "visibility",
+            "members", "excluding", "space", "view",
         ),
-        canonical=ARTIFACT_COLUMNS,
+        canonical=_artifact_columns(),
+        canonical_only=ARTIFACT_CANONICAL_ONLY,
+        shaped=True,
     ),
     ("layer", "members"): Contract(
-        required=("id", "key"), optional=("level", "rank", "view"), canonical=MEMBER_COLUMNS
+        required=("id", "key"),
+        optional=("level", "rank", "view"),
+        canonical=MEMBER_FIELDS + MEMBER_CANONICAL_ONLY,
+        canonical_only=MEMBER_CANONICAL_ONLY,
     ),
     ("labels", "text"): Contract(
         required=("key",),
         either=("text", "contents"),
-        optional=("level", "attached_key", "attached_level"),
-        canonical=ARTIFACT_COLUMNS,
+        optional=(
+            "level", "parent", "attached_layer", "attached_key", "attached_level", "members",
+            "excluding", "space",
+        ),
+        canonical=_artifact_columns(),
+        canonical_only=ARTIFACT_CANONICAL_ONLY,
     ),
     ("labels", "members"): Contract(
-        required=("id", "key"), optional=("level", "rank"), canonical=MEMBER_COLUMNS
+        required=("id", "key"),
+        optional=("level", "rank"),
+        canonical=MEMBER_FIELDS + MEMBER_CANONICAL_ONLY,
+        canonical_only=MEMBER_CANONICAL_ONLY,
     ),
     ("vocabulary", "values"): Contract(
-        required=("key",), optional=("title", "code"), canonical=VOCABULARY_COLUMNS
+        required=("key",), optional=("title", "code"), canonical=VOCABULARY_FIELDS
     ),
 }
 
@@ -121,6 +163,9 @@ class Insert:
     named_attributes: dict[str, str] = field(default_factory=dict)
     #: A group's roster carries one column per metadata name the group declared.
     metadata_columns: dict[str, str] = field(default_factory=dict)
+    #: The membership shape kind this table's rows carry, and the columns it is written in.
+    shape: str | None = None
+    shape_columns: list[str] = field(default_factory=list)
     #: The source key this insert writes into `[sources]`, before the first commit.
     source: str | None = None
     path: Path | None = None
@@ -130,11 +175,6 @@ class Insert:
     schema: dict[str, Any] = field(default_factory=dict)
     read: list[str] = field(default_factory=list)
     ignored: list[str] = field(default_factory=list)
-    #: Whether this insert was made before the first commit, and so is read by the build.
-    at_build: bool = True
-    #: A label set inserted as a mapping keeps it, so the table can be written with the
-    #: attachment the label set's own declaration knows.
-    mapping: dict | None = None
 
     @property
     def id_column(self) -> str | None:
@@ -224,7 +264,6 @@ def build(
             in_place=True,
             rows=rows,
             schema=schema,
-            at_build=at_build,
         )
     else:
         table = as_table(data)
@@ -240,7 +279,6 @@ def build(
             declared_path=f"{folder}/{source}.parquet",
             rows=table.num_rows,
             schema=dict(zip(table.schema.names, table.schema.types)),
-            at_build=at_build,
         )
     _check(insert, contract, named, projected, metadata)
     insert.named_attributes = dict(named_attributes or {})
@@ -265,8 +303,10 @@ def _check(
         for role in contract.optional
     )
     known = set(required) | set(optional) | set(contract.either) | set(metadata)
+    if contract.shaped:
+        known.add("shape")
     unknown = sorted(set(named) - known)
-    if unknown and not contract.free:
+    if unknown:
         raise Refusal(
             f"insert into {insert.kind} {insert.target!r}: "
             + ", ".join(f"{name}=" for name in unknown)
@@ -286,31 +326,101 @@ def _check(
             f"insert into {insert.kind} {insert.target!r}: name the column the text is in, "
             + " or ".join(f"{role}=" for role in contract.either)
         )
+    shape = named.pop("shape", None) if contract.shaped else None
+    shaped = _shape_columns(insert, shape)
     for role, column in named.items():
         if column not in insert.schema:
             raise Refusal(
                 f"insert into {insert.kind} {insert.target!r}: {role}={column!r} names no column "
                 f"of this table. Its columns are {', '.join(insert.schema)}"
             )
+        if role in contract.canonical_only and column != role:
+            raise Refusal(
+                f"insert into {insert.kind} {insert.target!r}: {role}={column!r} is read by the "
+                f"build under its own name, {role!r}, and no declaration moves it. Rename the "
+                f"column in the table"
+            )
     # Each role keeps the name the call gave it: a projected view names `lon=` and `lat=`, which
     # is what its declaration writes (configuration.md §1).
     insert.columns = {
-        role: column for role, column in named.items() if not (contract.free and role in metadata)
+        role: column for role, column in named.items() if role not in metadata
     }
     insert.metadata_columns = {
-        role: column for role, column in named.items() if contract.free and role in metadata
+        role: column for role, column in named.items() if role in metadata
     }
+    insert.shape = shape
+    insert.shape_columns = list(shaped)
+    _refuse_a_column_read_silently(insert, contract, shaped)
+
+
+def _shape_columns(insert: Insert, shape: str | None) -> tuple[str, ...]:
+    """The columns `shape=` names, each read under its own name (polygon-membership.md §6.1)."""
+    if shape is None:
+        return ()
+    if shape not in SHAPE_COLUMNS:
+        raise Refusal(
+            f"insert into {insert.kind} {insert.target!r}: shape={shape!r} is not a shape kind. "
+            f"It is one of {', '.join(sorted(SHAPE_COLUMNS))}, and its columns are read under "
+            f"their own names"
+        )
+    missing = [column for column in SHAPE_COLUMNS[shape] if column not in insert.schema]
+    if missing:
+        raise Refusal(
+            f"insert into {insert.kind} {insert.target!r}: shape={shape!r} is written in "
+            f"{', '.join(SHAPE_COLUMNS[shape])}, and this table carries no "
+            f"{', '.join(missing)}. The build reads them under those names, so the columns are "
+            f"renamed in the table"
+        )
+    return SHAPE_COLUMNS[shape]
+
+
+def _refuse_a_column_read_silently(
+    insert: Insert, contract: Contract, shaped: tuple[str, ...]
+) -> None:
+    """A canonical column the call did not name (§3).
+
+    A table in Tessera's own shape is no exception to the rule that every column a target reads
+    is named on the call: the build reads such a column under its own name whatever the SDK
+    prints, so a column the call passed over is refused rather than read silently at one door and
+    ignored at the other.
+    """
+    if not contract.canonical:
+        return
+    named = set(insert.columns.values()) | set(insert.metadata_columns.values()) | set(shaped)
+    unnamed = [
+        column
+        for column in insert.schema
+        if column in set(contract.canonical) and column not in named
+    ]
+    if not unnamed:
+        return
+    raise Refusal(
+        f"insert into {insert.kind} {insert.target!r}: this table carries "
+        + ", ".join(repr(column) for column in unnamed)
+        + ", which the build and the publication routes read under that name whatever this call "
+        "says. Name it on the call ("
+        + ", ".join(_remedy(column) for column in unnamed)
+        + "), or drop the column from the table"
+    )
+
+
+def _remedy(column: str) -> str:
+    """How a column of this name is named on the call."""
+    for kind, columns in SHAPE_COLUMNS.items():
+        if column in columns:
+            return f"shape={kind!r}"
+    return f"{column}="
 
 
 def _lists(insert: Insert, contract: Contract) -> None:
-    """The columns this insert read and the columns it ignored, in the table's own order (§3)."""
+    """The columns this insert read and the columns it ignored, in the table's own order (§3).
+
+    What is read is what the call named, and nothing else: a canonical column it did not name is
+    refused above rather than read here, so the two lists say the same thing at both doors.
+    """
     read = set(insert.columns.values())
     read |= set(insert.metadata_columns.values())
     read |= set(insert.named_attributes.values())
-    # A table in Tessera's own shape carries its own column names, which the build and the
-    # publication routes read whether or not the call renamed one.
-    for column in contract.canonical:
-        if column in insert.schema and column not in insert.columns.values():
-            read.add(column)
+    read |= set(insert.shape_columns)
     insert.read = [column for column in insert.schema if column in read]
     insert.ignored = [column for column in insert.schema if column not in read]

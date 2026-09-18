@@ -15,6 +15,7 @@ from __future__ import annotations
 import datetime
 from typing import Any, Iterable, Sequence
 
+from ._inserts import ARTIFACT_FIELDS, MEMBER_FIELDS, VOCABULARY_FIELDS
 from ._refusal import Refusal
 from ._toml import Inline
 
@@ -102,8 +103,8 @@ class Declaration:
         """The first declared view unless another says `anchor=True` (decision 0112).
 
         Written into the TOML in either case, so a rebuild that reorders the blocks cannot re-key
-        the corpus. A declaration carrying groups alone names none the SDK could write — a
-        group's views are the distinct values of its roster — and the build chooses.
+        the corpus. A declaration carrying groups alone names none the SDK could write, a
+        group's views being the distinct values of its roster, and the build chooses.
         """
         anchored = [b["name"] for b in self.blocks["view"] if b.get(ANCHOR)]
         if anchored:
@@ -398,7 +399,7 @@ def layer_block(
 
     Its artifacts and its memberships come from its inserts: a key column
     (`insert(layer, table, id=, key=)`), or an artifacts table and a members table. `artifacts=`
-    is the one exception and is a declaration rather than data — an authored roster written in
+    is the one exception and is a declaration rather than data: an authored roster written in
     the declaration itself, as configuration.md's inline `artifacts` array.
     """
     if kind not in HIERARCHY_KINDS:
@@ -866,19 +867,15 @@ class _Bind:
     @staticmethod
     def vocabulary_values(block: dict, insert: Any) -> None:
         block["source"] = insert.source
-        _fields(block, _renamed(insert, ("key", "title", "code")))
-
-
-#: The artifact table's own column names, against which an insert's names are written only where
-#: they differ: a column already carrying its canonical name needs no `fields` entry.
-ARTIFACT_FIELDS = (
-    "key", "level", "parent", "contents", "attached_layer", "attached_level", "attached_key",
-    "members", "excluding", "space", "bbox", "circle", "ellipse", "wkt", "view", "visibility",
-)
-MEMBER_FIELDS = ("key", "level", "rank")
+        _fields(block, _renamed(insert, VOCABULARY_FIELDS))
 
 
 def _renamed(insert: Any, canonical: Sequence[str]) -> dict:
+    """The `fields` entries an insert's names need: one per column it renamed (§4.8).
+
+    The names are `_inserts`' own tables, which are the build's field set, so a column the build
+    reads under its own name alone never reaches a `fields` map.
+    """
     return {
         name: insert.columns[name]
         for name in canonical

@@ -161,3 +161,28 @@ def test_a_group_sharing_another_s_views_is_declared_after_it(db):
     db.declare_view_group("quarter_alt", members="quarter", extent=BOX)
     names = db.blocks.group_names()
     assert names.index("quarter") < names.index("quarter_alt")
+
+
+def test_a_roster_refuses_a_keyword_that_is_no_metadata_name(db):
+    """A roster is read like every other table: the names are the group's, or they are nothing."""
+    db.declare_view_group("quarter", extent=BOX, metadata={"label": "text"})
+    with pytest.raises(Refusal, match="names nothing this target reads"):
+        db.insert("quarter", roster=roster(["2026-Q1"]), key="quarter", colour="label")
+
+
+def test_a_roster_column_the_call_did_not_name_is_refused(db):
+    """`key` and `visibility` are the roster's own, so a table carrying one names it (§3)."""
+    db.declare_view_group("quarter", extent=BOX, metadata={"label": "text"})
+    table = pa.table(
+        {
+            "key": pa.array(["2026-Q1"], pa.string()),
+            "label": pa.array(["Q1"], pa.string()),
+            "visibility": pa.array(["public"], pa.string()),
+        }
+    )
+    with pytest.raises(Refusal, match="'visibility'"):
+        db.insert("quarter", roster=table, key="key", label="label")
+    insert = db.insert(
+        "quarter", roster=table, key="key", label="label", visibility="visibility"
+    )
+    assert insert.ignored == []

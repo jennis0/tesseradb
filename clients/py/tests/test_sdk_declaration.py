@@ -6,6 +6,7 @@ TOML reader, and the declaration is proved to parse by `tessera check` reading i
 `test_sdk_corpus.py`.
 """
 
+import pyarrow.parquet as pq
 import pytest
 
 from tesseradb._database import create
@@ -191,6 +192,53 @@ def test_a_label_set_from_a_mapping_is_written_as_a_key_contents_table(db):
     assert insert.rows == 1
     assert insert.read == ["level", "key", "contents", "attached_layer", "attached_key"]
     assert 'source = "topics"' in db.declaration
+    # The SDK wrote the table, so it wrote the attachment: the label hangs from the cluster its
+    # key names, in the layer the set was declared `of`.
+    written = pq.read_table(insert.path)
+    assert written["attached_layer"].to_pylist() == ["clusters"]
+    assert written["attached_key"].to_pylist() == ["a"]
+
+
+def test_a_label_table_the_sdk_reads_as_it_stands_carries_its_own_attachment(db):
+    """§4.7: `contents=` is a table in the publication's shape, so the attachment is in it."""
+    db.declare_view("s0")
+    db.declare_layer("clusters", kind="flat")
+    db.declare_labels("topics", of="clusters", content_requires="all")
+    table = pd.DataFrame(
+        {
+            "key": ["t0"],
+            "contents": [[["Diffusion models"]]],
+            "attached_layer": ["clusters"],
+            "attached_key": ["a"],
+        }
+    )
+    with pytest.raises(Refusal, match="attached_key="):
+        db.insert("topics", table.drop(columns=["attached_layer", "attached_key"]),
+                  key="key", contents="contents")
+    insert = db.insert(
+        "topics", table, key="key", contents="contents",
+        attached_layer="attached_layer", attached_key="attached_key",
+    )
+    assert insert.ignored == []
+
+
+def test_a_label_table_carries_the_level_and_the_attachment_the_call_named(db):
+    """A `text=` table is written by the SDK, and every column the call named travels with it."""
+    db.declare_view("s0")
+    db.declare_layer("clusters", kind="flat")
+    db.declare_labels("topics", of="clusters", content_requires="all")
+    insert = db.insert(
+        "topics",
+        pd.DataFrame({"k": ["t0"], "text": ["Diffusion models"], "lvl": [0], "cluster": ["a"]}),
+        key="k",
+        text="text",
+        level="lvl",
+        attached_key="cluster",
+    )
+    written = pq.read_table(insert.path)
+    assert written["key"].to_pylist() == ["t0"]
+    assert written["attached_key"].to_pylist() == ["a"]
+    assert written["contents"].to_pylist() == [[["Diffusion models"]]]
 
 
 def test_a_group_takes_its_roster_and_its_rows_from_two_inserts(db):
@@ -228,3 +276,18 @@ def test_declaring_one_name_twice_is_refused(db):
     db.declare_view("s0")
     with pytest.raises(Refusal, match="already declared"):
         db.declare_view("s0")
+
+
+def test_a_text_table_refuses_a_column_the_written_one_would_not_carry(db):
+    """§4.7: the SDK writes that table, so a column it does not carry is refused, not dropped."""
+    db.declare_view("s0")
+    db.declare_layer("clusters", kind="flat")
+    db.declare_labels("topics", of="clusters", content_requires="all")
+    with pytest.raises(Refusal, match="insert it with contents="):
+        db.insert(
+            "topics",
+            pd.DataFrame({"k": ["t0"], "text": ["A"], "parent": ["p"]}),
+            key="k",
+            text="text",
+            parent="parent",
+        )

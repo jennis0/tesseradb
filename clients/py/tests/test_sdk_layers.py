@@ -46,9 +46,11 @@ def test_a_spatial_layer_names_its_shape_kind_and_the_space_its_shapes_are_writt
     assert block["default_space"] == "wgs84"
     db.insert(
         "regions",
-        artifacts=pd.DataFrame({"key": ["a"], "wkt": ["POLYGON ((0 0, 1 0, 1 1, 0 0))"]}),
+        artifacts=pd.DataFrame(
+            {"key": ["a"], "geometry": ["POLYGON ((0 0, 1 0, 1 1, 0 0))"]}
+        ),
         key="key",
-        wkt="wkt",
+        shape="polygon",
     )
     text = db.declaration
     assert '[layer.shape]\nkind = "polygon"' in text

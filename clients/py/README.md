@@ -30,9 +30,7 @@ Six sections: a DataFrame with a cluster column, mapped; the 50,000-paper arXiv 
 with terms, three clusterings and their topic lines, mapped as its own principal and as two arXiv
 categories; a week of new papers into the database while it serves; a second clustering over rows
 it already holds; one set of points under two projections; and the database saved, reopened and
-handed to `tessera serve --deployment`. Two of them print a refusal rather than working around it:
-the label set of section 1 and the key column of sections 3 and 4 wait on the two engine rules
-python-sdk.md §11.2 names, F and H.
+handed to `tessera serve --deployment`.
 
 They need `pip install -e 'clients/py[widget,local]'`, a `tessera` binary on `PATH` or named by
 `TESSERA_BIN`, and the corpus at `data/notebook/`, which `TESSERA_NOTEBOOK_DATA` names elsewhere.
@@ -97,15 +95,26 @@ case rather than a surprise.
 | a view group | as a view, plus `view=`; its roster is `insert(group, roster=table, key=, **metadata)` |
 | an attribute | `id=`, `value=`; on a group-scoped attribute also `view=` |
 | a layer, by key | `id=`, `key=`: one key per row |
-| a layer, artifacts | `insert(layer, artifacts=table, key=, level=, parent=, contents=, attached_key=, members=, excluding=, space=, bbox=|circle=|ellipse=|wkt=)` |
-| a layer, members | `insert(layer, members=table, id=, key=, level=, rank=)` |
-| a label set | a mapping `{key: text}`, or a table with `key=` and `text=` or `contents=`; its generating set is `insert(labels, members=table, id=, key=, rank=)` |
+| a layer, artifacts | `insert(layer, artifacts=table, key=, parent=, contents=, attached_layer=, attached_key=, members=, excluding=, space=, level=, attached_level=, shape=)` |
+| a layer, members | `insert(layer, members=table, id=, key=, rank=, level=)` |
+| a label set | a mapping `{key: text}`, or a table with `key=` and `text=` or `contents=`, with `attached_layer=`, `attached_key=` and `level=` where it carries them; its members are `insert(labels, members=table, id=, key=, rank=)` |
 | a vocabulary | `key=`, `title=`, `code=` |
 
 An artifacts table and a members table are two inserts on the same layer, each with its own column
 names, since both carry `key` and `level`. Several inserts on one target before a commit
-accumulate, so a corpus in parts is loaded by the same calls as one file. A path is accepted
-wherever a table is and is read where it lies.
+accumulate, so a corpus in parts is loaded by the same calls as one file; a second part whose
+schema differs from the first is refused naming the two types, and where the first part was a path
+read in place it is copied, a block reading one file. A path is accepted wherever a table is and is
+read where it lies, with two exceptions the call prints: a label set given a mapping or a `text=`
+column, where the SDK writes the table the publication takes, with the attachment its `of` names.
+
+A table in Tessera's own shape (an artifacts table, a members table, a roster, a value set) is no
+exception to the rule that every column a target reads is named on the call. A canonical column the
+call did not name is refused naming the column and the two remedies, name it or drop it, so nothing
+is read silently at one door and ignored at the other. `level` and `attached_level` are read by the
+build under their own names and by no `fields` map, so those keywords take the canonical name and a
+column called anything else is renamed in the table; a membership shape is named by its kind,
+`shape="polygon"`, and its columns (`min_x`…, `cx, cy, r`, `geometry`) are read under theirs.
 
 The one place a name is matched is an attribute's value column: the attribute was declared, and a
 column of its name in the frame inserted into the **allocation view** fills it, as SQL's `INSERT BY
@@ -132,7 +141,7 @@ addressed by the `tessera_id` a pick or the ingest route hands back, which is wh
 sends.
 
 The SDK holds nothing about what the database contains. A re-run of a cell is a re-run: the same
-frame is inserted again and sent again, and what happens then is the database's answer — a replay
+frame is inserted again and sent again, and what happens then is the database's answer: a replay
 where the bytes and the batch id are the ones first sent, a `409` on the page where the ids are
 ones it holds. Databases are stateful, and this one says so rather than guessing.
 
@@ -147,10 +156,10 @@ narrower after the first commit than before it:
   already exist, so `render=True` is refused at the verb (decision 0136's amendment). An indexed
   column is added at any time, and an insert into it fills it.
 
-Two inserts are refused for a rule the engine does not carry yet, each naming it: a key column
-inserted into a layer after the first commit (the values route does not read one, §11.2 F), and a
-label set given text with no generating set of its own (an attached artifact with no members is
-served to nobody, §11.2 H).
+One rule the engine does not carry yet shows as a pre-flight finding: a label with no members of
+its own is the label of its cluster (decision 0145), and until the engine places one that way such
+a label is served to nobody, so a label set given text and no members of its own is named and the
+commit is refused.
 
 Which declarations are new is read from `/v1/meta`, and a vocabulary reaches it through the column
 that names it. A vocabulary no attribute names yet is therefore declared again at each commit; the
