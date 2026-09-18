@@ -200,7 +200,7 @@ pub struct LayerPlan {
     ///
     /// The map is still what publication order is read off, so ordinals — which are identity under
     /// I9 — remain a function of the keys and never of arena order.
-    artifacts: BTreeMap<(String, u32, String), usize>,
+    artifacts: BTreeMap<Address, usize>,
     /// The artifacts themselves, named by the index [`Self::artifacts`] carries. Append-only: an
     /// index handed out stays valid for the whole read.
     bodies: Vec<PlannedArtifact>,
@@ -762,8 +762,8 @@ pub fn read(
             let parents: Vec<(String, String)> = plan
                 .artifacts
                 .iter()
-                .filter(|((layer, _, _), _)| layer == &input.name)
-                .flat_map(|((_, _, key), index)| {
+                .filter(|((layer, _, _, _), _)| layer == &input.name)
+                .flat_map(|((_, _, key, _), index)| {
                     plan.bodies[*index]
                         .parent_keys
                         .iter()
@@ -799,8 +799,8 @@ pub fn read(
             let mine: Vec<(String, usize)> = plan
                 .artifacts
                 .iter()
-                .filter(|((layer, _, _), _)| layer == &input.name)
-                .map(|((_, _, key), index)| (key.clone(), *index))
+                .filter(|((layer, _, _, _), _)| layer == &input.name)
+                .map(|((_, _, key, _), index)| (key.clone(), *index))
                 .collect();
             for (key, index) in mine {
                 let space = plan.bodies[index].space.clone();
@@ -836,6 +836,7 @@ pub fn read(
                 &members.path,
                 &members.fields,
                 declaration,
+                scoped.get(&input.name),
                 &mut plan,
                 ids,
             )?;
@@ -970,15 +971,25 @@ fn read_artifacts(
         }
 
         for row in 0..batch.num_rows() {
-            let address = address(path, layer, &level, &key, row)?;
+            // **The view is read before the duplicate check, because it is part of the identity**
+            // (`views.md` §3.5, contracts §3.4 r84). A key is unique per `(layer, view)` on a
+            // group-scoped layer, so one key on two views is two artifacts — which is what the
+            // control plane takes, and a build that refused it would be the fail-closed half of
+            // one rule stated twice (decision 0091).
+            let named = view_of_row(path, layer, scoped, view, &key, row)?;
+            let address = address(path, layer, &level, &key, row, named)?;
             if plan.artifacts.contains_key(&address) {
                 return Err(BuildError::Invalid(format!(
-                    "{}: artifact {} is declared on more than one row. One row is one artifact, so \
-                     a second row for a key is a second artifact under one name — which of the two \
-                     was published would be the file's row order rather than anything the caller \
-                     wrote",
+                    "{}: artifact {} is declared on more than one row{}. One row is one artifact, \
+                     so a second row for a key is a second artifact under one name — which of the \
+                     two was published would be the file's row order rather than anything the \
+                     caller wrote",
                     path.display(),
-                    address.2
+                    address.2,
+                    match named {
+                        Some(view) => format!(" of view '{view}'"),
+                        None => String::new(),
+                    }
                 )));
             }
 
@@ -1016,38 +1027,9 @@ fn read_artifacts(
                 }
                 (None, None) => PlannedMembership::default(),
             };
-            let view_key = match (scoped, view) {
-                (Some(scope), Some(column)) => {
-                    let named = value_at(column, row).ok_or_else(|| {
-                        BuildError::Invalid(format!(
-                            "{}: artifact {} carries no '{}', and this layer's artifacts are a \
-                             different set per view of '{}' (views §3.5) — a row naming no view \
-                             is in no artifact set",
-                            path.display(),
-                            address.2,
-                            scope.column,
-                            scope.group
-                        ))
-                    })?;
-                    if scope.keys.binary_search(&named).is_err() {
-                        return Err(BuildError::Invalid(format!(
-                            "{}: artifact {} names view '{named}', which group '{}' has no such \
-                             key for. Its keys are: {}. An artifact belongs to one view and its \
-                             keys are unique per (layer, view), so a key nobody declared is a \
-                             refusal rather than an artifact drawn nowhere (views §3.5)",
-                            path.display(),
-                            address.2,
-                            scope.group,
-                            scope.keys.join(", ")
-                        )));
-                    }
-                    Some(named)
-                }
-                _ => None,
-            };
             let index = plan.intern(address.clone());
             plan.bodies[index] = PlannedArtifact {
-                view_key,
+                view_key: named.map(str::to_string),
                 membership,
                 contents: match contents.as_ref() {
                     None => Vec::new(),
@@ -1083,7 +1065,9 @@ fn plan_inline(
     mut shapes: Option<&mut ShapeReader>,
 ) -> Result<()> {
     for row in rows {
-        let address = (layer.to_string(), row.level, row.key.clone());
+        // An inline artifact is on an unscoped layer: the scoped spelling is refused where the
+        // source is chosen, having no column to name a view with.
+        let address = (layer.to_string(), row.level, row.key.clone(), None);
         if plan.artifacts.contains_key(&address) {
             return Err(BuildError::Invalid(format!(
                 "layer '{layer}': artifact {} is written twice in the declaration. One entry is \
@@ -1188,14 +1172,17 @@ fn read_members(
     path: &Path,
     fields: &Fields,
     declaration: &LayerDeclaration,
+    scoped: Option<&crate::ScopedLayer>,
     plan: &mut LayerPlan,
     ids: &crate::ids::IdSpace,
 ) -> Result<(u64, u64)> {
     let value_set = declaration.value_set;
     let (mut unclustered, mut read) = (0u64, 0u64);
     // Built on the first integer batch and not before: a text-keyed layer never pays for it, and a
-    // layer of 10⁷ artifacts pays once rather than per point.
-    let mut roster: Option<KeyRoster> = None;
+    // layer of 10⁷ artifacts pays once rather than per point. **One roster per view**, because a
+    // key means an artifact only together with its view on a group-scoped layer — an unscoped
+    // layer has exactly one, under `None`, and pays a pointer comparison per row for it.
+    let mut rosters = Rosters::default();
     // The edges a list column declared, child address → parents. **One entry per child, not one
     // per row**: a cluster of a hundred thousand points states its parent a hundred thousand times,
     // and the second statement onward is a comparison rather than an insertion. Applied once the
@@ -1212,6 +1199,34 @@ fn read_members(
     for batch in batches_ahead(path, READ_AHEAD_BATCHES)? {
         let batch = batch?;
         let key = member_keys(path, &batch, fields, layer, declaration)?;
+        // **Which view each member row's key is in**, on a layer scoped to a group (`views.md`
+        // §3.5) — the same column the artifacts source carries, under the same declared name. A
+        // key alone would be ambiguous here: it is unique per `(layer, view)`, so two views' rows
+        // would join whichever artifact the reader met first.
+        let view: Option<crate::utf8::Utf8Column<'_>> = match scoped {
+            None => None,
+            Some(scope) => {
+                let array = batch.column_by_name(&scope.column).ok_or_else(|| {
+                    BuildError::Invalid(format!(
+                        "{}: layer '{layer}' is scoped to group '{}' and reads the view each \
+                         member row's artifact belongs to from a column named '{}', which this \
+                         file does not carry. Its columns are: {}",
+                        path.display(),
+                        scope.group,
+                        scope.column,
+                        column_names(&batch)
+                    ))
+                })?;
+                Some(crate::utf8::Utf8Column::new(array.as_ref()).ok_or_else(|| {
+                    BuildError::Invalid(format!(
+                        "{}: column {} is {:?}, which this reader cannot take",
+                        path.display(),
+                        scope.column,
+                        array.data_type()
+                    ))
+                })?)
+            }
+        };
         let level = optional_u32(path, &batch, LEVEL)?;
         let rank = optional_u32_field(path, &batch, fields, "rank")?;
         let entity = member_entities(path, &batch, fields, ids)?;
@@ -1235,14 +1250,16 @@ fn read_members(
             match &key {
                 MemberKeys::Scalar(column) => {
                     let at_level = level.map_or(0, |c| number_at(c, row));
+                    let named = member_view(path, layer, scoped, view, row)?;
                     let Some(member) = resolve_member(
                         layer,
                         at_level,
+                        named,
                         column.read_at(row),
                         value_set,
                         path,
                         plan,
-                        &mut roster,
+                        &mut rosters,
                     )?
                     else {
                         unclustered += 1;
@@ -1266,6 +1283,7 @@ fn read_members(
                     )?;
                 }
                 MemberKeys::Listed(listed) => {
+                    let named = member_view(path, layer, scoped, view, row)?;
                     let Some(positions) = listed.entries(path, layer, row)? else {
                         unclustered += 1;
                         continue;
@@ -1281,11 +1299,12 @@ fn read_members(
                         entries.push(resolve_member(
                             layer,
                             listed.meaning.level_of(position),
+                            named,
                             listed.values.read_at(index),
                             value_set,
                             path,
                             plan,
-                            &mut roster,
+                            &mut rosters,
                         )?);
                     }
                     // **A row whose every entry is noise is one row in no artifact**, counted
@@ -1325,11 +1344,12 @@ fn read_members(
 fn resolve_member(
     layer: &str,
     level: u32,
+    view: Option<&str>,
     read: KeyRead<'_>,
     value_set: ValueSet,
     path: &Path,
     plan: &mut LayerPlan,
-    roster: &mut Option<KeyRoster>,
+    rosters: &mut Rosters,
 ) -> Result<Option<usize>> {
     Ok(match read {
         KeyRead::Unclustered => None,
@@ -1338,11 +1358,16 @@ fn resolve_member(
             // built once per artifact rather than once per point. Building it here allocated the
             // layer name and the key on every member entry and then probed a `BTreeMap` whose
             // comparison walks both — three times over, counting `attach_member` and the lineage.
-            let roster = roster.get_or_insert_with(|| KeyRoster::of_layer(layer, plan));
+            let roster = rosters.of(layer, view, plan);
             match roster.text(level, name) {
                 Some(index) => Some(index),
                 None => {
-                    let address = (layer.to_string(), level, name.to_string());
+                    let address = (
+                        layer.to_string(),
+                        level,
+                        name.to_string(),
+                        view.map(str::to_string),
+                    );
                     if value_set == ValueSet::Closed {
                         return Err(undeclared_key(path, &address));
                     }
@@ -1352,7 +1377,7 @@ fn resolve_member(
             }
         }
         KeyRead::Numbered(value) => {
-            let roster = roster.get_or_insert_with(|| KeyRoster::of_layer(layer, plan));
+            let roster = rosters.of(layer, view, plan);
             match roster.get(level, value) {
                 Some(index) => Some(index),
                 None => {
@@ -1360,7 +1385,12 @@ fn resolve_member(
                     // never once per point. The spelling is the one
                     // `tessera_types::layer::integer_key` states for the wire — `3` and "3" name
                     // one artifact — taken here without allocating for the point that matched.
-                    let address = (layer.to_string(), level, value.to_string());
+                    let address = (
+                        layer.to_string(),
+                        level,
+                        value.to_string(),
+                        view.map(str::to_string),
+                    );
                     if value_set == ValueSet::Closed {
                         return Err(undeclared_key(path, &address));
                     }
@@ -1655,7 +1685,7 @@ pub fn publish(
         .par_iter_mut()
         .enumerate()
         .map(|(index, body)| {
-            let (layer, level, key) = &addresses[index];
+            let (layer, level, key, _) = &addresses[index];
             resolve_artifact(layer, *level, key, body, resolve, high_water)
         })
         .collect::<Result<_>>()?;
@@ -1673,7 +1703,7 @@ pub fn publish(
     // ordinals, and therefore its entities, are a function of the artifacts and never of the file's
     // row order. The plan's own map is already in that order, so this is a walk rather than a sort.
     let mut batched: BTreeMap<(&str, u32), Vec<(&str, usize)>> = BTreeMap::new();
-    for ((layer, level, key), index) in &plan.artifacts {
+    for ((layer, level, key, _), index) in &plan.artifacts {
         batched
             .entry((layer.as_str(), *level))
             .or_default()
@@ -1960,7 +1990,7 @@ fn merge_member_runs(
     let mut pairs = 0u64;
     while merge.next_artifact()? {
         let index = merge.index() as usize;
-        let (layer, level, key) = &plan.addresses[index];
+        let (layer, level, key, _) = &plan.addresses[index];
         // **Resolved in place, in the merge's own buffer.** A source id and the entity it resolves
         // to are both `u64`, so the artifact's sources *become* its entities; a second vector held
         // the largest single membership of the corpus twice, which at the Overture rung is
@@ -2214,7 +2244,7 @@ fn verify_dependencies(plan: &LayerPlan) -> Result<()> {
         .iter()
         .map(|d| (d.name.as_str(), d.depends_on.as_slice()))
         .collect();
-    for ((layer, _, key), index) in &plan.artifacts {
+    for ((layer, _, key, _), index) in &plan.artifacts {
         let Some(depends_on) = declared.get(layer.as_str()) else {
             continue;
         };
@@ -2254,7 +2284,11 @@ fn verify_dependencies(plan: &LayerPlan) -> Result<()> {
 /// level is a resolution, so the two never carry each other
 /// ([decision 0082](../../../docs/decisions/0082-a-hierarchy-lives-in-edges-levels-are-resolutions.md)).
 /// An edge naming a key in another level is therefore an unknown key here, and refuses.
-type Address = (String, u32, String);
+/// `(layer, level, key, view)`. **The view is part of the identity on a group-scoped layer**
+/// (`views.md` §3.5, contracts §3.4 r84): keys are unique per `(layer, view)` there, so one key on
+/// two views is two artifacts and the control plane takes exactly that. `None` on an unscoped
+/// layer, whose one artifact set is drawn on every view it names.
+type Address = (String, u32, String, Option<String>);
 
 /// The buffers one containment pass reads a membership through: the extent's raw bytes, and the
 /// members they decode to. Held by the task rather than by the parent, so the pass allocates once
@@ -2282,7 +2316,9 @@ fn verify_hierarchies(
     // depend on iteration order. **A `dag` layer's child holds several, and never enters this
     // map** (`dag-hierarchies.md` §4); its containment and coverage are per edge below, exactly as
     // a tree's are.
-    let mut claimed: BTreeMap<(&str, u32, &str), &str> = BTreeMap::new();
+    // **Keyed by the child's whole address**, the view included: a key is unique per
+    // `(layer, view)` on a group-scoped layer, so two views' children legitimately share a key.
+    let mut claimed: BTreeMap<(&str, u32, Option<&str>, &str), &str> = BTreeMap::new();
     // Children grouped under their parent, so containment and coverage are one pass over each
     // parent's membership rather than one per edge. **Each child by its full address**, because an
     // tiered layer's child sits at a different level from its parent and a bare key would
@@ -2303,7 +2339,7 @@ fn verify_hierarchies(
     // counts once, its parents each once.
     let mut shapes: BTreeMap<(&str, u32), HierarchyShape> = BTreeMap::new();
     for (address, index) in index_of {
-        let (layer, level, key) = address;
+        let (layer, level, key, view) = address;
         if let Some(kind) = kind_of.get(layer.as_str()).filter(|k| {
             !matches!(
                 k,
@@ -2358,7 +2394,9 @@ fn verify_hierarchies(
             let parent_address = if cross_level {
                 let mut found = None;
                 for coarser in 0..*level {
-                    let candidate = (layer.clone(), coarser, parent_key.to_string());
+                    // **An edge may not cross views** (`views.md` §3.5), so the parent is looked
+                    // for in the child's own view and nowhere else.
+                    let candidate = (layer.clone(), coarser, parent_key.to_string(), view.clone());
                     if let Some((stored, _)) = index_of.get_key_value(&candidate) {
                         if found.is_some() {
                             return Err(BuildError::Invalid(format!(
@@ -2382,7 +2420,7 @@ fn verify_hierarchies(
                     }
                 }
             } else {
-                let candidate = (layer.clone(), *level, parent_key.to_string());
+                let candidate = (layer.clone(), *level, parent_key.to_string(), view.clone());
                 match index_of.get_key_value(&candidate) {
                     Some((stored, _)) => stored,
                     None => {
@@ -2406,7 +2444,8 @@ fn verify_hierarchies(
             )));
             }
             if !several {
-                if let Some(first) = claimed.insert((layer, *level, key), parent_key) {
+                if let Some(first) = claimed.insert((layer, *level, view.as_deref(), key), parent_key)
+                {
                     return Err(BuildError::Invalid(format!(
                         "{layer} level {level} artifact {key} is claimed by both {first} and \
                      {parent_key}; a child has one lineage or the cut that walks it depends on \
@@ -2437,7 +2476,7 @@ fn verify_hierarchies(
         // parent's, so a pass over a hierarchy of 10⁵ artifacts allocates a handful of times as the
         // serial pass did, and the peak is a set of them per thread rather than one.
         .map_init(HierarchyBuffers::default, |scratch, (address, children)| {
-            let (layer, level, parent_key) = *address;
+            let (layer, level, parent_key, _) = *address;
             let parent_index = index_of[*address];
             load_members(
                 &resolved[parent_index].members,
@@ -2469,7 +2508,7 @@ fn verify_hierarchies(
                     &mut scratch.child_bytes,
                     &mut scratch.child_buf,
                 )?;
-                let (_, child_level, child_key) = *child_address;
+                let (_, child_level, child_key, _) = *child_address;
                 let mut escaping = 0u64;
                 // **Galloping from a cursor**, both sides being sorted: a child whose members sit
                 // in one region of the parent's finds them in a few probes each rather than a full
@@ -2567,8 +2606,9 @@ fn detect_cycles(
     //
     // A `BTreeMap` at both levels, because the order artifacts are visited in is the order this
     // reports a cycle in, and that order must stay `artifacts.keys()`'s.
-    let mut levels: BTreeMap<(&str, u32), BTreeMap<&str, &[String]>> = BTreeMap::new();
-    for ((layer, level, key), index) in index_of {
+    let mut levels: BTreeMap<(&str, u32, Option<&str>), BTreeMap<&str, &[String]>> =
+        BTreeMap::new();
+    for ((layer, level, key, view), index) in index_of {
         if !matches!(
             kind_of.get(layer.as_str()),
             Some(
@@ -2579,7 +2619,7 @@ fn detect_cycles(
             continue;
         }
         levels
-            .entry((layer.as_str(), *level))
+            .entry((layer.as_str(), *level, view.as_deref()))
             .or_default()
             .insert(key.as_str(), resolved[*index].parent_keys.as_slice());
     }
@@ -2598,7 +2638,7 @@ fn detect_cycles(
     // Over parent lists the walk is a depth-first search with an explicit stack of
     // `(node, next parent to try)`; on a tree every list has one entry and it is the chain walk
     // it replaces.
-    for ((layer, level), parents) in &levels {
+    for ((layer, level, _), parents) in &levels {
         // 0 unvisited · 1 on the chain being walked · 2 known to reach a root
         let mut state: std::collections::HashMap<&str, u8> =
             std::collections::HashMap::with_capacity(parents.len());
@@ -4108,14 +4148,95 @@ struct KeyRoster {
     by_text: BTreeMap<u32, rustc_hash::FxHashMap<Box<str>, usize>>,
 }
 
+/// The key rosters one member source resolves through: **one per view**, because a key names an
+/// artifact only together with its view on a group-scoped layer (`views.md` §3.5).
+///
+/// An unscoped layer has exactly one entry, under `None`, and every row finds it on the cached
+/// index without a probe — which is what keeps the resolution a pointer comparison per member
+/// entry rather than a map lookup. A scoped layer's rows are usually written a view at a time, so
+/// the same hint answers them too; a file that interleaves views pays a short linear scan over the
+/// group's keys, which number in the tens.
+#[derive(Default)]
+struct Rosters {
+    by_view: Vec<(Option<String>, KeyRoster)>,
+    /// The entry the last row resolved through.
+    last: usize,
+}
+
+impl Rosters {
+    fn of(&mut self, layer: &str, view: Option<&str>, plan: &LayerPlan) -> &mut KeyRoster {
+        if self.by_view.get(self.last).map(|(held, _)| held.as_deref()) != Some(view) {
+            self.last = match self
+                .by_view
+                .iter()
+                .position(|(held, _)| held.as_deref() == view)
+            {
+                Some(at) => at,
+                None => {
+                    self.by_view.push((
+                        view.map(str::to_string),
+                        KeyRoster::of_layer(layer, view, plan),
+                    ));
+                    self.by_view.len() - 1
+                }
+            };
+        }
+        &mut self.by_view[self.last].1
+    }
+}
+
+/// The view one member row names, where its layer is scoped — the artifacts source's own check
+/// (`view_of_row`), made against the member file's rows.
+fn member_view<'a>(
+    path: &Path,
+    layer: &str,
+    scoped: Option<&crate::ScopedLayer>,
+    view: Option<crate::utf8::Utf8Column<'a>>,
+    row: usize,
+) -> Result<Option<&'a str>> {
+    let (Some(scope), Some(column)) = (scoped, view) else {
+        return Ok(None);
+    };
+    let Some(named) = column.at(row) else {
+        return Err(BuildError::Invalid(format!(
+            "{}: row {row} carries no '{}', and layer '{layer}'s artifacts are a different set per \
+             view of '{}' (views §3.5) — a member row naming no view names no artifact",
+            path.display(),
+            scope.column,
+            scope.group
+        )));
+    };
+    if scope
+        .keys
+        .binary_search_by(|held| held.as_str().cmp(named))
+        .is_err()
+    {
+        return Err(BuildError::Invalid(format!(
+            "{}: row {row} names view '{named}', which group '{}' has no such key for. Its keys \
+             are: {}",
+            path.display(),
+            scope.group,
+            scope.keys.join(", ")
+        )));
+    }
+    Ok(Some(named))
+}
+
 impl KeyRoster {
-    /// **Built once, over the layer's whole planned roster**, integer and text keys alike.
-    fn of_layer(layer: &str, plan: &LayerPlan) -> KeyRoster {
+    /// **Built once, over the layer's whole planned roster for one view**, integer and text keys
+    /// alike. The view is part of the identity on a group-scoped layer (`views.md` §3.5), so a
+    /// roster holds one view's keys and a member row is resolved against the roster of the view
+    /// its own row names.
+    fn of_layer(layer: &str, view: Option<&str>, plan: &LayerPlan) -> KeyRoster {
         let mut roster = KeyRoster {
             by_integer: BTreeMap::new(),
             by_text: BTreeMap::new(),
         };
-        for (address, index) in plan.artifacts.iter().filter(|(a, _)| a.0 == layer) {
+        for (address, index) in plan
+            .artifacts
+            .iter()
+            .filter(|(a, _)| a.0 == layer && a.3.as_deref() == view)
+        {
             if let Some(value) = canonical_integer(&address.2) {
                 roster.by_integer.insert((address.1, value), *index);
             }
@@ -4178,7 +4299,7 @@ fn undeclared_key(path: &Path, address: &Address) -> BuildError {
     ))
 }
 
-/// One row's `(layer, level, key)`.
+/// One row's `(layer, level, key, view)`.
 ///
 /// **The layer is the source's own**, never a column: one file holds one layer, which is what
 /// removes the discriminator and with it any way for a layer to ingest another's rows.
@@ -4192,12 +4313,56 @@ pub(crate) fn key_at(key: &KeyColumn, row: usize) -> String {
     key.key_at(row).unwrap_or_else(|| format!("row {row}"))
 }
 
+/// The view one row of a group-scoped layer's source names, checked against the group's roster —
+/// and `None` on an unscoped layer, whose one artifact set is drawn on every view it names
+/// (`views.md` §3.5).
+///
+/// **Read by both of a layer's sources**, the artifacts and the members, because a key means
+/// nothing without it on such a layer: keys are unique per `(layer, view)`, so a member row naming
+/// a key alone could be either of two artifacts, and whichever it joined would be the file's
+/// column order rather than anything the caller wrote.
+fn view_of_row<'a>(
+    path: &Path,
+    layer: &str,
+    scoped: Option<&crate::ScopedLayer>,
+    view: Option<crate::utf8::Utf8Column<'a>>,
+    key: &KeyColumn,
+    row: usize,
+) -> Result<Option<&'a str>> {
+    let (Some(scope), Some(column)) = (scoped, view) else {
+        return Ok(None);
+    };
+    let Some(named) = column.at(row) else {
+        return Err(BuildError::Invalid(format!(
+            "{}: {} carries no '{}', and layer '{layer}'s artifacts are a different set per view \
+             of '{}' (views §3.5) — a row naming no view is in no artifact set",
+            path.display(),
+            key_at(key, row),
+            scope.column,
+            scope.group
+        )));
+    };
+    if scope.keys.binary_search_by(|held| held.as_str().cmp(named)).is_err() {
+        return Err(BuildError::Invalid(format!(
+            "{}: {} names view '{named}', which group '{}' has no such key for. Its keys are: {}. \
+             An artifact belongs to one view and its keys are unique per (layer, view), so a key \
+             nobody declared is a refusal rather than an artifact drawn nowhere (views §3.5)",
+            path.display(),
+            key_at(key, row),
+            scope.group,
+            scope.keys.join(", ")
+        )));
+    }
+    Ok(Some(named))
+}
+
 fn address(
     path: &Path,
     layer: &str,
     level: &Option<&UInt32Array>,
     key: &KeyColumn,
     row: usize,
+    view: Option<&str>,
 ) -> Result<Address> {
     let Some(key) = key.key_at(row) else {
         return Err(BuildError::Invalid(format!(
@@ -4210,6 +4375,7 @@ fn address(
         layer.to_string(),
         level.map_or(0, |c| number_at(c, row)),
         key,
+        view.map(str::to_string),
     ))
 }
 
@@ -4307,7 +4473,7 @@ mod tests {
             1 << 30,
         )?;
         let body = |layer: &str| -> &PlannedArtifact {
-            let index = plan.artifacts[&(layer.to_string(), 0, "uk".to_string())];
+            let index = plan.artifacts[&(layer.to_string(), 0, "uk".to_string(), None)];
             &plan.bodies[index]
         };
         let selects = body("regions/selects")
@@ -4744,12 +4910,12 @@ mod tests {
         for parent in 0..parents {
             let member = parent as u32 * 10;
             index_of.insert(
-                ("clusters/a".to_string(), 0, format!("p{parent:03}")),
+                ("clusters/a".to_string(), 0, format!("p{parent:03}"), None),
                 resolved.len(),
             );
             resolved.push(body(vec![member], Vec::new()));
             index_of.insert(
-                ("clusters/a".to_string(), 0, format!("c{parent:03}")),
+                ("clusters/a".to_string(), 0, format!("c{parent:03}"), None),
                 resolved.len(),
             );
             // One member the parent holds and one it does not, so every parent has exactly one

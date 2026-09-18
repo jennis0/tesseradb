@@ -149,16 +149,27 @@ def grouped(tmp_path, corpus):
         require_member_visibility="none",
         computed=(),
     )
+    # `shared` is one key on both views — two artifacts, because a key is unique per
+    # (layer, view) on a group-scoped layer (contracts §3.4 r84; issue #152).
     db.insert(
         "clusters",
-        artifacts=artifacts(["c0a", "c0b"], ["a", "b"]),
+        artifacts=artifacts(["c0a", "c0b", "shared", "shared"], ["a", "b", "a", "b"]),
         key="key",
         level="level",
         view="slice",
     )
     db.insert(
         "clusters",
-        members=pa.concat_tables([memberships("c0a", "a", IDS), memberships("c0b", "b", IDS)]),
+        members=pa.concat_tables(
+            [
+                memberships("c0a", "a", IDS),
+                memberships("c0b", "b", IDS),
+                # Half of each view's entities, and a different half in each: which artifact a
+                # member row joined is readable off the count rather than off a total.
+                memberships("shared", "a", IDS[:60]),
+                memberships("shared", "b", IDS[60:]),
+            ]
+        ),
         id="entity",
         key="key",
         level="level",
@@ -224,10 +235,21 @@ def test_a_group_scoped_attribute_filters_inside_the_view_it_was_read_for(groupe
 
 def test_a_scoped_layers_artifacts_are_keyed_per_view(grouped):
     """One artifact set per view of the group: each key is drawn on its own view and no other."""
-    on_a = {one["key"]: one["masked_count"] for one in browse(grouped, "slices:a", "clusters")["artifacts"]}
-    on_b = {one["key"]: one["masked_count"] for one in browse(grouped, "slices:b", "clusters")["artifacts"]}
+    rows_a = browse(grouped, "slices:a", "clusters")["artifacts"]
+    rows_b = browse(grouped, "slices:b", "clusters")["artifacts"]
+    on_a = {one["key"]: one["masked_count"] for one in rows_a}
+    on_b = {one["key"]: one["masked_count"] for one in rows_b}
     assert on_a["c0a"] == N and on_a.get("c0b", 0) == 0
     assert on_b["c0b"] == N and on_b.get("c0a", 0) == 0
+    # **`shared` is one key on two views, so it is two artifacts** (contracts §3.4 r84; issue
+    # #152) — two rows in the level's roster under one name, each holding its own members and
+    # counting zero on the view it does not belong to. Read as a list rather than as a map, a key
+    # no longer being unique within a level.
+    counts = lambda rows: sorted(  # noqa: E731
+        one["masked_count"] for one in rows if one["key"] == "shared"
+    )
+    assert counts(rows_a)[-1] == 60, counts(rows_a)
+    assert counts(rows_b)[-1] == N - 60, counts(rows_b)
 
 
 def test_a_later_commit_pages_an_insert_into_one_view_fills_a_family_and_adds_a_view(grouped):
