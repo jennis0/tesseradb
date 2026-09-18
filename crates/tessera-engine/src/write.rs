@@ -6442,6 +6442,37 @@ fn mint_plan<W>(
 /// entities joining it.
 type MintPlan = std::collections::BTreeMap<(String, u32, String), (usize, croaring::Bitmap)>;
 
+/// **A key that acquired an artifact between its resolution and its preparation grows into it**,
+/// rather than minting a second artifact for a key a live one already holds.
+///
+/// [`Executor::prepare_mints`] re-resolves every key it is given against the store, and answers
+/// the ones that turned out to be held; this writes those ordinals back onto the memberships, so
+/// [`growth_records`] and [`values_growth_records`] carry them as ordinary joins. A membership
+/// left with no ordinal is one the preparation is about to mint, and its publication carries the
+/// rows.
+///
+/// **It can only find something at the ingest door.** There, a window stays open across a
+/// `PublishArtifacts` command, which takes the work lane between an entry's admission and the
+/// window's close. At the values door the resolution and the preparation are two statements of one
+/// executor call with nothing between them, so `resolved` is always empty and this is a no-op —
+/// kept rather than elided because the two doors settle a batch the same way, and a door that
+/// skipped it would be the one to get this wrong if the call ever grew a yield.
+fn settle_resolved_ordinals(
+    memberships: &mut [tessera_lifecycle::ResolvedMembership],
+    resolved: &std::collections::BTreeMap<(String, u32, String), u32>,
+) {
+    if resolved.is_empty() {
+        return;
+    }
+    for join in memberships.iter_mut() {
+        if join.ordinal.is_some() {
+            continue;
+        }
+        let at = (join.layer.clone(), join.level, join.key.clone());
+        join.ordinal = resolved.get(&at).copied();
+    }
+}
+
 /// What [`Executor::prepare_mints`] answers: the publication records to append in order, the keys
 /// that turned out to be held after all and the ordinal each resolved to, and the keys this run
 /// created. `Err` is the refusal text the caller's waiters are answered with.
@@ -12595,19 +12626,10 @@ impl Executor {
         let (records, resolved, minted) = self.prepare_mints(&wanted, &edges)?;
 
         // A key that acquired an artifact between its batch's admission and this close is an
-        // ordinary growth, and `growth_records` takes it from there. Usually none did — that needs
-        // a publication to have executed inside the window — so the pass is skipped rather than
-        // walked.
-        if !resolved.is_empty() {
-            for entry in closed.iter_mut() {
-                for join in entry.memberships.iter_mut() {
-                    if join.ordinal.is_some() {
-                        continue;
-                    }
-                    let at = (join.layer.clone(), join.level, join.key.clone());
-                    join.ordinal = resolved.get(&at).copied();
-                }
-            }
+        // ordinary growth, and `growth_records` takes it from there — see
+        // [`settle_resolved_ordinals`], which the values door settles by too.
+        for entry in closed.iter_mut() {
+            settle_resolved_ordinals(&mut entry.memberships, &resolved);
         }
         for ((layer, level, key), (index, _)) in &wanted {
             if minted.contains(&(layer.clone(), *level, key.clone())) {
@@ -14295,29 +14317,11 @@ impl Executor {
         };
         let mut mints: Vec<WalRecord> = Vec::new();
         let mut minted_count = 0u64;
-        let mut minted_members = 0u64;
         if !wanted.is_empty() {
             match self.prepare_mints(&wanted, &mint_edges) {
                 Ok((records, resolved, minted)) => {
-                    // A key that acquired an artifact between the resolution above and this
-                    // preparation grows into it instead — `mint_records`' own patch, for the same
-                    // reason: a publication may have executed in between.
-                    for join in memberships.iter_mut() {
-                        if join.ordinal.is_some() {
-                            continue;
-                        }
-                        let at = (join.layer.clone(), join.level, join.key.clone());
-                        join.ordinal = resolved.get(&at).copied();
-                    }
-                    for (at, (_, members)) in &wanted {
-                        if minted.contains(at) {
-                            minted_count += 1;
-                            // Every member of a minted artifact is a new member: the artifact did
-                            // not exist a statement ago. Counted here because the publication
-                            // carries them and `new_members_of` reads growth records alone.
-                            minted_members += members.cardinality();
-                        }
-                    }
+                    settle_resolved_ordinals(&mut memberships, &resolved);
+                    minted_count = wanted.keys().filter(|at| minted.contains(*at)).count() as u64;
                     mints = records;
                 }
                 Err(detail) => {
@@ -14337,13 +14341,15 @@ impl Executor {
         };
         // Read beside the preparation and **before** the apply, on `growth_receipt`'s rule:
         // afterwards every joining member is a member and how many were new is gone.
-        let joined = minted_members
-            + self.live.with_artifacts(|store| {
-                growth
-                    .iter()
-                    .map(|record| new_members_of(record, store))
-                    .sum::<u64>()
-            });
+        // **`joined` counts members of artifacts that already existed**, at this door as at
+        // `PUT /control/layers/{name}/artifacts`: an artifact this batch created is reported under
+        // `minted`, and its first members are what creating it means rather than a second number.
+        let joined = self.live.with_artifacts(|store| {
+            growth
+                .iter()
+                .map(|record| new_members_of(record, store))
+                .sum::<u64>()
+        });
 
         let values_record = WalRecord::ValuesBatch {
             batch_id: request.batch_id.clone(),
@@ -14430,7 +14436,8 @@ impl Executor {
             // — and alarmed rather than asserted, on `commit_growth`'s rule.
             tracing::error!(
                 count = undecodable,
-                "ALARM: a values batch's membership growth did not survive its own round trip"
+                "ALARM: a values batch's artifact publications and membership growths did not \
+                 survive their own round trip"
             );
         }
         for ((record, at), refused) in artifact_records
@@ -14495,6 +14502,18 @@ impl Executor {
         if minted_count > 0 {
             tracing::info!(
                 minted = minted_count,
+                artifacts = ?mints
+                    .iter()
+                    .flat_map(|record| match record {
+                        WalRecord::ArtifactPublish { layer, level, artifacts, .. } => artifacts
+                            .iter()
+                            .filter_map(|a| a.key.as_ref())
+                            .map(|key| format!("{key} in level {level} of {layer}"))
+                            .take(8)
+                            .collect::<Vec<_>>(),
+                        _ => Vec::new(),
+                    })
+                    .collect::<Vec<_>>(),
                 "a values batch named keys no artifact held, and these layers' value sets are \
                  open, so the artifacts were created"
             );

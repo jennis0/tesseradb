@@ -1417,8 +1417,8 @@ struct ValuesResp {
     filled: u64,
     /// Cells that already held the identical value, which the fill rule accepts with no effect.
     held: u64,
-    /// Members this batch's layer columns added to artifacts that did not already hold them,
-    /// including the first members of an artifact this batch minted.
+    /// Members this batch's layer columns added to artifacts that already existed and did not
+    /// already hold them. An artifact this batch created is counted under `minted` alone.
     joined: u64,
     /// Artifacts this batch's layer columns **created**: a key no artifact held, on a layer whose
     /// value set is open (python-sdk §11.2 F). `/control/ingest`'s `minted` at this door.

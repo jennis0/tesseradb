@@ -641,9 +641,10 @@ pub enum Ack {
         /// Cells that already held the identical value, which the fill rule accepts with no
         /// effect. Reported so a pipeline resending a page sees that it changed nothing.
         held: u64,
-        /// Members this batch's layer columns added to artifacts that did not already hold them,
-        /// on [`MembershipGrown::joined`]'s terms — including the first members of an artifact
-        /// this batch minted, every one of which is new by construction.
+        /// Members this batch's layer columns added to **artifacts that already existed** and did
+        /// not already hold them, on [`MembershipGrown::joined`]'s terms. An artifact this batch
+        /// created is counted under `minted` and its first members are not counted here, so the
+        /// word means at this door what it means on the publication route.
         joined: u64,
         /// Artifacts this batch's layer columns **created**: a key no artifact held, on a layer
         /// whose value set is open (python-sdk §11.2 F). [`Ack::Ingested`]'s

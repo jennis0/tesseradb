@@ -543,10 +543,14 @@ async fn a_values_page_mints_the_keys_nothing_holds_and_joins_every_row() {
         Some(8 - BUILT),
         "the keys no artifact held were created: {body}"
     );
+    // **`joined` counts the artifacts that already existed.** The four built keys hold one member
+    // each, so the page adds five to each of them; the four keys it created carry their members as
+    // part of being created and are reported under `minted` alone, which is what the word means on
+    // the publication route.
     assert_eq!(
         body["joined"].as_u64(),
-        Some(N - BUILT),
-        "every row that was not already a member joined: {body}"
+        Some(BUILT * (N / 8 - 1)),
+        "the members that joined an artifact that already existed: {body}"
     );
 
     tick(&server).await;
@@ -557,8 +561,8 @@ async fn a_values_page_mints_the_keys_nothing_holds_and_joins_every_row() {
         "the memberships a client browses are the fixture's own"
     );
 
-    // **A second identical page is a no-op.** A fresh batch id, so this is the fill rule and the
-    // set join answering rather than the replay index.
+    // **A second identical page is a no-op**, under a fresh batch id — so this is the resolution
+    // and the set join answering, rather than the replay index.
     let (status, again) = post_values(
         &server,
         "values-2",
@@ -568,11 +572,26 @@ async fn a_values_page_mints_the_keys_nothing_holds_and_joins_every_row() {
     assert_eq!(status, 200, "{again}");
     assert_eq!(again["minted"].as_u64(), Some(0), "{again}");
     assert_eq!(again["joined"].as_u64(), Some(0), "{again}");
+
+    // **And the replay of the first page is a no-op too**, answered off the batch index: the flag
+    // is what tells a replay apart from a first submission whose keys another writer had already
+    // minted, and the count beside it says this submission created nothing.
+    let (status, replay) = post_values(
+        &server,
+        "values-1",
+        values_body(&rows, LAYER, &|e| json!(key_of(e))),
+    )
+    .await;
+    assert_eq!(status, 200, "{replay}");
+    assert_eq!(replay["replayed"].as_bool(), Some(true), "{replay}");
+    assert_eq!(replay["minted"].as_u64(), Some(0), "{replay}");
+    assert_eq!(replay["joined"].as_u64(), Some(0), "{replay}");
+
     tick(&server).await;
     assert_eq!(
         browse_counts(&server, &["0", "1"], LAYER, None).await,
         expected_members(),
-        "a resent page moved nothing"
+        "neither a resent page nor a replay moved anything"
     );
 }
 
