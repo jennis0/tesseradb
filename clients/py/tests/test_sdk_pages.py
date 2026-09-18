@@ -566,11 +566,14 @@ def test_leave_shrinks_a_generating_set_and_emptying_it_withdraws_the_content(se
         "topics", members=label_members(n=5), id="entity", key="key", level="level", rank="rank"
     )
     assert db.commit().ok
-    assert ("topics", "l0", ["A generated label"], 20) in artifact_rows_of(db)
+    # Five members of its own, so five is what its row carries — never its cluster's twenty
+    # (owner ruling, 2026-09-18, which withdrew the copy).
+    assert ("topics", "l0", ["A generated label"], 5) in artifact_rows_of(db)
 
-    # Three of the five leave: the content is served against the two that remain.
+    # Three of the five leave: the content is served against the two that remain. The generating
+    # set shrinks; the membership the count is taken over does not.
     assert db.leave("topics", "l0", ["p0", "p1", "p2"], rank=0).ok
-    assert ("topics", "l0", ["A generated label"], 20) in artifact_rows_of(db)
+    assert ("topics", "l0", ["A generated label"], 5) in artifact_rows_of(db)
 
     # The page that empties the set withdraws the content, and it does not come back on its own.
     assert db.leave("topics", "l0", ["p3", "p4"], rank=0).ok
@@ -856,6 +859,42 @@ def artifact_rows_of(db, view: str = "map", frame=None) -> list[tuple]:
     return rows
 
 
+def artifact_targets_of(db, view: str = "map", frame=None) -> dict[tuple[str, str], tuple[int, int | None]]:
+    """`(layer, key) -> (tessera_id, target)` from the same frame.
+
+    `target` is the identifier of the artifact a row is attached to, as this same response served
+    it, and `None` for a row attached to nothing (owner ruling, 2026-09-18). It is how a client
+    joins a label to its cluster; the masked count beside it is the label's own and says nothing
+    about which cluster it describes.
+    """
+    import io
+
+    import pyarrow.ipc as ipc
+
+    from conftest import post
+
+    box = [-5.0, -5.0, 40.0, 40.0] if frame is None else list(frame)
+    content = post(
+        db.viewer_url + "/v1/viewport",
+        db.token().token,
+        {"view": view, "zoom": 0, "bbox": box, "k": 16, "layers": "all"},
+    )
+    at = 0
+    out: dict[tuple[str, str], tuple[int, int | None]] = {}
+    while at + 5 <= len(content):
+        kind = content[at]
+        length = int.from_bytes(content[at + 1 : at + 5], "little")
+        payload = content[at + 5 : at + 5 + length]
+        at += 5 + length
+        if kind == 5:
+            table = ipc.open_stream(io.BytesIO(payload)).read_all().to_pydict()
+            for layer, key, tessera_id, target in zip(
+                table["layer"], table["key"], table["tessera_id"], table["target"]
+            ):
+                out[(layer, key)] = (tessera_id, target)
+    return out
+
+
 def test_one_members_insert_means_the_same_at_the_first_commit_and_at_the_second(served, corpus):
     """§3: what the call named is what both doors read, so the same table is the same membership.
 
@@ -972,7 +1011,12 @@ def test_a_label_set_declared_after_the_first_commit_is_declared_and_served(serv
     # The database is what says the layer is there, and the next commit reads it from there.
     assert "topics" in {layer["name"] for layer in db.meta()["layers"]}
 
-    assert ("topics", "l0", ["A generated label"], 20) in artifact_rows_of(db)
+    # The label's own five, and its cluster named by identifier rather than by a shared number
+    # (owner ruling, 2026-09-18).
+    assert ("topics", "l0", ["A generated label"], 5) in artifact_rows_of(db)
+    targets = artifact_targets_of(db)
+    assert targets[("topics", "l0")][1] == targets[("clusters", "c0")][0]
+    assert targets[("clusters", "c0")][1] is None
 
 
 def test_a_label_set_from_a_mapping_builds_and_is_served_with_its_text(served, corpus):
