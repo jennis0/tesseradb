@@ -308,7 +308,7 @@ pub fn run(
                 }
                 visit(
                     ordinal,
-                    &space.project_base_with(&record.members, &mut scratch.borrow_mut()),
+                    &space.project_base_with(store.members_of(record), &mut scratch.borrow_mut()),
                 );
             }
         });
@@ -374,19 +374,22 @@ pub fn run(
                 ordinals,
                 space.base_rows(),
                 &|visit| {
-                if let Some(rows) = resolved.get(&(layer.clone(), *level)) {
-                    walk_resolved(rows, visit);
-                    return;
-                }
-                for (ordinal, record) in store.level(layer, *level) {
-                    if elsewhere(layer, *level, ordinal) {
-                        continue;
+                    if let Some(rows) = resolved.get(&(layer.clone(), *level)) {
+                        walk_resolved(rows, visit);
+                        return;
                     }
-                    visit(
-                        ordinal,
-                        &space.project_base_with(&record.members, &mut scratch.borrow_mut()),
-                    );
-                }
+                    for (ordinal, record) in store.level(layer, *level) {
+                        if elsewhere(layer, *level, ordinal) {
+                            continue;
+                        }
+                        visit(
+                            ordinal,
+                            &space.project_base_with(
+                                store.members_of(record),
+                                &mut scratch.borrow_mut(),
+                            ),
+                        );
+                    }
                 },
             )),
         });
@@ -432,7 +435,8 @@ pub fn run(
                     }
                     visit(
                         ordinal,
-                        &space.project_base_with(&record.members, &mut scratch.borrow_mut()),
+                        &space
+                            .project_base_with(store.members_of(record), &mut scratch.borrow_mut()),
                     );
                 }
             },
@@ -532,7 +536,10 @@ pub fn run(
                 level: *level,
                 level_version,
                 layout: ServingLayout::ArtifactMajor,
-                bytes: derived::FiledBytes::InHand(derived::shape_held_bytes(level_version, &entries)),
+                bytes: derived::FiledBytes::InHand(derived::shape_held_bytes(
+                    level_version,
+                    &entries,
+                )),
             }
         })
         .collect();
@@ -688,7 +695,10 @@ pub fn containment(
             level: *level,
             level_version: store.level_version(layer, *level),
             layout: ServingLayout::ArtifactMajor,
-            bytes: derived::FiledBytes::InHand(derived::compose_containment(&contents, &signatures)),
+            bytes: derived::FiledBytes::InHand(derived::compose_containment(
+                &contents,
+                &signatures,
+            )),
         });
     }
     derived::file_containment(prefix_dir, partition, MANIFEST_N, index, composed)

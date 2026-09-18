@@ -16307,7 +16307,7 @@ impl Executor {
                 } else {
                     tessera_store::derived::observe_shape(space.base_rows(), &|visit| {
                         for (ordinal, record) in pending.records(store, &layer, level) {
-                            visit(ordinal, &space.project_base(&record.members));
+                            visit(ordinal, &space.project_base(store.members_of(record)));
                         }
                     })
                 }
@@ -16480,7 +16480,7 @@ impl Executor {
                             scratch,
                             &|visit| {
                                 for (ordinal, record) in pending.records(store, layer, *level) {
-                                    visit(ordinal, &space.project_base(&record.members));
+                                    visit(ordinal, &space.project_base(store.members_of(record)));
                                 }
                             },
                         )
@@ -16751,6 +16751,7 @@ impl Executor {
                             ordinals,
                             || pending.records(store, layer, *level),
                             space,
+                            store,
                         );
                         out.push((
                             view.clone(),

@@ -3224,7 +3224,8 @@ fn write_labels_without_members(path: &Path, clusters: &[i64]) {
 #[test]
 fn a_label_set_with_no_member_table_builds_over_a_from_column_clustering() {
     let clusters = every_point_clustered();
-    let layer = format!("{CURATED_LAYER}source = \"roster\"\n{FROM_POINTS}{LABELS_WITHOUT_MEMBERS}");
+    let layer =
+        format!("{CURATED_LAYER}source = \"roster\"\n{FROM_POINTS}{LABELS_WITHOUT_MEMBERS}");
     let (out, _tmp, report) = build_spelling_reported(&layer, |inputs| {
         write_clustered_points(&inputs.points, &clusters, true);
         write_cluster_roster(&inputs.at("roster.parquet"), &[0, 1, 2]);
@@ -3240,15 +3241,29 @@ fn a_label_set_with_no_member_table_builds_over_a_from_column_clustering() {
         names.contains(&"topics/x") && names.contains(&"curated/a"),
         "both layers are registered: {names:?}"
     );
-    let level = report
-        .artifact_levels
-        .iter()
-        .find(|l| l.layer == "topics/x")
-        .expect("the label level is in the pass's report");
-    assert_eq!(level.registered, 3, "three labels are published");
-    // **Nothing of their own to observe**, which is what the ruling is about: the build's pass
-    // reads each record's own membership, and these declare none. What they are served over is
-    // resolved where membership is resolved for serving
-    // (`tessera_engine::artifacts::ArtifactRows::inherit`).
-    assert_eq!(level.shape.artifacts, 0, "and none carries a member row");
+    let level_of = |layer: &str| {
+        report
+            .artifact_levels
+            .iter()
+            .find(|l| l.layer == layer)
+            .unwrap_or_else(|| panic!("{layer} is in the pass's report"))
+            .clone()
+    };
+    let labels = level_of("topics/x");
+    let clusters = level_of("curated/a");
+    assert_eq!(labels.registered, 3, "three labels are published");
+    // **And the pass counts the rows they are served over**, not the empty set each record
+    // declares: the build reads the same `ArtifactStore::members_of` the engine does (decision
+    // 0139), so the label level's tile index and column are written over the clusters' members and
+    // the report says so. Before the H ruling this line read `0 artifact(s) with rows`.
+    assert_eq!(
+        labels.shape.artifacts, clusters.shape.artifacts,
+        "each label is placed over the cluster it names, so the label level has rows for as many \
+         artifacts as the clustering does"
+    );
+    assert_eq!(labels.shape.artifacts, 3);
+    assert_eq!(
+        labels.shape.everywhere_fraction, clusters.shape.everywhere_fraction,
+        "over the same memberships, so the same spread"
+    );
 }

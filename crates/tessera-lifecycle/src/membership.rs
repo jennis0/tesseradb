@@ -345,10 +345,7 @@ fn bitmap_of_entities(entities: impl IntoIterator<Item = EntityId>) -> Bitmap {
     // here would turn an id that somehow was outside into another entity's, which is a document
     // nobody named put into the artifact. The build refuses the same id where it decodes a member
     // table, and refusing rather than truncating is what makes the two entry points agree.
-    let mut values: Vec<u32> = entities
-        .into_iter()
-        .map(crate::overlay::as_u32)
-        .collect();
+    let mut values: Vec<u32> = entities.into_iter().map(crate::overlay::as_u32).collect();
     values.sort_unstable();
     bitmap_of_sorted(&values)
 }
@@ -847,6 +844,17 @@ pub struct ArtifactRecord {
     /// the cut does not — those are information about what contains what, not a ladder to coarsen
     /// along (owner ruling, 2026-08-18).
     pub parents: Vec<crate::wal::ParentRef>,
+}
+
+/// How far a chain of borrowed memberships is followed — a label on a label on a cluster. See
+/// [`ArtifactStore::members_of`] on why this is a backstop rather than the rule.
+const BORROW_CHAIN_MAX: u32 = 8;
+
+/// **Does this artifact take its membership from what it attaches to?** It does where it is an
+/// attachment and declares no members of its own (owner ruling H, 2026-09-18) — asked here so that
+/// every reader of a membership asks it the same way.
+pub fn borrows_membership(record: &ArtifactRecord) -> bool {
+    record.attached_to.is_some() && record.members.is_empty()
 }
 
 /// The resolved target of an attachment: the edge `annotation-representation.md` §2.4 names, with
@@ -1924,6 +1932,92 @@ impl ArtifactStore {
             .get(&(layer.to_string(), level))
             .and_then(|slots| slots.get(ordinal as usize))
             .and_then(Option::as_ref)
+    }
+
+    /// **The membership an artifact is placed, counted and gated over**: its own, or — where it is
+    /// an attachment declaring none — what it attaches to, at the target's membership **now**
+    /// (owner ruling H, 2026-09-18; `python-sdk.md` §4.7).
+    ///
+    /// A label with no member rows is the label of its cluster: it is placed where the cluster is
+    /// placed, counted over the cluster's members, and served to whoever is served the cluster.
+    /// That is the default and no declaration asks for it — a label with nothing of its own has
+    /// nothing else it could mean. A label that *does* declare members keeps them, they being the
+    /// generating set the caller claimed
+    /// ([decision 0135](../../../docs/decisions/0135-a-generating-set-is-the-callers-claim-i8-withdrawn.md)),
+    /// and a content requirement of `all` reads them unchanged.
+    ///
+    /// **One implementation, below both entry points**
+    /// ([decision 0139](../../../docs/decisions/0139-one-implementation-between-build-and-ingest-and-across-a-type-family.md)):
+    /// the build's artifact pass, the fold's and the flush's, and the engine's row form all read
+    /// this rather than the record's field, so what a bundle's tile index and column describe and
+    /// what a request counts cannot come apart. Every caller that projects a membership asks here;
+    /// the field itself is what a *writer* wrote and what a fold packs.
+    ///
+    /// **It discloses nothing.** The answer is a set of entities, and every count taken over it is
+    /// taken inside the asker's own mask (**I2**). Existence is decided elsewhere and earlier: an
+    /// attached artifact is absent wherever its target is absent, on the target's whole predicate
+    /// and on every route
+    /// ([decision 0089](../../../docs/decisions/0089-a-dependency-edge-carries-deletion-and-visibility.md)),
+    /// so a principal not served the cluster is not served its label.
+    ///
+    /// **Each refusal is the dependency prerequisite's own**, and each leaves the artifact with the
+    /// empty membership it declared — a count of zero for every viewer, which is fail-closed: a
+    /// hole where the target stood, an ordinal holding a **different** entity from the one the edge
+    /// names (a target retired and republished over), and a chain longer than any real declaration.
+    /// The chain is bounded rather than trusted: a layer is registered after every layer it names
+    /// in `depends_on`, so the declaration graph is acyclic by construction and this is a backstop
+    /// for a store that disagrees with it.
+    pub fn members_of<'a>(&'a self, record: &'a ArtifactRecord) -> &'a Members {
+        if !borrows_membership(record) {
+            return &record.members;
+        }
+        self.borrowed_members(record, BORROW_CHAIN_MAX, &mut Vec::new())
+            .unwrap_or(&record.members)
+    }
+
+    /// [`Self::members_of`], reporting the `(layer, level)` of every hop the membership was
+    /// borrowed through — what a cached derivation records so it can tell when the thing it
+    /// borrowed has moved ([`Self::level_version`]).
+    pub fn members_of_tracked<'a>(
+        &'a self,
+        record: &'a ArtifactRecord,
+        hops: &mut Vec<(String, u32)>,
+    ) -> &'a Members {
+        if !borrows_membership(record) {
+            return &record.members;
+        }
+        // **The hops are reported only where the whole chain resolved**, so a caller reading them
+        // as *what this answer depends on* is never handed a dependency on a borrowing that did
+        // not happen.
+        let from = hops.len();
+        match self.borrowed_members(record, BORROW_CHAIN_MAX, hops) {
+            Some(members) => members,
+            None => {
+                hops.truncate(from);
+                &record.members
+            }
+        }
+    }
+
+    fn borrowed_members<'a>(
+        &'a self,
+        record: &ArtifactRecord,
+        depth: u32,
+        hops: &mut Vec<(String, u32)>,
+    ) -> Option<&'a Members> {
+        if depth == 0 {
+            return None;
+        }
+        let attachment = record.attached_to.as_ref()?;
+        let target = self.get(&attachment.layer, attachment.level, attachment.ordinal)?;
+        if target.entity != attachment.entity {
+            return None;
+        }
+        hops.push((attachment.layer.clone(), attachment.level));
+        if borrows_membership(target) {
+            return self.borrowed_members(target, depth - 1, hops);
+        }
+        Some(&target.members)
     }
 
     /// Every artifact of one level, with its ordinal. Holes are skipped.
@@ -3134,6 +3228,69 @@ mod tests {
         assert!(
             store.cascade_from(&[EntityId::new(999)]).is_empty(),
             "an entity that is not an artifact has no dependents"
+        );
+    }
+
+    /// **A label that declares no members of its own is served over its cluster's** (owner ruling
+    /// H, 2026-09-18), at the cluster's membership as it stands now — and each refusal leaves it
+    /// with the empty set it declared, which is a count of zero for everyone.
+    #[test]
+    fn a_borrowing_artifact_answers_its_targets_membership() {
+        let borrowing = |entity: u64, target: u64, layer: &str, ordinal: u32| ArtifactRecord {
+            members: Members::owned(Bitmap::new()),
+            ..attached(entity, target, layer, ordinal)
+        };
+        let mut store = ArtifactStore::new();
+        store.put("clusters/a", 0, 0, record(100, &[1, 2, 3]), None);
+        // One label over the cluster's members, one declaring its own, one naming an ordinal that
+        // now holds a different entity, and a label on a label.
+        store.put("topics/x", 0, 0, borrowing(200, 100, "clusters/a", 0), None);
+        store.put("topics/x", 0, 1, attached(201, 100, "clusters/a", 0), None);
+        store.put("topics/x", 0, 2, borrowing(202, 999, "clusters/a", 0), None);
+        store.put("glosses/y", 0, 0, borrowing(300, 200, "topics/x", 0), None);
+
+        let members_of = |layer: &str, ordinal: u32| {
+            let record = store.get(layer, 0, ordinal).expect("the record");
+            store.members_of(record).to_vec()
+        };
+        assert_eq!(
+            members_of("topics/x", 0),
+            vec![1, 2, 3],
+            "a label with nothing of its own is the label of its cluster"
+        );
+        assert_eq!(
+            members_of("topics/x", 1),
+            vec![1],
+            "a label that declared members keeps them"
+        );
+        assert!(
+            members_of("topics/x", 2).is_empty(),
+            "an edge into an ordinal holding another entity resolves to nothing"
+        );
+        assert_eq!(
+            members_of("glosses/y", 0),
+            vec![1, 2, 3],
+            "and a label on a label follows the chain to the set at the end of it"
+        );
+
+        // The hops are what a cached derivation records so it can tell when what it borrowed has
+        // moved — every hop on the way, and nothing at all where nothing was borrowed.
+        let mut hops = Vec::new();
+        let record = store.get("glosses/y", 0, 0).expect("the record");
+        assert_eq!(
+            store.members_of_tracked(record, &mut hops).to_vec(),
+            vec![1, 2, 3]
+        );
+        assert_eq!(
+            hops,
+            vec![("topics/x".to_string(), 0), ("clusters/a".to_string(), 0)]
+        );
+        let mut hops = Vec::new();
+        let record = store.get("topics/x", 0, 2).expect("the record");
+        assert!(store.members_of_tracked(record, &mut hops).is_empty());
+        assert!(
+            hops.is_empty(),
+            "a borrowing that did not happen is no dependency"
         );
     }
 

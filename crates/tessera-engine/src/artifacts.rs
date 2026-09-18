@@ -787,48 +787,6 @@ pub(crate) fn view_key(view: &str) -> &str {
         .unwrap_or(view)
 }
 
-/// How far a chain of borrowed memberships is followed — a label on a label on a cluster. The
-/// declaration graph is acyclic by construction (a layer is registered after every layer it names
-/// in `depends_on`), so this is a backstop for a store that disagrees with that, and it fails the
-/// way the dependency prerequisite fails: refused, not followed.
-const INHERIT_CHAIN_MAX: u32 = 8;
-
-/// **Does this artifact take its membership from what it attaches to?** It does where it is an
-/// attachment and declares no members of its own — the H ruling of 2026-09-18, spelled once so the
-/// question is asked the same way wherever it is asked.
-fn inherits_membership(record: &ArtifactRecord) -> bool {
-    record.attached_to.is_some() && record.members.is_empty()
-}
-
-/// The membership an artifact borrows, and the `(layer, level)` of every hop it was borrowed
-/// through — see [`ArtifactRows::inherit`].
-///
-/// `None` where there is nothing to borrow, and each refusal is the one the dependency
-/// prerequisite already makes for the same state: a hole where the target stood, an ordinal
-/// holding a **different** entity from the one the edge names — a target retired and republished
-/// over — and a chain longer than any real declaration. An artifact that borrows nothing keeps the
-/// empty membership it declared, which is a count of zero for every viewer.
-fn inherited_members<'a>(
-    store: &'a ArtifactStore,
-    record: &ArtifactRecord,
-    depth: u32,
-    hops: &mut Vec<(String, u32)>,
-) -> Option<&'a tessera_lifecycle::membership::Members> {
-    if depth == 0 {
-        return None;
-    }
-    let attachment = record.attached_to.as_ref()?;
-    let target = store.get(&attachment.layer, attachment.level, attachment.ordinal)?;
-    if target.entity != attachment.entity {
-        return None;
-    }
-    hops.push((attachment.layer.clone(), attachment.level));
-    if inherits_membership(target) {
-        return inherited_members(store, target, depth - 1, hops);
-    }
-    Some(&target.members)
-}
-
 /// The whole of a view's row space — base and every extent — as a row count.
 fn total_rows(space: &RowSpace) -> u32 {
     u32::try_from(space.total_rows()).unwrap_or(u32::MAX)
@@ -1676,10 +1634,12 @@ impl ArtifactRows {
     /// ([decision 0135](../../../docs/decisions/0135-a-generating-set-is-the-callers-claim-i8-withdrawn.md)),
     /// and `content_requires = "all"` gates on them unchanged.
     ///
-    /// **This is the one place an artifact's membership is resolved**, so the tile index, the
-    /// masked count, the criterion, the declared size and every derived property follow from it
-    /// without a second rule anywhere: it runs on the form, and every route — the viewport, the
-    /// drill-down, a filter, the dependency prerequisite — is served the form.
+    /// **The rule is the store's** — [`tessera_lifecycle::membership::ArtifactStore::members_of`],
+    /// which the build's artifact pass and the fold's read as well (decision 0139). What is this
+    /// function's own is *where* it is applied: on the level's row form, once, so the tile index,
+    /// the masked count, the criterion, the declared size and every derived property follow from
+    /// one membership, and every route — the viewport, the drill-down, a filter, the dependency
+    /// prerequisite — is served that form.
     ///
     /// **It inherits nothing the target's own gate would withhold.** The membership is a *set of
     /// rows*, and every count taken over it is taken against this viewer's own composed mask
@@ -1695,11 +1655,12 @@ impl ArtifactRows {
     /// [`Self::inherited`], so a target that grows re-derives its labels at the next request that
     /// finds the form ([`Self::inherited_current`]).
     ///
-    /// **The form goes artifact-major the moment anything inherits.** A row-major column is the
-    /// level's own membership addressed by row, written by a build or a fold that had none of
-    /// these rows to write; serving from it would answer over the empty membership the record
-    /// carries. The level's own bitmaps are cheap here — a label level is one artifact per
-    /// cluster — and the column is dropped rather than amended.
+    /// **The form goes artifact-major the moment anything borrows.** A build and a fold write such
+    /// a level's column over the borrowed membership as it stood then
+    /// ([`tessera_lifecycle::membership::ArtifactStore::members_of`], which they read too), and
+    /// that is a set the *target's* version moves without moving this level's — so the column is
+    /// dropped here rather than served from or amended. The level's own bitmaps are cheap: a label
+    /// level is one artifact per cluster.
     ///
     /// Returns how many ordinals took a membership that is not their own.
     fn inherit(
@@ -1713,14 +1674,20 @@ impl ArtifactRows {
         let mut taken = 0usize;
         let mut borrowed: Vec<(String, u32, u64)> = Vec::new();
         for (ordinal, record) in store.level_in_view(layer, level, view) {
-            if !inherits_membership(record) {
+            if !tessera_lifecycle::membership::borrows_membership(record) {
                 continue;
             }
+            // **The store's own rule, not a second walk** (decision 0139): the build's artifact
+            // pass and the fold's read the same function, so what a bundle's tile index describes
+            // and what this form counts cannot come apart. The hops are what this form records so
+            // it can tell when what it borrowed has moved.
             let mut hops = Vec::new();
-            let Some(members) = inherited_members(store, record, INHERIT_CHAIN_MAX, &mut hops)
-            else {
+            let members = store.members_of_tracked(record, &mut hops);
+            if hops.is_empty() {
+                // Nothing resolved: a hole, or an ordinal holding another entity. The artifact
+                // keeps the empty membership it declared, which is a count of zero for everyone.
                 continue;
-            };
+            }
             if taken == 0 && !self.membership.rows_held() {
                 // A column-only form holds no bitmap to overwrite. The level is rebuilt
                 // artifact-major from its records first, which is the same recovery the alarm

@@ -585,12 +585,9 @@ fn write_parquet(
     schema: std::sync::Arc<arrow::datatypes::Schema>,
     batch: arrow::record_batch::RecordBatch,
 ) {
-    let mut w = parquet::arrow::ArrowWriter::try_new(
-        std::fs::File::create(path).unwrap(),
-        schema,
-        None,
-    )
-    .unwrap();
+    let mut w =
+        parquet::arrow::ArrowWriter::try_new(std::fs::File::create(path).unwrap(), schema, None)
+            .unwrap();
     w.write(&batch).unwrap();
     w.close().unwrap();
 }
@@ -616,7 +613,11 @@ fn write_labels(path: &std::path::Path) {
     use arrow::record_batch::RecordBatch;
     let ranked = DataType::List(std::sync::Arc::new(Field::new(
         "item",
-        DataType::List(std::sync::Arc::new(Field::new("item", DataType::Utf8, true))),
+        DataType::List(std::sync::Arc::new(Field::new(
+            "item",
+            DataType::Utf8,
+            true,
+        ))),
         true,
     )));
     let schema = std::sync::Arc::new(Schema::new(vec![
@@ -739,6 +740,46 @@ async fn a_built_label_set_with_no_members_is_served_over_its_clustering() {
         row(&narrow, BUILT_CLUSTERS, "1").is_some() && row(&narrow, BUILT_TOPICS, "l-1").is_some(),
         "the large one clears it, and so its label is drawn: {narrow:?}"
     );
+
+    // **The build and the running service answer alike** (decision 0091, decision 0139): the same
+    // label, over the same cluster, published through the control plane onto the clustering the
+    // build wrote — and every principal is served the two identically.
+    let (status, body) = put(
+        &server,
+        BUILT_TOPICS,
+        json!([{
+            "key": "l-0-live",
+            "members": [],
+            "attached_to": { "layer": BUILT_CLUSTERS, "key": "0" },
+            "content": [{ "values": ["the first thirty"] }]
+        }]),
+    )
+    .await;
+    assert_eq!(status, 201, "{body}");
+    let live = id_of(&body, 0);
+    let built = row(&built_rows(&server, &["0"]).await, BUILT_TOPICS, "l-0")
+        .expect("the built label")
+        .tessera_id
+        .to_string();
+    for terms in [vec!["0"], vec!["1"], vec!["0", "1"]] {
+        let (built_status, built_body) = drill(&server, &terms, &built).await;
+        let (live_status, live_body) = drill(&server, &terms, &live).await;
+        assert_eq!(
+            built_status, live_status,
+            "{terms:?}: the built label and the published one are served alike"
+        );
+        assert_eq!(
+            built_body["masked_count"], live_body["masked_count"],
+            "{terms:?}: and at one number"
+        );
+        assert_eq!(built_body["content"], live_body["content"], "{terms:?}");
+        let rows = built_rows(&server, &terms).await;
+        assert_eq!(
+            row(&rows, BUILT_TOPICS, "l-0").is_some(),
+            row(&rows, BUILT_TOPICS, "l-0-live").is_some(),
+            "{terms:?}: and drawn together in the viewport"
+        );
+    }
 
     server.shutdown().await;
 }

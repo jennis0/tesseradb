@@ -169,10 +169,17 @@ impl TileIndex {
     /// residency it would otherwise be holding twice.
     ///
     /// A skipped ordinal is a **hole**, exactly as the row form's `resize_with(|| None)` makes it.
+    ///
+    /// **`store` is what an artifact's membership is asked of**, never the record's field: an
+    /// attached artifact that declares none is placed over its target's
+    /// ([`tessera_lifecycle::membership::ArtifactStore::members_of`], the H ruling of 2026-09-18),
+    /// and an index written over the empty set the record carries would put every such artifact in
+    /// no tile of the bundle it is filed in.
     pub fn project<'a, I>(
         ordinals: u32,
         artifacts: impl Fn() -> I,
         space: &tessera_store::permutation::RowSpace,
+        store: &tessera_lifecycle::membership::ArtifactStore,
     ) -> Self
     where
         I: Iterator<Item = (u32, &'a tessera_lifecycle::membership::ArtifactRecord)>,
@@ -182,7 +189,7 @@ impl TileIndex {
             space.base_rows(),
             &|visit| {
                 for (ordinal, record) in artifacts() {
-                    visit(ordinal, &space.project_base(&record.members));
+                    visit(ordinal, &space.project_base(store.members_of(record)));
                 }
             },
         ))
