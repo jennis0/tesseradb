@@ -26,6 +26,7 @@ agents receive.
 | The client-side id map | The SDK kept a map from the user's ids to Tessera ids and re-keyed member tables through it | The controller's design |
 | The commit log and re-runs that change nothing | The SDK recorded what it had sent so a re-run notebook would send nothing twice | The controller's design |
 | The access-column copy | The SDK copied a first view's access column onto a second view's rows | The controller's design |
+| A batch id derived from the body | The SDK built each page's batch id from the source name, the page index and a hash of the bytes, so the same points loaded a second time were answered as a replay and nothing was inserted. The owner had ruled against re-runs that change nothing on 2026-09-17; the rule was removed from the commit log and remained in the batch id | The controller's design |
 | A second wait for publication | The SDK waited for two publications in one case because the first number was reached early | An implementer, merged by the controller against issue #153 |
 | The label join by count | The engine copies a cluster's masked count onto its label's row, and the TypeScript client finds a label's cluster by looking for the one cluster with the same count | On main before the campaign; decision D13 asked for a target id on the wire and the id was not built |
 | The accepted-batch index | An in-memory index of accepted batch ids, rebuilt at restart by a pass written for one record kind | On main before the campaign (issue #154) |
@@ -50,7 +51,7 @@ agents receive.
 | Issue | Works | Does not work |
 |---|---|---|
 | #150 | An all-gated label over built members | The same label over ingested members |
-| #151 | A view created at a running service answers requests | The view is not listed on `/v1/meta` before its first flush, as reported; the cause is under review |
+| #151 | A view created at a running service is listed on `/v1/meta` from its acknowledgement | The SDK read `/v1/meta` through a session opened before the view existed, which the contract says does not see it. The issue blamed the engine |
 | #152 | One artifact key on two views through the control plane | The same through `tessera build` |
 | #153 | One view fed in a commit | Two views fed in a commit, before decision 0144's cycle; fixed on main before the issue was examined |
 | #154 | A replayed ingest batch id after a restart | A replayed values batch id after a restart |
@@ -109,8 +110,8 @@ system's completeness was not.
 **Diagnoses in the issues were not verified.** Issue #150's stated cause was a referee's reading
 and was wrong: the partition it blames is not consulted, and the fix it proposed would have
 changed nothing. Issue #153 attributed the fault to group views; the cause was two views in one
-commit, and it was already fixed on main. Issue #151's fix landed in the SDK, and whether the
-engine was at fault is under review. Each issue was written by an agent from another agent's
+commit, and it was already fixed on main. Issue #151 blamed the engine's meta builder; the server was correct and the SDK held a
+session opened before the view was created. Each issue was written by an agent from another agent's
 report, and the owner was asked to rule on options derived from them.
 
 **Review did not look for these faults.** Referees were briefed to check the invariants first and
