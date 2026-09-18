@@ -1332,11 +1332,19 @@ impl ArtifactRows {
     /// [`Self::extend_by`] for a spatial level: `piece` is the new segment's resolution, one
     /// segment-local row set per ordinal, taken at `row_base`. Parallel to the level's ordinals as
     /// the shapes were held when the segment was resolved; a hole takes nothing.
-    fn extend_by_resolved(
+    ///
+    /// The generating sets are extended here from `artifacts` and the row space, on
+    /// [`Self::extend_generating`]'s rule: a set is an entity set whatever the level's memberships
+    /// are, and a route that took the memberships without the sets would serve a content whose set
+    /// projects short of the size its record declares.
+    fn extend_by_resolved<'a>(
         &mut self,
         piece: &[Option<Bitmap>],
+        artifacts: impl Iterator<Item = (u32, &'a ArtifactRecord)>,
+        space: &RowSpace,
         row_base: u32,
     ) -> (Vec<(u32, u32)>, u64) {
+        self.extend_generating(artifacts, space);
         let mut added = Vec::new();
         let mut taken = 0u64;
         for (ordinal, part) in piece.iter().enumerate() {
@@ -1355,13 +1363,16 @@ impl ArtifactRows {
     }
 
     /// [`Self::rebase_span`] for a spatial level: `piece` is the merged segment's resolution,
-    /// taken at the span's start.
-    fn rebase_span_resolved(
+    /// taken at the span's start. The generating sets are rebased here from `artifacts`, on
+    /// [`Self::extend_by_resolved`]'s rule.
+    fn rebase_span_resolved<'a>(
         &mut self,
         piece: &[Option<Bitmap>],
+        artifacts: impl Iterator<Item = (u32, &'a ArtifactRecord)>,
         space: &RowSpace,
         start: usize,
     ) -> (u32, u32, Vec<(u32, u32)>, u64) {
+        self.rebase_generating(artifacts, space, start);
         let extent = &space.extents()[start];
         let lo = extent.row_base;
         let hi = lo.saturating_add(extent.row_count());
@@ -3334,9 +3345,12 @@ impl ArtifactProjections {
                     };
                     // The memberships come from the resolution; the generating sets are entity
                     // sets and are projected from the records either way.
-                    amended
-                        .extend_generating(store.level_in_view(layer, *level, view_key(view)), next);
-                    amended.extend_by_resolved(&piece, extent.row_base)
+                    amended.extend_by_resolved(
+                        &piece,
+                        store.level_in_view(layer, *level, view_key(view)),
+                        next,
+                        extent.row_base,
+                    )
                 }
             };
             let lost = amended.amend_derived(&added, total_rows(next));
@@ -3466,15 +3480,12 @@ impl ArtifactProjections {
                     next,
                     start,
                 ),
-                SegmentRows::Resolved(piece) => {
-                    // [`ArtifactRows::extend_generating`]'s rule at a merge.
-                    amended.rebase_generating(
-                        store.level_in_view(layer, *level, view_key(view)),
-                        next,
-                        start,
-                    );
-                    amended.rebase_span_resolved(&piece, next, start)
-                }
+                SegmentRows::Resolved(piece) => amended.rebase_span_resolved(
+                    &piece,
+                    store.level_in_view(layer, *level, view_key(view)),
+                    next,
+                    start,
+                ),
             };
             let lost = amended.rebase_derived(lo, hi, &added, total_rows(next));
             amended.covering(next);
