@@ -1417,8 +1417,12 @@ struct ValuesResp {
     filled: u64,
     /// Cells that already held the identical value, which the fill rule accepts with no effect.
     held: u64,
-    /// Members this batch's layer columns added to artifacts that did not already hold them.
+    /// Members this batch's layer columns added to artifacts that already existed and did not
+    /// already hold them. An artifact this batch created is counted under `minted` alone.
     joined: u64,
+    /// Artifacts this batch's layer columns **created**: a key no artifact held, on a layer whose
+    /// value set is open (python-sdk §11.2 F). `/control/ingest`'s `minted` at this door.
+    minted: u64,
     /// **This batch id was already accepted with these bytes** (write-path §2.4).
     ///
     /// A values batch allocates nothing, so a replay has no identifiers to hand back and the
@@ -1439,9 +1443,17 @@ struct ValuesResp {
 /// `POST /control/values` — fill attribute values on entities that already exist
 /// (`ingest.md` §1.4).
 ///
-/// **It allocates nothing and creates no row**, which is why it is its own route and not a mode of
+/// **It creates no point and no row**, which is why it is its own route and not a mode of
 /// `/control/ingest` (`ingest.md` §10, R2): a points batch allocates entities and needs a view,
-/// and a values batch allocates nothing and names a view only for a group-scoped column.
+/// and a values batch addresses entities that exist and names a view only for a group-scoped
+/// column.
+///
+/// **A column named for a layer is read by the ingest route's own rule** (python-sdk §11.2 F): a key an artifact holds joins the entity to it, and a key no artifact holds
+/// mints the artifact it names on a layer whose value set is `open`, with the batch's rows as its
+/// first members and its lineage from a list column. A `closed` layer's unknown key is a `422`, as
+/// is a column naming a layer that declares supplied content. A minted artifact is an object of
+/// its own, with its own entity, as the ingest door's are — what the route does not create is a
+/// *point*.
 ///
 /// **The view header decides which group-scoped families this batch may name.** A batch that gave
 /// none may name none, whatever the deployment's view count, so a scoped column on a viewless
@@ -1670,6 +1682,7 @@ fn run_values(
         filled: receipt.filled,
         held: receipt.held,
         joined: receipt.joined,
+        minted: receipt.minted,
         replayed,
         // Filled by the handler, which is where the wait can be awaited.
         publication: 0,
