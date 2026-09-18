@@ -170,9 +170,16 @@ pub struct GenerationStamp {
 // price every unkept term at no entities and take the split where the walk is cheaper, and would
 // refuse every entry whose image has rows against a count of zero. The number is what stops a 12
 // file opening.
+// 14: the entity→term transpose's offsets are relative to a block of 65,536 ranks, and a fourth
+// file `bases.u64` holds each block's absolute start, which is what takes a layer's pair count off
+// a u32 ceiling a corpus of a few billion rows reaches. A 13 layer has no such file, and every
+// offset in it is absolute, so a reader at 14 would find the file missing; were one supplied, a 13
+// layer's offsets past the first block would be read as relative to a base they already include
+// and every list after the first 65,536 ranks would name the wrong ordinals. The number is what
+// stops a 13 layer opening.
 // Each bump makes a stale local bundle a loud refusal rather than a silent misread — a fail-closed
 // guard, not compatibility (decision 0048).
-pub const BUNDLE_FORMAT: u32 = 13;
+pub const BUNDLE_FORMAT: u32 = 14;
 pub const API_VERSION: u32 = 1;
 pub const ABI_VERSION: u32 = 1;
 pub const ROW_ABSENT: u32 = 0xFFFF_FFFF;
@@ -196,7 +203,7 @@ mod tests {
     }
     #[test]
     fn constants() {
-        assert_eq!(BUNDLE_FORMAT, 13);
+        assert_eq!(BUNDLE_FORMAT, 14);
         assert_eq!(ROW_ABSENT, 0xFFFF_FFFF);
     }
 }

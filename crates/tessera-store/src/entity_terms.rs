@@ -22,18 +22,35 @@
 //!
 //! # The format
 //!
-//! Three files per layer, the same **has-row rank** addressing the record blob uses (records §3,
+//! Four files per layer, the same **has-row rank** addressing the record blob uses (records §3,
 //! review B5) and for the same reason: an entity with no term list costs nothing anywhere.
 //!
 //! ```text
 //! hasrow.roaring   portable Roaring over the entity ids this layer holds a list for
-//! offsets.u32      (cardinality + 1) u32 LE, ascending, [0] = 0 — start offsets into terms.u32
+//! offsets.u32      (cardinality + 1) u32 LE, each rank's start offset within its own block
 //! terms.u32        u32 LE term ordinals, each entity's slice strictly ascending
+//! bases.u64        ceil((cardinality + 1) / 65,536) u64 LE, block b's absolute start offset
 //! ```
 //!
-//! An entity's rank in `hasrow` indexes `offsets`; its terms are `terms[offsets[r]..offsets[r+1]]`.
-//! **An empty slice is a real answer** — an item may legitimately carry zero terms — and is
-//! distinct from an entity absent from `hasrow`, which this layer says nothing about.
+//! An entity's rank `r` in `hasrow` indexes `offsets`; the **absolute** start of its slice is
+//! `bases[r >> 16] + offsets[r]`, and its terms run from there to the absolute start of rank
+//! `r + 1`. **An empty slice is a real answer** — an item may legitimately carry zero terms — and
+//! is distinct from an entity absent from `hasrow`, which this layer says nothing about.
+//!
+//! # Why the offsets are paged
+//!
+//! A flat `u32` offset caps a layer at 4,294,967,295 (entity, term) pairs, and a corpus of
+//! 3.5×10⁹ rows carrying three terms a row holds 10.5×10⁹ (modelled, rows × 3): the build refused
+//! partway through, at the rank where the running total passed the ceiling. Paging the offsets
+//! against a block of 65,536 ranks carries the same 4 bytes a rank and adds 8 bytes a block,
+//! 427 KB at 3.5×10⁹ ranks (modelled, ranks ÷ 65,536 × 8 B), and what a `u32` now has to hold is
+//! one block's own pairs rather than the layer's. Entity ids are untouched and stay `u32`
+//! (**I9**). A read costs one further aligned `u64` per lookup, which is below anything a request
+//! path could see and is not measured.
+//!
+//! A layer whose 65,536 entities hold more than 4,294,967,295 terms **between them** is still
+//! refused at the writer, naming the rank: that is a block the format cannot address, not a
+//! corpus size.
 //!
 //! # The ordinals are bundle-relative and survive every rewrite
 //!
@@ -54,11 +71,13 @@
 //!
 //! # Fail-closed
 //!
-//! A short `offsets`, a `terms` file that does not end where the last offset says, and a
-//! descending or out-of-range offset pair are all [`StoreError::InvalidEntityTerms`] — never a
-//! truncated answer. The two ends are checked at open and each pair at the read that uses it,
-//! which is O(1) both times: walking every offset at open would be a 4 GB sequential read at 10⁹,
-//! on the path the external-ID sidecar was deliberately made lazy to keep clear.
+//! A short `offsets`, a `bases` of the wrong length or out of order, a `terms` file that does not
+//! end where the last absolute offset says, and a descending or out-of-range offset pair are all
+//! [`StoreError::InvalidEntityTerms`] — never a truncated answer. The two ends are checked at
+//! open and each pair at the read that uses it, which is O(1) both times: walking every offset at
+//! open would be a 4 GB sequential read at 10⁹, on the path the external-ID sidecar was made lazy
+//! to keep clear. `bases` **is** walked at open, because it is one entry per 65,536 ranks, which
+//! is 427 KB at 3.5×10⁹, and its order is what the length equality rests on.
 //!
 //! A truncated list would under-report an entity's labels, which on the write path is a **409 that
 //! does not fire**: a re-label accepted through a second view's row, with no overlay entry. On the
@@ -68,8 +87,8 @@
 //! # The coalesce merges the extents, and it is a concatenation
 //!
 //! An entity-space coalesce takes a contiguous window of `entity_terms_extents` and replaces it
-//! with one extent ([`coalesce_entity_terms_extents`]) — the **record blob's** axis exactly: three
-//! files, has-row addressed, disjoint in entity space, one window of one list spliced back at the
+//! with one extent ([`coalesce_entity_terms_extents`]) — the **record blob's** axis exactly: one
+//! file set, has-row addressed, disjoint in entity space, one window of one list spliced back at the
 //! window's position. Without it the layers accumulate one per flush until the next fold, and the
 //! reader pays file handles and a base-plus-linear probe per lookup.
 //!
@@ -91,7 +110,7 @@
 //! standard and for its reason: a read failure is reachable from a request, contracts §4 has the
 //! byte-scanner sweep logs as well as payloads for entity ids (**I10**), and a corrupt layer is a
 //! systematic build or flush fault whose file and inconsistency shape are what an operator needs.
-//! The **writer's** three refusals do name the entity, and that is the one place it belongs: they
+//! The **writer's** own refusals do name the entity, and that is the one place it belongs: they
 //! fire only on a caller feeding this type out of order, which no input can reach — both producers
 //! walk entity space ascending — so there is no request behind them and the slot is the whole
 //! diagnostic.
@@ -112,16 +131,26 @@ pub const ENTITY_TERMS_HASROW_FILE: &str = "hasrow.roaring";
 pub const ENTITY_TERMS_OFFSETS_FILE: &str = "offsets.u32";
 /// The term ordinals' file name, in a layer's directory.
 pub const ENTITY_TERMS_TERMS_FILE: &str = "terms.u32";
+/// The block bases' file name, in a layer's directory.
+pub const ENTITY_TERMS_BASES_FILE: &str = "bases.u64";
+
+/// Ranks one block of the offsets covers: `offsets[r]` is relative to `bases[r >> BLOCK_SHIFT]`.
+///
+/// 65,536, which is the Roaring container's own block and is the figure the sizing above uses. It
+/// is a constant of the format and not a parameter: no file records it, so changing it changes
+/// the format and takes a `BUNDLE_FORMAT` bump with it.
+pub const ENTITY_TERMS_BLOCK_SHIFT: u32 = 16;
 
 /// The base layer's directory, relative to a partition directory.
 pub const ENTITY_TERMS_DIR: &str = "entities/terms";
 
-/// One extent's three files, as a manifest's `entity_terms_extents` entry names them.
+/// One extent's four files, as a manifest's `entity_terms_extents` entry names them.
 #[derive(Debug, Clone)]
 pub struct EntityTermsExtentPaths {
     pub hasrow: PathBuf,
     pub offsets: PathBuf,
     pub terms: PathBuf,
+    pub bases: PathBuf,
 }
 
 /// Writes one layer — base or extent — streaming, in ascending entity order.
@@ -135,31 +164,45 @@ pub struct EntityTermsWriter {
     hasrow_path: PathBuf,
     offsets_path: PathBuf,
     terms_path: PathBuf,
+    bases_path: PathBuf,
     hasrow: Bitmap,
     offsets: BufWriter<File>,
     terms: BufWriter<File>,
-    /// The running total, and therefore the next offset to emit.
-    written: u32,
+    bases: BufWriter<File>,
+    /// The running absolute total, and therefore the next absolute offset to emit.
+    written: u64,
+    /// The absolute offset the current block started at: what the emitted offsets are relative
+    /// to, and the last entry written to `bases`.
+    base: u64,
+    /// How many ranks the offsets array already holds beyond its leading zero, so the index of
+    /// the next entry is `ranks + 1` and its block is that index's.
+    ranks: u64,
     /// The last entity pushed, so a caller feeding them out of order fails here rather than
     /// producing a layer whose ranks name the wrong lists.
     last: Option<u32>,
 }
 
 impl EntityTermsWriter {
-    /// Create the three files under `dir`, by their conventional names — the base layer's shape.
+    /// Create the four files under `dir`, by their conventional names — the base layer's shape.
     pub fn create(dir: &Path) -> Result<Self> {
         std::fs::create_dir_all(dir).map_err(|e| io(dir, e))?;
         Self::create_at(
             &dir.join(ENTITY_TERMS_HASROW_FILE),
             &dir.join(ENTITY_TERMS_OFFSETS_FILE),
             &dir.join(ENTITY_TERMS_TERMS_FILE),
+            &dir.join(ENTITY_TERMS_BASES_FILE),
         )
     }
 
-    /// Create the three files by explicit path — an extent's shape, whose three files share one
+    /// Create the four files by explicit path — an extent's shape, whose files share one
     /// directory with every other extent's and are distinguished by a `<seg_id>.` prefix, exactly
     /// as the record blob's extents are.
-    pub fn create_at(hasrow_path: &Path, offsets_path: &Path, terms_path: &Path) -> Result<Self> {
+    pub fn create_at(
+        hasrow_path: &Path,
+        offsets_path: &Path,
+        terms_path: &Path,
+        bases_path: &Path,
+    ) -> Result<Self> {
         let mut offsets =
             BufWriter::new(File::create(offsets_path).map_err(|e| io(offsets_path, e))?);
         // The leading zero, written up front: `offsets` has one more element than the bitmap has
@@ -168,14 +211,24 @@ impl EntityTermsWriter {
             .write_all(&0u32.to_le_bytes())
             .map_err(|e| io(offsets_path, e))?;
         let terms = BufWriter::new(File::create(terms_path).map_err(|e| io(terms_path, e))?);
+        let mut bases = BufWriter::new(File::create(bases_path).map_err(|e| io(bases_path, e))?);
+        // Block 0 starts at absolute 0, and an empty layer still carries the one entry its single
+        // rank, the sentinel, is addressed through.
+        bases
+            .write_all(&0u64.to_le_bytes())
+            .map_err(|e| io(bases_path, e))?;
         Ok(Self {
             hasrow_path: hasrow_path.to_path_buf(),
             offsets_path: offsets_path.to_path_buf(),
             terms_path: terms_path.to_path_buf(),
+            bases_path: bases_path.to_path_buf(),
             hasrow: Bitmap::new(),
             offsets,
             terms,
+            bases,
             written: 0,
+            base: 0,
+            ranks: 0,
             last: None,
         })
     }
@@ -204,38 +257,62 @@ impl EntityTermsWriter {
         }
         let next = self
             .written
-            .checked_add(u32::try_from(terms.len()).unwrap_or(u32::MAX))
+            .checked_add(terms.len() as u64)
             .ok_or_else(|| {
-                self.invalid(format!(
-                    "the layer's term count passes u32::MAX at entity {entity}"
-                ))
+                self.invalid(format!("the layer's term count passes u64 at {entity}"))
             })?;
         for term in terms {
             self.terms
                 .write_all(&term.to_le_bytes())
                 .map_err(|e| io(&self.terms_path, e))?;
         }
+        // The offsets index this push fills, and therefore the rank the entry addresses. A rank
+        // that opens a block rebases: its own entry is 0, and `bases` gains the absolute offset
+        // the block starts at. One entry is emitted per boundary crossed, which is one per push
+        // at most, so the file stays a function of the walk and nothing is buffered.
+        let index = self.ranks + 1;
+        if index.is_multiple_of(1u64 << ENTITY_TERMS_BLOCK_SHIFT) {
+            self.bases
+                .write_all(&next.to_le_bytes())
+                .map_err(|e| io(&self.bases_path, e))?;
+            self.base = next;
+        }
+        let relative = u32::try_from(next - self.base).map_err(|_| {
+            self.invalid(format!(
+                "the block opening at rank {} holds more than u32::MAX term ordinals by entity \
+                 {entity}; 65,536 ranks address one block between them",
+                index & !((1u64 << ENTITY_TERMS_BLOCK_SHIFT) - 1)
+            ))
+        })?;
         self.offsets
-            .write_all(&next.to_le_bytes())
+            .write_all(&relative.to_le_bytes())
             .map_err(|e| io(&self.offsets_path, e))?;
         self.hasrow.add(entity);
         self.written = next;
+        self.ranks = index;
         self.last = Some(entity);
         Ok(())
     }
 
-    /// Flush and close, returning the three paths written, in `(hasrow, offsets, terms)` order.
+    /// Flush and close, returning the four paths written, in `(hasrow, offsets, terms, bases)`
+    /// order.
     pub fn finish(mut self) -> Result<Vec<PathBuf>> {
         self.offsets
             .flush()
             .map_err(|e| io(&self.offsets_path, e))?;
         self.terms.flush().map_err(|e| io(&self.terms_path, e))?;
+        self.bases.flush().map_err(|e| io(&self.bases_path, e))?;
         // `run_optimize` before serialising, as the corpus's other Roaring writers do: a layer's
         // entities are an ascending, usually contiguous, run of ids.
         self.hasrow.run_optimize();
         std::fs::write(&self.hasrow_path, self.hasrow.serialize::<Portable>())
             .map_err(|e| io(&self.hasrow_path, e))?;
-        Ok(vec![self.hasrow_path, self.offsets_path, self.terms_path])
+        Ok(vec![
+            self.hasrow_path,
+            self.offsets_path,
+            self.terms_path,
+            self.bases_path,
+        ])
     }
 
     fn invalid(&self, detail: String) -> StoreError {
@@ -251,6 +328,7 @@ pub struct EntityTerms {
     hasrow: Bitmap,
     offsets: Mmap,
     terms: Mmap,
+    bases: Mmap,
     /// Carried for error messages only.
     dir: PathBuf,
 }
@@ -262,12 +340,18 @@ impl EntityTerms {
             &dir.join(ENTITY_TERMS_HASROW_FILE),
             &dir.join(ENTITY_TERMS_OFFSETS_FILE),
             &dir.join(ENTITY_TERMS_TERMS_FILE),
+            &dir.join(ENTITY_TERMS_BASES_FILE),
         )
     }
 
-    /// Open one layer from its three files, checking every length and the offsets' monotonicity —
+    /// Open one layer from its four files, checking every length and the offsets' monotonicity —
     /// see the module doc for why this is fail-closed rather than tolerant.
-    pub fn open(hasrow_path: &Path, offsets_path: &Path, terms_path: &Path) -> Result<Self> {
+    pub fn open(
+        hasrow_path: &Path,
+        offsets_path: &Path,
+        terms_path: &Path,
+        bases_path: &Path,
+    ) -> Result<Self> {
         let dir = hasrow_path
             .parent()
             .map(Path::to_path_buf)
@@ -281,6 +365,7 @@ impl EntityTerms {
         })?;
         let offsets = map(offsets_path)?;
         let terms = map(terms_path)?;
+        let bases = map(bases_path)?;
 
         let card = hasrow.cardinality();
         let want_offsets = (card + 1)
@@ -306,13 +391,53 @@ impl EntityTerms {
                 detail: format!("{} bytes is not a whole number of u32", terms.len()),
             });
         }
-        // **The ends, not the whole array.** The first offset must be 0 and the last must name
-        // exactly the terms file's length; every offset between them is checked at the read that
-        // uses it (`terms_of`), which is the same fail-closed answer at the point where a bad pair
-        // could produce a wrong one. Walking all of them here would be a sequential read of 4 B per
-        // entity — 4 GB at 10⁹ — at every `Engine::open`, which is the startup cost the external-ID
-        // sidecar was deliberately made lazy to avoid; the check that catches a truncation is the
-        // length equality below, and it is O(1).
+        // **`bases` whole, the offsets at their ends.** One entry per 65,536 ranks is 427 KB at
+        // 3.5×10⁹, so the whole array is walked here and its order established once; the offsets
+        // are one entry per rank, and walking those would be the 4 GB sequential read at 10⁹ that
+        // the external-ID sidecar was made lazy to avoid. So the first and the last absolute
+        // offset are checked here and every pair between them at the read that uses it
+        // (`terms_of`), which is the same fail-closed answer at the point where a bad pair could
+        // produce a wrong one.
+        let blocks = (card + 1).div_ceil(1u64 << ENTITY_TERMS_BLOCK_SHIFT);
+        let want_bases = blocks
+            .checked_mul(8)
+            .and_then(|n| usize::try_from(n).ok())
+            .ok_or_else(|| StoreError::InvalidEntityTerms {
+                path: dir.clone(),
+                detail: format!("a has-row cardinality of {card} overflows the bases length"),
+            })?;
+        if bases.len() != want_bases {
+            return Err(StoreError::InvalidEntityTerms {
+                path: bases_path.to_path_buf(),
+                detail: format!(
+                    "{} bytes for {card} entities; a layer carries one base per {} ranks of its \
+                     offsets, i.e. {want_bases} bytes",
+                    bases.len(),
+                    1u64 << ENTITY_TERMS_BLOCK_SHIFT
+                ),
+            });
+        }
+        let mut previous = 0u64;
+        for block in 0..blocks as usize {
+            let base = read_u64(&bases, block);
+            if block == 0 && base != 0 {
+                return Err(StoreError::InvalidEntityTerms {
+                    path: bases_path.to_path_buf(),
+                    detail: format!("the first base is {base}, not 0"),
+                });
+            }
+            if base < previous {
+                return Err(StoreError::InvalidEntityTerms {
+                    path: bases_path.to_path_buf(),
+                    detail: format!(
+                        "block {block} starts at {base}, below block {}'s {previous}; the blocks \
+                         partition the terms file in order",
+                        block - 1
+                    ),
+                });
+            }
+            previous = base;
+        }
         let first = read_u32(&offsets, 0);
         if first != 0 {
             return Err(StoreError::InvalidEntityTerms {
@@ -320,8 +445,9 @@ impl EntityTerms {
                 detail: format!("the first offset is {first}, not 0"),
             });
         }
-        let last = read_u32(&offsets, card as usize);
-        if (last as usize) * 4 != terms.len() {
+        let last = read_u64(&bases, (card >> ENTITY_TERMS_BLOCK_SHIFT) as usize)
+            + read_u32(&offsets, card as usize) as u64;
+        if last * 4 != terms.len() as u64 {
             return Err(StoreError::InvalidEntityTerms {
                 path: dir.clone(),
                 detail: format!(
@@ -334,8 +460,17 @@ impl EntityTerms {
             hasrow,
             offsets,
             terms,
+            bases,
             dir,
         })
+    }
+
+    /// The absolute start offset of rank `index`: one aligned `u64` and one `u32`, which is the
+    /// whole of what paging costs a read. The caller has established that `index` is within the
+    /// offsets array.
+    fn absolute(&self, index: usize) -> u64 {
+        read_u64(&self.bases, index >> ENTITY_TERMS_BLOCK_SHIFT)
+            + read_u32(&self.offsets, index) as u64
     }
 
     /// How many entities this layer holds a list for — what the writer put in it, read back.
@@ -362,12 +497,12 @@ impl EntityTerms {
             return Ok(None);
         }
         let rank = (self.hasrow.rank(entity) - 1) as usize;
-        let start = read_u32(&self.offsets, rank) as usize;
-        let end = read_u32(&self.offsets, rank + 1) as usize;
+        let start = self.absolute(rank) as usize;
+        let end = self.absolute(rank + 1) as usize;
         // **The pair is checked here rather than at open** — see [`EntityTerms::open`] for why the
-        // whole array is not walked. A descending pair or one past the terms file is a refusal and
-        // never a truncated list: a short label set on the write path is a `409` that does not
-        // fire, which is the fail-open direction.
+        // whole offsets array is not walked. A descending pair or one past the terms file is a
+        // refusal and never a truncated list: a short label set on the write path is a `409` that
+        // does not fire, which is the fail-open direction.
         if end < start || end * 4 > self.terms.len() {
             return Err(StoreError::InvalidEntityTerms {
                 path: self.dir.clone(),
@@ -387,8 +522,11 @@ impl EntityTerms {
     }
 }
 
-/// Merge `inputs` — a coalesce's window of extents — into one layer at the three given paths,
+/// Merge `inputs` — a coalesce's window of extents — into one layer at the four given paths,
 /// returning how many entities it holds.
+///
+/// The output's bases are the writer's own, computed from the running total as the lists are
+/// copied: the merge rebases as it goes and holds no absolute array.
 ///
 /// **A concatenation with bookkeeping, not a merge with a resolution rule.** The layers are
 /// disjoint in entity space (**I9**: an entity id is allocated once, and the flush that minted it
@@ -399,7 +537,7 @@ impl EntityTerms {
 ///
 /// **Byte-deterministic for a given input set**: the output is a pure function of the entity sets
 /// and the lists, and the order of the walk is the ascending entity order the format already
-/// requires. Two merges of the same inputs produce the same three files.
+/// requires. Two merges of the same inputs produce the same four files.
 ///
 /// A repeated entity is a **refusal**, not a resolution. Disjointness is a property of the
 /// writers, and this is the one place a violation of it could be silently collapsed into a layer
@@ -412,11 +550,13 @@ pub fn coalesce_entity_terms_extents(
     hasrow_path: &Path,
     offsets_path: &Path,
     terms_path: &Path,
+    bases_path: &Path,
 ) -> Result<u64> {
     if let Some(parent) = hasrow_path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| io(parent, e))?;
     }
-    let mut writer = EntityTermsWriter::create_at(hasrow_path, offsets_path, terms_path)?;
+    let mut writer =
+        EntityTermsWriter::create_at(hasrow_path, offsets_path, terms_path, bases_path)?;
     let mut cursors: Vec<std::iter::Peekable<croaring::bitmap::BitmapIterator<'_>>> = inputs
         .iter()
         .map(|layer| layer.hasrow.iter().peekable())
@@ -448,14 +588,15 @@ pub fn coalesce_entity_terms_extents(
         }
         let Some((index, entity)) = least else { break };
         cursors[index].next();
-        let terms = inputs[index].terms_of(entity)?.ok_or_else(|| {
-            StoreError::InvalidEntityTerms {
-                path: inputs[index].dir.clone(),
-                detail: "the layer's own has-row bitmap names an entity its offsets do not \
+        let terms =
+            inputs[index]
+                .terms_of(entity)?
+                .ok_or_else(|| StoreError::InvalidEntityTerms {
+                    path: inputs[index].dir.clone(),
+                    detail: "the layer's own has-row bitmap names an entity its offsets do not \
                          answer for — a merge input that disagrees with itself"
-                    .to_string(),
-            }
-        })?;
+                        .to_string(),
+                })?;
         writer.push(entity, &terms)?;
         written += 1;
     }
@@ -487,6 +628,7 @@ impl EntityTermsStack {
                 &extent.hasrow,
                 &extent.offsets,
                 &extent.terms,
+                &extent.bases,
             )?));
         }
         Ok(Self { layers })
@@ -505,6 +647,7 @@ impl EntityTermsStack {
                 &extent.hasrow,
                 &extent.offsets,
                 &extent.terms,
+                &extent.bases,
             )?));
         }
         Ok(Self { layers })
@@ -554,6 +697,15 @@ fn read_u32(map: &Mmap, index: usize) -> u32 {
     u32::from_le_bytes([map[at], map[at + 1], map[at + 2], map[at + 3]])
 }
 
+/// The `index`-th `u64` of a mapped LE array, on the same premise: the bases file's length was
+/// checked at open against the block count the has-row cardinality fixes.
+fn read_u64(map: &Mmap, index: usize) -> u64 {
+    let at = index * 8;
+    let mut bytes = [0u8; 8];
+    bytes.copy_from_slice(&map[at..at + 8]);
+    u64::from_le_bytes(bytes)
+}
+
 fn map(path: &Path) -> Result<Mmap> {
     let file = File::open(path).map_err(|e| io(path, e))?;
     // SAFETY: the file is a published, immutable bundle artefact (contracts §2.1 — every file but
@@ -572,6 +724,15 @@ fn io(path: &Path, source: std::io::Error) -> StoreError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn paths_of(dir: &Path) -> EntityTermsExtentPaths {
+        EntityTermsExtentPaths {
+            hasrow: dir.join(ENTITY_TERMS_HASROW_FILE),
+            offsets: dir.join(ENTITY_TERMS_OFFSETS_FILE),
+            terms: dir.join(ENTITY_TERMS_TERMS_FILE),
+            bases: dir.join(ENTITY_TERMS_BASES_FILE),
+        }
+    }
 
     fn round_trip(rows: &[(u32, Vec<u32>)]) -> (tempfile::TempDir, EntityTerms) {
         let dir = tempfile::tempdir().unwrap();
@@ -676,11 +837,7 @@ mod tests {
         writer.push(7, &[4]).unwrap();
         writer.finish().unwrap();
 
-        let paths = EntityTermsExtentPaths {
-            hasrow: extent.path().join(ENTITY_TERMS_HASROW_FILE),
-            offsets: extent.path().join(ENTITY_TERMS_OFFSETS_FILE),
-            terms: extent.path().join(ENTITY_TERMS_TERMS_FILE),
-        };
+        let paths = paths_of(extent.path());
         let stack =
             EntityTermsStack::open(Some(base.path()), std::slice::from_ref(&paths)).unwrap();
         assert_eq!(stack.terms_of(0).unwrap(), Some(vec![1]));
@@ -698,7 +855,7 @@ mod tests {
     }
 
     /// **A layer holding nothing must still open.** A flush that published only joining rows
-    /// mints no entity and writes an empty layer — three files, one of them zero bytes — and a
+    /// mints no entity and writes an empty layer — four files, one of them zero bytes — and a
     /// reader that refused it would fail the whole generation's open on a legitimate publication.
     #[test]
     fn an_empty_layer_opens_and_answers_nothing() {
@@ -744,20 +901,13 @@ mod tests {
         out
     }
 
-    fn paths_of(dir: &Path) -> EntityTermsExtentPaths {
-        EntityTermsExtentPaths {
-            hasrow: dir.join(ENTITY_TERMS_HASROW_FILE),
-            offsets: dir.join(ENTITY_TERMS_OFFSETS_FILE),
-            terms: dir.join(ENTITY_TERMS_TERMS_FILE),
-        }
-    }
-
     fn merge_into(dir: &Path, layers: &[&EntityTerms]) -> u64 {
         coalesce_entity_terms_extents(
             layers,
             &dir.join(ENTITY_TERMS_HASROW_FILE),
             &dir.join(ENTITY_TERMS_OFFSETS_FILE),
             &dir.join(ENTITY_TERMS_TERMS_FILE),
+            &dir.join(ENTITY_TERMS_BASES_FILE),
         )
         .unwrap()
     }
@@ -821,6 +971,7 @@ mod tests {
             ENTITY_TERMS_HASROW_FILE,
             ENTITY_TERMS_OFFSETS_FILE,
             ENTITY_TERMS_TERMS_FILE,
+            ENTITY_TERMS_BASES_FILE,
         ] {
             assert_eq!(
                 std::fs::read(first.path().join(name)).unwrap(),
@@ -844,6 +995,7 @@ mod tests {
                 &out.path().join(ENTITY_TERMS_HASROW_FILE),
                 &out.path().join(ENTITY_TERMS_OFFSETS_FILE),
                 &out.path().join(ENTITY_TERMS_TERMS_FILE),
+                &out.path().join(ENTITY_TERMS_BASES_FILE),
             ),
             Err(StoreError::InvalidEntityTerms { .. })
         ));
@@ -863,7 +1015,11 @@ mod tests {
         merge_into(out.path(), &opened.iter().collect::<Vec<_>>());
         assert!(EntityTerms::open_dir(out.path()).is_ok(), "whole, it opens");
 
-        for name in [ENTITY_TERMS_TERMS_FILE, ENTITY_TERMS_OFFSETS_FILE] {
+        for name in [
+            ENTITY_TERMS_TERMS_FILE,
+            ENTITY_TERMS_OFFSETS_FILE,
+            ENTITY_TERMS_BASES_FILE,
+        ] {
             let path = out.path().join(name);
             let whole = std::fs::read(&path).unwrap();
             std::fs::write(&path, &whole[..whole.len() - 4]).unwrap();
@@ -876,6 +1032,292 @@ mod tests {
             );
             std::fs::write(&path, &whole).unwrap();
         }
+    }
+
+    /// Ranks enough to cover `blocks` whole blocks of the offsets, each entity's list whatever
+    /// `terms_for` gives its rank: the shape every paging claim below is made over.
+    fn blocked_layer(
+        ranks: u32,
+        terms_for: impl Fn(u32) -> Vec<u32>,
+    ) -> (tempfile::TempDir, Vec<Vec<u32>>) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut writer = EntityTermsWriter::create(dir.path()).unwrap();
+        let mut lists = Vec::with_capacity(ranks as usize);
+        for rank in 0..ranks {
+            let terms = terms_for(rank);
+            writer.push(rank, &terms).unwrap();
+            lists.push(terms);
+        }
+        writer.finish().unwrap();
+        (dir, lists)
+    }
+
+    fn block_ranks() -> u32 {
+        1u32 << ENTITY_TERMS_BLOCK_SHIFT
+    }
+
+    /// **Ranks either side of a block boundary answer their own lists**, including the empty ones
+    /// that sit on it. A rank that opens a block carries offset 0 and its base carries the
+    /// absolute, and getting that pair the wrong way round would hand every later rank a list
+    /// short by a block's worth of ordinals.
+    #[test]
+    fn ranks_spanning_several_blocks_answer_their_own_lists() {
+        let block = block_ranks();
+        // Two whole blocks and a little, with the ranks on and beside each boundary left empty:
+        // an empty list is a value, and at a boundary it is the one that makes a base and an
+        // offset indistinguishable if the arithmetic is wrong.
+        let terms_for = |rank: u32| -> Vec<u32> {
+            if rank.is_multiple_of(block) || rank % block == 1 || rank.is_multiple_of(7) {
+                Vec::new()
+            } else {
+                vec![rank % 11, 20 + rank % 13, 40 + rank % 17]
+            }
+        };
+        let (dir, lists) = blocked_layer(2 * block + 5, terms_for);
+        let layer = EntityTerms::open_dir(dir.path()).unwrap();
+        for rank in [
+            0,
+            1,
+            block - 2,
+            block - 1,
+            block,
+            block + 1,
+            block + 2,
+            2 * block - 1,
+            2 * block,
+            2 * block + 4,
+        ] {
+            assert_eq!(
+                layer.terms_of(rank).unwrap().as_ref(),
+                Some(&lists[rank as usize]),
+                "rank {rank} answers its own list"
+            );
+        }
+        // The bases are what the offsets are read against, and block 1's is the running total at
+        // the boundary, checked against the lists rather than against the reader that uses it.
+        let expected: u64 = lists[..block as usize]
+            .iter()
+            .map(|list| list.len() as u64)
+            .sum();
+        let bases = std::fs::read(dir.path().join(ENTITY_TERMS_BASES_FILE)).unwrap();
+        assert_eq!(bases.len(), 3 * 8, "two whole blocks and the sentinel's");
+        assert_eq!(u64::from_le_bytes(bases[..8].try_into().unwrap()), 0);
+        assert_eq!(
+            u64::from_le_bytes(bases[8..16].try_into().unwrap()),
+            expected
+        );
+    }
+
+    /// **A layer whose sentinel opens a block still carries that block's base.** The sentinel is
+    /// addressed exactly as a rank is, so a layer of one whole block's entities has two bases and
+    /// not one, and a reader that sized the array by the cardinality alone would read past it.
+    #[test]
+    fn a_block_boundary_at_the_sentinel_carries_its_own_base() {
+        let block = block_ranks();
+        let (dir, lists) = blocked_layer(block, |rank| vec![rank % 5]);
+        let layer = EntityTerms::open_dir(dir.path()).unwrap();
+        assert_eq!(layer.len() as u32, block);
+        assert_eq!(
+            layer.terms_of(block - 1).unwrap().as_ref(),
+            Some(&lists[block as usize - 1])
+        );
+        let bases = std::fs::read(dir.path().join(ENTITY_TERMS_BASES_FILE)).unwrap();
+        assert_eq!(bases.len(), 2 * 8);
+        assert_eq!(
+            u64::from_le_bytes(bases[8..16].try_into().unwrap()),
+            block as u64,
+            "the sentinel's block starts at the layer's whole term count"
+        );
+    }
+
+    /// Every way the bases file can disagree with the rest of the layer, each a refusal.
+    #[test]
+    fn a_bases_file_that_disagrees_refuses_the_open() {
+        let block = block_ranks();
+        // Three blocks' worth of ranks, one term each, so the bases ascend strictly and a swap is
+        // a descent rather than a repeat.
+        let (dir, _) = blocked_layer(2 * block, |rank| vec![rank]);
+        let path = dir.path().join(ENTITY_TERMS_BASES_FILE);
+        let whole = std::fs::read(&path).unwrap();
+        assert_eq!(whole.len(), 3 * 8, "two whole blocks and the sentinel's");
+        assert!(EntityTerms::open_dir(dir.path()).is_ok(), "whole, it opens");
+
+        let restore = |bytes: &[u8]| std::fs::write(&path, bytes).unwrap();
+
+        std::fs::remove_file(&path).unwrap();
+        assert!(
+            EntityTerms::open_dir(dir.path()).is_err(),
+            "an absent bases file refuses the open, as an absent offsets file does"
+        );
+        restore(&whole);
+
+        for (case, bytes) in [
+            ("short", whole[..whole.len() - 8].to_vec()),
+            ("long", [whole.clone(), vec![0u8; 8]].concat()),
+            (
+                "a non-zero first base",
+                [8u64.to_le_bytes().to_vec(), whole[8..].to_vec()].concat(),
+            ),
+            (
+                "descending bases",
+                [
+                    whole[..8].to_vec(),
+                    whole[16..24].to_vec(),
+                    whole[8..16].to_vec(),
+                ]
+                .concat(),
+            ),
+            (
+                "a last base the terms file does not reach",
+                [
+                    whole[..16].to_vec(),
+                    (u64::from_le_bytes(whole[16..24].try_into().unwrap()) + 8)
+                        .to_le_bytes()
+                        .to_vec(),
+                ]
+                .concat(),
+            ),
+        ] {
+            restore(&bytes);
+            assert!(
+                matches!(
+                    EntityTerms::open_dir(dir.path()),
+                    Err(StoreError::InvalidEntityTerms { .. })
+                ),
+                "{case} must refuse the open"
+            );
+        }
+        restore(&whole);
+        assert!(EntityTerms::open_dir(dir.path()).is_ok());
+    }
+
+    /// **A layer whose absolute offsets pass `u32::MAX` reads correctly**, which is the whole
+    /// point of the paging: the ceiling a flat offsets array imposed is 4.29×10⁹ pairs, and a
+    /// corpus of a few billion rows carries more.
+    ///
+    /// Built by hand rather than by the writer, and `terms.u32` is a **sparse** file: the layer
+    /// this describes holds 5×10⁹ ordinals, which is 20 GB of real bytes and minutes of writing,
+    /// where what is under test is the arithmetic that addresses them. The four ordinals the
+    /// assertion reads back are the only ones written, at the offset past 2³² that a flat `u32`
+    /// could not have named.
+    #[test]
+    fn absolute_offsets_past_u32_max_address_the_right_ordinals() {
+        use std::io::Seek;
+
+        let block = block_ranks() as u64;
+        let dir = tempfile::tempdir().unwrap();
+        let card = 2 * block;
+        // Rank 0 holds 3×10⁹ ordinals and rank `block` holds 2×10⁹, so every rank above the first
+        // boundary starts past 2³²; the last rank holds the four that are actually written.
+        let first = 3_000_000_000u64;
+        let second = 2_000_000_000u64;
+        let tail = 4u64;
+        let mut absolute = vec![0u64; card as usize + 1];
+        for (rank, at) in absolute.iter_mut().enumerate() {
+            let rank = rank as u64;
+            *at = if rank == 0 {
+                0
+            } else if rank <= block {
+                first
+            } else if rank < card {
+                first + second
+            } else {
+                first + second + tail
+            };
+        }
+        let bases: Vec<u64> = (0..=2).map(|b| absolute[(b * block) as usize]).collect();
+        let mut offsets = Vec::with_capacity(absolute.len() * 4);
+        for (rank, at) in absolute.iter().enumerate() {
+            let base = bases[rank >> ENTITY_TERMS_BLOCK_SHIFT];
+            offsets.extend_from_slice(&u32::try_from(at - base).unwrap().to_le_bytes());
+        }
+        std::fs::write(dir.path().join(ENTITY_TERMS_OFFSETS_FILE), &offsets).unwrap();
+        let mut bases_bytes = Vec::new();
+        for base in &bases {
+            bases_bytes.extend_from_slice(&base.to_le_bytes());
+        }
+        std::fs::write(dir.path().join(ENTITY_TERMS_BASES_FILE), &bases_bytes).unwrap();
+        let mut hasrow = Bitmap::new();
+        hasrow.add_range(0..card as u32);
+        hasrow.run_optimize();
+        std::fs::write(
+            dir.path().join(ENTITY_TERMS_HASROW_FILE),
+            hasrow.serialize::<Portable>(),
+        )
+        .unwrap();
+
+        let written: [u32; 4] = [7, 9, 11, 13];
+        let terms_path = dir.path().join(ENTITY_TERMS_TERMS_FILE);
+        let mut terms = File::create(&terms_path).unwrap();
+        terms
+            .set_len((first + second + tail) * 4)
+            .expect("a sparse terms file");
+        terms
+            .seek(std::io::SeekFrom::Start((first + second) * 4))
+            .unwrap();
+        for ordinal in written {
+            terms.write_all(&ordinal.to_le_bytes()).unwrap();
+        }
+        terms.flush().unwrap();
+        drop(terms);
+
+        let layer = EntityTerms::open_dir(dir.path()).unwrap();
+        assert_eq!(
+            layer.terms_of(card as u32 - 1).unwrap(),
+            Some(written.to_vec()),
+            "the last rank's slice starts at 5×10⁹, which no u32 offset could have named"
+        );
+        // And a rank on the far side of the first boundary is empty rather than 3×10⁹ ordinals
+        // long, which is what a reader that took the offsets as absolute would have answered.
+        assert_eq!(
+            layer.terms_of(block as u32 + 1).unwrap(),
+            Some(Vec::new()),
+            "an empty list past the boundary stays empty"
+        );
+    }
+
+    /// **The merge rebases**, which is the one thing a concatenation of paged layers has to do
+    /// that a concatenation of flat ones did not: the inputs' bases mean nothing in the output,
+    /// and the output's are the running total of the walk.
+    #[test]
+    fn a_merge_across_a_block_boundary_answers_what_the_layers_answered() {
+        let block = block_ranks();
+        let half = block * 2 / 3;
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        for (dir, lo) in [(&first, 0u32), (&second, half)] {
+            let mut writer = EntityTermsWriter::create(dir.path()).unwrap();
+            for rank in lo..lo + half {
+                let terms: Vec<u32> = if rank % 5 == 0 {
+                    Vec::new()
+                } else {
+                    (0..(rank % 4 + 1)).map(|t| t * 3 + rank % 7).collect()
+                };
+                writer.push(rank, &terms).unwrap();
+            }
+            writer.finish().unwrap();
+        }
+        let opened = [
+            EntityTerms::open_dir(first.path()).unwrap(),
+            EntityTerms::open_dir(second.path()).unwrap(),
+        ];
+        let stack =
+            EntityTermsStack::open(None, &[paths_of(first.path()), paths_of(second.path())])
+                .unwrap();
+        let out = tempfile::tempdir().unwrap();
+        assert_eq!(
+            merge_into(out.path(), &[&opened[0], &opened[1]]),
+            2 * half as u64
+        );
+        let merged = EntityTerms::open_dir(out.path()).unwrap();
+        for rank in 0..2 * half {
+            assert_eq!(
+                merged.terms_of(rank).unwrap(),
+                stack.terms_of(rank).unwrap(),
+                "entity {rank} answers differently after the merge"
+            );
+        }
+        assert_eq!(merged.terms_of(2 * half).unwrap(), None);
     }
 
     /// A window of empty layers — a run of flushes that minted nothing — merges to an empty layer

@@ -9008,13 +9008,15 @@ impl Executor {
             carried_rels.insert(extent.postings.clone());
             carried_rels.insert(extent.presence.clone());
         }
-        // All three files of every carried transpose extent, under the same rule: the offsets
-        // address the terms and the has-row bitmap ranks them, so any one missing is a refusal at
-        // open rather than a shorter label set (`tessera_store::entity_terms`).
+        // All four files of every carried transpose extent, under the same rule: the offsets and
+        // their block bases address the terms and the has-row bitmap ranks them, so any one
+        // missing is a refusal at open rather than a shorter label set
+        // (`tessera_store::entity_terms`).
         for extent in &carried_entity_terms {
             carried_rels.insert(extent.hasrow.clone());
             carried_rels.insert(extent.offsets.clone());
             carried_rels.insert(extent.terms.clone());
+            carried_rels.insert(extent.bases.clone());
         }
         carried_rels.extend(live_manifest.dict_extents.iter().map(|e| e.path.clone()));
         for rel in &carried_rels {
@@ -9738,6 +9740,7 @@ impl Executor {
                     hasrow: prefix_dir.join(&e.hasrow),
                     offsets: prefix_dir.join(&e.offsets),
                     terms: prefix_dir.join(&e.terms),
+                    bases: prefix_dir.join(&e.bases),
                 })
                 .collect();
             match tessera_store::EntityTermsStack::open(
@@ -16954,6 +16957,7 @@ impl Executor {
             hasrow: record_dir.join(&completed.entity_terms_extent.hasrow),
             offsets: record_dir.join(&completed.entity_terms_extent.offsets),
             terms: record_dir.join(&completed.entity_terms_extent.terms),
+            bases: record_dir.join(&completed.entity_terms_extent.bases),
         }];
         let text_paths: Vec<crate::filter::TextExtentPaths> = completed
             .text_extents
