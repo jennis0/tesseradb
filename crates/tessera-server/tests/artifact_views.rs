@@ -840,3 +840,195 @@ async fn an_artifact_of_another_view_of_the_group_is_absent_from_every_verb() {
         "reopened: for the principal outside q1 either"
     );
 }
+
+/// The rows one view's request matched under a filter — what a `member_of` leaf naming an
+/// artifact resolves to, summed over the tiles.
+async fn matched(server: &TestServer, token: &str, view: &str, filters: serde_json::Value) -> u64 {
+    let resp = server
+        .client
+        .post(server.viewer_url("/v1/viewport"))
+        .bearer_auth(token)
+        .json(&json!({
+            "view": view,
+            "zoom": 0,
+            "bbox": [0.0, 0.0, 1000.0, 1000.0],
+            "k": 200,
+            "filters": filters,
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 200, "{:?}", resp.text().await);
+    let (tiles, _) = decode_viewport(&resp.bytes().await.unwrap());
+    tiles.iter().map(|tile| tile.2).sum()
+}
+
+/// A `member_of` leaf over the scoped layer, by identifier.
+fn member_of(tessera_id: &str) -> serde_json::Value {
+    json!({ "member_of": { "layer": SCOPED, "artifact": tessera_id } })
+}
+
+/// **One flush tick, asked for and waited on** — the one moment a held row form takes the
+/// interval's deltas (`ingest.md` §1.3). `POST /control/flush` pulls the tick's deadline forward
+/// rather than publishing off the cadence, and with nothing buffered the tick publishes the row
+/// forms and no geometry, which is the whole of what this needs.
+async fn ticked(server: &TestServer) {
+    let before = server.state.engine.write_executor_stats().ticks;
+    let resp = server
+        .client
+        .post(server.control_url("/control/flush"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 202);
+    wait_until(
+        server,
+        "the tick published the interval's deltas",
+        move |now| now.ticks > before,
+    )
+    .await;
+}
+
+/// What the second write into the other view is: a new artifact, or more members for one that
+/// view already holds. The first reaches a held form as `DeltaKind::Published`, the second as
+/// `DeltaKind::Grown` — two arms of the same amendment, and each is confined to its own view's
+/// ordinals or neither is.
+#[derive(Clone, Copy, PartialEq)]
+enum Second {
+    Published,
+    Grown,
+}
+
+/// **A held row form takes no delta of another view of its group** (`views.md` §3.5) — the warm
+/// path, which no cold projection covers.
+///
+/// A form is built per `(view, layer, level)` from the store's own per-view slice, so a view that
+/// has never been browsed cannot hold another view's artifact. But the tick applies one interval's
+/// deltas to *every* held form of the level, so a view whose form is already warm is the case
+/// where a write into another view of the group can reach it. The sequence is exactly that: browse
+/// A, which builds and holds A's form; write into B; let the tick pass; browse A again.
+///
+/// What a wrong answer hands a principal of A: B's key, B's `tessera_id` and a live count of A's
+/// own rows — and with them the drill-down, the `member_of` highlight and the region leaves, which
+/// all read the same form.
+async fn a_warm_form_takes_no_delta_of_another_view(warm: usize, second: Second) {
+    let tmp = TempDir::new().unwrap();
+    let server = serve_gated(&tmp).await;
+    register(&server, declaration(SCOPED, Some("quarter"), "flat")).await;
+    let (a, b) = (KEYS[warm], KEYS[1 - warm]);
+    let (a_view, b_view) = (format!("quarter:{a}"), format!("quarter:{b}"));
+    let (a_key, b_key) = (format!("only-{a}"), format!("only-{b}"));
+    // **B's membership is drawn from the whole corpus**, so every one of its members has a row in
+    // A's row space as well: an artifact of B projected into A's form would carry a real count
+    // there rather than an empty one, which is the answer this asserts against.
+    let b_members = 30;
+
+    // A's own artifact, and — for the growth arm — B's, published before A's form is warm so that
+    // the only thing reaching that form afterwards is the growth delta.
+    let mut first = vec![json!({ "key": a_key, "view": a, "members": members(0..10) })];
+    if second == Second::Grown {
+        first.push(json!({ "key": b_key, "view": b, "members": members(0..5) }));
+    }
+    let (status, body) = put(&server, SCOPED, json!(first)).await;
+    assert_eq!(status, 201, "{body}");
+    let a_id = body["artifacts"][0]["tessera_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let both = token_for(&server, &["0", "1"]).await;
+    // **The warming read.** After this the level's form for A is in the map, and every tick from
+    // here amends it in place rather than rebuilding it.
+    assert_eq!(
+        browsed(&server, &both, &a_view, SCOPED).await,
+        vec![(a_key.clone(), 10)],
+        "the premise: A holds its own artifact and its form is now warm"
+    );
+
+    let (status, body) = put(
+        &server,
+        SCOPED,
+        json!([{ "key": b_key, "view": b, "members": members(0..b_members) }]),
+    )
+    .await;
+    assert_eq!(
+        status,
+        if second == Second::Grown { 200 } else { 201 },
+        "{body}"
+    );
+    let b_id = body["artifacts"][0]["tessera_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    ticked(&server).await;
+
+    // Both principals reach A: one who reaches the whole group, and — where A is the ungated view
+    // — one whose visible-view set holds A alone and which can reach B by no route at all.
+    let mut principals = vec![("both views", both.clone())];
+    if a == KEYS[1] {
+        principals.push(("A alone", token_for(&server, &["0"]).await));
+    }
+    for (who, token) in &principals {
+        assert_eq!(
+            browsed(&server, token, &a_view, SCOPED).await,
+            vec![(a_key.clone(), 10)],
+            "{who}: A's browse page names A's artifact alone after the tick"
+        );
+        assert_eq!(
+            served_as(&server, token, &a_view, SCOPED).await,
+            vec![(a_key.clone(), 10)],
+            "{who}: and A's artifacts frame agrees with it"
+        );
+        assert_eq!(
+            drilled(&server, token, &a_view, &b_id).await.0,
+            404,
+            "{who}: B's artifact is not reachable on A by identifier"
+        );
+        assert_eq!(
+            matched(&server, token, &a_view, member_of(&b_id)).await,
+            0,
+            "{who}: and a `member_of` leaf naming it matches no row of A"
+        );
+        // The same leaf over A's own artifact, so what is asserted above is the view's answer and
+        // not a filter that matches nothing whatever it is given.
+        assert_eq!(
+            matched(&server, token, &a_view, member_of(&a_id)).await,
+            10,
+            "{who}: A's own artifact still highlights its members"
+        );
+    }
+
+    // And B is unharmed: the amendment was confined, not dropped.
+    assert_eq!(
+        browsed(&server, &both, &b_view, SCOPED).await,
+        vec![(b_key, b_members)],
+        "B holds the write that was made into it"
+    );
+}
+
+/// [`a_warm_form_takes_no_delta_of_another_view`] with q1 warm and the publication into q2.
+#[tokio::test]
+async fn a_warm_q1_form_takes_no_publication_of_q2() {
+    a_warm_form_takes_no_delta_of_another_view(0, Second::Published).await;
+}
+
+/// The same with the roles swapped — and with a principal whose visible-view set holds q2 alone,
+/// which q2 being the ungated view is what makes possible.
+#[tokio::test]
+async fn a_warm_q2_form_takes_no_publication_of_q1() {
+    a_warm_form_takes_no_delta_of_another_view(1, Second::Published).await;
+}
+
+/// The growth arm: the second write is more members for an artifact the other view already holds,
+/// which reaches the held form as a membership join rather than as a publication.
+#[tokio::test]
+async fn a_warm_q1_form_takes_no_growth_of_q2() {
+    a_warm_form_takes_no_delta_of_another_view(0, Second::Grown).await;
+}
+
+/// The growth arm with the roles swapped.
+#[tokio::test]
+async fn a_warm_q2_form_takes_no_growth_of_q1() {
+    a_warm_form_takes_no_delta_of_another_view(1, Second::Grown).await;
+}
