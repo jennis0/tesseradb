@@ -16305,6 +16305,16 @@ impl Executor {
                     }
                     observed.unwrap_or_else(tessera_store::derived::LevelShape::empty)
                 } else {
+                    // A borrowing artifact is observed over the membership it is served on, which
+                    // `members_of` reads from its target where the record declares none (decision
+                    // 0145). The tile index and the column this fold then files for such a level
+                    // are true when written and are not read: the borrowed set moves with the
+                    // target's level version and the file is keyed on this level's, so the engine
+                    // serves a borrowing level artifact-major and derives its index from the form
+                    // it resolved (`crate::artifacts::ArtifactRows::inherit`). Two directions would
+                    // change that. Record a borrowing level as artifact-major here, so no column is
+                    // filed for one; or carry the borrowed versions in the extent's manifest entry,
+                    // so a reader can claim a filed index while they still match.
                     tessera_store::derived::observe_shape(space.base_rows(), &|visit| {
                         for (ordinal, record) in pending.records(store, &layer, level) {
                             visit(ordinal, &space.project_base(store.members_of(record)));

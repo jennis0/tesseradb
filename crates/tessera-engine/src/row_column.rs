@@ -563,6 +563,13 @@ impl RowColumn {
     /// function, so what reaches this is `crates/tessera-bench/src/bin/epoch_shard_tile_index.rs`
     /// and this crate's tests. Kept because it is the projection the two routes are asserted equal
     /// against.
+    ///
+    /// ⊘ It reads the membership each record declares. An attached artifact that declares none is
+    /// served over its target's (decision 0145), which is read from the artifact store, and this
+    /// function is not given one. Its callers project levels whose artifacts carry no attachment,
+    /// so the two agree there and would not on a borrowing level. Taking the store, as
+    /// [`crate::tile_index::TileIndex::project`] does, is the fix, and it moves the bench's call
+    /// with it.
     pub fn project<'a, I>(
         ordinals: u32,
         space: &RowSpace,

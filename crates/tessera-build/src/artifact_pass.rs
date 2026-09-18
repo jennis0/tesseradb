@@ -297,6 +297,17 @@ pub fn run(
         };
         // One membership at a time, exactly as the fold observes it: the figure is the same either
         // way and what differs is what is held while it runs.
+        //
+        // A borrowing level is observed over the membership it is served on, because
+        // `members_of` answers with the target's where the record declares none (decision 0145).
+        // The report and the layout pick are then about the level as served. What this pass then
+        // files for such a level is true when it is written and the engine does not read it: the
+        // borrowed set moves with the target's level version, the file is keyed on this level's,
+        // so the engine serves a borrowing level artifact-major and derives its tile index from
+        // the form it has just resolved (`ArtifactRows::inherit`). Two directions would change
+        // that. Observe a borrowing level as artifact-major here, so no column is written for one;
+        // or carry the borrowed versions in the extent's manifest entry, so a reader can claim a
+        // filed index while they still match.
         let shape = derived::observe_shape(space.base_rows(), &|visit| {
             if let Some(rows) = resolved.get(&(layer.clone(), *level)) {
                 walk_resolved(rows, visit);

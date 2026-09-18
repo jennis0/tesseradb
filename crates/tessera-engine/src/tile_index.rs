@@ -170,11 +170,11 @@ impl TileIndex {
     ///
     /// A skipped ordinal is a **hole**, exactly as the row form's `resize_with(|| None)` makes it.
     ///
-    /// **`store` is what an artifact's membership is asked of**, never the record's field: an
+    /// An artifact's membership is asked of `store`, never read from the record's field. An
     /// attached artifact that declares none is placed over its target's
-    /// ([`tessera_lifecycle::membership::ArtifactStore::members_of`], the H ruling of 2026-09-18),
-    /// and an index written over the empty set the record carries would put every such artifact in
-    /// no tile of the bundle it is filed in.
+    /// ([`tessera_lifecycle::membership::ArtifactStore::members_of`], decision 0145), and an index
+    /// written over the empty set such a record carries would put it in no tile of the bundle it is
+    /// filed in.
     pub fn project<'a, I>(
         ordinals: u32,
         artifacts: impl Fn() -> I,

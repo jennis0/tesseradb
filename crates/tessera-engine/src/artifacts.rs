@@ -38,11 +38,11 @@
 //!    alone would start serving every label attached to a deleted cluster at the next nightly fold.
 //!    A hole answers *not served*, which makes the fold's own hole the durable form of the
 //!    withholding rather than a state something has to remember.
-//!    **And what it attaches to is where its membership comes from, where it declared none**
-//!    (owner ruling H, 2026-09-18). A label with no member rows is the label of its cluster — it
-//!    is placed where the cluster is placed and counted over the cluster's members, so the number
-//!    below and the tile above both read the target's membership. [`ArtifactRows::inherit`] is
-//!    where that is resolved, once, for every route.
+//!    What it attaches to is also where its membership comes from, where it declared none
+//!    (decision 0145). A label with no member rows is the label of its cluster. It is placed where
+//!    the cluster is placed and counted over the cluster's members, so the number below and the
+//!    tile above read the target's membership. [`ArtifactRows::inherit`] resolves that once, for
+//!    every route.
 //! 4. **The artifact's own terms, if its layer declared that its artifacts carry them.**
 //! 5. **The existence criterion, if declared** — the masked count against a declared bar.
 //!
@@ -282,18 +282,18 @@ pub struct ArtifactRows {
     /// reused (contracts §2.1).
     base_rows: u32,
     covered: Vec<String>,
-    /// **What this form borrowed, and the version it borrowed it at** — one entry per distinct
+    /// What this form borrowed and the version it borrowed it at: one entry per distinct
     /// `(layer, level)` an artifact of this level took its membership from, because it declared
-    /// none of its own ([`ArtifactRows::inherit`]). Empty on every level that inherits nothing,
-    /// which is every level that carries no attachment.
+    /// none of its own ([`ArtifactRows::inherit`]). Empty on a level that borrows nothing, which is
+    /// every level carrying no attachment.
     ///
-    /// **The staleness term the projection key cannot carry.** A form is filed under *its own*
-    /// level's version, and a target that grows moves the **target's** version and not this
-    /// level's — so a label of a cluster that gained members would go on answering over the
-    /// membership the cluster had when the label's form was built. Read at every cache hit
-    /// ([`ArtifactRows::inherited_current`]) beside [`ArtifactRows::covers`], and a form whose
+    /// The projection key cannot carry this staleness term. A form is filed under its own level's
+    /// version, and a target that grows moves the target's version and not this level's, so a label
+    /// of a cluster that gained members would go on answering over the membership the cluster had
+    /// when the label's form was built. Read at every cache hit
+    /// ([`ArtifactRows::inherited_current`]) beside [`ArtifactRows::covers`]. A form whose
     /// borrowing has moved is rebuilt rather than brought forward: the delta a publication or a
-    /// growth applies is the *target* level's, and there is no delta on this level to take it.
+    /// growth applies is the target level's, and this level has no delta to take it.
     inherited: Vec<(String, u32, u64)>,
 }
 
@@ -604,10 +604,10 @@ impl MembershipRows {
         rows
     }
 
-    /// **The slot at `idx` takes `rows` outright** — the one caller is [`ArtifactRows::inherit`],
-    /// where the rows are not this artifact's own and there is nothing of its own to keep. A
-    /// membership is never otherwise replaced: it grows ([`Self::or_rows`]) or it is rebased over
-    /// one extent ([`Self::rebase_rows`]).
+    /// The slot at `idx` takes `rows` outright. The one caller is [`ArtifactRows::inherit`], where
+    /// the rows are not this artifact's own and it has nothing of its own to keep. A membership is
+    /// never otherwise replaced: it grows ([`Self::or_rows`]) or it is rebased over one extent
+    /// ([`Self::rebase_rows`]).
     fn put_rows(&mut self, idx: usize, rows: Bitmap) {
         if self.rows.len() <= idx {
             self.rows.resize_with(idx + 1, || None);
@@ -1623,44 +1623,40 @@ impl ArtifactRows {
         .with_column(column)
     }
 
-    /// **An attached artifact that declares no members of its own is placed, counted and gated
-    /// over its target's membership** (owner ruling H, 2026-09-18; `python-sdk.md` §4.7).
+    /// Place, count and gate an attached artifact that declares no members of its own over its
+    /// target's membership (decision 0145, `annotations.md` §2.2).
     ///
-    /// A label with no member rows is the label of its cluster: it sits in the tiles the cluster
+    /// A label with no member rows is the label of its cluster. It sits in the tiles the cluster
     /// sits in, its masked count is the cluster's masked count, its existence criterion reads that
-    /// number, and its proportional denominator is the cluster's declared size. That is the
-    /// default and no declaration asks for it — a label that *does* declare members keeps them,
-    /// because those members are the generating set the caller claimed
-    /// ([decision 0135](../../../docs/decisions/0135-a-generating-set-is-the-callers-claim-i8-withdrawn.md)),
+    /// number, and its proportional denominator is the cluster's declared size. A label that
+    /// declares members keeps them: they are the generating set the caller claimed (decision 0135),
     /// and `content_requires = "all"` gates on them unchanged.
     ///
-    /// **The rule is the store's** — [`tessera_lifecycle::membership::ArtifactStore::members_of`],
-    /// which the build's artifact pass and the fold's read as well (decision 0139). What is this
-    /// function's own is *where* it is applied: on the level's row form, once, so the tile index,
-    /// the masked count, the criterion, the declared size and every derived property follow from
-    /// one membership, and every route — the viewport, the drill-down, a filter, the dependency
-    /// prerequisite — is served that form.
+    /// The rule is the store's, in
+    /// [`tessera_lifecycle::membership::ArtifactStore::members_of`], which the build's artifact
+    /// pass and the fold's read as well (decision 0139). What this function owns is where the rule
+    /// is applied: on the level's row form, once, so the tile index, the masked count, the
+    /// criterion, the declared size and every derived property follow from one membership. Every
+    /// route reads that form: the viewport, the drill-down, a filter, the dependency prerequisite.
     ///
-    /// **It inherits nothing the target's own gate would withhold.** The membership is a *set of
-    /// rows*, and every count taken over it is taken against this viewer's own composed mask
-    /// (**I2**), so a borrowed membership discloses no member the borrower's mask does not already
-    /// admit. Existence is the target's too, one conjunct earlier: an attached artifact is absent
-    /// wherever its target is absent, on the target's whole predicate and on every route
-    /// ([`ArtifactView::verdict`] step 3,
-    /// [decision 0089](../../../docs/decisions/0089-a-dependency-edge-carries-deletion-and-visibility.md)).
-    /// A principal not served the cluster is therefore not served its label, filtered or not
-    /// (**I3**, **I12**), and a filter moves neither number.
+    /// A borrowing artifact gains nothing its target's gate would withhold. The membership is a set
+    /// of rows, and every count taken over it is taken against this viewer's own composed mask
+    /// (**I2**), so it admits no member the viewer's mask does not already admit. Existence is the
+    /// target's too, one conjunct earlier: an attached artifact is absent wherever its target is
+    /// absent, on the target's whole predicate and on every route ([`ArtifactView::verdict`] step
+    /// 3, decision 0089). A principal not served the cluster is not served its label, filtered or
+    /// not (**I3**, **I12**), and a filter moves neither number.
     ///
-    /// **At the target's current membership.** The versions borrowed from are recorded in
+    /// The membership is the target's as it stands now. The versions borrowed from are recorded in
     /// [`Self::inherited`], so a target that grows re-derives its labels at the next request that
     /// finds the form ([`Self::inherited_current`]).
     ///
-    /// **The form goes artifact-major the moment anything borrows.** A build and a fold write such
-    /// a level's column over the borrowed membership as it stood then
-    /// ([`tessera_lifecycle::membership::ArtifactStore::members_of`], which they read too), and
-    /// that is a set the *target's* version moves without moving this level's — so the column is
-    /// dropped here rather than served from or amended. The level's own bitmaps are cheap: a label
-    /// level is one artifact per cluster.
+    /// The form is served artifact-major once anything borrows. A build and a fold write such a
+    /// level's column over the borrowed membership as it stood then (they read
+    /// [`tessera_lifecycle::membership::ArtifactStore::members_of`] too), and that is a set the
+    /// target's version moves without moving this level's, so the column is dropped here rather
+    /// than served from or amended. The level's own bitmaps are cheap: a label level holds one
+    /// artifact per cluster.
     ///
     /// Returns how many ordinals took a membership that is not their own.
     fn inherit(
@@ -1717,9 +1713,8 @@ impl ArtifactRows {
         taken
     }
 
-    /// Whether every membership this form borrowed is still the membership it borrowed — see
-    /// [`Self::inherited`]. Vacuously true for a form that borrowed nothing, which is every
-    /// ordinary level.
+    /// Whether every membership this form borrowed is still the membership it borrowed
+    /// ([`Self::inherited`]). True for a form that borrowed nothing, which is every ordinary level.
     fn inherited_current(&self, store: &ArtifactStore) -> bool {
         self.inherited
             .iter()
@@ -3445,16 +3440,14 @@ impl ArtifactProjections {
         );
     }
 
-    /// **Drop a form that borrowed a membership rather than amend it** — see
-    /// [`ArtifactRows::inherit`].
+    /// Drop a form that borrowed a membership rather than amend it ([`ArtifactRows::inherit`]).
     ///
-    /// Every amendment below carries what a level's own **records** changed by, and a borrowing
+    /// Every amendment below carries what a level's own records changed by, and a borrowing
     /// artifact's membership is not in its record: a delta hands it the empty set it declared, and
-    /// a flush's extension finds nothing of its own to extend. So a form holding one is rebuilt by
-    /// the next request naming the level, which resolves every borrowed membership against the
-    /// store as it stands then. Said at `debug`, because this is the ordinary course for such a
-    /// level and not a fault: what is given up is a warm form on a level whose artifacts are one
-    /// per cluster.
+    /// a flush's extension finds nothing of its own to extend. The next request naming the level
+    /// rebuilds the form and resolves every borrowed membership against the store as it stands
+    /// then. Said at `debug`, because this is the ordinary course for such a level rather than a
+    /// fault, and what is given up is a warm form on a level holding one artifact per cluster.
     fn drop_borrowed(&self, address: &LevelAddress, view: &str) {
         let (_, layer, level) = address;
         self.cached
@@ -3806,10 +3799,9 @@ impl ArtifactProjections {
                 MembershipRows::build(store.level_in_view(layer, level, view_key(view)), space);
             built.index = TileIndex::build(&built.membership, total_rows(space));
         }
-        // **The borrowed memberships, last** — after the form is otherwise complete, because what
-        // they replace is the empty membership the record declared and what they invalidate is the
-        // index derived over it. See [`ArtifactRows::inherit`]: an attached artifact with no
-        // members of its own is placed, counted and gated over its target's.
+        // The borrowed memberships come last, after the form is otherwise complete. They replace
+        // the empty membership each record declared, and they invalidate the index derived over it.
+        // See [`ArtifactRows::inherit`].
         let inherited = built.inherit(store, space, layer, level, view_key(view));
         if inherited > 0 {
             tracing::info!(

@@ -1,18 +1,18 @@
-//! **A label with no members of its own is the label of its cluster** (owner ruling H,
-//! 2026-09-18; `python-sdk.md` §4.7): an attached artifact that declares no membership is placed
-//! where its target is placed, counted over its target's members, gated by its target's gate, and
-//! served to whoever is served the target.
+//! A label with no members of its own is the label of its cluster (decision 0145,
+//! `annotations.md` §2.2). An attached artifact that declares no membership is placed where its
+//! target is placed, counted over its target's members, gated by its target's gate, and served to
+//! whoever is served the target.
 //!
 //! What is asserted, over the real routes: a label published with no `members` is drawn with its
 //! text in the viewport's artifact frame and counted over the cluster's members, for a principal
-//! who is served the cluster — and is absent, whole, for one who is not; the cluster's growth
-//! grows the label's count at the next publication; a label published onto a warm level takes the
-//! same membership; a label that declares its own members keeps them; for every principal the
-//! label's masked count is the cluster's; and the same rule holds in a bundle the build wrote.
+//! who is served the cluster, and is absent whole for one who is not; the cluster's growth grows
+//! the label's count at the next publication; a label published onto a warm level takes the same
+//! membership; a label that declares its own members keeps them; for every principal the label's
+//! masked count is the cluster's; and the same rule holds in a bundle the build wrote.
 //!
-//! **The counts are read from the drill-down**, not from the viewport row: a dependent's viewport
-//! row carries its target's masked count whatever its own membership is (decision 0104's D13,
-//! owner ruling 2026-08-25), so a number read there would be true before this rule as well.
+//! The counts are read from the drill-down rather than from the viewport row. A dependent's
+//! viewport row carries its target's masked count whatever its own membership is (decision 0104's
+//! D13), so a number read there would be true before this rule as well.
 
 mod common;
 
@@ -36,7 +36,7 @@ fn members(range: std::ops::Range<u64>) -> Vec<String> {
     range.map(member).collect()
 }
 
-/// How many of `range` carry term 1 — the narrow principal's masked count.
+/// How many of `range` carry term 1, which is the narrow principal's masked count.
 fn narrow_count(range: std::ops::Range<u64>) -> u64 {
     range.filter(|s| terms_of(*s).contains(&1)).count() as u64
 }
@@ -87,7 +87,7 @@ fn clusters() -> serde_json::Value {
 }
 
 /// The label set: one supplied text whose content requirement is `inherited`, attached to the
-/// clustering, and no criterion of its own — everything that decides is the cluster's.
+/// clustering, and no criterion of its own. Everything that decides is the cluster's.
 fn topics() -> serde_json::Value {
     json!({
         "name": TOPICS,
@@ -220,10 +220,10 @@ async fn fixture(server: &TestServer, range: std::ops::Range<u64>, text: &str) -
 
 /// The drill-down's status and body for one artifact, as `terms` sees it.
 ///
-/// **The route D13 does not reach.** The viewport substitutes a dependent's target's masked count
-/// on the wire (decision 0104's D13, owner ruling 2026-08-25), so a number read there says nothing
-/// about which membership the server counted. This route answers one artifact from its own
-/// verdict, so the number here is the membership the ruling is about.
+/// D13 does not reach this route. The viewport substitutes a dependent's target's masked count on
+/// the wire (decision 0104's D13), so a number read there says nothing about which membership the
+/// server counted. This route answers one artifact from its own verdict, so the number here is over
+/// the membership decision 0145 is about.
 async fn drill(server: &TestServer, terms: &[&str], tessera_id: &str) -> (u16, serde_json::Value) {
     let auth = authorise(server, terms).await;
     let token = auth["token"].as_str().unwrap();
@@ -246,9 +246,9 @@ fn id_of(body: &serde_json::Value, at: usize) -> String {
         .to_string()
 }
 
-/// **The headline.** The label is placed where the cluster is placed and carries its text there,
-/// its own masked count is the cluster's, and the principal the cluster is withheld from is served
-/// neither — the label having nothing of its own to be served on.
+/// The label is placed where the cluster is placed and carries its text there, its own masked
+/// count is the cluster's, and the principal the cluster is withheld from is served neither. The
+/// label has nothing of its own to be served on.
 #[tokio::test]
 async fn a_label_with_no_members_is_served_over_its_clusters_membership() {
     let tmp = TempDir::new().unwrap();
@@ -294,74 +294,96 @@ async fn a_label_with_no_members_is_served_over_its_clusters_membership() {
     server.shutdown().await;
 }
 
-/// **A conformance-style differential**: over every principal the fixture can produce, the label's
-/// masked count is the cluster's, and the label is served exactly where the cluster is. The pair is
-/// the ruling, so it is asserted as a pair.
+/// Over every principal the fixture can produce, the label's masked count is the cluster's and the
+/// label is served exactly where the cluster is. Decision 0145 is that pair, so it is asserted as a
+/// pair.
+///
+/// Two clusters, so that the sweep covers both states of served: the narrow principal sees ten of
+/// the small cluster's thirty and does not clear the bar, and thirty-four of the large one's
+/// hundred and does.
 #[tokio::test]
 async fn the_labels_masked_count_is_the_clusters_for_every_principal() {
     let tmp = TempDir::new().unwrap();
     let server = serve(&tmp).await;
-    // A bar of one, so the narrow principal clears it too and the differential compares both
-    // states of *served* rather than one.
-    register(&server, {
-        let mut declaration = clusters();
-        declaration["require_member_visibility"] = json!({ "count": 1 });
-        declaration
-    })
-    .await;
+    register(&server, clusters()).await;
     register(&server, topics()).await;
+    assert!(narrow_count(0..30) < BAR && narrow_count(0..100) >= BAR);
     let (status, body) = put(
         &server,
         CLUSTERS,
-        json!([{ "key": "c", "members": members(0..30) }]),
+        json!([
+            { "key": "small", "members": members(0..30) },
+            { "key": "big", "members": members(0..100) }
+        ]),
     )
     .await;
     assert_eq!(status, 201, "{body}");
-    let cluster = id_of(&body, 0);
+    let clusters = [id_of(&body, 0), id_of(&body, 1)];
     let (status, body) = put(
         &server,
         TOPICS,
-        json!([{
-            "key": "t",
-            "members": [],
-            "attached_to": { "layer": CLUSTERS, "key": "c" },
-            "content": [{ "values": ["shipping"] }]
-        }]),
+        json!([
+            {
+                "key": "t-small",
+                "members": [],
+                "attached_to": { "layer": CLUSTERS, "key": "small" },
+                "content": [{ "values": ["the small one"] }]
+            },
+            {
+                "key": "t-big",
+                "members": [],
+                "attached_to": { "layer": CLUSTERS, "key": "big" },
+                "content": [{ "values": ["the large one"] }]
+            }
+        ]),
     )
     .await;
     assert_eq!(status, 201, "{body}");
-    let label = id_of(&body, 0);
+    let labels = [id_of(&body, 0), id_of(&body, 1)];
 
+    let mut absences = 0;
     for terms in [vec!["0"], vec!["1"], vec!["0", "1"]] {
-        let (cluster_status, cluster_body) = drill(&server, &terms, &cluster).await;
-        let (label_status, label_body) = drill(&server, &terms, &label).await;
-        assert_eq!(
-            label_status, cluster_status,
-            "{terms:?}: the label is served exactly where its cluster is"
-        );
-        assert_eq!(
-            label_body["masked_count"], cluster_body["masked_count"],
-            "{terms:?}: at the cluster's masked count"
-        );
+        for (cluster, label) in clusters.iter().zip(&labels) {
+            let (cluster_status, cluster_body) = drill(&server, &terms, cluster).await;
+            let (label_status, label_body) = drill(&server, &terms, label).await;
+            assert_eq!(
+                label_status, cluster_status,
+                "{terms:?}: the label is served exactly where its cluster is"
+            );
+            assert_eq!(
+                label_body["masked_count"], cluster_body["masked_count"],
+                "{terms:?}: at the cluster's masked count"
+            );
+            if label_status == 404 {
+                absences += 1;
+            }
+        }
         let rows = served(&server, &terms).await;
-        assert_eq!(
-            row(&rows, TOPICS, "t").is_some(),
-            row(&rows, CLUSTERS, "c").is_some(),
-            "{terms:?}: and the viewport agrees with the drill-down"
-        );
+        for (cluster, label) in [("small", "t-small"), ("big", "t-big")] {
+            assert_eq!(
+                row(&rows, TOPICS, label).is_some(),
+                row(&rows, CLUSTERS, cluster).is_some(),
+                "{terms:?}: and the viewport agrees with the drill-down for {label}"
+            );
+        }
     }
     assert_eq!(
-        drill(&server, &["1"], &label).await.1["masked_count"],
-        narrow_count(0..30),
-        "and the number is that principal's own, never the cluster's size"
+        absences, 1,
+        "the narrow principal is served neither the small cluster nor its label, and every other \
+         pair is served"
+    );
+    assert_eq!(
+        drill(&server, &["1"], &labels[1]).await.1["masked_count"],
+        narrow_count(0..100),
+        "and a served label's number is that principal's own, never the cluster's size"
     );
 
     server.shutdown().await;
 }
 
-/// **A cluster that grows grows its label**, at the next publication and with nothing published to
-/// the label at all: the membership is borrowed at the version the target holds now, not copied at
-/// the label's own publication.
+/// A cluster that grows grows its label, at the next publication and with nothing published to the
+/// label. The membership is read at the version the target holds now rather than copied at the
+/// label's own publication.
 #[tokio::test]
 async fn a_cluster_that_grows_grows_its_labels_count() {
     let tmp = TempDir::new().unwrap();
@@ -394,10 +416,10 @@ async fn a_cluster_that_grows_grows_its_labels_count() {
     server.shutdown().await;
 }
 
-/// **A label that declares its own members keeps them.** They are the caller's claim about where
-/// the text came from (decision 0135) and the ruling does not touch them: this label is counted
-/// over its own six where the label beside it — attached to the same cluster, declaring none —
-/// is counted over the cluster's thirty.
+/// A label that declares its own members keeps them. They are the caller's claim about where the
+/// text came from (decision 0135), and decision 0145 does not touch them: this label is counted
+/// over its own six, and the label beside it, attached to the same cluster and declaring none, is
+/// counted over the cluster's thirty.
 #[tokio::test]
 async fn a_label_with_its_own_members_keeps_them() {
     let tmp = TempDir::new().unwrap();
@@ -446,7 +468,7 @@ async fn a_label_with_its_own_members_keeps_them() {
     );
     let rows = served(&server, &["0"]).await;
     for key in ["own", "borrowed"] {
-        // **Both carry the cluster's number on the wire**, which is D13 and not this ruling: a
+        // Both carry the cluster's number on the wire. That is D13 rather than decision 0145: a
         // dependent's viewport row takes its target's masked count whatever its own membership is
         // (decision 0104's D13). The two labels differ where the server counts, above.
         assert_eq!(
@@ -459,10 +481,10 @@ async fn a_label_with_its_own_members_keeps_them() {
     server.shutdown().await;
 }
 
-/// **A label published onto a level a request has already warmed** takes its cluster's membership
-/// too. The held form is amended by what a level's own records changed by, and a borrowed
-/// membership is in no record — so a form holding one is dropped at the publication rather than
-/// amended, and the next request resolves it again.
+/// A label published onto a level a request has already warmed takes its cluster's membership too.
+/// The held form is amended by what a level's own records changed by, and a borrowed membership is
+/// in no record, so a form holding one is dropped at the publication rather than amended and the
+/// next request resolves it again.
 #[tokio::test]
 async fn a_label_published_after_the_form_is_warm_is_served_over_its_cluster() {
     let tmp = TempDir::new().unwrap();
@@ -508,8 +530,8 @@ async fn a_label_published_after_the_form_is_warm_is_served_over_its_cluster() {
 const BUILT_CLUSTERS: &str = "clusters/built";
 const BUILT_TOPICS: &str = "topics/built";
 
-/// The declaration the bundle below is built from: a clustering whose membership is a **column on
-/// the points** (`artifacts-from-points.md` §2) and a label set over it with **no member table**.
+/// The declaration the bundle below is built from: a clustering whose membership is a column on the
+/// points (`artifacts-from-points.md` §2) and a label set over it with no member table.
 const BUILT_TOML: &str = r#"
 [sources]
 points = "points.parquet"
@@ -592,7 +614,7 @@ fn write_parquet(
     w.close().unwrap();
 }
 
-/// One row per cluster — the roster the layer is named from.
+/// One row per cluster: the roster the layer is named from.
 fn write_roster(path: &std::path::Path) {
     use arrow::array::{ArrayRef, StringArray};
     use arrow::datatypes::{DataType, Field, Schema};
@@ -697,10 +719,10 @@ fn build_with_labels(dir: &std::path::Path) {
     tessera_build::build(&args).expect("the bundle builds");
 }
 
-/// **The built bundle serves it too** (decision 0091). The label of the small cluster is drawn
-/// with its text for the principal who is served that cluster and is absent for the one who is
-/// not; the label of the large cluster is drawn for both. Nothing here was published through the
-/// control plane.
+/// The built bundle serves it too (decision 0091). The label of the small cluster is drawn with its
+/// text for the principal who is served that cluster and is absent for the one who is not. The
+/// label of the large cluster is drawn for both. Nothing here was published through the control
+/// plane.
 #[tokio::test]
 async fn a_built_label_set_with_no_members_is_served_over_its_clustering() {
     let tmp = TempDir::new().unwrap();
@@ -741,9 +763,9 @@ async fn a_built_label_set_with_no_members_is_served_over_its_clustering() {
         "the large one clears it, and so its label is drawn: {narrow:?}"
     );
 
-    // **The build and the running service answer alike** (decision 0091, decision 0139): the same
+    // The build and the running service answer alike (decision 0091, decision 0139). The same
     // label, over the same cluster, published through the control plane onto the clustering the
-    // build wrote — and every principal is served the two identically.
+    // build wrote, and every principal is served the two identically.
     let (status, body) = put(
         &server,
         BUILT_TOPICS,

@@ -3161,9 +3161,9 @@ fn a_build_reads_an_authored_shape_content_and_discloses_the_kind() {
     assert!(message.contains("one drawn geometry"), "{message}");
 }
 
-/// A label set over a from-column clustering, carrying **no member table of its own** — the shape
-/// the H ruling of 2026-09-18 makes servable, and the one the SDK writes when a user declares
-/// labels and inserts nothing but their text.
+/// A label set over a from-column clustering, carrying no member table of its own. Decision 0145
+/// makes this shape servable, and it is what the SDK writes when a user declares labels and inserts
+/// nothing but their text.
 const LABELS_WITHOUT_MEMBERS: &str = r#"
   [layer.labels]
   name = "topics/x"
@@ -3215,12 +3215,12 @@ fn write_labels_without_members(path: &Path, clusters: &[i64]) {
     write(path, schema, batch);
 }
 
-/// **A label set declaring no members builds** (the H ruling of 2026-09-18): the label layer's
-/// artifacts carry an attachment, a text and an empty membership, and the build publishes them
-/// beside the clustering they name rather than refusing the declaration for want of a member
-/// table. What such a label is *served over* is the engine's
-/// (`tessera-server/tests/label_membership.rs`); what is asserted here is that the bundle carries
-/// it, and that its clustering came from a point column with no member table anywhere.
+/// A label set declaring no members builds (decision 0145). The label layer's artifacts carry an
+/// attachment, a text and an empty membership, and the build publishes them beside the clustering
+/// they name rather than refusing the declaration for want of a member table. What such a label is
+/// served over is asserted in `tessera-server/tests/label_membership.rs`; asserted here is that the
+/// bundle carries it, and that its clustering came from a point column with no member table
+/// anywhere.
 #[test]
 fn a_label_set_with_no_member_table_builds_over_a_from_column_clustering() {
     let clusters = every_point_clustered();
@@ -3252,10 +3252,9 @@ fn a_label_set_with_no_member_table_builds_over_a_from_column_clustering() {
     let labels = level_of("topics/x");
     let clusters = level_of("curated/a");
     assert_eq!(labels.registered, 3, "three labels are published");
-    // **And the pass counts the rows they are served over**, not the empty set each record
-    // declares: the build reads the same `ArtifactStore::members_of` the engine does (decision
-    // 0139), so the label level's tile index and column are written over the clusters' members and
-    // the report says so. Before the H ruling this line read `0 artifact(s) with rows`.
+    // The pass counts the rows they are served over. The build reads the same
+    // `ArtifactStore::members_of` the engine does (decision 0139), so the label level's tile index
+    // and column are written over the clusters' members and the report says so.
     assert_eq!(
         labels.shape.artifacts, clusters.shape.artifacts,
         "each label is placed over the cluster it names, so the label level has rows for as many \
