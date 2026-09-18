@@ -1,12 +1,12 @@
 # The Python SDK: a Tessera database in a notebook
 
 **Status:** Provisional — under review. Reviewed once under the user-experience and capability
-lenses, re-reviewed on §3, §4, §6 and §12 after the rulings of §11.1, and built through S1 to
-S8 of §12 by 2026-09-17, each stage refereed before merge. The verbs were re-cut on 2026-09-18
-(§11.1: declaring and inserting are different verbs, no guessed names, no inference by
-default), and that cut, S9, and the two engine rules it leans on, F and H, are not built: the
-examples of §10 are written to the new verbs and run only where marked otherwise. Before this
-becomes normative: S9, F and H built and the examples run as the demo notebooks.
+lenses, re-reviewed on §3, §4, §6 and §12 after the rulings of §11.1, and built through every
+stage of §12 by 2026-09-18, each stage refereed before merge, the verbs re-cut on 2026-09-18
+(§11.1) and rebuilt; the examples of §10 run as the demo notebooks under `clients/py/examples/`
+and a headless test asserts what each serves. Before this becomes normative: the rulings still
+open in §11.2, and a pass to make the text describe the package as built where it still
+describes the plan.
 
 **Owns:** the `tesseradb` package's verbs for creating, filling and reading a Tessera database,
 and the shape of a local instance. It does not own the wire (contracts §3), the ingest model
@@ -227,7 +227,8 @@ db.declare_view_group(name, metadata=None, members=None, default_label="public",
 this group shares; `default_label` is the group's `point_visibility` default. The group's views
 and their metadata come from `insert(group, roster=table, key=, ...)`, and its rows from
 `insert(group, table, id=, x=, y=, access=, view=)` with `view=` naming the column that says
-which view each row belongs to (§3). A group-scoped attribute or layer names the group in
+which view each row belongs to, or `view_key=` naming the one view a whole table is for (§3); a
+view's metadata comes from the roster insert in either form. A group-scoped attribute or layer names the group in
 `scope` (§4.5, §4.6) and its view column on the insert. views.md owns the semantics.
 
 ### 4.4 Vocabularies
@@ -715,6 +716,6 @@ prints. The stages order the building; the goal is all of them.
 | S6 runtime declarations | attributes and vocabularies declared after the first commit | the served filter and category listing | S3 |
 | S7 demo | the two notebooks and the headless test | | S2, S3 |
 | S8 simplification | the id map, the commit log and its digests, the access-column copy, the from-column publish and the held-row logic removed; the pre-flight reports and sends nothing; the wait on the publication counter | every existing test, rewritten to the stateful reading | A, the publication signal |
-| S9 declare and insert | `declare_*` takes no data; `insert(target, table, **columns)`; `commit()` forgets; `stage` removed; `declare_columns`; no guessed names; undeclared columns ignored; the examples and the demo rewritten | every served test and the demo's headless walk | F, H |
+| S9 declare and insert | `declare_*` takes no data; `insert(target, table, **columns)`; `commit()` forgets; `stage` removed; `declare_columns`; no guessed names; undeclared columns ignored; the examples and the demo rewritten | every served test, every corpus regeneration and the demo's headless walk | the values route, decision 0145 |
 
 The Rust changes (A, B, C) are small and sit in the server and the CLI; the engine is untouched.
