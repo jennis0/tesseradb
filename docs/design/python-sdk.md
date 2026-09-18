@@ -700,7 +700,7 @@ Rulings of 2026-09-18:
   The amendment to client-components and 0104 is the controller's. Not built yet.
 - An attached record at the publish route may omit `members` and `excluding`; an unattached one
   keeps the requirement. The SDK omits the field for a memberless label.
-- Issues #151, #152, #153 and #155 are fixed as found ; #153 was already fixed on main by
+- Issues #151, #152, #153 and #155 are fixed as found; #153 was already fixed on main by
   decision 0144's cycle, and #151 was the SDK reading through a session older than the view.
 - A batch id is the client's own id for one request and is never derived from the request's
   content. Loading the same points again is a second load. The server remembers an id for as
