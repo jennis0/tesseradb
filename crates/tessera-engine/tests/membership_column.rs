@@ -797,11 +797,19 @@ fn measure_the_column_cost() {
     }
 }
 
-/// **A label carries its cluster's masked count** (D13): the number beside a label is the
-/// target's, as this principal sees it, so the two agree in one response — and a label whose
-/// target this response does not hold is absent, so there is no count to disagree with.
+/// **A label names its cluster by identifier, and its count is its own** (owner ruling,
+/// 2026-09-18).
+///
+/// `target` is the `tessera_id` this same response served the cluster under, so a client attaches
+/// the two exactly rather than by matching numbers — the join that left a label unattached
+/// wherever two clusters happened to share a count. The count copy is gone with it: this label
+/// declares ten members of its own, so by
+/// [decision 0145](../../../docs/decisions/0145-an-attached-artifact-with-no-members-of-its-own-is-served-over-its-targets-membership.md)
+/// it is served over its own generating set and its row carries that number, not its cluster's
+/// hundred. A label whose target this response does not hold is absent entire, so `target` never
+/// names a row that is not here.
 #[test]
-fn a_dependent_artifact_carries_its_targets_masked_count() {
+fn a_dependent_artifact_names_its_target_and_carries_its_own_count() {
     let fx = fixture();
     let engine = fx.open();
     engine
@@ -849,13 +857,26 @@ fn a_dependent_artifact_carries_its_targets_masked_count() {
                     .get("l-a1")
                     .expect("the label is served beside its cluster");
                 assert_eq!(
-                    label.masked_count, target.masked_count,
-                    "the label's count is its cluster's"
+                    label.target,
+                    Some(target.tessera_id),
+                    "the label names its cluster by the identifier this response served it under"
+                );
+                assert_eq!(
+                    label.masked_count, 10,
+                    "and its count is its own generating set's, never its cluster's"
                 );
                 assert!(
                     target.masked_count > 10,
-                    "and not the label's own membership"
+                    "the two are different numbers, so a copy would show here"
                 );
+                // The property the client's join rests on: the value is an identifier this same
+                // response carries.
+                assert!(out
+                    .artifacts
+                    .iter()
+                    .any(|a| Some(a.tessera_id) == label.target));
+                // A cluster is attached to nothing, and says so.
+                assert_eq!(target.target, None);
             }
             // The subset principal: `a1` fails the bar and `a` is served instead, so the label —
             // describing an artifact this response does not hold — is absent whole.

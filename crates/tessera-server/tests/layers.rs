@@ -1129,7 +1129,7 @@ async fn the_shape_columns_trail_and_are_absent_when_no_served_layer_declares_on
     let names = artifact_schema_names(&without).unwrap();
     assert_eq!(
         names.last().map(String::as_str),
-        Some("highlighted"),
+        Some("target"),
         "no served layer declares a hull, so the schema ends at the fixed prefix: {names:?}"
     );
     assert!(!names.iter().any(|n| n.starts_with("shape_")));

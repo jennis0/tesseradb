@@ -32,6 +32,7 @@ use tessera_corpus::{Corpus, Grant, BAY_VALUES};
 use tessera_engine::filter::{FilterExpr, FilterOperand};
 use tessera_engine::viewport::ViewportRequest;
 use tessera_engine::Engine;
+use tessera_types::TesseraId;
 use tessera_lifecycle::membership::{IncomingAttachment, IncomingContent};
 use tessera_lifecycle::IncomingArtifact;
 use tessera_types::layer::{
@@ -342,7 +343,8 @@ fn the_bit_is_scoped_to_the_requested_tiles() {
 }
 
 // ---------------------------------------------------------------------------------------------
-// A label carries its target's bit, on the same argument its count does (D13, decision 0104).
+// A label carries its target's two filter bits (decision 0104). Not its count: the copy that
+// once stood beside them was withdrawn by the owner's ruling of 2026-09-18.
 // ---------------------------------------------------------------------------------------------
 
 const CLUSTERS: &str = "case/clusters";
@@ -405,13 +407,14 @@ fn labels() -> LayerDeclaration {
     }
 }
 
-/// **A label's bits are its cluster's** — D13's rule for the count, applied to the two fields
-/// beside it (decision 0104; `highlight-and-hierarchy.md` §2 for the second).
+/// **A label's bits are its cluster's, and its count is its own** (decision 0104;
+/// `highlight-and-hierarchy.md` §2 for the second bit; the owner's ruling of 2026-09-18 for the
+/// count).
 ///
 /// The case is a label whose own membership would answer differently: `c-hit` holds members
 /// carrying `BAY` and its label holds only members that do not, so a bit computed over the label's
 /// own membership reads `false` beside a cluster reading `true`. A label describes its cluster, so
-/// *does anything here match* is the cluster's question — the same reason its count is the
+/// *does anything here match* is the cluster's question — which used to be the same reason its count was the
 /// cluster's.
 ///
 /// **`highlighted` is asserted beside `matched` and against it**, because the two are one answer
@@ -472,7 +475,7 @@ fn a_label_carries_its_targets_bits() {
     // layers in one request**, which is what a layer picker offering the closure sends
     // (decision 0096) and what puts the target in the response for its dependent to read.
     let grant = "0,1,2,3,4,5,6,7,8";
-    type Row = (u64, Option<bool>, Option<bool>);
+    type Row = (u64, Option<bool>, Option<bool>, Option<TesseraId>, TesseraId);
     let both = |filter: Option<FilterExpr>,
                 highlight: Option<FilterExpr>|
      -> BTreeMap<(String, String), Row> {
@@ -490,7 +493,13 @@ fn a_label_carries_its_targets_bits() {
             .map(|a| {
                 (
                     (a.layer, a.key.expect("both layers publish keyed artifacts")),
-                    (a.masked_count, a.matched, a.highlighted),
+                    (
+                        a.masked_count,
+                        a.matched,
+                        a.highlighted,
+                        a.target,
+                        a.tessera_id,
+                    ),
                 )
             })
             .collect()
@@ -513,16 +522,28 @@ fn a_label_carries_its_targets_bits() {
         (LABELS, "label-hit"),
         (LABELS, "label-miss"),
     ] {
-        let (_, matched, highlighted) = at(layer, key);
+        let (_, matched, highlighted, _, _) = at(layer, key);
         assert_eq!(
             highlighted, matched,
             "{layer}/{key}: one clause in both fields is one answer, and the label's must be its \
              cluster's in the second field exactly as in the first"
         );
     }
-    // The count rule and the bit rules agree about which artifact is being described.
-    assert_eq!(at(LABELS, "label-hit").0, at(CLUSTERS, "hit").0);
-    assert_eq!(at(LABELS, "label-miss").0, at(CLUSTERS, "miss").0);
+    // **And the count is not inherited with them** (owner ruling, 2026-09-18). Each label
+    // declares the same ten members of its own, so both rows carry ten — where the clusters they
+    // describe carry the sizes of two disjoint halves of the corpus. Which artifact a label
+    // describes is said by `target` now, and by nothing numeric.
+    assert_eq!(
+        at(LABELS, "label-hit").0,
+        at(LABELS, "label-miss").0,
+        "one declared membership, so one count, whichever cluster the label hangs from"
+    );
+    assert!(at(LABELS, "label-hit").0 > 0);
+    assert_ne!(at(LABELS, "label-hit").0, at(CLUSTERS, "hit").0);
+    assert_ne!(at(LABELS, "label-miss").0, at(CLUSTERS, "miss").0);
+    assert_eq!(at(LABELS, "label-hit").3, Some(at(CLUSTERS, "hit").4));
+    assert_eq!(at(LABELS, "label-miss").3, Some(at(CLUSTERS, "miss").4));
+    assert_eq!(at(CLUSTERS, "hit").3, None, "a cluster is attached to nothing");
 
     // A highlight with **no** filter beside it: the label still answers for its cluster, and
     // `matched` is null because no filter was asked — the two fields are independent questions.
@@ -530,12 +551,12 @@ fn a_label_carries_its_targets_bits() {
     let lit_at = |layer: &str, key: &str| lit[&(layer.to_string(), key.to_string())];
     assert_eq!(lit_at(LABELS, "label-hit").2, Some(true));
     assert_eq!(lit_at(LABELS, "label-miss").2, Some(false));
-    assert!(lit.values().all(|(_, matched, _)| matched.is_none()));
+    assert!(lit.values().all(|(_, matched, ..)| matched.is_none()));
 
     // And with neither there is still no question, on a label as on anything else.
     assert!(both(None, None)
         .values()
-        .all(|(_, matched, highlighted)| matched.is_none() && highlighted.is_none()));
+        .all(|(_, matched, highlighted, ..)| matched.is_none() && highlighted.is_none()));
 }
 
 // ---------------------------------------------------------------------------------------------
