@@ -56,6 +56,7 @@ agents receive.
 | #153 | One view fed in a commit | Two views fed in a commit, before decision 0144's cycle; fixed on main before the issue was examined |
 | #154 | A replayed ingest batch id after a restart | A replayed values batch id after a restart |
 | #155 | The growth route ignores members already held | The values route appends a record for them |
+| Group-scoped layers | A view draws its own artifacts on the map frame | Browse, fetch by id, the `member_of` leaf and the attachment check served another view's artifact, with its key and id, to a viewer not allowed on that view. Found when a referee asked for a build fixture to be read back through the engine. The first tests written over it asserted the wrong answer as the expected one, and the first fix closed the cold path and left the path through a form already held in memory, which served the other view's artifact with a live count |
 | D13 | A label is served where its cluster is | The wire does not say which cluster it belongs to |
 
 ## Observations
