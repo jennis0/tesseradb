@@ -658,6 +658,89 @@ async fn a_restated_values_page_appends_no_growth_record() {
     );
 }
 
+/// **A page that restates part of a membership appends the rest of it alone** (issue #155). The
+/// subtraction is per artifact and per entity, so a producer that resends its last page with more
+/// rows on the end grows each artifact by the rows it has not sent before.
+///
+/// The record's own contents are read, rather than only its presence: a delta carrying the
+/// restated members would produce the same served membership and the same `joined`, and would
+/// differ only in what the log holds.
+#[tokio::test]
+async fn a_partly_restated_values_page_appends_only_the_new_members() {
+    let built = build_side(
+        &(0..N).collect::<Vec<_>>(),
+        &|e| e < BUILT,
+        &layer_toml("flat"),
+    );
+    let wal_dir = built.dir.join("wal");
+    let server = serve(&built).await;
+
+    // The first half of the corpus: three rows of each of the eight keys, of which the four keys
+    // the build minted already hold one member each.
+    let first: Vec<u64> = (0..N / 2).collect();
+    let (status, body) = post_values(
+        &server,
+        "values-1",
+        values_body(&first, LAYER, &|e| json!(key_of(e))),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["minted"].as_u64(), Some(8 - BUILT), "{body}");
+    assert_eq!(
+        body["joined"].as_u64(),
+        Some(BUILT * (N / 2 / 8 - 1)),
+        "{body}"
+    );
+    tick(&server).await;
+
+    // The whole corpus: every row of the page above restated, and the second half new.
+    let all: Vec<u64> = (0..N).collect();
+    let (status, again) = post_values(
+        &server,
+        "values-2",
+        values_body(&all, LAYER, &|e| json!(key_of(e))),
+    )
+    .await;
+    assert_eq!(status, 200, "{again}");
+    assert_eq!(again["minted"].as_u64(), Some(0), "{again}");
+    assert_eq!(
+        again["joined"].as_u64(),
+        Some(N / 2),
+        "the new rows joined and the restated ones did not: {again}"
+    );
+    tick(&server).await;
+
+    assert_eq!(
+        browse_counts(&server, &["0", "1"], LAYER, None).await,
+        expected_members(),
+        "the memberships a client browses are the fixture's own"
+    );
+
+    server.shutdown().await;
+    let (_wal, records) = tessera_lifecycle::wal::Wal::open(&wal_dir).expect("the log reopens");
+    let growths: Vec<&Vec<tessera_lifecycle::wal::MembershipGrowth>> = records
+        .iter()
+        .filter_map(|record| match record {
+            tessera_lifecycle::wal::WalRecord::ArtifactGrow { growth, .. } => Some(growth),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(growths.len(), 2, "one record per page");
+    let joining: Vec<u64> = growths[1]
+        .iter()
+        .map(|grown| {
+            tessera_lifecycle::membership::deserialise_members(&grown.joining)
+                .expect("the delta decodes")
+                .cardinality()
+        })
+        .collect();
+    assert_eq!(
+        joining,
+        vec![N / 2 / 8; 8],
+        "the second record grows each of the eight artifacts by the three rows it had not seen"
+    );
+}
+
 /// **A `closed` layer's unknown key is the `422` it has always been.** The value set is the whole
 /// of the difference: what `open` says is that a key names an artifact that may not exist yet, and
 /// `closed` says the roster is the roster.
