@@ -1726,176 +1726,27 @@ pub fn estimate_buffer_retry_after_s(stats: &ExecutorStats, buffered: u64) -> u6
 pub const DEFAULT_COMMIT_WINDOW_MAX_ROWS: usize = 10_000;
 
 // =================================================================================================
-// The ack channel, and the proof it demands
+// The ack channel
 // =================================================================================================
 
-/// The receipt half of a submitted command: the sender, the proof token, and **nothing else**.
-///
-/// ## Why this is a module and not two types beside the executor
-///
-/// The obvious claim to make for a proof token is "ack before swap does not compile", and putting
-/// `Published` beside [`Executor`] does **not** make it true. The proof would then be demanded only
-/// by the *helper* [`Responder::ack`], while `Receipt::ok` is a public constructor with no proof
-/// parameter; give `Job` a raw `SyncSender<Receipt>` and `respond.send(Receipt::ok(ack))` compiles
-/// anywhere — including inside this file, which is the only place that matters, since every rewrite
-/// the token exists to survive is a rewrite *of this file*. Rust's privacy is per **module**, so a
-/// guard that lives in the same module as the code it guards guards nothing.
-///
-/// So the sender moves in here and the field is private to this module. Outside it — which is all
-/// of the executor — a `Responder` offers exactly two operations, [`Responder::ack`] (needs a
-/// [`Published`]) and [`Responder::fail`] (cannot carry an `Ack`). There is no third route to a
-/// successful receipt, because there is no way to reach the channel.
-///
-/// ## What this still does not buy
-///
-/// [`Published::by_swap`] and [`Published::already_in_force`] are callable from anywhere in
-/// `write.rs`. A worker who *wants* to ack early can still mint a token — the replay path's
-/// `already_in_force()` is the obvious thing to reach for, and is exactly what a mutation testing
-/// this guard reaches for. Two things catch that rather than the type system:
-/// `check-layers.sh` rule 3 pins
-/// every `Published::` construction to this file, and there are exactly two ([`Executor::publish`],
-/// and the replay arm of [`Executor::admit_ingest`]); and `ack_follows_fsync_then_swap`'s
-/// `BeforeAck` leg
-/// fails on engine state — the effect is not in force at the moment the ack is being sent — with no
-/// reference to the step log. Type, rule, test: the claim is that no *one* of them is the
-/// guarantee.
-///
-/// **The token is taken by reference, and that is a deliberate weakening.** [`Responder::ack`]
-/// takes `&Published` rather than a `Published` by value, so one token acks unboundedly many
-/// waiters — which means acking window *k+1*'s waiters with window *k*'s token type-checks. By
-/// value would be stronger per ack and weaker overall: N acks would need N tokens, so a window's
-/// ack *loop* would have to mint inside itself, at a site with no swap adjacent, and
-/// `check-layers.sh`'s rule is a *location* rule that would not see it. The reduction is real and
-/// is written down here rather than left to be rediscovered. What still holds it: one window swaps
-/// once, and [`Executor::close_window`] is the only place a window's waiters are reached.
-mod ack {
-    use std::sync::mpsc::SyncSender;
+/// The receipt half of a submitted command. A handler acks only after the effect is in force:
+/// durable, applied and swapped in. `ack_follows_fsync_then_swap` holds that.
+pub(crate) struct Responder(SyncSender<Receipt>);
 
-    use tessera_lifecycle::command::{Ack, ExecError, Receipt};
-
-    /// Proof that a generation carrying a command's effect is live.
-    ///
-    /// [`super::Responder::ack`] cannot send a *successful* receipt without one, and the only
-    /// producers are the named constructors below — the ones `scripts/check-layers.sh` pins to this
-    /// file.
-    #[must_use = "a Published token exists to be handed to `ack`; dropping it discards the proof"]
-    pub(super) struct Published(());
-
-    impl Published {
-        /// Produced by the generation swap, and by nothing else on the success path.
-        pub(super) fn by_swap() -> Self {
-            Published(())
-        }
-
-        /// The one case where a success ack is honest without *this* command having swapped: an
-        /// idempotent replay of a `batch_id` whose **original** acceptance already swapped
-        /// (contracts §3.4's replay rule). The effect is in force; it was simply put there by an
-        /// earlier command.
-        ///
-        /// Takes the recorded ids it is replaying so it cannot be conjured out of nothing at a
-        /// site that has looked nothing up — the argument is the evidence, and the borrow makes
-        /// "I found this batch already accepted" a precondition of the call rather than a comment
-        /// above it.
-        pub(super) fn already_in_force(_replay_of: &[tessera_types::EntityId]) -> Self {
-            Published(())
-        }
-
-        /// A command that resolved to **no change at all**: every key it named exists and nothing
-        /// was joining, so no record was appended and no structure moved.
-        ///
-        /// This is honest without a swap for the one reason none of the others can claim — there is
-        /// no effect whose being in force could lag the ack. It is the narrowest of the four and
-        /// the easiest to misuse: *nothing to do* and *not done yet* are the same shape from the
-        /// caller's side and opposite from the service's, so a site reaching for this must have
-        /// established the first. Takes the resolved batch, on the constructors above's rule: the
-        /// argument is the evidence that something was looked at.
-        pub(super) fn nothing_to_apply(_resolved: &[tessera_lifecycle::IncomingGrowth]) -> Self {
-            Published(())
-        }
-
-        /// The same, for a `PUT` whose every key the level held with every part identical
-        /// (`ingest.md` §1.5): the preparation carries no record, so nothing moved. Takes the
-        /// prepared batch, on `nothing_to_apply`'s rule.
-        pub(super) fn nothing_prepared(_prepared: &tessera_lifecycle::PreparedPut) -> Self {
-            Published(())
-        }
-
-        /// An attribute declaration that met a column already carrying its identity
-        /// (`ingest.md` §1.1: a part present and identical): nothing was appended and nothing
-        /// moved, the effect being in force from the build or the earlier declaration. Takes the
-        /// request that was looked up, on the constructors above's rule.
-        pub(super) fn already_declared(_held: &tessera_lifecycle::AttributeRequest) -> Self {
-            Published(())
-        }
-
-        /// A page of vocabulary values that bound nothing and filled nothing
-        /// (`ingest.md` §1.1: every part present and identical). Nothing was appended and nothing
-        /// moved. Takes the page, on the constructors above's rule.
-        pub(super) fn nothing_bound(_page: &[tessera_lifecycle::DeclaredValue]) -> Self {
-            Published(())
-        }
-
-        /// A view group or plain view declaration that met the object already carrying its
-        /// identity (`ingest.md` §1.1): nothing was appended and nothing moved. Takes the name
-        /// that was looked up, on the constructors above's rule.
-        pub(super) fn already_declared_view(_name: &str) -> Self {
-            Published(())
-        }
-
-        /// A registry or artifact-store record applied. **Neither structure is carried by a
-        /// generation**, which is why this is honest without a swap: `/v1/meta`, every reachability
-        /// check and every membership read them from `LiveState` behind its own lock, so the effect
-        /// is in force the instant `LayerRegistry::apply` or `ArtifactStore::apply` returns. A
-        /// generation swap would prove something about row space, which a layer has none of and an
-        /// artifact holds only through its members.
-        ///
-        /// Takes the applied record for the same reason the replay constructor takes its ids: the
-        /// argument is the evidence, so the token cannot be minted at a site that has applied
-        /// nothing.
-        pub(super) fn registry_applied(_applied: &tessera_lifecycle::WalRecord) -> Self {
-            Published(())
-        }
+impl Responder {
+    fn new(tx: SyncSender<Receipt>) -> Self {
+        Responder(tx)
     }
 
-    /// Where one submitted `Command`'s [`Receipt`] is delivered.
-    ///
-    /// A **synchronous** channel sender, and that is forced rather than chosen: `tessera-engine`
-    /// has no tokio dependency and must not acquire one, so the plan's two options for "receipt
-    /// awaiting must not block the reactor" collapse to one — the handler wraps its submit in
-    /// `spawn_blocking`, and this stays a plain `std::sync::mpsc` sender. `sync_channel(1)`, not
-    /// `channel()`, so the executor's ack send never blocks on a caller that has gone away.
-    pub(crate) struct Responder(SyncSender<Receipt>);
+    /// A caller that has gone away is not an error: the effect stands either way.
+    fn ack(&self, ack: Ack) {
+        let _ = self.0.send(Receipt::ok(ack));
+    }
 
-    impl Responder {
-        pub(super) fn new(tx: SyncSender<Receipt>) -> Self {
-            Responder(tx)
-        }
-
-        /// Send a **successful** receipt. Requires proof that the effect is live.
-        ///
-        /// A dropped receiver is not an error: the caller's connection went away, and by then the
-        /// effect is already in force.
-        ///
-        /// **By reference** — one generation swap acknowledges N waiters, and
-        /// `Published` is deliberately neither `Clone` nor constructible outside `write.rs`. Taking
-        /// it by value would have forced the ack loop to mint a token per waiter, which is precisely
-        /// the residual hole this module's doc names: a `Published::by_swap()` at a site with no
-        /// swap adjacent, which `check-layers.sh` rule 3 (a *location* rule) would not see. A borrow
-        /// keeps "you must hold proof" as a precondition of the call while letting one swap answer
-        /// the window it published.
-        pub(super) fn ack(&self, ack: Ack, _proof: &Published) {
-            let _ = self.0.send(Receipt::ok(ack));
-        }
-
-        /// Send a failure receipt. No proof, because there is no effect to prove — and no way to
-        /// smuggle an [`Ack`] through it.
-        pub(super) fn fail(&self, error: ExecError) {
-            let _ = self.0.send(Receipt::failed(error));
-        }
+    fn fail(&self, error: ExecError) {
+        let _ = self.0.send(Receipt::failed(error));
     }
 }
-
-use ack::{Published, Responder};
 
 // =================================================================================================
 // Live state
@@ -7353,7 +7204,7 @@ impl Executor {
         };
         // Nothing acknowledged anything — the hook's own channel is what the caller waits on — so
         // the token is dropped here as the rebuild's is.
-        let _published = self.publish(next, std::time::Instant::now());
+        self.publish(next, std::time::Instant::now());
     }
 
     /// Build one vocabulary's suggestion index from the live minter and publish it, inline —
@@ -7422,7 +7273,7 @@ impl Executor {
             };
             // Nothing acknowledged anything: a rebuild answers no caller, so the token is
             // dropped here as the coalesce's is.
-            let _published = self.publish(next, std::time::Instant::now());
+            self.publish(next, std::time::Instant::now());
             // **After the swap, and unlinking a mapped file is the point.** A request still holding
             // the superseded generation keeps its pages — the mapping outlives the directory entry
             // — and a rebuild that deleted before the swap would race a walk against a file whose
@@ -7634,7 +7485,7 @@ impl Executor {
         self.refresh
             .in_flight
             .store(segments_version, Ordering::SeqCst);
-        let _published = self.publish_arc(Arc::clone(&next), started);
+        self.publish_arc(Arc::clone(&next), started);
         self.refresh.spawn(next);
 
         self.row_projection_cache
@@ -9803,7 +9654,7 @@ impl Executor {
             .retain(|held| held.strong_count() > 0);
         self.superseded_sidecars
             .push(Arc::downgrade(&live.external_index));
-        let _published = self.publish(next, started);
+        self.publish(next, started);
         self.health.coalesces.fetch_add(1, Ordering::Relaxed);
     }
 
@@ -10562,7 +10413,7 @@ impl Executor {
                 // every restore, which is the fail-open `overlay_diverged`'s gate also guards. The
                 // gate would refuse this window anyway; not setting the flag is the primary
                 // reason it never arises.
-                let _published = self.apply_changes(applied);
+                self.apply_changes(applied);
             }
             let mut real = Some(error);
             for (i, entry) in entries.into_iter().enumerate() {
@@ -10590,7 +10441,7 @@ impl Executor {
         // alone and no manifest field carried one; with that op deleted (decision 0048) each of the
         // three remaining ops moves state a `SEGMENTS-<n>.json` carries, and a window is never
         // empty — `commit_denies` is only ever called with entries.
-        let published = self.apply_changes(applied);
+        self.apply_changes(applied);
         self.deny_dirty = true;
         self.windows_since_publication += 1;
         // The liveness floor: a drain that never closes still publishes. See
@@ -10599,12 +10450,12 @@ impl Executor {
             self.publish_overlay_state();
         }
 
-        // **k waiters, one proof.** A death partway through this loop leaves some waiters acked and
+        // A death partway through this loop leaves some waiters acked and
         // some not; every un-acked one gets `SubmitError::ReceiptLost` → 500, never `ExecutorDead`
         // → 503, because its change is durably in force.
         for entry in entries {
             if let Some(respond) = &entry.respond {
-                self.ack(respond, Ack::Changed, &published);
+                self.ack(respond, Ack::Changed);
             }
         }
     }
@@ -11080,7 +10931,6 @@ impl Executor {
                 entity_ids,
             } => {
                 if prev_hash == body_hash {
-                    let proof = Published::already_in_force(&entity_ids);
                     // **A replay mints nothing, and the zero says so**: the artifacts this batch's
                     // keys created were created when it was first accepted, and this submission
                     // created none.
@@ -11089,9 +10939,7 @@ impl Executor {
                         Ack::Ingested {
                             entity_ids,
                             minted: 0,
-                        },
-                        &proof,
-                    );
+                        });
                 } else {
                     self.ack_failed(&respond, ExecError::BatchConflict { batch_id });
                 }
@@ -12825,7 +12673,7 @@ impl Executor {
         // One buffer clone, one generation, **one swap** for every entry in the window — carrying
         // the mutated `vocabularies`, so the next generation publishes this window's mints and not
         // merely its rows.
-        let published = self.apply_window(&mut closed, &positions, vocabularies, &fresh_bindings);
+        self.apply_window(&mut closed, &positions, vocabularies, &fresh_bindings);
 
         // **After the rows are in force, never before.** A membership is projected through rows, so
         // a store that held the join while the generation still lacked the row would describe an
@@ -12953,7 +12801,7 @@ impl Executor {
             );
         }
 
-        // **N waiters, one proof.** A death partway through this loop leaves some waiters acked and
+        // A death partway through this loop leaves some waiters acked and
         // some not; every un-acked one gets `SubmitError::ReceiptLost` → 500, never `ExecutorDead`
         // → 503, because its ingest is durably in force. That is the widening `ReceiptLost`'s own
         // doc predicts for this task.
@@ -12973,9 +12821,9 @@ impl Executor {
                 .expect("an entry always has at least one waiter");
             for waiter in waiters {
                 let entity_ids = entity_ids.clone();
-                self.ack(&waiter, Ack::Ingested { entity_ids, minted }, &published);
+                self.ack(&waiter, Ack::Ingested { entity_ids, minted });
             }
-            self.ack(&last, Ack::Ingested { entity_ids, minted }, &published);
+            self.ack(&last, Ack::Ingested { entity_ids, minted });
         }
 
         self.health
@@ -13536,7 +13384,6 @@ impl Executor {
         if records.is_empty() {
             // Every key was held and every part identical: nothing to append, on
             // `commit_growth`'s no-op rule, and the acknowledgement is the held artifacts' own.
-            let published = Published::nothing_prepared(&prepared);
             let ack = Ack::ArtifactsPublished {
                 entities: prepared.entities,
                 created: 0,
@@ -13544,7 +13391,7 @@ impl Executor {
                 filled: 0,
                 joined: 0,
             };
-            respond.ack(ack, &published);
+            respond.ack(ack);
             return;
         }
 
@@ -13596,7 +13443,6 @@ impl Executor {
         for ((at, record), refused) in (before..).zip(records.iter()).zip(&refused_per_record) {
             self.hold_delta(record, at, refused);
         }
-        let published = Published::registry_applied(records[0]);
         // A shape layer's held shapes are rebuilt at the tick's publication, at the version these
         // records moved the level to, and the new shapes resolved over every segment the
         // generation serves (`polygon-membership.md` §6.3: built at publication and at open, never
@@ -13613,7 +13459,6 @@ impl Executor {
                 filled: prepared.fills.len() as u64,
                 joined: prepared.joined,
             },
-            &published,
         );
     }
 
@@ -13781,9 +13626,7 @@ impl Executor {
             // record is owed for a no-op, and appending an empty one would pin the log at a
             // growth that changed nothing.
             respond.ack(
-                Ack::MembershipsGrown { grown },
-                &Published::nothing_to_apply(&joins),
-            );
+                Ack::MembershipsGrown { grown });
             return;
         }
 
@@ -13829,12 +13672,11 @@ impl Executor {
         for ((at, record), refused) in (before..).zip(records.iter()).zip(&refused_per_record) {
             self.hold_delta(record, at, refused);
         }
-        let published = Published::registry_applied(records[0]);
         // A growth against an artifact **above** its level's high-water is carried by the next
         // tail pack like any other unpublished record; one below it waits for the fold, held in the
         // log by the pin. Marking the manifest dirty is what gets the first case published.
         self.deny_dirty = true;
-        respond.ack(Ack::MembershipsGrown { grown }, &published);
+        respond.ack(Ack::MembershipsGrown { grown });
     }
 
     /// Validate, allocate, append, sync, apply — in that order, which is the whole of the
@@ -13902,12 +13744,11 @@ impl Executor {
             self.lineages.forget(name);
             self.level_contents.forget(name);
         }
-        let published = Published::registry_applied(&record);
         // The registry is durable in the log but not yet in a manifest, and a rotation reclaims the
         // log. Marking the manifest dirty is what gets it published at the next flush, on the same
         // mechanism a deny uses to reach `SEGMENTS-<n>.json`.
         self.deny_dirty = true;
-        respond.ack(ack, &published);
+        respond.ack(ack);
     }
 
     /// `PUT /control/views/{group}/{key}` — create a view of a group while the service runs
@@ -13975,12 +13816,12 @@ impl Executor {
             return;
         }
         self.live.with_roster(|roster| roster.apply(&record));
-        let published = self.publish_roster(&generation, started, &[]);
+        self.publish_roster(&generation, started, &[]);
         // Durable in the log and not yet in a manifest, and a rotation reclaims the log — so the
         // roster reaches `SEGMENTS-<n>.json` on the mechanism a deny already uses (`views.md`
         // §3.2: the durable home is the segments manifest).
         self.deny_dirty = true;
-        respond.ack(Ack::ViewCreated, &published);
+        respond.ack(Ack::ViewCreated);
     }
 
     /// `PUT /control/attributes` — declare an attribute column while the service runs
@@ -14223,7 +14064,7 @@ impl Executor {
             buffer: Arc::new(buffer),
             ..Generation::clone(&generation)
         };
-        let published = self.publish(next, started);
+        self.publish(next, started);
         // A values batch allocates no entity, so the index records none: the batch id and the
         // body hash are the whole of what a retry is answered off. Indexed at the values record's
         // own position, so the rotation that reclaims that record forgets the id with it — the
@@ -14279,7 +14120,6 @@ impl Executor {
                 joined,
                 minted: minted_count,
             },
-            &published,
         );
     }
 
@@ -14298,9 +14138,7 @@ impl Executor {
         let compiled = match resolved {
             Ok(crate::attributes::Resolution::Existing) => {
                 respond.ack(
-                    Ack::AttributeDeclared { existing: true },
-                    &Published::already_declared(&request),
-                );
+                    Ack::AttributeDeclared { existing: true });
                 return;
             }
             Ok(crate::attributes::Resolution::New(compiled)) => compiled,
@@ -14385,11 +14223,11 @@ impl Executor {
             denied,
             ..Generation::clone(&generation)
         };
-        let published = self.publish(next, started);
+        self.publish(next, started);
         // Durable in the log and not yet in a manifest, and a rotation reclaims the log: the
         // declaration reaches `SEGMENTS-<n>.json` on the mechanism a deny already uses.
         self.deny_dirty = true;
-        respond.ack(Ack::AttributeDeclared { existing: false }, &published);
+        respond.ack(Ack::AttributeDeclared { existing: false });
     }
 
     /// `PUT /control/view_groups/{name}` — declare a view group while the service runs
@@ -14416,9 +14254,7 @@ impl Executor {
         ) {
             Ok(crate::view_declarations::Resolution::Existing) => {
                 respond.ack(
-                    Ack::ViewGroupCreated { existing: true },
-                    &Published::already_declared_view(&declaration.name),
-                );
+                    Ack::ViewGroupCreated { existing: true });
                 return;
             }
             Ok(crate::view_declarations::Resolution::New(compiled)) => *compiled,
@@ -14446,11 +14282,11 @@ impl Executor {
             .bundle
             .manifest
             .with_groups(std::slice::from_ref(&compiled));
-        let published = self.publish_view_manifest(&generation, manifest, started);
+        self.publish_view_manifest(&generation, manifest, started);
         // Durable in the log and not yet in a manifest, and a rotation reclaims the log: the
         // declaration reaches `SEGMENTS-<n>.json` on the mechanism a deny already uses.
         self.deny_dirty = true;
-        respond.ack(Ack::ViewGroupCreated { existing: false }, &published);
+        respond.ack(Ack::ViewGroupCreated { existing: false });
     }
 
     /// `PUT /control/views/{name}` — create a plain view while the service runs (`ingest.md`
@@ -14474,9 +14310,7 @@ impl Executor {
         ) {
             Ok(crate::view_declarations::Resolution::Existing) => {
                 respond.ack(
-                    Ack::PlainViewCreated { existing: true },
-                    &Published::already_declared_view(&declaration.name),
-                );
+                    Ack::PlainViewCreated { existing: true });
                 return;
             }
             Ok(crate::view_declarations::Resolution::New(compiled)) => *compiled,
@@ -14503,9 +14337,9 @@ impl Executor {
             .bundle
             .manifest
             .with_plain_views(std::slice::from_ref(&compiled));
-        let published = self.publish_view_manifest(&generation, manifest, started);
+        self.publish_view_manifest(&generation, manifest, started);
         self.deny_dirty = true;
-        respond.ack(Ack::PlainViewCreated { existing: false }, &published);
+        respond.ack(Ack::PlainViewCreated { existing: false });
     }
 
     /// Publish a generation carrying `manifest` and nothing else moved — the swap a group
@@ -14520,7 +14354,7 @@ impl Executor {
         generation: &Arc<Generation>,
         manifest: tessera_store::manifest::Manifest,
         started: std::time::Instant,
-    ) -> Published {
+    ) {
         let bundle = generation.bundle.with_views(manifest);
         let denied = Arc::new(crate::compose::derive_denied(&generation.overlay, &bundle));
         let next = Generation {
@@ -14626,7 +14460,7 @@ impl Executor {
             denied,
             ..Generation::clone(&generation)
         };
-        let published = self.publish(next, started);
+        self.publish(next, started);
         // Durable in the log and not yet in a manifest, and a rotation reclaims the log: the
         // declaration reaches `SEGMENTS-<n>.json` on the mechanism a deny already uses.
         self.deny_dirty = true;
@@ -14638,7 +14472,6 @@ impl Executor {
                 // carries arrived with the value that drew its code.
                 titles: 0,
             },
-            &published,
         );
     }
 
@@ -14738,9 +14571,7 @@ impl Executor {
                         existing,
                         titles: 0,
                     }
-                },
-                &Published::nothing_bound(&values),
-            );
+                });
             return;
         }
         let declaration = tessera_lifecycle::wal::VocabularyDeclaration {
@@ -14780,7 +14611,7 @@ impl Executor {
             vocabularies: Arc::new(vocabularies),
             ..Generation::clone(&generation)
         };
-        let published = self.publish(next, started);
+        self.publish(next, started);
         // A binding of a *built* vocabulary reaches the manifest as a `vocabulary_extensions`
         // entry and one of a runtime-declared vocabulary as a value of its own runtime entry;
         // both are written at the next side-manifest publication, which this marks due.
@@ -14799,7 +14630,6 @@ impl Executor {
                     titles,
                 }
             },
-            &published,
         );
     }
 
@@ -14866,7 +14696,7 @@ impl Executor {
             return;
         }
         self.live.with_roster(|roster| roster.apply(&record));
-        let published = self.publish_roster(&generation, started, &ids);
+        self.publish_roster(&generation, started, &ids);
         self.deny_dirty = true;
         // **Ordinary deletions, through the ordinary lane.** They are appended, fsynced and
         // applied by the same path a `/control/changes` delete takes, so they retire at the fold
@@ -14890,7 +14720,7 @@ impl Executor {
             self.cascade_dependents(&mut entries);
             self.commit_denies(entries);
         }
-        respond.ack(Ack::ViewDropped { deleted }, &published);
+        respond.ack(Ack::ViewDropped { deleted });
     }
 
     /// Publish the generation a create or a drop makes: the bundle as the live roster describes
@@ -14907,7 +14737,7 @@ impl Executor {
         generation: &Arc<Generation>,
         started: std::time::Instant,
         dropped: &[String],
-    ) -> Published {
+    ) {
         let (created, tombstones) = self.live.roster_for_publication();
         let manifest = generation
             .bundle
@@ -14993,7 +14823,7 @@ impl Executor {
         positions: &[u64],
         vocabularies: Vocabularies,
         mints: &[(String, String, u32)],
-    ) -> Published {
+    ) {
         let started = std::time::Instant::now();
         let mut mark = StageMark::now();
         let generation = self.generation.load_full();
@@ -15061,9 +14891,8 @@ impl Executor {
             suggest,
             ..Generation::clone(&generation)
         };
-        let published = self.publish(next, started);
+        self.publish(next, started);
         self.health.lap(WriteStage::ApplySwap, mark);
-        published
     }
 
     /// Clone the overlay **once**, apply every change in the window, publish **once**.
@@ -15083,7 +14912,7 @@ impl Executor {
     /// Pins are never invalidated by this (I11): a pin fixes `(prefix, segments_version)`, and this
     /// bumps `overlay_version`. That is lifecycle §2.3's rule that a suppression applies to a
     /// pinned request the moment it is accepted, without expiring the pin.
-    fn apply_changes(&self, changes: Vec<(EntityId, ChangeOp)>) -> Published {
+    fn apply_changes(&self, changes: Vec<(EntityId, ChangeOp)>) {
         let started = std::time::Instant::now();
         let generation = self.generation.load_full();
         let mut overlay: Overlay = (*generation.overlay).clone();
@@ -17236,7 +17065,7 @@ impl Executor {
         self.refresh
             .in_flight
             .store(segments_version, Ordering::SeqCst);
-        let _published = self.publish_arc(Arc::clone(&next), started);
+        self.publish_arc(Arc::clone(&next), started);
         self.refresh.spawn(next);
 
         // A flush supersedes geometry, so it prunes exactly as any other geometry publication
@@ -17574,7 +17403,7 @@ impl Executor {
             .unwrap_or_default();
 
         let next = Arc::new(next);
-        let _published = self.publish_arc(Arc::clone(&next), started);
+        self.publish_arc(Arc::clone(&next), started);
 
         // **A rotation refreshes after the swap and does not arm the shed** (decision 0053). The
         // pass still runs, most-recently-used first, so a resident session's projection is rebuilt
@@ -17606,8 +17435,7 @@ impl Executor {
         Ok(())
     }
 
-    /// The generation swap. **The only `store` in the write path**, and the only producer of a
-    /// [`Published`] token on the success path.
+    /// The generation swap. **The only `store` in the write path.**
     ///
     /// `load_full` + `store` is safe here for one reason and one only: this is the sole thread that
     /// can publish. A flush would be a second publisher and **must not `store` directly** — it
@@ -17617,13 +17445,13 @@ impl Executor {
     /// *live* generation on the pin drain list, where the cache's prune evicts projections still in
     /// use. `scripts/check-layers.sh` refuses any non-atomic `.store(` in this crate's sources
     /// outside this file — and that rule is demonstrated going red, not merely written.
-    fn publish(&self, next: Generation, started: std::time::Instant) -> Published {
+    fn publish(&self, next: Generation, started: std::time::Instant) {
         self.publish_arc(Arc::new(next), started)
     }
 
     /// [`Self::publish`] over a generation the caller already holds by `Arc` — a geometry
     /// publication needs the same value afterwards, to hand the background refresh.
-    fn publish_arc(&self, next: Arc<Generation>, started: std::time::Instant) -> Published {
+    fn publish_arc(&self, next: Arc<Generation>, started: std::time::Instant) {
         // **The deny mask's derivation rule, enforced at the one place a generation becomes live.**
         // `crate::compose::derive_denied` states the rule; every build site — the incremental
         // addition on a deny window, the rebuild at each geometry publication, the carry-forward
@@ -17647,7 +17475,6 @@ impl Executor {
         if let Some(faults) = &self.faults {
             faults.record(tessera_lifecycle::faults::Step::Swap);
         }
-        Published::by_swap()
     }
 
     /// Mirror the WAL's own poison flag into the posture, **in both directions**.
@@ -17663,19 +17490,19 @@ impl Executor {
         self.health.mirror_wal(self.wal.is_poisoned());
     }
 
-    /// Send a **successful** receipt. Requires proof that the effect is live — see [`Published`].
+    /// Send a successful receipt.
     ///
     /// The [`PauseSite::BeforeAck`] point is armed **here**, one statement above the send, rather
     /// than at either call site. That is what makes it a statement about the ack rather than about
     /// a line number: an ack that any later rewrite moves above the swap takes this pause point
     /// with it, and a test parked here then observes the effect *not* in force.
-    fn ack(&self, respond: &Responder, ack: Ack, proof: &Published) {
+    fn ack(&self, respond: &Responder, ack: Ack) {
         self.pause_point(PauseSiteArg::BeforeAck);
         #[cfg(feature = "fault-injection")]
         if let Some(faults) = &self.faults {
             faults.record(tessera_lifecycle::faults::Step::Ack);
         }
-        respond.ack(ack, proof);
+        respond.ack(ack);
     }
 
     /// Send a failure receipt. **Not** armed with the pause point above: parking there would stall
