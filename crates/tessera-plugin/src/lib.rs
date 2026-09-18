@@ -234,6 +234,50 @@ fn hex_lower(bytes: &[u8]) -> String {
     out
 }
 
+/// The label every principal holds. A gate of `public` alone is no gate.
+pub const PUBLIC: &str = "public";
+/// Means "take the container's gate" where a layer declares visibility; it is not a label.
+pub const INHERITED: &str = "inherited";
+
+/// Check the labels a view or group declares as its gate, and answer the gate as stored: `None`
+/// for a public view. A principal passes a gate by holding any one of its terms, so a gate that
+/// names no terms would shut everyone out and is refused.
+pub fn check_gate(
+    plugin: &dyn Plugin,
+    declared: Option<&[String]>,
+) -> Result<Option<Vec<String>>, String> {
+    let Some(labels) = declared else {
+        return Ok(None);
+    };
+    if labels == [PUBLIC] {
+        return Ok(None);
+    }
+    if labels.is_empty() {
+        return Err("`visibility = []` names no labels; write `public` or list them".to_string());
+    }
+    for label in labels {
+        if label.trim().is_empty() {
+            return Err("`visibility` has an empty label".to_string());
+        }
+        if label == PUBLIC {
+            return Err("`visibility` lists `public` beside other labels; write `public` alone \
+                        or leave it out"
+                .to_string());
+        }
+        if label == INHERITED {
+            return Err("`inherited` is not a label a view's `visibility` can take".to_string());
+        }
+    }
+    let descriptors: Vec<Descriptor> = labels.iter().map(|l| l.as_bytes().to_vec()).collect();
+    let terms = plugin
+        .terms_of_labels(&descriptors)
+        .map_err(|e| format!("`visibility = {labels:?}`: the plugin cannot read the labels ({e})"))?;
+    if terms.is_empty() {
+        return Err(format!("`visibility = {labels:?}` names no terms"));
+    }
+    Ok(Some(labels.to_vec()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -333,5 +377,25 @@ mod tests {
         assert_eq!(b.max_distinct_terms, 200_000_000);
         assert_eq!(b.max_terms_per_item, 4_096);
         assert_eq!(b.max_terms_per_token, 100_000);
+    }
+
+    #[test]
+    fn a_gate_is_stored_as_its_labels_and_public_as_none() {
+        let p = Passthrough::new();
+        let labels = |l: &[&str]| l.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(check_gate(&p, None), Ok(None));
+        assert_eq!(check_gate(&p, Some(&labels(&["public"]))), Ok(None));
+        assert_eq!(
+            check_gate(&p, Some(&labels(&["finance", "legal"]))),
+            Ok(Some(labels(&["finance", "legal"])))
+        );
+        for refused in [
+            labels(&[]),
+            labels(&[""]),
+            labels(&["finance", "public"]),
+            labels(&["inherited"]),
+        ] {
+            assert!(check_gate(&p, Some(&refused)).is_err(), "{refused:?}");
+        }
     }
 }

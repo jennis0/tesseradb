@@ -154,7 +154,6 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
-use tessera_plugin::Plugin;
 use tessera_spatial::frame::{snap_outward, Snap};
 use tessera_spatial::tiler::ScalarType;
 use tessera_spatial::{cell, Bounds, Projection};
@@ -1041,7 +1040,14 @@ impl ViewMetadata {
             | (false, ScalarType::Text)
             | (false, ScalarType::Keyword) => ViewMetadataType::Text,
             (false, ScalarType::TimestampUs) => ViewMetadataType::TimestampUs,
-            (false, _) => ViewMetadataType::Int,
+            (false, ScalarType::U8) => ViewMetadataType::U8,
+            (false, ScalarType::U16) => ViewMetadataType::U16,
+            (false, ScalarType::U32) => ViewMetadataType::U32,
+            (false, ScalarType::U64) => ViewMetadataType::U64,
+            (false, ScalarType::I8) => ViewMetadataType::I8,
+            (false, ScalarType::I16) => ViewMetadataType::I16,
+            (false, ScalarType::I32) => ViewMetadataType::I32,
+            (false, ScalarType::I64) => ViewMetadataType::I64,
         }
     }
 }
@@ -3150,12 +3156,8 @@ fn compile_projection(object: &str, declared: Option<&str>) -> Result<Projection
     };
     Projection::from_name(name).ok_or_else(|| {
         declaration_error(format!(
-            "{object}: `projection = \"{name}\"` is not one of the projections this service \
-             transforms with. They are: web_mercator, equirectangular, plate_carree, \
-             gall_isographic, none (projections.md §5). The set is closed and stays cylindrical — \
-             a conic or azimuthal entry would stop a longitude/latitude rectangle being a \
-             rectangle, which is what lets an extent be written in degrees — and no datum shift, \
-             national grid or caller-supplied projection is accepted"
+            "{object}: no projection named '{name}'. They are web_mercator, equirectangular, \
+             plate_carree, gall_isographic and none"
         ))
     })
 }
@@ -3361,56 +3363,8 @@ fn check_view_name(object: &str, name: &str) -> Result<()> {
 /// (`tessera_build::build`); a deployment serving the bundle under a different plugin is a
 /// mismatch the gate fails closed on rather than one this check could anticipate.
 fn compile_view_gate(object: &str, declared: Option<&[String]>) -> Result<Option<Vec<String>>> {
-    let Some(labels) = declared else {
-        return Ok(None);
-    };
-    if labels == [PUBLIC] {
-        return Ok(None);
-    }
-    if labels.is_empty() {
-        return Err(declaration_error(format!(
-            "{object}: `visibility = []` names no terms. A gate is satisfied where its term set \
-             meets the principal's, so an empty one is satisfied by nobody and the view would be \
-             reachable by no principal at all — including this build's author. Write `public`, \
-             or the labels the gate names, one per element"
-        )));
-    }
-    if labels.iter().any(|l| l == PUBLIC) {
-        return Err(declaration_error(format!(
-            "{object}: `visibility = {labels:?}` lists `public` beside another label. `public` \
-             is the label every principal holds, so a gate naming it is satisfied by everybody; \
-             write `public` alone, or leave it out of the list"
-        )));
-    }
-    for (i, label) in labels.iter().enumerate() {
-        if label.is_empty() {
-            return Err(declaration_error(format!(
-                "{object}: element {i} of `visibility = {labels:?}` is empty. Each element is \
-                 one label a principal holds, taken as written, and an empty one is no label. \
-                 Write `public`, or the labels the gate names, one per element"
-            )));
-        }
-        check_label(object, "visibility", label)?;
-    }
-    let descriptors: Vec<Vec<u8>> = labels.iter().map(|l| l.as_bytes().to_vec()).collect();
-    let descriptors = tessera_plugin::Passthrough::new()
-        .terms_of_labels(&descriptors)
-        .map_err(|e| {
-            declaration_error(format!(
-                "{object}: `visibility = {labels:?}` is not a label list the plugin can read \
-                 ({e}). A view's gate is satisfied by the item-visibility predicate (views §6), \
-                 so a label the plugin cannot turn into a term is one no principal could satisfy"
-            ))
-        })?;
-    if descriptors.is_empty() {
-        return Err(declaration_error(format!(
-            "{object}: `visibility = {labels:?}` names no terms. A gate is satisfied where its \
-             term set meets the principal's, so an empty one is satisfied by nobody and the view \
-             would be reachable by no principal at all — including this build's author. Write \
-             `public`, or labels naming terms"
-        )));
-    }
-    Ok(Some(labels.to_vec()))
+    tessera_plugin::check_gate(&tessera_plugin::Passthrough::new(), declared)
+        .map_err(|detail| declaration_error(format!("{object}: {detail}")))
 }
 
 /// Compile every `[[view_group]]` (`views.md` §3, decision 0108).
@@ -3765,7 +3719,7 @@ fn compile_point_visibility(
 }
 
 /// The roster's own key set, which no metadata name may take (`views.md` §3.2).
-const ROSTER_KEYS: [&str; 3] = ["key", "source", "visibility"];
+use tessera_types::view::ROSTER_KEYS;
 
 /// The keys a group declares and a view of it may not (`views.md` §3.1).
 const GROUP_LEVEL_KEYS: [&str; 8] = [
@@ -3797,16 +3751,8 @@ fn compile_metadata_types(
     };
     let mut metadata = Vec::with_capacity(declared.len());
     for (name, value) in declared {
-        check_metadata_name(object, name)?;
-        if ROSTER_KEYS.contains(&name.as_str()) {
-            return Err(declaration_error(format!(
-                "{object}: `metadata.{name}` takes a name the roster already uses. `key`, `source` \
-                 and `visibility` are the roster's own keys (views §3.2), and a \
-                 `[[view_group.view]]` block mixes them with the metadata names — so a name in \
-                 both is a key with two readings, on the block and as a column of \
-                 `[view_group.views]`"
-            )));
-        }
+        tessera_types::view::check_metadata_name(name)
+            .map_err(|detail| declaration_error(format!("{object}: {detail}")))?;
         if discriminator == Some(name.as_str()) {
             return Err(declaration_error(format!(
                 "{object}: `metadata.{name}` takes the name of this group's discriminator column, \
@@ -3819,26 +3765,6 @@ fn compile_metadata_types(
     Ok(metadata)
 }
 
-/// A metadata name is a field name on the wire — `/v1/meta` serves it inside each roster entry —
-/// so it takes the column charset, on [`check_column_name`]'s argument.
-fn check_metadata_name(object: &str, name: &str) -> Result<()> {
-    if name.trim().is_empty() {
-        return Err(declaration_error(format!(
-            "{object}: a metadata name is empty. It is the name a view's value is served under"
-        )));
-    }
-    if !name
-        .bytes()
-        .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
-    {
-        return Err(declaration_error(format!(
-            "{object}: `metadata.{name}` is limited to ASCII letters, digits, `_` and `-`. It is a \
-             field name on the wire — `/v1/meta` serves it inside the roster entry for each view — \
-             on the same argument a column name is (contracts §3.2)"
-        )));
-    }
-    Ok(())
-}
 
 /// One metadata declaration: `name = "<type>"`, or `name = { type = "category", vocabulary = … }`.
 fn compile_metadata_type(
@@ -4105,17 +4031,20 @@ fn compile_metadata_value(
                 .ok_or_else(|| wrong("write a string"))?
                 .to_string(),
         ),
-        integer => {
+        _ => {
             let held = value
                 .as_integer()
                 .ok_or_else(|| wrong("write an integer"))?;
-            let (min, max) = integer_range(integer);
+            let (min, max) = declared
+                .declared_type()
+                .integer_range()
+                .unwrap_or((i64::MIN, i64::MAX));
             if held < min || held > max {
                 return Err(declaration_error(format!(
                     "{object}: `{name}` is {held}, and this group declares it '{}', which holds \
                      {min} to {max}. The width is part of the declaration, so the value is refused \
                      rather than narrowed",
-                    integer.arrow_type_name()
+                    declared.ty.arrow_type_name()
                 )));
             }
             MetadataValue::Int(held)
@@ -4141,21 +4070,6 @@ fn timestamp_us(object: &str, name: &str, when: &toml::value::Datetime) -> Resul
     Ok(parsed.timestamp_micros())
 }
 
-/// The inclusive range an integer type holds, for a metadata value to be checked against.
-fn integer_range(ty: ScalarType) -> (i64, i64) {
-    match ty {
-        ScalarType::U8 => (0, u8::MAX as i64),
-        ScalarType::U16 => (0, u16::MAX as i64),
-        ScalarType::U32 => (0, u32::MAX as i64),
-        // `u64`'s upper half is not expressible in TOML's own signed integer, which is where this
-        // value is read from — so the ceiling is the reader's, stated rather than silently wrapped.
-        ScalarType::U64 => (0, i64::MAX),
-        ScalarType::I8 => (i8::MIN as i64, i8::MAX as i64),
-        ScalarType::I16 => (i16::MIN as i64, i16::MAX as i64),
-        ScalarType::I32 => (i32::MIN as i64, i32::MAX as i64),
-        _ => (i64::MIN, i64::MAX),
-    }
-}
 
 /// `[view_group.views]` — form B's roster table (`views.md` §3.1).
 ///

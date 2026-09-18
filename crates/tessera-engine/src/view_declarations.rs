@@ -6,23 +6,15 @@
 //! carry an **empty row space** until their first flush, which is what a view created under a
 //! group already gets (`views.md` §3.2).
 //!
-//! **This is what decision 0136's R9 overturns.** `views.md` §7 ruled that no plain view is added
-//! after the build, on the argument that a view carries a frame and a gate and the design has one
-//! place where those are reviewed. The rule decision 0134 states is the wider one: anything a
-//! build can create, live ingest can create. The review of a frame and a gate is an operator's
-//! question, and the control plane holds the operator credential.
-//!
-//! **The rules are the build's, transcribed**, on `crate::attributes`' argument (decision 0091).
-//! What differs is the frame: a declaration here names the frame in **frame coordinates**
-//! (`extent = { x = [a, b], y = [c, d] }`) and never `auto`, because there is no data to fit one
-//! to and no source to survey. A projected view's frame is the projected box the build's
-//! `lon`/`lat` spelling produces, so nothing is unsayable here — only spelled once rather than
-//! twice.
+//! A declaration here gives the frame in frame coordinates and never `auto`: there is no data to
+//! fit a frame to.
 
 use tessera_lifecycle::wal::{DeclaredFrame, PlainViewDeclaration, ViewGroupDeclaration};
 use tessera_lifecycle::ExecError;
 use tessera_store::manifest::{GroupDescriptor, Manifest, Quantisation, ViewDescriptor};
-use tessera_types::view::{check_view_key, ViewMetadataType, DECLARED_INCARNATION};
+use tessera_types::view::{
+    check_metadata_name, check_view_key, GroupMetadataField, ViewMetadataType, DECLARED_INCARNATION,
+};
 
 /// The groups and plain views declared at a running service and not yet written into a
 /// `MANIFEST.json` by a fold, in declaration order: the segments manifest's `groups` and
@@ -97,11 +89,10 @@ pub(crate) fn resolve_group(
 ) -> Result<Resolution<GroupDescriptor>, ExecError> {
     let refused = |detail: String| ExecError::ViewRefused { detail };
     let name = declaration.name.as_str();
-    check_view_key(name).map_err(refused)?;
-    check_name_free(name, manifest, NameKind::Group).map_err(refused)?;
-    let projection = parse_projection(name, &declaration.projection).map_err(refused)?;
-    let quantisation = compile_frame(name, &declaration.frame).map_err(refused)?;
-    check_gate(name, declaration.visibility.as_deref()).map_err(refused)?;
+    let taken = manifest.views.iter().any(|v| v.id == name);
+    let (projection, quantisation) =
+        compile_common(name, taken, &declaration.projection, &declaration.frame)
+            .map_err(refused)?;
 
     // **A `members` group takes another group's keys** (`views.md` §3.3), so the owner must exist
     // and must own its own keys — chains are refused at the declaration, which is what lets every
@@ -109,11 +100,7 @@ pub(crate) fn resolve_group(
     if let Some(owner) = &declaration.members {
         let Some(owner_descriptor) = manifest.groups.iter().find(|g| &g.name == owner) else {
             return Err(ExecError::ViewUnknown {
-                detail: format!(
-                    "view group '{name}' declares `members = \"{owner}\"`, which names no view \
-                     group this deployment carries. A `members` group takes another group's keys \
-                     (views §3.3), so the owner is declared first"
-                ),
+                detail: format!("view group '{name}': `members` names no view group '{owner}'"),
             });
         };
         if owner_descriptor.members_of.is_some() {
@@ -171,11 +158,10 @@ pub(crate) fn resolve_plain(
 ) -> Result<Resolution<ViewDescriptor>, ExecError> {
     let refused = |detail: String| ExecError::ViewRefused { detail };
     let name = declaration.name.as_str();
-    check_view_key(name).map_err(refused)?;
-    check_name_free(name, manifest, NameKind::View).map_err(refused)?;
-    let projection = parse_projection(name, &declaration.projection).map_err(refused)?;
-    let quantisation = compile_frame(name, &declaration.frame).map_err(refused)?;
-    check_gate(name, declaration.visibility.as_deref()).map_err(refused)?;
+    let taken = manifest.groups.iter().any(|g| g.name == name);
+    let (projection, quantisation) =
+        compile_common(name, taken, &declaration.projection, &declaration.frame)
+            .map_err(refused)?;
 
     let compiled = ViewDescriptor {
         display_name: declaration
@@ -209,140 +195,60 @@ pub(crate) fn resolve_plain(
     Ok(Resolution::New(Box::new(compiled)))
 }
 
-/// Whether a name is being claimed for a group or for a view. Both are refused against both
-/// lists: a group's name and a plain view's name are read at the same position of a request, so a
-/// deployment carrying one of each under one name would answer two things to one word.
-enum NameKind {
-    Group,
-    View,
-}
-
-fn check_name_free(name: &str, manifest: &Manifest, kind: NameKind) -> Result<(), String> {
-    let clash = match kind {
-        NameKind::Group => manifest.views.iter().any(|v| v.id == name),
-        NameKind::View => manifest.groups.iter().any(|g| g.name == name),
-    };
-    if clash {
-        let (mine, theirs) = match kind {
-            NameKind::Group => ("view group", "view"),
-            NameKind::View => ("view", "view group"),
-        };
-        return Err(format!(
-            "{mine} '{name}': this deployment already declares a {theirs} of that name. A view id \
-             and a group's name are read at the same position of a request (views §3.2), so one \
-             word cannot name both"
-        ));
+/// What a group and a plain view declare alike: a name, a projection and a frame. `taken` says
+/// the other kind already has the name; a view id and a group's name are read at the same place
+/// in a request, so one word cannot name both.
+fn compile_common(
+    name: &str,
+    taken: bool,
+    projection: &str,
+    frame: &DeclaredFrame,
+) -> Result<(tessera_spatial::Projection, Quantisation), String> {
+    check_view_key(name)?;
+    if taken {
+        return Err(format!("'{name}' already names a view or a view group"));
     }
-    Ok(())
-}
-
-fn parse_projection(name: &str, declared: &str) -> Result<tessera_spatial::Projection, String> {
-    tessera_spatial::Projection::from_name(declared).ok_or_else(|| {
-        format!(
-            "'{name}': `projection = \"{declared}\"` is not a projection this build can place \
-             points under (projections.md §5)"
-        )
-    })
-}
-
-/// The declared frame as the manifest stores it.
-///
-/// **Frame coordinates, and never `auto`.** A declaration at a running service has no source to
-/// survey, so there is nothing for `auto` to fit; and the bounds are checked here because a
-/// Morton code is a fraction of the frame, so a frame with no width places every point of the
-/// view at one coordinate.
-fn compile_frame(name: &str, frame: &DeclaredFrame) -> Result<Quantisation, String> {
-    for (axis, min, max) in [
-        ("x", frame.x_min, frame.x_max),
-        ("y", frame.y_min, frame.y_max),
-    ] {
-        if !min.is_finite() || !max.is_finite() {
-            return Err(format!(
-                "'{name}': the `{axis}` extent is not a pair of finite numbers. A position is \
-                 quantised as a fraction of the frame, so a bound that is not a number places \
-                 every point of the view nowhere"
-            ));
-        }
-        if min >= max {
-            return Err(format!(
-                "'{name}': the `{axis}` extent is [{min}, {max}], which has no width. A position \
-                 is quantised as a fraction of the frame, so every point of the view would take \
-                 one coordinate"
-            ));
-        }
-    }
-    Ok(Quantisation {
+    let projection = tessera_spatial::Projection::from_name(projection)
+        .ok_or_else(|| format!("'{name}': no projection named '{projection}'"))?;
+    tessera_spatial::Bounds {
         x_min: frame.x_min,
         x_max: frame.x_max,
         y_min: frame.y_min,
         y_max: frame.y_max,
-    })
+    }
+    .validate()
+    .map_err(|e| format!("'{name}': extent: {e}"))?;
+    let quantisation = Quantisation {
+        x_min: frame.x_min,
+        x_max: frame.x_max,
+        y_min: frame.y_min,
+        y_max: frame.y_max,
+    };
+    Ok((projection, quantisation))
 }
 
-/// The gate as the manifest stores it: `public` is the absence of a gate (decision 0088), and the
-/// list is stored as written (decision 0132). Whether the plugin can read a label is asked at the
-/// door, where the plugin is.
+/// The gate as the manifest stores it: a public view has none. The labels were checked against
+/// the plugin before the declaration reached the executor.
 fn gate_of(visibility: Option<Vec<String>>) -> Option<Vec<String>> {
     visibility.filter(|labels| labels.as_slice() != ["public"])
 }
 
-/// What the door cannot ask the plugin about: the shapes a gate may not take
-/// (`views.md` §6, decision 0132). The plugin half is `Engine::check_gate_labels`.
-fn check_gate(name: &str, visibility: Option<&[String]>) -> Result<(), String> {
-    let Some(labels) = visibility else {
-        return Ok(());
-    };
-    if labels.is_empty() {
-        return Err(format!(
-            "'{name}': `visibility = []` names no terms. A gate is satisfied where its term set \
-             meets the principal's, so an empty one is satisfied by nobody and the view would be \
-             reachable by no principal at all. Write `public`, or the labels the gate names, one \
-             per element (views §6)"
-        ));
-    }
-    if labels.iter().any(|l| l.is_empty()) {
-        return Err(format!(
-            "'{name}': `visibility` names an empty label, which is no label. Each element is one \
-             label taken verbatim (decision 0132)"
-        ));
-    }
-    Ok(())
-}
-
-/// The names a roster record already uses, which a metadata name may not take
-/// (`configuration.md` §1).
-const ROSTER_NAMES: [&str; 3] = ["key", "source", "visibility"];
-
-fn check_metadata(
-    name: &str,
-    metadata: &[tessera_types::view::GroupMetadataField],
-) -> Result<(), String> {
+fn check_metadata(name: &str, metadata: &[GroupMetadataField]) -> Result<(), String> {
     let mut seen = std::collections::BTreeSet::new();
     for field in metadata {
+        check_metadata_name(&field.name).map_err(|e| format!("view group '{name}': {e}"))?;
         if !seen.insert(field.name.as_str()) {
             return Err(format!(
                 "view group '{name}': metadata '{}' is declared twice",
                 field.name
             ));
         }
-        if ROSTER_NAMES.contains(&field.name.as_str()) {
-            return Err(format!(
-                "view group '{name}': metadata '{}' takes a name the roster record already uses. \
-                 Reserved: {}",
-                field.name,
-                ROSTER_NAMES.join(", ")
-            ));
-        }
-        // ⊘ **A category-typed metadata name has no create that can satisfy it** at a running
-        // service (`views.md` §3.2): a category's value is a key resolved to its vocabulary's
-        // code, and the create route resolves none. Declaring one here would declare a group
-        // whose views cannot be created, so it is refused at the declaration rather than at every
-        // create.
+        // Not built: the create route resolves no vocabulary key, so a view of this group could
+        // never be created.
         if field.ty == ViewMetadataType::Category {
             return Err(format!(
-                "view group '{name}': metadata '{}' is a category, and a view of a group declared \
-                 at a running service is created by a route that resolves no category value \
-                 (views §3.2). Declare the name as a scalar, or declare the group at a build",
+                "view group '{name}': metadata '{}' is a category, which a group declared at a \
+                 running service does not support yet; declare the group at a build",
                 field.name
             ));
         }

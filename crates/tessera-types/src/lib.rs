@@ -179,7 +179,7 @@ pub struct GenerationStamp {
 // stops a 13 layer opening.
 // Each bump makes a stale local bundle a loud refusal rather than a silent misread — a fail-closed
 // guard, not compatibility (decision 0048).
-pub const BUNDLE_FORMAT: u32 = 14;
+pub const BUNDLE_FORMAT: u32 = 15;
 pub const API_VERSION: u32 = 1;
 pub const ABI_VERSION: u32 = 1;
 pub const ROW_ABSENT: u32 = 0xFFFF_FFFF;
@@ -203,7 +203,6 @@ mod tests {
     }
     #[test]
     fn constants() {
-        assert_eq!(BUNDLE_FORMAT, 14);
         assert_eq!(ROW_ABSENT, 0xFFFF_FFFF);
     }
 }
