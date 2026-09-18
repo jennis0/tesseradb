@@ -622,8 +622,8 @@ takes (spec §5):
   curated reading list shown on the whole-corpus map and on every quarter alike. The layer's
   file is what it is today.
 - **`scope = { group = "quarter" }`**: a different artifact set per view — clusters recomputed
-  each quarter. The artifact rows carry a `view` column (`fields.view`), an artifact belongs to
-  one view, keys are unique per `(layer, view)`, edges (`parent`, `attached_key`) may not cross
+  each quarter. The artifact rows carry a `view` column (`fields.view`), and so do the rows of a
+  `[layer.members]` source, an artifact belongs to one view, keys are unique per `(layer, view)`, edges (`parent`, `attached_key`) may not cross
   views, and `views` may name only that group and groups sharing its views. Membership storage
   is unchanged — an entity set per artifact — and its row-space projection was per view already.
 

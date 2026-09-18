@@ -559,9 +559,11 @@ that the object has a smaller spelling or is already bounded elsewhere (spec §1
   **Built 2026-09-08 (T2c)**: the list is refused over the bound with a `422` naming the limit and
   the inclusion spelling; the complement is one `andnot` on the executor over the view's entities
   — every entity holding a row in the view or buffered for it, deleted entities excluded — and its
-  size is logged. `members` and `excluding` on one row is a `422`, and so is a record carrying
-  neither: `members` is optional only where `excluding` is given, an empty list being the
-  membership that holds nobody. **Which view**, since an
+  size is logged. `members` and `excluding` on one row is a `422`. A record carrying neither is a
+  `422` where it attaches to nothing, and is accepted where it carries `attached_to`: an attached
+  artifact with no members of its own is served over its target's membership (decision 0145), and
+  an empty list on it says the same thing. Elsewhere an empty list is the membership that holds
+  nobody. **Which view**, since an
   entity-scoped layer is drawn on several: the artifact's own on a group-scoped layer, where it
   belongs to one; the union of the layer's declared views otherwise, that being the corpus the
   layer is drawn over. On a single-view corpus the union is the whole entity space, which is what
