@@ -1040,7 +1040,14 @@ impl ViewMetadata {
             | (false, ScalarType::Text)
             | (false, ScalarType::Keyword) => ViewMetadataType::Text,
             (false, ScalarType::TimestampUs) => ViewMetadataType::TimestampUs,
-            (false, _) => ViewMetadataType::Int,
+            (false, ScalarType::U8) => ViewMetadataType::U8,
+            (false, ScalarType::U16) => ViewMetadataType::U16,
+            (false, ScalarType::U32) => ViewMetadataType::U32,
+            (false, ScalarType::U64) => ViewMetadataType::U64,
+            (false, ScalarType::I8) => ViewMetadataType::I8,
+            (false, ScalarType::I16) => ViewMetadataType::I16,
+            (false, ScalarType::I32) => ViewMetadataType::I32,
+            (false, ScalarType::I64) => ViewMetadataType::I64,
         }
     }
 }
@@ -4056,17 +4063,20 @@ fn compile_metadata_value(
                 .ok_or_else(|| wrong("write a string"))?
                 .to_string(),
         ),
-        integer => {
+        _ => {
             let held = value
                 .as_integer()
                 .ok_or_else(|| wrong("write an integer"))?;
-            let (min, max) = integer_range(integer);
+            let (min, max) = declared
+                .declared_type()
+                .integer_range()
+                .unwrap_or((i64::MIN, i64::MAX));
             if held < min || held > max {
                 return Err(declaration_error(format!(
                     "{object}: `{name}` is {held}, and this group declares it '{}', which holds \
                      {min} to {max}. The width is part of the declaration, so the value is refused \
                      rather than narrowed",
-                    integer.arrow_type_name()
+                    declared.ty.arrow_type_name()
                 )));
             }
             MetadataValue::Int(held)
@@ -4092,21 +4102,6 @@ fn timestamp_us(object: &str, name: &str, when: &toml::value::Datetime) -> Resul
     Ok(parsed.timestamp_micros())
 }
 
-/// The inclusive range an integer type holds, for a metadata value to be checked against.
-fn integer_range(ty: ScalarType) -> (i64, i64) {
-    match ty {
-        ScalarType::U8 => (0, u8::MAX as i64),
-        ScalarType::U16 => (0, u16::MAX as i64),
-        ScalarType::U32 => (0, u32::MAX as i64),
-        // `u64`'s upper half is not expressible in TOML's own signed integer, which is where this
-        // value is read from — so the ceiling is the reader's, stated rather than silently wrapped.
-        ScalarType::U64 => (0, i64::MAX),
-        ScalarType::I8 => (i8::MIN as i64, i8::MAX as i64),
-        ScalarType::I16 => (i16::MIN as i64, i16::MAX as i64),
-        ScalarType::I32 => (i32::MIN as i64, i32::MAX as i64),
-        _ => (i64::MIN, i64::MAX),
-    }
-}
 
 /// `[view_group.views]` — form B's roster table (`views.md` §3.1).
 ///

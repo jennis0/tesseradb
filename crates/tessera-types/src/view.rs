@@ -81,11 +81,18 @@ impl ViewMetadataValue {
 #[serde(rename_all = "snake_case")]
 pub enum ViewMetadataType {
     Bool,
-    Int,
+    U8,
+    U16,
+    U32,
+    U64,
+    I8,
+    I16,
+    I32,
+    I64,
     Float,
     Text,
     TimestampUs,
-    /// A category: the value is a key resolved to its vocabulary's code (`views.md` §3.1).
+    /// A category: the value is a key resolved to its vocabulary's code.
     Category,
 }
 
@@ -93,7 +100,14 @@ impl ViewMetadataType {
     pub fn name(self) -> &'static str {
         match self {
             ViewMetadataType::Bool => "bool",
-            ViewMetadataType::Int => "integer",
+            ViewMetadataType::U8 => "u8",
+            ViewMetadataType::U16 => "u16",
+            ViewMetadataType::U32 => "u32",
+            ViewMetadataType::U64 => "u64",
+            ViewMetadataType::I8 => "i8",
+            ViewMetadataType::I16 => "i16",
+            ViewMetadataType::I32 => "i32",
+            ViewMetadataType::I64 => "i64",
             ViewMetadataType::Float => "float",
             ViewMetadataType::Text => "text",
             ViewMetadataType::TimestampUs => "timestamp_us",
@@ -101,24 +115,37 @@ impl ViewMetadataType {
         }
     }
 
-    /// Does `value` belong under this declaration?
-    ///
-    /// An integer is **not** accepted where a float is declared, and vice versa: the roster is
-    /// served typed and a client reading `starts` as a float because one record happened to carry
-    /// one is a client the declaration cannot help.
+    /// The values an integer type holds, or `None` for a type that is not an integer. A value is
+    /// carried as an `i64`, so `u64` stops at `i64::MAX`.
+    pub fn integer_range(self) -> Option<(i64, i64)> {
+        Some(match self {
+            ViewMetadataType::U8 => (0, i64::from(u8::MAX)),
+            ViewMetadataType::U16 => (0, i64::from(u16::MAX)),
+            ViewMetadataType::U32 => (0, i64::from(u32::MAX)),
+            ViewMetadataType::U64 => (0, i64::MAX),
+            ViewMetadataType::I8 => (i64::from(i8::MIN), i64::from(i8::MAX)),
+            ViewMetadataType::I16 => (i64::from(i16::MIN), i64::from(i16::MAX)),
+            ViewMetadataType::I32 => (i64::from(i32::MIN), i64::from(i32::MAX)),
+            ViewMetadataType::I64 => (i64::MIN, i64::MAX),
+            _ => return None,
+        })
+    }
+
+    /// Does `value` belong under this declaration? An integer must fit the declared width. An
+    /// integer is not accepted where a float is declared, because the roster is served typed.
     pub fn admits(self, value: &ViewMetadataValue) -> bool {
-        matches!(
-            (self, value),
+        match (self, value) {
             (ViewMetadataType::Bool, ViewMetadataValue::Bool(_))
-                | (ViewMetadataType::Int, ViewMetadataValue::Int(_))
-                | (ViewMetadataType::Float, ViewMetadataValue::Float(_))
-                | (ViewMetadataType::Text, ViewMetadataValue::Text(_))
-                | (ViewMetadataType::TimestampUs, ViewMetadataValue::TimestampUs(_))
-                // A category's stored form is its code, which is how a *build* writes one. The
-                // create operation refuses the type outright rather than accepting a code from
-                // the wire — see `ViewRoster::prepare_create`.
-                | (ViewMetadataType::Category, ViewMetadataValue::Int(_))
-        )
+            | (ViewMetadataType::Float, ViewMetadataValue::Float(_))
+            | (ViewMetadataType::Text, ViewMetadataValue::Text(_))
+            | (ViewMetadataType::TimestampUs, ViewMetadataValue::TimestampUs(_))
+            // A category is stored as its code, which is how a build writes one.
+            | (ViewMetadataType::Category, ViewMetadataValue::Int(_)) => true,
+            (ty, ViewMetadataValue::Int(v)) => ty
+                .integer_range()
+                .is_some_and(|(min, max)| (min..=max).contains(v)),
+            _ => false,
+        }
     }
 }
 
@@ -251,4 +278,19 @@ pub fn check_view_key(key: &str) -> Result<(), String> {
             .to_string());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_integer_must_fit_the_declared_width() {
+        assert!(ViewMetadataType::U8.admits(&ViewMetadataValue::Int(255)));
+        assert!(!ViewMetadataType::U8.admits(&ViewMetadataValue::Int(256)));
+        assert!(!ViewMetadataType::U8.admits(&ViewMetadataValue::Int(-1)));
+        assert!(ViewMetadataType::I8.admits(&ViewMetadataValue::Int(-128)));
+        assert!(!ViewMetadataType::Float.admits(&ViewMetadataValue::Int(1)));
+        assert!(!ViewMetadataType::I32.admits(&ViewMetadataValue::Text("1".to_string())));
+    }
 }
