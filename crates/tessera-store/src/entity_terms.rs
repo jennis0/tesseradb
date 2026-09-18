@@ -40,13 +40,13 @@
 //! # Why the offsets are paged
 //!
 //! A flat `u32` offset caps a layer at 4,294,967,295 (entity, term) pairs, and a corpus of
-//! 3.5×10⁹ rows carrying three terms a row holds 10.5×10⁹ (modelled, rows × 3): the build refused
-//! partway through, at the rank where the running total passed the ceiling. Paging the offsets
-//! against a block of 65,536 ranks carries the same 4 bytes a rank and adds 8 bytes a block,
-//! 427 KB at 3.5×10⁹ ranks (modelled, ranks ÷ 65,536 × 8 B), and what a `u32` now has to hold is
-//! one block's own pairs rather than the layer's. Entity ids are untouched and stay `u32`
-//! (**I9**). A read costs one further aligned `u64` per lookup, which is below anything a request
-//! path could see and is not measured.
+//! 3.5×10⁹ rows carrying three terms a row holds 10.5×10⁹ (modelled, rows × 3), so such a build
+//! would refuse partway through, at the rank where the running total passes the ceiling. Paging
+//! the offsets against a block of 65,536 ranks carries the same 4 bytes a rank and adds 8 bytes
+//! a block, 427 KB at 3.5×10⁹ ranks (modelled, ranks ÷ 65,536 × 8 B), and what a `u32` now has
+//! to hold is one block's own pairs rather than the layer's. Entity ids are untouched and stay
+//! `u32` (**I9**). A read costs one further aligned `u64` per lookup, which is below anything a
+//! request path could see and is not measured.
 //!
 //! A layer whose 65,536 entities hold more than 4,294,967,295 terms **between them** is still
 //! refused at the writer, naming the rank: that is a block the format cannot address, not a
@@ -88,8 +88,8 @@
 //!
 //! An entity-space coalesce takes a contiguous window of `entity_terms_extents` and replaces it
 //! with one extent ([`coalesce_entity_terms_extents`]) — the **record blob's** axis exactly: one
-//! file set, has-row addressed, disjoint in entity space, one window of one list spliced back at the
-//! window's position. Without it the layers accumulate one per flush until the next fold, and the
+//! file set, has-row addressed, disjoint in entity space, one window of one list spliced back at
+//! the window's position. Without it the layers accumulate one per flush until the next fold, and the
 //! reader pays file handles and a base-plus-linear probe per lookup.
 //!
 //! **A merge here needs no remap and no dictionary**, which is what makes it a concatenation
@@ -315,6 +315,14 @@ impl EntityTermsWriter {
         ])
     }
 
+    /// Start the running total at `absolute`, so a test can reach a block's `u32` ceiling without
+    /// writing the 4.29×10⁹ ordinals reaching it honestly would take. What this leaves behind is
+    /// not a layer any reader could open; the refusal is the only thing it exists to reach.
+    #[cfg(test)]
+    fn seed_total_for_test(&mut self, absolute: u64) {
+        self.written = absolute;
+    }
+
     fn invalid(&self, detail: String) -> StoreError {
         StoreError::InvalidEntityTerms {
             path: self.terms_path.clone(),
@@ -447,7 +455,10 @@ impl EntityTerms {
         }
         let last = read_u64(&bases, (card >> ENTITY_TERMS_BLOCK_SHIFT) as usize)
             + read_u32(&offsets, card as usize) as u64;
-        if last * 4 != terms.len() as u64 {
+        // Compared in ordinals rather than in bytes: a base near `u64::MAX` is a file a reader can
+        // be handed, and `last * 4` would wrap around it into a length that agrees. The terms
+        // file's length is a whole number of `u32` by the check above, so the division is exact.
+        if last != terms.len() as u64 / 4 {
             return Err(StoreError::InvalidEntityTerms {
                 path: dir.clone(),
                 detail: format!(
@@ -497,13 +508,14 @@ impl EntityTerms {
             return Ok(None);
         }
         let rank = (self.hasrow.rank(entity) - 1) as usize;
-        let start = self.absolute(rank) as usize;
-        let end = self.absolute(rank + 1) as usize;
+        let start = self.absolute(rank);
+        let end = self.absolute(rank + 1);
         // **The pair is checked here rather than at open** — see [`EntityTerms::open`] for why the
         // whole offsets array is not walked. A descending pair or one past the terms file is a
         // refusal and never a truncated list: a short label set on the write path is a `409` that
-        // does not fire, which is the fail-open direction.
-        if end < start || end * 4 > self.terms.len() {
+        // does not fire, which is the fail-open direction. The bound is in ordinals, for the
+        // reason the open's is: `end * 4` wraps for a `bases` entry near `u64::MAX`.
+        if end < start || end > self.terms.len() as u64 / 4 {
             return Err(StoreError::InvalidEntityTerms {
                 path: self.dir.clone(),
                 detail: format!(
@@ -513,6 +525,7 @@ impl EntityTerms {
                 ),
             });
         }
+        let (start, end) = (start as usize, end as usize);
         Ok(Some(
             self.terms[start * 4..end * 4]
                 .chunks_exact(4)
@@ -786,6 +799,25 @@ mod tests {
             "a label set is a set: a repeat is refused, not deduplicated"
         );
         assert!(writer.push(6, &[9, 1]).is_err(), "and it is ascending");
+    }
+
+    /// **A block whose own ranks hold more than `u32::MAX` ordinals is refused**, which is the one
+    /// ceiling the paged form keeps: 65,536 entities may hold 4.29×10⁹ terms between them and no
+    /// more. The refusal names the block's opening rank and the entity that tripped it, the two
+    /// things an operator has to find the input by.
+    #[test]
+    fn the_writer_refuses_a_block_whose_own_ranks_pass_u32_max() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut writer = EntityTermsWriter::create(dir.path()).unwrap();
+        writer.push(3, &[1, 2]).unwrap();
+        writer.seed_total_for_test(u64::from(u32::MAX) - 1);
+        let Err(StoreError::InvalidEntityTerms { detail, .. }) = writer.push(7, &[1, 2, 3]) else {
+            panic!("a block past u32::MAX must be refused");
+        };
+        assert!(
+            detail.contains("rank 0") && detail.contains("entity 7"),
+            "the refusal names the block's opening rank and the entity: {detail}"
+        );
     }
 
     /// A truncated `terms.u32` must refuse the open, not answer a shorter list. This is the
@@ -1139,6 +1171,10 @@ mod tests {
         let (dir, _) = blocked_layer(2 * block, |rank| vec![rank]);
         let path = dir.path().join(ENTITY_TERMS_BASES_FILE);
         let whole = std::fs::read(&path).unwrap();
+        let ordinals = std::fs::metadata(dir.path().join(ENTITY_TERMS_TERMS_FILE))
+            .unwrap()
+            .len()
+            / 4;
         assert_eq!(whole.len(), 3 * 8, "two whole blocks and the sentinel's");
         assert!(EntityTerms::open_dir(dir.path()).is_ok(), "whole, it opens");
 
@@ -1164,6 +1200,17 @@ mod tests {
                     whole[..8].to_vec(),
                     whole[16..24].to_vec(),
                     whole[8..16].to_vec(),
+                ]
+                .concat(),
+            ),
+            (
+                // The last base carries the length check, so a base of 2⁶² plus the terms file's
+                // own ordinal count is the file that agrees with it once `base × 4` has wrapped
+                // the whole way round `u64`. In ordinals it does not agree, and is refused.
+                "a last base so large that four times it wraps",
+                [
+                    whole[..16].to_vec(),
+                    ((1u64 << 62) + ordinals).to_le_bytes().to_vec(),
                 ]
                 .concat(),
             ),

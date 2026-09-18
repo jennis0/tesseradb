@@ -5,7 +5,8 @@
 holding one absolute start offset per block of 65,536 has-row ranks, and `offsets.u32` becomes
 relative to its own block's base. A flat `u32` offset capped a layer at 4,294,967,295
 (entity, term) pairs, and a corpus of 3.5×10⁹ rows carrying three terms a row holds more than
-twice that, so the build refused partway through. The cost is 8 bytes per 65,536 ranks of disk
+twice that (modelled, rows × 3), so such a build would refuse partway through. The cost is 8 bytes
+per 65,536 ranks of disk
 (427 KB at 3.5×10⁹, modelled) and one aligned `u64` read a lookup; entity ids are untouched and
 stay `u32` (**I9**). **`bundle_format` moves from 13 to 14**: a 13 layer has no `bases.u64` and its
 offsets are absolute, so a reader at 14 would read every rank above the first block against a base
