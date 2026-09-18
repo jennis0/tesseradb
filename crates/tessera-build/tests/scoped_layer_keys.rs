@@ -19,6 +19,7 @@ use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
 
 use tessera_build::{build, BuildArgs, ScopedLayer, ViewArgs};
+use tessera_engine::browse::{BrowseForm, BrowseRequest};
 use tessera_spatial::Bounds;
 use tessera_store::read::open_bundle;
 use tessera_types::IdentityKey;
@@ -308,6 +309,88 @@ fn one_key_on_two_views_of_a_group_is_two_artifacts() {
 }
 
 #[test]
+fn each_view_serves_its_own_copy_of_the_key() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    build_fixture(dir, &[("c0", "a"), ("c0", "b")]).expect("the fixture builds");
+
+    // A build is an ingest into an empty database (decision 0091), so what the report counted and
+    // what the control plane serves are the same artifacts. The counts below are the ones a
+    // request answers with, read for a principal who sees every entity: each view's `c0` holds
+    // the half of the 24 members the member source gave it.
+    let engine = open_engine(dir);
+    let session = engine
+        .authorise(br#"{"terms": ["1"]}"#)
+        .expect("the credential covers every entity");
+    for view in ["slices:a", "slices:b"] {
+        let out = engine
+            .browse(
+                &session,
+                BrowseRequest {
+                    view,
+                    layer: "clusters",
+                    level: None,
+                    form: BrowseForm::Roots,
+                    filter: None,
+                    limit: 16,
+                    cursor: None,
+                },
+            )
+            .expect("the layer browses on both views of the group");
+        let counts: Vec<u64> = out
+            .artifacts
+            .iter()
+            .map(|row| {
+                assert_eq!(
+                    row.key.as_deref(),
+                    Some("c0"),
+                    "{view} serves the one key the fixture declares"
+                );
+                row.masked_count
+            })
+            .collect();
+        // One artifact on this view holds members, and it holds this view's half of them. The
+        // level's roster spans both views of the group, so the other view's artifact is reached
+        // here as well, holding none of this view's rows.
+        assert_eq!(
+            counts.iter().filter(|count| **count > 0).collect::<Vec<_>>(),
+            vec![&12],
+            "{view} serves its own half of the members and no more: {counts:?}"
+        );
+    }
+}
+
+/// An engine over the built bundle, with the caps raised above the fixture so no assertion above
+/// is answering a question about a cap.
+fn open_engine(dir: &Path) -> tessera_engine::Engine {
+    tessera_engine::Engine::open(
+        &dir.join("bundle"),
+        &dir.join("cache"),
+        &dir.join("wal.log"),
+        tessera_plugin::Passthrough::new(),
+        tessera_engine::EngineConfig {
+            token_max_lifetime_secs: 3600,
+            max_k: 1024,
+            k_min: 2,
+            k_max_marks: 1024,
+            theta_target_marks: 1024,
+            max_underlay_offset: 4,
+            max_underlay_cells: 8192,
+            max_tiles_per_request: 262_144,
+            compute_threads: tessera_engine::default_compute_threads(),
+            flush_max_age_secs: 90,
+            flush_max_items: 40_000,
+            max_merged_segment_bytes: None,
+            tier_width: None,
+            segment_floor_bytes: None,
+            coalesce_width: None,
+            compaction: tessera_engine::CompactionSchedule::off(),
+        },
+    )
+    .expect("the engine opens over the built bundle")
+}
+
+#[test]
 fn one_key_twice_on_one_view_is_still_refused() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path();
@@ -323,3 +406,4 @@ fn one_key_twice_on_one_view_is_still_refused() {
         "the refusal names the view the collision is in: {message}"
     );
 }
+
