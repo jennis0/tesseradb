@@ -264,7 +264,7 @@ one view; 422 when ambiguous). In order, before anything is owed:
    dictionary has never seen is minted a process-local **extension id**, counted down from
    `u32::MAX` so it is **unsatisfiable by construction**: a novel descriptor can buffer an item
    but can never make one visible until a flush promotes it (spec §4.3).
-6. **Batch idempotency.** `x-tessera-batch-id` maps to the SHA-256 of the raw body. A replay of
+6. **Batch idempotency.** `x-tessera-batch-id` is the client's own id for this request, held against the SHA-256 of the raw body. A replay of
    an accepted batch with identical bytes is answered 200 with the recorded `tessera_id`s and no
    effect; different bytes are a 409, no effect. (Arrow serialisation is not canonical; a client
    must resend the same bytes, not re-serialise.)
@@ -374,10 +374,11 @@ in front of it. The response and every refusal:
 | 503 `not-ready` | executor not `Running` (posture), or a partition is serving a stepped-down manifest — refused at the engine boundary, before anything is acked (owner-ruled gate, 2026-08-04; spec §5.6) | yes, later — for step-down, after the damaged newest manifest is repaired |
 
 **The idempotency horizon is the WAL retention window** (spec §4.5). Rotation reclaims WAL
-members; after a restart, a batch id older than the retained log regresses to *unknown*, and a
+members and drops the index entries whose records lay in them, so a batch id older than the
+retained log regresses to *unknown* in a running process and after a restart alike, and a
 byte-identical retry of it is no longer recognised — rows carrying external ids are still caught
-by the duplicate check; rows without them would be ingested twice. A client retrying across
-restarts and long intervals must carry external ids. *(This is a client-visible weakening of
+by the duplicate check; rows without them would be ingested twice. A client retrying past a
+flush must carry external ids. *(This is a client-visible weakening of
 contracts §3.4's replay rule and is proposed there — spec §13.3.)*
 
 ### 2.5 What the viewer observes: nothing, yet

@@ -447,10 +447,12 @@ declaration and commits again.
 
 ### 6.4 Retries
 
-A page is sent with a batch id derived from the source name, the page index and a hash of its
-bytes. A `429` is retried after its `Retry-After` with identical bytes, and a lost
-acknowledgement is resent the same way within the WAL retention window, where the server
-answers it as a replay (write-path §2.4). A `409` on a differing part is reported per row and
+A page is sent with a fresh random batch id, made when the page is built and reused only for
+the retries of that page inside one `commit()`. A `429` is retried after its `Retry-After` under
+that id with identical bytes. A request whose answer is lost is reported as unanswered and is
+not resent. Nothing is kept across commits or sessions: the same frame inserted and committed
+twice is two requests, so rows carrying an id are refused as duplicates the second time and rows
+without one are loaded again. A `409` on a differing part is reported per row and
 part and not retried: an edit is refused by the server, and the SDK has no edit verb. The SDK
 keeps no log of what it sent.
 
@@ -697,18 +699,22 @@ Rulings of 2026-09-18:
   so a label could print its cluster's size; the number is not useful beside a label and goes.
   The amendment to client-components and 0104 is the controller's. Not built yet.
 - An attached record at the publish route may omit `members` and `excluding`; an unattached one
-  keeps the requirement. The SDK omits the field for a memberless label. Not built yet.
-- Issues #151, #152, #153 and #155 are fixed as found (tracks `fix-wire`, `fix-group-cycle`).
-  Not built yet.
-- Issues #150 and #154 are not patched. Each is bottomed out first: the containment partition's
-  base-rows premise, and the accepted-batch index rebuilt per record kind, are questioned as
-  design, not as defects.
+  keeps the requirement. The SDK omits the field for a memberless label.
+- Issues #151, #152, #153 and #155 are fixed as found ; #153 was already fixed on main by
+  decision 0144's cycle, and #151 was the SDK reading through a session older than the view.
+- A batch id is the client's own id for one request and is never derived from the request's
+  content. Loading the same points again is a second load. The server remembers an id for as
+  long as the log holding its record is retained (#154).
+- A generating set is projected and maintained over the whole row space as a membership is, and
+  the containment partition declines a set that reaches above the base rows (#150, option (a)).
+  Not built yet: on a branch under review.
+- A label names its target by the target's id on the wire. The copied count and the client's
+  join by count go. Not built yet: on a branch.
 
 ### 11.2 Needed
 
 - **E. The binary at release.** Platform wheels carrying it. Until then `PATH`, `TESSERA_BIN`
   or the checkout.
-- **G. Issues #150 and #154**, awaiting the owner's ruling on the design each exposes.
 
 ## 12. Order of work
 
