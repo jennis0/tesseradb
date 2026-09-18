@@ -854,6 +854,10 @@ pub struct ArtifactRow {
     /// the trailing shape columns are absent (no served layer declares one) and where they carry
     /// a per-row null.
     pub shape: Option<Vec<Vec<Vec<[u32; 2]>>>>,
+    /// The artifact's supplied content, positional to its layer's declared kinds — column 10, and
+    /// an **empty** list where the layer declares none. Never a null and never a short list: an
+    /// artifact whose content could not be served is absent whole (decision 0076).
+    pub content: Vec<String>,
     /// The rung this artifact is drawn at — the declared level on a levelled layer, the
     /// response-local parent-chain depth on a treed one, 0 on a flat one.
     pub rung: u32,
@@ -1140,6 +1144,21 @@ pub fn decode_viewport_frames(bytes: &[u8]) -> DecodedViewport {
                                 ]
                             }),
                             shape,
+                            content: {
+                                let a = batch
+                                    .column(10)
+                                    .as_any()
+                                    .downcast_ref::<arrow::array::ListArray>()
+                                    .expect("content is a list of utf8");
+                                let values = a.value(i);
+                                let values = values
+                                    .as_any()
+                                    .downcast_ref::<arrow::array::StringArray>()
+                                    .expect("a content is utf8");
+                                (0..values.len())
+                                    .map(|k| values.value(k).to_string())
+                                    .collect()
+                            },
                             // Column 12, after `content` at 10 and `parent_ids` at 11 — read
                             // positionally here on purpose, because the fixed prefix's positions
                             // are contract and a test that read by name would not notice a column

@@ -38,6 +38,11 @@
 //!    alone would start serving every label attached to a deleted cluster at the next nightly fold.
 //!    A hole answers *not served*, which makes the fold's own hole the durable form of the
 //!    withholding rather than a state something has to remember.
+//!    **And what it attaches to is where its membership comes from, where it declared none**
+//!    (owner ruling H, 2026-09-18). A label with no member rows is the label of its cluster — it
+//!    is placed where the cluster is placed and counted over the cluster's members, so the number
+//!    below and the tile above both read the target's membership. [`ArtifactRows::inherit`] is
+//!    where that is resolved, once, for every route.
 //! 4. **The artifact's own terms, if its layer declared that its artifacts carry them.**
 //! 5. **The existence criterion, if declared** — the masked count against a declared bar.
 //!
@@ -277,6 +282,19 @@ pub struct ArtifactRows {
     /// reused (contracts §2.1).
     base_rows: u32,
     covered: Vec<String>,
+    /// **What this form borrowed, and the version it borrowed it at** — one entry per distinct
+    /// `(layer, level)` an artifact of this level took its membership from, because it declared
+    /// none of its own ([`ArtifactRows::inherit`]). Empty on every level that inherits nothing,
+    /// which is every level that carries no attachment.
+    ///
+    /// **The staleness term the projection key cannot carry.** A form is filed under *its own*
+    /// level's version, and a target that grows moves the **target's** version and not this
+    /// level's — so a label of a cluster that gained members would go on answering over the
+    /// membership the cluster had when the label's form was built. Read at every cache hit
+    /// ([`ArtifactRows::inherited_current`]) beside [`ArtifactRows::covers`], and a form whose
+    /// borrowing has moved is rebuilt rather than brought forward: the delta a publication or a
+    /// growth applies is the *target* level's, and there is no delta on this level to take it.
+    inherited: Vec<(String, u32, u64)>,
 }
 
 /// What one viewport's narrowing produced, on whichever route the level's layout takes.
@@ -586,6 +604,19 @@ impl MembershipRows {
         rows
     }
 
+    /// **The slot at `idx` takes `rows` outright** — the one caller is [`ArtifactRows::inherit`],
+    /// where the rows are not this artifact's own and there is nothing of its own to keep. A
+    /// membership is never otherwise replaced: it grows ([`Self::or_rows`]) or it is rebased over
+    /// one extent ([`Self::rebase_rows`]).
+    fn put_rows(&mut self, idx: usize, rows: Bitmap) {
+        if self.rows.len() <= idx {
+            self.rows.resize_with(idx + 1, || None);
+            self.generating.resize_with(idx + 1, Vec::new);
+        }
+        self.rows[idx] = Some(Arc::new(rows));
+        self.rows_held = true;
+    }
+
     /// Union `rows` into the slot at `idx` — **the only way a held form's membership grows**.
     ///
     /// A slot holding `None` is a **hole** and stays one: an ordinal no record occupies is an
@@ -756,6 +787,48 @@ pub(crate) fn view_key(view: &str) -> &str {
         .unwrap_or(view)
 }
 
+/// How far a chain of borrowed memberships is followed — a label on a label on a cluster. The
+/// declaration graph is acyclic by construction (a layer is registered after every layer it names
+/// in `depends_on`), so this is a backstop for a store that disagrees with that, and it fails the
+/// way the dependency prerequisite fails: refused, not followed.
+const INHERIT_CHAIN_MAX: u32 = 8;
+
+/// **Does this artifact take its membership from what it attaches to?** It does where it is an
+/// attachment and declares no members of its own — the H ruling of 2026-09-18, spelled once so the
+/// question is asked the same way wherever it is asked.
+fn inherits_membership(record: &ArtifactRecord) -> bool {
+    record.attached_to.is_some() && record.members.is_empty()
+}
+
+/// The membership an artifact borrows, and the `(layer, level)` of every hop it was borrowed
+/// through — see [`ArtifactRows::inherit`].
+///
+/// `None` where there is nothing to borrow, and each refusal is the one the dependency
+/// prerequisite already makes for the same state: a hole where the target stood, an ordinal
+/// holding a **different** entity from the one the edge names — a target retired and republished
+/// over — and a chain longer than any real declaration. An artifact that borrows nothing keeps the
+/// empty membership it declared, which is a count of zero for every viewer.
+fn inherited_members<'a>(
+    store: &'a ArtifactStore,
+    record: &ArtifactRecord,
+    depth: u32,
+    hops: &mut Vec<(String, u32)>,
+) -> Option<&'a tessera_lifecycle::membership::Members> {
+    if depth == 0 {
+        return None;
+    }
+    let attachment = record.attached_to.as_ref()?;
+    let target = store.get(&attachment.layer, attachment.level, attachment.ordinal)?;
+    if target.entity != attachment.entity {
+        return None;
+    }
+    hops.push((attachment.layer.clone(), attachment.level));
+    if inherits_membership(target) {
+        return inherited_members(store, target, depth - 1, hops);
+    }
+    Some(&target.members)
+}
+
 /// The whole of a view's row space — base and every extent — as a row count.
 fn total_rows(space: &RowSpace) -> u32 {
     u32::try_from(space.total_rows()).unwrap_or(u32::MAX)
@@ -828,6 +901,7 @@ impl ArtifactRows {
             column: None,
             base_rows: space.base_rows(),
             covered: covered_by(space),
+            inherited: Vec::new(),
         }
     }
 
@@ -922,6 +996,7 @@ impl ArtifactRows {
                 column: None,
                 base_rows: space.base_rows(),
                 covered: covered_by(space),
+                inherited: Vec::new(),
             });
         }
         // [`Self::build_over`]'s rule for an offered index, and its reason: a shorter one leaves
@@ -960,6 +1035,7 @@ impl ArtifactRows {
             column: None,
             base_rows: space.base_rows(),
             covered: covered_by(space),
+            inherited: Vec::new(),
         })
     }
 
@@ -997,6 +1073,7 @@ impl ArtifactRows {
             column: None,
             base_rows: space.base_rows(),
             covered: covered_by(space),
+            inherited: Vec::new(),
         }
     }
 
@@ -1406,8 +1483,7 @@ impl ArtifactRows {
             return false;
         };
         let row_count = self.index.row_count().max(column.row_count());
-        let Some(listed) =
-            column.recompose_as_list(added, self.base_rows, row_count, scratch)
+        let Some(listed) = column.recompose_as_list(added, self.base_rows, row_count, scratch)
         else {
             return false;
         };
@@ -1584,8 +1660,103 @@ impl ArtifactRows {
             column: None,
             base_rows: 0,
             covered: Vec::new(),
+            inherited: Vec::new(),
         }
         .with_column(column)
+    }
+
+    /// **An attached artifact that declares no members of its own is placed, counted and gated
+    /// over its target's membership** (owner ruling H, 2026-09-18; `python-sdk.md` §4.7).
+    ///
+    /// A label with no member rows is the label of its cluster: it sits in the tiles the cluster
+    /// sits in, its masked count is the cluster's masked count, its existence criterion reads that
+    /// number, and its proportional denominator is the cluster's declared size. That is the
+    /// default and no declaration asks for it — a label that *does* declare members keeps them,
+    /// because those members are the generating set the caller claimed
+    /// ([decision 0135](../../../docs/decisions/0135-a-generating-set-is-the-callers-claim-i8-withdrawn.md)),
+    /// and `content_requires = "all"` gates on them unchanged.
+    ///
+    /// **This is the one place an artifact's membership is resolved**, so the tile index, the
+    /// masked count, the criterion, the declared size and every derived property follow from it
+    /// without a second rule anywhere: it runs on the form, and every route — the viewport, the
+    /// drill-down, a filter, the dependency prerequisite — is served the form.
+    ///
+    /// **It inherits nothing the target's own gate would withhold.** The membership is a *set of
+    /// rows*, and every count taken over it is taken against this viewer's own composed mask
+    /// (**I2**), so a borrowed membership discloses no member the borrower's mask does not already
+    /// admit. Existence is the target's too, one conjunct earlier: an attached artifact is absent
+    /// wherever its target is absent, on the target's whole predicate and on every route
+    /// ([`ArtifactView::verdict`] step 3,
+    /// [decision 0089](../../../docs/decisions/0089-a-dependency-edge-carries-deletion-and-visibility.md)).
+    /// A principal not served the cluster is therefore not served its label, filtered or not
+    /// (**I3**, **I12**), and a filter moves neither number.
+    ///
+    /// **At the target's current membership.** The versions borrowed from are recorded in
+    /// [`Self::inherited`], so a target that grows re-derives its labels at the next request that
+    /// finds the form ([`Self::inherited_current`]).
+    ///
+    /// **The form goes artifact-major the moment anything inherits.** A row-major column is the
+    /// level's own membership addressed by row, written by a build or a fold that had none of
+    /// these rows to write; serving from it would answer over the empty membership the record
+    /// carries. The level's own bitmaps are cheap here — a label level is one artifact per
+    /// cluster — and the column is dropped rather than amended.
+    ///
+    /// Returns how many ordinals took a membership that is not their own.
+    fn inherit(
+        &mut self,
+        store: &ArtifactStore,
+        space: &RowSpace,
+        layer: &str,
+        level: u32,
+        view: &str,
+    ) -> usize {
+        let mut taken = 0usize;
+        let mut borrowed: Vec<(String, u32, u64)> = Vec::new();
+        for (ordinal, record) in store.level_in_view(layer, level, view) {
+            if !inherits_membership(record) {
+                continue;
+            }
+            let mut hops = Vec::new();
+            let Some(members) = inherited_members(store, record, INHERIT_CHAIN_MAX, &mut hops)
+            else {
+                continue;
+            };
+            if taken == 0 && !self.membership.rows_held() {
+                // A column-only form holds no bitmap to overwrite. The level is rebuilt
+                // artifact-major from its records first, which is the same recovery the alarm
+                // below [`ArtifactProjections::get_or_build`]'s column branch makes.
+                self.membership =
+                    MembershipRows::build(store.level_in_view(layer, level, view), space);
+            }
+            self.membership
+                .put_rows(ordinal as usize, space.project(members));
+            taken += 1;
+            for hop in hops {
+                let version = store.level_version(&hop.0, hop.1);
+                if !borrowed
+                    .iter()
+                    .any(|(l, lv, _)| l == &hop.0 && *lv == hop.1)
+                {
+                    borrowed.push((hop.0, hop.1, version));
+                }
+            }
+        }
+        if taken > 0 {
+            self.layout = ServingLayout::ArtifactMajor;
+            self.column = None;
+            self.index = TileIndex::build(&self.membership, total_rows(space));
+        }
+        self.inherited = borrowed;
+        taken
+    }
+
+    /// Whether every membership this form borrowed is still the membership it borrowed — see
+    /// [`Self::inherited`]. Vacuously true for a form that borrowed nothing, which is every
+    /// ordinary level.
+    fn inherited_current(&self, store: &ArtifactStore) -> bool {
+        self.inherited
+            .iter()
+            .all(|(layer, level, version)| store.level_version(layer, *level) == *version)
     }
 
     pub fn get(&self, ordinal: u32) -> Option<&Bitmap> {
@@ -2748,7 +2919,9 @@ impl ArtifactProjections {
             .iter()
             .filter(|delta| delta.before >= pending_from)
             .collect();
-        let now = pending.last().map_or(pending_from, |delta| delta.before + 1);
+        let now = pending
+            .last()
+            .map_or(pending_from, |delta| delta.before + 1);
         if pending.is_empty() && read_prefix == prefix {
             // The form was built from the store after every delta held here, and it is still the
             // form this prefix serves. Nothing to apply, and it never left the map.
@@ -2772,6 +2945,13 @@ impl ArtifactProjections {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .insert(map_key, Held { key, at, rows });
+            return;
+        }
+        // **A form that borrowed is rebuilt rather than amended** ([`Self::drop_borrowed`]). The
+        // entry is already out of the map, so returning here is what drops it.
+        if !rows.inherited.is_empty() {
+            drop(rows);
+            self.drop_borrowed(&map_key, view);
             return;
         }
         // **Every term that would make the amendment describe something other than what is held.**
@@ -3036,6 +3216,11 @@ impl ArtifactProjections {
     ) {
         for (address, key, mut rows) in self.held_of_view(prefix, view) {
             let (_, layer, level) = &address;
+            if !rows.inherited.is_empty() {
+                // [`Self::drop_borrowed`]: the rows are not this level's records' to extend.
+                self.drop_borrowed(&address, view);
+                continue;
+            }
             if rows.covers(next) {
                 continue;
             }
@@ -3169,6 +3354,11 @@ impl ArtifactProjections {
         };
         for (address, key, mut rows) in self.held_of_view(prefix, view) {
             let (_, layer, level) = &address;
+            if !rows.inherited.is_empty() {
+                // [`Self::drop_borrowed`]: the rows are not this level's records' to rebase.
+                self.drop_borrowed(&address, view);
+                continue;
+            }
             if !(rows.covers(previous) && rows.extends_to(previous)) {
                 // A form that agrees with `previous` and is shorter than it is a straddling
                 // build's: built against an older generation and inserted where nothing stood,
@@ -3288,6 +3478,32 @@ impl ArtifactProjections {
         );
     }
 
+    /// **Drop a form that borrowed a membership rather than amend it** — see
+    /// [`ArtifactRows::inherit`].
+    ///
+    /// Every amendment below carries what a level's own **records** changed by, and a borrowing
+    /// artifact's membership is not in its record: a delta hands it the empty set it declared, and
+    /// a flush's extension finds nothing of its own to extend. So a form holding one is rebuilt by
+    /// the next request naming the level, which resolves every borrowed membership against the
+    /// store as it stands then. Said at `debug`, because this is the ordinary course for such a
+    /// level and not a fault: what is given up is a warm form on a level whose artifacts are one
+    /// per cluster.
+    fn drop_borrowed(&self, address: &LevelAddress, view: &str) {
+        let (_, layer, level) = address;
+        self.cached
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(address);
+        tracing::debug!(
+            layer = %layer,
+            level,
+            view = %view,
+            "this level's artifacts borrow their membership from what they attach to, so its held \
+             row form is dropped rather than amended; the next request naming it resolves them \
+             again"
+        );
+    }
+
     /// Drop a form whose rows are not rows of the generation being published — see
     /// [`ArtifactRows::covers`] on the one way such a form is held.
     fn drop_disagreeing(&self, address: &LevelAddress, view: &str) {
@@ -3382,7 +3598,14 @@ impl ArtifactProjections {
             // the cardinality this form published together. Every other term of the key is an
             // equality: a form under another prefix, or of another view, or of an attribute
             // predicate whose value column the geometry has moved, describes something else.
-            if held.key.stale_form_of(&key) && held.rows.covers(space) {
+            // **And what it borrowed is still what it borrowed.** A level whose artifacts take
+            // their membership from another's is filed under its *own* version, which a target
+            // that grew did not move; without this term a label would answer over the membership
+            // its cluster had when the form was built (`ArtifactRows::inherited`).
+            if held.key.stale_form_of(&key)
+                && held.rows.covers(space)
+                && held.rows.inherited_current(store)
+            {
                 // **Its own version and not `key`'s**: see the doc above. A form still waiting for
                 // a tick's delta is the level at the earlier version, and that is what anything
                 // derived from it must be filed under.
@@ -3612,14 +3835,31 @@ impl ArtifactProjections {
                 "ALARM: a level built from its column alone has no column to serve from; its rows \
                  are transposed back"
             );
-            built.membership = MembershipRows::build(
-                store.level_in_view(layer, level, view_key(view)),
-                space,
-            );
+            built.membership =
+                MembershipRows::build(store.level_in_view(layer, level, view_key(view)), space);
             built.index = TileIndex::build(&built.membership, total_rows(space));
         }
+        // **The borrowed memberships, last** — after the form is otherwise complete, because what
+        // they replace is the empty membership the record declared and what they invalidate is the
+        // index derived over it. See [`ArtifactRows::inherit`]: an attached artifact with no
+        // members of its own is placed, counted and gated over its target's.
+        let inherited = built.inherit(store, space, layer, level, view_key(view));
+        if inherited > 0 {
+            tracing::info!(
+                layer = %layer,
+                level,
+                view = %view,
+                artifacts = inherited,
+                borrowed = ?built.inherited,
+                "artifacts of this level declare no membership of their own and take the \
+                 membership of what they attach to; the level is served artifact-major"
+            );
+        }
         let rows = Arc::new(built);
-        if layout.is_row_major() && !from_column {
+        // **Not the fallback below**, where a recorded layout could not be honoured: a level that
+        // borrows is served artifact-major because the borrowed rows are in no column, which the
+        // line above has already said.
+        if layout.is_row_major() && !from_column && inherited == 0 {
             self.fallbacks
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             tracing::warn!(
@@ -4307,6 +4547,7 @@ mod tests {
             column: None,
             base_rows: 0,
             covered: Vec::new(),
+            inherited: Vec::new(),
         }
     }
 
