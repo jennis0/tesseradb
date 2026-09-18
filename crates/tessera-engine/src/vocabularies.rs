@@ -20,15 +20,11 @@
 //! the held title, and the acknowledgement says how many titles were updated. Every identity field
 //! — the key's binding, and the vocabulary's width, kind, visibility and `reserved` — is a `409`
 //! on a difference, because each is baked into rows or into what ingest may say.
-//!
-//! **The rules are the build's, transcribed**, on `crate::attributes`' argument: a declaration
-//! the build accepts and this route refuses, or the reverse, is a feature that works at one door
-//! and not the other (decision 0091). `tessera_build::config`'s vocabulary compile is the other
-//! statement of them.
 
 use tessera_lifecycle::wal::{DeclaredVocabularyValue, VocabularyDeclaration};
 use tessera_lifecycle::{DeclaredValue, ExecError, VocabularyRequest};
 use tessera_spatial::tiler::ScalarType;
+use tessera_store::declaration::{check_value_keys, check_vocabulary};
 use tessera_store::manifest::{Manifest, ManifestVocabulary, ManifestVocabularyValue};
 use tessera_store::vocabulary::{Vocabularies, VocabularyMinter};
 
@@ -124,55 +120,8 @@ pub(crate) fn resolve(
 ) -> Result<Resolution, ExecError> {
     let refused = |detail: String| ExecError::VocabularyRefused { detail };
     let name = request.name.as_str();
-    check_name(name).map_err(refused)?;
-    let Some(width) = ScalarType::parse(&request.width).filter(is_category_width) else {
-        return Err(refused(format!(
-            "vocabulary '{name}': `width = \"{}\"` is not a code space. A category's code is \
-             stored at `u8`, `u16` or `u32` (per-point-attributes §3.6), and the width is baked \
-             into every row that carries a code",
-            request.width
-        )));
-    };
-    for &code in &request.reserved {
-        if code == 0 {
-            return Err(refused(format!(
-                "vocabulary '{name}': `reserved` names code 0, the *absent* sentinel, which is \
-                 never assigned to a value (per-point-attributes §3.6)"
-            )));
-        }
-        if code > usable_max(width) {
-            return Err(refused(format!(
-                "vocabulary '{name}': `reserved` names code {code}, which a {} code space cannot \
-                 hold",
-                request.width
-            )));
-        }
-    }
-    let mut keys = std::collections::BTreeSet::new();
-    for value in &request.values {
-        check_value_key(name, &value.key).map_err(refused)?;
-        if !keys.insert(value.key.as_str()) {
-            return Err(refused(format!(
-                "vocabulary '{name}': value '{}' is named twice in one request. A value is a key \
-                 and its properties, so two rows for one key are two answers to which properties \
-                 it has",
-                value.key
-            )));
-        }
-    }
-    // **A closed set with no values is refused at both doors** (the build's own rule): the set is
-    // the authority on what may be ingested, so an empty one refuses every value while its column
-    // costs its width in every row.
-    if request.kind == tessera_types::vocabulary::VocabularyKind::Declared
-        && request.values.is_empty()
-    {
-        return Err(refused(format!(
-            "vocabulary '{name}': `value_set = \"closed\"` with no values. A closed set is the \
-             authority on what may be ingested, so an empty one refuses every value while its \
-             column costs its width in every row. Declare the values, or write \
-             `value_set = \"open\"` to have them minted as they arrive"
-        )));
-    }
+    let width = check_vocabulary(name, &request.width, &request.reserved).map_err(refused)?;
+    check_value_keys(name, request.values.iter().map(|v| v.key.as_str())).map_err(refused)?;
 
     let compiled = ManifestVocabulary {
         name: request.name.clone(),
@@ -302,7 +251,7 @@ pub(crate) fn compile_record(declaration: &VocabularyDeclaration) -> Option<Mani
         name: declaration.name.clone(),
         kind: declaration.kind,
         visibility: declaration.visibility,
-        width: ScalarType::parse(&declaration.width).filter(is_category_width)?,
+        width: ScalarType::parse(&declaration.width).filter(|w| w.is_category_width())?,
         values: declaration
             .values
             .iter()
@@ -318,55 +267,6 @@ pub(crate) fn compile_record(declaration: &VocabularyDeclaration) -> Option<Mani
     })
 }
 
-/// Whether a stored type is a code space. `ScalarType::parse` reads every declarable width, and
-/// three of them hold a category's code.
-fn is_category_width(ty: &ScalarType) -> bool {
-    matches!(ty, ScalarType::U8 | ScalarType::U16 | ScalarType::U32)
-}
-
-/// The highest code a width can hold — `tessera_store::vocabulary`'s own `usable_max`, which is
-/// private to that module, restated for the `reserved` check.
-fn usable_max(width: ScalarType) -> u32 {
-    match width {
-        ScalarType::U8 => u32::from(u8::MAX),
-        ScalarType::U16 => u32::from(u16::MAX),
-        _ => u32::MAX,
-    }
-}
-
-/// A vocabulary's name is what an attribute's `vocabulary` key names and what `/v1/meta`
-/// publishes, so it takes the column charset
-/// (`tessera_build::config::check_column_name`, transcribed).
-fn check_name(name: &str) -> Result<(), String> {
-    if name.is_empty() {
-        return Err("a vocabulary with an empty name".to_string());
-    }
-    if !name
-        .bytes()
-        .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
-    {
-        return Err(format!(
-            "vocabulary '{name}': a vocabulary's name is what an attribute's `vocabulary` key \
-             names and what `/v1/meta` publishes, so it is limited to ASCII letters, digits, `_` \
-             and `-`"
-        ));
-    }
-    Ok(())
-}
-
-/// A value key is what a category column's rows carry on the wire (per-point-attributes §5), so
-/// the spelling a defect produces is refused here.
-fn check_value_key(vocabulary: &str, key: &str) -> Result<(), String> {
-    if key.is_empty() {
-        return Err(format!(
-            "vocabulary '{vocabulary}': a value with an empty key. An empty string is what an \
-             unset field and a client bug both produce, so minting for it would make a typo a \
-             category (per-point-attributes §5)"
-        ));
-    }
-    Ok(())
-}
-
 /// Check one page of values before any code is drawn, and count the titles it will change.
 ///
 /// **A title upserts** (decision 0136's amendment): a value is addressed by its key, and a title
@@ -380,21 +280,10 @@ pub(crate) fn check_page(
     vocabulary: &str,
     values: &[DeclaredValue],
 ) -> Result<u64, ExecError> {
-    let mut seen = std::collections::BTreeSet::new();
+    check_value_keys(vocabulary, values.iter().map(|v| v.key.as_str()))
+        .map_err(|detail| ExecError::VocabularyRefused { detail })?;
     let mut titles = 0u64;
     for value in values {
-        check_value_key(vocabulary, &value.key)
-            .map_err(|detail| ExecError::VocabularyRefused { detail })?;
-        if !seen.insert(value.key.as_str()) {
-            return Err(ExecError::VocabularyRefused {
-                detail: format!(
-                    "vocabulary '{vocabulary}': value '{}' is named twice in one page. A value is \
-                     a key and its properties, so two rows for one key are two answers to which \
-                     properties it has",
-                    value.key
-                ),
-            });
-        }
         if let Some(supplied) = value.title.as_deref() {
             if minter.code_of(&value.key).is_some() && minter.title_of(&value.key) != Some(supplied)
             {

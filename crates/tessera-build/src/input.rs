@@ -2181,17 +2181,6 @@ pub fn read_vocabulary_file(
         };
         for row in 0..batch.num_rows() {
             let key = keys.value(row).to_string();
-            // A duplicate key here is a duplicate *code assignment*, which the caller's file
-            // decides silently by row order unless it is refused. `check_codes` catches two keys
-            // at one code; this catches one key at two.
-            if set.order.iter().any(|seen| seen == &key) {
-                return Err(crate::config::declaration_error(format!(
-                    "vocabulary '{vocabulary}': the file at {} lists key '{key}' twice. Which \
-                     code every row carrying '{key}' would mean is decided by row order, so it is \
-                     refused",
-                    path.display()
-                )));
-            }
             set.order.push(key.clone());
             if let Some(codes) = &code_values {
                 let raw = codes[row];

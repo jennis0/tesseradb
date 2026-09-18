@@ -158,6 +158,9 @@ use tessera_plugin::Plugin;
 use tessera_spatial::frame::{snap_outward, Snap};
 use tessera_spatial::tiler::ScalarType;
 use tessera_spatial::{cell, Bounds, Projection};
+use tessera_store::declaration::{
+    check_attribute, check_value_keys, check_vocabulary, AttributeSpec, DECLARABLE_TYPES,
+};
 use tessera_store::vocabulary::VocabularyMinter;
 use tessera_types::layer::{
     ArtifactVisibility, ContentDeclaration, ExistenceCriterion, Hierarchy, HierarchyKind,
@@ -472,10 +475,6 @@ struct AttributeBlock {
     render: bool,
     #[serde(default)]
     index: bool,
-    #[serde(default)]
-    multi: bool,
-    #[serde(default)]
-    render_in: Option<Vec<String>>,
     /// `"entity"` (the default) or `{ group = "<view_group>" }` — whether this column is one
     /// value per entity or one per `(entity, view of the group)` (`views.md` §5,
     /// [decision 0109](../../../docs/decisions/0109-scope-binds-an-attribute-or-layer-to-a-groups-views.md)).
@@ -4314,28 +4313,45 @@ fn compile_vocabularies(
 ) -> Result<HashMap<String, Vocabulary>> {
     let mut compiled: HashMap<String, Vocabulary> = HashMap::new();
     for block in blocks {
-        if block.name.is_empty() {
-            return Err(declaration_error("a vocabulary with an empty name"));
-        }
-        if compiled.contains_key(&block.name) {
+        let name = &block.name;
+        if compiled.contains_key(name) {
             return Err(declaration_error(format!(
-                "vocabulary '{}' is declared twice. A vocabulary is an object named by every \
-                 attribute that shares it, so two blocks of one name is not a last-one-wins \
-                 question — it is two code spaces read back under one name, and which one a stored \
-                 code meant would depend on parse order",
-                block.name
+                "vocabulary '{name}' is declared twice"
             )));
         }
-        let object = format!("vocabulary '{}'", block.name);
-        // **No `[defaults].source` here**: a vocabulary with no source is one that mints rather
-        // than reads, and supplying it a file would open a value set nobody opened.
+        let required = |key: &str, choices: &str| {
+            declaration_error(format!(
+                "vocabulary '{name}': `{key}` is required: {choices}"
+            ))
+        };
+        let width_name = block
+            .width
+            .as_deref()
+            .ok_or_else(|| required("width", "`u8`, `u16` or `u32`"))?;
+        let reserved = compile_reserved(block)?;
+        let width = check_vocabulary(name, width_name, &reserved).map_err(declaration_error)?;
+
+        // `closed` refuses a key it does not hold at ingest; `open` gives it a new code.
+        let value_set = match block.value_set.as_deref() {
+            Some("closed") => ValueSet::Closed,
+            Some("open") => ValueSet::Open,
+            _ => return Err(required("value_set", "`closed` or `open`")),
+        };
+        // `public` publishes the value set; `derived` shows a viewer only the values carried by
+        // points they can see.
+        let visibility = match block.visibility.as_deref() {
+            Some("public") => Visibility::Public,
+            Some("derived") => Visibility::Derived,
+            _ => return Err(required("visibility", "`public` or `derived`")),
+        };
+
+        let object = format!("vocabulary '{name}'");
+        // A vocabulary does not take `[defaults].source`: with no source it has no values file.
         let source = match &block.source {
             Some(declared) => Some(sources.path(&object, declared)?),
             None => None,
         };
-        // A `code` field pins the codes and its absence assigns them, which is why it is *always*
-        // available rather than asserted by another key: which of the two a file does is the file's
-        // to say, and §1 makes that the one difference between the two spellings.
+        // A `code` field pins the codes; without one the build assigns them.
         let fields = check_fields(
             &object,
             source.as_ref(),
@@ -4347,143 +4363,25 @@ fn compile_vocabularies(
             block.fields.as_ref(),
             ENTITY_ID,
         )?;
-
-        let width_name = block.width.as_deref().ok_or_else(|| {
-            declaration_error(format!(
-                "vocabulary '{}': `width` is required and has no default (configuration.md §6). \
-                 The three are u8 (255 usable values), u16 and u32 — it is the code space's width, \
-                 baked into every row that carries a value from this vocabulary, so changing it \
-                 rewrites the corpus. That is a migration, not a default worth guessing",
-                block.name
-            ))
-        })?;
-        let width = ScalarType::parse(width_name)
-            .filter(|t| t.is_category_width())
-            .ok_or_else(|| {
-                declaration_error(format!(
-                    "vocabulary '{}': `width = \"{width_name}\"` is not a category width. The \
-                     three are u8 (255 usable values), u16 and u32 — per-point-attributes §3.6. \
-                     Code 0 is the reserved *absent* sentinel, which is why each carries one fewer \
-                     value than its range",
-                    block.name
-                ))
-            })?;
-
-        let value_set = match block.value_set.as_deref() {
-            Some("closed") => ValueSet::Closed,
-            Some("open") => ValueSet::Open,
-            Some(other) => {
-                return Err(declaration_error(format!(
-                    "vocabulary '{}': `value_set = \"{other}\"` is neither \"closed\" nor \
-                     \"open\". `closed` refuses an unknown key at ingest; `open` mints it a fresh \
-                     code",
-                    block.name
-                )));
-            }
-            None => {
-                return Err(declaration_error(format!(
-                    "vocabulary '{}': `value_set` is required and has no default \
-                     (configuration.md §6). `closed` means the set is authored and an unknown key \
-                     at ingest is refused; `open` means an unknown key is minted a fresh code. \
-                     There is no default because either answer decides what a typo in a data file \
-                     does — create a category, or fail the batch",
-                    block.name
-                )));
-            }
-        };
-
-        let visibility = match block.visibility.as_deref() {
-            Some("public") => Visibility::Public,
-            Some("derived") => Visibility::Derived,
-            Some(other) => {
-                return Err(declaration_error(format!(
-                    "vocabulary '{}': `visibility = \"{other}\"` is neither \"public\" nor \
-                     \"derived\", and this slot takes no access label — only a layer's does. \
-                     `public` publishes the value set; `derived` makes a value's existence follow \
-                     from the viewer being able to see a point carrying it. A word outside the two \
-                     is refused rather than read as a label, because reading it as one would gate \
-                     the set on a term nobody holds — or publish it",
-                    block.name
-                )));
-            }
-            None => {
-                return Err(declaration_error(format!(
-                    "vocabulary '{}': `visibility` is required and has no default \
-                     (configuration.md §6). It is a disclosure control — whether the *existence* \
-                     of a value is sensitive — with exactly two settings: `public` publishes the \
-                     value set, `derived` makes a value's existence follow from the viewer being \
-                     able to see a point carrying it. A bundle built without one would have to be \
-                     rebuilt to acquire it",
-                    block.name
-                )));
-            }
-        };
-
-        // §3.8's original refusal, relaxed to a warning by owner ruling (2026-08-07): an open
-        // vocabulary's values are inferred from whatever is in the corpus, so publishing them
-        // discloses data-derived names on nobody's authority — but the operator may have a reason,
-        // and there is still no `/v1/categories` for the disclosure to reach.
-        if visibility == Visibility::Public && value_set == ValueSet::Open {
-            eprintln!(
-                "warning: vocabulary '{}': `visibility = \"public\"` with `value_set = \"open\"` \
-                 publishes data-derived value names on nobody's authority (per-point-attributes \
-                 §3.8, relaxed from a refusal to a warning by owner ruling 2026-08-07). Confirm \
-                 this is intended",
-                block.name
-            );
-        }
-
-        let reserved = compile_reserved(block)?;
         let mut declared = match (&block.values, source.as_ref()) {
             (Some(_), Some(_)) => {
                 return Err(declaration_error(format!(
-                    "vocabulary '{}' declares values inline and names a `source`. They are \
-                     spellings of one thing — a value set is inline *or* sourced — so declaring \
-                     both is a parse error rather than a precedence question",
-                    block.name
+                    "vocabulary '{name}' gives `values` and a `source`; give one"
                 )));
             }
-            (Some(inline), None) => parse_inline_values(inline, &block.name)?,
-            (None, Some(path)) => crate::input::read_vocabulary_file(path, &block.name, &fields)?,
-            (None, None) if value_set == ValueSet::Closed => {
-                return Err(declaration_error(format!(
-                    "vocabulary '{}': `value_set = \"closed\"` with no value source. A closed set \
-                     is authored, and an authored set of nothing refuses every ingest and costs \
-                     its width in every row for ever. Declare `values = [\"a\", \"b\"]` (codes \
-                     assigned in the order given), or a `[vocabulary.values]` table pinning them, \
-                     or name a `source` and bind it with `--file`. An unbound source is never a \
-                     silent fall-through to minting, which would open the set with nobody deciding \
-                     to",
-                    block.name
-                )));
-            }
-            // Open, and no values given: starts empty rather than closing the set, and the build
-            // mints every code it will ever carry.
+            (Some(inline), None) => parse_inline_values(inline, name)?,
+            (None, Some(path)) => crate::input::read_vocabulary_file(path, name, &fields)?,
             (None, None) => DeclaredValues::default(),
         };
-
-        assign_codes(&mut declared, &reserved, width, &block.name)?;
-        check_codes(&declared.codes, &reserved, width, &block.name)?;
-
-        // **Applied here, after the three spellings converge**, and not at the source: an inline
-        // table, a bare key array and a bound Parquet each reach this point as one `codes` map, so
-        // no spelling can acquire a rule another lacks. Refusing only *the absence of a source*
-        // would admit a source that declares nothing, which is the same column with the same cost
-        // and none of the message.
-        if value_set == ValueSet::Closed && declared.codes.is_empty() {
-            return Err(declaration_error(format!(
-                "vocabulary '{}': `value_set = \"closed\"` with no values. A closed set is the \
-                 authority on what may be ingested, so an empty one refuses every value for ever \
-                 while its column costs its width in every row. Author the values, or write \
-                 `value_set = \"open\"` to have them minted as they arrive",
-                block.name
-            )));
-        }
+        check_value_keys(name, declared.order.iter().map(String::as_str))
+            .map_err(declaration_error)?;
+        assign_codes(&mut declared, &reserved, width, name)?;
+        check_codes(&declared.codes, &reserved, width, name)?;
 
         compiled.insert(
-            block.name.clone(),
+            name.clone(),
             Vocabulary {
-                name: block.name.clone(),
+                name: name.clone(),
                 title: block.title.clone(),
                 value_set,
                 visibility,
@@ -4527,12 +4425,6 @@ fn parse_inline_values(values: &toml::Value, vocabulary: &str) -> Result<Declare
                          `[vocabulary.values]` with `key = code` to pin the codes instead"
                     ))
                 })?;
-                if set.order.iter().any(|seen| seen == key) {
-                    return Err(declaration_error(format!(
-                        "vocabulary '{vocabulary}': value '{key}' is listed twice. Which code it \
-                         would take is decided by position, so it is refused"
-                    )));
-                }
                 set.order.push(key.to_string());
             }
         }
@@ -4671,304 +4563,65 @@ fn compile_attributes(
     let mut seen_names: HashSet<&str> = HashSet::new();
 
     for decl in blocks {
-        if !seen_names.insert(decl.name.as_str()) {
+        let name = decl.name.as_str();
+        if !seen_names.insert(name) {
             return Err(declaration_error(format!(
-                "attribute '{}' is declared twice. The scalar tail is stored positionally, so two \
-                 columns of one name is not a last-one-wins config question — it is two columns \
-                 whose values are read back under one name",
-                decl.name
+                "attribute '{name}' is declared twice"
             )));
         }
-        check_column_name(&decl.name)?;
-        // **Column names and filter combinators share one namespace** (decision 0062). A leaf in a
-        // filter expression is a column name directly — there is no wrapper object — so a column
-        // called `any_of` would be ambiguous with the combinator at request time. Refused at the
-        // build instead, where it is one error against one declaration rather than a request that
-        // means two things.
-        if matches!(decl.name.as_str(), "all_of" | "any_of" | "none_of") {
-            return Err(declaration_error(format!(
-                "attribute '{}': that name is a filter combinator (decision 0062), and a filter \
-                 expression names columns directly, so a column may not take one. Reserved: {}",
-                decl.name,
-                RESERVED_COLUMN_NAMES.join(", ")
-            )));
-        }
-        // The two reserved *leaves*, on the same argument: `region` is the spatial one
-        // (selection-operand §2) and `member_of` names one artifact's membership
-        // (`highlight-and-hierarchy.md` §3). A column of either name would make a request mean two
-        // things.
-        if matches!(decl.name.as_str(), "region" | "member_of") {
-            return Err(declaration_error(format!(
-                "attribute '{}': that name is a filter leaf of the request surface \
-                 (`selection-operand.md` §2, `highlight-and-hierarchy.md` §3), and a filter \
-                 expression names columns directly, so a column may not take it. Reserved: {}",
-                decl.name,
-                RESERVED_COLUMN_NAMES.join(", ")
-            )));
-        }
-        // **The frames' own reserved name.** `highlighted` is a column of the *tiles*, *points* and
-        // *artifacts* frames (`highlight-and-hierarchy.md` §2), so a render column of that name
-        // would put two columns of one name on the points frame and a by-name reader would take
-        // the wrong one.
-        if decl.name == "highlighted" {
-            return Err(declaration_error(format!(
-                "attribute '{}': that name is the *points* frame's highlight column \
-                 (`highlight-and-hierarchy.md` §2), so a render column of it would put two \
-                 columns of one name on one frame and a by-name reader would take the wrong one. \
-                 Reserved: {}",
-                decl.name,
-                RESERVED_COLUMN_NAMES.join(", ")
-            )));
-        }
-        // The attribute's own one-field map: `field` locates the column when it differs from the
-        // served name, and the attribute pass reads it (`Attribute::field`). Empty is refused
-        // rather than read as *the same as the name*: it names no column at all.
         if decl.field.as_deref().is_some_and(|f| f.trim().is_empty()) {
             return Err(declaration_error(format!(
-                "attribute '{}': `field` is empty, so it names no column. Omit it to read the \
-                 column named '{}'",
-                decl.name, decl.name
+                "attribute '{name}': `field` is empty; omit it to read the column named '{name}'"
             )));
         }
-        // `render` + `multi` before bare `multi`: the first is a permanent fence (0039) and the
-        // second an unbuilt stage, and a caller who set both must hear the fence — it survives the
-        // epic that lifts the other refusal.
-        if decl.render && decl.multi {
-            return Err(declaration_error(format!(
-                "attribute '{}': `render` with `multi = true` is never admissible (decision 0039) \
-                 — a rendered mark has one colour, and no projection or summary of a list earns a \
-                 hot column. Declare an ordinary single-valued attribute carrying the value to \
-                 colour by",
-                decl.name
-            )));
-        }
-        if decl.multi {
-            return Err(declaration_error(format!(
-                "attribute '{}': `multi = true` is specified and not built (records §5 — the list \
-                 addressing lands with the multi-value epic, records §13). Refused rather than \
-                 read as single-valued: accepting it would store one value per item under a \
-                 declaration promising several",
-                decl.name
-            )));
-        }
-        if decl.render_in.is_some() {
-            return Err(declaration_error(format!(
-                "attribute '{}': `render_in` is specified and not built (per-point-attributes \
-                 §3.9). A per-view hot column needs contracts §2.6 to enumerate columns per view, \
-                 which views §3 permits and the format does not yet carry — \
-                 `MANIFEST.declared_scalars` is one flat bundle-wide list. Accepting it would put \
-                 the column in every view anyway, silently, which is the opposite of what it asks \
-                 for. Omit it: every view is the current behaviour and the documented default",
-                decl.name
-            )));
-        }
-        // Neither `render` nor `index` is not a refusal: the declaration is blob-resident (records
-        // §3) — no hot-column slot, no entity-space structure, no `/v1/meta` operand; the record
-        // blob holds its values and drill-down returns them.
-
-        let ty_name = decl.ty.as_deref().ok_or_else(|| {
+        let ty = decl.ty.as_deref().ok_or_else(|| {
             declaration_error(format!(
-                "attribute '{}': `type` is required and has no default (configuration.md §6). The \
-                 declarable types are bool, u8, u16, u32, u64, i8, i16, i32, i64, f32, f64, \
-                 timestamp_us, keyword, text and category",
-                decl.name
+                "attribute '{name}': `type` is required. The types are {DECLARABLE_TYPES}"
             ))
         })?;
-
-        let attribute = match ty_name {
-            "category" => {
-                let name = decl.vocabulary.as_deref().ok_or_else(|| {
-                    declaration_error(format!(
-                        "attribute '{}': `vocabulary` is required for a category and has no \
-                         default (configuration.md §6). It names a `[[vocabulary]]` block, which \
-                         is where the width, the value set and the visibility live — every one of \
-                         them a decision nobody can make on the author's behalf",
-                        decl.name
-                    ))
-                })?;
-                // **Refused here, before a data file is opened**, and never an implicitly minted
-                // open vocabulary: the fall-through §7 forbids, arriving through a typo. An
-                // implicit vocabulary would take whatever width, value set and visibility the
-                // fall-through picked, none of which anyone declared.
-                let vocabulary = vocabularies.get(name).ok_or_else(|| {
-                    declaration_error(format!(
-                        "attribute '{}': `vocabulary = \"{name}\"` names no `[[vocabulary]]` \
-                         block. Declared: {}. A missing block is refused rather than minted as an \
-                         open vocabulary — a typo would otherwise create a value set nobody \
-                         authored, at whatever width and visibility the fall-through picked",
-                        decl.name,
-                        declared_names(vocabularies)
-                    ))
-                })?;
-                if let Some(analyser) = &decl.analyser {
-                    return Err(declaration_error(format!(
-                        "attribute '{}' is a category, not `text`, so `analyser = \"{analyser}\"` \
-                         has no meaning for it. Refused rather than ignored: an ignored analyser is \
-                         a pipeline its author believes is in use",
-                        decl.name
-                    )));
-                }
-                Attribute {
-                    name: decl.name.clone(),
-                    title: decl.title.clone(),
-                    field: decl.field.clone(),
-                    ty: vocabulary.width,
-                    analyser: None,
-                    vocabulary: Some(vocabulary.name.clone()),
-                    value_set: Some(vocabulary.value_set),
-                    // Every flag combination is legal for a category — a rendered category stays
-                    // filterable because its entity-space structures are the constant floor, not a
-                    // placement (records §4.2).
-                    index: decl.index,
-                    render: decl.render,
-                }
-            }
-            // **`utf8` is retired as a declared type, and the refusal names its two successors**
-            // (records §4.3, §4.4; decision 0048 makes this a refusal rather than an alias, because
-            // a silent rename would give a schema a storage layout its author did not choose). It
-            // remains the *wire* type of a keyword's value and of a category's key.
-            "utf8" => {
-                return Err(declaration_error(format!(
-                    "attribute '{}': `utf8` is retired as a declared type. A short string matched \
-                     whole — an identifier, an order number, a hostname — is `keyword`, which \
-                     stores a per-layer sorted dictionary and a `u32` ordinal and keeps `eq`, \
-                     `in`, `prefix` and `contains` byte-exact. Prose searched by word is `text` \
-                     (records-and-search §4.4), whose values live in the record blob and whose \
-                     terms come from a named analyser",
-                    decl.name
-                )));
-            }
-            other => {
-                // A plain scalar: the type *is* the width, and none of the vocabulary machinery
-                // applies. Refused rather than ignored if any of it is present.
-                let ty = ScalarType::parse(other).ok_or_else(|| {
-                    declaration_error(format!(
-                        "attribute '{}': unknown type '{other}'. Declarable types are bool, u8, \
-                         u16, u32, u64, i8, i16, i32, i64, f32, f64, timestamp_us, keyword, text \
-                         and category",
-                        decl.name
-                    ))
-                })?;
-                if decl.vocabulary.is_some() {
-                    return Err(declaration_error(format!(
-                        "attribute '{}' is type '{other}', not a category, so `vocabulary` has no \
-                         meaning for it. Refused rather than ignored: a value set on a column that \
-                         has none is a disclosure control its author believes is set",
-                        decl.name
-                    )));
-                }
-                // **The analyser is resolved here** (decision 0070): a `text` column's terms are
-                // whatever its named analyser produces, so a name this binary does not carry must
-                // be refused at the declaration rather than defaulted — indexing a column with a
-                // pipeline its author did not ask for is the silent mismatch the named shape
-                // exists to prevent.
-                let analyser = match (ty, decl.analyser.as_deref()) {
-                    (ScalarType::Text, name) => {
-                        let name = name.unwrap_or(tessera_analyse::UNICODE);
-                        let resolved = tessera_analyse::analyser(name).ok_or_else(|| {
-                            declaration_error(format!(
-                                "attribute '{}': '{name}' is not an analyser this build carries. \
-                                 Available: {}",
-                                decl.name,
-                                tessera_analyse::ANALYSER_NAMES.join(", ")
-                            ))
-                        })?;
-                        Some(resolved.identity())
-                    }
-                    (_, Some(name)) => {
-                        return Err(declaration_error(format!(
-                            "attribute '{}' is type '{other}', not `text`, so `analyser = \
-                             \"{name}\"` has no meaning for it. Refused rather than ignored: an \
-                             ignored analyser is a pipeline its author believes is in use",
-                            decl.name
-                        )));
-                    }
-                    (_, None) => None,
-                };
-                // **`render` on `text` is refused for the reason `keyword`'s is, and one more.**
-                // Prose is not a fixed-width slot, and a text column's value does not live in
-                // entity space at all — it lives in the record blob, which no scan reads.
-                if ty == ScalarType::Text && decl.render {
-                    return Err(declaration_error(format!(
-                        "attribute '{}': `render` on `text` is refused — the hot column is a \
-                         fixed-width slot in every row and prose is not one, and a text column's \
-                         value lives in the record blob, which no scan reads (records-and-search \
-                         §3, §4.4). `index = true` gives it a token index and costs the hot column \
-                         nothing",
-                        decl.name
-                    )));
-                }
-                if ty == ScalarType::Keyword && decl.render {
-                    return Err(declaration_error(format!(
-                        "attribute '{}': `render` on `keyword` is refused (configuration.md §6 — \
-                         the hot column is a fixed-width slot in every row, and a keyword's value \
-                         is not one). Its ordinal is fixed-width but is a per-layer index internal \
-                         that never leaves the server (records §4.3). Declare a category, whose \
-                         row cost is its width. `index = true` is available and costs the hot \
-                         column nothing",
-                        decl.name
-                    )));
-                }
-                Attribute {
-                    name: decl.name.clone(),
-                    title: decl.title.clone(),
-                    field: decl.field.clone(),
-                    ty,
-                    analyser,
-                    vocabulary: None,
-                    value_set: None,
-                    index: decl.index,
-                    render: decl.render,
-                }
-            }
+        let column = check_attribute(
+            &AttributeSpec {
+                name,
+                ty,
+                vocabulary: decl.vocabulary.as_deref(),
+                analyser: decl.analyser.as_deref(),
+                index: decl.index,
+                render: decl.render,
+                group_scoped: scopes.contains_key(name),
+            },
+            |vocabulary| vocabularies.get(vocabulary).map(|v| v.width),
+        )
+        .map_err(declaration_error)?;
+        let attribute = Attribute {
+            name: decl.name.clone(),
+            title: decl.title.clone(),
+            field: decl.field.clone(),
+            ty: column.ty,
+            analyser: column.analyser,
+            value_set: column
+                .vocabulary
+                .as_deref()
+                .and_then(|v| vocabularies.get(v))
+                .map(|v| v.value_set),
+            vocabulary: column.vocabulary,
+            index: decl.index,
+            render: decl.render,
         };
-        // **A group-scoped column is not one of `MANIFEST.declared_scalars`** (`views.md` §5):
-        // it is a *family* — one entity-space column per view of the group — and the manifest's
-        // list is one flat set of bundle-wide columns. Held apart here rather than filtered at
-        // each consumer, so no pass can forget: a scoped column in the schema would take a slot
-        // in every row's hot tail and a whole-corpus `attrs/<column>/` of its own, both of them
-        // absent for every entity, and both served as if the attribute were entity-scoped.
-        match scopes.get(&decl.name) {
+        // A group-scoped column is one column per view of its group, so it is kept apart from
+        // the bundle-wide columns.
+        match scopes.get(name) {
             None => {
-                // **`fields` names the view discriminator and nothing else**, so an entity-scoped
-                // column has nothing to say with it: its values are one per entity and no column
-                // of its file decides which view they are for. Refused rather than ignored, on
-                // this module's rule for every disclosure-adjacent key — a `fields` map that reads
-                // as a default is a routing its author believes is in effect.
                 if decl.fields.is_some() {
                     return Err(declaration_error(format!(
-                        "attribute '{}': `fields` names the view discriminator on a group-scoped \
-                         column's own source (views §5), and this column is entity scope — one \
-                         value per entity, under every view — so there is nothing for it to \
-                         choose between. The entity id is `entity_id_field`",
-                        decl.name
+                        "attribute '{name}': `fields` applies to a group-scoped column's own \
+                         `source` only"
                     )));
                 }
                 attributes.push(attribute)
             }
             Some(group) => {
-                // **A scoped attribute's own `source` carries the discriminator** (`views.md`
-                // §5): one row per `(entity, view)`, `fields.view` saying which view each row's
-                // value is for, and the row routed to that view's column. Without the
-                // discriminator the file would be read as entity space, which would take one
-                // arbitrary view's values as every view's — so the column is resolved here, where
-                // the source name and the field spellings are both in hand.
-                // **A scoped `text` column must be indexed, because the index is its only
-                // home.** An entity-scoped text column has two — a token index answering `match`
-                // and a record-blob row answering `entity → value` — and the blob is bundle-wide,
-                // addressed by a column's position in `declared_scalars`, which a family has none
-                // of. So an unindexed scoped text column would be a declared field stored nowhere
-                // at all: acknowledged and then lost. Refused rather than reported, on the rule
-                // that separates a config a build can honour from one it cannot.
-                if attribute.ty == ScalarType::Text && !attribute.index {
-                    return Err(declaration_error(format!(
-                        "attribute '{}': a `text` column scoped to group '{group}' needs \
-                         `index = true`. Its terms are its only home — the record blob is one \
-                         bundle-wide list with no slot for a column family (views §5) — so \
-                         without the index the prose would be read and stored nowhere",
-                        decl.name
-                    )));
-                }
+                // Its own source holds one row per (entity, view); `fields.view` names the column
+                // saying which view a row is for.
                 let source = compile_scoped_attribute_source(decl, sources, defaults)?;
                 scoped.push(ScopedAttribute {
                     attribute,
@@ -5043,84 +4696,6 @@ fn compile_scoped_attribute_source(
         entity_id,
         view_field,
     }))
-}
-
-fn declared_names(vocabularies: &HashMap<String, Vocabulary>) -> String {
-    if vocabularies.is_empty() {
-        return "none".to_string();
-    }
-    let mut names: Vec<&str> = vocabularies.keys().map(String::as_str).collect();
-    names.sort_unstable();
-    names.join(", ")
-}
-
-/// The names an attribute may not take, in the order the refusals list them.
-///
-/// **One list, read by the three refusals above**, so a name added to the request surface is added
-/// here and every message says the same set. `all_of`/`any_of`/`none_of` are the combinators
-/// (decision 0062); `region` is the spatial leaf (`selection-operand.md` §2); `member_of` names
-/// one artifact's membership (`highlight-and-hierarchy.md` §3). A filter expression names columns
-/// directly — there is no wrapper object — so a column of any of these names would make a request
-/// mean two things. `highlighted` is not a leaf but a **frame column**
-/// (`highlight-and-hierarchy.md` §2): a render column of that name would put two columns of one
-/// name on the points frame, and a by-name reader would take the wrong one.
-pub const RESERVED_COLUMN_NAMES: [&str; 6] = [
-    "all_of",
-    "any_of",
-    "none_of",
-    "region",
-    "member_of",
-    "highlighted",
-];
-
-/// A column name that can be written into `columns.arrow`'s schema without colliding with the
-/// fixed columns or with the ingest batch's reserved names.
-///
-/// The reserved set is transcribed rather than imported: `tessera-server`'s `RESERVED_COLUMNS`
-/// belongs to a crate this one must not depend on, and the two are checked against each other in
-/// this module's tests instead.
-fn check_column_name(name: &str) -> Result<()> {
-    const FIXED: [&str; 2] = ["tessera_id", "residual"];
-    const INGEST_RESERVED: [&str; 5] = ["external_id", "x", "y", "access", "node_id"];
-    if name.is_empty() {
-        return Err(declaration_error("an attribute with an empty name"));
-    }
-    // The name is the column's **identifier**, not merely its display label: it addresses the
-    // column in `/v1/categories/{column}` (contracts §3.2), and the duplicate check above is what
-    // makes it unique bundle-wide. A path segment is therefore what it has to survive, so the
-    // character set is closed here rather than escaped at every use site — one refusal at build
-    // beats a percent-encoding convention that two readers can spell differently.
-    if !name
-        .bytes()
-        .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
-    {
-        return Err(declaration_error(format!(
-            "attribute '{name}': a column name is its identifier on the wire \
-             (`/v1/categories/{{column}}`, contracts §3.2), so it is limited to ASCII letters, \
-             digits, `_` and `-`"
-        )));
-    }
-    if FIXED.contains(&name) {
-        return Err(declaration_error(format!(
-            "attribute '{name}' shadows a fixed column of `columns.arrow` (contracts §2.6). The \
-             reader refuses such a segment at load"
-        )));
-    }
-    if name == "record" {
-        return Err(declaration_error(
-            "attribute 'record': the name is reserved — `attrs/record/` is the record blob's \
-             namespace (records §2, review N10), so a column of that name would address the \
-             blob's files as its own",
-        ));
-    }
-    if INGEST_RESERVED.contains(&name) {
-        return Err(declaration_error(format!(
-            "attribute '{name}' shadows a reserved `/control/ingest` column (contracts §3.4), so \
-             no batch could ever carry a value for it — the handler would read the reserved \
-             column's meaning instead"
-        )));
-    }
-    Ok(())
 }
 
 // ---------------------------------------------------------------------------------------------
