@@ -1008,14 +1008,23 @@ def _artifact_block(row: dict, budget: int) -> tuple[bytes, list, int]:
         # against the view's entities as of that step, so a second page would name a different
         # set (ingest §2.3). The route's count bound is checked before the plan is built.
         record["excluding"] = [addressed(e) for e in row["excluding"]]
+    elif not members and record.get("attached_to"):
+        # **A memberless label carries no `members` at all** (decision 0145): an attached artifact
+        # with no members of its own is served over its target's membership, so the field is
+        # omitted rather than sent empty. An empty list would say the same thing today, and saying
+        # nothing is what the mapping form — a cluster key to a line of text — actually means.
+        pass
     else:
-        # A record carrying neither `members` nor `excluding` is a `422`, and the route makes no
-        # exception for a shape: "an artifact whose membership holds nobody is published with an
-        # empty `members` list" (contracts §3.4). So a spatial record carries the empty list
-        # beside its shape, which the shape's own resolution then supersedes.
+        # A record carrying neither `members` nor `excluding` and attaching to nothing is a `422`,
+        # and the route makes no exception for a shape: "an artifact whose membership holds nobody
+        # is published with an empty `members` list" (contracts §3.4). So a spatial record carries
+        # the empty list beside its shape, which the shape's own resolution then supersedes.
         record["members"] = [addressed(e) for e in members]
     body = json.dumps(record).encode()
-    while len(body) > budget and "members" in record and (members or any(sets)):
+    # A membership spelled by exclusion travels whole, so nothing of it is trimmed; every other
+    # record pages its membership and then its generating sets, a memberless attached one included
+    # — it has sets to page even with no `members` field of its own.
+    while len(body) > budget and row.get("excluding") is None and (members or any(sets)):
         # Trim the membership first, then each generating set from the last rank down: the page
         # that follows carries the rest, and a set's own page is a `PATCH` at its rank.
         if len(members) > 1:
