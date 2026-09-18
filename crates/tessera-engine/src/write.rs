@@ -7505,21 +7505,7 @@ impl Executor {
         let live = self.generation.load_full();
         let next = Generation {
             suggest: Arc::new(live.suggest.without(vocabulary)),
-            prefix: live.prefix.clone(),
-            vocabularies: Arc::clone(&live.vocabularies),
-            filter_columns: Arc::clone(&live.filter_columns),
-            segments_version: live.segments_version,
-            watermark: live.watermark,
-            bundle: Arc::clone(&live.bundle),
-            dict: Arc::clone(&live.dict),
-            postings: Arc::clone(&live.postings),
-            fragments: Arc::clone(&live.fragments),
-            external_index: Arc::clone(&live.external_index),
-            delta_postings: live.delta_postings.clone(),
-            overlay_version: live.overlay_version,
-            overlay: Arc::clone(&live.overlay),
-            buffer: Arc::clone(&live.buffer),
-            denied: Arc::clone(&live.denied),
+            ..Generation::clone(&live)
         };
         // Nothing acknowledged anything — the hook's own channel is what the caller waits on — so
         // the token is dropped here as the rebuild's is.
@@ -7588,21 +7574,7 @@ impl Executor {
             ));
             let next = Generation {
                 suggest,
-                prefix: generation.prefix.clone(),
-                vocabularies: Arc::clone(&generation.vocabularies),
-                filter_columns: Arc::clone(&generation.filter_columns),
-                segments_version: generation.segments_version,
-                watermark: generation.watermark,
-                bundle: Arc::clone(&generation.bundle),
-                dict: Arc::clone(&generation.dict),
-                postings: Arc::clone(&generation.postings),
-                fragments: Arc::clone(&generation.fragments),
-                external_index: Arc::clone(&generation.external_index),
-                delta_postings: generation.delta_postings.clone(),
-                overlay_version: generation.overlay_version,
-                overlay: Arc::clone(&generation.overlay),
-                buffer: Arc::clone(&generation.buffer),
-                denied: Arc::clone(&generation.denied),
+                ..Generation::clone(&generation)
             };
             // Nothing acknowledged anything: a rebuild answers no caller, so the token is
             // dropped here as the coalesce's is.
@@ -7812,31 +7784,11 @@ impl Executor {
         let denied = Arc::new(crate::compose::derive_denied(&live.overlay, &next_bundle));
 
         let next = Arc::new(Generation {
-            prefix: live.prefix.clone(),
-            vocabularies: Arc::clone(&live.vocabularies),
-            // A **merge** rewrites geometry, never the filter artefact, so the columns are carried
-            // forward here. The fold is the one that rebuilds them, in its own pass 4a
-            // (`filter-index.md` §6.2), and it publishes through its own seam rather than through
-            // this path.
-            filter_columns: Arc::clone(&live.filter_columns),
-            // A merge changes no value and no title, so the index it holds is still the right one.
-            suggest: Arc::clone(&live.suggest),
             segments_version,
-            // A merge moves neither, and both are the live values — see `MergeSpec::watermark`.
-            watermark: live.watermark,
             bundle: next_bundle,
-            dict: Arc::clone(&live.dict),
-            postings: Arc::clone(&live.postings),
-            fragments: Arc::clone(&live.fragments),
-            external_index: Arc::clone(&live.external_index),
-            // **The consumed segments' delta tiers stay listed**, and the entities they carry
-            // still have rows — in the merged segment. Dropping one would make every item it
-            // carries invisible to every session. See `crate::merge::rebase_into`.
-            delta_postings: live.delta_postings.clone(),
-            overlay_version: live.overlay_version,
-            overlay: Arc::clone(&live.overlay),
-            buffer: Arc::clone(&live.buffer),
             denied,
+            // The consumed segments' delta tiers carry: their entities still have rows, in the merged segment.
+            ..Generation::clone(&live)
         });
         // The claim names the generation it is for, so a pass that is superseded mid-flight
         // releases nothing when it ends — see `refresh::clear_if_current`.
@@ -10066,22 +10018,11 @@ impl Executor {
         }
 
         let next = Generation {
-            prefix: live.prefix.clone(),
-            vocabularies: Arc::clone(&live.vocabularies),
             // The live columns with each consumed window replaced by the layer that carries its
             // values — the same set of `(entity, value)` pairs in fewer files, so a request holding
             // the old and one holding the new agree on every answer.
             filter_columns,
-            // A coalesce is content-preserving in value space too.
-            suggest: Arc::clone(&live.suggest),
-            // **Unchanged, and this is the whole of D2.** Row space did not move, so no
-            // projection is stale and no cache key may rotate.
-            segments_version: live.segments_version,
-            watermark: live.watermark,
             bundle: next_bundle,
-            dict: Arc::clone(&live.dict),
-            postings: Arc::clone(&live.postings),
-            fragments: Arc::clone(&live.fragments),
             // **The sidecar rides the swap, rather than being stored beside it.** It used to be an
             // `ArcSwap` on the `Engine`, stored one statement after this publication; that was
             // sound here because a coalesce is content-preserving, and it is not sound for a fold,
@@ -10090,10 +10031,7 @@ impl Executor {
             // publications.
             external_index: Arc::new(next_index),
             delta_postings,
-            overlay_version: live.overlay_version,
-            overlay: Arc::clone(&live.overlay),
-            buffer: Arc::clone(&live.buffer),
-            denied: Arc::clone(&live.denied),
+            ..Generation::clone(&live)
         };
         // **The outgoing sidecar is remembered before it stops being live.** A coalesce is the one
         // publication that builds a *new* one over the same prefix, so from here a generation
@@ -14562,24 +14500,8 @@ impl Executor {
             .buffered_items
             .store(buffer.len(), Ordering::SeqCst);
         let next = Generation {
-            prefix: generation.prefix.clone(),
-            // **Unmoved**: no row moved and no segment was published. What moved is the buffer's
-            // fill map, which no permutation and no mask reads.
-            segments_version: generation.segments_version,
-            watermark: generation.watermark,
-            bundle: Arc::clone(&generation.bundle),
-            dict: Arc::clone(&generation.dict),
-            postings: Arc::clone(&generation.postings),
-            fragments: Arc::clone(&generation.fragments),
-            external_index: Arc::clone(&generation.external_index),
-            delta_postings: generation.delta_postings.clone(),
-            overlay_version: generation.overlay_version,
-            overlay: Arc::clone(&generation.overlay),
             buffer: Arc::new(buffer),
-            vocabularies: Arc::clone(&generation.vocabularies),
-            filter_columns: Arc::clone(&generation.filter_columns),
-            suggest: Arc::clone(&generation.suggest),
-            denied: Arc::clone(&generation.denied),
+            ..Generation::clone(&generation)
         };
         let published = self.publish(next, started);
         // A values batch allocates no entity, so the index records none: the batch id and the
@@ -14738,23 +14660,12 @@ impl Executor {
         let bundle = generation.bundle.with_views(manifest);
         let denied = Arc::new(crate::compose::derive_denied(&generation.overlay, &bundle));
         let next = Generation {
-            prefix: generation.prefix.clone(),
-            // **Unmoved**, on `publish_roster`'s argument: no row moved.
-            segments_version: generation.segments_version,
-            watermark: generation.watermark,
             bundle,
-            dict: Arc::clone(&generation.dict),
-            postings: Arc::clone(&generation.postings),
-            fragments: Arc::clone(&generation.fragments),
-            external_index: Arc::clone(&generation.external_index),
-            delta_postings: generation.delta_postings.clone(),
-            overlay_version: generation.overlay_version,
-            overlay: Arc::clone(&generation.overlay),
-            buffer: Arc::clone(&generation.buffer),
             vocabularies,
             filter_columns,
             suggest,
             denied,
+            ..Generation::clone(&generation)
         };
         let published = self.publish(next, started);
         // Durable in the log and not yet in a manifest, and a rotation reclaims the log: the
@@ -14897,22 +14808,9 @@ impl Executor {
         let bundle = generation.bundle.with_views(manifest);
         let denied = Arc::new(crate::compose::derive_denied(&generation.overlay, &bundle));
         let next = Generation {
-            prefix: generation.prefix.clone(),
-            segments_version: generation.segments_version,
-            watermark: generation.watermark,
             bundle,
-            dict: Arc::clone(&generation.dict),
-            postings: Arc::clone(&generation.postings),
-            fragments: Arc::clone(&generation.fragments),
-            external_index: Arc::clone(&generation.external_index),
-            delta_postings: generation.delta_postings.clone(),
-            overlay_version: generation.overlay_version,
-            overlay: Arc::clone(&generation.overlay),
-            buffer: Arc::clone(&generation.buffer),
-            vocabularies: Arc::clone(&generation.vocabularies),
-            filter_columns: Arc::clone(&generation.filter_columns),
-            suggest: Arc::clone(&generation.suggest),
             denied,
+            ..Generation::clone(generation)
         };
         self.publish(next, started)
     }
@@ -15009,26 +14907,10 @@ impl Executor {
         let bundle = generation.bundle.with_views(manifest);
         let denied = Arc::new(crate::compose::derive_denied(&generation.overlay, &bundle));
         let next = Generation {
-            prefix: generation.prefix.clone(),
-            // **Unmoved**, on `publish_roster`'s argument: no row moved.
-            segments_version: generation.segments_version,
-            watermark: generation.watermark,
             bundle,
-            dict: Arc::clone(&generation.dict),
-            postings: Arc::clone(&generation.postings),
-            fragments: Arc::clone(&generation.fragments),
-            external_index: Arc::clone(&generation.external_index),
-            delta_postings: generation.delta_postings.clone(),
-            overlay_version: generation.overlay_version,
-            overlay: Arc::clone(&generation.overlay),
-            buffer: Arc::clone(&generation.buffer),
             vocabularies: Arc::new(vocabularies),
-            filter_columns: Arc::clone(&generation.filter_columns),
-            // **No suggestion index.** One is built for the vocabularies a *column* names, and
-            // this vocabulary is named by none until one is declared over it — which is where the
-            // index is built (`commit_attribute_declare`).
-            suggest: Arc::clone(&generation.suggest),
             denied,
+            ..Generation::clone(&generation)
         };
         let published = self.publish(next, started);
         // Durable in the log and not yet in a manifest, and a rotation reclaims the log: the
@@ -15184,22 +15066,8 @@ impl Executor {
         let mut vocabularies: Vocabularies = (*generation.vocabularies).clone();
         vocabularies.insert(minter);
         let next = Generation {
-            prefix: generation.prefix.clone(),
-            segments_version: generation.segments_version,
-            watermark: generation.watermark,
-            bundle: Arc::clone(&generation.bundle),
-            dict: Arc::clone(&generation.dict),
-            postings: Arc::clone(&generation.postings),
-            fragments: Arc::clone(&generation.fragments),
-            external_index: Arc::clone(&generation.external_index),
-            delta_postings: generation.delta_postings.clone(),
-            overlay_version: generation.overlay_version,
-            overlay: Arc::clone(&generation.overlay),
-            buffer: Arc::clone(&generation.buffer),
             vocabularies: Arc::new(vocabularies),
-            filter_columns: Arc::clone(&generation.filter_columns),
-            suggest: Arc::clone(&generation.suggest),
-            denied: Arc::clone(&generation.denied),
+            ..Generation::clone(&generation)
         };
         let published = self.publish(next, started);
         // A binding of a *built* vocabulary reaches the manifest as a `vocabulary_extensions`
@@ -15362,24 +15230,10 @@ impl Executor {
         // exactly the state carrying it forward across a create would produce.
         let denied = Arc::new(crate::compose::derive_denied(&generation.overlay, &bundle));
         let next = Generation {
-            prefix: generation.prefix.clone(),
-            // **Unmoved**: no row moved, so every row-projection cache keyed on it stays valid.
-            // The coalesce publication is the precedent — a new bundle at the same version.
-            segments_version: generation.segments_version,
-            watermark: generation.watermark,
             bundle,
-            dict: Arc::clone(&generation.dict),
-            postings: Arc::clone(&generation.postings),
-            fragments: Arc::clone(&generation.fragments),
-            external_index: Arc::clone(&generation.external_index),
-            delta_postings: generation.delta_postings.clone(),
-            overlay_version: generation.overlay_version,
-            overlay: Arc::clone(&generation.overlay),
             buffer,
-            vocabularies: Arc::clone(&generation.vocabularies),
-            filter_columns: Arc::clone(&generation.filter_columns),
-            suggest: Arc::clone(&generation.suggest),
             denied,
+            ..Generation::clone(generation)
         };
         self.publish(next, started)
     }
@@ -15486,29 +15340,16 @@ impl Executor {
             .store(buffer.len(), Ordering::SeqCst);
 
         let next = Generation {
-            filter_columns: Arc::clone(&generation.filter_columns),
             overlay_version: generation.overlay_version + 1,
             buffer: Arc::new(buffer),
-            prefix: generation.prefix.clone(),
             vocabularies: Arc::new(vocabularies),
-            segments_version: generation.segments_version,
-            watermark: generation.watermark,
-            bundle: Arc::clone(&generation.bundle),
-            dict: Arc::clone(&generation.dict),
-            postings: Arc::clone(&generation.postings),
-            fragments: Arc::clone(&generation.fragments),
-            external_index: Arc::clone(&generation.external_index),
-            delta_postings: generation.delta_postings.clone(),
-            overlay: Arc::clone(&generation.overlay),
             // **The one publication that changes the suggestion index**, and it changes it by the
             // same mints that changed the bindings above: a novel key gets its code here, and a
             // viewer typing its prefix on the next keystroke must be offered it rather than
             // waiting for the next rebuild (`value-suggestion.md` §6.1). Every other publication
             // carries the index forward.
             suggest,
-            // Neither the deny sets nor the row space moved, so the mask is unchanged. An ingest
-            // adds a *buffered* row, which has no row id to be denied at.
-            denied: Arc::clone(&generation.denied),
+            ..Generation::clone(&generation)
         };
         let published = self.publish(next, started);
         self.health.lap(WriteStage::ApplySwap, mark);
@@ -15636,26 +15477,11 @@ impl Executor {
         };
 
         let next = Generation {
-            filter_columns: Arc::clone(&generation.filter_columns),
-            // A deny changes who may be told a value name and never which value names exist, so
-            // the index is carried and the *predicate* answers differently — which is
-            // membership-derivation self-retiring, and is the whole reason it is derived per
-            // request rather than maintained (per-point-attributes §3.3).
-            suggest: Arc::clone(&generation.suggest),
             overlay_version: generation.overlay_version + 1,
             overlay: Arc::new(overlay),
-            prefix: generation.prefix.clone(),
-            vocabularies: Arc::clone(&generation.vocabularies),
-            segments_version: generation.segments_version,
-            watermark: generation.watermark,
-            bundle: Arc::clone(&generation.bundle),
-            dict: Arc::clone(&generation.dict),
-            postings: Arc::clone(&generation.postings),
-            fragments: Arc::clone(&generation.fragments),
-            external_index: Arc::clone(&generation.external_index),
-            delta_postings: generation.delta_postings.clone(),
             buffer,
             denied,
+            ..Generation::clone(&generation)
         };
         self.publish(next, started)
     }
@@ -17682,28 +17508,17 @@ impl Executor {
             .flush_lap(crate::flush::FlushStage::Artifacts, *mark);
 
         let next = Arc::new(Generation {
-            prefix: live.prefix.clone(),
-            vocabularies: Arc::clone(&live.vocabularies),
             // The live columns with this flush's extents composed on — the whole of what makes an
             // entity ingested since the build answer a filter on its own value.
             filter_columns,
-            // **A flush changes which entities carry a value, not which values exist**, so this is
-            // carried rather than rebuilt — the sort a rebuild pays is measured in tens of seconds
-            // at 10⁷ values (§6.1). The values a flush's *rows* minted are already in the side map:
-            // they were put there at the commit window that minted them, not here.
-            suggest: Arc::clone(&live.suggest),
             segments_version,
             watermark,
             bundle: next_bundle,
             dict: completed.dict,
-            postings: Arc::clone(&live.postings),
-            fragments: Arc::clone(&live.fragments),
-            external_index: Arc::clone(&live.external_index),
             delta_postings,
-            overlay_version: live.overlay_version,
-            overlay: Arc::clone(&live.overlay),
             buffer: Arc::new(buffer),
             denied,
+            ..Generation::clone(&live)
         });
         // **Armed before the swap, and that ordering is the mechanism** (decision 0044 D1; review
         // finding F5). A request landing between the swap and the pool task's first insert must
@@ -18009,7 +17824,6 @@ impl Executor {
 
         let next = Generation {
             prefix,
-            vocabularies: Arc::clone(&previous.vocabularies),
             // **A rotation carries the new prefix's own columns**, opened over it by
             // `open_rotation`; every other publication stays within the live prefix and carries
             // the live ones. Cloning the previous generation's across a rotation would serve the
@@ -18035,17 +17849,12 @@ impl Executor {
                 || Arc::clone(&previous.external_index),
                 |r| Arc::clone(&r.external_index),
             ),
-            // **Carried across a rotation too**, and this is not the oversight it looks like: a
-            // fold retires entities, never values — a code is pinned forever (§3.4) and no
-            // publication removes one from a vocabulary — so the value set the index is over is the
-            // set the new prefix carries. What a fold *can* change is a title, and it does so
-            // through a new bundle, which is a new `Engine::open` and therefore a fresh build.
-            suggest: Arc::clone(&previous.suggest),
             delta_postings,
             overlay_version,
             overlay,
-            buffer: Arc::clone(&previous.buffer),
             denied,
+            // The suggestion index carries across a rotation: a fold retires entities, never values.
+            ..Generation::clone(&previous)
         };
         // **Listed before the swap, deleted after it** (compaction §8). At this instant every
         // persisted fragment is under the identity about to be superseded, so the listing *is* the

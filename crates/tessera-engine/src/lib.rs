@@ -182,6 +182,7 @@ pub use tessera_lifecycle::{DeclaredValue, VocabularyRequest};
 /// sidecar — are here rather than on `Engine`, which is what makes a prefix flip expressible at all
 /// (compaction §4). Merge publishes through this type too: the entity-space coalesce without moving
 /// `segments_version`, the row-space merge as its own swap (`crate::coalesce`, `crate::merge`).
+#[derive(Clone)]
 pub struct Generation {
     /// The bundle's `CURRENT` prefix (e.g. `"v00000"`) this generation was loaded from.
     pub prefix: String,
