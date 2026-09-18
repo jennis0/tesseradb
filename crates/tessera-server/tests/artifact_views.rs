@@ -71,7 +71,11 @@ fn write_points(path: &Path, offset: f64, ids: std::ops::Range<u64>) {
 /// A two-view group over one corpus: every entity of q2 has a row in q1 as well, so an artifact
 /// of one view could be projected into the other's row space — which is exactly the mistake
 /// `view` in the identity prevents.
-fn build_group(dir: &Path) -> std::path::PathBuf {
+fn build_group(dir: &Path, gate_first_view: bool) -> std::path::PathBuf {
+    // **`gate_first_view` puts q1 behind the label `1`** (`views.md` §6), which only the entities
+    // divisible by three carry (`common::terms_of`). A principal holding `0` alone then reaches q2
+    // and not q1, which is the visible-view set the identifier case below needs.
+    let gate = |slot: usize| (gate_first_view && slot == 0).then(|| vec!["1".to_string()]);
     let pairs = dir.join("pairs.parquet");
     write_pairs_n(&pairs, ITEMS);
     let views: Vec<tessera_build::ViewArgs> = KEYS
@@ -81,7 +85,7 @@ fn build_group(dir: &Path) -> std::path::PathBuf {
             let points = dir.join(format!("{key}.parquet"));
             write_points(&points, slot as f64 * 10.0, 0..IN_VIEW[slot]);
             tessera_build::ViewArgs {
-                visibility: None,
+                visibility: gate(slot),
                 view_id: format!("quarter:{key}"),
                 projection: tessera_spatial::Projection::None,
                 extent: extent(),
@@ -114,9 +118,10 @@ fn build_group(dir: &Path) -> std::path::PathBuf {
             metadata: Vec::new(),
             views: KEYS
                 .iter()
-                .map(|key| GroupViewDescriptor {
+                .enumerate()
+                .map(|(slot, key)| GroupViewDescriptor {
                     key: key.to_string(),
-                    visibility: None,
+                    visibility: gate(slot),
                     metadata: Default::default(),
                 })
                 .collect(),
@@ -153,7 +158,13 @@ async fn open(tmp: &TempDir) -> TestServer {
 }
 
 async fn serve(tmp: &TempDir) -> TestServer {
-    build_group(tmp.path());
+    build_group(tmp.path(), false);
+    open(tmp).await
+}
+
+/// The same fixture with q1 behind a gate — see [`build_group`].
+async fn serve_gated(tmp: &TempDir) -> TestServer {
+    build_group(tmp.path(), true);
     open(tmp).await
 }
 
@@ -220,7 +231,18 @@ async fn put(
 /// One view's served artifact rows of a layer, by key — the answer a viewer is given.
 async fn served(server: &TestServer, view: &str, layer: &str) -> Vec<(String, u64)> {
     let auth = authorise(server, &["0"]).await;
-    let token = auth["token"].as_str().unwrap();
+    let token = auth["token"].as_str().unwrap().to_string();
+    served_as(server, &token, view, layer).await
+}
+
+/// The same frame for a principal already authorised — a gated view needs a credential `served`'s
+/// own does not carry.
+async fn served_as(
+    server: &TestServer,
+    token: &str,
+    view: &str,
+    layer: &str,
+) -> Vec<(String, u64)> {
     let resp = server
         .client
         .post(server.viewer_url("/v1/viewport"))
@@ -634,5 +656,187 @@ async fn a_group_scoped_exclusion_complements_against_its_own_views_entities() {
         served(&server, "quarter:q2", SCOPED).await,
         vec![("rest".to_string(), IN_VIEW[1] - 3)],
         "q2's is its own half, not the corpus and not nothing"
+    );
+}
+
+/// One principal's browse page of a layer on one view: key → masked count, ascending.
+async fn browsed(server: &TestServer, token: &str, view: &str, layer: &str) -> Vec<(String, u64)> {
+    let resp = server
+        .client
+        .post(server.viewer_url("/v1/artifacts/browse"))
+        .bearer_auth(token)
+        .json(&json!({ "view": view, "layer": layer, "limit": 200 }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 200, "{:?}", resp.text().await);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let mut rows: Vec<(String, u64)> = body["artifacts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| {
+            (
+                row["key"].as_str().unwrap().to_string(),
+                row["masked_count"].as_u64().unwrap(),
+            )
+        })
+        .collect();
+    rows.sort();
+    rows
+}
+
+/// `POST /v1/artifacts/{id}` on one view, as a status and a body.
+async fn drilled(
+    server: &TestServer,
+    token: &str,
+    view: &str,
+    tessera_id: &str,
+) -> (u16, serde_json::Value) {
+    let resp = server
+        .client
+        .post(server.viewer_url(&format!("/v1/artifacts/{tessera_id}")))
+        .bearer_auth(token)
+        .json(&json!({ "view": view }))
+        .send()
+        .await
+        .unwrap();
+    let status = resp.status().as_u16();
+    (status, resp.json().await.unwrap_or(serde_json::Value::Null))
+}
+
+async fn token_for(server: &TestServer, terms: &[&str]) -> String {
+    authorise(server, terms).await["token"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+/// **A view of a group-scoped layer serves that view's artifacts and no others** (`views.md`
+/// §3.5). An artifact of another view of the group is absent entire — from the viewport's
+/// artifacts frame, from browse, and from the identifier route — rather than served with a masked
+/// count of zero beside its key and its `tessera_id`.
+///
+/// The layer declares no existence criterion, which is the condition that makes the distinction
+/// observable: a zero count clears no bar, so nothing else withholds the row. The two views carry
+/// **different keys**, so what a wrong answer hands over is the other view's name as well as its
+/// identifier.
+///
+/// q1 is gated and q2 is not, so the second principal here holds q2 alone in its visible-view set
+/// and can reach q1's artifact by no route at all: q1 is a 404 to it, and q2's own verbs are asked
+/// for q1's key and for q1's identifier.
+#[tokio::test]
+async fn an_artifact_of_another_view_of_the_group_is_absent_from_every_verb() {
+    let tmp = TempDir::new().unwrap();
+    let server = serve_gated(&tmp).await;
+    register(&server, declaration(SCOPED, Some("quarter"), "flat")).await;
+
+    let (status, body) = put(
+        &server,
+        SCOPED,
+        json!([
+            { "key": "only-q1", "view": "q1", "members": members(0..10) },
+            { "key": "only-q2", "view": "q2", "members": members(0..30) },
+        ]),
+    )
+    .await;
+    assert_eq!(status, 201, "{body}");
+    let q1_id = body["artifacts"][0]["tessera_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let q2_id = body["artifacts"][1]["tessera_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // A principal who reaches both views, so the asymmetry is the layer's and not the gate's.
+    let both = token_for(&server, &["0", "1"]).await;
+    // A principal whose visible-view set holds q2 alone.
+    let only_q2 = token_for(&server, &["0"]).await;
+
+    // Twice: over the publication the control plane took, and again over the packed records a
+    // fold rebuilds the level's forms from.
+    for round in ["published", "folded"] {
+        if round == "folded" {
+            flush_and_fold(&server).await;
+        }
+        assert_eq!(
+            browsed(&server, &both, "quarter:q1", SCOPED).await,
+            vec![("only-q1".to_string(), 10)],
+            "{round}: q1 browses its own artifact alone"
+        );
+        assert_eq!(
+            browsed(&server, &both, "quarter:q2", SCOPED).await,
+            vec![("only-q2".to_string(), 30)],
+            "{round}: q2 browses its own artifact alone"
+        );
+        assert_eq!(
+            served_as(&server, &both, "quarter:q1", SCOPED).await,
+            vec![("only-q1".to_string(), 10)],
+            "{round}: and the artifacts frame agrees with browse"
+        );
+        assert_eq!(
+            served_as(&server, &both, "quarter:q2", SCOPED).await,
+            vec![("only-q2".to_string(), 30)],
+            "{round}: and the artifacts frame agrees with browse"
+        );
+
+        // The identifier route, each view asked for the other's artifact. Each resolves its own,
+        // so a `404` here is the view's answer and not an identifier that names nothing.
+        assert_eq!(
+            drilled(&server, &both, "quarter:q1", &q1_id).await.0,
+            200,
+            "{round}: q1's own artifact resolves on q1"
+        );
+        assert_eq!(
+            drilled(&server, &both, "quarter:q1", &q2_id).await.0,
+            404,
+            "{round}: q2's artifact is not reachable on q1 by identifier"
+        );
+        assert_eq!(
+            drilled(&server, &both, "quarter:q2", &q1_id).await.0,
+            404,
+            "{round}: q1's artifact is not reachable on q2 by identifier"
+        );
+
+        // The principal outside q1 entirely: q1 is a 404 as a view, and q2 hands over neither
+        // q1's key nor its artifact for q1's identifier.
+        let (status, _) = drilled(&server, &only_q2, "quarter:q1", &q1_id).await;
+        assert_eq!(
+            status, 404,
+            "{round}: the gated view is a 404 to this principal"
+        );
+        assert_eq!(
+            browsed(&server, &only_q2, "quarter:q2", SCOPED).await,
+            vec![("only-q2".to_string(), 30)],
+            "{round}: q2's browse names no artifact of the view this principal cannot reach"
+        );
+        assert_eq!(
+            drilled(&server, &only_q2, "quarter:q2", &q1_id).await.0,
+            404,
+            "{round}: nor does q2's identifier route hand it over"
+        );
+    }
+
+    // And across a restart, the store seeded from the packed extents rather than from the log.
+    server.shutdown().await;
+    let server = open(&tmp).await;
+    let both = token_for(&server, &["0", "1"]).await;
+    let only_q2 = token_for(&server, &["0"]).await;
+    assert_eq!(
+        browsed(&server, &both, "quarter:q2", SCOPED).await,
+        vec![("only-q2".to_string(), 30)],
+        "reopened: q2 browses its own artifact alone"
+    );
+    assert_eq!(
+        drilled(&server, &both, "quarter:q2", &q1_id).await.0,
+        404,
+        "reopened: and resolves no artifact of q1"
+    );
+    assert_eq!(
+        drilled(&server, &only_q2, "quarter:q2", &q1_id).await.0,
+        404,
+        "reopened: for the principal outside q1 either"
     );
 }
