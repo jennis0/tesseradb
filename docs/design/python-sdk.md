@@ -693,12 +693,22 @@ Rulings of 2026-09-18:
 - A table with an id column and a value column is insertable whatever the source's history: a
   layer's key column mints and joins at the values route as at the other two doors (F).
 - The verb names follow the industry's: `insert`, not `write` or `stage`.
+- A label shows no count. Decision 0104's D13 gave a dependent's row its target's masked count
+  so a label could print its cluster's size; the number is not useful beside a label and goes.
+  The amendment to client-components and 0104 is the controller's. Not built yet.
+- An attached record at the publish route may omit `members` and `excluding`; an unattached one
+  keeps the requirement. The SDK omits the field for a memberless label. Not built yet.
+- Issues #151, #152, #153 and #155 are fixed as found (tracks `fix-wire`, `fix-group-cycle`).
+  Not built yet.
+- Issues #150 and #154 are not patched. Each is bottomed out first: the containment partition's
+  base-rows premise, and the accepted-batch index rebuilt per record kind, are questioned as
+  design, not as defects.
 
 ### 11.2 Needed
 
 - **E. The binary at release.** Platform wheels carrying it. Until then `PATH`, `TESSERA_BIN`
   or the checkout.
-- **G. Issues #150 to #153**, engine and build defects the SDK's tests found.
+- **G. Issues #150 and #154**, awaiting the owner's ruling on the design each exposes.
 
 ## 12. Order of work
 
