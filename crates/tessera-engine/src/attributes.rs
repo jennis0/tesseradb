@@ -31,7 +31,6 @@ use tessera_lifecycle::wal::{AttributeDeclaration, WalScalar};
 use tessera_lifecycle::{AttributeRequest, ExecError};
 use tessera_spatial::tiler::ScalarType;
 use tessera_store::manifest::{DeclaredScalar, Manifest, ScopedScalar};
-use tessera_store::vocabulary::Vocabularies;
 use tessera_types::layer::LayerScope;
 
 /// A declaration compiled to the manifest entry it becomes: one of the flat bundle-wide columns,
@@ -122,11 +121,7 @@ impl RuntimeAttributes {
 pub(crate) enum Resolution {
     /// A column of this name already carries exactly this identity: nothing to append.
     Existing,
-    /// A new column, with the width a vocabulary no column named before must narrow to.
-    New {
-        compiled: CompiledAttribute,
-        narrow: Option<(String, ScalarType)>,
-    },
+    New(CompiledAttribute),
 }
 
 /// The names the segment writer and the ingest batch reserve, and the request surface's own
@@ -151,7 +146,6 @@ const REQUEST_RESERVED: [&str; 6] = [
 pub(crate) fn resolve(
     request: &AttributeRequest,
     manifest: &Manifest,
-    vocabularies: &Vocabularies,
     is_layer: impl Fn(&str) -> bool,
 ) -> Result<Resolution, ExecError> {
     let refused = |detail: String| ExecError::AttributeRefused { detail };
@@ -190,7 +184,7 @@ pub(crate) fn resolve(
         )));
     }
 
-    let compiled = compile(request, manifest, vocabularies).map_err(refused)?;
+    let compiled = compile(request, manifest).map_err(refused)?;
 
     // A name the schema holds is a held part (`ingest.md` §1.1): identical is accepted with no
     // effect, different is a conflict.
@@ -209,31 +203,7 @@ pub(crate) fn resolve(
         };
     }
 
-    // A vocabulary named by no column is seeded at the widest width; the first column to name it
-    // fixes the width, and a code already bound past it is refused here rather than truncated.
-    let narrow = match compiled.category() {
-        Some((vocabulary, width)) if width_named_by_columns(manifest, vocabulary).is_none() => {
-            let minter = vocabularies.get(vocabulary).ok_or_else(|| {
-                refused(format!(
-                    "attribute '{name}': `vocabulary = \"{vocabulary}\"` names no vocabulary this \
-                     deployment carries. Declared: {}",
-                    declared_vocabularies(manifest)
-                ))
-            })?;
-            let mut probe = minter.clone();
-            if let Err(code) = probe.narrow_to(width) {
-                return Err(refused(format!(
-                    "attribute '{name}': vocabulary '{vocabulary}' already binds code {code}, \
-                     which a {} column cannot hold; declare the column at a width that holds \
-                     every bound code",
-                    width.arrow_type_name()
-                )));
-            }
-            Some((vocabulary.to_string(), width))
-        }
-        _ => None,
-    };
-    Ok(Resolution::New { compiled, narrow })
+    Ok(Resolution::New(compiled))
 }
 
 /// A replayed record's column, at the width it recorded. The door validated the declaration
@@ -279,25 +249,6 @@ pub(crate) fn held_by_name(manifest: &Manifest, name: &str) -> Option<CompiledAt
             let mut family = f.clone();
             family.views.clear();
             CompiledAttribute::Scoped(family)
-        })
-}
-
-/// The width the columns already naming `vocabulary` store it at, or `None` where none does.
-/// Every column over one vocabulary stores one width (`Vocabularies::seed` refuses otherwise),
-/// so the first found is the answer.
-fn width_named_by_columns(manifest: &Manifest, vocabulary: &str) -> Option<ScalarType> {
-    manifest
-        .declared_scalars
-        .iter()
-        .find(|d| d.vocabulary.as_deref() == Some(vocabulary))
-        .map(|d| d.arrow_type)
-        .or_else(|| {
-            manifest
-                .groups
-                .iter()
-                .flat_map(|g| g.scoped_scalars.iter())
-                .find(|f| f.vocabulary.as_deref() == Some(vocabulary))
-                .map(|f| f.arrow_type)
         })
 }
 
@@ -352,11 +303,7 @@ fn check_name(name: &str) -> Result<(), String> {
 
 /// The build's `compile_attributes`, over a request: the type, its vocabulary or analyser, the
 /// flag combinations the schema refuses, and the scope.
-fn compile(
-    request: &AttributeRequest,
-    manifest: &Manifest,
-    vocabularies: &Vocabularies,
-) -> Result<CompiledAttribute, String> {
+fn compile(request: &AttributeRequest, manifest: &Manifest) -> Result<CompiledAttribute, String> {
     let name = request.name.as_str();
     let (arrow_type, vocabulary, analyser) = match request.ty.as_str() {
         "category" => {
@@ -366,25 +313,20 @@ fn compile(
                      default (configuration.md §6)"
                 )
             })?;
-            if !manifest.vocabularies.iter().any(|v| v.name == vocabulary)
-                || vocabularies.get(vocabulary).is_none()
-            {
+            let Some(declared) = manifest.vocabularies.iter().find(|v| v.name == vocabulary)
+            else {
                 return Err(format!(
-                    "attribute '{name}': `vocabulary = \"{vocabulary}\"` names no vocabulary this \
-                     deployment carries. Declared: {}. A missing vocabulary is refused rather than \
-                     minted: an implicit one would take a width, a value set and a visibility \
-                     nobody declared",
+                    "attribute '{name}': no vocabulary named '{vocabulary}'. Declared: {}",
                     declared_vocabularies(manifest)
                 ));
-            }
+            };
             if let Some(analyser) = &request.analyser {
                 return Err(format!(
                     "attribute '{name}' is a category, not `text`, so `analyser = \"{analyser}\"` \
                      has no meaning for it. Refused rather than ignored"
                 ));
             }
-            let width = category_width(request, manifest, vocabulary)?;
-            (width, Some(vocabulary.to_string()), None)
+            (declared.width, Some(vocabulary.to_string()), None)
         }
         "utf8" => {
             return Err(format!(
@@ -401,36 +343,10 @@ fn compile(
                      category"
                 )
             })?;
-            // A category-width type naming a vocabulary is the record's own spelling of a
-            // category (`AttributeDeclaration::ty`), accepted at the door as well so a caller
-            // may say the width where the block says `category` and the vocabulary says the width.
-            if let Some(vocabulary) = request.vocabulary.as_deref() {
-                if !ty.is_category_width() {
-                    return Err(format!(
-                        "attribute '{name}' is type '{other}', not a category, so `vocabulary` \
-                         has no meaning for it. Refused rather than ignored: a value set on a \
-                         column that has none is a disclosure control its author believes is set"
-                    ));
-                }
-                let explicit = AttributeRequest {
-                    ty: "category".to_string(),
-                    width: Some(other.to_string()),
-                    ..request.clone()
-                };
-                return compile(&explicit, manifest, vocabularies).and_then(|compiled| {
-                    match compiled.category() {
-                        Some((_, width)) if width == ty => Ok(compiled),
-                        _ => Err(format!(
-                            "attribute '{name}': vocabulary '{vocabulary}' is stored at another \
-                             width by the columns that already name it"
-                        )),
-                    }
-                });
-            }
-            if request.width.is_some() {
+            if request.vocabulary.is_some() {
                 return Err(format!(
-                    "attribute '{name}' is type '{other}', not a category, so `width` has no \
-                     meaning for it; the type is the width"
+                    "attribute '{name}' is type '{other}', so `vocabulary` does not apply; a \
+                     column over a vocabulary is `type = \"category\"`"
                 ));
             }
             let analyser = match (ty, request.analyser.as_deref()) {
@@ -522,46 +438,6 @@ fn compile(
                 views: Vec::new(),
             }))
         }
-    }
-}
-
-/// A category's width: the width the columns already naming its vocabulary store, which a
-/// supplied `width` must agree with, or the supplied `width` where no column names it yet.
-fn category_width(
-    request: &AttributeRequest,
-    manifest: &Manifest,
-    vocabulary: &str,
-) -> Result<ScalarType, String> {
-    let name = request.name.as_str();
-    let supplied = request
-        .width
-        .as_deref()
-        .map(|w| {
-            ScalarType::parse(w)
-                .filter(|t| t.is_category_width())
-                .ok_or_else(|| {
-                    format!(
-                        "attribute '{name}': `width = \"{w}\"` is not a code width; a vocabulary's \
-                         width is `u8`, `u16` or `u32` (per-point-attributes §3.6)"
-                    )
-                })
-        })
-        .transpose()?;
-    match (width_named_by_columns(manifest, vocabulary), supplied) {
-        (Some(held), Some(width)) if held != width => Err(format!(
-            "attribute '{name}': vocabulary '{vocabulary}' is stored at {} by the columns that \
-             already name it, and a vocabulary is one code space whichever columns draw on it \
-             (per-point-attributes §3.9); omit `width` or say {}",
-            held.arrow_type_name(),
-            held.arrow_type_name()
-        )),
-        (Some(held), _) => Ok(held),
-        (None, Some(width)) => Ok(width),
-        (None, None) => Err(format!(
-            "attribute '{name}': no column names vocabulary '{vocabulary}' yet, so its code width \
-             is not recorded; say `width` (`u8`, `u16` or `u32`), which fixes it for every column \
-             that names the vocabulary after this one"
-        )),
     }
 }
 

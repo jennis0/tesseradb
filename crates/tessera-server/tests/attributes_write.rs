@@ -402,7 +402,6 @@ async fn the_route_declares_answers_redeclarations_and_refuses_what_the_schema_r
                 "name": "shade",
                 "type": "category",
                 "vocabulary": "dept",
-                "width": "u8",
                 "render": true
             }),
             "interim",

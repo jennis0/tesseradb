@@ -3664,8 +3664,6 @@ struct AttributeBody {
     #[serde(default)]
     vocabulary: Option<String>,
     #[serde(default)]
-    width: Option<String>,
-    #[serde(default)]
     analyser: Option<String>,
     #[serde(default)]
     index: bool,
@@ -3701,7 +3699,6 @@ async fn declare_attribute(
         title: body.title,
         ty: body.ty,
         vocabulary: body.vocabulary,
-        width: body.width,
         analyser: body.analyser,
         index: body.index,
         render: body.render,
@@ -6443,7 +6440,7 @@ mod tests {
                     name: "departments".to_string(),
                     kind,
                     visibility: tessera_engine::Visibility::Derived,
-                    width: "u32".to_string(),
+                    width: tessera_engine::ScalarType::U32,
                     values: vec![tessera_engine::ManifestVocabularyValue {
                         key: "ops".to_string(),
                         code: CODE_OPS,

@@ -178,7 +178,7 @@ pub(crate) fn resolve(
         name: request.name.clone(),
         kind: request.kind,
         visibility: request.visibility,
-        width: width.arrow_type_name().to_string(),
+        width,
         values: Vec::new(),
         reserved: {
             let mut reserved = request.reserved.clone();
@@ -274,7 +274,7 @@ pub(crate) fn declaration_record(
         title: request.title.clone(),
         kind: compiled.kind,
         visibility: compiled.visibility,
-        width: compiled.width.clone(),
+        width: compiled.width.arrow_type_name().to_string(),
         values: codes
             .iter()
             .map(|(key, code)| DeclaredVocabularyValue {
@@ -297,12 +297,12 @@ pub(crate) fn declaration_record(
 /// before the record was written, so what is compiled here is the record's own fields; a value
 /// carrying no code is one no draw ever recorded, and is dropped rather than bound at a number
 /// nobody assigned.
-pub(crate) fn compile_record(declaration: &VocabularyDeclaration) -> ManifestVocabulary {
-    ManifestVocabulary {
+pub(crate) fn compile_record(declaration: &VocabularyDeclaration) -> Option<ManifestVocabulary> {
+    Some(ManifestVocabulary {
         name: declaration.name.clone(),
         kind: declaration.kind,
         visibility: declaration.visibility,
-        width: declaration.width.clone(),
+        width: ScalarType::parse(&declaration.width).filter(is_category_width)?,
         values: declaration
             .values
             .iter()
@@ -315,7 +315,7 @@ pub(crate) fn compile_record(declaration: &VocabularyDeclaration) -> ManifestVoc
             })
             .collect(),
         reserved: declaration.reserved.clone(),
-    }
+    })
 }
 
 /// Whether a stored type is a code space. `ScalarType::parse` reads every declarable width, and

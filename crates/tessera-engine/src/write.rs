@@ -3204,7 +3204,12 @@ impl WritePath {
             let WalRecord::VocabularyDeclare { declaration } = record else {
                 continue;
             };
-            let compiled = crate::vocabularies::compile_record(declaration);
+            let compiled = crate::vocabularies::compile_record(declaration).ok_or_else(|| {
+                EngineError::Malformed(format!(
+                    "the WAL declares vocabulary '{}' at width '{}', which is not a code width",
+                    declaration.name, declaration.width
+                ))
+            })?;
             match vocabularies.get_mut(&compiled.name) {
                 Some(minter) => {
                     // Kind, visibility and the code space's width: the whole of what
@@ -3212,7 +3217,7 @@ impl WritePath {
                     // which a minter holds as spent codes rather than as a list.
                     if minter.kind() != compiled.kind
                         || minter.visibility() != compiled.visibility
-                        || minter.width().arrow_type_name() != compiled.width
+                        || minter.width() != compiled.width
                     {
                         return Err(EngineError::Malformed(format!(
                             "the WAL declares vocabulary '{}' with an identity the manifests do \
@@ -3236,15 +3241,11 @@ impl WritePath {
                     }
                 }
                 None => {
-                    // The width the declaration named, so a code drawn after this restart lands
-                    // in the space the columns over it store (`ManifestVocabulary::width`).
-                    let width = tessera_spatial::tiler::ScalarType::parse(&compiled.width)
-                        .unwrap_or(tessera_spatial::tiler::ScalarType::U32);
                     let mut minter = tessera_store::vocabulary::VocabularyMinter::new(
                         compiled.name.clone(),
                         compiled.kind,
                         compiled.visibility,
-                        width,
+                        compiled.width,
                     );
                     minter
                         .seed_manifest(&compiled)
@@ -5787,7 +5788,7 @@ mod vocabulary_extensions_tests {
             name: name.to_string(),
             kind: VocabularyKind::Discovered,
             visibility: crate::Visibility::Derived,
-            width: "u32".to_string(),
+            width: tessera_spatial::tiler::ScalarType::U32,
             values: Vec::new(),
             reserved: Vec::new(),
         }
@@ -14650,10 +14651,9 @@ impl Executor {
         let resolved = crate::attributes::resolve(
             &request,
             &generation.bundle.manifest,
-            &generation.vocabularies,
             |name| self.live.registered_layer(name).is_some(),
         );
-        let (compiled, narrow) = match resolved {
+        let compiled = match resolved {
             Ok(crate::attributes::Resolution::Existing) => {
                 respond.ack(
                     Ack::AttributeDeclared { existing: true },
@@ -14661,7 +14661,7 @@ impl Executor {
                 );
                 return;
             }
-            Ok(crate::attributes::Resolution::New { compiled, narrow }) => (compiled, narrow),
+            Ok(crate::attributes::Resolution::New(compiled)) => compiled,
             Err(e) => {
                 respond.fail(e);
                 self.health.note_work_refused();
@@ -14716,26 +14716,7 @@ impl Executor {
         // The apply: the live list first, then the successor generation built from it.
         self.live
             .with_attributes(|attributes| attributes.push(compiled.clone()));
-        let vocabularies = match narrow {
-            Some((vocabulary, width)) => {
-                let mut vocabularies: Vocabularies = (*generation.vocabularies).clone();
-                if let Some(minter) = vocabularies.get_mut(&vocabulary) {
-                    // Checked by `resolve` against the same bindings; a code bound past the width
-                    // between the two reads cannot happen, minting being this thread's alone.
-                    if let Err(code) = minter.narrow_to(width) {
-                        tracing::error!(
-                            vocabulary = %vocabulary,
-                            code,
-                            "ALARM: a vocabulary bound a code past a width the executor had just \
-                             checked it against; the declaration is durable and the width stays \
-                             the wider one"
-                        );
-                    }
-                }
-                Arc::new(vocabularies)
-            }
-            None => Arc::clone(&generation.vocabularies),
-        };
+        let vocabularies = Arc::clone(&generation.vocabularies);
         // A category over a vocabulary no column named before has no suggestion index, the open
         // building one only for the vocabularies a column names; built here, on this thread, as
         // the open builds it, so the suggest verb answers the column from the acknowledgement
@@ -14974,13 +14955,11 @@ impl Executor {
         };
         // The codes, drawn into a minter this thread owns and nothing has published. A draw that
         // exhausts the width refuses with nothing appended and no binding anywhere.
-        let width = tessera_spatial::tiler::ScalarType::parse(&compiled.width)
-            .unwrap_or(tessera_spatial::tiler::ScalarType::U32);
         let mut minter = tessera_store::vocabulary::VocabularyMinter::new(
             compiled.name.clone(),
             compiled.kind,
             compiled.visibility,
-            width,
+            compiled.width,
         );
         for &code in &compiled.reserved {
             minter.seed_reserved(code);

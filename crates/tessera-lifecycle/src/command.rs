@@ -693,9 +693,6 @@ pub struct AttributeRequest {
     /// The declared type by its `configuration.md` §6 name: a storage type, or `category`.
     pub ty: String,
     pub vocabulary: Option<String>,
-    /// A category's code width where the vocabulary is named by no column yet: `u8`, `u16` or
-    /// `u32`.
-    pub width: Option<String>,
     pub analyser: Option<String>,
     pub index: bool,
     pub render: bool,

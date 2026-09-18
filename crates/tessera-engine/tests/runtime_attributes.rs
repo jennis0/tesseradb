@@ -235,7 +235,6 @@ fn request(name: &str, ty: &str) -> AttributeRequest {
         title: None,
         ty: ty.to_string(),
         vocabulary: None,
-        width: None,
         analyser: None,
         index: false,
         render: false,
@@ -395,7 +394,6 @@ fn every_family_declares_at_runtime_and_earlier_entities_read_absent_without_a_b
         },
         AttributeRequest {
             vocabulary: Some("dept".to_string()),
-            width: Some("u8".to_string()),
             index: true,
             ..request("tag", "category")
         },
@@ -829,7 +827,6 @@ fn a_runtime_category_offers_a_restricted_principal_only_its_visible_values() {
     engine
         .declare_attribute(AttributeRequest {
             vocabulary: Some("dept".to_string()),
-            width: Some("u8".to_string()),
             index: true,
             ..request("tag", "category")
         })
@@ -1053,21 +1050,9 @@ fn an_identical_redeclaration_is_a_no_op_and_a_differing_one_conflicts() {
     assert!(refused(request("weird", "utf8")).contains("retired"));
     assert!(refused(AttributeRequest {
         vocabulary: Some("nothing".to_string()),
-        width: Some("u8".to_string()),
         ..request("tag", "category")
     })
-    .contains("names no vocabulary"));
-    assert!(refused(AttributeRequest {
-        vocabulary: Some("dept".to_string()),
-        ..request("tag", "category")
-    })
-    .contains("say `width`"));
-    assert!(refused(AttributeRequest {
-        vocabulary: Some("band".to_string()),
-        width: Some("u16".to_string()),
-        ..request("band2", "category")
-    })
-    .contains("stored at u8"));
+    .contains("no vocabulary named"));
     // **`render` is refused for every type, as an interim** (decision 0136's amendment): the
     // reason is that this route addresses entities rather than rows, so it does not depend on the
     // type, and the message says the refusal is not a rule about rendered columns.
@@ -1079,13 +1064,11 @@ fn an_identical_redeclaration_is_a_no_op_and_a_differing_one_conflicts() {
         },
         AttributeRequest {
             vocabulary: Some("dept".to_string()),
-            width: Some("u8".to_string()),
             render: true,
             ..request("tag", "category")
         },
         AttributeRequest {
             vocabulary: Some("band".to_string()),
-            width: Some("u8".to_string()),
             render: true,
             ..request("band3", "category")
         },

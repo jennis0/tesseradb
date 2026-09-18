@@ -314,27 +314,6 @@ impl VocabularyMinter {
         self.width
     }
 
-    /// Bound this minter's code space to `width`, for a column declared at a running service over
-    /// a vocabulary no column named before (`ingest.md` §1.3).
-    ///
-    /// A vocabulary no column names is seeded at `u32`, the widest domain, and the first column
-    /// to name it is what fixes the width the rows store; the same rule a build applies through
-    /// the columns it compiles (`Vocabularies::seed`). Refused where a code already bound would
-    /// not fit: narrowing past a bound code would leave a row whose stored code the column cannot
-    /// hold, and the offending code is returned so the refusal can name it. Widening is never
-    /// asked for, because a column that names the vocabulary already fixed the width and a
-    /// differing declaration is refused before this is reached.
-    pub fn narrow_to(&mut self, width: ScalarType) -> std::result::Result<(), u32> {
-        let max = usable_max(width);
-        if let Some(&code) = self.assigned.iter().next_back() {
-            if code > max {
-                return Err(code);
-            }
-        }
-        self.width = width;
-        Ok(())
-    }
-
     /// Whether a key this minter does not carry is a typo or a value waiting for a code.
     ///
     /// **Consulted at the boundary, not here.** The refusal for a declared vocabulary belongs in
@@ -483,9 +462,7 @@ pub enum SeedError {
     /// A column names a vocabulary the manifest does not carry. Its codes would decode to nothing,
     /// so the bundle does not open rather than serving marks of unknowable colour.
     UndeclaredVocabulary { column: String, vocabulary: String },
-    /// Two columns share a vocabulary at different widths. One code space, and one of the columns
-    /// cannot hold the other's codes (§3.9) — caught at build, so reaching it means a hand-edited
-    /// or corrupt manifest.
+    /// A column stores its vocabulary at a width other than the vocabulary's own.
     WidthDisagreement {
         vocabulary: String,
         column: String,
@@ -514,9 +491,7 @@ impl std::fmt::Display for SeedError {
                 other_width,
             } => write!(
                 f,
-                "vocabulary '{vocabulary}' is shared by columns declared {} and {} (at '{column}'). \
-                 A shared vocabulary is one code space, and one column cannot hold the other's \
-                 codes (per-point-attributes §3.9)",
+                "vocabulary '{vocabulary}' is declared {} and column '{column}' stores it as {}",
                 other_width.arrow_type_name(),
                 width.arrow_type_name()
             ),
@@ -556,59 +531,39 @@ impl Vocabularies {
     /// Assemble the live view from a bundle's `MANIFEST.json` and the served
     /// `SEGMENTS-<n>.json`'s extensions.
     ///
-    /// The width comes from the `declared_scalars` entry that names the vocabulary, not from the
-    /// vocabulary itself: a value set is a set of keys and codes, and what bounds the code space is
-    /// the column that stores them.
+    /// A category column must store its vocabulary's width.
     pub fn seed(
         vocabularies: &[ManifestVocabulary],
         declared_scalars: &[DeclaredScalar],
         extensions: &[VocabularyExtension],
     ) -> std::result::Result<Self, SeedError> {
-        let mut widths: BTreeMap<&str, (ScalarType, &str)> = BTreeMap::new();
         for scalar in declared_scalars {
             let Some(name) = scalar.vocabulary.as_deref() else {
                 continue;
             };
-            if !vocabularies.iter().any(|v| v.name == name) {
+            let Some(vocabulary) = vocabularies.iter().find(|v| v.name == name) else {
                 return Err(SeedError::UndeclaredVocabulary {
                     column: scalar.name.clone(),
                     vocabulary: name.to_string(),
                 });
-            }
-            match widths.get(name) {
-                Some(&(width, _)) if width != scalar.arrow_type => {
-                    return Err(SeedError::WidthDisagreement {
-                        vocabulary: name.to_string(),
-                        column: scalar.name.clone(),
-                        width: scalar.arrow_type,
-                        other_width: width,
-                    });
-                }
-                _ => {
-                    widths.insert(name, (scalar.arrow_type, scalar.name.as_str()));
-                }
+            };
+            if vocabulary.width != scalar.arrow_type {
+                return Err(SeedError::WidthDisagreement {
+                    vocabulary: name.to_string(),
+                    column: scalar.name.clone(),
+                    width: scalar.arrow_type,
+                    other_width: vocabulary.width,
+                });
             }
         }
 
         let mut by_name = BTreeMap::new();
         for vocabulary in vocabularies {
-            // **A column that names the vocabulary is the authority; the declaration's own width
-            // is the answer where none does.** A built vocabulary no column names is carried but
-            // unusable, so either answer would serve; one declared at a running service is minted
-            // into before any column names it (`ingest.md` §1.3), and taking the widest domain
-            // there would draw codes the column later declared for it cannot hold. A width this
-            // build cannot parse is `u32`, the widest domain, which can only fail to exhaust and
-            // never to collide.
-            let width = widths
-                .get(vocabulary.name.as_str())
-                .map(|&(w, _)| w)
-                .or_else(|| ScalarType::parse(&vocabulary.width))
-                .unwrap_or(ScalarType::U32);
             let mut minter = VocabularyMinter::new(
                 vocabulary.name.clone(),
                 vocabulary.kind,
                 vocabulary.visibility,
-                width,
+                vocabulary.width,
             );
             minter.seed_manifest(vocabulary)?;
             by_name.insert(vocabulary.name.clone(), minter);
@@ -819,7 +774,7 @@ mod tests {
             name: "departments".to_string(),
             kind: VocabularyKind::Declared,
             visibility: Visibility::Derived,
-            width: "u32".to_string(),
+            width: ScalarType::U32,
             values: (1..=100)
                 .map(|c| ManifestVocabularyValue {
                     key: format!("built-{c}"),
@@ -975,7 +930,7 @@ mod tests {
             name: name.to_string(),
             kind: VocabularyKind::Declared,
             visibility: Visibility::Derived,
-            width: "u32".to_string(),
+            width: ScalarType::U32,
             values: values
                 .iter()
                 .map(|(key, code)| ManifestVocabularyValue {
@@ -988,33 +943,14 @@ mod tests {
         }
     }
 
-    /// The width bounding a vocabulary's code space is the *column's*, not the vocabulary's — a
-    /// value set is keys and codes, and what bounds the space is what stores it.
     #[test]
-    fn a_vocabularys_width_comes_from_the_column_that_stores_it() {
-        let v = Vocabularies::seed(
-            &[vocabulary("departments", &[("ops", 9)])],
-            &[declared("department", ScalarType::U8, Some("departments"))],
-            &[],
-        )
-        .expect("a consistent bundle seeds");
-        assert_eq!(v.get("departments").unwrap().width(), ScalarType::U8);
-        assert_eq!(v.get("departments").unwrap().code_of("ops"), Some(9));
-    }
-
-    /// §3.9: a shared vocabulary is one code space, so two widths over it is one column unable to
-    /// hold the other's codes. Caught at build; reaching it means a hand-edited manifest.
-    #[test]
-    fn two_widths_over_one_vocabulary_refuse_to_open() {
+    fn a_column_storing_another_width_than_its_vocabulary_refuses_to_open() {
         let err = Vocabularies::seed(
             &[vocabulary("shared", &[])],
-            &[
-                declared("a", ScalarType::U8, Some("shared")),
-                declared("b", ScalarType::U16, Some("shared")),
-            ],
+            &[declared("a", ScalarType::U8, Some("shared"))],
             &[],
         )
-        .expect_err("one code space cannot have two widths");
+        .expect_err("the vocabulary is u32 and the column u8");
         assert!(matches!(err, SeedError::WidthDisagreement { .. }), "{err}");
     }
 
@@ -1024,7 +960,7 @@ mod tests {
     fn a_column_naming_no_vocabulary_refuses_to_open() {
         let err = Vocabularies::seed(
             &[],
-            &[declared("department", ScalarType::U8, Some("departments"))],
+            &[declared("department", ScalarType::U32, Some("departments"))],
             &[],
         )
         .expect_err("a category with no value set is not openable");
@@ -1042,7 +978,7 @@ mod tests {
         let built = vec![vocabulary("departments", &[("ops", 9)])];
         let mut v = Vocabularies::seed(
             &built,
-            &[declared("department", ScalarType::U16, Some("departments"))],
+            &[declared("department", ScalarType::U32, Some("departments"))],
             &[],
         )
         .unwrap();
@@ -1069,7 +1005,7 @@ mod tests {
         // which is what makes a restart lossless.
         let reopened = Vocabularies::seed(
             &built,
-            &[declared("department", ScalarType::U16, Some("departments"))],
+            &[declared("department", ScalarType::U32, Some("departments"))],
             &extensions,
         )
         .expect("the two homes agree");
@@ -1086,7 +1022,7 @@ mod tests {
     fn an_extension_with_no_vocabulary_refuses_to_open() {
         let err = Vocabularies::seed(
             &[vocabulary("departments", &[])],
-            &[declared("department", ScalarType::U8, Some("departments"))],
+            &[declared("department", ScalarType::U32, Some("departments"))],
             &[VocabularyExtension {
                 name: "ghosts".to_string(),
                 values: vec![ManifestVocabularyValue {
@@ -1142,7 +1078,7 @@ mod tests {
             name: "departments".to_string(),
             kind: VocabularyKind::Declared,
             visibility: Visibility::Derived,
-            width: "u16".to_string(),
+            width: ScalarType::U16,
             values: vec![ManifestVocabularyValue {
                 key: "alpha".to_string(),
                 code: alpha,
@@ -1183,7 +1119,7 @@ mod tests {
             name: "departments".to_string(),
             kind: VocabularyKind::Declared,
             visibility: Visibility::Derived,
-            width: "u16".to_string(),
+            width: ScalarType::U16,
             values: vec![ManifestVocabularyValue {
                 key: "alpha".to_string(),
                 code: 41,
@@ -1239,7 +1175,7 @@ mod tests {
             name: "departments".to_string(),
             kind: VocabularyKind::Declared,
             visibility: Visibility::Derived,
-            width: "u32".to_string(),
+            width: ScalarType::U32,
             values: vec![ManifestVocabularyValue {
                 key: "ops".to_string(),
                 code: 4711,

@@ -208,19 +208,10 @@ pub struct ManifestVocabulary {
     /// Whether the *existence* of a value is sensitive (§3.8) — the disclosure control
     /// `/v1/categories` gates on.
     pub visibility: Visibility,
-    /// The code space's width, by its contracts §2.2 name (`u8`, `u16`, `u32`) — the declaration's
-    /// own `width` key (`configuration.md` §1, per-point-attributes §3.6).
-    ///
-    /// **A column that names this vocabulary is still the authority**, and this is the answer
-    /// where none does. The width bounds every code drawn into the set, so a vocabulary declared
-    /// at a running service and not yet named by a column would otherwise come back from a
-    /// restart at `u32` and draw codes the column declared for it cannot hold
-    /// ([`crate::vocabulary::Vocabularies::seed`]).
-    ///
-    /// **Required, not `default`.** A defaulted `u32` is the widest domain, so a vocabulary whose
-    /// width went missing mints codes no narrower column can store, and the refusal arrives at
-    /// the column rather than at the manifest.
-    pub width: String,
+    /// The width every code of this vocabulary is stored at (`u8`, `u16` or `u32`). A category
+    /// column stores its vocabulary's width.
+    #[serde(with = "scalar_type_name")]
+    pub width: ScalarType,
     pub values: Vec<ManifestVocabularyValue>,
     /// Retired codes, never reassigned (§3.4). Carried into the manifest rather than left in the
     /// schema file so that a later build reading this bundle's lineage can see which codes are
