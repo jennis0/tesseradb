@@ -495,12 +495,12 @@ fn the_column_set_follows_the_layers_the_response_served() {
     assert_eq!(named.points.membership[0].layer, TREE);
 }
 
-/// **A dependent layer's column is its artifacts' own membership.** A label published with the
-/// members it describes names itself on those points; one published with no members is a
-/// candidate nowhere and so is in neither the frame nor the column; and a label whose cluster
-/// this response does not hold is absent from the frame and so from the column.
+/// A dependent layer's column is the membership its artifacts are served over. A label published
+/// with the members it describes names itself on those points. One published with no members is
+/// served over its cluster's membership and names its cluster's points (decision 0145). A label
+/// whose cluster this response does not hold is absent from the frame and so from the column.
 #[test]
-fn a_dependent_layer_resolves_over_its_own_members() {
+fn a_dependent_layer_resolves_over_the_membership_it_is_served_over() {
     let fx = fixture();
     let engine = fx.open();
     engine
@@ -588,16 +588,26 @@ fn a_dependent_layer_resolves_over_its_own_members() {
     assert_eq!(by_point[&a1_point][TREE], "a1");
     let b1_point = served_from(200..300);
     assert_eq!(by_point[&b1_point][TREE], "b1");
-    assert!(
-        !by_point[&b1_point].contains_key(LABELS),
-        "a label with no members names no point"
+    // The label that declared no members of its own is the label of `b1` (decision 0145). It is
+    // placed where `b1` is placed, so it is a candidate in `b1`'s tiles and names `b1`'s points in
+    // the column as a label published over those members would.
+    assert_eq!(
+        by_point[&b1_point][LABELS], "l-b1",
+        "a label with no members of its own names the points of what it attaches to"
     );
-    assert!(
-        !out.artifacts
-            .iter()
-            .any(|a| a.key.as_deref() == Some("l-b1")),
-        "a memberless label has no visible member in any viewport, so it is no candidate and \
-         is absent from the frame as well as the column"
+    let b1_label = out
+        .artifacts
+        .iter()
+        .find(|a| a.key.as_deref() == Some("l-b1"))
+        .expect("and so is served in the frame beside its cluster");
+    let b1 = out
+        .artifacts
+        .iter()
+        .find(|a| a.key.as_deref() == Some("b1"))
+        .expect("the cluster it names");
+    assert_eq!(
+        b1_label.masked_count, b1.masked_count,
+        "at the cluster's masked count"
     );
 
     // Cut to the children: `a1` goes, its label goes with it (decision 0089), and the column says

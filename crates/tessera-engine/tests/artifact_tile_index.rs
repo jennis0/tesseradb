@@ -871,7 +871,12 @@ fn the_folds_projection_and_the_derived_index_are_the_same_column() {
         let fx = build_fixture(shape);
         let derived = TileIndex::build(&fx.membership(), fx.row_space.base_rows());
         let ordinals = fx.store.level(LAYER, 0).count() as u32;
-        let projected = TileIndex::project(ordinals, || fx.store.level(LAYER, 0), &fx.row_space);
+        let projected = TileIndex::project(
+            ordinals,
+            || fx.store.level(LAYER, 0),
+            &fx.row_space,
+            &fx.store,
+        );
         assert_eq!(
             projected.as_bytes(),
             derived.as_bytes(),
@@ -1035,14 +1040,12 @@ fn a_transposed_row_form_is_the_projected_one() {
         let projected = fx.rows();
         let mut composed = 0;
         for layout in [ServingLayout::RowMajorLabel, ServingLayout::RowMajorList] {
-            let Some(column) =
-                RowColumn::compose(
-                    projected.membership(),
-                    fx.row_space.base_rows(),
-                    layout,
-                    &std::env::temp_dir(),
-                )
-            else {
+            let Some(column) = RowColumn::compose(
+                projected.membership(),
+                fx.row_space.base_rows(),
+                layout,
+                &std::env::temp_dir(),
+            ) else {
                 continue;
             };
             composed += 1;
@@ -1107,14 +1110,13 @@ fn a_transposed_row_form_is_the_projected_one() {
             // The column composed from the transposed form is the column it was transposed from,
             // which is the round trip the serving path takes: the level is served from the very
             // bytes this membership was read out of.
-            let again =
-                RowColumn::compose(
-                    transposed.membership(),
-                    fx.row_space.base_rows(),
-                    layout,
-                    &std::env::temp_dir(),
-                )
-                    .expect("the same memberships compose the same form");
+            let again = RowColumn::compose(
+                transposed.membership(),
+                fx.row_space.base_rows(),
+                layout,
+                &std::env::temp_dir(),
+            )
+            .expect("the same memberships compose the same form");
             assert_eq!(again.as_bytes(), column.as_bytes());
             for ordinal in 0..column.len() as u32 {
                 assert_eq!(again.declared_size(ordinal), column.declared_size(ordinal));

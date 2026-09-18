@@ -1872,3 +1872,110 @@ fn remove_the_whole_log(fx: &Fixture) {
     }
     let _ = std::fs::remove_file(&fx.wal);
 }
+
+// ---- a borrowed membership across a flush and a fold -------------------------------------------
+
+/// A label attached to `clusters/a`'s one artifact, declaring no members of its own. Its membership
+/// is the cluster's (decision 0145), so what these two cases read is whether the cluster's rows
+/// reach it at the publication that gives the cluster them.
+fn publish_borrowing_label(engine: &Engine) {
+    let mut label_layer = declaration(LABELS);
+    label_layer.depends_on = vec!["clusters/a".into()];
+    engine.register_layer(label_layer).unwrap();
+    engine
+        .publish_artifacts(
+            LABELS.into(),
+            0,
+            vec![IncomingArtifact::attached(
+                Some("l0".into()),
+                Vec::new(),
+                Vec::new(),
+                tessera_lifecycle::membership::IncomingAttachment {
+                    layer: "clusters/a".into(),
+                    level: 0,
+                    key: "c0".into(),
+                },
+            )],
+        )
+        .unwrap();
+}
+
+const LABELS: &str = "topics/x";
+
+/// The masked count of one key, for a principal who can see everything.
+fn count_of(engine: &Engine, layer: &str, key: &str) -> u64 {
+    artifacts_of(engine)
+        .into_iter()
+        .find(|a| a.layer == layer && a.key.as_deref() == Some(key))
+        .unwrap_or_else(|| panic!("{layer}/{key} is served"))
+        .masked_count
+}
+
+/// A member ingested since the last fold counts for the label as it counts for the cluster, from
+/// the flush that gives it a row.
+///
+/// The form is warmed first, so what is read after the flush is a form that was already held. A
+/// flush extends each held form by the segment it published, and a borrowing artifact's membership
+/// is in no record of its own level, so such a form is dropped instead and the next request
+/// resolves the cluster's rows again (`ArtifactProjections::drop_borrowed`). Without that the label
+/// would stay at the count the cluster had when the label's form was built.
+#[test]
+fn a_borrowing_label_takes_its_targets_flushed_member() {
+    let fx = fixture();
+    let engine = fx.open();
+    engine.register_layer(declaration("clusters/a")).unwrap();
+    let fresh = ingest(&engine, b"fresh-for-the-label");
+    let mut members = fx.members(0..300);
+    members.push(fresh);
+    engine
+        .publish_artifacts(
+            "clusters/a".into(),
+            0,
+            vec![IncomingArtifact::from_entities(Some("c0".into()), members)],
+        )
+        .unwrap();
+    publish_borrowing_label(&engine);
+    wait_for_publication(&fx, &engine, 2);
+
+    // Warm: both forms are built and held, the ingested member having no row yet.
+    assert_eq!(count_of(&engine, "clusters/a", "c0"), 300);
+    assert_eq!(
+        count_of(&engine, LABELS, "l0"),
+        300,
+        "the label is counted over the cluster's members"
+    );
+
+    flush(&engine);
+    assert_eq!(count_of(&engine, "clusters/a", "c0"), 301);
+    assert_eq!(
+        count_of(&engine, LABELS, "l0"),
+        301,
+        "and over them after the flush that gave the new member a row"
+    );
+}
+
+/// The same membership across a fold, which renumbers every row and rewrites the level's files.
+///
+/// The fold writes a borrowing level's tile index and column over the membership the artifact is
+/// served on, and the engine rebuilds the form against the new prefix and resolves the cluster's
+/// rows again. A label counted over the cluster before the fold is counted over it after.
+#[test]
+fn a_borrowing_label_keeps_its_targets_membership_across_a_fold() {
+    let fx = fixture();
+    let engine = fx.open();
+    publish(&fx, &engine, 0..300);
+    publish_borrowing_label(&engine);
+    wait_for_publication(&fx, &engine, 2);
+    assert_eq!(count_of(&engine, LABELS, "l0"), 300);
+
+    ingest(&engine, b"folded-for-the-label");
+    flush(&engine);
+    fold(&engine);
+
+    assert_eq!(count_of(&engine, "clusters/a", "c0"), 300);
+    assert_eq!(
+        count_of(&engine, LABELS, "l0"),
+        300,
+        "the fold renumbered the rows the cluster holds, and the label still reads them"
+    );
+}

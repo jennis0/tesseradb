@@ -3160,3 +3160,109 @@ fn a_build_reads_an_authored_shape_content_and_discloses_the_kind() {
         .to_string();
     assert!(message.contains("one drawn geometry"), "{message}");
 }
+
+/// A label set over a from-column clustering, carrying no member table of its own. Decision 0145
+/// makes this shape servable, and it is what the SDK writes when a user declares labels and inserts
+/// nothing but their text.
+const LABELS_WITHOUT_MEMBERS: &str = r#"
+  [layer.labels]
+  name = "topics/x"
+  title = "topics"
+  source = "topics"
+  type = "text"
+  membership = "enumerated"
+  require_member_visibility = "none"
+  artifact_visibility = { default = "inherited" }
+
+    [layer.labels.content]
+    require_member_visibility = "inherited"
+"#;
+
+/// One label per cluster, attached by the cluster's own key, with one content and no members.
+fn write_labels_without_members(path: &Path, clusters: &[i64]) {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("key", DataType::Utf8, false),
+        Field::new("contents", ranked(), true),
+        Field::new("attached_layer", DataType::Utf8, true),
+        Field::new("attached_key", DataType::Utf8, true),
+    ]));
+    let mut contents = ListBuilder::new(ListBuilder::new(StringBuilder::new()));
+    for cluster in clusters {
+        contents
+            .values()
+            .values()
+            .append_value(format!("topic {cluster}"));
+        contents.values().append(true);
+        contents.append(true);
+    }
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(StringArray::from(
+                clusters
+                    .iter()
+                    .map(|c| format!("l-{c}"))
+                    .collect::<Vec<_>>(),
+            )) as ArrayRef,
+            Arc::new(contents.finish()),
+            Arc::new(StringArray::from(vec![Some("curated/a"); clusters.len()])),
+            Arc::new(StringArray::from(
+                clusters.iter().map(|c| c.to_string()).collect::<Vec<_>>(),
+            )),
+        ],
+    )
+    .unwrap();
+    write(path, schema, batch);
+}
+
+/// A label set declaring no members builds (decision 0145). The label layer's artifacts carry an
+/// attachment, a text and an empty membership, and the build publishes them beside the clustering
+/// they name rather than refusing the declaration for want of a member table. What such a label is
+/// served over is asserted in `tessera-server/tests/label_membership.rs`; asserted here is that the
+/// bundle carries it, and that its clustering came from a point column with no member table
+/// anywhere.
+#[test]
+fn a_label_set_with_no_member_table_builds_over_a_from_column_clustering() {
+    let clusters = every_point_clustered();
+    let layer =
+        format!("{CURATED_LAYER}source = \"roster\"\n{FROM_POINTS}{LABELS_WITHOUT_MEMBERS}");
+    let (out, _tmp, report) = build_spelling_reported(&layer, |inputs| {
+        write_clustered_points(&inputs.points, &clusters, true);
+        write_cluster_roster(&inputs.at("roster.parquet"), &[0, 1, 2]);
+        write_labels_without_members(&inputs.at("topics.parquet"), &[0, 1, 2]);
+    });
+    let manifest = manifest_of(&out);
+    let names: Vec<&str> = manifest
+        .layers
+        .iter()
+        .map(|l| l.declaration.name.as_str())
+        .collect();
+    assert!(
+        names.contains(&"topics/x") && names.contains(&"curated/a"),
+        "both layers are registered: {names:?}"
+    );
+    let level_of = |layer: &str| {
+        report
+            .artifact_levels
+            .iter()
+            .find(|l| l.layer == layer)
+            .unwrap_or_else(|| panic!("{layer} is in the pass's report"))
+            .clone()
+    };
+    let labels = level_of("topics/x");
+    let clusters = level_of("curated/a");
+    assert_eq!(labels.registered, 3, "three labels are published");
+    // The pass counts the rows they are served over. The build reads the same
+    // `ArtifactStore::members_of` the engine does (decision 0139), so the label level's tile index
+    // and column are written over the clusters' members and the report says so.
+    assert_eq!(
+        labels.shape.artifacts, clusters.shape.artifacts,
+        "each label is placed over the cluster it names, so the label level has rows for as many \
+         artifacts as the clustering does"
+    );
+    assert_eq!(labels.shape.artifacts, 3);
+    assert_eq!(
+        labels.shape.everywhere_fraction, clusters.shape.everywhere_fraction,
+        "over the same memberships, so the same spread"
+    );
+}
