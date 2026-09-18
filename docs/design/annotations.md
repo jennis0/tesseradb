@@ -164,8 +164,17 @@ Neither is more correct. **Restricting counties but not countries requires three
 gate is a layer property; publishing a mapping agency's release as one revisable unit argues for one.
 The caller decides and the engine honours it.
 
-**A label is an artifact, not an attachment.** It carries its own membership — the sample it was
-generated from — its own gate, and an edge to the cluster it names. §2.3 records why: a label's
+**A label is an artifact, not an attachment.** It carries its own gate, an edge to the cluster it
+names, and its own membership where it declares one: the sample it was generated from. **A label
+that declares no members of its own is served over its target's** (decision 0145): placed where
+the cluster is placed, counted over the cluster's visible members inside the viewer's mask, tested
+by its own criterion against that number, and served to whoever is served the cluster, at the
+target's membership as it stands now, so a cluster that grows grows its labels. That is the
+default and no declaration key asks for it. The build, the fold and the request path resolve it
+through one function (decision 0139). It discloses nothing: the borrowed thing is a set of rows,
+every count over it is taken against the borrower's own mask (I2), and existence is the target's
+whole predicate one conjunct earlier (§5, decision 0089), so a principal not served the cluster
+is not served its label (I3, I12). §2.3 records why: a label's
 visibility does not follow from its cluster's, a synthesis can be more sensitive than its sources,
 and a label that leaks must be suppressible *now*, which addresses an entity.
 
@@ -621,7 +630,7 @@ inconsistent statements about the same object, one of them ours. It also foreclo
 non-covering analyses this model exists to carry.
 
 **What replaces it is a per-artifact test.** Gather the candidates intersecting the viewport, and
-test each independently against the existence criterion on its **own declared membership**. Serve
+test each independently against the existence criterion on the **membership it is served over**: its own declared membership, or its target's where it declares none (decision 0145). Serve
 those that pass. The hierarchy then does display work — where a child and its parent both pass,
 prefer the child at depth — and rollup emerges from independent decisions rather than being a
 property of the tree. Where "descent" survives in this corpus it means that display pruning over

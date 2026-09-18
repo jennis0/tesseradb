@@ -130,15 +130,19 @@ the columns. Every insert prints two lists, the columns it read and the columns 
 | a view group | as a view, plus `view=`, the column naming which view of the group each row belongs to; a roster of views with their metadata is `insert(group, roster=table, key=, **metadata_columns)` |
 | an attribute | `id=`, `value=`; on a group-scoped attribute also `view=` |
 | a layer, by key | `id=`, `key=`: one key per row, or a list of one key per level on a tiered layer; on a group-scoped layer also `view=` |
-| a layer, artifacts | `insert(layer, artifacts=table, key=, level=, parent=, contents=, attached_layer=, attached_level=, attached_key=, members=, excluding=, space=, bbox=|circle=|ellipse=|wkt=)`, each named where the table carries it |
-| a layer, members | `insert(layer, members=table, id=, key=, level=, rank=)` |
-| a label set | a mapping `{key: text}`, or a table with `key=` and `text=` (a plain string column) or `contents=` (a layer's ranked contents column); a generating set is `insert(labels, members=table, id=, key=, rank=)` |
+| a layer, artifacts | `insert(layer, artifacts=table, key=, parent=, contents=, attached_layer=, attached_key=, members=, excluding=, space=, level=, attached_level=, shape=)`, each named where the table carries it. `level` and `attached_level` are read by the build only under their own names, so those two take the canonical name or the column is renamed in the table; `shape=` takes the kind word and the shape columns (`min_x`…, `cx, cy, r`, `geometry`) are read under their canonical names |
+| a layer, members | `insert(layer, members=table, id=, key=, rank=, level=)`, `level` under its own name as above |
+| a label set | a mapping `{key: text}`, or a table with `key=` and `text=` (a plain string column) or `contents=` (a layer's ranked contents column), with `attached_layer=`, `attached_key=` and `level=` where the table carries them; a generating set is `insert(labels, members=table, id=, key=, rank=)` |
 | a vocabulary | `key=`, `title=`, `code=` |
 
 An artifacts table and a members table are two inserts on the same layer, each with its own
-column names, since both carry `key` and `level`. Several inserts on one target before a commit
-accumulate: the build reads them all and ingest pages each, so a corpus in parts is loaded by
-the same calls as one file.
+column names, since both carry `key` and `level`. A table in Tessera's own shape is no exception
+to the rule: a canonical column the call did not name (`members`, `excluding`, `rank`, `parent`,
+`contents`, `attached_layer`, `attached_key`, `space`, `code`) is refused naming the column and
+the two remedies, name it or drop it, so nothing is read silently at either door. Several inserts
+on one target before a commit accumulate: the build reads them all and ingest pages each, so a
+corpus in parts is loaded by the same calls as one file; a second part whose schema differs from
+the first is refused naming the two types.
 
 The columns that carry identity or disclosure are named on every call and never matched: the
 id, the coordinates, the access labels, a layer's key, a group's view column. An attribute's
@@ -330,12 +334,9 @@ A label set over a clustering: the `[layer.labels]` block, which expands to a fl
 supplied content attached to `of`. Its text comes from `insert(name, {key: text})` or
 `insert(name, table, key=, text=)`.
 
-**A label with no members of its own is the label of its cluster** (the H ruling of
-2026-09-18): it is drawn where the cluster is drawn, counted over the cluster's members, and
-served to whoever is served the cluster. That is the default and needs no declaration key. Not
-built yet: the engine places an attached artifact by its own member rows and a label with none
-is served to nobody; until the rule lands, `insert` on a label set without `members=` is
-refused naming it.
+**A label with no members of its own is the label of its cluster** (decision 0145): it is drawn
+where the cluster is drawn, counted over the cluster's members, and served to whoever is served
+the cluster. That is the default and needs no declaration key.
 
 `content_requires="all"` is the exception that narrows: the text was generated from a specific
 set of documents, given as `members=` on the insert with `key=`, `id=` and `rank=`, and is read
@@ -404,10 +405,8 @@ the order is fixed:
    are flushed with `wait=visible` here, so the values that follow address rows the database
    holds.
 3. **Values**: an insert into an attribute, or into a layer by key column, on rows the database
-   holds, through `POST /control/values`. Not built yet: the values route fills attribute cells
-   and mints no artifact, so a layer insert by key after the first commit is refused naming the
-   artifacts-table spelling until the route reads a layer column as the ingest route does
-   (§11.2 F).
+   holds, through `POST /control/values`, which fills the cells and mints or joins the artifacts
+   a key column names as the other two doors do (contracts §3.4).
 4. **Artifacts**, per layer in dependency order: a clustering before its labels, a target before
    a layer attached to it, a layer before one that depends on it. Within a layer, `PUT` pages
    carry members, parent, shape and content; a nested batch resolves parents that are its own
@@ -538,7 +537,7 @@ db.declare_layer("clusters", kind="flat")
 db.declare_labels("topics", of="clusters")
 db.insert("map", df, id="paper", x="x", y="y")          # title and year read by name
 db.insert("clusters", df, id="paper", key="cluster")
-db.insert("topics", topic_names)                        # {cluster_key: text}; Not built yet: H
+db.insert("topics", topic_names)                        # {cluster_key: text}
 db.commit()
 db.map(colour_by="cluster:clusters")
 ```
@@ -593,7 +592,7 @@ The same calls as the first load, on the new tables.
 
 ```python
 db.insert("s0", new_df, id="entity_id", x="x", y="y", access="categories")
-db.insert("clusters/kmeans", new_df, id="entity_id", key="cluster")   # held keys join, new keys mint; Not built yet: F
+db.insert("clusters/kmeans", new_df, id="entity_id", key="cluster")   # held keys join, new keys mint
 db.insert("topics/kmeans", {"k-new": "Diffusion models for audio"})
 db.insert("topics/kmeans", members=generating_rows, id="entity_id", key="key", rank="rank")
 print(db.check())     # the plan and the pre-flight
@@ -604,7 +603,7 @@ db.commit()           # the report
 
 ```python
 db.declare_layer("clusters/second", kind="flat")
-db.insert("clusters/second", df, id="entity_id", key="cluster2")  # held rows; one column and an id; Not built yet: F
+db.insert("clusters/second", df, id="entity_id", key="cluster2")  # held rows; one column and an id
 db.commit()
 db.map(colour_by="cluster:clusters/second")
 ```
@@ -692,10 +691,6 @@ Rulings of 2026-09-18:
 
 - **E. The binary at release.** Platform wheels carrying it. Until then `PATH`, `TESSERA_BIN`
   or the checkout.
-- **F. The values route reads a layer column** (ruled; not built): `POST /control/values`
-  mints and joins artifacts from a key column as the ingest route does (decision 0128).
-- **H. An attached artifact with no members takes its target's membership** (ruled; not
-  built): the engine's placement, counting and gating of a label read the cluster's rows.
 - **G. Issues #150 to #153**, engine and build defects the SDK's tests found.
 
 ## 12. Order of work

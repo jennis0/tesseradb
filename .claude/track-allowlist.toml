@@ -70,6 +70,7 @@ paths = [
 # members of its own is served over its target's membership. Types, build, engine and server.
 [track.sdk-labels]
 paths = [
+  "crates/tessera-lifecycle/src/membership.rs",
   "crates/tessera-types/src/*",
   "crates/tessera-build/src/*",
   "crates/tessera-build/tests/*",
