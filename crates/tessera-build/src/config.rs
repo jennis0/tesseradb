@@ -6279,7 +6279,6 @@ fn attribute_payload(
         Some(vocabulary) => {
             body.insert("type".to_string(), "category".into());
             body.insert("vocabulary".to_string(), vocabulary.clone().into());
-            body.insert("width".to_string(), attribute.ty.arrow_type_name().into());
         }
         None => {
             body.insert("type".to_string(), attribute.ty.arrow_type_name().into());
@@ -6715,7 +6714,6 @@ source = "members"
 
         assert_eq!(attributes[1]["type"], "category");
         assert_eq!(attributes[1]["vocabulary"], "kind");
-        assert_eq!(attributes[1]["width"], "u8");
 
         assert_eq!(attributes[2]["type"], "text");
         assert_eq!(
