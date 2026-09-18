@@ -1252,12 +1252,14 @@ fn read_members(
                     let at_level = level.map_or(0, |c| number_at(c, row));
                     let named = member_view(path, layer, scoped, view, row)?;
                     let Some(member) = resolve_member(
-                        layer,
-                        at_level,
-                        named,
-                        column.read_at(row),
-                        value_set,
-                        path,
+                        MemberKey {
+                            layer,
+                            level: at_level,
+                            view: named,
+                            read: column.read_at(row),
+                            value_set,
+                            path,
+                        },
                         plan,
                         &mut rosters,
                     )?
@@ -1297,12 +1299,14 @@ fn read_members(
                     entries.clear();
                     for (position, index) in positions.enumerate() {
                         entries.push(resolve_member(
-                            layer,
-                            listed.meaning.level_of(position),
-                            named,
-                            listed.values.read_at(index),
-                            value_set,
-                            path,
+                            MemberKey {
+                                layer,
+                                level: listed.meaning.level_of(position),
+                                view: named,
+                                read: listed.values.read_at(index),
+                                value_set,
+                                path,
+                            },
                             plan,
                             &mut rosters,
                         )?);
@@ -1328,6 +1332,19 @@ fn read_members(
     Ok((unclustered, read))
 }
 
+/// One member row's key as the file spelled it, with what the layer's declaration says about it.
+///
+/// `layer`, `value_set` and `path` are the same for every row of a file; `level`, `view` and `read`
+/// are the row's.
+struct MemberKey<'a> {
+    layer: &'a str,
+    level: u32,
+    view: Option<&'a str>,
+    read: KeyRead<'a>,
+    value_set: ValueSet,
+    path: &'a Path,
+}
+
 /// One member row's key, resolved against the plan — **minting where the value set is open**, and
 /// `None` where the key said the point is in no artifact.
 ///
@@ -1342,15 +1359,18 @@ fn read_members(
 /// and the artifacts source, if there is one, is enrichment. A list column mints from the same call,
 /// so an interior parent no artifact declares is minted on the same rule as a leaf.
 fn resolve_member(
-    layer: &str,
-    level: u32,
-    view: Option<&str>,
-    read: KeyRead<'_>,
-    value_set: ValueSet,
-    path: &Path,
+    key: MemberKey<'_>,
     plan: &mut LayerPlan,
     rosters: &mut Rosters,
 ) -> Result<Option<usize>> {
+    let MemberKey {
+        layer,
+        level,
+        view,
+        read,
+        value_set,
+        path,
+    } = key;
     Ok(match read {
         KeyRead::Unclustered => None,
         KeyRead::Named(name) => {
@@ -2579,6 +2599,12 @@ fn verify_hierarchies(
     Ok((violations, coverage, shapes.into_values().collect()))
 }
 
+/// Each key at one level of one layer, with the parent keys it names.
+type ParentsByKey<'a> = BTreeMap<&'a str, &'a [String]>;
+
+/// The parent edges a cycle walk reads, one entry per `(layer, level, view)`.
+type ParentLevels<'a> = BTreeMap<(&'a str, u32, Option<&'a str>), ParentsByKey<'a>>;
+
 /// Refuse a hierarchy holding a cycle, which is neither a tree nor a DAG and has no root to descend
 /// from.
 ///
@@ -2606,8 +2632,7 @@ fn detect_cycles(
     //
     // A `BTreeMap` at both levels, because the order artifacts are visited in is the order this
     // reports a cycle in, and that order must stay `artifacts.keys()`'s.
-    let mut levels: BTreeMap<(&str, u32, Option<&str>), BTreeMap<&str, &[String]>> =
-        BTreeMap::new();
+    let mut levels: ParentLevels<'_> = BTreeMap::new();
     for ((layer, level, key, view), index) in index_of {
         if !matches!(
             kind_of.get(layer.as_str()),
