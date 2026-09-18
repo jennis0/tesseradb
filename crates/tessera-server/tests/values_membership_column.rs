@@ -595,6 +595,69 @@ async fn a_values_page_mints_the_keys_nothing_holds_and_joins_every_row() {
     );
 }
 
+/// **A restated page appends no growth record** (issue #155). `joined` already reported zero, but
+/// the record was written anyway: `values_growth_records` built its joining bitmaps from the
+/// batch's rows alone, and `growth_record` drops only an *empty* one — so a producer re-sending
+/// its last page put a delta that changes nothing into the log and pinned the log at it, a pin
+/// only the compaction fold releases.
+///
+/// Counted from the log itself rather than from a gauge: `wal.members` is sampled at most once a
+/// flush period, and what is under test is a record, not a byte count.
+#[tokio::test]
+async fn a_restated_values_page_appends_no_growth_record() {
+    let built = build_side(
+        &(0..N).collect::<Vec<_>>(),
+        &|e| e < BUILT,
+        &layer_toml("flat"),
+    );
+    let wal_dir = built.dir.join("wal");
+    let server = serve(&built).await;
+
+    let rows: Vec<u64> = (0..N).collect();
+    let (status, body) = post_values(
+        &server,
+        "values-1",
+        values_body(&rows, LAYER, &|e| json!(key_of(e))),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    assert!(
+        body["joined"].as_u64().unwrap() > 0,
+        "the first page joins the artifacts the build already held: {body}"
+    );
+    tick(&server).await;
+
+    // The same page again, under a batch id the replay index has never seen — so what answers is
+    // the membership, not the batch index.
+    let (status, again) = post_values(
+        &server,
+        "values-2",
+        values_body(&rows, LAYER, &|e| json!(key_of(e))),
+    )
+    .await;
+    assert_eq!(status, 200, "{again}");
+    assert_eq!(again["minted"].as_u64(), Some(0), "{again}");
+    assert_eq!(again["joined"].as_u64(), Some(0), "{again}");
+    tick(&server).await;
+
+    server.shutdown().await;
+    let (_wal, records) = tessera_lifecycle::wal::Wal::open(&wal_dir).expect("the log reopens");
+    let growths = records
+        .iter()
+        .filter(|record| {
+            matches!(
+                record,
+                tessera_lifecycle::wal::WalRecord::ArtifactGrow { .. }
+            )
+        })
+        .count();
+    assert_eq!(
+        growths, 1,
+        "only the first page's growth is in the log; a growth pin is released by the compaction \
+         fold alone, so a second record would be held for the life of the process"
+    );
+}
+
 /// **A `closed` layer's unknown key is the `422` it has always been.** The value set is the whole
 /// of the difference: what `open` says is that a key names an artifact that may not exist yet, and
 /// `closed` says the roster is the roster.
