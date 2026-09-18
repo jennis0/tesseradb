@@ -1541,170 +1541,60 @@ pub struct LevelVersion {
     pub version: u64,
 }
 
-/// One entry of `containment_extents`: one level's fold-written containment partition
-/// (`tessera_engine::containment`, and `membership.rs` for the format).
+/// One file derived from an artifact level: a containment partition, a tile index, a row-major
+/// column, a segment's shape row form, or a level's held shapes.
 ///
-/// **The coordinate is the whole of the adoption rule.** The partition is a pure function of a
-/// level's records and the prefix's postings, so a file describes the level *at one version*; a
-/// reader adopts it only where the level it seeds is at exactly that version, and recomposes
-/// otherwise. Never a weaker match. Growth shrinks nothing and publication only adds, so a stale
-/// partition answers containment for a generating set that has since grown — and growth makes
-/// containment **harder**, which makes the stale answer the permissive one on the one test
-/// **I3** exists to make conservative.
+/// A reader adopts the file only where the level it seeded is at exactly `level_version`, and
+/// derives the structure again otherwise. A stale file is narrow (a growth added members it does
+/// not cover), so nothing weaker than equality is safe.
 ///
-/// **One file per level, not per publication**, which is the difference from [`MembershipExtent`]:
-/// a membership extent covers the ordinals one publication appended and a reader unions them, where
-/// a partition covers the whole level and is replaced wholesale. That follows from what it is —
-/// interning is over the level's whole population, so an expression identifier means nothing
-/// outside the table it was interned into.
+/// Every form but containment is addressed by row, so it names the view and the incarnation whose
+/// row space it was written over; a containment partition names entities' terms and answers for
+/// every view of the level.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct ContainmentExtent {
-    /// Prefix-relative path of the packed partition.
+pub struct DerivedExtent {
+    /// Prefix-relative path of the file.
     pub path: String,
     pub layer: String,
     pub level: u32,
-    /// The level's version when this partition was composed. **Also the adoption test**: a reader
-    /// takes the file only where the level it seeded is at exactly this version.
     pub level_version: u64,
+    pub view: Option<String>,
+    pub incarnation: Option<ViewIncarnation>,
+    pub form: DerivedForm,
 }
 
-/// One entry of `tile_index_extents`: one `(view, layer, level)`'s fold-written per-artifact
-/// extents, over which `tessera_engine::tile_index` folds the hierarchical row-range index
-/// (`membership.rs` for the format).
-///
-/// **The coordinate is [`ContainmentExtent`]'s rule with a view on it**, and the view is the whole
-/// of the difference. A containment expression names entities' terms, so no row space is involved
-/// in it and one file answers for every view of a level. An extent is a pair of **rows**, so it
-/// answers for exactly the view whose row space it was projected through — and a level's row form
-/// is per view for the same reason. A file adopted under another view would settle artifacts
-/// against ranges that name other documents.
-///
-/// The version half is the same rule and the same direction of mistake: a growth adds members, so
-/// a stale extent is **narrow**, and a narrow extent settles an artifact whose membership reaches
-/// outside the viewport — which turns the design's collapse (`membership ⊆ viewport`, so one probe
-/// answers both questions) into a claim that is no longer true. Equality, never anything weaker.
+/// Which structure a [`DerivedExtent`] holds, and what else a reader checks before adopting it.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct TileIndexExtent {
-    /// Prefix-relative path of the packed extent column.
-    pub path: String,
-    /// The view whose row space these extents are in.
-    pub view: String,
-    /// The view's incarnation when this structure was written (decision 0115). Carried for
-    /// [`SegmentDescriptor::incarnation`]'s reason: a derived structure is addressed by *row*, so
-    /// one written over a dropped incarnation's row space would label the rows of a key created
-    /// again with the predecessor's artifacts.
-    pub incarnation: ViewIncarnation,
-    pub layer: String,
-    pub level: u32,
-    /// The level's version when this column was projected. **Also the adoption test.**
-    pub level_version: u64,
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum DerivedForm {
+    Containment,
+    TileIndex,
+    /// `layout` says which of the two column formats the file is in, and is checked against the
+    /// file's magic at open. Never [`ServingLayout::ArtifactMajor`], which has no column.
+    RowColumn {
+        layout: ServingLayout,
+    },
+    /// The rows of one segment. A `seg_id` is never reused, so the file answers for that segment
+    /// in every generation that carries it; `row_count` catches a file written for another.
+    ShapeRows {
+        seg_id: String,
+        row_count: u32,
+    },
+    ShapeHeld,
 }
 
-/// One entry of `row_column_extents`: one `(view, layer, level)`'s fold-written **row-major**
-/// column — a label per row, or a list per row (`membership.rs` for the two formats).
-///
-/// **[`TileIndexExtent`]'s coordinate, with the layout tag beside it.** A column is addressed by
-/// row, so it answers for exactly the view whose row space it was written over, and the level's
-/// version is what says whether it still describes that level. Equality on both, never anything
-/// weaker: a stale column is **narrow** — a growth added rows it does not label — and an unlabelled
-/// row is one no artifact claims, so the artifact holding it silently stops being a candidate
-/// there.
-///
-/// **The tag is the fail-closed guard the selection memo §5 asks for**, and it is not compatibility
-/// machinery. The manifest states which form each level's file is in and each format carries a
-/// distinct magic, so a reader handed a file the manifest mis-describes refuses at the first bytes
-/// rather than decoding a list's offset table as a label column. A refusal here is a drop and a
-/// recomposition, exactly as an unreadable containment partition is — the level is served
-/// artifact-major, which is what every request did before this structure existed.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct RowColumnExtent {
-    /// Prefix-relative path of the packed column.
-    pub path: String,
-    /// The view whose row space this column is addressed in.
-    pub view: String,
-    /// The view's incarnation when this structure was written (decision 0115). Carried for
-    /// [`SegmentDescriptor::incarnation`]'s reason: a derived structure is addressed by *row*, so
-    /// one written over a dropped incarnation's row space would label the rows of a key created
-    /// again with the predecessor's artifacts.
-    pub incarnation: ViewIncarnation,
-    pub layer: String,
-    pub level: u32,
-    /// The level's version when this column was written. **Also the adoption test.**
-    pub level_version: u64,
-    /// Which form the file is in — checked against the file's own magic at open.
-    ///
-    /// Never [`ServingLayout::ArtifactMajor`]: that layout has no column, so an entry claiming it
-    /// names a file no writer produces, and the reader refuses it.
-    pub layout: ServingLayout,
-}
-
-/// One entry of `shape_rows_extents`: one `(view, layer, level)`'s membership of **one segment**,
-/// resolved against the level's shapes and written as the row form (`membership.rs`'s
-/// `pack_shape_rows`) by the build and by every fold, so an open claims it instead of resolving
-/// the segment again (`polygon-membership.md` §6.3).
-///
-/// **[`RowColumnExtent`]'s coordinate with the segment beside it**, and the segment is the whole
-/// of the difference: a piece is rows of one segment, keyed by a `seg_id` that is never reused,
-/// so the same file answers for that segment in every generation that carries it and for no
-/// other. The level version is the other half of the key — a publication into the level moves it
-/// and the piece then describes shapes the level no longer holds — and both are equality tests.
-/// A piece that fails either is resolved again from the geometry, never adapted (I11).
-///
-/// Written for a spatial level whose serving layout is artifact-major; a row-major level's
-/// persisted form is its column, which the open inverts into the same piece.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct ShapeRowsExtent {
-    /// Prefix-relative path of the packed row form.
-    pub path: String,
-    /// The view whose segment the rows are of.
-    pub view: String,
-    /// The view's incarnation when this structure was written (decision 0115). Carried for
-    /// [`SegmentDescriptor::incarnation`]'s reason: a derived structure is addressed by *row*, so
-    /// one written over a dropped incarnation's row space would label the rows of a key created
-    /// again with the predecessor's artifacts.
-    pub incarnation: ViewIncarnation,
-    pub layer: String,
-    pub level: u32,
-    /// The level's version when the segment was resolved. **Also the adoption test.**
-    pub level_version: u64,
-    /// The segment the rows are of, and the other adoption test.
-    pub seg_id: String,
-    /// The segment's row count when it was resolved — a segment is immutable, so a mismatch is a
-    /// file written for another segment under a reused name, which contracts §2.1 forbids.
-    pub row_count: u32,
-}
-
-/// One entry of `shape_held_extents`: one `(view, layer, level)`'s **decompositions** — every
-/// artifact's interior tiles, boundary cells and bounds (`polygon-membership.md` §6.3), written
-/// by the build and by every fold so an open assembles the held form from the file instead of
-/// descending every shape again, which on Overture's part 0 was 8.9 of a 9.3 s open.
-///
-/// **[`TileIndexExtent`]'s coordinate**, and the same equality rule: the level version is the
-/// adoption test, and inside the file each entry also carries the length and a digest of the
-/// canonical bytes it was decomposed from, so an entry is used only for the shape that produced
-/// it. A decomposition is a pure function of the canonical shape, so a mismatch is not a
-/// disclosure, but it is refused all the same and the shape decomposed again — a form written by
-/// a different descent would place rows in the wrong cells.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct ShapeHeldExtent {
-    /// Prefix-relative path of the packed decompositions.
-    pub path: String,
-    /// The view the shapes were canonicalised for.
-    pub view: String,
-    /// The view's incarnation when this structure was written (decision 0115). Carried for
-    /// [`SegmentDescriptor::incarnation`]'s reason: a derived structure is addressed by *row*, so
-    /// one written over a dropped incarnation's row space would label the rows of a key created
-    /// again with the predecessor's artifacts.
-    pub incarnation: ViewIncarnation,
-    pub layer: String,
-    pub level: u32,
-    /// The level's version when the decompositions were written. **Also the adoption test.**
-    pub level_version: u64,
+impl DerivedForm {
+    /// The directory under a partition that files of this form are written to.
+    pub fn dir(&self) -> &'static str {
+        match self {
+            DerivedForm::Containment => "containment",
+            DerivedForm::TileIndex => "tile-index",
+            DerivedForm::RowColumn { .. } => "row-column",
+            DerivedForm::ShapeRows { .. } => "shape-rows",
+            DerivedForm::ShapeHeld => "shape-held",
+        }
+    }
 }
 
 /// One entry of `term_image_extents`: one `(partition, view)`'s term images — every
@@ -1925,43 +1815,9 @@ pub struct SegmentsManifest {
     /// under the *old* numbering could compare equal to. A manifest omitting it is malformed, not
     /// version-free.
     pub level_versions: Vec<LevelVersion>,
-    /// Every fold-written containment partition this partition holds — see [`ContainmentExtent`].
-    /// Empty in a bundle that has never folded, and in one served by a plugin other than the
-    /// builtin.
-    ///
-    /// No `serde(default)`, on `membership_extents`' argument. The consequence of a lost list is
-    /// milder than that field's — a partition that is not adopted is recomposed on first use, and
-    /// the answer is the same — but *indistinguishable from an empty one* is the property the rule
-    /// is about, and a list that silently emptied itself would turn a fold's consolidation into a
-    /// stall on whichever request arrived first, with nothing reporting a fault.
-    pub containment_extents: Vec<ContainmentExtent>,
-    /// Every fold-written tile-index extent column this partition holds — see [`TileIndexExtent`].
-    /// Empty in a bundle that has never folded.
-    ///
-    /// No `serde(default)`, on `membership_extents`' argument and with `containment_extents`'
-    /// consequence: an unadopted column is refolded on first use and the answer is the same, but a
-    /// list that silently emptied itself would turn a fold's consolidation into a stall on
-    /// whichever request arrived first, with nothing reporting a fault.
-    pub tile_index_extents: Vec<TileIndexExtent>,
-    /// Every fold-written row-major column this partition holds — see [`RowColumnExtent`]. Empty
-    /// in a bundle that has never folded, and in one whose every level is artifact-major, which is
-    /// most of them.
-    ///
-    /// No `serde(default)`, on `membership_extents`' argument and with `tile_index_extents`'
-    /// consequence: an unadopted column is recomposed on first use and the answer is the same, but
-    /// a list that silently emptied itself would turn a fold's consolidation into a stall on
-    /// whichever request arrived first, with nothing reporting a fault.
-    pub row_column_extents: Vec<RowColumnExtent>,
-    /// Every persisted shape row form this partition holds — see [`ShapeRowsExtent`]. Empty in a
-    /// bundle with no spatial layer, and in one whose spatial levels are all served row-major.
-    ///
-    /// No `serde(default)`, on `row_column_extents`' argument: an unclaimed piece is resolved again
-    /// on open and the answer is the same, but a list that silently emptied itself would put the
-    /// whole re-resolution back into every open with nothing reporting a fault.
-    pub shape_rows_extents: Vec<ShapeRowsExtent>,
-    /// Every persisted decomposition this partition holds — see [`ShapeHeldExtent`]. Empty in a
-    /// bundle with no spatial layer. No `serde(default)`, on `shape_rows_extents`' argument.
-    pub shape_held_extents: Vec<ShapeHeldExtent>,
+    /// Every derived artifact file this partition holds. See [`DerivedExtent`]. No
+    /// `serde(default)`: a lost list must not read as an empty one.
+    pub derived_extents: Vec<DerivedExtent>,
     /// Every view's term images this partition holds. See [`TermImageExtent`]. Empty in a bundle
     /// whose views hold no rows, in one whose dictionary carries no terms, and in one published
     /// before a build or a fold derived them.
@@ -2160,6 +2016,43 @@ pub enum Honourability {
 }
 
 impl SegmentsManifest {
+    /// A side-manifest that names nothing.
+    pub fn empty() -> SegmentsManifest {
+        SegmentsManifest {
+            watermark: 0,
+            entity_id_high_water: 0,
+            entity_id_low_water: tessera_types::layer::ROWLESS_CEILING,
+            layers: Vec::new(),
+            layer_tombstones: Vec::new(),
+            views: Vec::new(),
+            scoped_columns: Vec::new(),
+            attributes: Vec::new(),
+            scoped_attributes: Vec::new(),
+            vocabularies: Vec::new(),
+            groups: Vec::new(),
+            plain_views: Vec::new(),
+            dead_view_incarnations: Vec::new(),
+            membership_extents: Vec::new(),
+            level_versions: Vec::new(),
+            derived_extents: Vec::new(),
+            term_image_extents: Vec::new(),
+            artifact_record_extents: Vec::new(),
+            segments: Vec::new(),
+            deltas: Vec::new(),
+            dict_extents: Vec::new(),
+            attr_extents: Vec::new(),
+            record_extents: Vec::new(),
+            entity_terms_extents: Vec::new(),
+            text_extents: Vec::new(),
+            external_id_runs: Vec::new(),
+            locator_extents: Vec::new(),
+            tombstones: Vec::new(),
+            deny: Vec::new(),
+            vocabulary_extensions: Vec::new(),
+            files: BTreeMap::new(),
+        }
+    }
+
     /// The state fields this manifest carries that [`HONOURED_STATE`] does not cover, by name.
     ///
     /// **A list of names, never a bool**, because the operator has to be told *which* build
@@ -2345,46 +2238,6 @@ mod tests {
         );
     }
 
-    fn empty_segments_manifest() -> SegmentsManifest {
-        SegmentsManifest {
-            watermark: 0,
-            entity_id_high_water: 0,
-            entity_id_low_water: tessera_types::layer::ROWLESS_CEILING,
-            layers: Vec::new(),
-            layer_tombstones: Vec::new(),
-            views: Vec::new(),
-            scoped_columns: Vec::new(),
-            attributes: Vec::new(),
-            scoped_attributes: Vec::new(),
-            vocabularies: Vec::new(),
-            groups: Vec::new(),
-            plain_views: Vec::new(),
-            dead_view_incarnations: Vec::new(),
-            membership_extents: Vec::new(),
-            level_versions: Vec::new(),
-            containment_extents: Vec::new(),
-            tile_index_extents: Vec::new(),
-            row_column_extents: Vec::new(),
-            shape_rows_extents: Vec::new(),
-            shape_held_extents: Vec::new(),
-            term_image_extents: Vec::new(),
-            artifact_record_extents: Vec::new(),
-            segments: Vec::new(),
-            deltas: Vec::new(),
-            dict_extents: Vec::new(),
-            attr_extents: Vec::new(),
-            record_extents: Vec::new(),
-            entity_terms_extents: Vec::new(),
-            text_extents: Vec::new(),
-            external_id_runs: Vec::new(),
-            locator_extents: Vec::new(),
-            tombstones: Vec::new(),
-            deny: Vec::new(),
-            vocabulary_extensions: Vec::new(),
-            files: BTreeMap::new(),
-        }
-    }
-
     /// The term-image list survives a round trip, and a manifest that omits it is refused.
     ///
     /// The refusal is the half worth testing. There is no `serde(default)` on the field, so a
@@ -2392,7 +2245,7 @@ mod tests {
     /// have no images, which is what a list lost in transit would look like.
     #[test]
     fn a_term_image_list_round_trips_and_an_absent_one_is_refused() {
-        let mut manifest = empty_segments_manifest();
+        let mut manifest = SegmentsManifest::empty();
         manifest.term_image_extents.push(TermImageExtent {
             path: "partitions/default/term-images/term-images-000000-000.timg".to_string(),
             view: "s0".to_string(),
@@ -2416,13 +2269,56 @@ mod tests {
         );
     }
 
+    #[test]
+    fn every_derived_form_round_trips_and_an_absent_list_is_refused() {
+        let entry = |form: DerivedForm, view: Option<&str>| DerivedExtent {
+            path: format!("partitions/default/{}/x", form.dir()),
+            layer: "regions".to_string(),
+            level: 0,
+            level_version: 3,
+            view: view.map(str::to_string),
+            incarnation: view.map(|_| DECLARED_INCARNATION),
+            form,
+        };
+        let mut manifest = SegmentsManifest::empty();
+        manifest.derived_extents = vec![
+            entry(DerivedForm::Containment, None),
+            entry(DerivedForm::TileIndex, Some("s0")),
+            entry(
+                DerivedForm::RowColumn {
+                    layout: ServingLayout::RowMajorList,
+                },
+                Some("s0"),
+            ),
+            entry(
+                DerivedForm::ShapeRows {
+                    seg_id: "base".to_string(),
+                    row_count: 7,
+                },
+                Some("s0"),
+            ),
+            entry(DerivedForm::ShapeHeld, Some("s0")),
+        ];
+        let bytes = serde_json::to_vec(&manifest).expect("a manifest serialises");
+        let parsed: SegmentsManifest = serde_json::from_slice(&bytes).expect("and parses back");
+        assert_eq!(parsed.derived_extents, manifest.derived_extents);
+
+        let mut value: serde_json::Value = serde_json::from_slice(&bytes).expect("as JSON");
+        value
+            .as_object_mut()
+            .expect("an object")
+            .remove("derived_extents");
+        let without = serde_json::to_vec(&value).expect("re-serialises");
+        assert!(serde_json::from_slice::<SegmentsManifest>(&without).is_err());
+    }
+
     /// The guard must be invisible on the shape `tessera build` writes, or every bundle in the
     /// project stops opening.
     #[test]
     fn a_manifest_with_no_state_carries_nothing_unhonourable() {
-        assert!(empty_segments_manifest().unhonourable_state().is_empty());
+        assert!(SegmentsManifest::empty().unhonourable_state().is_empty());
         assert_eq!(
-            empty_segments_manifest().honourability(),
+            SegmentsManifest::empty().honourability(),
             Honourability::Honourable
         );
     }
@@ -2436,12 +2332,12 @@ mod tests {
     /// deny-carrying. Landing the constant without the second property is the fail-open.
     #[test]
     fn a_honoured_field_no_longer_refuses_a_manifest_but_deny_state_stays_visible() {
-        let mut with_tombstone = empty_segments_manifest();
+        let mut with_tombstone = SegmentsManifest::empty();
         with_tombstone.tombstones.push(17);
         assert_eq!(with_tombstone.honourability(), Honourability::Honourable);
         assert_eq!(with_tombstone.deny_disposition_state(), vec!["tombstones"]);
 
-        let mut with_deny = empty_segments_manifest();
+        let mut with_deny = SegmentsManifest::empty();
         with_deny.deny.push(DenyEntry {
             entity_id: 17,
             cause: "suppress".to_string(),
@@ -2452,7 +2348,7 @@ mod tests {
         // `deltas` is not deny-disposition state: its absence leaves items *missing*, which is
         // staleness in the fail-safe direction, so a deltas-only candidate whose files do not
         // verify may still be stepped past.
-        let mut with_delta = empty_segments_manifest();
+        let mut with_delta = SegmentsManifest::empty();
         with_delta.deltas.push("d.arrow".to_string());
         assert_eq!(with_delta.honourability(), Honourability::Honourable);
         assert!(with_delta.deny_disposition_state().is_empty());
@@ -2463,7 +2359,7 @@ mod tests {
     /// arrive with the code that acts on it or be refused.
     #[test]
     fn no_known_state_field_is_unhonourable_any_more() {
-        let mut all_three = empty_segments_manifest();
+        let mut all_three = SegmentsManifest::empty();
         all_three.tombstones.push(17);
         all_three.deltas.push("d.arrow".to_string());
         all_three.deny.push(DenyEntry {
@@ -2484,7 +2380,7 @@ mod tests {
     /// availability loss), and one returning none would step past the suppression.
     #[test]
     fn a_deny_beside_deltas_is_still_deny_disposition_state() {
-        let mut manifest = empty_segments_manifest();
+        let mut manifest = SegmentsManifest::empty();
         manifest.deltas.push("d.arrow".to_string());
         manifest.deny.push(DenyEntry {
             entity_id: 17,
@@ -2493,7 +2389,7 @@ mod tests {
         assert_eq!(manifest.deny_disposition_state(), vec!["deny"]);
 
         // And the same for a tombstone beside deltas — the other deny-disposition field.
-        let mut manifest = empty_segments_manifest();
+        let mut manifest = SegmentsManifest::empty();
         manifest.deltas.push("d.arrow".to_string());
         manifest.tombstones.push(17);
         assert_eq!(manifest.deny_disposition_state(), vec!["tombstones"]);

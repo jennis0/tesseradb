@@ -1384,30 +1384,10 @@ impl Engine {
             .values()
             .flat_map(|partition| partition.manifest.level_versions.iter().cloned())
             .collect();
-        let manifest_containment_extents: Vec<tessera_store::manifest::ContainmentExtent> = bundle
+        let manifest_derived_extents: Vec<tessera_store::manifest::DerivedExtent> = bundle
             .partitions
             .values()
-            .flat_map(|partition| partition.manifest.containment_extents.iter().cloned())
-            .collect();
-        let manifest_tile_index_extents: Vec<tessera_store::manifest::TileIndexExtent> = bundle
-            .partitions
-            .values()
-            .flat_map(|partition| partition.manifest.tile_index_extents.iter().cloned())
-            .collect();
-        let manifest_row_column_extents: Vec<tessera_store::manifest::RowColumnExtent> = bundle
-            .partitions
-            .values()
-            .flat_map(|partition| partition.manifest.row_column_extents.iter().cloned())
-            .collect();
-        let manifest_shape_rows_extents: Vec<tessera_store::manifest::ShapeRowsExtent> = bundle
-            .partitions
-            .values()
-            .flat_map(|partition| partition.manifest.shape_rows_extents.iter().cloned())
-            .collect();
-        let manifest_shape_held_extents: Vec<tessera_store::manifest::ShapeHeldExtent> = bundle
-            .partitions
-            .values()
-            .flat_map(|partition| partition.manifest.shape_held_extents.iter().cloned())
+            .flat_map(|partition| partition.manifest.derived_extents.iter().cloned())
             .collect();
         let (overlay, buffer, write_state) = WritePath::reconstruct(
             wal_path,
@@ -1695,7 +1675,7 @@ impl Engine {
         artifact_projections.adopt_all(
             &prefix_dir,
             generation.load().prefix.as_str(),
-            &manifest_containment_extents,
+            &manifest_derived_extents,
             &write_state.artifacts,
         );
         // **And the tile indexes beside them, at the same point and under the same rule** — the
@@ -1705,7 +1685,7 @@ impl Engine {
         artifact_projections.adopt_indexes(
             &prefix_dir,
             generation.load().prefix.as_str(),
-            &manifest_tile_index_extents,
+            &manifest_derived_extents,
             &write_state.artifacts,
         );
         // **And the row-major columns, at the same point and under the same rule.** A stale column
@@ -1715,7 +1695,7 @@ impl Engine {
         artifact_projections.adopt_columns(
             &prefix_dir,
             generation.load().prefix.as_str(),
-            &manifest_row_column_extents,
+            &manifest_derived_extents,
             &write_state.artifacts,
         );
         // **What the open actually took**, counted here rather than left to be inferred from the
@@ -1730,10 +1710,8 @@ impl Engine {
         // this open would have mapped, and at half a million artifacts that derivation is the
         // minute-long one the campaign found being truncated inside a response.
         tracing::info!(
-            containment_named = manifest_containment_extents.len(),
+            named = manifest_derived_extents.len(),
             containment_adopted = artifact_projections.adopted(),
-            tile_indexes_named = manifest_tile_index_extents.len(),
-            row_columns_named = manifest_row_column_extents.len(),
             prefix = %generation.load().prefix,
             "the engine adopted the prefix's derived artifact structures"
         );
@@ -1756,9 +1734,7 @@ impl Engine {
                 &write_state.artifacts,
                 &crate::shapes::PersistedPieces {
                     prefix_dir: Some(&prefix_dir),
-                    shape_rows: &manifest_shape_rows_extents,
-                    row_columns: &manifest_row_column_extents,
-                    shape_held: &manifest_shape_held_extents,
+                    extents: &manifest_derived_extents,
                 },
             );
             if warmed.levels > 0 {

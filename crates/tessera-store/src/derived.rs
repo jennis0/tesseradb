@@ -60,9 +60,7 @@ use tessera_types::MortonCode;
 
 use crate::read::{tile_ranges_all, SegmentData};
 
-use crate::manifest::{
-    ContainmentExtent, RowColumnExtent, ShapeHeldExtent, ShapeRowsExtent, TileIndexExtent,
-};
+use crate::manifest::{DerivedExtent, DerivedForm};
 use crate::membership::{
     pack_containment, pack_shape_rows, pack_tile_index, ShapeRowsPack, TILE_INDEX_EMPTY,
     TILE_INDEX_HOLE,
@@ -927,17 +925,12 @@ pub fn encode_expression(mut clauses: Vec<&[u32]>) -> Vec<u32> {
 
 /// One derived file waiting to be filed: its coordinates and its bytes.
 pub struct Filed {
-    pub view: String,
-    /// The incarnation of `view` this structure was derived over (decision 0115). Stamped into
-    /// the manifest entry so that a key created again does not adopt it.
-    pub incarnation: tessera_types::view::ViewIncarnation,
+    pub view: Option<String>,
+    pub incarnation: Option<tessera_types::view::ViewIncarnation>,
     pub layer: String,
     pub level: u32,
     pub level_version: u64,
-    /// The form the bytes are in, where the kind has more than one. Read by
-    /// [`file_row_columns`] for the extension and for the manifest entry's tag; ignored by the
-    /// kinds that have a single form.
-    pub layout: ServingLayout,
+    pub form: DerivedForm,
     pub bytes: FiledBytes,
 }
 
@@ -1022,9 +1015,9 @@ fn derived_dir(prefix_dir: &Path, partition: &str, kind: &str) -> Option<std::pa
 /// leave gaps in each kind's numbering and say nothing more.
 #[derive(Debug, Default)]
 pub struct DerivedIndex {
+    containment: usize,
     tile_index: usize,
     row_column: usize,
-    containment: usize,
     shape_rows: usize,
     shape_held: usize,
     term_images: usize,
@@ -1081,233 +1074,68 @@ fn derived_name(kind: &str, n: u64, index: usize, extension: &str) -> String {
 /// The directory entry itself has to be durable, or a crash leaves a manifest naming a file whose
 /// name was never written — the rule every other publication follows. A directory that will not
 /// fsync drops the whole kind.
-#[allow(clippy::too_many_arguments)]
-fn file_all<T>(
+/// Writes each item under its form's directory and returns the manifest entries for the ones that
+/// landed. A file that will not be written is a dropped entry: the level derives it on first use.
+pub fn file_derived(
     prefix_dir: &Path,
     partition: &str,
-    kind: &str,
     n: u64,
-    next: &mut usize,
+    index: &mut DerivedIndex,
     items: Vec<Filed>,
-    extension_of: &dyn Fn(&Filed) -> &'static str,
-    entry_of: &dyn Fn(&Filed, String) -> T,
-) -> Vec<T> {
-    if items.is_empty() {
-        return Vec::new();
-    }
-    // **Advanced before the first write, by every item.** A file that will not be written still
-    // spends its index: an index handed out again after a failure would name the next call's file
-    // after one this call's manifest entry already names.
-    let start = *next;
-    *next += items.len();
-    let Some(dir) = derived_dir(prefix_dir, partition, kind) else {
-        return Vec::new();
-    };
+) -> Vec<DerivedExtent> {
     let mut entries = Vec::with_capacity(items.len());
-    for (index, item) in items.iter().enumerate() {
-        let name = derived_name(kind, n, start + index, extension_of(item));
+    let mut dirs: Vec<std::path::PathBuf> = Vec::new();
+    for item in &items {
+        let kind = item.form.dir();
+        let (next, extension) = match &item.form {
+            DerivedForm::Containment => (&mut index.containment, "tscp"),
+            DerivedForm::TileIndex => (&mut index.tile_index, "tsti"),
+            DerivedForm::RowColumn {
+                layout: ServingLayout::RowMajorList,
+            } => (&mut index.row_column, "tsll"),
+            DerivedForm::RowColumn { .. } => (&mut index.row_column, "tslb"),
+            DerivedForm::ShapeRows { .. } => (&mut index.shape_rows, "tssr"),
+            DerivedForm::ShapeHeld => (&mut index.shape_held, "tssh"),
+        };
+        // Every item spends an index, written or not, so a later call never reuses a name this
+        // call's manifest entry may already carry.
+        let name = derived_name(kind, n, *next, extension);
+        *next += 1;
+        let Some(dir) = derived_dir(prefix_dir, partition, kind) else {
+            continue;
+        };
         if let Err(error) = item.bytes.place(&dir.join(&name)) {
             tracing::warn!(
                 layer = %item.layer,
                 level = item.level,
-                view = %item.view,
+                view = ?item.view,
                 kind,
                 %error,
                 "a derived artifact structure would not be written; that level derives it on first use"
             );
             continue;
         }
-        entries.push(entry_of(
-            item,
-            format!("partitions/{partition}/{kind}/{name}"),
-        ));
-    }
-    if let Err(error) = crate::fsync_dir(&dir) {
-        tracing::warn!(%error, kind, "a derived-structure directory would not be fsynced; its files are dropped");
-        return Vec::new();
-    }
-    entries
-}
-
-/// File this prefix's tile-index extent columns, one per `(view, layer, level)`.
-pub fn file_tile_indexes(
-    prefix_dir: &Path,
-    partition: &str,
-    n: u64,
-    index: &mut DerivedIndex,
-    items: Vec<Filed>,
-) -> Vec<TileIndexExtent> {
-    file_all(
-        prefix_dir,
-        partition,
-        "tile-index",
-        n,
-        &mut index.tile_index,
-        items,
-        &|_| "tsti",
-        &|item, path| TileIndexExtent {
-            path,
-            view: item.view.clone(),
-            incarnation: item.incarnation,
-            layer: item.layer.clone(),
-            level: item.level,
-            level_version: item.level_version,
-        },
-    )
-}
-
-/// File this prefix's row-major columns, one per `(view, layer, level)` whose layout has one.
-///
-/// The extension names the form, so a directory listing says which is which, and the manifest
-/// entry's tag is the same [`Filed::layout`] the bytes were packed in — checked against the file's
-/// own magic when a reader adopts it.
-pub fn file_row_columns(
-    prefix_dir: &Path,
-    partition: &str,
-    n: u64,
-    index: &mut DerivedIndex,
-    items: Vec<Filed>,
-) -> Vec<RowColumnExtent> {
-    file_all(
-        prefix_dir,
-        partition,
-        "row-column",
-        n,
-        &mut index.row_column,
-        items,
-        &|item| match item.layout {
-            ServingLayout::RowMajorList => "tsll",
-            _ => "tslb",
-        },
-        &|item, path| RowColumnExtent {
-            path,
-            view: item.view.clone(),
-            incarnation: item.incarnation,
-            layer: item.layer.clone(),
-            level: item.level,
-            level_version: item.level_version,
-            layout: item.layout,
-        },
-    )
-}
-
-/// File this prefix's containment partitions, one per `(layer, level)`.
-///
-/// A partition is not per view — it is a function of the level's records and the prefix's postings
-/// — so `Filed::view` is ignored here and the entry carries none.
-pub fn file_containment(
-    prefix_dir: &Path,
-    partition: &str,
-    n: u64,
-    index: &mut DerivedIndex,
-    items: Vec<Filed>,
-) -> Vec<ContainmentExtent> {
-    file_all(
-        prefix_dir,
-        partition,
-        "containment",
-        n,
-        &mut index.containment,
-        items,
-        &|_| "tscp",
-        &|item, path| ContainmentExtent {
-            path,
-            layer: item.layer.clone(),
-            level: item.level,
-            level_version: item.level_version,
-        },
-    )
-}
-
-/// One segment's resolved shape rows waiting to be filed: its coordinates, its key and its bytes.
-pub struct FiledShapeRows {
-    pub view: String,
-    /// The incarnation of `view` these rows were resolved over (decision 0115).
-    pub incarnation: tessera_types::view::ViewIncarnation,
-    pub layer: String,
-    pub level: u32,
-    pub level_version: u64,
-    pub seg_id: String,
-    pub row_count: u32,
-    pub bytes: Vec<u8>,
-}
-
-/// File this prefix's shape row forms, one per `(view, layer, level, segment)`, under the same
-/// naming rule and the same durability sequence as every other derived kind.
-pub fn file_shape_rows(
-    prefix_dir: &Path,
-    partition: &str,
-    n: u64,
-    index: &mut DerivedIndex,
-    items: Vec<FiledShapeRows>,
-) -> Vec<ShapeRowsExtent> {
-    if items.is_empty() {
-        return Vec::new();
-    }
-    let kind = "shape-rows";
-    // [`file_all`]'s rule: every item spends an index, written or not.
-    let start = index.shape_rows;
-    index.shape_rows += items.len();
-    let Some(dir) = derived_dir(prefix_dir, partition, kind) else {
-        return Vec::new();
-    };
-    let mut entries = Vec::with_capacity(items.len());
-    for (offset, item) in items.iter().enumerate() {
-        let name = derived_name(kind, n, start + offset, "tssr");
-        if let Err(error) = crate::write_and_fsync(&dir.join(&name), &item.bytes) {
-            tracing::warn!(
-                layer = %item.layer,
-                level = item.level,
-                view = %item.view,
-                seg_id = %item.seg_id,
-                %error,
-                "a shape row form would not be written; that segment is resolved again at open"
-            );
-            continue;
+        if !dirs.contains(&dir) {
+            dirs.push(dir);
         }
-        entries.push(ShapeRowsExtent {
+        entries.push(DerivedExtent {
             path: format!("partitions/{partition}/{kind}/{name}"),
-            view: item.view.clone(),
-            incarnation: item.incarnation,
             layer: item.layer.clone(),
             level: item.level,
             level_version: item.level_version,
-            seg_id: item.seg_id.clone(),
-            row_count: item.row_count,
+            view: item.view.clone(),
+            incarnation: item.incarnation,
+            form: item.form.clone(),
         });
     }
-    if let Err(error) = crate::fsync_dir(&dir) {
-        tracing::warn!(%error, kind, "a derived-structure directory would not be fsynced; its files are dropped");
-        return Vec::new();
+    for dir in &dirs {
+        if let Err(error) = crate::fsync_dir(dir) {
+            tracing::warn!(%error, dir = %dir.display(), "a derived-structure directory would not be fsynced; its files are dropped");
+            let rel = dir.file_name().and_then(|k| k.to_str()).unwrap_or_default();
+            entries.retain(|e| e.form.dir() != rel);
+        }
     }
     entries
-}
-
-/// File this prefix's persisted decompositions, one per `(view, layer, level)`.
-pub fn file_shape_held(
-    prefix_dir: &Path,
-    partition: &str,
-    n: u64,
-    index: &mut DerivedIndex,
-    items: Vec<Filed>,
-) -> Vec<ShapeHeldExtent> {
-    file_all(
-        prefix_dir,
-        partition,
-        "shape-held",
-        n,
-        &mut index.shape_held,
-        items,
-        &|_| "tssh",
-        &|item, path| ShapeHeldExtent {
-            path,
-            view: item.view.clone(),
-            incarnation: item.incarnation,
-            layer: item.layer.clone(),
-            level: item.level,
-            level_version: item.level_version,
-        },
-    )
 }
 
 const SHAPE_HELD_MAGIC: &[u8; 4] = b"TSSH";

@@ -283,32 +283,43 @@ fn the_manifest_names_a_column_for_one_level_and_an_index_for_the_other() {
     let fx = fixture();
     let manifest = manifest(&fx);
 
+    let is_column = |e: &&tessera_store::manifest::DerivedExtent| matches!(e.form, tessera_store::manifest::DerivedForm::RowColumn { .. });
+    let is_index = |e: &&tessera_store::manifest::DerivedExtent| e.form == tessera_store::manifest::DerivedForm::TileIndex;
     let columns: Vec<_> = manifest
-        .row_column_extents
+        .derived_extents
         .iter()
+        .filter(is_column)
         .filter(|e| e.layer == SPREAD)
         .collect();
     assert_eq!(columns.len(), 1, "one column per (view, layer, level)");
-    assert_eq!(columns[0].view, "s0");
-    assert_eq!(columns[0].layout, ServingLayout::RowMajorLabel);
+    assert_eq!(columns[0].view.as_deref(), Some("s0"));
+    assert_eq!(
+        columns[0].form,
+        tessera_store::manifest::DerivedForm::RowColumn {
+            layout: ServingLayout::RowMajorLabel
+        }
+    );
     assert!(
         manifest
-            .row_column_extents
+            .derived_extents
             .iter()
+            .filter(is_column)
             .all(|e| e.layer != CLUMPED),
         "an artifact-major level has no column"
     );
 
     let indexes: Vec<_> = manifest
-        .tile_index_extents
+        .derived_extents
         .iter()
+        .filter(is_index)
         .filter(|e| e.layer == CLUMPED)
         .collect();
     assert_eq!(indexes.len(), 1, "one index per (view, layer, level)");
     assert!(
         manifest
-            .tile_index_extents
+            .derived_extents
             .iter()
+            .filter(is_index)
             .all(|e| e.layer != SPREAD),
         "a row-major level has nothing to index — its candidacy is a scan of the viewport"
     );
@@ -319,13 +330,7 @@ fn the_manifest_names_a_column_for_one_level_and_an_index_for_the_other() {
     let generation = engine.generation();
     let prefix_dir = fx.root.join(generation.prefix.as_str());
     let digests = &generation.bundle.manifest.files;
-    for path in manifest
-        .row_column_extents
-        .iter()
-        .map(|e| &e.path)
-        .chain(manifest.tile_index_extents.iter().map(|e| &e.path))
-        .chain(manifest.containment_extents.iter().map(|e| &e.path))
-    {
+    for path in manifest.derived_extents.iter().map(|e| &e.path) {
         assert!(
             prefix_dir.join(path).exists(),
             "{path} is named by the manifest and is not in the prefix"

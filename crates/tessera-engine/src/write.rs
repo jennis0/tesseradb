@@ -3008,38 +3008,34 @@ fn level_length<'a>(
     records.map(|(ordinal, _)| ordinal + 1).max().unwrap_or(0)
 }
 
-/// The two artifact coordinates a manifest carries: every level's version, and the derived
-/// structures whose stamped version is that version.
+/// What a fold hands the manifest commit in place of the held list: the derived files it has just
+/// written, and the levels its retirement is about to move.
+struct FoldDerived<'a> {
+    written: &'a [tessera_store::manifest::DerivedExtent],
+    pending_retirement: &'a [(String, u32)],
+}
+
+/// Every level's version, and the derived files of `held` stamped with their level's version.
 ///
-/// **Filtered, so the invariant is true by construction rather than checked at open**: every entry
-/// a manifest names is one whose coordinate equals the version list beside it, so a manifest never
-/// names a structure that has already been invalidated. An entry whose level has moved is dropped
-/// here rather than carried and rejected later — carrying it would leave the prefix naming a file
-/// nothing could ever adopt, which reads as a partition that exists.
-///
-/// `pending_retirement` is the levels this publication is about to change and has not yet, which
-/// is the fold's own case ([`PendingRetirement`]). For those levels the version stated, and the
-/// version an entry must carry to be named, is the store's plus one: the version the level will
-/// have when the retirement has run, and the version the fold stamped the structures it composed
-/// for such a level with. An entry a previous prefix held for the level carries the store's own
-/// version or an older one and is dropped. Every other publication passes an empty slice, having
-/// nothing pending.
+/// A file whose level has moved is dropped here, so a manifest never names one nothing could
+/// adopt. For a level in `pending_retirement` (the fold's own case, see [`PendingRetirement`]) the
+/// version is the store's plus one: what the level will carry once the retirement has run, and
+/// what the fold stamped the files it composed for it with.
 fn artifact_coordinates(
     store: &ArtifactStore,
-    held: &[tessera_store::manifest::ContainmentExtent],
-    held_indexes: &[tessera_store::manifest::TileIndexExtent],
-    held_columns: &[tessera_store::manifest::RowColumnExtent],
-    held_shape_rows: &[tessera_store::manifest::ShapeRowsExtent],
-    held_shape_held: &[tessera_store::manifest::ShapeHeldExtent],
+    held: &[tessera_store::manifest::DerivedExtent],
     pending_retirement: &[(String, u32)],
-) -> ArtifactCoordinates {
+) -> (
+    Vec<tessera_store::manifest::LevelVersion>,
+    Vec<tessera_store::manifest::DerivedExtent>,
+) {
     let expected = |layer: &str, level: u32| {
         let pending = pending_retirement
             .iter()
             .any(|(l, v)| l == layer && *v == level);
         store.level_version(layer, level) + u64::from(pending)
     };
-    let versions: Vec<tessera_store::manifest::LevelVersion> = store
+    let versions = store
         .level_versions()
         .map(|(layer, level, _)| tessera_store::manifest::LevelVersion {
             layer: layer.to_string(),
@@ -3052,84 +3048,35 @@ fn artifact_coordinates(
         .filter(|entry| expected(&entry.layer, entry.level) == entry.level_version)
         .cloned()
         .collect();
-    // The tile indexes take the same filter and for the same reason. The view an entry carries is
-    // not part of it: a view is an address, not a validity term — a level's version is what says
-    // whether the extents projected through *any* row space still describe it.
-    let indexes_still_true = held_indexes
-        .iter()
-        .filter(|entry| expected(&entry.layer, entry.level) == entry.level_version)
-        .cloned()
-        .collect();
-    // The row-major columns take the same filter, and the layout tag each carries is not part of
-    // it: a tag says which *form* the file is in, and what decides whether it still describes the
-    // level is the version, exactly as it is for an extent column.
-    let columns_still_true = held_columns
-        .iter()
-        .filter(|entry| expected(&entry.layer, entry.level) == entry.level_version)
-        .cloned()
-        .collect();
-    // The shape row forms take the same filter. The segment half of their key is not part of it:
-    // a segment is immutable and its id never reused, so an entry naming one that no generation
-    // serves any more is a file nothing will claim, and is dropped when the prefix is.
-    let shape_rows_still_true = held_shape_rows
-        .iter()
-        .filter(|entry| expected(&entry.layer, entry.level) == entry.level_version)
-        .cloned()
-        .collect();
-    let shape_held_still_true = held_shape_held
-        .iter()
-        .filter(|entry| expected(&entry.layer, entry.level) == entry.level_version)
-        .cloned()
-        .collect();
-    ArtifactCoordinates {
-        level_versions: versions,
-        containment: still_true,
-        tile_indexes: indexes_still_true,
-        row_columns: columns_still_true,
-        shape_rows: shape_rows_still_true,
-        shape_held: shape_held_still_true,
-    }
+    (versions, still_true)
 }
 
-/// The entries of one fold-written list whose stamped version is the level's now, after the
-/// fold's retirement has run; every other entry is dropped and named. See [`PendingRetirement`].
-fn held_at_current_version<E: Clone>(
+/// The fold-written files whose stamped version is the level's now, after the fold's retirement
+/// has run; every other one is dropped and named. See [`PendingRetirement`].
+fn held_at_current_version(
     store: &ArtifactStore,
-    what: &str,
-    entries: &[E],
-    coordinate: impl Fn(&E) -> (&str, u32, u64),
-) -> Vec<E> {
+    entries: &[tessera_store::manifest::DerivedExtent],
+) -> Vec<tessera_store::manifest::DerivedExtent> {
     entries
         .iter()
         .filter(|entry| {
-            let (layer, level, stamped) = coordinate(entry);
-            let now = store.level_version(layer, level);
-            if now == stamped {
+            let now = store.level_version(&entry.layer, entry.level);
+            if now == entry.level_version {
                 return true;
             }
             tracing::error!(
-                layer,
-                level,
-                stamped,
+                layer = %entry.layer,
+                level = entry.level,
+                form = entry.form.dir(),
+                stamped = entry.level_version,
                 now,
-                "ALARM: a fold-written {what} is stamped with a version the level does not carry \
-                 after the retirement; it is dropped and the level recomposes on first use"
+                "ALARM: a fold-written derived file is stamped with a version the level does not \
+                 carry after the retirement; it is dropped and the level recomposes on first use"
             );
             false
         })
         .cloned()
         .collect()
-}
-
-/// What [`artifact_coordinates`] stamps into a side-manifest: the level versions and every
-/// derived-structure list filtered to the entries still true at them.
-struct ArtifactCoordinates {
-    level_versions: Vec<tessera_store::manifest::LevelVersion>,
-    containment: Vec<tessera_store::manifest::ContainmentExtent>,
-    tile_indexes: Vec<tessera_store::manifest::TileIndexExtent>,
-    row_columns: Vec<tessera_store::manifest::RowColumnExtent>,
-    shape_rows: Vec<tessera_store::manifest::ShapeRowsExtent>,
-    shape_held: Vec<tessera_store::manifest::ShapeHeldExtent>,
 }
 
 impl WritePath {
@@ -3904,48 +3851,13 @@ impl WritePath {
             .values()
             .flat_map(|p| p.manifest.membership_extents.iter().cloned())
             .collect();
-        // The containment partitions the last fold wrote, seeded identically: a publication clones
-        // a stale manifest, so the list has to be held here rather than re-read from it.
-        let seeded_containment_extents: Vec<tessera_store::manifest::ContainmentExtent> =
-            generation
-                .load()
-                .bundle
-                .partitions
-                .values()
-                .flat_map(|p| p.manifest.containment_extents.iter().cloned())
-                .collect();
-        // The tile indexes the last fold wrote, seeded identically and for the identical reason.
-        let seeded_tile_index_extents: Vec<tessera_store::manifest::TileIndexExtent> = generation
+        // The derived files the last fold or the build wrote, held for the same reason.
+        let seeded_derived_extents: Vec<tessera_store::manifest::DerivedExtent> = generation
             .load()
             .bundle
             .partitions
             .values()
-            .flat_map(|p| p.manifest.tile_index_extents.iter().cloned())
-            .collect();
-        // The row-major columns the last fold wrote, seeded identically and for the identical
-        // reason.
-        let seeded_row_column_extents: Vec<tessera_store::manifest::RowColumnExtent> = generation
-            .load()
-            .bundle
-            .partitions
-            .values()
-            .flat_map(|p| p.manifest.row_column_extents.iter().cloned())
-            .collect();
-        // The shape row forms the build or the last fold wrote, seeded identically and for the
-        // identical reason.
-        let seeded_shape_rows_extents: Vec<tessera_store::manifest::ShapeRowsExtent> = generation
-            .load()
-            .bundle
-            .partitions
-            .values()
-            .flat_map(|p| p.manifest.shape_rows_extents.iter().cloned())
-            .collect();
-        let seeded_shape_held_extents: Vec<tessera_store::manifest::ShapeHeldExtent> = generation
-            .load()
-            .bundle
-            .partitions
-            .values()
-            .flat_map(|p| p.manifest.shape_held_extents.iter().cloned())
+            .flat_map(|p| p.manifest.derived_extents.iter().cloned())
             .collect();
         // The content half, seeded identically and for the identical reason.
         let seeded_content_extents: Vec<tessera_store::manifest::RecordExtent> = generation
@@ -4024,11 +3936,7 @@ impl WritePath {
                     last_fold_start_unix: None,
                     superseded_sidecars: Vec::new(),
                     membership_extents: seeded_membership_extents,
-                    containment_extents: seeded_containment_extents,
-                    tile_index_extents: seeded_tile_index_extents,
-                    row_column_extents: seeded_row_column_extents,
-                    shape_rows_extents: seeded_shape_rows_extents,
-                    shape_held_extents: seeded_shape_held_extents,
+                    derived_extents: seeded_derived_extents,
                     artifact_record_extents: seeded_content_extents,
                     pending_reclaim: Vec::new(),
                     last_tick: std::time::Instant::now(),
@@ -5738,50 +5646,9 @@ mod segment_schema_tests {
 #[cfg(test)]
 mod vocabulary_extensions_tests {
     use super::*;
-    use std::collections::BTreeMap;
     use tessera_store::manifest::{
         ManifestVocabulary, ManifestVocabularyValue, VocabularyExtension, VocabularyKind,
     };
-
-    fn empty_manifest() -> SegmentsManifest {
-        SegmentsManifest {
-            watermark: 0,
-            entity_id_high_water: 0,
-            entity_id_low_water: tessera_types::layer::ROWLESS_CEILING,
-            layers: Vec::new(),
-            layer_tombstones: Vec::new(),
-            views: Vec::new(),
-            scoped_columns: Vec::new(),
-            attributes: Vec::new(),
-            scoped_attributes: Vec::new(),
-            vocabularies: Vec::new(),
-            groups: Vec::new(),
-            plain_views: Vec::new(),
-            dead_view_incarnations: Vec::new(),
-            membership_extents: Vec::new(),
-            level_versions: Vec::new(),
-            containment_extents: Vec::new(),
-            tile_index_extents: Vec::new(),
-            row_column_extents: Vec::new(),
-            shape_rows_extents: Vec::new(),
-            shape_held_extents: Vec::new(),
-            term_image_extents: Vec::new(),
-            artifact_record_extents: Vec::new(),
-            segments: Vec::new(),
-            deltas: Vec::new(),
-            dict_extents: Vec::new(),
-            attr_extents: Vec::new(),
-            record_extents: Vec::new(),
-            entity_terms_extents: Vec::new(),
-            text_extents: Vec::new(),
-            external_id_runs: Vec::new(),
-            locator_extents: Vec::new(),
-            tombstones: Vec::new(),
-            deny: Vec::new(),
-            vocabulary_extensions: Vec::new(),
-            files: BTreeMap::new(),
-        }
-    }
 
     fn empty_vocabulary(name: &str) -> ManifestVocabulary {
         ManifestVocabulary {
@@ -5806,7 +5673,7 @@ mod vocabulary_extensions_tests {
     /// this fails — the carried `"legacy"` binding is wiped by a write that had nothing new to say.
     #[test]
     fn a_carried_extension_survives_a_write_the_live_view_recomputes_nothing_for() {
-        let mut manifest = empty_manifest();
+        let mut manifest = SegmentsManifest::empty();
         manifest.vocabulary_extensions.push(VocabularyExtension {
             name: "legacy".to_string(),
             values: vec![ManifestVocabularyValue {
@@ -5834,7 +5701,7 @@ mod vocabulary_extensions_tests {
     /// binding restated identically is not duplicated.
     #[test]
     fn a_fresh_binding_is_appended_beside_what_is_already_carried_and_not_duplicated() {
-        let mut manifest = empty_manifest();
+        let mut manifest = SegmentsManifest::empty();
         manifest.vocabulary_extensions.push(VocabularyExtension {
             name: "department".to_string(),
             values: vec![ManifestVocabularyValue {
@@ -6797,34 +6664,11 @@ struct Executor {
     /// The deny list solves the identical problem by writing complete state from the live overlay;
     /// this is that posture for a list the overlay does not hold.
     membership_extents: Vec<tessera_store::manifest::MembershipExtent>,
-    /// Every containment partition the current prefix holds — one per `(layer, level)` the last
-    /// fold wrote one for. **Held rather than read from the manifest**, for
-    /// [`Executor::membership_extents`]' reason: a publication clones a stale manifest.
-    ///
-    /// **What reaches a manifest is this list filtered**, at every commit, to the entries the
-    /// store's level versions still make adoptable ([`artifact_coordinates`]) — so a manifest never
-    /// names a partition that has already been invalidated, whatever this list happens to hold. The
-    /// fold replaces it wholesale, its paths being relative to the prefix the fold publishes.
-    containment_extents: Vec<tessera_store::manifest::ContainmentExtent>,
-    /// Every tile-index extent column the current prefix holds — one per `(view, layer, level)` the
-    /// last fold wrote one for. Held, filtered and replaced exactly as
-    /// [`Executor::containment_extents`] is, and by the same code
-    /// ([`artifact_coordinates`]); the only difference is that a view is part of the address,
-    /// because an extent is a pair of rows and a row space is per view.
-    tile_index_extents: Vec<tessera_store::manifest::TileIndexExtent>,
-    /// Every row-major column the current prefix holds — one per `(view, layer, level)` the last
-    /// fold wrote one for. Held, filtered and replaced exactly as
-    /// [`Executor::tile_index_extents`] is, and by the same code ([`artifact_coordinates`]); the
-    /// only difference is the layout tag each entry carries, which says which form the file is in
-    /// and is checked against the file's own magic at open.
-    row_column_extents: Vec<tessera_store::manifest::RowColumnExtent>,
-    /// Every persisted shape row form the current prefix holds — one per `(view, layer, level,
-    /// segment)` the build or the last fold wrote one for. Held, filtered and replaced exactly as
-    /// [`Executor::row_column_extents`] is, and by the same code ([`artifact_coordinates`]).
-    shape_rows_extents: Vec<tessera_store::manifest::ShapeRowsExtent>,
-    /// Every persisted decomposition file the current prefix holds, held and filtered as
-    /// [`Executor::shape_rows_extents`] is.
-    shape_held_extents: Vec<tessera_store::manifest::ShapeHeldExtent>,
+    /// Every derived file the current prefix holds. Held here because a publication clones a
+    /// manifest that may be stale. What reaches a manifest is this list filtered to the files the
+    /// store's level versions still make adoptable ([`artifact_coordinates`]); the fold replaces
+    /// it wholesale, its paths being relative to the prefix the fold publishes.
+    derived_extents: Vec<tessera_store::manifest::DerivedExtent>,
     /// Every artifact **content** extent this node has published, complete current state, held for
     /// the reason above and written the same way. The two lists travel together: a membership
     /// without its content leaves an artifact whose description cannot be read, which withholds it.
@@ -7683,12 +7527,7 @@ impl Executor {
             &completed.plan.partition,
             manifest_n,
             &mut manifest,
-            &self.containment_extents,
-            &self.tile_index_extents,
-            &self.row_column_extents,
-            &self.shape_rows_extents,
-            &self.shape_held_extents,
-            &[],
+            None,
         ) {
             self.health.merge_failures.fetch_add(1, Ordering::Relaxed);
             tracing::error!(
@@ -8173,7 +8012,7 @@ impl Executor {
     /// still holds mapped. That is compaction §7's "crash between `CURRENT` and the swap", reached
     /// without a crash.
     fn publish_fold(&mut self, completed: crate::compact::CompletedFold) {
-        use std::collections::{BTreeMap, BTreeSet};
+        use std::collections::BTreeSet;
 
         let started = std::time::Instant::now();
         // The fold thread's staircase, continued here for the publication's phases so the gauges
@@ -8628,7 +8467,7 @@ impl Executor {
         // disjoint kinds, and `compact::TERM_IMAGE_MANIFEST_N` carries why that pass cannot use
         // this one.
         let mut derived_index = tessera_store::derived::DerivedIndex::default();
-        let containment = self.write_containment_partitions(
+        let mut derived = self.write_containment_partitions(
             &to_prefix_dir,
             &plan.partition,
             manifest_n,
@@ -8676,7 +8515,7 @@ impl Executor {
         // **The tile indexes, in the same pass and omitting the same levels** — and omitting the
         // levels now recorded row-major, which have nothing to index. Their extents are rows, so
         // they are per view and are projected against the base permutation this fold just wrote.
-        let tile_indexes = self.write_tile_indexes(
+        derived.extend(self.write_tile_indexes(
             &to_prefix_dir,
             &plan.partition,
             manifest_n,
@@ -8685,7 +8524,7 @@ impl Executor {
             &layouts,
             &pending,
             &mut derived_index,
-        );
+        ));
         // **And the columns for the levels that do**, in the same pass and under the same
         // omissions. A level whose column will not compose gets no entry, and is served
         // artifact-major.
@@ -8700,6 +8539,7 @@ impl Executor {
             &fold_segments,
             &mut derived_index,
         );
+        derived.extend(row_columns);
         // **And the row forms of the spatial levels the columns do not cover**, so the next open
         // claims what this fold just resolved instead of resolving it again
         // (`polygon-membership.md` §6.3; owner ruling 2026-08-29).
@@ -8708,12 +8548,13 @@ impl Executor {
             &plan.partition,
             manifest_n,
             &fold_incarnations,
-            &row_columns,
+            &derived,
             &pending,
             &fold_segments,
             &mut derived_index,
         );
-        let shape_held = self.write_shape_held(
+        derived.extend(shape_rows);
+        derived.extend(self.write_shape_held(
             &to_prefix_dir,
             &plan.partition,
             manifest_n,
@@ -8721,7 +8562,7 @@ impl Executor {
             &pending,
             &fold_segments,
             &mut derived_index,
-        );
+        ));
         stairs.record("8 derived");
 
         // ---- step 3b: the report, before anything retires ---------------------------------------
@@ -8792,6 +8633,8 @@ impl Executor {
             .live
             .with_view_declarations(|declarations| declarations.names());
 
+        // The fold has written the scoped columns, vocabularies, view declarations, bindings and
+        // file digests into `MANIFEST.json`, so the side-manifest starts without them.
         let mut segments_manifest = SegmentsManifest {
             // The flight's text extents, and the pass merged every other one into the new base
             // index. A flush publishing during the fold indexed entities the new base does not
@@ -8816,12 +8659,6 @@ impl Executor {
             layers: registered_layers,
             layer_tombstones: registered_tombstones,
             views: created_views,
-            // **Emptied, because the fold has just written the list into `MANIFEST.json`.** The
-            // new bundle manifest carries every `(family, view)` the live one had folded into
-            // `scoped_scalars[..].views`, and the fold wrote a column for each — so restating them
-            // here would be a second copy of a fact the prefix's own manifest now states
-            // (`views.md` §5).
-            scoped_columns: Vec::new(),
             // **The declarations made since the fold planned, and only those.** The fold's
             // `MANIFEST.json` is the served schema as it stood at the plan, runtime columns
             // included, with a base written for each (`compact::FoldContext::runtime_attributes`);
@@ -8839,36 +8676,12 @@ impl Executor {
                 .filter(|f| !completed.runtime_scoped_attributes.contains(&f.name))
                 .cloned()
                 .collect(),
-            // **Emptied, because the fold has just written them into `MANIFEST.json`**, on the
-            // scoped columns' argument above: `bundle_manifest` below is the live manifest, which
-            // carries every runtime vocabulary the merge appended, so restating them here would be
-            // a second copy of a fact the new prefix's own manifest states. A vocabulary declared
-            // *while the fold ran* is in the live manifest too — a declaration writes no artefact
-            // for the fold to have missed, unlike an attribute column's base — so it folds in with
-            // the rest and needs no since-plan half.
-            vocabularies: Vec::new(),
-            // **Emptied, because the fold has just written them into `MANIFEST.json`**, on the
-            // vocabularies' argument above: a group and a plain view are manifest state and write
-            // no artefact for the fold to have missed, so one declared while the fold ran folds in
-            // with the rest.
-            groups: Vec::new(),
-            plain_views: Vec::new(),
             dead_view_incarnations,
             // **The pass's own output, not the live list.** The paths are prefix-relative and the
             // fold publishes a *new* prefix, so what step 3a wrote is the only list that names
             // files this prefix contains. The content extents beside it are carried by link, their
             // bytes being the same inodes under a second name.
             membership_extents: repacked.clone(),
-            // **Stamped by `commit_side_manifest`, from the store and the list above.** Placed
-            // here as the empty pair the assembly needs and replaced at the commit, so the version
-            // list and the partitions beside it come from one borrow rather than from two points
-            // in the fold's flight.
-            level_versions: Vec::new(),
-            containment_extents: Vec::new(),
-            tile_index_extents: Vec::new(),
-            row_column_extents: Vec::new(),
-            shape_rows_extents: Vec::new(),
-            shape_held_extents: Vec::new(),
             // **Pass 2b's own output, not the live list.** The paths are prefix-relative and the
             // fold publishes a new prefix, so what the fold thread wrote is the only list naming
             // files this prefix contains. The images cover the new base alone, which is what a
@@ -8898,15 +8711,7 @@ impl Executor {
             entity_terms_extents: carried_entity_terms.clone(),
             external_id_runs,
             locator_extents: carried_locators.clone(),
-            tombstones: Vec::new(),
-            deny: Vec::new(),
-            // **Empty, because the fold has just folded them in.** Every binding these carried is
-            // now a value of the new prefix's `MANIFEST.vocabularies`, so restating them here
-            // would bind each key twice — once in each home — and a later reader would have to
-            // decide which won.
-            vocabulary_extensions: Vec::new(),
-            // Every digest goes in `MANIFEST.json` instead — see below.
-            files: BTreeMap::new(),
+            ..SegmentsManifest::empty()
         };
         write_deny_state(&mut segments_manifest, &published_overlay);
 
@@ -9153,12 +8958,10 @@ impl Executor {
             &plan.partition,
             manifest_n,
             &mut segments_manifest,
-            &containment,
-            &tile_indexes,
-            &row_columns,
-            &shape_rows,
-            &shape_held,
-            &pending.levels,
+            Some(FoldDerived {
+                written: &derived,
+                pending_retirement: &pending.levels,
+            }),
         ) {
             discard(&format!(
                 "its SEGMENTS-{manifest_n}.json would not commit ({e})"
@@ -9257,46 +9060,9 @@ impl Executor {
         // The structures this fold wrote replace whatever the previous prefix held: their paths
         // are prefix-relative and the fold publishes a new prefix, so the old entries name files
         // this prefix does not contain. Held only at the version the store now carries.
-        let (containment, tile_indexes, row_columns, shape_rows, shape_held) =
-            self.live.with_artifacts(|store| {
-                (
-                    held_at_current_version(
-                        store,
-                        "containment partition",
-                        &segments_manifest.containment_extents,
-                        |e| (e.layer.as_str(), e.level, e.level_version),
-                    ),
-                    held_at_current_version(
-                        store,
-                        "tile index",
-                        &segments_manifest.tile_index_extents,
-                        |e| (e.layer.as_str(), e.level, e.level_version),
-                    ),
-                    held_at_current_version(
-                        store,
-                        "row column",
-                        &segments_manifest.row_column_extents,
-                        |e| (e.layer.as_str(), e.level, e.level_version),
-                    ),
-                    held_at_current_version(
-                        store,
-                        "shape row form",
-                        &segments_manifest.shape_rows_extents,
-                        |e| (e.layer.as_str(), e.level, e.level_version),
-                    ),
-                    held_at_current_version(
-                        store,
-                        "held shape",
-                        &segments_manifest.shape_held_extents,
-                        |e| (e.layer.as_str(), e.level, e.level_version),
-                    ),
-                )
-            });
-        self.containment_extents = containment;
-        self.tile_index_extents = tile_indexes;
-        self.row_column_extents = row_columns;
-        self.shape_rows_extents = shape_rows;
-        self.shape_held_extents = shape_held;
+        self.derived_extents = self.live.with_artifacts(|store| {
+            held_at_current_version(store, &segments_manifest.derived_extents)
+        });
         *lock_recover(&self.health.last_fold_report) = degraded;
         stairs.record("12 retire");
 
@@ -9388,19 +9154,19 @@ impl Executor {
             self.artifact_projections.adopt_all(
                 &to_prefix_dir,
                 &completed.prefix,
-                &self.containment_extents,
+                &self.derived_extents,
                 store,
             );
             self.artifact_projections.adopt_indexes(
                 &to_prefix_dir,
                 &completed.prefix,
-                &self.tile_index_extents,
+                &self.derived_extents,
                 store,
             );
             self.artifact_projections.adopt_columns(
                 &to_prefix_dir,
                 &completed.prefix,
-                &self.row_column_extents,
+                &self.derived_extents,
                 store,
             );
         });
@@ -9927,12 +9693,7 @@ impl Executor {
             &completed.plan.partition,
             manifest_n,
             &mut manifest,
-            &self.containment_extents,
-            &self.tile_index_extents,
-            &self.row_column_extents,
-            &self.shape_rows_extents,
-            &self.shape_held_extents,
-            &[],
+            None,
         ) {
             self.health
                 .coalesce_failures
@@ -11247,32 +11008,11 @@ impl Executor {
         n
     }
 
-    /// Commit one partition's side-manifest — **the only route to
-    /// `tessera_store::write_segments_manifest` in this crate**, and the durable half of the
-    /// publication guard.
-    ///
-    /// `crate::geometry::check_publishable` refuses a *generation* that regresses the watermark,
-    /// but every publication writes its manifest before it swaps, and assembles it by editing a
-    /// clone of the live one — a seam the swap guard cannot see, and the one through which the
-    /// merge's rebase regressed the durable watermark by a batch whenever a flush shared its
-    /// flight. So the manifest's own ordered scalars are checked against `live_manifest` — the
-    /// live partition manifest at this publication — here, where every publication converges
-    /// (see [`crate::geometry::check_manifest_publishable`] for what is compared and why). A
-    /// refusal leaves each caller its usual failure posture: nothing written, files orphaned,
-    /// the next tick re-plans.
-    ///
-    /// **The artifact coordinates are stamped here rather than by each caller**, which is the same
-    /// argument the watermark check above rests on: every publication converges on this function,
-    /// and a level's version list assembled at five call sites is one that goes stale at whichever
-    /// of them nobody thought about. `containment` and `tile_indexes` are the derived-structure
-    /// lists the caller wants named — the fold's freshly written ones, everyone else's held ones —
-    /// and what lands in the manifest is each list filtered to the entries the store's versions
-    /// still make adoptable ([`artifact_coordinates`]). Read `next.containment_extents` and
-    /// `next.tile_index_extents` back after a success to keep the held lists in step.
-    // Eight, plus the manifest being written. Every one of them is a thing this publication *is* —
-    // where it goes, what it replaces, and the three artifact coordinates it has to stamp.
-    // Bundling them would name the same nine things one call earlier.
-    #[allow(clippy::too_many_arguments)]
+    /// Commits one partition's side-manifest. Every publication writes its manifest through
+    /// here, so two things are done here once: the manifest's ordered scalars are checked against
+    /// `live_manifest` ([`crate::geometry::check_manifest_publishable`]), because a manifest is
+    /// assembled by editing a clone that may be stale; and the level versions and derived files
+    /// are stamped ([`artifact_coordinates`]). A refusal writes nothing.
     fn commit_side_manifest(
         &self,
         live_manifest: &tessera_store::manifest::SegmentsManifest,
@@ -11280,30 +11020,19 @@ impl Executor {
         partition: &str,
         n: u64,
         next: &mut tessera_store::manifest::SegmentsManifest,
-        containment: &[tessera_store::manifest::ContainmentExtent],
-        tile_indexes: &[tessera_store::manifest::TileIndexExtent],
-        row_columns: &[tessera_store::manifest::RowColumnExtent],
-        shape_rows: &[tessera_store::manifest::ShapeRowsExtent],
-        shape_held: &[tessera_store::manifest::ShapeHeldExtent],
-        pending_retirement: &[(String, u32)],
+        fold: Option<FoldDerived<'_>>,
     ) -> Result<(), ManifestCommitRefused> {
-        let coordinates = self.live.with_artifacts(|store| {
-            artifact_coordinates(
-                store,
-                containment,
-                tile_indexes,
-                row_columns,
-                shape_rows,
-                shape_held,
-                pending_retirement,
-            )
-        });
-        next.level_versions = coordinates.level_versions;
-        next.containment_extents = coordinates.containment;
-        next.tile_index_extents = coordinates.tile_indexes;
-        next.row_column_extents = coordinates.row_columns;
-        next.shape_rows_extents = coordinates.shape_rows;
-        next.shape_held_extents = coordinates.shape_held;
+        // Only the fold brings its own derived files and levels pending retirement; every other
+        // publication carries the held list forward.
+        let (derived, pending_retirement) = match &fold {
+            Some(fold) => (fold.written, fold.pending_retirement),
+            None => (self.derived_extents.as_slice(), &[][..]),
+        };
+        let (level_versions, derived_extents) = self
+            .live
+            .with_artifacts(|store| artifact_coordinates(store, derived, pending_retirement));
+        next.level_versions = level_versions;
+        next.derived_extents = derived_extents;
         crate::geometry::check_manifest_publishable(live_manifest, next)
             .map_err(ManifestCommitRefused::Regresses)?;
         tessera_store::write_segments_manifest(prefix_dir, partition, n, next)
@@ -15632,12 +15361,7 @@ impl Executor {
                 partition,
                 n,
                 &mut manifest,
-                &self.containment_extents,
-                &self.tile_index_extents,
-                &self.row_column_extents,
-                &self.shape_rows_extents,
-                &self.shape_held_extents,
-                &[],
+                None,
             ) {
                 tracing::error!(
                     error = %e,
@@ -15920,7 +15644,7 @@ impl Executor {
         data_plugin_hash: &str,
         pending: &PendingRetirement,
         index: &mut tessera_store::derived::DerivedIndex,
-    ) -> Vec<tessera_store::manifest::ContainmentExtent> {
+    ) -> Vec<tessera_store::manifest::DerivedExtent> {
         // The gate: under any plugin but the builtin the partition is not sound at all, so nothing
         // is composed and nothing is written (`crate::containment`).
         if !crate::containment::signature_shaped(data_plugin_hash) {
@@ -15980,7 +15704,7 @@ impl Executor {
 
         // **Filed by the shared writer**, which is the same one `tessera build`'s artifact pass
         // calls: one naming rule, one durability sequence, one manifest-entry shape.
-        tessera_store::derived::file_containment(
+        tessera_store::derived::file_derived(
             prefix_dir,
             partition,
             n,
@@ -15989,15 +15713,12 @@ impl Executor {
                 .into_iter()
                 .map(
                     |(layer, level, level_version, bytes)| tessera_store::derived::Filed {
-                        // A partition is a function of the level's records and the prefix's
-                        // postings, so it is not per view and the entry carries none — and no
-                        // incarnation either, there being no view to carry one for.
-                        view: String::new(),
-                        incarnation: tessera_store::manifest::DECLARED_INCARNATION,
+                        view: None,
+                        incarnation: None,
                         layer,
                         level,
                         level_version,
-                        layout: tessera_types::layer::ServingLayout::ArtifactMajor,
+                        form: tessera_store::manifest::DerivedForm::Containment,
                         bytes: tessera_store::derived::FiledBytes::InHand(bytes),
                     },
                 )
@@ -16293,7 +16014,7 @@ impl Executor {
         pending: &PendingRetirement,
         fold_segments: &[(String, tessera_store::read::SegmentData)],
         index: &mut tessera_store::derived::DerivedIndex,
-    ) -> Vec<tessera_store::manifest::RowColumnExtent> {
+    ) -> Vec<tessera_store::manifest::DerivedExtent> {
         let wanted: Vec<(String, u32, tessera_types::layer::ServingLayout)> = layouts
             .iter()
             .filter(|(layer, level, layout)| {
@@ -16420,7 +16141,7 @@ impl Executor {
         }
 
         // **Filed by the shared writer** — see `write_containment_partitions` above.
-        tessera_store::derived::file_row_columns(
+        tessera_store::derived::file_derived(
             prefix_dir,
             partition,
             n,
@@ -16435,12 +16156,12 @@ impl Executor {
                         return None;
                     };
                     Some(tessera_store::derived::Filed {
-                        view,
-                        incarnation,
+                        view: Some(view),
+                        incarnation: Some(incarnation),
                         layer,
                         level,
                         level_version,
-                        layout,
+                        form: tessera_store::manifest::DerivedForm::RowColumn { layout },
                         bytes: tessera_store::derived::FiledBytes::Staged(path),
                     })
                 })
@@ -16461,11 +16182,11 @@ impl Executor {
         partition: &str,
         n: u64,
         incarnations: &FxHashMap<String, tessera_types::view::ViewIncarnation>,
-        columns: &[tessera_store::manifest::RowColumnExtent],
+        columns: &[tessera_store::manifest::DerivedExtent],
         pending: &PendingRetirement,
         fold_segments: &[(String, tessera_store::read::SegmentData)],
         index: &mut tessera_store::derived::DerivedIndex,
-    ) -> Vec<tessera_store::manifest::ShapeRowsExtent> {
+    ) -> Vec<tessera_store::manifest::DerivedExtent> {
         let levels: Vec<(String, u32)> = self.live.with_artifacts(|store| {
             store
                 .levels_and_extents()
@@ -16480,15 +16201,20 @@ impl Executor {
                 })
                 .collect()
         });
-        let mut filed: Vec<tessera_store::derived::FiledShapeRows> = Vec::new();
+        let mut filed: Vec<tessera_store::derived::Filed> = Vec::new();
         for (layer, level) in &levels {
             let version = self
                 .live
                 .with_artifacts(|store| store.level_version(layer, *level));
             for (view, segment) in fold_segments {
-                let covered = columns
-                    .iter()
-                    .any(|c| &c.layer == layer && c.level == *level && &c.view == view);
+                let covered = columns.iter().any(|c| {
+                    matches!(
+                        c.form,
+                        tessera_store::manifest::DerivedForm::RowColumn { .. }
+                    ) && &c.layer == layer
+                        && c.level == *level
+                        && c.view.as_ref() == Some(view)
+                });
                 if covered {
                     continue;
                 }
@@ -16511,24 +16237,28 @@ impl Executor {
                 let Some(incarnation) = incarnations.get(view).copied() else {
                     continue;
                 };
-                filed.push(tessera_store::derived::FiledShapeRows {
-                    view: view.clone(),
-                    incarnation,
+                filed.push(tessera_store::derived::Filed {
+                    view: Some(view.clone()),
+                    incarnation: Some(incarnation),
                     layer: layer.clone(),
                     level: *level,
                     level_version: version,
-                    seg_id: segment.seg_id.clone(),
-                    row_count: segment.row_count,
-                    bytes: tessera_store::derived::shape_rows_bytes(
-                        version,
-                        &segment.seg_id,
-                        segment.row_count,
-                        &piece,
+                    form: tessera_store::manifest::DerivedForm::ShapeRows {
+                        seg_id: segment.seg_id.clone(),
+                        row_count: segment.row_count,
+                    },
+                    bytes: tessera_store::derived::FiledBytes::InHand(
+                        tessera_store::derived::shape_rows_bytes(
+                            version,
+                            &segment.seg_id,
+                            segment.row_count,
+                            &piece,
+                        ),
                     ),
                 });
             }
         }
-        tessera_store::derived::file_shape_rows(prefix_dir, partition, n, index, filed)
+        tessera_store::derived::file_derived(prefix_dir, partition, n, index, filed)
     }
 
     /// Write this prefix's persisted decompositions: every spatial level's held shapes for each
@@ -16543,7 +16273,7 @@ impl Executor {
         pending: &PendingRetirement,
         fold_segments: &[(String, tessera_store::read::SegmentData)],
         index: &mut tessera_store::derived::DerivedIndex,
-    ) -> Vec<tessera_store::manifest::ShapeHeldExtent> {
+    ) -> Vec<tessera_store::manifest::DerivedExtent> {
         let filed: Vec<tessera_store::derived::Filed> = self.live.with_artifacts(|store| {
             let mut out = Vec::new();
             let levels: Vec<(String, u32)> = store
@@ -16582,12 +16312,12 @@ impl Executor {
                         continue;
                     };
                     out.push(tessera_store::derived::Filed {
-                        view: view.clone(),
-                        incarnation,
+                        view: Some(view.clone()),
+                        incarnation: Some(incarnation),
                         layer: layer.clone(),
                         level: *level,
                         level_version: version,
-                        layout: tessera_types::layer::ServingLayout::ArtifactMajor,
+                        form: tessera_store::manifest::DerivedForm::ShapeHeld,
                         bytes: tessera_store::derived::FiledBytes::InHand(
                             tessera_store::derived::shape_held_bytes(version, &shapes),
                         ),
@@ -16596,7 +16326,7 @@ impl Executor {
             }
             out
         });
-        tessera_store::derived::file_shape_held(prefix_dir, partition, n, index, filed)
+        tessera_store::derived::file_derived(prefix_dir, partition, n, index, filed)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -16610,7 +16340,7 @@ impl Executor {
         layouts: &[(String, u32, tessera_types::layer::ServingLayout)],
         pending: &PendingRetirement,
         index: &mut tessera_store::derived::DerivedIndex,
-    ) -> Vec<tessera_store::manifest::TileIndexExtent> {
+    ) -> Vec<tessera_store::manifest::DerivedExtent> {
         if spaces.is_empty() {
             return Vec::new();
         }
@@ -16673,7 +16403,7 @@ impl Executor {
         }
 
         // **Filed by the shared writer** — see `write_containment_partitions` above.
-        tessera_store::derived::file_tile_indexes(
+        tessera_store::derived::file_derived(
             prefix_dir,
             partition,
             n,
@@ -16684,12 +16414,12 @@ impl Executor {
                     // **No incarnation, no file** — `write_row_columns`' rule.
                     let incarnation = *incarnations.get(&view)?;
                     Some(tessera_store::derived::Filed {
-                        view,
-                        incarnation,
+                        view: Some(view),
+                        incarnation: Some(incarnation),
                         layer,
                         level,
                         level_version,
-                        layout: tessera_types::layer::ServingLayout::ArtifactMajor,
+                        form: tessera_store::manifest::DerivedForm::TileIndex,
                         bytes: tessera_store::derived::FiledBytes::InHand(bytes),
                     })
                 })
@@ -17283,12 +17013,7 @@ impl Executor {
             &completed.partition,
             manifest_n,
             &mut manifest,
-            &self.containment_extents,
-            &self.tile_index_extents,
-            &self.row_column_extents,
-            &self.shape_rows_extents,
-            &self.shape_held_extents,
-            &[],
+            None,
         ) {
             self.health.flush_failures.fetch_add(1, Ordering::Relaxed);
             tracing::error!(

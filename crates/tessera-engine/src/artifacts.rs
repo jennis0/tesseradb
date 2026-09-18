@@ -2518,7 +2518,7 @@ impl ArtifactProjections {
         &self,
         prefix_dir: &std::path::Path,
         prefix: &str,
-        extents: &[tessera_store::manifest::ContainmentExtent],
+        extents: &[tessera_store::manifest::DerivedExtent],
         store: &ArtifactStore,
     ) {
         // **Everything held for another prefix leaves here.** A claim leaves an entry held for a
@@ -2530,7 +2530,10 @@ impl ArtifactProjections {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .retain(|_, (key, _)| key.prefix == prefix);
-        for extent in extents {
+        for extent in extents
+            .iter()
+            .filter(|e| e.form == tessera_store::manifest::DerivedForm::Containment)
+        {
             let level_version = store.level_version(&extent.layer, extent.level);
             if level_version != extent.level_version {
                 tracing::info!(
@@ -2596,7 +2599,7 @@ impl ArtifactProjections {
         &self,
         prefix_dir: &std::path::Path,
         prefix: &str,
-        extents: &[tessera_store::manifest::TileIndexExtent],
+        extents: &[tessera_store::manifest::DerivedExtent],
         store: &ArtifactStore,
     ) {
         // Purged for [`Self::adopt_all`]'s reason.
@@ -2605,12 +2608,17 @@ impl ArtifactProjections {
             .unwrap_or_else(|e| e.into_inner())
             .retain(|_, (key, _)| key.prefix == prefix);
         for extent in extents {
+            let (tessera_store::manifest::DerivedForm::TileIndex, Some(view)) =
+                (&extent.form, extent.view.as_deref())
+            else {
+                continue;
+            };
             let level_version = store.level_version(&extent.layer, extent.level);
             if level_version != extent.level_version {
                 tracing::info!(
                     layer = %extent.layer,
                     level = extent.level,
-                    view = %extent.view,
+                    view = %view,
                     projected_at = extent.level_version,
                     now = level_version,
                     "a fold-written tile index is not adopted: the level has moved since it was \
@@ -2627,7 +2635,7 @@ impl ArtifactProjections {
                     tracing::error!(
                         layer = %extent.layer,
                         level = extent.level,
-                        view = %extent.view,
+                        view = %view,
                         path = %extent.path,
                         %error,
                         "ALARM: a tile index named by the manifest would not open; candidacy is \
@@ -2640,7 +2648,7 @@ impl ArtifactProjections {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .insert(
-                    (extent.view.clone(), extent.layer.clone(), extent.level),
+                    (view.to_string(), extent.layer.clone(), extent.level),
                     (
                         IndexKey {
                             prefix: prefix.to_string(),
@@ -2667,7 +2675,7 @@ impl ArtifactProjections {
         &self,
         prefix_dir: &std::path::Path,
         prefix: &str,
-        extents: &[tessera_store::manifest::RowColumnExtent],
+        extents: &[tessera_store::manifest::DerivedExtent],
         store: &ArtifactStore,
     ) {
         // Purged for [`Self::adopt_all`]'s reason.
@@ -2676,12 +2684,18 @@ impl ArtifactProjections {
             .unwrap_or_else(|e| e.into_inner())
             .retain(|_, (key, _)| key.prefix == prefix);
         for extent in extents {
+            let (tessera_store::manifest::DerivedForm::RowColumn { layout }, Some(view)) =
+                (&extent.form, extent.view.as_deref())
+            else {
+                continue;
+            };
+            let layout = *layout;
             let level_version = store.level_version(&extent.layer, extent.level);
             if level_version != extent.level_version {
                 tracing::info!(
                     layer = %extent.layer,
                     level = extent.level,
-                    view = %extent.view,
+                    view = %view,
                     written_at = extent.level_version,
                     now = level_version,
                     "a fold-written row-major column is not adopted: the level has moved since it \
@@ -2690,7 +2704,7 @@ impl ArtifactProjections {
                 continue;
             }
             let path = prefix_dir.join(&extent.path);
-            let column = match RowColumn::open(&path, extent.layout) {
+            let column = match RowColumn::open(&path, layout) {
                 Ok(column) => column,
                 Err(error) => {
                     // Loud, because this one is a fault rather than a cadence: the manifest names a
@@ -2699,9 +2713,9 @@ impl ArtifactProjections {
                     tracing::error!(
                         layer = %extent.layer,
                         level = extent.level,
-                        view = %extent.view,
+                        view = %view,
                         path = %extent.path,
-                        layout = ?extent.layout,
+                        layout = ?layout,
                         %error,
                         "ALARM: a row-major column named by the manifest would not open as the \
                          form the manifest names; the level is recomposed on first use"
@@ -2713,7 +2727,7 @@ impl ArtifactProjections {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .insert(
-                    (extent.view.clone(), extent.layer.clone(), extent.level),
+                    (view.to_string(), extent.layer.clone(), extent.level),
                     (
                         IndexKey {
                             prefix: prefix.to_string(),

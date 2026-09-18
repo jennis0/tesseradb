@@ -2201,24 +2201,12 @@ fn build_bundle(
         // `(view, layer, level)`, so each view's pass adds its own; assigning would leave the
         // manifest carrying the last view's alone.
         published_layers
-            .tile_index_extents
-            .extend(artifact_pass.tile_index_extents.iter().cloned());
-        published_layers
-            .row_column_extents
-            .extend(artifact_pass.row_column_extents.iter().cloned());
-        published_layers
-            .shape_rows_extents
-            .extend(artifact_pass.shape_rows_extents.iter().cloned());
-        published_layers
-            .shape_held_extents
-            .extend(artifact_pass.shape_held_extents.iter().cloned());
+            .derived_extents
+            .extend(artifact_pass.derived_extents.iter().cloned());
         artifact_paths.extend(artifact_pass.paths.iter().cloned());
         timer.end(
             BuildStage::ArtifactPass,
-            (artifact_pass.tile_index_extents.len()
-                + artifact_pass.row_column_extents.len()
-                + artifact_pass.shape_rows_extents.len()
-                + artifact_pass.shape_held_extents.len()) as u64,
+            artifact_pass.derived_extents.len() as u64,
         );
 
         // ---- 10c. this view's term images (`crate::term_images_pass`) ----------------------
@@ -2280,7 +2268,7 @@ fn build_bundle(
                 .map(|entry| args.out.join(crate::PREFIX).join(&entry.path)),
         );
         let composed = containment.len() as u64;
-        published_layers.containment_extents.extend(containment);
+        published_layers.derived_extents.extend(containment);
         timer.end(BuildStage::ArtifactPass, composed);
     }
 
