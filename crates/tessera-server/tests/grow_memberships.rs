@@ -679,6 +679,58 @@ async fn a_growth_body_carries_keys_members_and_the_fixed_parts_and_nothing_else
     assert_eq!(count(&server, &["0"]).await, 10);
 }
 
+/// **A growth restating members the artifact holds appends no record, and one restating part of a
+/// page appends the rest alone** (issue #155).
+///
+/// `prepare_grow` built its delta from the caller's set alone, so a page a producer resent put a
+/// delta that changes nothing into the log and pinned the log at it, a growth pin being one the
+/// compaction fold alone releases. The receipt already read the difference, so the log is where
+/// this is visible: the records are counted from the reopened log, and the second page's delta is
+/// decoded and checked against the members it had not sent before.
+#[tokio::test]
+async fn a_restated_growth_appends_only_the_members_the_artifact_does_not_hold() {
+    let tmp = TempDir::new().unwrap();
+    let server = serve(&tmp).await;
+    register(&server).await;
+    publish(&server, "a", members(0..10)).await;
+
+    // Restated whole: every member the publication gave it.
+    let (status, body) = grow(&server, json!([{ "key": "a", "members": members(0..10) }])).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["artifacts"][0]["joined"], 0, "{body}");
+
+    // Restated in part: the ten it holds and ten it does not.
+    let (status, body) = grow(&server, json!([{ "key": "a", "members": members(0..20) }])).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["artifacts"][0]["joined"], 10, "{body}");
+    assert_eq!(count(&server, &["0"]).await, 20);
+
+    server.shutdown().await;
+    let (_wal, records) =
+        tessera_lifecycle::wal::Wal::open(tmp.path().join("wal.log")).expect("the log reopens");
+    let growths: Vec<&Vec<tessera_lifecycle::wal::MembershipGrowth>> = records
+        .iter()
+        .filter_map(|record| match record {
+            tessera_lifecycle::wal::WalRecord::ArtifactGrow { growth, .. } => Some(growth),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        growths.len(),
+        1,
+        "the wholly restated page appended nothing, and the partly restated one appended once"
+    );
+    let joining: Vec<u64> = growths[0]
+        .iter()
+        .map(|grown| {
+            tessera_lifecycle::membership::deserialise_members(&grown.joining)
+                .expect("the delta decodes")
+                .cardinality()
+        })
+        .collect();
+    assert_eq!(joining, vec![10], "the delta is the ten that had not joined");
+}
+
 /// The verb sits under the control plane's credential gate like every other route.
 #[tokio::test]
 async fn a_growth_requires_the_operator_credential() {

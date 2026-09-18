@@ -5056,15 +5056,27 @@ async fn publish_artifacts(
     }
 
     // **A membership has one spelling and a row carries one of them** (`ingest.md` §2.3):
-    // `members` is optional only where `excluding` is given, so a row with neither is the refusal
-    // it was before the exclusion form existed rather than an accepted empty artifact.
+    // `members` is optional only where `excluding` is given, so an *unattached* row with neither
+    // is the refusal it was before the exclusion form existed rather than an accepted empty
+    // artifact.
+    //
+    // **An attached record may carry neither**
+    // ([decision 0145](../../../docs/decisions/0145-an-attached-artifact-with-no-members-of-its-own-is-served-over-its-targets.md)):
+    // an artifact with a target and no members of its own is served over its target's membership,
+    // which is the default and asks for no declaration key. `members: []` on such a record is a
+    // caller who declared the empty set and means the same thing — the predicate is a state, not
+    // a flag. A record with no target has nothing to borrow, so it keeps the refusal.
     for (index, artifact) in artifacts.iter().enumerate() {
-        if artifact.members.is_none() && artifact.excluding.is_none() {
+        if artifact.members.is_none()
+            && artifact.excluding.is_none()
+            && artifact.attached_to.is_none()
+        {
             return Err(ApiError::Contract(format!(
-                "artifact {index} of this publication carries neither `members` nor `excluding`. \
-                 A record names the members its membership holds, or the entities it leaves out \
-                 (ingest.md §2.3); an artifact whose membership holds nobody is published with an \
-                 empty `members` list"
+                "artifact {index} of this publication carries neither `members` nor `excluding`, \
+                 and attaches to nothing. A record names the members its membership holds, or the \
+                 entities it leaves out (ingest.md §2.3); an artifact whose membership holds \
+                 nobody is published with an empty `members` list, and only an attached artifact \
+                 may omit both and be served over its target's membership (decision 0145)"
             )));
         }
     }

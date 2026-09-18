@@ -872,6 +872,13 @@ class Database:
             return report
         C.run(control, pages, report)
         self._record_terms(self._document())
+        # **A session's visible view set is fixed when it is authorised** (`views.md` §6), so a
+        # token minted before this commit cannot reach a view the commit created: `/v1/meta` read
+        # through it lists the views the session was built over and not the new one, and the next
+        # commit's plan — which reads `held_views` off that document — would create it again and
+        # take the 409 (issue #151). Dropped on the rule a newly inserted term already follows.
+        if any(page.kind in ("view_group", "view", "group_view") for page in pages):
+            self._viewer = None
         self.pending.clear()
         self._save_state()
         return report

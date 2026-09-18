@@ -149,16 +149,27 @@ def grouped(tmp_path, corpus):
         require_member_visibility="none",
         computed=(),
     )
+    # `shared` is one key on both views — two artifacts, because a key is unique per
+    # (layer, view) on a group-scoped layer (contracts §3.4 r84; issue #152).
     db.insert(
         "clusters",
-        artifacts=artifacts(["c0a", "c0b"], ["a", "b"]),
+        artifacts=artifacts(["c0a", "c0b", "shared", "shared"], ["a", "b", "a", "b"]),
         key="key",
         level="level",
         view="slice",
     )
     db.insert(
         "clusters",
-        members=pa.concat_tables([memberships("c0a", "a", IDS), memberships("c0b", "b", IDS)]),
+        members=pa.concat_tables(
+            [
+                memberships("c0a", "a", IDS),
+                memberships("c0b", "b", IDS),
+                # Half of each view's entities, and a different half in each: which artifact a
+                # member row joined is readable off the count rather than off a total.
+                memberships("shared", "a", IDS[:60]),
+                memberships("shared", "b", IDS[60:]),
+            ]
+        ),
         id="entity",
         key="key",
         level="level",
@@ -224,10 +235,22 @@ def test_a_group_scoped_attribute_filters_inside_the_view_it_was_read_for(groupe
 
 def test_a_scoped_layers_artifacts_are_keyed_per_view(grouped):
     """One artifact set per view of the group: each key is drawn on its own view and no other."""
-    on_a = {one["key"]: one["masked_count"] for one in browse(grouped, "slices:a", "clusters")["artifacts"]}
-    on_b = {one["key"]: one["masked_count"] for one in browse(grouped, "slices:b", "clusters")["artifacts"]}
+    rows_a = browse(grouped, "slices:a", "clusters")["artifacts"]
+    rows_b = browse(grouped, "slices:b", "clusters")["artifacts"]
+    on_a = {one["key"]: one["masked_count"] for one in rows_a}
+    on_b = {one["key"]: one["masked_count"] for one in rows_b}
     assert on_a["c0a"] == N and on_a.get("c0b", 0) == 0
     assert on_b["c0b"] == N and on_b.get("c0a", 0) == 0
+    # **`shared` is one key on two views, so it is two artifacts** (contracts §3.4 r84; issue
+    # #152) — two rows in the level's roster under one name, each holding its own members and
+    # counting zero on the view it does not belong to. Read as a list rather than as a map, a key
+    # no longer being unique within a level: each view's own row carries its own members, and the
+    # other view's row, where the roster reaches it, carries none of this view's.
+    counts = lambda rows: sorted(  # noqa: E731
+        one["masked_count"] for one in rows if one["key"] == "shared"
+    )
+    assert counts(rows_a) == [60], counts(rows_a)
+    assert counts(rows_b) == [0, N - 60], counts(rows_b)
 
 
 def test_a_later_commit_pages_an_insert_into_one_view_fills_a_family_and_adds_a_view(grouped):
@@ -276,11 +299,39 @@ def test_a_later_commit_pages_an_insert_into_one_view_fills_a_family_and_adds_a_
     assert filtered["counts"]["matched"] == 50
     # The view created in this commit answers, with the rows staged for it.
     assert viewport(db, "slices:c", FRAME)["counts"]["visible"] == len(added)
+    # And it is on `/v1/meta`, which is what a client lists views from: a session's visible view
+    # set is fixed when it is authorised (views.md §6), so the commit that created the view drops
+    # the token held before it (issue #151).
+    assert [view["id"] for view in db.meta()["views"]] == ["slices:a", "slices:b", "slices:c"]
+    assert db.meta()["groups"][0]["views"] == ["slices:a", "slices:b", "slices:c"]
     # The new artifact is drawn on the view its row named and on no other.
     on_b = {one["key"]: one["masked_count"] for one in browse(db, "slices:b", "clusters")["artifacts"]}
     assert on_b["c1"] == len(fresh)
     on_a = {one["key"]: one["masked_count"] for one in browse(db, "slices:a", "clusters")["artifacts"]}
     assert on_a.get("c1", 0) == 0
+
+
+def test_a_view_created_with_no_rows_is_listed_on_meta_and_is_not_created_twice(grouped):
+    """A roster record and nothing else: the view exists, `/v1/meta` says so, and a second commit
+    plans no create for it (views.md §3.2, contracts §3.4 r55; issue #151).
+
+    The commit that creates it sends no rows, so nothing flushes — which is the state a client
+    meets when it declares the views a producer is about to fill.
+    """
+    db = grouped
+    db.insert("slices", roster=roster(["c"]), key="key", label="label", starts="starts")
+    report = db.commit()
+    assert report.ok, report.refusals
+    assert report.plan[0] == "create view 'slices:c' of group 'slices'"
+
+
+    assert [view["id"] for view in db.meta()["views"]] == ["slices:a", "slices:b", "slices:c"]
+    assert viewport(db, "slices:c", FRAME)["counts"]["visible"] == 0
+
+    # The next commit reads the same document and plans nothing: a create of a key the group holds
+    # is a 409, so a stale view list is a commit that cannot run.
+    db.insert("slices", roster=roster(["c"]), key="key", label="label", starts="starts")
+    assert db.check().plan == []
 
 
 def test_a_plain_view_declared_after_the_first_commit_is_created_and_served(grouped):

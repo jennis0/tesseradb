@@ -1041,3 +1041,34 @@ def test_a_label_set_from_a_mapping_builds_and_is_served_with_its_text(served, c
     rows = artifact_rows_of(db, view="s0", frame=whole_frame(db))
     served_text = {key: content for layer, key, content, _ in rows if layer == "topics/second"}
     assert served_text == {"c2-a": ["Audio diffusion"], "c2-b": ["Graph learning"]}
+
+
+def test_a_memberless_attached_record_omits_members_and_an_unattached_one_sends_the_empty_list():
+    """A label with no members of its own carries no `members` field (decision 0145).
+
+    The route stopped requiring one on an attached record, and the empty list the SDK used to send
+    said the same thing. Omitting it is what the mapping form — a cluster key to a line of text —
+    actually means, and an unattached record still names its membership or is refused.
+    """
+    import json
+
+    from tesseradb._commit import _artifact_block
+
+    label = {
+        "key": "t0",
+        "attached": {"layer": "clusters", "key": "c0", "level": 0},
+        "content": [["Ward A"]],
+    }
+    body, remainders, count = _artifact_block(label, 4096)
+    record = json.loads(body)
+    assert "members" not in record, record
+    assert record["attached_to"] == {"layer": "clusters", "key": "c0", "level": 0}
+    assert remainders == [] and count == 0
+
+    # An attached record that does name members keeps them: they are the generating set the caller
+    # claimed, and the predicate is a state rather than a flag.
+    held = dict(label, members=[b"p0"])
+    assert "members" in json.loads(_artifact_block(held, 4096)[0])
+
+    # A record attaching to nothing has no membership to borrow, so the empty list still travels.
+    assert json.loads(_artifact_block({"key": "c0"}, 4096)[0])["members"] == []

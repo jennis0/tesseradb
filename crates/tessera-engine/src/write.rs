@@ -11898,6 +11898,7 @@ fn plan_fills(
 fn values_growth_records(
     memberships: &[tessera_lifecycle::ResolvedMembership],
     rows: &[tessera_lifecycle::IncomingValues],
+    store: &tessera_lifecycle::ArtifactStore,
 ) -> Result<Vec<WalRecord>, String> {
     use std::collections::BTreeMap;
     // Ordered, so the records a batch appends do not depend on hash iteration order: two nodes
@@ -11921,6 +11922,23 @@ fn values_growth_records(
             };
             // Entity space is `u32` by I9, so the narrowing is total.
             joining.add(entity.entity.raw() as u32);
+        }
+    }
+    // **What the artifact already holds is not a join** (`artifacts-from-points.md` §6.1). A page
+    // restating a membership the store carries would otherwise append a record that changes
+    // nothing and pins the log at it — the log is reclaimed up to the oldest record a generation
+    // still needs, so a producer re-sending its last page keeps the whole of it. `growth_record`
+    // drops an empty set, so subtracting here is what turns a restated page into no record at
+    // all, and `new_members_of` then reports the same zero from the record that is left.
+    //
+    // Read against the store *before* the batch is applied, which is the only moment the
+    // difference exists — [`Executor::commit_values`] holds the executor's one lock across the
+    // preparation, so nothing moves between this and the append.
+    for ((layer, level), ordinals) in &mut by_level {
+        for (ordinal, joining) in ordinals.iter_mut() {
+            if let Some(record) = store.get(layer, *level, *ordinal) {
+                joining.andnot_inplace(&record.members);
+            }
         }
     }
     Ok(by_level
@@ -14334,7 +14352,10 @@ impl Executor {
                 }
             }
         }
-        let growth = match values_growth_records(&memberships, &request.rows) {
+        let growth = match self
+            .live
+            .with_artifacts(|store| values_growth_records(&memberships, &request.rows, store))
+        {
             Ok(records) => records,
             Err(detail) => {
                 self.ack_failed(&respond, ExecError::ValuesRefused { detail });

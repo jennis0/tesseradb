@@ -294,6 +294,68 @@ async fn a_label_with_no_members_is_served_over_its_clusters_membership() {
     server.shutdown().await;
 }
 
+/// **An attached record may carry neither `members` nor `excluding`** (owner ruling, 2026-09-18,
+/// on decision 0145). The rule the decision states is a state and not a flag — an attached
+/// artifact with no members of its own is served over its target's — so the route has nothing to
+/// require of such a record, and the SDK's mapping form, a cluster key to a line of text, sends
+/// exactly that. A record attaching to nothing has no membership to borrow and keeps the refusal.
+///
+/// `members: []` on an attached record stays accepted and means the same thing, which the fixture
+/// above already publishes; what is new is the omission beside it.
+#[tokio::test]
+async fn an_attached_record_may_omit_members_and_an_unattached_one_may_not() {
+    let tmp = TempDir::new().unwrap();
+    let server = serve(&tmp).await;
+    register(&server, clusters()).await;
+    register(&server, topics()).await;
+
+    let (status, body) = put(
+        &server,
+        CLUSTERS,
+        json!([{ "key": "c", "members": members(0..30) }]),
+    )
+    .await;
+    assert_eq!(status, 201, "{body}");
+
+    // A record with no target and no membership: the refusal it has always been.
+    let (status, body) = put(&server, CLUSTERS, json!([{ "key": "bare" }])).await;
+    assert_eq!(status, 422, "{body}");
+    assert!(
+        body["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("neither `members` nor `excluding`"),
+        "{body}"
+    );
+
+    // The same record with a target is a label, and is served over the cluster's membership.
+    let (status, body) = put(
+        &server,
+        TOPICS,
+        json!([{
+            "key": "t",
+            "attached_to": { "layer": CLUSTERS, "key": "c" },
+            "content": [{ "values": ["shipping"] }]
+        }]),
+    )
+    .await;
+    assert_eq!(status, 201, "a label needs no membership of its own: {body}");
+    let label = id_of(&body, 0);
+
+    let wide = served(&server, &["0"]).await;
+    let served_label = row(&wide, TOPICS, "t").expect("the label is served with its cluster");
+    assert_eq!(served_label.content, vec!["shipping".to_string()]);
+    let (status, drilled) = drill(&server, &["0"], &label).await;
+    assert_eq!(status, 200, "{drilled}");
+    assert_eq!(
+        drilled["masked_count"], 30,
+        "and is counted over its target's members, exactly as an empty `members` list is: \
+         {drilled}"
+    );
+
+    server.shutdown().await;
+}
+
 /// Over every principal the fixture can produce, the label's masked count is the cluster's and the
 /// label is served exactly where the cluster is. Decision 0145 is that pair, so it is asserted as a
 /// pair.
