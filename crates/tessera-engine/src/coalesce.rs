@@ -373,11 +373,7 @@ pub(crate) fn plan_coalesce(
     // otherwise selected exactly as every other column. Whether a window's extents carry
     // dictionaries decides which merge `execute_coalesce` runs, never whether the window is taken.
     plan.attrs = column_windows(&manifest.attr_extents, policy, is_live, |extent| {
-        Some(
-            size_of(&extent.values)
-                + size_of(&extent.presence)
-                + extent.dict.as_deref().map_or(0, &size_of),
-        )
+        Some(extent.files().map(&size_of).sum())
     });
 
     // ---- record-blob extents: the fifth axis, one pseudo-column on the attribute policy -------
@@ -1196,11 +1192,7 @@ pub(crate) fn rebase_into(manifest: &mut SegmentsManifest, completed: &Completed
         .attrs
         .iter()
         .flat_map(|w| w.extents.iter())
-        .flat_map(|e| {
-            [e.values.clone(), e.presence.clone()]
-                .into_iter()
-                .chain(e.dict.clone())
-        })
+        .flat_map(|e| e.files().map(String::from))
         .collect();
     let text_paths: Vec<String> = plan
         .texts

@@ -403,27 +403,16 @@ pub(super) fn carried_files(
     rels.extend(forward.locators.iter().map(|e| e.path.clone()));
     rels.extend(forward.tiers.iter().cloned());
     for extent in &forward.attrs {
-        rels.insert(extent.values.clone());
-        rels.insert(extent.presence.clone());
-        rels.extend(extent.dict.iter().cloned());
-        rels.extend(extent.postings.iter().cloned());
-        rels.extend(extent.offsets.iter().cloned());
+        rels.extend(extent.files().map(String::from));
     }
     for extent in &forward.records {
-        rels.insert(extent.blocks.clone());
-        rels.insert(extent.hasrow.clone());
-        rels.insert(extent.directory.clone());
+        rels.extend(extent.files().map(String::from));
     }
     for extent in &forward.texts {
-        rels.insert(extent.dict.clone());
-        rels.insert(extent.postings.clone());
-        rels.insert(extent.presence.clone());
+        rels.extend(extent.files().map(String::from));
     }
     for extent in &forward.entity_terms {
-        rels.insert(extent.hasrow.clone());
-        rels.insert(extent.offsets.clone());
-        rels.insert(extent.terms.clone());
-        rels.insert(extent.bases.clone());
+        rels.extend(extent.files().map(String::from));
     }
     rels.extend(live_manifest.dict_extents.iter().map(|e| e.path.clone()));
     rels
@@ -1097,9 +1086,7 @@ impl Executor {
         // rather than through the digest loop above, from the held list rather than the manifest
         // (which can be behind the live generation).
         for extent in &self.artifact_record_extents {
-            carried_rels.push(extent.blocks.clone());
-            carried_rels.push(extent.hasrow.clone());
-            carried_rels.push(extent.directory.clone());
+            carried_rels.extend(extent.files().map(String::from));
         }
         if let Err(e) =
             tessera_store::hard_link_forward(&from_prefix_dir, &to_prefix_dir, &carried_rels)
