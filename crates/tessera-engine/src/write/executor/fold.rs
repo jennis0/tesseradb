@@ -1371,7 +1371,7 @@ impl Executor {
         retired: croaring::Bitmap,
     ) -> Result<(), String> {
         let (bundle, rotation) =
-            crate::session::open_rotation(&self.bundle_root, prefix, &live.fragments, retired)
+            crate::engine::open_rotation(&self.bundle_root, prefix, &live.fragments, retired)
                 .map_err(|e| format!("the folded prefix would not open ({e})"))?;
         let delta_postings = folded_tiers
             .iter()

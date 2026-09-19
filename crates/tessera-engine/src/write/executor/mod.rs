@@ -415,7 +415,7 @@ pub(super) struct PendingReclaim {
     prefix_dir: PathBuf,
     /// Every sidecar that was live over this prefix before the one the held generation carries.
     /// See [`Executor::superseded_sidecars`].
-    superseded_sidecars: Vec<std::sync::Weak<crate::session::ExternalIdIndex>>,
+    superseded_sidecars: Vec<std::sync::Weak<crate::engine::ExternalIdIndex>>,
 }
 
 /// Seconds since the Unix epoch, or `None` if the clock is before it.
@@ -676,7 +676,7 @@ pub(super) struct Executor {
     /// Every external-id sidecar replaced over the live prefix, weakly held: a `Weak` answers
     /// whether one is still alive without keeping its mappings alive itself. Moved into
     /// [`PendingReclaim`] at a fold.
-    pub(super) superseded_sidecars: Vec<std::sync::Weak<crate::session::ExternalIdIndex>>,
+    pub(super) superseded_sidecars: Vec<std::sync::Weak<crate::engine::ExternalIdIndex>>,
     /// Every membership extent this node has published: the complete list, not a diff, since a
     /// publication clones a manifest that may be stale and extending that clone would drop entries.
     pub(super) membership_extents: Vec<tessera_store::manifest::MembershipExtent>,

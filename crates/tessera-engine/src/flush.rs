@@ -451,17 +451,17 @@ fn entity_fill_as_item(
     fill: &tessera_lifecycle::Fill,
 ) -> BufferedItem {
     let manifest = &generation.bundle.manifest;
-    let mut blob = crate::session::BlobRow::default();
+    let mut blob = crate::write::joined::BlobRow::default();
     let mut scalars = fill.scalars.clone();
     for (at, declared) in manifest.declared_scalars.iter().enumerate() {
         let Some(value) = scalars.get(at) else {
             break;
         };
-        if crate::session::scalar_is_absent(value, declared) {
+        if crate::write::joined::scalar_is_absent(value, declared) {
             continue;
         }
-        if crate::session::flushed_scalar_of(generation, entity, at, &mut blob)
-            .is_some_and(|held| !crate::session::scalar_is_absent(&held, declared))
+        if crate::write::joined::flushed_scalar_of(generation, entity, at, &mut blob)
+            .is_some_and(|held| !crate::write::joined::scalar_is_absent(&held, declared))
         {
             scalars[at] = WalScalar::Null;
         }
@@ -481,16 +481,16 @@ fn scoped_fill_as_item(
     let families = crate::write::scoped_families_of_view(manifest, &fill.view);
     let mut scoped = fill.scoped.clone();
     for (at, family) in families.iter().enumerate() {
-        let declared = crate::session::declared_of_scoped(family);
+        let declared = crate::write::joined::declared_of_scoped(family);
         let Some(value) = scoped.get(at) else {
             break;
         };
-        if crate::session::scalar_is_absent(value, &declared) {
+        if crate::write::joined::scalar_is_absent(value, &declared) {
             continue;
         }
-        let held = crate::session::flushed_scoped_of(generation, entity, family, owner_view)
-            .is_some_and(|held| !crate::session::scalar_is_absent(&held, &declared))
-            || crate::session::flushed_scoped_text_present(generation, entity, family, owner_view);
+        let held = crate::write::joined::flushed_scoped_of(generation, entity, family, owner_view)
+            .is_some_and(|held| !crate::write::joined::scalar_is_absent(&held, &declared))
+            || crate::write::joined::flushed_scoped_text_present(generation, entity, family, owner_view);
         if held {
             scoped[at] = WalScalar::Null;
         }

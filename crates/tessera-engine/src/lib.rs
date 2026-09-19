@@ -16,11 +16,15 @@ pub mod cancel;
 mod categories;
 mod coalesce;
 mod compact;
+mod config;
 pub mod compose;
 pub mod containment;
+mod control;
 pub mod cut;
 pub mod derived;
 pub mod derived_cache;
+mod engine;
+mod error;
 pub mod filter;
 mod flush;
 pub mod gate;
@@ -39,8 +43,10 @@ pub mod session;
 pub mod shapes;
 mod single_flight;
 mod stage;
+mod status;
 pub mod suggest;
 pub mod suggest_set;
+mod test_hooks;
 pub mod tile_index;
 pub mod timing;
 pub mod view_declarations;
@@ -70,10 +76,12 @@ pub use compose::{
 // judgement, and a caller that could ask separately could also act on a stale answer.
 pub use gate::VisibleViews;
 pub use geometry::{GeometryPublication, GeometryRefused, GeometryRefusedReason};
-pub use session::{
-    default_compute_threads, Engine, EngineConfig, EngineError, GrownMembership, PartitionStatus,
-    PublishedArtifacts, Session, ViewSegments,
-};
+pub use config::{default_compute_threads, EngineConfig};
+pub use control::{GrownMembership, PublishedArtifacts};
+pub use engine::Engine;
+pub use error::EngineError;
+pub use session::Session;
+pub use status::{PartitionStatus, ViewSegments};
 // The row-projection cache's gauges. `single_flight` itself stays private — the cache, its slot
 // state machine and its four eviction rules are engine-internal — but the numbers
 // `/control/status` publishes have to cross the crate boundary.

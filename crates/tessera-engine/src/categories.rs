@@ -66,7 +66,8 @@ use tessera_analyse::SuggestionField;
 use tessera_store::manifest::{Visibility, VocabularyKind};
 use tessera_store::vocabulary::ABSENT_CODE;
 
-use crate::session::{EngineError, Result, Session};
+use crate::error::{EngineError, Result};
+use crate::session::Session;
 use crate::Engine;
 
 /// One category column, as `/v1/meta` publishes it.
