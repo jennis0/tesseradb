@@ -12,7 +12,7 @@ use tessera_authz::{DeltaTier, Dict, FragmentCache, PostingsReader};
 use tessera_lifecycle::wal::ChangeOp;
 use tessera_plugin::Plugin;
 use tessera_store::{Bundle, StoreError};
-use tessera_store::manifest::CurrentPointer;
+use tessera_store::manifest::{CurrentPointer, Declarations};
 use tessera_store::read::open_bundle;
 use tessera_store::vocabulary::Vocabularies;
 use tessera_types::{EntityId, IdentityKey};
@@ -324,26 +324,20 @@ impl Engine {
         config.check()?;
         let mut bundle = open_bundle(bundle_root).map_err(EngineError::Store)?;
 
-        // The attribute columns declared while the service ran, appended to the schema before
-        // anything reads it. The side manifests are the declaration's durable home; `MANIFEST.json`
-        // carries the build's columns and those a fold has since written.
-        // The view groups and plain views declared while the service ran, before the roster:
-        // `Manifest::with_roster` drops a creation whose group the manifest does not declare.
+        // Everything declared while the service ran, merged into the schema before anything reads
+        // it. The side manifests are the declaration's durable home; `MANIFEST.json` carries the
+        // build's columns and those a fold has since written.
         let (side_groups, side_plain_views) = side_manifest_view_declarations(&bundle);
-        bundle.manifest = bundle
-            .manifest
-            .with_groups(&side_groups)
-            .with_plain_views(&side_plain_views);
-
-        // The vocabularies declared while the service ran, before the columns that name them: a
-        // runtime column over a runtime vocabulary refuses to seed otherwise.
         let side_vocabularies = side_manifest_vocabularies(&bundle);
-        bundle.manifest = bundle.manifest.with_vocabularies(&side_vocabularies);
-
         let (side_attributes, side_scoped_attributes) = side_manifest_attributes(&bundle);
-        bundle.manifest = bundle
-            .manifest
-            .with_attributes(&side_attributes, &side_scoped_attributes);
+        bundle.manifest = bundle.manifest.with_declarations(&Declarations {
+            groups: &side_groups,
+            plain_views: &side_plain_views,
+            vocabularies: &side_vocabularies,
+            attributes: &side_attributes,
+            scoped_attributes: &side_scoped_attributes,
+            ..Declarations::default()
+        });
 
         // The plugin that serves a bundle must be the plugin that labelled it: every posting is
         // that implementation's output, and serving under a different one mislabels every item
@@ -558,7 +552,6 @@ impl Engine {
 
         // The vocabularies and attributes the log holds past the last publication.
         let runtime_vocabularies = write_state.vocabularies.snapshot(&vocabularies);
-        bundle.manifest = bundle.manifest.with_vocabularies(&runtime_vocabularies);
         let (runtime_attributes, runtime_scoped_attributes) = write_state.attributes.snapshot();
         let unfolded_attributes = write_state.attributes.entity_names();
         let plugin: Arc<dyn Plugin> = Arc::new(plugin);
@@ -592,6 +585,18 @@ impl Engine {
                     .iter()
                     .map(|c| (c.column.clone(), c.view.clone(), c.incarnation))
             });
+        let manifest = bundle.manifest.with_declarations(&Declarations {
+            groups: &runtime_groups,
+            plain_views: &runtime_plain_views,
+            vocabularies: &runtime_vocabularies,
+            attributes: &runtime_attributes,
+            scoped_attributes: &runtime_scoped_attributes,
+            created_views: &created_views,
+            dead_incarnations: &dead_incarnations,
+            scoped_columns: &scoped_columns,
+        });
+        // Only the view lists move the per-view map, so a log that declared none keeps the bundle
+        // `open_bundle` built rather than rebuilding every partition's map to the same thing.
         let bundle = if created_views.is_empty()
             && dead_incarnations.is_empty()
             && scoped_columns.is_empty()
@@ -600,17 +605,9 @@ impl Engine {
             && runtime_groups.is_empty()
             && runtime_plain_views.is_empty()
         {
+            bundle.manifest = manifest;
             Arc::new(bundle)
         } else {
-            // Groups and plain views first, so a creation lands on a group the manifest carries;
-            // then the runtime columns.
-            let manifest = bundle
-                .manifest
-                .with_groups(&runtime_groups)
-                .with_plain_views(&runtime_plain_views)
-                .with_attributes(&runtime_attributes, &runtime_scoped_attributes)
-                .with_roster(&created_views, &dead_incarnations)
-                .with_scoped_columns(&scoped_columns);
             Arc::new(bundle).with_views(manifest)
         };
 
@@ -962,9 +959,11 @@ pub(crate) fn open_rotation(
     // published carries the rest.
     let (side_attributes, side_scoped_attributes) = side_manifest_attributes(&bundle);
     let unfolded_attributes: Vec<String> = side_attributes.iter().map(|d| d.name.clone()).collect();
-    bundle.manifest = bundle
-        .manifest
-        .with_attributes(&side_attributes, &side_scoped_attributes);
+    bundle.manifest = bundle.manifest.with_declarations(&Declarations {
+        attributes: &side_attributes,
+        scoped_attributes: &side_scoped_attributes,
+        ..Declarations::default()
+    });
     let bundle = Arc::new(bundle);
     let (phash, partition) = bundle
         .partitions
