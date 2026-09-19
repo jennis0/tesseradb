@@ -5775,49 +5775,19 @@ struct Executor {
     /// Distinguishes two flush attempts at the same `segments_version` — see the `seg_id` this
     /// feeds.
     flush_attempt: u64,
-    /// The next `SEGMENTS-<n>.json` number to write, for the single partition this executor
-    /// publishes.
-    ///
-    /// **One allocator, on the one thread that writes manifests, and every writer of a
-    /// side-manifest takes its number from it** — flush, merge, coalesce, fold and overlay
-    /// publication alike. `n` is per-partition, monotone and never reused (contracts §2.3), and it
-    /// must be allocated by whoever writes at it: a number taken when a flush is *planned* is stale
-    /// by the time that flush lands, because a deny publication may have taken one during its
-    /// flight, and a flush committed beneath the newest manifest is a segment a restore never
-    /// reads.
-    ///
-    /// **The counter alone is not a floor**, which is why [`Executor::allocate_manifest_n`] raises
-    /// it over the files on disc at every allocation rather than only at the seed. A counter is
-    /// above what *this* executor has written; the numbers taken are the filenames present, and the
-    /// two differ wherever a second writer holds the same bundle root — the state a restart passes
-    /// through, whose two executors would otherwise advance in lockstep from one seed and collide
-    /// at every publication either made.
-    ///
-    /// Seeding from a manifest is the same gap standing still: a manifest names the files of its
-    /// own publication, and a side-manifest another writer left, or one an in-flight compaction's
-    /// unpublished prefix holds, is named by nothing.
+    /// The next `SEGMENTS-<n>.json` number. Every writer of a side-manifest takes its number here,
+    /// at the moment it writes: a number taken when a flush is planned is stale by the time it
+    /// lands. [`Executor::allocate_manifest_n`] also raises it over the files on disc, because a
+    /// counter only knows what this executor wrote.
     next_manifest_n: u64,
-    /// Whether the overlay holds deny state no side-manifest carries yet.
-    ///
-    /// Set by any window of changes — every remaining op is a `Delete`, `Suppress` or
-    /// `Unsuppress`, and each of the three moves state a manifest carries; cleared only by a
-    /// successful publication. It persists across a refused publication, which is what makes a node
-    /// that was poisoned or diverged publish once on its own after recovery rather than waiting for
-    /// its next deny.
+    /// Whether live state holds something no side-manifest carries yet. Cleared only by a
+    /// successful publication, so a node that was poisoned or diverged publishes once on recovery.
     deny_dirty: bool,
     /// Deny windows applied since the last publication — the counter
     /// [`OVERLAY_PUBLICATION_MAX_WINDOWS`] floors.
     windows_since_publication: u64,
-    /// The bundle root. **Not the prefix directory, and that is the fourth gap of compaction §4.**
-    ///
-    /// A flush publishes *inside* the live prefix — never `MANIFEST.json`, never `CURRENT` — which
-    /// is what separates it from a compaction, and for as long as nothing could publish a new
-    /// prefix a directory captured once was the same value. A fold breaks that: the first deny
-    /// published after a flip would write its side-manifest into the prefix reclamation is about
-    /// to delete, which is acked deny state gone from the restore path with no error anywhere.
-    /// Storing a second copy and rotating it is not the fix — it is one more thing to miss at one
-    /// of eight call sites. [`Executor::prefix_dir`] derives it from the live generation instead,
-    /// and a derived value cannot go stale.
+    /// The bundle root, not the prefix directory. A fold moves the prefix, so
+    /// [`Executor::prefix_dir`] derives the directory from the live generation at each use.
     bundle_root: PathBuf,
     identity_key: IdentityKey,
     /// The shared compute pool a flush executes on (§1.1), and the handle it submits its completed
@@ -5825,16 +5795,9 @@ struct Executor {
     pool: Arc<rayon::ThreadPool>,
     /// See [`MaintenanceDeps::max_distinct_terms`].
     max_distinct_terms: u64,
-    /// Completed flushes arriving from the pool (§1.1).
-    ///
-    /// **Its own channel, not the bounded work queue**, for two reasons. A completed flush may not
-    /// be shed — there is no 429 for a unit whose files are already durable, and shedding one
-    /// would leave a committed side-manifest with nothing publishing it. And `LifecycleHandle` is
-    /// deliberately not `Clone` (`WritePath::drop` joins the thread, which needs one owner), so a
-    /// pool task cannot hold one.
-    ///
-    /// Drained **after** the deny lane, exactly as work is: that ordering is what keeps a
-    /// suppression from queueing behind a flush's publication.
+    /// Completed flushes arriving from the pool. Its own channel: a completed flush's files are
+    /// durable and may not be shed, and a pool task cannot hold the handle. Drained after the deny
+    /// lane, so a suppression never queues behind a flush's publication.
     flush_done: Receiver<crate::flush::CompletedFlush>,
     /// The entity-space coalesce's policy, its in-flight flag, its attempt counter and its own
     /// completion channel — the same three-part shape a flush has, and separate from a flush's for
@@ -5859,15 +5822,8 @@ struct Executor {
     merge_attempt: u64,
     merge_done: Receiver<crate::merge::CompletedMerge>,
     merge_submit: Sender<crate::merge::CompletedMerge>,
-    /// **The compaction fold** — the same in-flight flag, attempt counter and completion channel
-    /// the other three maintenance passes have, and one thing none of them has: its own thread.
-    ///
-    /// A fold's input is the corpus, and `flush`, `merge` and `coalesce` all execute on the shared
-    /// rayon pool a viewport's tile loop installs onto. Occupying request-serving workers for the
-    /// minutes-to-hours a fold takes is the maintenance schedule leaking into the product that
-    /// decision 0043 forbids, so [`Executor::dispatch_fold`] spawns a plain thread and the fold
-    /// stays sequential on it (compaction §3, which also takes the memory bound sequential
-    /// execution gives: there are no per-worker buffers to multiply).
+    /// The compaction fold's in-flight flag. A fold runs on its own thread, not the shared pool:
+    /// it takes minutes to hours and the pool serves viewports.
     fold_in_flight: Arc<AtomicBool>,
     fold_attempt: u64,
     fold_done: Receiver<crate::compact::CompletedFold>,
@@ -5892,74 +5848,18 @@ struct Executor {
     merge_publication_paused: Arc<AtomicBool>,
     /// See [`crate::compact::CompactionSchedule`]. Consulted at the tick, beside the flush's own.
     compaction: crate::compact::CompactionSchedule,
-    /// When the last fold attempt **started**, as a Unix timestamp — half of the operand
-    /// `compaction_min_interval_secs` is measured from. See [`Executor::fold_floor_from`] for the
-    /// rule and [`ExecutorHealth::fold_ended_unix`] for the other half.
-    ///
-    /// **Stamped by every dispatch, whatever the attempt then does**, and that is what makes the
-    /// interval a rate limit rather than a success-rate limit. Several discard causes are
-    /// *persistent* — the merge-size relation against a small corpus, a carried file with no digest
-    /// — and a discard leaves the gauge that dispatched the fold exactly where it was. Stamped only
-    /// on success, the next tick would redispatch, rewrite the whole corpus, discard again, and
-    /// repeat for ever, each iteration leaving a complete prefix `CURRENT` never named and which
-    /// no sweep reclaims. One bad configuration value would fill the device and take the write
-    /// path down with it.
-    ///
-    /// Process-local, and `crate::compact::due` argues why that is harmless for the *success*
-    /// case: both gauges are read against the bundle a fold itself produced.
+    /// When the last fold attempt started, as a unix second. Stamped by every dispatch whatever the
+    /// attempt then does, so the interval limits attempts: several discard causes are persistent,
+    /// and each discarded fold leaves a whole prefix on disc. See [`Executor::fold_floor_from`].
     last_fold_start_unix: Option<u64>,
-    /// Every external-id sidecar that has been **replaced** over the live prefix, weakly.
-    ///
-    /// **A `Weak`, and that is the whole trick.** The question reclamation has to answer is "can any
-    /// live generation still resolve a path under this prefix", and a generation resolves external
-    /// ids through its sidecar. A flush publishes by *cloning* the live sidecar `Arc`, so one
-    /// pointer answers for every generation a flush produced — which is what
-    /// [`Executor::reclaim_superseded_prefixes`] counts. **A coalesce does not**: it builds a new
-    /// sidecar over the same prefix, so a generation still holding the pre-coalesce one is invisible
-    /// to that count, and unlinking the tree under it turns its next external-id lookup into a typed
-    /// IO error. Holding the old sidecars *strongly* would answer the question and keep their
-    /// mappings alive for the prefix's whole life; a `Weak` answers it and costs a pointer.
-    ///
-    /// Pruned at each push, so a long-lived prefix does not accumulate dead entries, and moved into
-    /// the [`PendingReclaim`] at a fold's publication — the new prefix starts with none.
+    /// Every external-id sidecar replaced over the live prefix, weakly. A coalesce builds a new
+    /// sidecar over the same prefix, so a generation still holding the old one is invisible to the
+    /// strong counts [`Executor::reclaim_superseded_prefixes`] reads; a `Weak` answers whether one
+    /// is still alive without keeping its mappings. Moved into the [`PendingReclaim`] at a fold.
     superseded_sidecars: Vec<std::sync::Weak<crate::session::ExternalIdIndex>>,
-    /// Superseded prefixes awaiting reclamation, each held by the generation that named it.
-    ///
-    /// **The `Arc` is the wait.** Compaction §8 reclaims the old prefix whole, and lifecycle §2
-    /// adds that prefix deletion waits on the requests still finishing against it. Unlinking a
-    /// *mapped* file is safe on POSIX — `reclaim.rs` rests on exactly that — but the external-id
-    /// sidecar opens its runs lazily, so a request holding the superseded generation could still
-    /// be about to `File::open` a path under that tree. Holding the generation and reclaiming only
-    /// once nothing else holds it turns that window into a wait: the pointer has already moved, so
-    /// no new holder can appear and the count falls monotonically to one.
-    ///
-    /// **The sidecar's own count is asked too, and it is the one that reaches furthest.** The
-    /// hazard is a *lazy* open: `ExternalIdSidecar` maps each run and locator extent at first touch,
-    /// so a request that loaded a generation over the old prefix and has not yet resolved an
-    /// external id will `File::open` a path under the deleted tree. A flush publishes by cloning
-    /// the live sidecar `Arc`, so every generation a flush produced over this prefix shares one —
-    /// and waiting on that `Arc` sees them all, where waiting on the fold's own superseded
-    /// generation sees only itself.
-    ///
-    /// ⊘ **It is a narrowing, not a proof.** A coalesce publishes a *new* sidecar over the same
-    /// prefix, so a generation still holding the pre-coalesce one is invisible to both counts. The
-    /// residual is a request that fails with a typed IO error — never a wrong answer, since the
-    /// paths simply cease to exist — and closing it properly means tracking every live generation
-    /// per prefix, which nothing does today.
-    ///
-    /// A `Vec` rather than an `Option` because several folds may run in one process and a busy
-    /// generation may outlive the next fold's snapshot. What it does **not** cover is a process
-    /// that exits first: the tree then stands as an orphan until something sweeps it, which is
-    /// compaction §7's startup sweep and is not built.
-    /// Every membership extent this node has published, **complete current state** rather than a
-    /// diff.
-    ///
-    /// **Held here because the manifest a publication starts from is stale.** Both publication paths
-    /// clone the *live generation's* manifest, and a side-manifest write does not swap the
-    /// generation — so a second publication that merely extended its clone would drop the first
-    /// publication's entries, and every artifact in them would come back absent at the next open.
-    /// The deny list solves the identical problem by writing complete state from the live overlay;
-    /// this is that posture for a list the overlay does not hold.
+    /// Every membership extent this node has published: the complete list, not a diff. Held here
+    /// because a publication starts from a clone of the live generation's manifest, which a
+    /// side-manifest write does not refresh; extending the clone would drop earlier entries.
     membership_extents: Vec<tessera_store::manifest::MembershipExtent>,
     /// Every derived file the current prefix holds. Held here because a publication clones a
     /// manifest that may be stale. What reaches a manifest is this list filtered to the files the
@@ -5970,25 +5870,21 @@ struct Executor {
     /// the reason above and written the same way. The two lists travel together: a membership
     /// without its content leaves an artifact whose description cannot be read, which withholds it.
     artifact_record_extents: Vec<tessera_store::manifest::RecordExtent>,
+    /// Superseded prefixes awaiting reclamation, each held by the generation that named it. A
+    /// prefix is deleted only once nothing else holds that generation or its external-id sidecar,
+    /// because the sidecar opens its files lazily and a request could still be about to. A process
+    /// that exits first leaves the tree for the startup sweep.
     pending_reclaim: Vec<PendingReclaim>,
-    /// The sender pool tasks are given a clone of.
-    ///
-    /// **Nothing rings the doorbell when a flush completes**, and that is deliberate twice over.
-    /// A completed flush is picked up at the next tick, which is what §1.3 requires anyway — every
-    /// geometry publication is on one cadence — so ringing would only publish *off* it. And an
-    /// executor holding a clone of its own doorbell sender would keep the bell channel alive for
-    /// ever, so `wait_for_work` would never observe the disconnect and `WritePath::drop`'s join
-    /// would hang: the shutdown path depends on this thread owning no sender of its own.
+    /// The sender pool tasks are given a clone of. Nothing rings the doorbell when a flush
+    /// completes: it is picked up at the next tick, and an executor holding its own doorbell sender
+    /// would never see the disconnect that shuts it down.
     flush_submit: Sender<crate::flush::CompletedFlush>,
     /// When the last tick fired. Started at construction, so the first tick is one period after
     /// the executor starts rather than immediately at startup.
     last_tick: std::time::Instant,
-    /// **What every accepted write since the last tick did to each level's row forms**, keyed by
-    /// `(layer, level)` and applied at the next tick (`ingest.md` §1.3, §10 ruling 6).
-    ///
-    /// The deltas of one level carry consecutive level versions, which is what lets a form be
-    /// brought from wherever it stands to the store's present. A level the fold rewrites has its
-    /// entry dropped with its forms: those deltas describe records that no longer exist.
+    /// What every accepted write since the last tick did to each level's row forms, applied at the
+    /// next tick. One level's deltas carry consecutive level versions. A level the fold rewrites
+    /// has its entry dropped with its forms.
     pending_forms: std::collections::BTreeMap<(String, u32), Vec<crate::artifacts::LevelDelta>>,
     /// The WAL's sequence position after the last rotation (or at start), so a tick can tell
     /// whether the log has grown since — the deny-only regime's rotation trigger (owner-ruled
