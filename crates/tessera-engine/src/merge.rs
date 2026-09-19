@@ -1,38 +1,11 @@
-//! The **row-space** merge: selection on the executor, execution on the pool, publication by
-//! rebase — the half of merge that permutes row ids, and the one decision 0044's D1 mechanism
-//! gates.
+//! The row-space merge. It collapses an adjacent run of one view's flushed segments into one
+//! segment, so a viewport resolves each tile against fewer segments. The executor selects the
+//! run, the background pool writes the merged segment, and the executor publishes it by
+//! rebasing the live manifest.
 //!
-//! Its entity-space twin is [`crate::coalesce`], which publishes without moving a row. What is
-//! left to this module is the axis that half cannot bound: **segments**. A tile resolves to one
-//! contiguous range per live segment (arch §11.3), so a viewport pays a binary search and a
-//! `range_cardinality` per segment per tile — ~tens of milliseconds at 1,000 segments, which a
-//! 90 s tick reaches in a day of sustained ingest.
-//!
-//! ## What makes this the gated half
-//!
-//! A merge collapses an adjacent run of extents into one, so **a row id inside the merged span
-//! names a different entity afterwards** (I11; `geometry-pinning.md` §4). Two consequences, and
-//! neither is optional:
-//!
-//! - **No row-space artefact may key on the prefix.** `segments_version` is the only safe
-//!   discriminator, and the row-projection cache keys on it (`crate::cache`'s fact 2).
-//! - **Stale-serve is unsound across it.** Decision 0044's rung 2 serves a one-generation-stale
-//!   projection, which is exact for a flush because a flush appends; across a merge the stale
-//!   entry's bits inside the span are simply wrong. `RowProjection::extends_to` refuses, and the
-//!   request falls to rung 3 — a **429 for the refresh's bounded duration**, which is the residual
-//!   0044 permits and the reason a merge is published as its own swap (D3) rather than riding a
-//!   flush's.
-//!
-//! What keeps that residual short is the refresh's second rung: an extents-only re-projection
-//! (`RowProjection::rebase_extents`) rather than the *measured* 1 277 ms full rebuild.
-//!
-//! ## What a merge must not do
-//!
-//! **Drop a row.** Reclaiming a tombstoned row is the compaction *fold*, which is
-//! invariant-bearing work this layer must not perform; `execute_merge` is row-count preserving and
-//! says so at the function. **Consume the base segment.** Its files live in `MANIFEST.files`, so a
-//! merge that took it would need a new prefix — compaction under another name — and the enforced
-//! relation is that `max_merged_segment_bytes` sits strictly below the base segment's size.
+//! A row id inside the merged span names a different entity afterwards. Anything cached in row
+//! space must therefore be keyed on `segments_version`. A merge keeps every row; removing
+//! deleted rows is the fold's work. It takes extents only and leaves the base segment alone.
 
 use tessera_store::manifest::SegmentDescriptor;
 use tessera_store::merge::{execute_merge, MergeInput, MergePolicy, MergeSpec};
@@ -45,36 +18,32 @@ use crate::Generation;
 
 /// One merge's immutable plan: the segments it consumes, in listed (entity) order.
 ///
-/// **Named by `seg_id`, never by index.** Ids are never reused (contracts §2.1), so a `seg_id`
-/// still present in the live generation at publication is the same segment the merge consumed —
-/// which is what makes the rebase ABA-safe against the flushes that published while it ran.
+/// Segments are named by `seg_id`, never by index. Ids are never reused, so a `seg_id` still
+/// present in the live generation at publication is the same segment the merge consumed, even
+/// if a flush published while the merge ran.
 pub(crate) struct MergePlan {
     pub(crate) partition: String,
     pub(crate) view: String,
-    /// The incarnation of `view` the inputs carry and the output takes (decision 0115). A merge
-    /// never crosses a drop: its inputs are the live row space's own extents.
+    /// The incarnation of `view` the inputs carry and the output takes. A merge never crosses a
+    /// drop: its inputs are the live row space's own extents.
     pub(crate) incarnation: tessera_types::view::ViewIncarnation,
     pub(crate) inputs: Vec<MergeInput>,
-    /// Where the merged extent begins in view row space — the first consumed extent's `row_base`.
+    /// Where the merged extent begins in view row space: the first consumed extent's `row_base`.
     pub(crate) row_base: u32,
 }
 
 /// Select a merge over `generation`, or `None` if nothing qualifies.
 ///
-/// Pure, so the selection is testable without an executor. Sizes come from the manifest's `files`
-/// map rather than the filesystem: a merge's inputs are files this process wrote and digested, and
-/// stat-ing them per tick would put IO on the executor thread for a decision it can make from
-/// state it already holds.
+/// Sizes come from the manifest's `files` map rather than stat-ing the filesystem, so selection
+/// stays IO-free.
 pub(crate) fn plan_merge(generation: &Generation, policy: MergePolicy) -> Option<MergePlan> {
     let (partition, partition_data) = generation.bundle.partitions.iter().next()?;
     if partition_data.stepped_down() {
         return None;
     }
     for (view, view_data) in &partition_data.views {
-        // **The view's live incarnation, or this view is not merged** (decision 0115). The bundle
-        // and its manifest are brought into step by `Bundle::with_views`, so a mismatch here is a
-        // state the composition already refuses to serve; failing closed costs a merge and never
-        // publishes one over a dead row space.
+        // Use the view's live incarnation, or skip it. A mismatch between the bundle and its
+        // manifest is a state the composition already refuses to serve.
         let incarnation = view_data.incarnation;
         if !generation
             .bundle
@@ -83,9 +52,8 @@ pub(crate) fn plan_merge(generation: &Generation, policy: MergePolicy) -> Option
         {
             continue;
         }
-        // **Only extents may be merged, never the base segment.** The base is the one segment with
-        // no extent — `permutation.bin` addresses it — so restricting selection to the extent list
-        // excludes it structurally rather than by the size bound alone.
+        // Only extents may be merged. The base segment has no extent; `permutation.bin`
+        // addresses it, and it is excluded by only ever selecting from the extent list.
         let extents = view_data.row_space.extents();
         if extents.len() < policy.tier_width {
             continue;
@@ -160,19 +128,12 @@ pub(crate) struct MergeContext {
     pub(crate) shard_id: u32,
     pub(crate) scalar_schema: Vec<(String, tessera_spatial::tiler::ScalarType)>,
     /// The columns an input segment may lawfully lack: the view's group-scoped render lanes and
-    /// the entity-scoped columns declared at a running service and not yet folded
-    /// (`tessera_store::segment_cursor::gather_scalars`). Any other missing column is a torn
-    /// segment and fails the merge.
+    /// the entity-scoped columns declared at a running service and not yet folded. Any other
+    /// missing column is a torn segment and fails the merge.
     pub(crate) absent_ok: Vec<String>,
-    /// The live partition watermark and allocator high-water, **passed through untouched**. A
-    /// merge moves neither: deriving `entity_hi + 1` from the inputs would move the watermark
-    /// *backwards* on any interior merge, and composition treats everything at or above it as
-    /// buffer-resident — so entities that already have rows would be looked for in a buffer that
-    /// no longer holds them. See `MergeSpec::watermark`.
-    ///
-    /// **Plan-time snapshots, and publication never reads them back**: a flush publishing during
-    /// this merge's flight advances the live values, so [`rebase_into`] keeps the cloned live
-    /// manifest's own — these exist only because `execute_merge`'s output shape requires them.
+    /// The live partition watermark and allocator high-water, passed through untouched. These are
+    /// plan-time snapshots; [`rebase_into`] writes the live manifest's own values instead, which
+    /// may have advanced past these if a flush published during the merge.
     pub(crate) watermark: u64,
     pub(crate) entity_id_high_water: u64,
 }
@@ -185,30 +146,11 @@ pub(crate) struct CompletedMerge {
     pub(crate) segment: SegmentData,
 }
 
-/// Turn a plan into durable files. **Runs on the background pool, over immutable inputs.**
+/// Turn a plan into durable files. Runs on the background pool, over immutable inputs.
 ///
-/// # Memory: the row-space half streams, the entity-space half does not
-///
-/// The **measured 4.4–4.9× peak over the inputs' on-disk bytes**
-/// (`probes/2026-08-04-maintenance-memory/`) was taken against a merge that decoded every input
-/// into `TilerItem`s at once and doubled again at the sort. That multiplier — not the policy — is
-/// why decision 0049 ruled `max_merged_segment_bytes` may not be raised: a cap that bounds
-/// selection-time *file* bytes is a memory bound only through it, and 256 MiB modelled to a
-/// ~1.1–1.3 GB pool transient.
-///
-/// `execute_merge` now k-way merges its inputs' mapped bytes into a streaming segment writer
-/// (`tessera_store::write::SegmentWriter`), so the columns no longer materialise at all. **The
-/// figure above is therefore stale rather than wrong, and nothing here has re-measured it** —
-/// which is why the cap is unchanged. What still materialises is the **external-id runs**:
-/// `read_runs` collects every consumed run's `(key, entity)` pairs before the coalesce sorts them,
-/// and that term now dominates a merge's peak. Streaming it is compaction's pass 3.
-///
-/// Re-measuring is the precondition for raising the cap, and decision 0049 already makes that a
-/// separate ruling rather than a consequence of this one.
-///
-/// **What remains unmeasured on any version**: tier coalescence (postings rather than rows — the
-/// probe's shape does not transfer) and the **sum** when a flush, a merge and a coalesce overlap on
-/// this pool, which nothing bounds.
+/// `execute_merge` streams row and column data through the segment writer. It still materialises
+/// every consumed external-id run's `(key, entity)` pairs before sorting them, which dominates a
+/// merge's peak memory.
 pub(crate) fn execute(
     plan: MergePlan,
     ctx: MergeContext,
@@ -251,20 +193,14 @@ pub(crate) fn execute(
 
 /// Apply `completed` to `manifest` in place, or `false` if it no longer rebases.
 ///
-/// **Three lists move and one deliberately does not.**
+/// Three lists move and one does not.
 ///
 /// - `segments`: the consumed descriptors out, the merged one in at the first's position.
-/// - `external_id_runs` and `locator_extents`: `execute_merge` coalesced the consumed segments'
-///   runs into the merged segment's own, so the consumed entries go and the merged one takes the
-///   **first's position** — recency is list position, and decision 0047's resolution reads it
-///   newest-first. Required to be contiguous, for the same reason [`crate::coalesce`] requires it:
-///   a merged run at a position it did not earn answers a stale binding.
-/// - **`deltas` does not move, and that is the rule most easily got wrong.** A tier's postings are
-///   `(term, entity)` pairs and carry no row, so a row-space merge has no business rewriting them
-///   — and the consumed segments' entities still have rows, in the merged segment, so dropping a
-///   tier would make every item it carries invisible to every session. Their files therefore stay
-///   digested in `files` too; what leaves is only the four row-space files the merged segment
-///   replaces. Bounding the tier axis is [`crate::coalesce`]'s job, on its own cadence.
+/// - `external_id_runs` and `locator_extents`: the consumed entries go and the merged run takes
+///   the first's position, because resolution reads these lists newest-first by position. They
+///   must stay contiguous, or a merged run at the wrong position answers a stale binding.
+/// - `deltas` is unchanged: a tier's postings are `(term, entity)` pairs and name no row, and
+///   the consumed segments' entities still have rows in the merged segment.
 pub(crate) fn rebase_into(
     manifest: &mut tessera_store::manifest::SegmentsManifest,
     completed: &CompletedMerge,
@@ -314,14 +250,9 @@ pub(crate) fn rebase_into(
         .locator_extents
         .splice(locators, [completed.output.locator_extent.clone()]);
 
-    // The four row-space files the merged segment replaces, and any presence bitmaps beside them
-    // (decision 0064) — the merged segment carries its own, permuted. `delta.arrow` is **not**
-    // among them — see this function's doc.
-    //
-    // The bitmaps go by prefix rather than by name because which columns have one is a property of
-    // the consumed segments' *contents*, not of the schema: a column with no absence in a given
-    // segment has no file there. A name left behind here is a manifest naming a file the reclaim
-    // has removed, which refuses at the next open.
+    // Remove the row-space files and any presence bitmaps the merged segment replaces; the
+    // merged segment carries its own, permuted. Bitmaps are removed by prefix because a column
+    // with no absence in a given segment has no bitmap file there.
     for seg_id in &consumed {
         let seg_rel = format!(
             "partitions/{}/{}/segments/{seg_id}",
@@ -349,14 +280,8 @@ pub(crate) fn rebase_into(
             .iter()
             .map(|(rel, digest)| (rel.clone(), digest.clone())),
     );
-    // `watermark` and `entity_id_high_water` keep the values `manifest` — a clone of the *live*
-    // partition manifest, taken at publication — already carries. Those are the live values, and
-    // the live values are what a merge publishes: it moves no entity into or out of the visible
-    // set, so it has nothing to say about either (write-path §7). The completed unit's own copies
-    // are plan-time snapshots, one flush stale whenever a flush published during the merge's
-    // flight; a manifest stamped from them regresses on disc while the generation keeps the live
-    // value, which `check_manifest_publishable` now refuses at the commit rather than trusting
-    // every rebase to remember.
+    // `watermark` and `entity_id_high_water` stay as the live manifest has them. A merge moves no
+    // entity, and the plan's copies may be one flush old.
     true
 }
 
