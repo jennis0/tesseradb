@@ -359,7 +359,8 @@ impl SuggestionFold {
     }
 
     /// Every entry one value contributes: the whole key, the whole title where there is one, and
-    /// every word start after the first of the title, or of the key where there is no title.
+    /// every word start of the title, or of the key where there is no title, that the whole entry
+    /// does not already begin at.
     ///
     /// A whole entry that folds to the empty string is dropped: it would sit at the lower bound of
     /// every prefix range and stands for nothing a caller could type.
@@ -408,8 +409,8 @@ impl SuggestionFold {
         entry: &str,
         field: SuggestionField,
     ) -> Vec<SuggestionEntry> {
-        let folded_starts = self.word_starts(entry.char_indices());
-        let served_starts = self.word_starts(served.chars().enumerate());
+        let folded_starts = self.word_starts(entry.char_indices(), 0);
+        let served_starts = self.word_starts(served.chars().enumerate(), served_start(served));
         if folded_starts.len() != served_starts.len() {
             return Vec::new();
         }
@@ -425,20 +426,20 @@ impl SuggestionFold {
             .collect()
     }
 
-    /// The position of every word start after the first, over `(position, character)` pairs:
-    /// byte positions for an entry string, character positions for a served one.
+    /// The position of every word start over `(position, character)` pairs: byte positions for an
+    /// entry string, character positions for a served one.
     ///
-    /// The first word is skipped wherever it begins, because the whole-string entry stands for it.
-    fn word_starts(&self, chars: impl Iterator<Item = (usize, char)>) -> Vec<usize> {
+    /// A word that starts at `whole`, where the whole-string entry begins, is left out: that entry
+    /// stands for it. A first word behind a bracket is kept, so `draft` finds `[Draft] Notes`.
+    fn word_starts(&self, chars: impl Iterator<Item = (usize, char)>, whole: usize) -> Vec<usize> {
         let mut previous = false;
         chars
             .filter_map(|(at, c)| {
                 let wordish = self.wordish(c);
                 let starts = wordish && !previous;
                 previous = wordish;
-                starts.then_some(at)
+                (starts && at != whole).then_some(at)
             })
-            .skip(1)
             .collect()
     }
 
@@ -478,7 +479,7 @@ mod tests {
     use super::*;
 
     fn word_starts<'a>(s: &SuggestionFold, entry: &'a str) -> Vec<&'a str> {
-        s.word_starts(entry.char_indices())
+        s.word_starts(entry.char_indices(), 0)
             .into_iter()
             .map(|at| &entry[at..])
             .collect()
@@ -510,24 +511,29 @@ mod tests {
         );
     }
 
-    /// The first word is skipped wherever it begins, in the entry string and the served string
-    /// alike. If the two disagreed, `entries_of` would drop every word start of the value.
+    /// The whole entry of `[Draft] Machine Learning` opens with `[`, so its first word is reached
+    /// by a word start and not by the whole entry.
     #[test]
-    fn a_leading_non_word_character_does_not_make_the_first_word_a_start() {
+    fn a_first_word_behind_a_non_word_character_is_a_word_start() {
         let s = SuggestionFold::new();
         for (served, want) in [
-            ("(cs.LG)", vec!["lg)"]),
+            ("(cs.LG)", vec![("cs.lg)", 1), ("lg)", 4)]),
             (
                 "[Draft] Machine Learning",
-                vec!["machine learning", "learning"],
+                vec![
+                    ("draft] machine learning", 1),
+                    ("machine learning", 8),
+                    ("learning", 16),
+                ],
             ),
-            ("  ...cs.LG", vec!["lg"]),
+            ("  ...cs.LG", vec![("cs.lg", 5), ("lg", 8)]),
+            ("  cs.LG", vec![("lg", 5)]),
         ] {
             let entries = s.entries_of("k", Some(served));
-            let starts: Vec<&str> = entries
+            let starts: Vec<(&str, u32)> = entries
                 .iter()
                 .filter(|e| e.kind == EntryKind::WordStart)
-                .map(|e| e.entry.as_str())
+                .map(|e| (e.entry.as_str(), e.start))
                 .collect();
             assert_eq!(starts, want, "{served:?}");
         }
