@@ -280,7 +280,8 @@ pub(crate) struct RefreshDeps {
     /// inline-rebuild herd decision 0044's D2 withdrew the pre-swap refresh to avoid, arriving
     /// through duration instead of through omission.
     pub(crate) in_flight: Arc<std::sync::atomic::AtomicU64>,
-    pub(crate) refreshes: Arc<std::sync::atomic::AtomicU64>,
+    /// `refreshes`, the entries this pass has produced.
+    pub(crate) counters: Arc<crate::status::ServeCounters>,
     /// `refresh_enabled`, whether the pass runs at all, and `refresh_paused`, whether it **holds**.
     /// A test disables it to model a refresh that **produces nothing and finishes** — the degraded
     /// case, where the in-flight flag clears and the ladder's rung 3 becomes a build rather than a
@@ -303,7 +304,7 @@ impl RefreshDeps {
         let cache = Arc::clone(&self.cache);
         let pool = Arc::clone(&self.pool);
         let in_flight = Arc::clone(&self.in_flight);
-        let refreshes = Arc::clone(&self.refreshes);
+        let counters = Arc::clone(&self.counters);
         // The generation this pass is for. Taken before the early return so both exit paths
         // release only their own claim — see [`clear_if_current`].
         let mine = generation.segments_version;
@@ -321,7 +322,7 @@ impl RefreshDeps {
                 std::thread::sleep(std::time::Duration::from_millis(2));
             }
             let produced = refresh_resident(&cache, &pool, &generation, &projection_routes);
-            refreshes.fetch_add(produced as u64, Ordering::Relaxed);
+            counters.refreshes.fetch_add(produced as u64, Ordering::Relaxed);
             clear_if_current(&in_flight, mine);
         });
     }

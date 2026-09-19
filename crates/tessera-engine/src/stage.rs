@@ -115,9 +115,9 @@ pub(crate) struct LadderTask {
 
 /// The engine handles one fill runs against, taken once at [`crate::Engine::open`].
 pub(crate) struct StageDeps {
-    /// [`crate::Engine::occupancy_walks`]' counter, shared rather than duplicated: a walk this
-    /// fill makes is a walk of the same mask and the same column as a request's.
-    pub(crate) walks: Arc<std::sync::atomic::AtomicU64>,
+    /// `occupancy_walks`, shared rather than duplicated: a walk this fill makes is a walk of the
+    /// same mask and the same column as a request's.
+    pub(crate) counters: Arc<crate::status::ServeCounters>,
     pub(crate) occupancy:
         Arc<crate::single_flight::SingleFlightCache<OccupancyKey, OccupiedTiles>>,
     pub(crate) pool: Arc<rayon::ThreadPool>,
@@ -160,9 +160,9 @@ impl StageDeps {
         debug_assert_eq!(task.token_id, token_id, "the task must be this session's");
         let occupancy = Arc::clone(&self.occupancy);
         let in_flight = Arc::clone(&self.in_flight);
-        let walks = Arc::clone(&self.walks);
+        let counters = Arc::clone(&self.counters);
         self.pool.spawn(move || {
-            run(&occupancy, &walks, &task, &cancel);
+            run(&occupancy, &counters, &task, &cancel);
             // However it ended — completion, cancellation, a view that could not be resolved —
             // this session is no longer filling and the entry must go, or the map grows by one per
             // session for the process's life.
@@ -189,7 +189,7 @@ impl StageDeps {
 /// Fill `0..=`[`BACKGROUND_DEPTH`] for one `(session, view, generation)`.
 fn run(
     occupancy: &crate::single_flight::SingleFlightCache<OccupancyKey, OccupiedTiles>,
-    walks: &std::sync::atomic::AtomicU64,
+    counters: &crate::status::ServeCounters,
     task: &LadderTask,
     cancel: &CancelToken,
 ) {
@@ -240,7 +240,9 @@ fn run(
     if cancel.is_cancelled() {
         return;
     }
-    walks.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    counters
+        .occupancy_walks
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let ladder = crate::occupancy::occupied_tiles_ladder(&mask, &segments, BACKGROUND_DEPTH);
     for rung in 0..=BACKGROUND_DEPTH {
         key.depth = rung;
