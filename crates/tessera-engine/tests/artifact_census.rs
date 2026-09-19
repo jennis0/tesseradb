@@ -151,27 +151,6 @@ fn served_counts(engine: &Engine) -> BTreeMap<String, u64> {
         .collect()
 }
 
-fn fold(engine: &Engine) {
-    let before = engine.write_executor_stats();
-    engine.request_fold();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-    loop {
-        let now = engine.write_executor_stats();
-        assert_eq!(
-            now.fold_failures, before.fold_failures,
-            "the fold was discarded rather than published"
-        );
-        if now.folds > before.folds {
-            return;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the fold never published"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
-}
-
 /// **The census.** The generator says what every artifact holds and what holds every entity; the
 /// engine is asked the same and must agree, before a write, after a deletion, and after the fold
 /// that executes it.

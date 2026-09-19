@@ -152,28 +152,6 @@ fn served(engine: &Engine, layer: &str) -> Vec<(String, u64)> {
     out
 }
 
-/// Request a fold and block until it has published, asserting it was not discarded.
-fn fold(engine: &Engine) {
-    let before = engine.write_executor_stats();
-    engine.request_fold();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-    loop {
-        let now = engine.write_executor_stats();
-        assert_eq!(
-            now.fold_failures, before.fold_failures,
-            "the fold was discarded rather than published"
-        );
-        if now.folds > before.folds {
-            return;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the fold never published"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
-}
-
 /// **The headline: a write to one layer does not rebuild another layer's row form.**
 ///
 /// Under the store-wide version this assertion was false by construction — every level in every

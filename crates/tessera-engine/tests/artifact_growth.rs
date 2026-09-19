@@ -210,43 +210,6 @@ fn grow(fx: &Fixture, engine: &Engine, sources: std::ops::Range<u64>) {
     tick(engine);
 }
 
-/// Request a flush and block until it has published — what gives an ingested point a base row, and
-/// therefore what makes it count towards any membership it joined.
-fn flush(engine: &Engine) {
-    let before = engine.write_executor_stats().flushes;
-    engine.request_flush();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-    while engine.write_executor_stats().flushes == before {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the flush never published"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
-}
-
-/// Request a fold and block until it has published, asserting it was not discarded.
-fn fold(engine: &Engine) {
-    let before = engine.write_executor_stats();
-    engine.request_fold();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-    loop {
-        let now = engine.write_executor_stats();
-        assert_eq!(
-            now.fold_failures, before.fold_failures,
-            "the fold was discarded rather than published"
-        );
-        if now.folds > before.folds {
-            return;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the fold never published"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
-}
-
 fn remove_the_whole_log(fx: &Fixture) {
     let dir = fx.wal.parent().expect("the log has a directory");
     let stem = fx.wal.file_stem().expect("the log has a stem").to_owned();

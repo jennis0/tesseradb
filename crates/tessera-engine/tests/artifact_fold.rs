@@ -217,28 +217,6 @@ fn count(engine: &Engine) -> u64 {
     artifacts[0].masked_count
 }
 
-/// Request a fold and block until it has published, asserting it was not discarded.
-fn fold(engine: &Engine) {
-    let before = engine.write_executor_stats();
-    engine.request_fold();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-    loop {
-        let now = engine.write_executor_stats();
-        assert_eq!(
-            now.fold_failures, before.fold_failures,
-            "the fold was discarded rather than published"
-        );
-        if now.folds > before.folds {
-            return;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the fold never published"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
-}
-
 /// Wait until the executor has written the memberships of everything published so far.
 fn wait_for_publication(fx: &Fixture, engine: &Engine, files: usize) {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
@@ -804,19 +782,6 @@ fn ingest(engine: &Engine, external_id: &[u8]) -> EntityId {
             key,
         )
         .expect("the ingest is accepted")[0]
-}
-
-fn flush(engine: &Engine) {
-    let before = engine.write_executor_stats().flushes;
-    engine.request_flush();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-    while engine.write_executor_stats().flushes == before {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the flush never landed"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
 }
 
 /// **A member counts from its flush**, which is the first moment it has a row at all.

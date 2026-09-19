@@ -310,19 +310,6 @@ fn ingest_own(engine: &Engine, external_id: &str, value: u32, term: u32, x: f64,
     ingest_point_into(engine, external_id, value, term, x, y, 1, 0)
 }
 
-fn flush(engine: &Engine) {
-    let before = engine.write_executor_stats().flushes;
-    engine.request_flush();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-    while engine.write_executor_stats().flushes == before {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the flush never published"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
-}
-
 /// **A point ingested with value *v* counts against *v*'s artifact on the next request, with
 /// nothing rebuilt.**
 ///
@@ -699,27 +686,6 @@ fn a_suppressed_values_key_never_mints_again() {
         !served(&fx.engine, grant, BANDS, 0, WHOLE_MAP).contains_key(&anchor),
         "the suppression was defeated by ingesting a point"
     );
-}
-
-fn fold(engine: &Engine) {
-    let before = engine.write_executor_stats();
-    engine.request_fold();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-    loop {
-        let now = engine.write_executor_stats();
-        assert_eq!(
-            now.fold_failures, before.fold_failures,
-            "the fold was discarded rather than published"
-        );
-        if now.folds > before.folds {
-            return;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the fold never published"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
 }
 
 /// **A deleted value's key mints again, and what comes back is a new object.**

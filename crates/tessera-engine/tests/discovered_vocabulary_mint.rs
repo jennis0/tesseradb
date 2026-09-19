@@ -188,19 +188,6 @@ fn engine_over(tmp: &Path, root: &Path, config: EngineConfig) -> Engine {
     engine
 }
 
-fn flush(engine: &Engine) {
-    let before = engine.write_executor_stats().flushes;
-    engine.request_flush();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-    while engine.write_executor_stats().flushes == before {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the flush never published"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
-}
-
 fn ingest_row(engine: &Engine, external_id: &str, scalar: WalScalar) -> EntityId {
     engine
         .accept_ingest(

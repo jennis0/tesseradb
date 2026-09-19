@@ -226,27 +226,6 @@ fn ingest_and_flush(engine: &Engine, root: &Path) -> Vec<EntityId> {
     }
 }
 
-fn fold(engine: &Engine) {
-    let before = engine.write_executor_stats();
-    engine.request_fold();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
-    loop {
-        let now = engine.write_executor_stats();
-        assert_eq!(
-            now.fold_failures, before.fold_failures,
-            "the fold was discarded rather than published"
-        );
-        if now.folds > before.folds {
-            return;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the fold never published"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
-}
-
 fn current_prefix(root: &Path) -> String {
     let current: tessera_store::manifest::CurrentPointer =
         serde_json::from_slice(&std::fs::read(root.join("CURRENT")).expect("CURRENT is readable"))

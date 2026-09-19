@@ -293,30 +293,6 @@ fn artifact_entity(engine: &Engine, id: tessera_types::TesseraId) -> EntityId {
     engine.resolve_tessera_ids(&[id], idset).unwrap()[0].expect("it names what was issued")
 }
 
-/// Request a flush and block until it has published — what gives an ingested point a base row, and
-/// therefore what makes it count towards any membership it joined.
-fn flush(engine: &Engine) {
-    let before = engine.write_executor_stats().flushes;
-    engine.request_flush();
-    wait_until("the flush publishes", WAIT, || {
-        engine.write_executor_stats().flushes > before
-    });
-}
-
-/// Request a fold and block until it has published, asserting it was not discarded.
-fn fold(engine: &Engine) {
-    let before = engine.write_executor_stats();
-    engine.request_fold();
-    wait_until("the fold publishes", WAIT, || {
-        let now = engine.write_executor_stats();
-        assert_eq!(
-            now.fold_failures, before.fold_failures,
-            "the fold was discarded rather than published"
-        );
-        now.folds > before.folds
-    });
-}
-
 /// **Flush, then fold** — what an *ingested* point needs before it counts towards a membership it
 /// joined, and what `artifact_growth.rs` does for the same reason.
 ///

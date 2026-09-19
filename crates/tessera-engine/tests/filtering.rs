@@ -2808,32 +2808,6 @@ fn a_value_carried_only_since_the_build_is_offered_to_whoever_can_see_it() {
 // doing neither: the bundle then opens cleanly and answers filters short, which is a wrong answer
 // wearing a correct one's clothes.
 
-/// Request a fold and block until it has published, asserting it was not discarded.
-///
-/// `tests/fold.rs`'s helper, duplicated rather than shared: `common` is the fixture module and this
-/// binary's fixture is its own (the one with declared filter columns), so the alternative is
-/// widening `common` for two callers that agree about nothing else.
-fn fold(engine: &tessera_engine::Engine) {
-    let before = engine.write_executor_stats();
-    engine.request_fold();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-    loop {
-        let now = engine.write_executor_stats();
-        assert_eq!(
-            now.fold_failures, before.fold_failures,
-            "the fold was discarded rather than published"
-        );
-        if now.folds > before.folds {
-            return;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the fold never published"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
-}
-
 /// One operand per family and per route, answered against `columns` under `candidate`.
 ///
 /// **Both routes are here on purpose.** `archive` is `visibility = "public"`, so its `eq`/`in` are

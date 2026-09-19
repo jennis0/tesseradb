@@ -143,19 +143,6 @@ fn build_fixture(out: &Path, points_path: &Path, pairs_path: &Path, points: &[(f
     .expect("the deep-frame fixture builds");
 }
 
-fn flush(engine: &Engine) {
-    let before = engine.write_executor_stats().flushes;
-    engine.request_flush();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-    while engine.write_executor_stats().flushes == before {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the flush never published"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
-}
-
 /// Every served point's 64-bit position, by `tessera_id`.
 fn served_positions(engine: &Engine) -> BTreeMap<u64, u64> {
     let session = engine.authorise(&full_coverage_credential()).unwrap();
