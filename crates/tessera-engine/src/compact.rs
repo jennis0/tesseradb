@@ -1248,6 +1248,42 @@ pub(crate) struct CompletedFold {
     pub(crate) runtime_scoped_attributes: Vec<String>,
 }
 
+/// The state the fold's passes share: every file written so far, and the attribute passes' IO.
+#[derive(Default)]
+struct FoldOutput {
+    /// Every file this fold writes, prefix-relative and resolved, in write order — pass 5 digests
+    /// exactly this list, so a file a pass writes without recording it here is a file the new
+    /// `MANIFEST.json` does not name and `ensure_verified` refuses at the first read.
+    written: Vec<(String, PathBuf)>,
+    /// Attribute bytes read and written. Reported, never triggered on.
+    attr_read: u64,
+    attr_written: u64,
+}
+
+impl FoldOutput {
+    /// Record a file the fold wrote.
+    fn push(&mut self, rel: String, path: PathBuf) {
+        self.written.push((rel, path));
+    }
+
+    /// Record a file an attribute pass wrote, and charge its bytes to `attr_written`.
+    fn wrote(&mut self, rel: String, path: PathBuf) {
+        self.attr_written += file_len(&path);
+        self.written.push((rel, path));
+    }
+}
+
+/// What a pass was doing when it failed, and what went wrong.
+fn failed(what: &str, e: &dyn std::fmt::Display) -> MaintenanceFailed {
+    MaintenanceFailed(format!("{what}: {e}"))
+}
+
+/// A written file's length, and zero where it cannot be read — this counts bytes for a report and
+/// never decides anything.
+fn file_len(path: &Path) -> u64 {
+    std::fs::metadata(path).map(|m| m.len()).unwrap_or(0)
+}
+
 /// Run the fold's five passes into `ctx.to_prefix_dir`. **On one dedicated thread** — see the
 /// module doc.
 ///
@@ -1271,8 +1307,6 @@ pub(crate) fn execute(
     plan: FoldPlan,
     ctx: FoldContext,
 ) -> Result<CompletedFold, MaintenanceFailed> {
-    let failed = |what: &str, e: &dyn std::fmt::Display| MaintenanceFailed(format!("{what}: {e}"));
-
     let partition_dir = ctx.to_prefix_dir.join("partitions").join(&plan.partition);
     let terms_dir = partition_dir.join("terms");
     let entities_dir = partition_dir.join("entities");
@@ -1280,10 +1314,7 @@ pub(crate) fn execute(
         std::fs::create_dir_all(dir).map_err(|e| failed("creating the new prefix", &e))?;
     }
 
-    // Every file this fold writes, prefix-relative and resolved, in write order — pass 5 digests
-    // exactly this list, so a file added to a pass without being recorded here is a file the new
-    // `MANIFEST.json` does not name and `ensure_verified` refuses at the first read.
-    let mut written: Vec<(String, PathBuf)> = Vec::new();
+    let mut out = FoldOutput::default();
 
     // The staircase — see [`PassCost`]. `entry` is the zero every later reading is read against,
     // and it is taken here rather than by the caller so that what it excludes is exactly the
@@ -1291,11 +1322,59 @@ pub(crate) fn execute(
     let mut stairs = Staircase::start();
     stairs.record("entry");
 
-    // ---- pass 1 — row space -------------------------------------------------------------------
-    //
-    // One new segment per (partition, view), and one `permutation.bin` beside it. Rows whose
-    // entity is in `D₀` are dropped, which shifts the row id of every row after them — the whole
-    // reason compaction §6 exists.
+    let (segments, base_segment_bytes) = fold_row_spaces(&plan, &ctx, &mut out)?;
+    stairs.record("1 row space");
+
+    let postings_path = fold_postings(&plan, &ctx, &terms_dir, &mut out)?;
+    stairs.record("2 postings");
+
+    let term_images = derive_term_images(&plan, &ctx, &segments, &postings_path, &mut out)?;
+    stairs.record("2b term images");
+
+    let external_id_run = fold_external_ids(&plan, &ctx, &entities_dir, &mut out)?;
+    stairs.record("3 external ids");
+
+    fold_text_columns(&plan, &ctx, &mut out)?;
+    fold_value_columns(&plan, &ctx, &mut out)?;
+    fold_record_blob(&plan, &ctx, &mut out)?;
+    stairs.record("4a attributes");
+
+    fold_entity_terms(&plan, &ctx, &mut out)?;
+    stairs.record("4c entity terms");
+
+    // Pass 4b writes nothing and is not marked: the term dictionary is carried forward verbatim by
+    // a hard link at publication, and a zero-cost row would read as an unmeasured one.
+    let files = digest_and_sync(&out)?;
+    stairs.record("5 digests + fsync");
+
+    let finished = stairs.mark();
+    Ok(CompletedFold {
+        plan,
+        prefix: ctx.to_prefix,
+        segments,
+        files,
+        external_id_run,
+        term_images,
+        base_segment_bytes,
+        cost: stairs.into_cost(),
+        finished,
+        attr_bytes_read: out.attr_read,
+        attr_bytes_written: out.attr_written,
+        runtime_attributes: ctx.runtime_attributes,
+        runtime_scoped_attributes: ctx.runtime_scoped_attributes,
+    })
+}
+
+/// Pass 1: one new segment per (partition, view), and one `permutation.bin` beside it.
+///
+/// Rows whose entity is in `D₀` are dropped, which shifts the row id of every row after them.
+/// Returns the new base descriptors and the largest one's mapped bytes — its `columns.arrow`,
+/// `morton.u32` and cut index together.
+fn fold_row_spaces(
+    plan: &FoldPlan,
+    ctx: &FoldContext,
+    output: &mut FoldOutput,
+) -> Result<(Vec<SegmentDescriptor>, u64), MaintenanceFailed> {
     let mut segments: Vec<SegmentDescriptor> = Vec::with_capacity(plan.views.len());
     let mut base_segment_bytes = 0u64;
     for view in &plan.views {
@@ -1358,20 +1437,20 @@ pub(crate) fn execute(
             view_bytes += std::fs::metadata(&path)
                 .map_err(|e| failed("sizing the new base segment", &e))?
                 .len();
-            written.push((format!("{segment_rel}/{name}"), path));
+            output.push(format!("{segment_rel}/{name}"), path);
         }
         base_segment_bytes = base_segment_bytes.max(view_bytes);
         // The render columns' presence bitmaps beside the new segment (decision 0064), named by
         // the pass that decided which columns still have an absence after the drops. Not counted
         // into `view_bytes`, which is the three mapped files step 3's headroom check is about.
         for column in &out.presence_columns {
-            written.push((
+            output.push(
                 format!("{segment_rel}/{RENDER_PRESENCE_DIR}/{column}.roaring"),
                 tessera_store::render_presence::render_presence_path(&segment_dir, column),
-            ));
+            );
         }
-        written.push((permutation_rel, permutation_path));
-        written.push((row_entity_rel, row_entity_path));
+        output.push(permutation_rel, permutation_path);
+        output.push(row_entity_rel, row_entity_path);
 
         segments.push(SegmentDescriptor {
             view: view.view.clone(),
@@ -1386,22 +1465,25 @@ pub(crate) fn execute(
         });
     }
 
-    stairs.record("1 row space");
+    Ok((segments, base_segment_bytes))
+}
 
-    // ---- pass 2 — postings, and `pairs.parquet` as a side output ------------------------------
-    //
-    // A fold rewrites postings by subtraction only (decision 0048 deleted the evaluate arm), so
-    // there is no scatter, no descriptor resolution and no dictionary write on this path. Every
-    // ordinal below `dict_len` gets a record, empty or not: `dict.len()` must not decrease and
-    // every ordinal must stay stable across a fold.
-    //
-    // **`pairs.parquet` cannot be carried forward.** It would then disagree with the new base
-    // postings about every folded deletion, which is the one disagreement the I1 differential
-    // exists to catch — so a fold that carried it would silently make the compacted bundle
-    // unconformable. It is written unconditionally, even where the source build emitted none:
-    // nothing in the bundle records whether a deployment wants the file, so the alternative is to
-    // infer "do not write it" from its absence, which makes conformability a property of a build
-    // flag nobody can read back.
+/// Pass 2: the new base postings, with `pairs.parquet` as a side output. Returns the postings'
+/// path, which pass 2b reads.
+///
+/// A fold rewrites postings by subtraction only, so there is no scatter, no descriptor resolution
+/// and no dictionary write on this path. Every ordinal below `dict_len` gets a record, empty or
+/// not: `dict.len()` must not decrease and every ordinal must stay stable across a fold.
+///
+/// `pairs.parquet` is written unconditionally, even where the source build emitted none, and is
+/// never carried forward: a carried file would disagree with the new base postings about every
+/// folded deletion.
+fn fold_postings(
+    plan: &FoldPlan,
+    ctx: &FoldContext,
+    terms_dir: &Path,
+    out: &mut FoldOutput,
+) -> Result<PathBuf, MaintenanceFailed> {
     let postings_rel = format!("partitions/{}/terms/postings.arrow", plan.partition);
     let pairs_rel = format!("partitions/{}/terms/pairs.parquet", plan.partition);
     let postings_path = ctx.to_prefix_dir.join(&postings_rel);
@@ -1436,132 +1518,136 @@ pub(crate) fn execute(
         outcome?;
         pairs.finish().map_err(|e| failed("pass 2 (pairs)", &e))?;
     }
-    written.push((postings_rel, postings_path.clone()));
-    written.push((pairs_rel, pairs_path));
-    stairs.record("2 postings");
+    out.push(postings_rel, postings_path.clone());
+    out.push(pairs_rel, pairs_path);
 
-    // ---- pass 2b: the term images -------------------------------------------------------------
-    //
-    // One file per view, each term's new base posting projected into the view's new row space
-    // (`tessera_store::term_images`). Here rather than at publication because the derivation is
-    // minutes of work at corpus scale and the executor must stay free to reach a queued deny; and
-    // after pass 2 rather than beside pass 1 because the postings it reads are the ones pass 2 has
-    // just written, from which every folded deletion is already gone. A deleted entity is in no
-    // posting, so it is in no image, and that is the whole of the deletion rule reaching this
-    // artefact. There is no second removal route (write-path §5.4).
-    //
-    // **The new base only.** Rows a later flush appends are an extent, and an extent gets no
-    // images: a session unions the images of the terms it holds and walks the rest, and the rows
-    // it arrives at are the same either way.
+    Ok(postings_path)
+}
+
+/// Pass 2b: one term-image file per view, each term's new base posting projected into that view's
+/// new row space.
+///
+/// Reads the postings pass 2 has just written, from which every folded deletion is already gone: a
+/// deleted entity is in no posting, so it is in no image, and there is no second removal route.
+/// The new base only — rows a later flush appends are an extent, and an extent gets no images.
+fn derive_term_images(
+    plan: &FoldPlan,
+    ctx: &FoldContext,
+    segments: &[SegmentDescriptor],
+    postings_path: &Path,
+    out: &mut FoldOutput,
+) -> Result<Vec<FoldedTermImages>, MaintenanceFailed> {
     let mut term_images: Vec<FoldedTermImages> = Vec::new();
-    {
-        let postings = PostingsReader::open(&postings_path, true)
-            .map_err(|e| failed("pass 2b (term images: the new postings)", &e))?;
-        let dict_len = postings.term_count();
-        // The counter that names the files, as a publication's own does
-        // (`tessera_store::derived::DerivedIndex`). This one belongs to the fold thread: the
-        // publication's counter is created hours later and numbers the structures the executor
-        // writes. The two cannot collide, because the kinds are different and this prefix is one
-        // no other publication has ever written a term image into.
-        let mut index = tessera_store::derived::DerivedIndex::default();
-        // **Over the descriptors pass 1 pushed.** Each carries the view, its incarnation and the
-        // rows the new base holds: the three fields the opener matches an entry on, and the two
-        // the stamp must agree with. Reading them from the plan instead would be a second
-        // statement of what pass 1 wrote.
-        for segment in &segments {
-            // Neither has an image to hold: projection maps entities to rows, and a view with no
-            // row projects every posting to the empty set. The build's pass skips both for the
-            // same reason, and a view with no entry is one the opener leaves walking.
-            if segment.row_count == 0 || dict_len == 0 {
-                continue;
-            }
-            let permutation_path = ctx.to_prefix_dir.join(format!(
-                "partitions/{}/{}/permutation.bin",
-                plan.partition,
-                tessera_store::view_rel(&segment.view)
-            ));
-            // Reloaded from the file pass 1 wrote rather than kept from that pass, so the images
-            // are a function of the published permutation. The build's pass loads it for the same
-            // reason.
-            let permutation = tessera_store::Permutation::load(&permutation_path)
-                .map_err(|e| failed("pass 2b (term images: the new permutation)", &e))?;
-            let space = tessera_store::RowSpace::new(Arc::new(permutation), segment.row_count);
-            let stamp = tessera_store::term_images::TermImageStamp {
-                prefix: ctx.to_prefix.clone(),
-                view: segment.view.clone(),
-                base_seg_id: segment.seg_id.clone(),
-                incarnation: segment.incarnation,
-                base_rows: segment.row_count,
-                bound: space.base().bound(),
-            };
-            let file = tessera_store::derived::term_image_file(
-                &ctx.to_prefix_dir,
-                &plan.partition,
-                TERM_IMAGE_MANIFEST_N,
-                &mut index,
-            )
-            .map_err(|e| failed("pass 2b (term images: naming the file)", &e))?;
+    let postings = PostingsReader::open(postings_path, true)
+        .map_err(|e| failed("pass 2b (term images: the new postings)", &e))?;
+    let dict_len = postings.term_count();
+    // The counter that names the files, as a publication's own does
+    // (`tessera_store::derived::DerivedIndex`). This one belongs to the fold thread: the
+    // publication's counter is created hours later and numbers the structures the executor
+    // writes. The two cannot collide, because the kinds are different and this prefix is one
+    // no other publication has ever written a term image into.
+    let mut index = tessera_store::derived::DerivedIndex::default();
+    // **Over the descriptors pass 1 pushed.** Each carries the view, its incarnation and the
+    // rows the new base holds: the three fields the opener matches an entry on, and the two
+    // the stamp must agree with. Reading them from the plan instead would be a second
+    // statement of what pass 1 wrote.
+    for segment in segments {
+        // Neither has an image to hold: projection maps entities to rows, and a view with no
+        // row projects every posting to the empty set. The build's pass skips both for the
+        // same reason, and a view with no entry is one the opener leaves walking.
+        if segment.row_count == 0 || dict_len == 0 {
+            continue;
+        }
+        let permutation_path = ctx.to_prefix_dir.join(format!(
+            "partitions/{}/{}/permutation.bin",
+            plan.partition,
+            tessera_store::view_rel(&segment.view)
+        ));
+        // Reloaded from the file pass 1 wrote rather than kept from that pass, so the images
+        // are a function of the published permutation. The build's pass loads it for the same
+        // reason.
+        let permutation = tessera_store::Permutation::load(&permutation_path)
+            .map_err(|e| failed("pass 2b (term images: the new permutation)", &e))?;
+        let space = tessera_store::RowSpace::new(Arc::new(permutation), segment.row_count);
+        let stamp = tessera_store::term_images::TermImageStamp {
+            prefix: ctx.to_prefix.clone(),
+            view: segment.view.clone(),
+            base_seg_id: segment.seg_id.clone(),
+            incarnation: segment.incarnation,
+            base_rows: segment.row_count,
+            bound: space.base().bound(),
+        };
+        let file = tessera_store::derived::term_image_file(
+            &ctx.to_prefix_dir,
+            &plan.partition,
+            TERM_IMAGE_MANIFEST_N,
+            &mut index,
+        )
+        .map_err(|e| failed("pass 2b (term images: naming the file)", &e))?;
 
-            // The one adapter between the postings format and the derivation: `tessera-store` does
-            // not depend on `tessera-authz`, so the shape is handed across. `term_images_pass::run`
-            // in `tessera-build` holds the identical six lines, and `containment` here holds them
-            // for its own derivation.
-            let walk = |term: u32,
-                        visit: &mut dyn FnMut(tessera_store::derived::PostingSlice<'_>)|
-             -> std::io::Result<()> {
-                if let Some(posting) = postings.posting_at(term)? {
-                    match posting {
-                        tessera_authz::PostingRef::Array(bytes) => {
-                            visit(tessera_store::derived::PostingSlice::Array(bytes))
-                        }
-                        tessera_authz::PostingRef::Roaring(bitmap) => {
-                            visit(tessera_store::derived::PostingSlice::Roaring(&bitmap))
-                        }
+        // The one adapter between the postings format and the derivation: `tessera-store` does
+        // not depend on `tessera-authz`, so the shape is handed across. `term_images_pass::run`
+        // in `tessera-build` holds the identical six lines, and `containment` here holds them
+        // for its own derivation.
+        let walk = |term: u32,
+                    visit: &mut dyn FnMut(tessera_store::derived::PostingSlice<'_>)|
+         -> std::io::Result<()> {
+            if let Some(posting) = postings.posting_at(term)? {
+                match posting {
+                    tessera_authz::PostingRef::Array(bytes) => {
+                        visit(tessera_store::derived::PostingSlice::Array(bytes))
+                    }
+                    tessera_authz::PostingRef::Roaring(bitmap) => {
+                        visit(tessera_store::derived::PostingSlice::Roaring(&bitmap))
                     }
                 }
-                Ok(())
-            };
-            let summary = tessera_store::term_images::derive_term_images(
-                &space,
+            }
+            Ok(())
+        };
+        let summary = tessera_store::term_images::derive_term_images(
+            &space,
+            dict_len,
+            &walk,
+            &stamp,
+            &file.path,
+            tessera_store::term_images::DeriveOptions {
+                threads: TERM_IMAGE_THREADS,
+            },
+        )
+        .map_err(|e| failed("pass 2b (term images: the derivation)", &e))?;
+
+        // Pass 5 digests and syncs what `written` names, the file's directory entry included
+        // (`tessera_store::fsync_written`), so this pass syncs nothing of its own. The build's
+        // does, because its digest pass has no such list.
+        out.push(file.rel.clone(), file.path);
+        term_images.push(FoldedTermImages {
+            extent: tessera_store::manifest::TermImageExtent {
+                path: file.rel,
+                view: segment.view.clone(),
+                incarnation: segment.incarnation,
                 dict_len,
-                &walk,
-                &stamp,
-                &file.path,
-                tessera_store::term_images::DeriveOptions {
-                    threads: TERM_IMAGE_THREADS,
-                },
-            )
-            .map_err(|e| failed("pass 2b (term images: the derivation)", &e))?;
-
-            // Pass 5 digests and syncs what `written` names, the file's directory entry included
-            // (`tessera_store::fsync_written`), so this pass syncs nothing of its own. The build's
-            // does, because its digest pass has no such list.
-            written.push((file.rel.clone(), file.path));
-            term_images.push(FoldedTermImages {
-                extent: tessera_store::manifest::TermImageExtent {
-                    path: file.rel,
-                    view: segment.view.clone(),
-                    incarnation: segment.incarnation,
-                    dict_len,
-                    keep_rows_per_container: tessera_store::term_images::KEEP_ROWS_PER_CONTAINER
-                        as u32,
-                },
-                summary,
-            });
-        }
+                keep_rows_per_container: tessera_store::term_images::KEEP_ROWS_PER_CONTAINER
+                    as u32,
+            },
+            summary,
+        });
     }
-    stairs.record("2b term images");
 
-    // ---- pass 3 — external ids ----------------------------------------------------------------
-    //
-    // One run 0 and one locator, **bounded at the snapshot's entity space** so post-snapshot
-    // locator extents stay reachable past it. `D₀`'s keys are dropped: leaving one standing turns a
-    // lawful re-ingest of that external id into a 409 once retirement makes `is_deleted` false,
-    // which contradicts decision 0047 directly.
-    //
-    // A deployment whose callers supplied no external ids has no runs and no locator (contracts
-    // §2.4 r6), and the fold emits none either — writing an empty pair here would give the sidecar
-    // a run list where the bundle's own state is "this deployment has none".
+    Ok(term_images)
+}
+
+/// Pass 3: one external-id run 0 and one locator, **bounded at the snapshot's entity space** so
+/// post-snapshot locator extents stay reachable past it. Returns run 0's prefix-relative path.
+///
+/// `D₀`'s keys are dropped: leaving one standing turns a lawful re-ingest of that external id into
+/// a 409 once retirement makes `is_deleted` false. A deployment whose callers supplied no external
+/// ids has no runs and no locator, and the fold emits none either.
+fn fold_external_ids(
+    plan: &FoldPlan,
+    ctx: &FoldContext,
+    entities_dir: &Path,
+    out: &mut FoldOutput,
+) -> Result<Option<String>, MaintenanceFailed> {
     let external_id_run = if plan.runs.is_empty() {
         None
     } else {
@@ -1575,7 +1661,7 @@ pub(crate) fn execute(
             0,
             plan.entity_bound.saturating_sub(1),
             &plan.tombstones,
-            &entities_dir,
+            entities_dir,
         )
         .map_err(|e| failed("pass 3 (external ids)", &e))?;
         // The sidecar derives the locator's path from the *first* run's directory rather than from
@@ -1583,479 +1669,12 @@ pub(crate) fn execute(
         // locator must sit in one directory and run 0 must stay first in `external_id_runs`.
         let run_rel = format!("partitions/{}/entities/external-ids.arrow", plan.partition);
         let locator_rel = format!("partitions/{}/entities/ext-locator.u32", plan.partition);
-        written.push((run_rel.clone(), entities_dir.join("external-ids.arrow")));
-        written.push((locator_rel, entities_dir.join("ext-locator.u32")));
+        out.push(run_rel.clone(), entities_dir.join("external-ids.arrow"));
+        out.push(locator_rel, entities_dir.join("ext-locator.u32"));
         Some(run_rel)
     };
 
-    stairs.record("3 external ids");
-
-    // ---- pass 4a — the attribute artefact ------------------------------------------------------
-    //
-    // filter-index §6.2. One streaming pass per declared filter column: its base and every
-    // snapshot extent merged in entity order into one new base, `D₀`'s entities blanked — removed
-    // from presence, their value bytes never written — and a category's postings rebuilt whole
-    // from the folded column, which is what makes the accelerator self-retiring rather than a
-    // second durable identity.
-    //
-    // **What only the fold can do here is retention.** A layered column already queries within ~5%
-    // of a single build's (measured, §5.1) and the coalesce bounds the file count continuously
-    // (§5.2), but a deleted entity's *filter* value survives every other pass: its row is gone, so
-    // its render value is gone with it, while the value column is positional and **I9** forbids
-    // renumbering the slot away. This is where those bytes leave the corpus.
-    //
-    // **Nothing here is a third retirement rule.** A suppression touches no attribute artefact at
-    // all (Rule S), and what this executes is exactly `D₀`, the same set passes 1–3 took.
-    // **The pass reports its IO, because §6.2 asks for reporting and not for a gauge.** The
-    // staircase already attributes time and resident bytes to `4a attributes`; what it cannot show
-    // is that the pass is a *streaming* cost — ~12 GB per `u32` column at 10⁹, read, written and
-    // re-read for the digest — which is the term the non-disruption argument turns on. Bytes, not a
-    // trigger: §5.2's coalesce bounds the extent axis continuously and the segment axis is gauged
-    // already, so there is nothing here for a threshold to do.
-    let mut attr_read = 0u64;
-    let mut attr_written = 0u64;
-    let file_len = |path: &std::path::Path| std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
-
-    // **A text column's index, merged and blanked.** Its own pass, before the value columns,
-    // because this family owes no value column at all — its whole index is a token dictionary and
-    // postings over it, and the generic merge below would have nothing to merge.
-    fold_text_columns(&plan, &ctx, &mut written, &mut attr_read, &mut attr_written)?;
-
-    for job in value_column_jobs(&plan, &ctx) {
-        let scalar = &job;
-        let incarnation = job_incarnation(&ctx, &job);
-        let belongs = |e: &&AttrExtent| {
-            e.column == scalar.name && e.view == job.view && e.incarnation == incarnation
-        };
-        let column_rel = job.rel.clone();
-        let from_dir = ctx.from_prefix_dir.join(&column_rel);
-        let to_dir = ctx.to_prefix_dir.join(&column_rel);
-        std::fs::create_dir_all(&to_dir).map_err(|e| failed("pass 4a (attributes)", &e))?;
-
-        // **Advised `MADV_SEQUENTIAL`, and these are the fold's own mappings** rather than the live
-        // generation's: decision 0052's rule is that the hint belongs to the mappings the fold
-        // owns, and the request path's `FilterColumns` must never be advised on the fold's behalf —
-        // which its signature makes unexpressible. The merge below streams each layer exactly once
-        // in entity order, so the readahead suits the access and the drop-behind is the point: these
-        // pages are not wanted again, and the request path's are.
-        // **A column declared at a running service has no base until this pass writes one**
-        // (`ingest.md` §6.3): its layers are the extents alone, and a column no flush has carried
-        // yet folds to an empty base, so the reopen finds the files every declared column owes.
-        let unfolded = job.view.is_none() && ctx.runtime_attributes.contains(&job.name);
-        let base = if unfolded {
-            None
-        } else {
-            let base = tessera_filter::ValueColumn::open_dir(
-                &from_dir,
-                tessera_filter::Access::MappedSequential,
-            )
-            .map_err(|e| failed("pass 4a (attributes: the base column)", &e))?;
-            attr_read += file_len(&from_dir.join(tessera_filter::VALUES_FILE))
-                + file_len(&from_dir.join(tessera_filter::PRESENCE_FILE));
-            Some(base)
-        };
-        let mut extents = Vec::new();
-        for extent in plan.attr_extents.iter().filter(belongs) {
-            extents.push(
-                tessera_filter::open_extent(
-                    &ctx.from_prefix_dir.join(&extent.values),
-                    &ctx.from_prefix_dir.join(&extent.presence),
-                    tessera_filter::Access::MappedSequential,
-                )
-                .map_err(|e| failed("pass 4a (attributes: an extent)", &e))?,
-            );
-            attr_read += file_len(&ctx.from_prefix_dir.join(&extent.values))
-                + file_len(&ctx.from_prefix_dir.join(&extent.presence));
-        }
-        let layers: Vec<&tessera_filter::ValueColumn> = base.iter().chain(extents.iter()).collect();
-        // A keyword layer's dictionary, opened beside its ordinals and in the same order, because
-        // an ordinal names a position in *its own* layer's dictionary and nothing anywhere else.
-        // Empty for every other family, which is what selects the generic fold below.
-        let mut keyword_dicts: Vec<tessera_filter::SortedDict> = Vec::new();
-        if scalar.arrow_type == tessera_spatial::tiler::ScalarType::Keyword {
-            if !unfolded {
-                keyword_dicts.push(
-                    tessera_filter::SortedDict::open_dir(
-                        &from_dir,
-                        tessera_filter::Access::MappedSequential,
-                    )
-                    .map_err(|e| failed("pass 4a (attributes: the base dictionary)", &e))?,
-                );
-            }
-            for extent in plan.attr_extents.iter().filter(belongs) {
-                let Some(dict_rel) = extent.dict.as_ref() else {
-                    return Err(MaintenanceFailed(format!(
-                        "pass 4a (attributes): keyword column '{}' has an extent with no \
-                         dictionary; its ordinals name nothing",
-                        scalar.name
-                    )));
-                };
-                keyword_dicts.push(
-                    tessera_filter::SortedDict::open(
-                        &ctx.from_prefix_dir.join(dict_rel),
-                        tessera_filter::Access::MappedSequential,
-                    )
-                    .map_err(|e| failed("pass 4a (attributes: an extent dictionary)", &e))?,
-                );
-            }
-        }
-
-        let values_rel = format!("{column_rel}/{}", tessera_filter::VALUES_FILE);
-        let presence_rel = format!("{column_rel}/{}", tessera_filter::PRESENCE_FILE);
-        let dict_rel = format!("{column_rel}/{}", tessera_filter::DICT_FILE);
-        let values_path = ctx.to_prefix_dir.join(&values_rel);
-        let presence_path = ctx.to_prefix_dir.join(&presence_rel);
-        let dict_path = ctx.to_prefix_dir.join(&dict_rel);
-        // The snapshot's entity space, which is what the folded column covers. A column dense to
-        // this bound writes no presence bitmap at all — the reader's "the entity id is the array
-        // index" — and one deletion below it is what takes that away.
-        let bound = u32::try_from(plan.entity_bound).map_err(|_| {
-            MaintenanceFailed("pass 4a (attributes): the entity bound exceeds u32".to_string())
-        })?;
-        // **A keyword folds through its own pass, because its values are ordinals.** The generic
-        // fold carries values through byte-preserved, which is exactly wrong for a column whose
-        // dictionary is rebuilt from the survivors and whose ordinals must be renumbered against
-        // it — a key whose only carrier was blanked leaves the corpus, which is the retention
-        // argument reaching dictionary keys (records §7). The two passes are otherwise the same
-        // merge under the same guards.
-        let partial = if layers.is_empty() {
-            // Nothing has carried the column: an empty base with an empty presence, which is
-            // what a column no entity holds a value for is.
-            write_empty_value_column(
-                &values_path,
-                &presence_path,
-                column_kind_of(scalar.arrow_type, job.postings),
-            )
-            .map_err(|e| failed("pass 4a (attributes: an empty base)", &e))?;
-            if scalar.arrow_type == tessera_spatial::tiler::ScalarType::Keyword {
-                write_empty_dictionary(&dict_path)
-                    .map_err(|e| failed("pass 4a (attributes: an empty dictionary)", &e))?;
-                attr_written += file_len(&dict_path);
-                written.push((dict_rel, dict_path.clone()));
-            }
-            true
-        } else if keyword_dicts.is_empty() {
-            tessera_filter_write::fold_value_column(
-                &layers,
-                &plan.tombstones,
-                bound,
-                &values_path,
-                &presence_path,
-            )
-            .map_err(|e| failed("pass 4a (attributes: the merge)", &e))?
-        } else {
-            let keyword_layers: Vec<tessera_filter_write::KeywordLayer<'_>> = layers
-                .iter()
-                .zip(keyword_dicts.iter())
-                .map(|(values, dict)| tessera_filter_write::KeywordLayer { values, dict })
-                .collect();
-            let partial = tessera_filter_write::fold_keyword_column(
-                &keyword_layers,
-                &plan.tombstones,
-                bound,
-                &values_path,
-                &presence_path,
-                &dict_path,
-            )
-            .map_err(|e| failed("pass 4a (attributes: the keyword merge)", &e))?;
-            attr_written += file_len(&dict_path);
-            written.push((dict_rel, dict_path.clone()));
-            partial
-        };
-        attr_written += file_len(&values_path);
-        written.push((values_rel, values_path.clone()));
-        if partial {
-            attr_written += file_len(&presence_path);
-            written.push((presence_rel, presence_path.clone()));
-        }
-
-        if !job.postings {
-            continue;
-        }
-        // **Rebuilt from the folded column**, read back rather than from the layers it was merged
-        // from: that is what makes the postings a derivative of the artefact of record rather than
-        // a second opinion about it, and it is the same emit the batch build calls.
-        // **Mapped without the hint, unlike the merge's inputs above.** The banded emit scans this
-        // column once per band (§6.2), and `MADV_SEQUENTIAL`'s drop-behind would turn every band
-        // after the first into a re-read of bytes this pass has just written and still has in cache.
-        // The advice is right for a single stream and wrong for a repeated one.
-        let folded = tessera_filter::ValueColumn::open(
-            &values_path,
-            partial.then_some(presence_path.as_path()),
-            tessera_filter::Access::Mapped,
-        )
-        .map_err(|e| failed("pass 4a (attributes: reopening the folded column)", &e))?;
-        let postings_rel = format!("{column_rel}/postings.arrow");
-        let postings_path = ctx.to_prefix_dir.join(&postings_rel);
-        tessera_filter_write::write_category_postings(
-            &postings_path,
-            &scalar.name,
-            &folded,
-            tessera_filter_write::POSTINGS_BAND_ROWS,
-        )
-        .map_err(|e| failed("pass 4a (attributes: the postings rebuild)", &e))?;
-        attr_written += file_len(&postings_path);
-        written.push((postings_rel, postings_path));
-    }
-
-    // ---- pass 4a, continued — the record blob --------------------------------------------------
-    //
-    // records §7: the blob is rewritten without the blanked entities' rows, base plus every
-    // snapshot extent streamed in entity order into one new base — *remove, emit no bytes*, so a
-    // deleted entity's prose is physically absent from the folded artefact. That retention
-    // asymmetry is why the blob lives under `attrs/` and folds with everything else rather than
-    // in a store the fold does not touch. **Rule F only**: the set blanked here is exactly `D₀`,
-    // the same set every other pass took, and a suppression is not in it — a suppressed entity's
-    // row streams through byte-preserved like any survivor's.
-    //
-    // The blob exists iff the schema declares a blob-resident column — the build's own predicate
-    // (`write_record_blob`), so base presence is a function of the schema exactly as the column
-    // artefacts' is. The mismatch arms are unreachable by construction and refuse loudly rather
-    // than silently dropping extents' bytes.
-    let blob_resident = ctx
-        .declared_scalars
-        .iter()
-        .any(|d| crate::filter::blob_resident(d, &ctx.vocabularies));
-    // The base blob exists where a column the build or an earlier fold declared is
-    // blob-resident; a blob-resident column declared at a running service has extents alone
-    // until this pass writes the base (`ingest.md` §6.3).
-    let based_blob_resident = ctx.declared_scalars.iter().any(|d| {
-        !ctx.runtime_attributes.contains(&d.name)
-            && crate::filter::blob_resident(d, &ctx.vocabularies)
-    });
-    if !blob_resident && !plan.record_extents.is_empty() {
-        return Err(MaintenanceFailed(
-            "pass 4a (record blob): the manifest names record extents but the schema declares no \
-             blob-resident column; folding would drop their bytes silently, so it is refused"
-                .to_string(),
-        ));
-    }
-    if blob_resident {
-        let record_rel = format!("partitions/{}/attrs/record", plan.partition);
-        let from_dir = ctx.from_prefix_dir.join(&record_rel);
-        let to_dir = ctx.to_prefix_dir.join(&record_rel);
-        std::fs::create_dir_all(&to_dir).map_err(|e| failed("pass 4a (record blob)", &e))?;
-
-        // The fold's own mappings, advised sequential like the value columns above (decision
-        // 0052): each layer streams exactly once, block by block.
-        let base = if based_blob_resident {
-            let base = tessera_filter::RecordBlob::open_dir(
-                &from_dir,
-                tessera_filter::Access::MappedSequential,
-            )
-            .map_err(|e| failed("pass 4a (record blob: the base)", &e))?;
-            for name in [
-                tessera_filter::RECORD_BLOCKS_FILE,
-                tessera_filter::RECORD_HASROW_FILE,
-                tessera_filter::RECORD_DIRECTORY_FILE,
-            ] {
-                attr_read += file_len(&from_dir.join(name));
-            }
-            Some(base)
-        } else {
-            None
-        };
-        let mut extents = Vec::with_capacity(plan.record_extents.len());
-        for extent in &plan.record_extents {
-            extents.push(
-                tessera_filter::RecordBlob::open(
-                    &ctx.from_prefix_dir.join(&extent.blocks),
-                    &ctx.from_prefix_dir.join(&extent.hasrow),
-                    &ctx.from_prefix_dir.join(&extent.directory),
-                    tessera_filter::Access::MappedSequential,
-                )
-                .map_err(|e| failed("pass 4a (record blob: an extent)", &e))?,
-            );
-            for rel in extent.files() {
-                attr_read += file_len(&ctx.from_prefix_dir.join(rel));
-            }
-        }
-        let layers: Vec<&tessera_filter::RecordBlob> = base.iter().chain(extents.iter()).collect();
-
-        let blocks_rel = format!("{record_rel}/{}", tessera_filter::RECORD_BLOCKS_FILE);
-        let hasrow_rel = format!("{record_rel}/{}", tessera_filter::RECORD_HASROW_FILE);
-        let directory_rel = format!("{record_rel}/{}", tessera_filter::RECORD_DIRECTORY_FILE);
-        let blocks_path = ctx.to_prefix_dir.join(&blocks_rel);
-        let hasrow_path = ctx.to_prefix_dir.join(&hasrow_rel);
-        let directory_path = ctx.to_prefix_dir.join(&directory_rel);
-        if layers.is_empty() {
-            // A blob-resident column declared at a running service that no flush has carried:
-            // an empty base, so the reopen finds the blob the schema says exists.
-            tessera_filter_write::RecordBlobWriter::create(
-                &blocks_path,
-                &hasrow_path,
-                &directory_path,
-                tessera_filter::RECORD_BLOCK_TARGET,
-            )
-            .and_then(|writer| writer.finish())
-            .map_err(|e| failed("pass 4a (record blob: an empty base)", &e))?;
-        } else {
-            tessera_filter_write::fold_record_blob(
-                &layers,
-                &plan.tombstones,
-                &blocks_path,
-                &hasrow_path,
-                &directory_path,
-                tessera_filter::RECORD_BLOCK_TARGET,
-            )
-            .map_err(|e| failed("pass 4a (record blob: the rewrite)", &e))?;
-        }
-        for (rel, path) in [
-            (blocks_rel, blocks_path),
-            (hasrow_rel, hasrow_path),
-            (directory_rel, directory_path),
-        ] {
-            attr_written += file_len(&path);
-            written.push((rel, path));
-        }
-    }
-
-    stairs.record("4a attributes");
-
-    // ---- pass 4c — the entity→term transpose ---------------------------------------------------
-    //
-    // The same shape as the record blob's fold and the same retention: base plus every snapshot
-    // extent, streamed in entity order into one new base, with `D₀`'s entities emitting nothing.
-    // **Rule F only** — a suppression is not in `D₀`, and a suppressed entity's list streams
-    // through unchanged, which is correct: a suppression hides an item and does not unlabel it.
-    //
-    // **No ordinal is remapped, and that is a property of the dictionary rather than a choice
-    // here.** A stored ordinal is a position in the concatenation of `dict_extents` in listed
-    // order; pass 4b carries that list forward verbatim by hard link, never renumbered and never
-    // shrunk, and `coalesce_dict_extents` preserves positions for the same reason. So the numbers
-    // this pass copies mean the same terms in the new prefix — unlike a keyword column's
-    // ordinals, which are positions in a per-layer dictionary the fold rebuilds.
-    //
-    // Unconditional, unlike the blob's pass: every entity has a label set, so a base always
-    // exists.
-    {
-        let terms_rel = format!(
-            "partitions/{}/{}",
-            plan.partition,
-            tessera_store::ENTITY_TERMS_DIR
-        );
-        let from_dir = ctx.from_prefix_dir.join(&terms_rel);
-        let to_dir = ctx.to_prefix_dir.join(&terms_rel);
-        std::fs::create_dir_all(&to_dir).map_err(|e| failed("pass 4c (entity terms)", &e))?;
-
-        let mut extent_paths = Vec::with_capacity(plan.entity_terms_extents.len());
-        for extent in &plan.entity_terms_extents {
-            extent_paths.push(tessera_store::EntityTermsExtentPaths {
-                hasrow: ctx.from_prefix_dir.join(&extent.hasrow),
-                offsets: ctx.from_prefix_dir.join(&extent.offsets),
-                terms: ctx.from_prefix_dir.join(&extent.terms),
-                bases: ctx.from_prefix_dir.join(&extent.bases),
-            });
-            for rel in extent.files() {
-                attr_read += file_len(&ctx.from_prefix_dir.join(rel));
-            }
-        }
-        for name in [
-            tessera_store::ENTITY_TERMS_HASROW_FILE,
-            tessera_store::ENTITY_TERMS_OFFSETS_FILE,
-            tessera_store::ENTITY_TERMS_TERMS_FILE,
-            tessera_store::ENTITY_TERMS_BASES_FILE,
-        ] {
-            attr_read += file_len(&from_dir.join(name));
-        }
-        let layers = tessera_store::EntityTermsStack::open(Some(&from_dir), &extent_paths)
-            .map_err(|e| failed("pass 4c (entity terms: the layers)", &e))?;
-        let mut writer = tessera_store::EntityTermsWriter::create(&to_dir)
-            .map_err(|e| failed("pass 4c (entity terms: the rewrite)", &e))?;
-        // One ascending pass over the union of the layers' has-row sets, which is the order the
-        // writer requires and the order every layer already holds.
-        let live = layers.entity_set();
-        for entity in live.iter() {
-            if plan.tombstones.contains(entity) {
-                continue;
-            }
-            let Some(terms) = layers
-                .terms_of(entity)
-                .map_err(|e| failed("pass 4c (entity terms: a layer)", &e))?
-            else {
-                continue;
-            };
-            writer
-                .push(entity, &terms)
-                .map_err(|e| failed("pass 4c (entity terms: the rewrite)", &e))?;
-        }
-        for path in writer
-            .finish()
-            .map_err(|e| failed("pass 4c (entity terms: the rewrite)", &e))?
-        {
-            attr_written += file_len(&path);
-            let rel = format!(
-                "{terms_rel}/{}",
-                path.file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or_default()
-            );
-            written.push((rel, path));
-        }
-    }
-
-    // **Its own line, because it is its own pass.** The bytes above join `attr_read`/`attr_written`
-    // — the fold's streamed-IO total covers every entity-space artefact it rewrites, and the
-    // transpose is one — but the *time and resident bytes* are the staircase's business, and a
-    // pass folded into its neighbour's row is a pass an operator reading the report cannot see.
-    stairs.record("4c entity terms");
-
-    // ---- pass 4b — the dictionary --------------------------------------------------------------
-    //
-    // Carried forward verbatim, hard-linked, never renumbered and never shrunk — and the linking
-    // happens at publication with every other carry-forward (compaction §4 step 4), because a fold
-    // discarded before then must leave nothing behind that a later reader could name. Nothing is
-    // written here, and the live `Arc<Dict>` is carried onto the new generation unchanged, so the
-    // 7.1 GB copy a promoting flush pays at 1.17×10⁸ terms has no counterpart.
-
-    // ---- pass 5 — the digests, and the durability the flip is about to vouch for ----------------
-    //
-    // **`CURRENT` is a durable pointer at bytes that are not yet durable, until this runs.** The
-    // segment, postings and external-id writers deliberately do not sync — a partially-written file
-    // is *detectable* through the manifest digests, and a build or a flush can simply re-run. A
-    // fold cannot: it flips `CURRENT` onto this prefix and then deletes the old tree and reclaims
-    // the WAL members behind it, so these bytes become the only copy and "detectable" becomes
-    // "detectably gone". A power loss inside the writeback window would leave a durable `CURRENT`
-    // naming a torn prefix with nothing to fall back to.
-    //
-    // Here, on the fold's own thread, rather than at publication: it is the executor that must stay
-    // free to reach a queued deny, and compaction §6.1's standing ruling is that a fold's wall clock
-    // is a property nobody observes. The carried-forward links are the executor's half, and they
-    // need only their directory entries synced — a link copies no bytes.
-    //
-    // **This makes the fold's own output durable; publication does the same for what it links.** A
-    // carried-forward file was written by a flush that did not sync it either — no producer here
-    // syncs a data file — and a hard link copies no bytes, so `publish_fold` syncs the carry-forward
-    // set before the flip for exactly the reason this pass syncs its own (compaction §8).
-    let mut files = BTreeMap::new();
-    for (rel, path) in &written {
-        files.insert(
-            rel.clone(),
-            crate::flush::digest_of(path)?,
-        );
-    }
-    let paths: Vec<PathBuf> = written.iter().map(|(_, path)| path.clone()).collect();
-    tessera_store::fsync_written(&paths).map_err(|e| failed("pass 5 (durability)", &e))?;
-    // Pass 4b is not marked because it does nothing: the dictionary is carried forward by a link at
-    // publication, and a zero-cost row in the staircase would read as an unmeasured one.
-    stairs.record("5 digests + fsync");
-
-    let finished = stairs.mark();
-    Ok(CompletedFold {
-        plan,
-        prefix: ctx.to_prefix,
-        segments,
-        files,
-        external_id_run,
-        term_images,
-        base_segment_bytes,
-        cost: stairs.into_cost(),
-        finished,
-        attr_bytes_read: attr_read,
-        attr_bytes_written: attr_written,
-        runtime_attributes: ctx.runtime_attributes,
-        runtime_scoped_attributes: ctx.runtime_scoped_attributes,
-    })
+    Ok(external_id_run)
 }
 
 /// Rebuild each indexed `text` column's index from the layers the snapshot named, minus `D₀`.
@@ -2115,13 +1734,8 @@ pub(crate) fn execute(
 fn fold_text_columns(
     plan: &FoldPlan,
     ctx: &FoldContext,
-    written: &mut Vec<(String, PathBuf)>,
-    attr_read: &mut u64,
-    attr_written: &mut u64,
+    out: &mut FoldOutput,
 ) -> Result<(), MaintenanceFailed> {
-    let file_len = |path: &Path| std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
-    let failed = |what: &str, e: &dyn std::fmt::Display| MaintenanceFailed(format!("{what}: {e}"));
-
     // The entity-scoped indexed text columns, then one job per view of each indexed **scoped**
     // text family (`views.md` §5): a family's per-view index is the same three artefacts in a
     // per-view directory, and the merge does not care which it is folding.
@@ -2192,7 +1806,7 @@ fn fold_text_columns(
                 tessera_filter::ColumnPostings::open(&from_dir.join("postings.arrow"), true)
                     .map_err(|e| failed("pass 4a (text: the base postings)", &e))?,
             );
-            *attr_read += file_len(&from_dir.join(tessera_filter::DICT_FILE))
+            out.attr_read += file_len(&from_dir.join(tessera_filter::DICT_FILE))
                 + file_len(&from_dir.join("postings.arrow"));
         }
         for extent in plan.text_extents.iter().filter(|e| {
@@ -2213,7 +1827,7 @@ fn fold_text_columns(
                 .map_err(|e| failed("pass 4a (text: an extent's postings)", &e))?,
             );
             for rel in extent.files() {
-                *attr_read += file_len(&ctx.from_prefix_dir.join(rel));
+                out.attr_read += file_len(&ctx.from_prefix_dir.join(rel));
             }
         }
         let dict_rel = format!("{column_rel}/{}", tessera_filter::DICT_FILE);
@@ -2249,11 +1863,424 @@ fn fold_text_columns(
         }
         outcome?;
 
-        *attr_written += file_len(&dict_path) + file_len(&postings_path);
-        written.push((dict_rel, dict_path));
-        written.push((postings_rel, postings_path));
+        out.wrote(dict_rel, dict_path);
+        out.wrote(postings_rel, postings_path);
     }
     Ok(())
+}
+
+/// Pass 4a: every declared filter column that owes a value column, in manifest order.
+fn fold_value_columns(
+    plan: &FoldPlan,
+    ctx: &FoldContext,
+    out: &mut FoldOutput,
+) -> Result<(), MaintenanceFailed> {
+    for job in value_column_jobs(plan, ctx) {
+        fold_value_column(plan, ctx, &job, out)?;
+    }
+    Ok(())
+}
+
+/// Fold one value column: its base and every snapshot extent merged in entity order into one new
+/// base, `D₀`'s entities blanked — removed from presence, their value bytes never written — and a
+/// category's postings rebuilt whole from the folded column.
+///
+/// **What only the fold can do here is retention.** A deleted entity's *filter* value survives
+/// every other pass: its row is gone, so its render value is gone with it, while the value column
+/// is positional and the slot cannot be renumbered away. This is where those bytes leave the
+/// corpus. The set blanked is `D₀`, the same set every other pass takes; a suppression touches no
+/// attribute artefact at all.
+///
+/// The pass reports its IO into [`FoldOutput`] and nothing triggers on it.
+fn fold_value_column(
+    plan: &FoldPlan,
+    ctx: &FoldContext,
+    job: &ColumnJob,
+    out: &mut FoldOutput,
+) -> Result<(), MaintenanceFailed> {
+    let scalar = job;
+    let incarnation = job_incarnation(ctx, job);
+    let belongs = |e: &&AttrExtent| {
+        e.column == scalar.name && e.view == job.view && e.incarnation == incarnation
+    };
+    let column_rel = job.rel.clone();
+    let from_dir = ctx.from_prefix_dir.join(&column_rel);
+    let to_dir = ctx.to_prefix_dir.join(&column_rel);
+    std::fs::create_dir_all(&to_dir).map_err(|e| failed("pass 4a (attributes)", &e))?;
+
+    // **Advised `MADV_SEQUENTIAL`, and these are the fold's own mappings** rather than the live
+    // generation's: decision 0052's rule is that the hint belongs to the mappings the fold
+    // owns, and the request path's `FilterColumns` must never be advised on the fold's behalf —
+    // which its signature makes unexpressible. The merge below streams each layer exactly once
+    // in entity order, so the readahead suits the access and the drop-behind is the point: these
+    // pages are not wanted again, and the request path's are.
+    // **A column declared at a running service has no base until this pass writes one**
+    // (`ingest.md` §6.3): its layers are the extents alone, and a column no flush has carried
+    // yet folds to an empty base, so the reopen finds the files every declared column owes.
+    let unfolded = job.view.is_none() && ctx.runtime_attributes.contains(&job.name);
+    let base = if unfolded {
+        None
+    } else {
+        let base = tessera_filter::ValueColumn::open_dir(
+            &from_dir,
+            tessera_filter::Access::MappedSequential,
+        )
+        .map_err(|e| failed("pass 4a (attributes: the base column)", &e))?;
+        out.attr_read += file_len(&from_dir.join(tessera_filter::VALUES_FILE))
+            + file_len(&from_dir.join(tessera_filter::PRESENCE_FILE));
+        Some(base)
+    };
+    let mut extents = Vec::new();
+    for extent in plan.attr_extents.iter().filter(belongs) {
+        extents.push(
+            tessera_filter::open_extent(
+                &ctx.from_prefix_dir.join(&extent.values),
+                &ctx.from_prefix_dir.join(&extent.presence),
+                tessera_filter::Access::MappedSequential,
+            )
+            .map_err(|e| failed("pass 4a (attributes: an extent)", &e))?,
+        );
+        out.attr_read += file_len(&ctx.from_prefix_dir.join(&extent.values))
+            + file_len(&ctx.from_prefix_dir.join(&extent.presence));
+    }
+    let layers: Vec<&tessera_filter::ValueColumn> = base.iter().chain(extents.iter()).collect();
+    // A keyword layer's dictionary, opened beside its ordinals and in the same order, because
+    // an ordinal names a position in *its own* layer's dictionary and nothing anywhere else.
+    // Empty for every other family, which is what selects the generic fold below.
+    let mut keyword_dicts: Vec<tessera_filter::SortedDict> = Vec::new();
+    if scalar.arrow_type == tessera_spatial::tiler::ScalarType::Keyword {
+        if !unfolded {
+            keyword_dicts.push(
+                tessera_filter::SortedDict::open_dir(
+                    &from_dir,
+                    tessera_filter::Access::MappedSequential,
+                )
+                .map_err(|e| failed("pass 4a (attributes: the base dictionary)", &e))?,
+            );
+        }
+        for extent in plan.attr_extents.iter().filter(belongs) {
+            let Some(dict_rel) = extent.dict.as_ref() else {
+                return Err(MaintenanceFailed(format!(
+                    "pass 4a (attributes): keyword column '{}' has an extent with no \
+                     dictionary; its ordinals name nothing",
+                    scalar.name
+                )));
+            };
+            keyword_dicts.push(
+                tessera_filter::SortedDict::open(
+                    &ctx.from_prefix_dir.join(dict_rel),
+                    tessera_filter::Access::MappedSequential,
+                )
+                .map_err(|e| failed("pass 4a (attributes: an extent dictionary)", &e))?,
+            );
+        }
+    }
+
+    let values_rel = format!("{column_rel}/{}", tessera_filter::VALUES_FILE);
+    let presence_rel = format!("{column_rel}/{}", tessera_filter::PRESENCE_FILE);
+    let dict_rel = format!("{column_rel}/{}", tessera_filter::DICT_FILE);
+    let values_path = ctx.to_prefix_dir.join(&values_rel);
+    let presence_path = ctx.to_prefix_dir.join(&presence_rel);
+    let dict_path = ctx.to_prefix_dir.join(&dict_rel);
+    // The snapshot's entity space, which is what the folded column covers. A column dense to
+    // this bound writes no presence bitmap at all — the reader's "the entity id is the array
+    // index" — and one deletion below it is what takes that away.
+    let bound = u32::try_from(plan.entity_bound).map_err(|_| {
+        MaintenanceFailed("pass 4a (attributes): the entity bound exceeds u32".to_string())
+    })?;
+    // **A keyword folds through its own pass, because its values are ordinals.** The generic
+    // fold carries values through byte-preserved, which is exactly wrong for a column whose
+    // dictionary is rebuilt from the survivors and whose ordinals must be renumbered against
+    // it — a key whose only carrier was blanked leaves the corpus, which is the retention
+    // argument reaching dictionary keys (records §7). The two passes are otherwise the same
+    // merge under the same guards.
+    let partial = if layers.is_empty() {
+        // Nothing has carried the column: an empty base with an empty presence, which is
+        // what a column no entity holds a value for is.
+        write_empty_value_column(
+            &values_path,
+            &presence_path,
+            column_kind_of(scalar.arrow_type, job.postings),
+        )
+        .map_err(|e| failed("pass 4a (attributes: an empty base)", &e))?;
+        if scalar.arrow_type == tessera_spatial::tiler::ScalarType::Keyword {
+            write_empty_dictionary(&dict_path)
+                .map_err(|e| failed("pass 4a (attributes: an empty dictionary)", &e))?;
+            out.wrote(dict_rel, dict_path.clone());
+        }
+        true
+    } else if keyword_dicts.is_empty() {
+        tessera_filter_write::fold_value_column(
+            &layers,
+            &plan.tombstones,
+            bound,
+            &values_path,
+            &presence_path,
+        )
+        .map_err(|e| failed("pass 4a (attributes: the merge)", &e))?
+    } else {
+        let keyword_layers: Vec<tessera_filter_write::KeywordLayer<'_>> = layers
+            .iter()
+            .zip(keyword_dicts.iter())
+            .map(|(values, dict)| tessera_filter_write::KeywordLayer { values, dict })
+            .collect();
+        let partial = tessera_filter_write::fold_keyword_column(
+            &keyword_layers,
+            &plan.tombstones,
+            bound,
+            &values_path,
+            &presence_path,
+            &dict_path,
+        )
+        .map_err(|e| failed("pass 4a (attributes: the keyword merge)", &e))?;
+        out.wrote(dict_rel, dict_path.clone());
+        partial
+    };
+    out.wrote(values_rel, values_path.clone());
+    if partial {
+        out.wrote(presence_rel, presence_path.clone());
+    }
+
+    if !job.postings {
+        return Ok(());
+    }
+    // **Rebuilt from the folded column**, read back rather than from the layers it was merged
+    // from: that is what makes the postings a derivative of the artefact of record rather than
+    // a second opinion about it, and it is the same emit the batch build calls.
+    // **Mapped without the hint, unlike the merge's inputs above.** The banded emit scans this
+    // column once per band (§6.2), and `MADV_SEQUENTIAL`'s drop-behind would turn every band
+    // after the first into a re-read of bytes this pass has just written and still has in cache.
+    // The advice is right for a single stream and wrong for a repeated one.
+    let folded = tessera_filter::ValueColumn::open(
+        &values_path,
+        partial.then_some(presence_path.as_path()),
+        tessera_filter::Access::Mapped,
+    )
+    .map_err(|e| failed("pass 4a (attributes: reopening the folded column)", &e))?;
+    let postings_rel = format!("{column_rel}/postings.arrow");
+    let postings_path = ctx.to_prefix_dir.join(&postings_rel);
+    tessera_filter_write::write_category_postings(
+        &postings_path,
+        &scalar.name,
+        &folded,
+        tessera_filter_write::POSTINGS_BAND_ROWS,
+    )
+    .map_err(|e| failed("pass 4a (attributes: the postings rebuild)", &e))?;
+    out.wrote(postings_rel, postings_path);
+
+    Ok(())
+}
+
+/// Pass 4a, continued: the record blob rewritten without the blanked entities' rows, base plus
+/// every snapshot extent streamed in entity order into one new base — *remove, emit no bytes*, so
+/// a deleted entity's prose is physically absent from the folded artefact.
+///
+/// The set blanked is exactly `D₀`: a suppressed entity's row streams through byte-preserved like
+/// any survivor's. The blob exists iff the schema declares a blob-resident column, so the mismatch
+/// arms are unreachable by construction and refuse loudly rather than silently dropping extents'
+/// bytes.
+fn fold_record_blob(
+    plan: &FoldPlan,
+    ctx: &FoldContext,
+    out: &mut FoldOutput,
+) -> Result<(), MaintenanceFailed> {
+    let blob_resident = ctx
+        .declared_scalars
+        .iter()
+        .any(|d| crate::filter::blob_resident(d, &ctx.vocabularies));
+    // The base blob exists where a column the build or an earlier fold declared is
+    // blob-resident; a blob-resident column declared at a running service has extents alone
+    // until this pass writes the base (`ingest.md` §6.3).
+    let based_blob_resident = ctx.declared_scalars.iter().any(|d| {
+        !ctx.runtime_attributes.contains(&d.name)
+            && crate::filter::blob_resident(d, &ctx.vocabularies)
+    });
+    if !blob_resident && !plan.record_extents.is_empty() {
+        return Err(MaintenanceFailed(
+            "pass 4a (record blob): the manifest names record extents but the schema declares no \
+             blob-resident column; folding would drop their bytes silently, so it is refused"
+                .to_string(),
+        ));
+    }
+    if blob_resident {
+        let record_rel = format!("partitions/{}/attrs/record", plan.partition);
+        let from_dir = ctx.from_prefix_dir.join(&record_rel);
+        let to_dir = ctx.to_prefix_dir.join(&record_rel);
+        std::fs::create_dir_all(&to_dir).map_err(|e| failed("pass 4a (record blob)", &e))?;
+
+        // The fold's own mappings, advised sequential like the value columns above (decision
+        // 0052): each layer streams exactly once, block by block.
+        let base = if based_blob_resident {
+            let base = tessera_filter::RecordBlob::open_dir(
+                &from_dir,
+                tessera_filter::Access::MappedSequential,
+            )
+            .map_err(|e| failed("pass 4a (record blob: the base)", &e))?;
+            for name in [
+                tessera_filter::RECORD_BLOCKS_FILE,
+                tessera_filter::RECORD_HASROW_FILE,
+                tessera_filter::RECORD_DIRECTORY_FILE,
+            ] {
+                out.attr_read += file_len(&from_dir.join(name));
+            }
+            Some(base)
+        } else {
+            None
+        };
+        let mut extents = Vec::with_capacity(plan.record_extents.len());
+        for extent in &plan.record_extents {
+            extents.push(
+                tessera_filter::RecordBlob::open(
+                    &ctx.from_prefix_dir.join(&extent.blocks),
+                    &ctx.from_prefix_dir.join(&extent.hasrow),
+                    &ctx.from_prefix_dir.join(&extent.directory),
+                    tessera_filter::Access::MappedSequential,
+                )
+                .map_err(|e| failed("pass 4a (record blob: an extent)", &e))?,
+            );
+            for rel in extent.files() {
+                out.attr_read += file_len(&ctx.from_prefix_dir.join(rel));
+            }
+        }
+        let layers: Vec<&tessera_filter::RecordBlob> = base.iter().chain(extents.iter()).collect();
+
+        let blocks_rel = format!("{record_rel}/{}", tessera_filter::RECORD_BLOCKS_FILE);
+        let hasrow_rel = format!("{record_rel}/{}", tessera_filter::RECORD_HASROW_FILE);
+        let directory_rel = format!("{record_rel}/{}", tessera_filter::RECORD_DIRECTORY_FILE);
+        let blocks_path = ctx.to_prefix_dir.join(&blocks_rel);
+        let hasrow_path = ctx.to_prefix_dir.join(&hasrow_rel);
+        let directory_path = ctx.to_prefix_dir.join(&directory_rel);
+        if layers.is_empty() {
+            // A blob-resident column declared at a running service that no flush has carried:
+            // an empty base, so the reopen finds the blob the schema says exists.
+            tessera_filter_write::RecordBlobWriter::create(
+                &blocks_path,
+                &hasrow_path,
+                &directory_path,
+                tessera_filter::RECORD_BLOCK_TARGET,
+            )
+            .and_then(|writer| writer.finish())
+            .map_err(|e| failed("pass 4a (record blob: an empty base)", &e))?;
+        } else {
+            tessera_filter_write::fold_record_blob(
+                &layers,
+                &plan.tombstones,
+                &blocks_path,
+                &hasrow_path,
+                &directory_path,
+                tessera_filter::RECORD_BLOCK_TARGET,
+            )
+            .map_err(|e| failed("pass 4a (record blob: the rewrite)", &e))?;
+        }
+        for (rel, path) in [
+            (blocks_rel, blocks_path),
+            (hasrow_rel, hasrow_path),
+            (directory_rel, directory_path),
+        ] {
+            out.wrote(rel, path);
+        }
+    }
+
+    Ok(())
+}
+
+/// Pass 4c: the entity→term transpose, base plus every snapshot extent streamed in entity order
+/// into one new base, with `D₀`'s entities emitting nothing. A suppressed entity's list streams
+/// through unchanged — a suppression hides an item and does not unlabel it.
+///
+/// **No ordinal is remapped**: a stored ordinal is a position in the concatenation of the
+/// dictionary extents, and those are carried forward verbatim, never renumbered and never shrunk.
+/// Unconditional, unlike the blob's pass: every entity has a label set, so a base always exists.
+fn fold_entity_terms(
+    plan: &FoldPlan,
+    ctx: &FoldContext,
+    out: &mut FoldOutput,
+) -> Result<(), MaintenanceFailed> {
+    let terms_rel = format!(
+        "partitions/{}/{}",
+        plan.partition,
+        tessera_store::ENTITY_TERMS_DIR
+    );
+    let from_dir = ctx.from_prefix_dir.join(&terms_rel);
+    let to_dir = ctx.to_prefix_dir.join(&terms_rel);
+    std::fs::create_dir_all(&to_dir).map_err(|e| failed("pass 4c (entity terms)", &e))?;
+
+    let mut extent_paths = Vec::with_capacity(plan.entity_terms_extents.len());
+    for extent in &plan.entity_terms_extents {
+        extent_paths.push(tessera_store::EntityTermsExtentPaths {
+            hasrow: ctx.from_prefix_dir.join(&extent.hasrow),
+            offsets: ctx.from_prefix_dir.join(&extent.offsets),
+            terms: ctx.from_prefix_dir.join(&extent.terms),
+            bases: ctx.from_prefix_dir.join(&extent.bases),
+        });
+        for rel in extent.files() {
+            out.attr_read += file_len(&ctx.from_prefix_dir.join(rel));
+        }
+    }
+    for name in [
+        tessera_store::ENTITY_TERMS_HASROW_FILE,
+        tessera_store::ENTITY_TERMS_OFFSETS_FILE,
+        tessera_store::ENTITY_TERMS_TERMS_FILE,
+        tessera_store::ENTITY_TERMS_BASES_FILE,
+    ] {
+        out.attr_read += file_len(&from_dir.join(name));
+    }
+    let layers = tessera_store::EntityTermsStack::open(Some(&from_dir), &extent_paths)
+        .map_err(|e| failed("pass 4c (entity terms: the layers)", &e))?;
+    let mut writer = tessera_store::EntityTermsWriter::create(&to_dir)
+        .map_err(|e| failed("pass 4c (entity terms: the rewrite)", &e))?;
+    // One ascending pass over the union of the layers' has-row sets, which is the order the
+    // writer requires and the order every layer already holds.
+    let live = layers.entity_set();
+    for entity in live.iter() {
+        if plan.tombstones.contains(entity) {
+            continue;
+        }
+        let Some(terms) = layers
+            .terms_of(entity)
+            .map_err(|e| failed("pass 4c (entity terms: a layer)", &e))?
+        else {
+            continue;
+        };
+        writer
+            .push(entity, &terms)
+            .map_err(|e| failed("pass 4c (entity terms: the rewrite)", &e))?;
+    }
+    for path in writer
+        .finish()
+        .map_err(|e| failed("pass 4c (entity terms: the rewrite)", &e))?
+    {
+        let rel = format!(
+            "{terms_rel}/{}",
+            path.file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or_default()
+        );
+        out.wrote(rel, path);
+    }
+
+    Ok(())
+}
+
+/// Pass 5: a digest of every file the fold wrote, and an fsync of all of them.
+///
+/// **`CURRENT` is a durable pointer at bytes that are not yet durable, until this runs.** The
+/// segment, postings and external-id writers do not sync: a partially-written file is *detectable*
+/// through the manifest digests, and a build or a flush can simply re-run. A fold cannot — it
+/// flips `CURRENT` onto this prefix and then deletes the old tree, so these bytes become the only
+/// copy. Publication does the same for the files it links.
+fn digest_and_sync(out: &FoldOutput) -> Result<BTreeMap<String, FileDigest>, MaintenanceFailed> {
+    let mut files = BTreeMap::new();
+    for (rel, path) in &out.written {
+        files.insert(
+            rel.clone(),
+            crate::flush::digest_of(path)?,
+        );
+    }
+    let paths: Vec<PathBuf> = out.written.iter().map(|(_, path)| path.clone()).collect();
+    tessera_store::fsync_written(&paths).map_err(|e| failed("pass 5 (durability)", &e))?;
+
+    Ok(files)
 }
 
 /// The next `v#####` prefix name under `bundle_root` — one past the highest already present.
@@ -3202,3 +3229,4 @@ mod tests {
         }
     }
 }
+
