@@ -43,10 +43,10 @@ pub(super) fn held_entity_value(
     declared: &tessera_store::manifest::DeclaredScalar,
     buffered: Option<&tessera_lifecycle::BufferedItem>,
     pending: Option<&tessera_lifecycle::Fill>,
-    blob: &mut crate::session::BlobRow,
+    blob: &mut crate::write::joined::BlobRow,
 ) -> Option<WalScalar> {
     let held =
-        |value: WalScalar| (!crate::session::scalar_is_absent(&value, declared)).then_some(value);
+        |value: WalScalar| (!crate::write::joined::scalar_is_absent(&value, declared)).then_some(value);
     buffered
         .and_then(|item| item.scalars.get(at).cloned())
         .and_then(held)
@@ -55,7 +55,7 @@ pub(super) fn held_entity_value(
                 .and_then(|fill| fill.scalars.get(at).cloned())
                 .and_then(held)
         })
-        .or_else(|| crate::session::flushed_scalar_of(generation, entity, at, blob).and_then(held))
+        .or_else(|| crate::write::joined::flushed_scalar_of(generation, entity, at, blob).and_then(held))
 }
 
 /// What this deployment already holds for one `(entity, attribute, key)` cell, on
@@ -74,7 +74,7 @@ pub(super) fn held_scoped_value(
 ) -> Option<WalScalar> {
     let manifest = &generation.bundle.manifest;
     let held =
-        |value: WalScalar| (!crate::session::scalar_is_absent(&value, declared)).then_some(value);
+        |value: WalScalar| (!crate::write::joined::scalar_is_absent(&value, declared)).then_some(value);
     generation
         .buffer
         .rows_of(entity)
@@ -86,7 +86,7 @@ pub(super) fn held_scoped_value(
                 .and_then(held)
         })
         .or_else(|| {
-            crate::session::flushed_scoped_of(generation, entity, family, owner_view).and_then(held)
+            crate::write::joined::flushed_scoped_of(generation, entity, family, owner_view).and_then(held)
         })
 }
 
@@ -170,7 +170,7 @@ pub(super) fn plan_fills(
         let pending = generation.buffer.fill_of(entity);
         let pending_scoped = generation.buffer.scoped_fill_of(entity, &owner_view);
         // Read at most once for this row, and only if a blob-resident column asks.
-        let mut blob = crate::session::BlobRow::default();
+        let mut blob = crate::write::joined::BlobRow::default();
         // Absence in a fill's tails is `WalScalar::Null` for every family, category included: the
         // flush's gather maps `Null` onto the category's reserved code. Using `Null` here lets a
         // merge of two fills tell an unfilled cell from a filled one.
@@ -186,7 +186,7 @@ pub(super) fn plan_fills(
             match column {
                 ValuesColumn::Entity(at) => {
                     let d = &declared[*at];
-                    if crate::session::scalar_is_absent(supplied, d) {
+                    if crate::write::joined::scalar_is_absent(supplied, d) {
                         continue;
                     }
                     let stored = held_entity_value(
@@ -220,8 +220,8 @@ pub(super) fn plan_fills(
                 }
                 ValuesColumn::Scoped(at) => {
                     let family = &families[*at];
-                    let d = crate::session::declared_of_scoped(family);
-                    if crate::session::scalar_is_absent(supplied, &d) {
+                    let d = crate::write::joined::declared_of_scoped(family);
+                    if crate::write::joined::scalar_is_absent(supplied, &d) {
                         continue;
                     }
                     let stored = held_scoped_value(
@@ -238,7 +238,7 @@ pub(super) fn plan_fills(
                     // so there is nothing to compare against. Occupancy is asked instead.
                     if stored.is_none()
                         && family.arrow_type == ScalarType::Text
-                        && crate::session::flushed_scoped_text_present(
+                        && crate::write::joined::flushed_scoped_text_present(
                             generation,
                             entity,
                             family,
@@ -454,7 +454,7 @@ pub(super) fn settle_joins(generation: &Generation, rows: &mut [UnallocatedRow])
         let pending = generation.buffer.fill_of(entity);
         let pending_scoped = generation.buffer.scoped_fill_of(entity, &owner_view);
         // Read at most once for this row, and only if a blob-resident column asks.
-        let mut blob = crate::session::BlobRow::default();
+        let mut blob = crate::write::joined::BlobRow::default();
         // The label arm reads the buffer first, the transpose after, and both are exact.
         //
         // A novel descriptor resolves to a process-local extension id no stored ordinal can equal,
@@ -462,7 +462,7 @@ pub(super) fn settle_joins(generation: &Generation, rows: &mut [UnallocatedRow])
         // entity cannot be carrying it.
         let held_terms: Option<Vec<u32>> = match &buffered {
             Some(buffered) => Some(buffered.terms.iter().map(|t| t.raw()).collect()),
-            None => crate::session::flushed_terms_of(generation, entity)
+            None => crate::write::joined::flushed_terms_of(generation, entity)
                 .map(|terms| terms.iter().map(|t| t.raw()).collect()),
         };
         if let Some(mut held_terms) = held_terms {
@@ -489,7 +489,7 @@ pub(super) fn settle_joins(generation: &Generation, rows: &mut [UnallocatedRow])
             // An omitted value is not a disagreement, and is not written through as an absence
             // either: the backfill below fills a `render` column's omitted slot from the entity's
             // stored value, once join-ness is settled.
-            if crate::session::scalar_is_absent(supplied, d) {
+            if crate::write::joined::scalar_is_absent(supplied, d) {
                 continue;
             }
             let held = held_entity_value(generation, entity, position, d, buffered, pending, &mut blob);
@@ -518,8 +518,8 @@ pub(super) fn settle_joins(generation: &Generation, rows: &mut [UnallocatedRow])
             let Some(supplied) = row.scoped.get(position) else {
                 continue;
             };
-            let d = crate::session::declared_of_scoped(family);
-            if crate::session::scalar_is_absent(supplied, &d) {
+            let d = crate::write::joined::declared_of_scoped(family);
+            if crate::write::joined::scalar_is_absent(supplied, &d) {
                 continue;
             }
             let held =
@@ -534,7 +534,7 @@ pub(super) fn settle_joins(generation: &Generation, rows: &mut [UnallocatedRow])
             );
             if held.is_none()
                 && family.arrow_type == ScalarType::Text
-                && crate::session::flushed_scoped_text_present(
+                && crate::write::joined::flushed_scoped_text_present(
                     generation,
                     entity,
                     family,
@@ -589,7 +589,7 @@ pub(super) fn settle_joins(generation: &Generation, rows: &mut [UnallocatedRow])
             let Some(supplied) = row.scalars.get(position) else {
                 continue;
             };
-            if !crate::session::scalar_is_absent(supplied, d) {
+            if !crate::write::joined::scalar_is_absent(supplied, d) {
                 continue;
             }
             // A column the entity genuinely holds nothing for is `None` here and its absence stays

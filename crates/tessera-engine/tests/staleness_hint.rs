@@ -35,6 +35,10 @@ const NOVEL: &[u8] = b"dept:secret";
 /// The fixture's `ALL_TERM` — which resolves — plus [`NOVEL`], which does not.
 const PARTLY_UNRESOLVED: &[u8] = br#"{"terms": ["0", "dept:secret"]}"#;
 
+/// The fixture's `ALL_TERM`, named twice. The passthrough plugin hands descriptors on verbatim and
+/// deduplicates nothing, so this is two descriptors resolving to one ordinal.
+const DOUBLED: &[u8] = br#"{"terms": ["0", "0"]}"#;
+
 fn engine_on_fixture(tmp: &Path) -> (Engine, PathBuf) {
     let root = tmp.join("bundle");
     build_fixture(
@@ -154,6 +158,65 @@ fn a_hinted_session_continues_to_serve() {
         out.tiles.iter().map(|t| t.visible).sum::<u64>() > 0,
         "and it still sees everything its unchanged mask covers"
     );
+}
+
+/// Two descriptors that resolve to one term leave nothing unresolved.
+///
+/// `satisfied` is a set, so the credential's descriptor count is not the number of terms it
+/// resolved to: a session that named the same descriptor twice must be hinted by no promotion, and
+/// must see exactly what the same credential naming it once sees. Counting the difference instead
+/// would hint this session for ever, and a hint that fires for a session with nothing missing is
+/// the one shape that makes the advisory worthless.
+#[test]
+fn a_credential_naming_one_descriptor_twice_is_never_hinted() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let (engine, _root) = engine_on_fixture(tmp.path());
+
+    let doubled = engine.authorise(DOUBLED).expect("authorises");
+    let once = engine
+        .authorise(&full_coverage_credential())
+        .expect("authorises");
+    assert_eq!(
+        resolved(&doubled),
+        1,
+        "two descriptors, one term — or this test is about something else"
+    );
+    assert_eq!(
+        visible(&engine, &doubled),
+        visible(&engine, &once),
+        "the duplicate changes nothing about what is served"
+    );
+
+    let dict_len_before = engine.generation().dict.len();
+    promote(&engine, &tmp.path().join("promoted"), b"dept:unrelated");
+    assert!(
+        engine.generation().dict.len() > dict_len_before,
+        "the dictionary must have grown, or this test proves nothing"
+    );
+
+    assert!(
+        !doubled.is_stale(&engine.generation()),
+        "this session left no descriptor unresolved, duplicate or not"
+    );
+    assert_eq!(
+        visible(&engine, &doubled),
+        visible(&engine, &once),
+        "and it still sees exactly what the single-descriptor credential sees"
+    );
+}
+
+/// This session's total visible count over the whole extent.
+fn visible(engine: &Engine, session: &Session) -> u64 {
+    engine
+        .viewport(
+            session,
+            ViewportRequest::new("s0", 0, [0.0, 0.0, 1000.0, 1000.0], N_ITEMS as usize),
+        )
+        .expect("a viewport")
+        .tiles
+        .iter()
+        .map(|tile| tile.visible)
+        .sum()
 }
 
 /// The credential's own resolved descriptors: `satisfied` minus the reserved `public` term.

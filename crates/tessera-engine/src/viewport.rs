@@ -71,7 +71,9 @@ use crate::compose::{compose, visible_to, EffectiveMask, FilterRows};
 use crate::filter::{Endpoint, Family, FilterOperand, Scalar};
 use crate::membership_column::{ServedLayer, ServedLevel};
 use crate::select::{SelectParams, Selection, SelectionPart, SelectionParts, Threshold};
-use crate::session::{Engine, EngineError, Result, Session};
+use crate::engine::Engine;
+use crate::error::{EngineError, Result};
+use crate::session::Session;
 use crate::timing::{Probe, StageTimings, TileProbe, TileStats};
 use crate::Generation;
 

@@ -21,6 +21,7 @@
 mod command;
 mod executor;
 mod health;
+pub(crate) mod joined;
 mod live;
 mod reconstruct;
 mod schema;
@@ -65,7 +66,7 @@ use tessera_store::render_presence::RENDER_PRESENCE_DIR;
 use tessera_store::vocabulary::{MintError, Minted, Vocabularies};
 use tessera_types::{EntityId, IdentityKey, TermId};
 
-use crate::session::EngineError;
+use crate::error::EngineError;
 use crate::{Generation, GenerationHandle};
 
 /// Take a lock, recovering rather than panicking if a previous holder panicked.

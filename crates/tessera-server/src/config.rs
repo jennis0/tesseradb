@@ -2146,7 +2146,7 @@ fn non_zero_u64(key: &'static str, value: u64, consequence: &'static str) -> Res
 /// pass-disabling as 0 and [`non_zero_usize`] would wave it through. See
 /// [`ConfigError::SelectionWidthBelowTwo`].
 fn selection_width(key: &'static str, width: usize) -> Result<usize> {
-    if width < 2 {
+    if width < tessera_engine::MIN_SELECTION_WIDTH {
         return Err(ConfigError::SelectionWidthBelowTwo { key, width });
     }
     Ok(width)
@@ -2296,7 +2296,7 @@ fn parse(text: &str) -> Result<Config> {
         .serve
         .theta_target_marks
         .unwrap_or(DEFAULT_THETA_TARGET_MARKS);
-    if k_min == 0 {
+    if k_min < tessera_engine::MIN_K_MIN {
         return Err(ConfigError::FloorClauseDisabled);
     }
     // BOTH caps clamp the floor, because the effective cap is `min(k, max_k, k_max_marks)` and the

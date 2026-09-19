@@ -775,3 +775,100 @@ fn the_refusals_are_about_schema_and_an_artifact_is_an_empty_page() {
         );
     }
 }
+
+/// **A session established before a fold counts none of the entity the fold retired** — the same
+/// session object, never re-authorised, over a filtered browse.
+///
+/// A fold retires the deletion's tombstone and rotates the bundle identity without moving the
+/// watermark, so this session's frozen fragment still names the retired entity and the overlay no
+/// longer denies it. A filtered browse composes that fragment into an entity-space candidate, and
+/// a row's `matched_count` is what a retired entity would reappear in.
+#[test]
+fn a_session_from_before_a_fold_counts_none_of_the_entity_the_fold_retired() {
+    let fx = fixture(None);
+    // A refresh pass rebuilds each resident session's fragment, which would make a request path
+    // that failed to notice the rotation indistinguishable from one that noticed.
+    fx.engine.set_background_refresh_for_test(false);
+    let session = fx
+        .engine
+        .authorise(&full_coverage_credential())
+        .expect("the credential resolves");
+
+    // Source 0 is `alpha`'s first member and carries `xx`; `charlie` is the untouched control.
+    let doomed = EntityId::new(source_to_new_map(&fx._dir.path().join("bundle"), "v00000")[&0]);
+    assert_eq!(archive_of(0), "xx");
+    let xx = FilterExpr::Leaf {
+        column: "archive".into(),
+        operand: FilterOperand::Equals(tessera_types::AttrLocalId::new(fx.codes["xx"])),
+    };
+    let counted = |key: &str| -> u64 {
+        let out = fx
+            .engine
+            .browse(
+                &session,
+                BrowseRequest {
+                    view: "s0",
+                    layer: LAYER,
+                    level: None,
+                    form: BrowseForm::Roots,
+                    filter: Some(xx.clone()),
+                    limit: 100,
+                    cursor: None,
+                },
+            )
+            .expect("a filtered browse answers");
+        out.artifacts
+            .iter()
+            .find(|row| row.key.as_deref() == Some(key))
+            .unwrap_or_else(|| panic!("'{key}' is served"))
+            .matched_count
+            .expect("a filtered row carries a matched count")
+    };
+
+    let alpha_before = counted("alpha");
+    let charlie_before = counted("charlie");
+    assert!(alpha_before > 1, "the count must have room to fall by one");
+
+    fx.engine
+        .accept_change(doomed, tessera_lifecycle::wal::ChangeOp::Delete)
+        .expect("a delete is accepted");
+    let before = fx.engine.write_executor_stats();
+    fx.engine.request_fold();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    loop {
+        let now = fx.engine.write_executor_stats();
+        assert_eq!(
+            now.fold_failures, before.fold_failures,
+            "the fold was discarded rather than published"
+        );
+        if now.folds > before.folds {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the fold never published"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert_eq!(
+        fx.engine.overlay_depth(),
+        0,
+        "the tombstone retired, so nothing but the folded corpus hides the entity now"
+    );
+    // The premise, without which the assertions below hold for the wrong reason.
+    assert!(
+        session.fragment.view().contains(doomed.raw() as u32),
+        "the frozen fragment must still name the retired entity"
+    );
+
+    assert_eq!(
+        counted("alpha"),
+        alpha_before - 1,
+        "the filtered count moved by exactly the retired entity"
+    );
+    assert_eq!(
+        counted("charlie"),
+        charlie_before,
+        "and an artifact the fold did not touch counts what it counted"
+    );
+}

@@ -1640,6 +1640,9 @@ async fn every_scoped_family_survives_ingest_flush_layering_fold_and_restart() {
     // `coalesce::tests::a_scoped_familys_window_is_one_views_own` plans over a manifest carrying
     // two views' extents of one family and asserts one window per view, each holding only its own
     // view's layers and each under its own view's directory.
+    // Held still while the stack is built and read: this test's coalesce width is 2, so a pass
+    // landing between two of these flushes would collapse the layers the assertions count.
+    served.server.state.engine.set_coalesce_for_test(false);
     for round in 0..3 {
         ingest_scoped(
             &served,
@@ -1670,6 +1673,7 @@ async fn every_scoped_family_survives_ingest_flush_layering_fold_and_restart() {
         "and on no other view's — a layer belongs to the `(column, view)` that wrote it"
     );
     assert_written_answers(&served, "over a stack of layers", &[q1, q3[0]], minted).await;
+    served.server.state.engine.set_coalesce_for_test(true);
 
     // ---- the fold -----------------------------------------------------------------------------
     fold(&served).await;

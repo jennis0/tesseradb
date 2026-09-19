@@ -22,11 +22,14 @@ Things found during the cleanup that are not yet done. One line each; delete a l
 
 - `tessera-build` keeps a second whole implementation of the build (`build_in_memory`) as a test oracle for the streaming one. Every change to the build is made twice.
 - Things declared at a running service live in separate lists (`RuntimeAttributes`, `RuntimeVocabularies`, `RuntimeViewDeclarations`) until a fold writes them into `MANIFEST.json`, then are removed from those lists. Two manifests hold one schema.
+- `PauseSiteArg::BeforeAck` (`write/executor/mod.rs`) is never constructed in a build without `fault-injection`, so `cargo clippy -p tessera-engine --lib -- -D warnings` fails. The workspace clippy enables the feature and does not see it.
+- `Engine::request_flush`'s comment says `flush_max_items` was deleted. It is a live `EngineConfig` field and the tick reads it.
 
 - The Python oracle's `BUNDLE_FORMAT` (`reference/oracle/harness.py`) is 11 and the Rust constant is 16, so the oracle does not accept a current bundle.
 
 ## Needs a decision
 
+- The engine takes part of its configuration at `Engine::open` (`EngineConfig`) and the rest through nine setters afterwards (`set_cache_bounds` and its siblings). The default values and most validity rules live in `tessera-server`'s loader, so a caller that opens the engine directly (`tessera-bench`, tests, any embedder) gets unbounded caches unless it calls the setters, and re-states every default. `Engine::open` refuses `k_min = 0` and selection widths below 2; the rest is unchecked below the server. Decide whether the engine owns the defaults and the bounds, with the server's loader reading from it.
 - A label's row on the artifacts frame still carries its cluster's two filter bits (`matched`, `highlighted`). The row now names its cluster in `target`, so a client can read them from the cluster's own row. Keep the copy or remove it.
 - How the `tessera` binary reaches a Python user at release. Measured 2026-09-18: 45 MiB, 12 MiB stripped and compressed. The options were a wheel per platform that the `[local]` extra depends on, or a download on first use.
 

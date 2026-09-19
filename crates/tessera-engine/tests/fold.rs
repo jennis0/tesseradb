@@ -1951,6 +1951,90 @@ fn item_lookup_answers_exactly_m_auth_across_a_fold() {
     );
 }
 
+/// **A session established before the fold never sees the entity the fold retired** — the same
+/// session object, never re-authorised, across the flip.
+///
+/// The sibling cases above authorise once and read counts, or read `Engine::item`. This one pins
+/// the marks: the served `tessera_id` list, which is what a viewer actually draws, is where a
+/// retired entity would appear point by point rather than as a number one smaller than expected.
+/// A session's fragment is frozen at authorise and a fold advances no watermark, so what decides
+/// whether that fragment is reused is the bundle-identity comparison in `Engine::fragment_for` —
+/// and a fragment carried across the rotation still names every entity the fold retired.
+#[test]
+fn a_session_from_before_a_fold_is_never_served_the_entity_the_fold_retired() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().join("bundle");
+    let engine = engine_over_fixture(tmp.path(), &root, config_uncapped());
+
+    // Source 6 carries both fixture terms, so it is visible to this principal before the delete;
+    // source 5 is never deleted and is the control.
+    let doomed = entity_of_source(&root, "v00000", 6);
+    let survivor = entity_of_source(&root, "v00000", 5);
+    let doomed_id: TesseraId = engine.tessera_id_of(doomed).unwrap();
+    let survivor_id: TesseraId = engine.tessera_id_of(survivor).unwrap();
+
+    let session = engine.authorise(&full_coverage_credential()).unwrap();
+    let before = marks(&engine, &session);
+    assert!(
+        before.contains(&doomed_id.raw()),
+        "the fixture must serve the item this case deletes, or it proves nothing"
+    );
+    assert!(before.contains(&survivor_id.raw()));
+    let count_before = visible(&engine, &session);
+
+    engine
+        .accept_change(doomed, ChangeOp::Delete)
+        .expect("a delete is accepted");
+    fold(&engine);
+    assert_eq!(engine.generation().prefix, "v00001");
+    assert_eq!(
+        engine.overlay_depth(),
+        0,
+        "the tombstone retired, so nothing but the rebuilt fragment hides the entity now"
+    );
+
+    // The same session, never re-authorised.
+    let after = marks(&engine, &session);
+    assert!(
+        !after.contains(&doomed_id.raw()),
+        "the retired entity was drawn to a session that authorised before the fold"
+    );
+    assert!(
+        after.contains(&survivor_id.raw()),
+        "and an entity the fold did not retire is still served to it"
+    );
+    assert_eq!(
+        visible(&engine, &session),
+        count_before - 1,
+        "the count moved by exactly the retired entity"
+    );
+    assert!(
+        engine.item(&session, doomed_id, None).unwrap().is_none(),
+        "and the drill-down answers nothing for it"
+    );
+    assert!(
+        engine.item(&session, survivor_id, None).unwrap().is_some(),
+        "while the entity the fold kept still answers"
+    );
+}
+
+/// The `tessera_id`s a whole-map request serves this session, which is the mark set a viewer draws.
+fn marks(engine: &Engine, session: &tessera_engine::Session) -> Vec<u64> {
+    engine
+        .viewport(
+            session,
+            ViewportRequest::new(
+                "s0",
+                0,
+                [0.0, 0.0, 1000.0, 1000.0],
+                (N_ITEMS + 100) as usize,
+            ),
+        )
+        .unwrap()
+        .points
+        .tessera_ids
+}
+
 /// **The drill-down's satisfied labels survive a fold, and a folded-away entity's list is gone**
 /// (contracts §2.4's `entities/terms/`, [decision 0114](../../../docs/decisions/0114-the-drill-down-serves-the-satisfied-labels-only.md)).
 ///

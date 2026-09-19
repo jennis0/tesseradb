@@ -24,6 +24,7 @@ use arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
 use arrow::record_batch::RecordBatch;
 use common::*;
 use parquet::arrow::ArrowWriter;
+use rustc_hash::FxHashSet;
 use tessera_analyse::SuggestionField;
 use tessera_build::config::{Config, Schema};
 use tessera_build::{build, BuildArgs};
@@ -1328,4 +1329,54 @@ fn a_rebuild_between_the_sweep_and_the_read_discards_the_set_and_resweeps() {
     ));
     served.sort_unstable();
     assert_eq!(served, ["alpha", "zulu"]);
+}
+
+/// **A prune drops the pruned session's visible-value set and nobody else's** — the set is held per
+/// `(session, column)` and is pinned by nothing once the session is revoked.
+///
+/// Both pruners, because the expiry sweep takes the batch form and a set left behind by one of them
+/// is memory no request can ever reach again.
+#[test]
+fn a_prune_drops_the_tokens_visible_value_set() {
+    let fx = fixture();
+    let engine = engine_for(&fx, "prune");
+
+    let doomed = engine
+        .authorise(&full_coverage_credential())
+        .expect("the credential resolves");
+    let survivor = engine
+        .authorise(&subset_credential())
+        .expect("the credential resolves");
+    wait_for_set(&engine, &doomed, "department");
+    wait_for_set(&engine, &survivor, "department");
+    assert_eq!(
+        engine.suggest_set_stats().entries,
+        2,
+        "one set each, or this proves nothing"
+    );
+
+    engine.prune_token(doomed.token_id);
+    assert_eq!(engine.suggest_set_stats().entries, 1);
+
+    // The survivor's own set is still there: a hit rather than a re-sweep.
+    let hits = engine.suggest_set_stats().hits;
+    let page = suggest_with(
+        &engine,
+        &survivor,
+        "department",
+        "",
+        20,
+        false,
+        100_000,
+        WIDE_CEILING,
+    );
+    assert!(!keys(&page).is_empty(), "and it is still served");
+    assert_eq!(engine.suggest_set_stats().hits, hits + 1);
+
+    engine.prune_tokens(&FxHashSet::from_iter([survivor.token_id]));
+    assert_eq!(
+        engine.suggest_set_stats().entries,
+        0,
+        "the batch form removes the same thing"
+    );
 }
