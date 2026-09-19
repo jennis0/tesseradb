@@ -142,17 +142,16 @@ pub(crate) struct VocabularyValues {
 
 /// One unit of work for the write executor, and the channel it is answered on.
 ///
-/// Ingest and change are the whole vocabulary. A flush and a compaction fold are specified as
-/// further commands and would arrive additively, as new variants, not a changed shape for these
-/// two. Neither exists yet, so nothing today submits anything but these.
+/// A command carries what the caller sent, unvalidated and unallocated. Whether a name or key is
+/// free, which ids or ordinals or codes to allocate, and whether a batch id was seen before all
+/// read state only the executor may write, so they are decided there: a handler that checked
+/// first could be overtaken between its check and the enqueue, and two callers would be
+/// acknowledged onto one name. Items and members are addressed by entity, which the handler
+/// resolves at the boundary, because a `tessera_id` means nothing without its key. Large payloads
+/// are boxed so one variant does not set the size of every command in the queue.
 pub(crate) enum Command {
-    /// An accepted `/control/ingest` batch, rows not yet allocated (see
-    /// [`tessera_lifecycle::UnallocatedRow`]).
-    ///
-    /// `batch_id`/`body_hash` are the idempotency key material and travel with the command because
-    /// the batch-state lookup is evaluated on the executor, not in the handler: between a handler
-    /// check and the enqueue an open window can close, and a retry that saw `Unknown` and then
-    /// enqueued into a fresh window has double-allocated.
+    /// An accepted `/control/ingest` batch. `batch_id` and `body_hash` are the idempotency key.
+    /// The answer is the entity per row, in the caller's order, and how many artifacts it minted.
     Ingest {
         rows: Vec<UnallocatedRow>,
         batch_id: String,
@@ -163,50 +162,22 @@ pub(crate) enum Command {
         artifacts: BatchArtifacts,
         reply: Reply<Ingested>,
     },
-    /// One accepted `/control/changes` entry.
-    ///
-    /// Addressed by entity, whatever the caller supplied: the handler resolves an `external_id`
-    /// through the live map and the bundle sidecar, or inverts a `tessera_id`, and carries the
-    /// result, so the executor re-resolves nothing inside its critical section, and the record it
-    /// appends names the entity rather than an identifier whose meaning depends on a key
-    /// (`WalRecord::ChangeByEntity`). An item ingested without an external id is addressable only
-    /// this way.
-    ///
-    /// Nothing comes back: the caller named the item.
+    /// One accepted `/control/changes` entry. The only command on the deny lane
+    /// ([`Command::is_never_shed`]).
     Change {
         entity: EntityId,
         op: ChangeOp,
         reply: Reply<()>,
     },
-    /// Register an annotation layer.
-    ///
-    /// The declaration travels unvalidated and unallocated, in the same shape and for the same
-    /// reason as [`Command::Ingest`]'s rows: the checks that decide a name is free, and the
-    /// allocations that follow them, both read state only the executor may write. A handler that
-    /// validated first could be overtaken by a registration of the same name between its check and
-    /// the enqueue, and would then have acked two layers onto one name. Boxed so one large variant
-    /// does not set the size of every command in the queue.
-    ///
-    /// The layer's own entity comes back, so the handler can hand back its `tessera_id`, the only
-    /// address by which a caller can later suppress the layer, since an entity id never crosses
-    /// the boundary.
+    /// Register an annotation layer. The answer is the layer's own entity, which the handler turns
+    /// into the `tessera_id` a caller later suppresses the layer by.
     RegisterLayer {
         declaration: Box<tessera_types::layer::LayerDeclaration>,
         reply: Reply<EntityId>,
     },
-    /// Drop an annotation layer, tombstoning its name for ever. Nothing comes back: the caller
-    /// named it.
+    /// Drop an annotation layer. Its name is never issued again.
     DropLayer { name: String, reply: Reply<()> },
     /// Create a view of a view group.
-    ///
-    /// The record travels unvalidated, in the same shape and for the same reason as
-    /// [`Command::RegisterLayer`]'s declaration: the checks that decide a key is free, and the
-    /// ordinal that follows them, read state only the executor may write, so a handler that
-    /// validated first could be overtaken by a create of the same key between its check and the
-    /// enqueue, and would then have acked two views onto one key.
-    ///
-    /// Nothing comes back: the caller named the group and the key, and the key is the view's only
-    /// address.
     CreateView {
         group: String,
         key: String,
@@ -215,132 +186,63 @@ pub(crate) enum Command {
         metadata: std::collections::BTreeMap<String, tessera_types::view::ViewMetadataValue>,
         reply: Reply<()>,
     },
-    /// Drop a view of a view group, tombstoning its key for ever.
-    ///
-    /// `delete_dangling` is sugar and nothing else: at the drop the executor computes the entities
-    /// of this view that hold a row in no other view, the commit-window buffer included, and
-    /// submits them as ordinary deletions, which enter the overlay and retire at the fold like any
-    /// deletion. It is not a second retirement route: a drop that removed an entity any other way
-    /// would be the fail-open the two removal rules exist to prevent.
-    ///
-    /// The answer is how many entities `delete_dangling` submitted for deletion, reported because
-    /// the operation is not undoable, on the rule [`Ingested::minted`] is reported by, and `0` for
-    /// a drop that did not ask for it.
+    /// Drop a view of a view group. Its key is never issued again. With `delete_dangling`, the
+    /// entities that hold a row in no other view are submitted as ordinary deletions, which retire
+    /// at the fold like any other; the answer is how many.
     DropView {
         group: String,
         key: String,
         delete_dangling: bool,
         reply: Reply<u64>,
     },
-    /// Declare an attribute column while the service runs (`PUT /control/attributes`).
-    ///
-    /// The request travels unvalidated, on [`Command::RegisterLayer`]'s rule: whether the name is
-    /// free, whether a column of that name already carries this identity, and which width a
-    /// vocabulary no column named before takes, all read the served schema and the live bindings,
-    /// which only the executor may move between a check and an apply.
-    ///
-    /// The answer is whether an identical declaration met the column that already carries it.
-    /// Nothing else: the name is the column's only address, on every surface that names one.
+    /// Declare an attribute column. The answer is whether an identical declaration already held the
+    /// name.
     DeclareAttribute {
         request: Box<AttributeRequest>,
         reply: Reply<bool>,
     },
-    /// Declare a vocabulary while the service runs (`PUT /control/vocabularies/{name}`). On the
-    /// executor for [`Command::DeclareAttribute`]'s reason: whether the name is free and whether a
-    /// held vocabulary carries this identity read state only the executor may move between a
-    /// check and an apply.
+    /// Declare a vocabulary.
     DeclareVocabulary {
         request: Box<VocabularyRequest>,
         reply: Reply<VocabularyDeclared>,
     },
-    /// Declare a view group while the service runs (`PUT /control/view_groups/{name}`). On the
-    /// executor for [`Command::DeclareAttribute`]'s reason: whether the name is free, and what a
-    /// held group's identity is, read state only the executor may move between a check and an
-    /// apply.
-    ///
-    /// The answer is whether an identical declaration met the group that already carries that name.
-    /// Nothing else: the name is the group's only address.
+    /// Declare a view group. The answer is whether an identical declaration already held the name.
     CreateViewGroup {
         declaration: Box<ViewGroupDeclaration>,
         reply: Reply<bool>,
     },
-    /// Create a plain view while the service runs (`PUT /control/views/{name}`), on
-    /// [`Command::CreateViewGroup`]'s rule and answered on its terms.
+    /// Create a plain view, answered as [`Command::CreateViewGroup`] is.
     CreatePlainView {
         declaration: Box<PlainViewDeclaration>,
         reply: Reply<bool>,
     },
-    /// A page of values for a vocabulary that already exists
-    /// (`PATCH /control/vocabularies/{name}/values`).
-    ///
-    /// The codes are not here, and cannot be: a code is drawn on the executor at the moment the
-    /// binding becomes durable, and a caller who supplied one would be the minting authority for a
-    /// space the server owns.
+    /// A page of values for a vocabulary that exists. The caller supplies no codes: the server
+    /// owns the code space.
     MintVocabularyValues {
         vocabulary: String,
         values: Vec<DeclaredValue>,
         reply: Reply<VocabularyValues>,
     },
-    /// Publish a batch of artifacts into one level of one layer.
-    ///
-    /// Members are entities already: the handler inverts the caller's `tessera_id`s once, at the
-    /// boundary, on the same rule [`Command::Change`] follows, because a blinded identifier's
-    /// meaning depends on a key and carrying one into the executor and the log would let a
-    /// rotation silently redirect a membership.
-    ///
-    /// Ordinals are not carried: they are claimed on the executor from the level's cursor, for the
-    /// reason [`Command::RegisterLayer`] leaves its name check there. Two batches admitted
-    /// concurrently would otherwise be handed the same ordinals and the second would overwrite the
-    /// first's artifacts in place.
-    ///
-    /// The answer carries the artifacts' entities, which the handler turns into `tessera_id`s,
-    /// never the ordinals: an ordinal is a position in a dense level, so a caller holding two of
-    /// them learns how many artifacts sit between, and across two principals that is a corpus-wide
-    /// count over objects one of them may not see.
+    /// Publish a batch of artifacts into one level of one layer. The answer carries their entities
+    /// and never their ordinals: an ordinal is a position in a dense level, so two of them tell a
+    /// caller how many artifacts lie between, including ones the caller may not see.
     PublishArtifacts {
         layer: String,
         level: u32,
         artifacts: Vec<IncomingArtifact>,
         reply: Reply<PublishedBatch>,
     },
-    /// Add entities to the memberships of artifacts that already exist, each named by the key it
-    /// was published under.
-    ///
-    /// Members are entities already, on [`Command::PublishArtifacts`]'s rule, and the keys are not
-    /// resolved here: `ordinal_of_key` reads state only the executor may write, so a handler that
-    /// resolved first could be overtaken by a fold retiring the artifact between its lookup and
-    /// the enqueue, and would have grown an ordinal a later publication now holds.
-    ///
-    /// The whole batch or none of it: a key that names no artifact refuses the command rather than
-    /// growing the rest, so a caller is never left unable to say which of their joins happened.
-    ///
-    /// It rides the bounded, sheddable lane, like the publication it grows: a join refused for
-    /// load is backpressure and the caller retries, where a deny refused for load is an item left
-    /// visible. See [`Command::is_never_shed`].
-    ///
-    /// One receipt comes back per join the caller submitted, in the caller's order.
+    /// Add entities to the memberships of artifacts that exist, each named by its key. The whole
+    /// batch or none of it: a key naming no artifact refuses the command. One receipt per join, in
+    /// the caller's order.
     GrowMemberships {
         layer: String,
         level: u32,
         joins: Vec<IncomingGrowth>,
         reply: Reply<Vec<MembershipGrown>>,
     },
-    /// An accepted `POST /control/values` batch: attribute values for entities that already
-    /// exist, filled per cell under the fill rule.
-    ///
-    /// The comparison travels unmade, on [`Command::Ingest`]'s rule: whether a cell is absent,
-    /// holds the identical value or holds a different one is read from the buffer and the flushed
-    /// homes, which only the executor may move between a check and an apply. A handler that
-    /// compared first could be overtaken by the window that writes the cell and would then fill it
-    /// twice.
-    ///
-    /// Entities, not identifiers: the handler resolves each row's `external_id` or inverts its
-    /// `tessera_id` at the boundary, on [`Command::Change`]'s rule, so no blinded identifier
-    /// reaches the executor or the log.
-    ///
-    /// It rides the bounded, sheddable lane ([`Command::is_never_shed`]): a values batch refused
-    /// for load is backpressure and the caller retries, nothing having been filled. Boxed so one
-    /// large variant does not set the size of every command in the queue.
+    /// An accepted `POST /control/values` batch: attribute values for entities that exist, filled
+    /// per cell. The answer says how many cells were filled, already held, joined and minted.
     Values {
         request: Box<ValuesRequest>,
         reply: Reply<ValuesReceipt>,
