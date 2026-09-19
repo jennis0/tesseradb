@@ -33,7 +33,8 @@ use tessera_authz::{write_postings, FragmentCache, PostingsReader};
 use tessera_engine::artifacts::{
     ArtifactProjections, ArtifactRows, ArtifactVerdict, ArtifactView, MembershipRows,
 };
-use tessera_engine::compose::{compose, EffectiveMask, RowProjection};
+use tessera_engine::compose::{compose, EffectiveMask};
+use tessera_engine::projection::RowProjection;
 use tessera_engine::denied_rows_of;
 use tessera_engine::row_column::RowColumn;
 use tessera_engine::tile_index::{Extent, TileIndex, Viewport};

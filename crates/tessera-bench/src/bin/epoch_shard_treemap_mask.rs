@@ -53,7 +53,8 @@ use rand::{Rng, SeedableRng};
 use rustc_hash::FxHashSet;
 use serde::Serialize;
 
-use tessera_engine::compose::{compose, EffectiveMask, RowProjection};
+use tessera_engine::compose::{compose, EffectiveMask};
+use tessera_engine::projection::RowProjection;
 use tessera_engine::select::{
     decode_tier, DecodeTier, SelectParams, Selection, SelectionPart, SelectionParts, Threshold,
 };

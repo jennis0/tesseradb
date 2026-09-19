@@ -2751,9 +2751,9 @@ impl Engine {
                 self.counters.full_projection_builds.fetch_add(1, Ordering::Relaxed);
                 // **The route is chosen here, from this principal's own grant, before any route
                 // runs**, and every route returns the identical projection
-                // (`crate::compose::RowProjection::new`). The images are the bundle's, mapped;
+                // (`crate::projection::RowProjection::new`). The images are the bundle's, mapped;
                 // nothing is cached across sessions.
-                let inputs = crate::compose::ProjectionInputs {
+                let inputs = crate::projection::ProjectionInputs {
                     fragment: &fragment,
                     satisfied: session.satisfied_sorted(),
                     postings: &generation.postings,

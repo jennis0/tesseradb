@@ -285,7 +285,7 @@ pub struct ArtifactRows {
     /// in.
     ///
     /// **The whole list rather than a count and a boundary id**, which is what
-    /// [`crate::compose::RowProjection`] carries. That one is a session's and is only ever
+    /// [`crate::projection::RowProjection`] carries. That one is a session's and is only ever
     /// extended; this one is shared, and is asked about by requests at **two** live generations at
     /// once — a session may be served one geometry behind the newest (decision 0044). A form that
     /// had to be at exactly the asker's extent count would then be rebuilt by each of the two in
@@ -1146,7 +1146,7 @@ impl ArtifactRows {
     /// new id at the same `row_base` and re-sorts the rows inside it: `seg_id`s are never reused
     /// (contracts §2.1), so ids standing where they stood are the same segments and the rows in
     /// them are the same rows. That makes the comparison exact rather than a heuristic, exactly as
-    /// it is for [`crate::compose::RowProjection::extends_to`].
+    /// it is for [`crate::projection::RowProjection::extends_to`].
     fn agrees_with(&self, space: &RowSpace) -> bool {
         if self.base_rows != space.base_rows() {
             return false;
@@ -1313,7 +1313,7 @@ impl ArtifactRows {
     /// one segment at a time.
     ///
     /// **Callers check [`Self::extends_to`] first.** This does not, for
-    /// [`crate::compose::RowProjection::extend`]'s reason: the answer decides whether the caller
+    /// [`crate::projection::RowProjection::extend`]'s reason: the answer decides whether the caller
     /// brings the form forward at all, and re-deriving it here would be a second place to get it
     /// wrong.
     fn extend_by<'a>(

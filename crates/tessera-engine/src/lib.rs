@@ -35,6 +35,7 @@ pub mod layout;
 pub mod membership_column;
 mod merge;
 pub mod occupancy;
+pub mod projection;
 mod refresh;
 pub mod region;
 pub mod row_column;
@@ -68,10 +69,8 @@ pub use categories::{
 // is the only reader. The rest of `compact` stays private — what a fold *is* is this crate's
 // business, and when it runs is the deployment's.
 pub use compact::{CompactionSchedule, PassCost};
-pub use compose::{
-    compose, denied_rows_of, visible_to, EffectiveMask, ProjectionInputs, ProjectionRoute,
-    RowProjection,
-};
+pub use compose::{compose, denied_rows_of, visible_to, EffectiveMask};
+pub use projection::{ProjectionInputs, ProjectionRoute, RowProjection};
 // The publication guard's refusal, which a publisher outside this crate must handle.
 // `check_publishable` itself stays private: whether a geometry may be published is this crate's
 // judgement, and a caller that could ask separately could also act on a stale answer.

@@ -44,7 +44,8 @@ use rustc_hash::FxHashSet;
 use tempfile::TempDir;
 
 use tessera_authz::{write_postings, FragmentCache, PostingsReader};
-use tessera_engine::compose::{compose, EffectiveMask, RowProjection};
+use tessera_engine::compose::{compose, EffectiveMask};
+use tessera_engine::projection::RowProjection;
 use tessera_engine::select::{
     cell_route_pays, decode_tier, CellRoute, DecodeTier, SelectParams, Selection, SelectionPart,
     SelectionParts, Threshold, CELL_ROUTE_MIN_ROWS_PER_CELL,

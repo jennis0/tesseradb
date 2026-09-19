@@ -368,7 +368,7 @@ impl Engine {
         self.counters.full_projection_builds.load(Ordering::Relaxed)
     }
 
-    /// Projection builds split by route, in [`crate::compose::ProjectionRoute::ALL`]'s order; does
+    /// Projection builds split by route, in [`crate::projection::ProjectionRoute::ALL`]'s order; does
     /// not sum to [`Self::full_projection_builds`] since it excludes the background refresh.
     pub fn projection_builds_by_route(&self) -> [u64; 4] {
         self.projection_routes.counts()

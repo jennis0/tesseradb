@@ -17,7 +17,7 @@
 //! builds `RowProjection::new` over `ProjectionInputs` carrying the session's own frozen fragment,
 //! its satisfied terms and the *pinned* generation's postings, tiers, images and row space — all of
 //! which the key names or the request pins. The route that build takes is priced from those same
-//! inputs and every route returns the identical rows (`crate::compose::RowProjection::new`), so a
+//! inputs and every route returns the identical rows (`crate::projection::RowProjection::new`), so a
 //! miss that prices differently from the build before it still produces what was evicted.
 //! **There is no route by which a miss composes against a different mask than a hit**, which is the
 //! property `eviction_never_widens_a_mask` exists to keep true.
@@ -31,7 +31,7 @@ use tessera_authz::FrozenFragment;
 use tessera_types::TermId;
 
 use crate::cancel::CancelToken;
-use crate::compose::RowProjection;
+use crate::projection::RowProjection;
 use crate::single_flight::{CacheStats, CacheWeight, SingleFlightCache, WaitEnded};
 
 /// `(token_id, view, segments_version)` — the row-projection cache's key (shared-context
@@ -176,7 +176,7 @@ impl CacheWeight for RowProjection {
     /// size. The caveat is stated here, at the site that computes the number, because the same claim
     /// is easy to reach for in `tessera-server::config` to justify a margin it does not explain.
     ///
-    /// **A projection is run-optimised at construction** (`crate::compose::RowProjection::from_rows`),
+    /// **A projection is run-optimised at construction** (`crate::projection::RowProjection::from_rows`),
     /// so a grant covering runs of row space is charged the run containers it holds rather than the
     /// bitmap containers it would otherwise hold. That moves the charge down and never up — a
     /// container is converted only where the run form is smaller — so the 125.12 MB above stays an
@@ -191,7 +191,7 @@ impl CacheWeight for RowProjection {
 }
 
 /// Cached row-space projections, keyed `(token_id, view, segments_version)` — never recomputed on
-/// the per-viewport path (shared-context constraint 8; see `crate::compose::RowProjection`'s doc
+/// the per-viewport path (shared-context constraint 8; see `crate::projection::RowProjection`'s doc
 /// for the cost this avoids).
 ///
 /// # Sizing: what the bound bounds, and the number an operator actually needs

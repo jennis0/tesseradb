@@ -158,7 +158,7 @@ pub struct Engine {
     /// Every full projection build split by the route it took. Shared with the background
     /// refresh, so it does not sum to [`ServeCounters::full_projection_builds`], which counts the
     /// request path alone.
-    pub(crate) projection_routes: Arc<crate::compose::ProjectionRoutes>,
+    pub(crate) projection_routes: Arc<crate::projection::ProjectionRoutes>,
     /// The occupancy stage — see [`crate::stage`]. `N_occ(d)` is memoised per depth; this fills the
     /// rest of the ladder on the pool once one request has.
     pub(crate) stage: crate::stage::StageDeps,
@@ -915,7 +915,7 @@ impl Engine {
             switches,
             counters,
             refresh_in_flight: Arc::clone(&refresh_in_flight),
-            projection_routes: Arc::new(crate::compose::ProjectionRoutes::default()),
+            projection_routes: Arc::new(crate::projection::ProjectionRoutes::default()),
             stage,
         };
 

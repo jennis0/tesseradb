@@ -34,7 +34,8 @@ use rustc_hash::FxHashSet;
 use tempfile::TempDir;
 
 use tessera_authz::{write_postings, FragmentCache, PostingsReader};
-use tessera_engine::compose::{compose, EffectiveMask, RowProjection};
+use tessera_engine::compose::{compose, EffectiveMask};
+use tessera_engine::projection::RowProjection;
 use tessera_engine::select::{SelectParams, Selection, SelectionPart, SelectionParts, Threshold};
 use tessera_lifecycle::{IngestBuffer, Overlay};
 use tessera_spatial::{fixed32, tiler::sort_batch, Bounds, TilerItem};

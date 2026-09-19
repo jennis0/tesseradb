@@ -28,7 +28,8 @@ use tempfile::TempDir;
 
 use tessera_authz::{build_fragment, FragmentCache, PostingsReader};
 use tessera_build::{build, BuildArgs};
-use tessera_engine::compose::{compose, RowProjection};
+use tessera_engine::compose::compose;
+use tessera_engine::projection::RowProjection;
 use tessera_engine::viewport::ViewportRequest;
 use tessera_engine::{Engine, EngineConfig};
 use tessera_lifecycle::{IngestBuffer, Overlay};

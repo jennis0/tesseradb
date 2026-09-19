@@ -6254,7 +6254,7 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::V
             "thrashing": projection_cache.young_evictions > 0,
             "oversized_admissions": projection_cache.oversized_admissions,
         },
-        // **How each session's row projection was built** (`tessera_engine::compose::RowProjection`).
+        // **How each session's row projection was built** (`tessera_engine::projection::RowProjection`).
         // A session's projection is the walk over its fragment, the row range where its grant
         // covers the whole entity domain, or the union of the bundle's images of the terms it
         // holds plus a walk over the residual. The route is priced before any of them runs, from
