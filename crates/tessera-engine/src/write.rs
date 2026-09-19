@@ -3940,6 +3940,18 @@ impl WritePath {
 
     // --- submission -----------------------------------------------------------------------------
 
+    /// Submits a command, waits for its receipt, and takes the ack that command answers with.
+    fn run<T>(
+        &self,
+        command: Command,
+        take: impl FnOnce(Ack) -> Option<T>,
+    ) -> Result<T, AcceptError> {
+        match self.handle()?.submit(command)?.outcome {
+            Ok(ack) => Ok(take(ack).expect("a command answers with its own ack")),
+            Err(e) => Err(AcceptError::Exec(e)),
+        }
+    }
+
     /// Submit an ingest batch and wait for its receipt.
     ///
     /// **Blocking**, so a tokio handler must call this inside `spawn_blocking` — `tessera-engine`
@@ -3959,20 +3971,20 @@ impl WritePath {
         artifacts: tessera_lifecycle::BatchArtifacts,
     ) -> Result<(Vec<EntityId>, u64), AcceptError> {
         let mark = StageMark::now();
-        let receipt = self.handle()?.submit(Command::Ingest {
-            rows,
-            batch_id,
-            body_hash,
-            artifacts,
-        })?;
+        let answered = self.run(
+            Command::Ingest {
+                rows,
+                batch_id,
+                body_hash,
+                artifacts,
+            },
+            |ack| match ack {
+                Ack::Ingested { entity_ids, minted } => Some((entity_ids, minted)),
+                _ => None,
+            },
+        );
         self.health().lap(WriteStage::SubmitToReceipt, mark);
-        match receipt.outcome {
-            Ok(Ack::Ingested { entity_ids, minted }) => Ok((entity_ids, minted)),
-            Ok(other) => {
-                unreachable!("an Ingest command answers with Ack::Ingested, not {other:?}")
-            }
-            Err(e) => Err(AcceptError::Exec(e)),
-        }
+        answered
     }
 
     /// Submit one `/control/changes` entry and wait for its receipt.
@@ -3997,26 +4009,26 @@ impl WritePath {
         &self,
         declaration: tessera_types::layer::LayerDeclaration,
     ) -> Result<EntityId, AcceptError> {
-        let receipt = self.handle()?.submit(Command::RegisterLayer {
-            declaration: Box::new(declaration),
-        })?;
-        match receipt.outcome {
-            Ok(Ack::LayerRegistered { entity }) => Ok(entity),
-            Ok(other) => {
-                unreachable!("a RegisterLayer command answers LayerRegistered, not {other:?}")
-            }
-            Err(e) => Err(AcceptError::Exec(e)),
-        }
+        self.run(
+            Command::RegisterLayer {
+                declaration: Box::new(declaration),
+            },
+            |ack| match ack {
+                Ack::LayerRegistered { entity } => Some(entity),
+                _ => None,
+            },
+        )
     }
 
     /// Drop a layer, tombstoning its name for ever.
     pub(crate) fn drop_layer(&self, name: String) -> Result<(), AcceptError> {
-        let receipt = self.handle()?.submit(Command::DropLayer { name })?;
-        match receipt.outcome {
-            Ok(Ack::LayerDropped) => Ok(()),
-            Ok(other) => unreachable!("a DropLayer command answers LayerDropped, not {other:?}"),
-            Err(e) => Err(AcceptError::Exec(e)),
-        }
+        self.run(
+            Command::DropLayer { name },
+            |ack| match ack {
+                Ack::LayerDropped => Some(()),
+                _ => None,
+            },
+        )
     }
 
     /// Create a view of a view group while the service runs (`views.md` §3.2).
@@ -4027,17 +4039,18 @@ impl WritePath {
         visibility: Option<Vec<String>>,
         metadata: std::collections::BTreeMap<String, tessera_types::view::ViewMetadataValue>,
     ) -> Result<(), AcceptError> {
-        let receipt = self.handle()?.submit(Command::CreateView {
-            group,
-            key,
-            visibility,
-            metadata,
-        })?;
-        match receipt.outcome {
-            Ok(Ack::ViewCreated) => Ok(()),
-            Ok(other) => unreachable!("a CreateView command answers ViewCreated, not {other:?}"),
-            Err(e) => Err(AcceptError::Exec(e)),
-        }
+        self.run(
+            Command::CreateView {
+                group,
+                key,
+                visibility,
+                metadata,
+            },
+            |ack| match ack {
+                Ack::ViewCreated => Some(()),
+                _ => None,
+            },
+        )
     }
 
     /// Declare an attribute column while the service runs (`ingest.md` §1.3, §6.3). Answers
@@ -4046,16 +4059,15 @@ impl WritePath {
         &self,
         request: tessera_lifecycle::AttributeRequest,
     ) -> Result<bool, AcceptError> {
-        let receipt = self.handle()?.submit(Command::DeclareAttribute {
-            request: Box::new(request),
-        })?;
-        match receipt.outcome {
-            Ok(Ack::AttributeDeclared { existing }) => Ok(existing),
-            Ok(other) => {
-                unreachable!("a DeclareAttribute command answers AttributeDeclared, not {other:?}")
-            }
-            Err(e) => Err(AcceptError::Exec(e)),
-        }
+        self.run(
+            Command::DeclareAttribute {
+                request: Box::new(request),
+            },
+            |ack| match ack {
+                Ack::AttributeDeclared { existing } => Some(existing),
+                _ => None,
+            },
+        )
     }
 
     /// Fill attribute values on entities that already exist (`POST /control/values`,
@@ -4064,24 +4076,25 @@ impl WritePath {
         &self,
         request: tessera_lifecycle::ValuesRequest,
     ) -> Result<ValuesReceipt, AcceptError> {
-        let receipt = self.handle()?.submit(Command::Values {
-            request: Box::new(request),
-        })?;
-        match receipt.outcome {
-            Ok(Ack::ValuesFilled {
-                filled,
-                held,
-                joined,
-                minted,
-            }) => Ok(ValuesReceipt {
-                filled,
-                held,
-                joined,
-                minted,
-            }),
-            Ok(other) => unreachable!("a Values command answers ValuesFilled, not {other:?}"),
-            Err(e) => Err(AcceptError::Exec(e)),
-        }
+        self.run(
+            Command::Values {
+                request: Box::new(request),
+            },
+            |ack| match ack {
+                Ack::ValuesFilled {
+                    filled,
+                    held,
+                    joined,
+                    minted,
+                } => Some(ValuesReceipt {
+                    filled,
+                    held,
+                    joined,
+                    minted,
+                }),
+                _ => None,
+            },
+        )
     }
 
     /// Declare a vocabulary. Answers `(existing, added, titles)`: whether a vocabulary of that
@@ -4091,22 +4104,19 @@ impl WritePath {
         &self,
         request: tessera_lifecycle::VocabularyRequest,
     ) -> Result<(bool, u64, u64), AcceptError> {
-        let receipt = self.handle()?.submit(Command::DeclareVocabulary {
-            request: Box::new(request),
-        })?;
-        match receipt.outcome {
-            Ok(Ack::VocabularyDeclared {
-                existing,
-                added,
-                titles,
-            }) => Ok((existing, added, titles)),
-            Ok(other) => {
-                unreachable!(
-                    "a DeclareVocabulary command answers VocabularyDeclared, not {other:?}"
-                )
-            }
-            Err(e) => Err(AcceptError::Exec(e)),
-        }
+        self.run(
+            Command::DeclareVocabulary {
+                request: Box::new(request),
+            },
+            |ack| match ack {
+                Ack::VocabularyDeclared {
+                    existing,
+                    added,
+                    titles,
+                } => Some((existing, added, titles)),
+                _ => None,
+            },
+        )
     }
 
     /// A page of values for a vocabulary that exists. Answers `(added, existing, titles)`.
@@ -4115,20 +4125,17 @@ impl WritePath {
         vocabulary: String,
         values: Vec<tessera_lifecycle::DeclaredValue>,
     ) -> Result<(u64, u64, u64), AcceptError> {
-        let receipt = self
-            .handle()?
-            .submit(Command::MintVocabularyValues { vocabulary, values })?;
-        match receipt.outcome {
-            Ok(Ack::VocabularyValuesMinted {
-                added,
-                existing,
-                titles,
-            }) => Ok((added, existing, titles)),
-            Ok(other) => unreachable!(
-                "a MintVocabularyValues command answers VocabularyValuesMinted, not {other:?}"
-            ),
-            Err(e) => Err(AcceptError::Exec(e)),
-        }
+        self.run(
+            Command::MintVocabularyValues { vocabulary, values },
+            |ack| match ack {
+                Ack::VocabularyValuesMinted {
+                    added,
+                    existing,
+                    titles,
+                } => Some((added, existing, titles)),
+                _ => None,
+            },
+        )
     }
 
     /// Declare a view group. Answers whether a group of that name already carried this identity.
@@ -4136,16 +4143,15 @@ impl WritePath {
         &self,
         declaration: tessera_lifecycle::wal::ViewGroupDeclaration,
     ) -> Result<bool, AcceptError> {
-        let receipt = self.handle()?.submit(Command::CreateViewGroup {
-            declaration: Box::new(declaration),
-        })?;
-        match receipt.outcome {
-            Ok(Ack::ViewGroupCreated { existing }) => Ok(existing),
-            Ok(other) => {
-                unreachable!("a CreateViewGroup command answers ViewGroupCreated, not {other:?}")
-            }
-            Err(e) => Err(AcceptError::Exec(e)),
-        }
+        self.run(
+            Command::CreateViewGroup {
+                declaration: Box::new(declaration),
+            },
+            |ack| match ack {
+                Ack::ViewGroupCreated { existing } => Some(existing),
+                _ => None,
+            },
+        )
     }
 
     /// Create a plain view. Answers whether a view of that name already carried this identity.
@@ -4153,16 +4159,15 @@ impl WritePath {
         &self,
         declaration: tessera_lifecycle::wal::PlainViewDeclaration,
     ) -> Result<bool, AcceptError> {
-        let receipt = self.handle()?.submit(Command::CreatePlainView {
-            declaration: Box::new(declaration),
-        })?;
-        match receipt.outcome {
-            Ok(Ack::PlainViewCreated { existing }) => Ok(existing),
-            Ok(other) => {
-                unreachable!("a CreatePlainView command answers PlainViewCreated, not {other:?}")
-            }
-            Err(e) => Err(AcceptError::Exec(e)),
-        }
+        self.run(
+            Command::CreatePlainView {
+                declaration: Box::new(declaration),
+            },
+            |ack| match ack {
+                Ack::PlainViewCreated { existing } => Some(existing),
+                _ => None,
+            },
+        )
     }
 
     /// Drop a view — freeing its key and killing its incarnation (decision 0115) — and answer how
@@ -4173,16 +4178,17 @@ impl WritePath {
         key: String,
         delete_dangling: bool,
     ) -> Result<u64, AcceptError> {
-        let receipt = self.handle()?.submit(Command::DropView {
-            group,
-            key,
-            delete_dangling,
-        })?;
-        match receipt.outcome {
-            Ok(Ack::ViewDropped { deleted }) => Ok(deleted),
-            Ok(other) => unreachable!("a DropView command answers ViewDropped, not {other:?}"),
-            Err(e) => Err(AcceptError::Exec(e)),
-        }
+        self.run(
+            Command::DropView {
+                group,
+                key,
+                delete_dangling,
+            },
+            |ack| match ack {
+                Ack::ViewDropped { deleted } => Some(deleted),
+                _ => None,
+            },
+        )
     }
 
     /// Which layers a principal may know exist, resolved once per session.
@@ -4214,30 +4220,29 @@ impl WritePath {
         level: u32,
         artifacts: Vec<IncomingArtifact>,
     ) -> Result<PublishedBatch, AcceptError> {
-        let receipt = self.handle()?.submit(Command::PublishArtifacts {
-            layer,
-            level,
-            artifacts,
-        })?;
-        match receipt.outcome {
-            Ok(Ack::ArtifactsPublished {
-                entities,
-                created,
-                without_content,
-                filled,
-                joined,
-            }) => Ok(PublishedBatch {
-                entities,
-                created,
-                without_content,
-                filled,
-                joined,
-            }),
-            Ok(other) => {
-                unreachable!("a PublishArtifacts command answers ArtifactsPublished, not {other:?}")
-            }
-            Err(e) => Err(AcceptError::Exec(e)),
-        }
+        self.run(
+            Command::PublishArtifacts {
+                layer,
+                level,
+                artifacts,
+            },
+            |ack| match ack {
+                Ack::ArtifactsPublished {
+                    entities,
+                    created,
+                    without_content,
+                    filled,
+                    joined,
+                } => Some(PublishedBatch {
+                    entities,
+                    created,
+                    without_content,
+                    filled,
+                    joined,
+                }),
+                _ => None,
+            },
+        )
     }
 
     /// Grow the memberships of artifacts that already exist, answering one receipt per join in
@@ -4248,18 +4253,17 @@ impl WritePath {
         level: u32,
         joins: Vec<tessera_lifecycle::IncomingGrowth>,
     ) -> Result<Vec<tessera_lifecycle::MembershipGrown>, AcceptError> {
-        let receipt = self.handle()?.submit(Command::GrowMemberships {
-            layer,
-            level,
-            joins,
-        })?;
-        match receipt.outcome {
-            Ok(Ack::MembershipsGrown { grown }) => Ok(grown),
-            Ok(other) => {
-                unreachable!("a GrowMemberships command answers MembershipsGrown, not {other:?}")
-            }
-            Err(e) => Err(AcceptError::Exec(e)),
-        }
+        self.run(
+            Command::GrowMemberships {
+                layer,
+                level,
+                joins,
+            },
+            |ack| match ack {
+                Ack::MembershipsGrown { grown } => Some(grown),
+                _ => None,
+            },
+        )
     }
 
     pub(crate) fn with_artifacts<R>(&self, f: impl FnOnce(&ArtifactStore) -> R) -> R {
