@@ -6088,6 +6088,62 @@ fn view_row_space<'a>(
         .map(|v| &v.row_space)
 }
 
+/// Write one membership extent per packed level into the prefix and fsync it, returning the
+/// manifest entries — the file half of [`Executor::write_membership_extents`] and of
+/// [`Executor::rewrite_membership_extents`], which differ only in where `ready` comes from.
+///
+/// **The layer name never reaches the filename.** It is path-shaped — `clusters/a` — so a
+/// name-derived path would escape the directory or collide after escaping. The manifest entry
+/// carries the name; the file is addressed by the publication that introduced it and its index
+/// within that publication. The directory entry has to be durable too, or a crash leaves a
+/// manifest naming a file whose name was never written.
+fn pack_membership_extents(
+    prefix_dir: &std::path::Path,
+    partition: &str,
+    n: u64,
+    ready: Vec<tessera_lifecycle::membership::PendingExtent>,
+) -> tessera_store::Result<Vec<tessera_store::manifest::MembershipExtent>> {
+    if ready.is_empty() {
+        return Ok(Vec::new());
+    }
+    let dir = prefix_dir
+        .join("partitions")
+        .join(partition)
+        .join("members");
+    std::fs::create_dir_all(&dir).map_err(|source| tessera_store::StoreError::Io {
+        path: dir.clone(),
+        source,
+    })?;
+    let mut entries = Vec::with_capacity(ready.len());
+    for (index, (layer, level, ordinal_lo, blobs)) in ready.into_iter().enumerate() {
+        let name = format!("members-{n:06}-{index:03}.tsmb");
+        let count = blobs.len() as u32;
+        let bytes = tessera_store::membership::pack(ordinal_lo, &blobs);
+        tessera_store::write_and_fsync(&dir.join(&name), &bytes)?;
+        entries.push(tessera_store::manifest::MembershipExtent {
+            path: format!("partitions/{partition}/members/{name}"),
+            layer,
+            level,
+            ordinal_lo,
+            count,
+        });
+    }
+    tessera_store::fsync_dir(&dir)?;
+    Ok(entries)
+}
+
+/// The reader this process holds open for the tier `rel` names, or `None` if it holds none.
+///
+/// The two lists are positional against each other: `tiers` was opened from `rels`, which is the
+/// `deltas` list of the manifest they came from.
+fn held_tier(tiers: &[Arc<DeltaTier>], rels: &[String], rel: &str) -> Option<Arc<DeltaTier>> {
+    tiers
+        .iter()
+        .zip(rels)
+        .find(|(_, live_rel)| live_rel.as_str() == rel)
+        .map(|(tier, _)| Arc::clone(tier))
+}
+
 /// A background job is outstanding while it runs, and until its completed unit has been drained
 /// from its channel and published — see [`Executor::fold_outstanding`].
 fn outstanding(in_flight: &AtomicBool, completed_pending: &AtomicBool) -> bool {
@@ -8913,25 +8969,18 @@ impl Executor {
         // as `reclaim_prefix` argues.
         let mut delta_postings: Vec<Arc<DeltaTier>> = Vec::with_capacity(carried_tiers.len());
         for rel in &segments_manifest.deltas {
-            match live
-                .delta_postings
-                .iter()
-                .zip(&live_manifest.deltas)
-                .find(|(_, live_rel)| *live_rel == rel)
-            {
-                Some((tier, _)) => delta_postings.push(Arc::clone(tier)),
-                None => {
-                    self.diverge_from_current(&completed.prefix);
-                    tracing::error!(
-                        tier = %rel,
-                        "ALARM: the folded manifest names a delta tier this process does not hold \
-                         open; abandoning the swap rather than serving a fragment built from fewer \
-                         tiers than the manifest declares. CURRENT names the new prefix and a \
-                         restart serves it"
-                    );
-                    return;
-                }
-            }
+            let Some(tier) = held_tier(&live.delta_postings, &live_manifest.deltas, rel) else {
+                self.diverge_from_current(&completed.prefix);
+                tracing::error!(
+                    tier = %rel,
+                    "ALARM: the folded manifest names a delta tier this process does not hold \
+                     open; abandoning the swap rather than serving a fragment built from fewer \
+                     tiers than the manifest declares. CURRENT names the new prefix and a restart \
+                     serves it"
+                );
+                return;
+            };
+            delta_postings.push(tier);
         }
 
         let segments_version = live.segments_version + 1;
@@ -9554,26 +9603,20 @@ impl Executor {
             .manifest
             .deltas
         {
-            match coalesced.filter(|(path, _)| path == rel) {
-                Some((_, tier)) => delta_postings.push(Arc::clone(tier)),
-                None => match live
-                    .delta_postings
-                    .iter()
-                    .zip(&partition_data.manifest.deltas)
-                    .find(|(_, live_rel)| *live_rel == rel)
-                {
-                    Some((tier, _)) => delta_postings.push(Arc::clone(tier)),
-                    None => {
-                        tracing::error!(
-                            tier = %rel,
-                            "ALARM: a coalesce's manifest names a delta tier this process does \
-                             not hold open; abandoning the swap rather than serving a fragment \
-                             built from fewer tiers than the manifest declares"
-                        );
-                        return;
-                    }
-                },
-            }
+            let held = match coalesced.filter(|(path, _)| path == rel) {
+                Some((_, tier)) => Some(Arc::clone(tier)),
+                None => held_tier(&live.delta_postings, &partition_data.manifest.deltas, rel),
+            };
+            let Some(tier) = held else {
+                tracing::error!(
+                    tier = %rel,
+                    "ALARM: a coalesce's manifest names a delta tier this process does not hold \
+                     open; abandoning the swap rather than serving a fragment built from fewer \
+                     tiers than the manifest declares"
+                );
+                return;
+            };
+            delta_postings.push(tier);
         }
 
         let next = Generation {
@@ -15137,36 +15180,7 @@ impl Executor {
         retired: &croaring::Bitmap,
     ) -> tessera_store::Result<Vec<tessera_store::manifest::MembershipExtent>> {
         let ready = self.live.with_artifacts(|store| store.repack_all(retired));
-        if ready.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        let dir = prefix_dir
-            .join("partitions")
-            .join(partition)
-            .join("members");
-        std::fs::create_dir_all(&dir).map_err(|source| tessera_store::StoreError::Io {
-            path: dir.clone(),
-            source,
-        })?;
-        let mut entries = Vec::with_capacity(ready.len());
-        for (index, (layer, level, ordinal_lo, blobs)) in ready.into_iter().enumerate() {
-            // The same naming rule the online route follows: the layer name is path-shaped and
-            // never reaches a filename; the publication that introduced the file does.
-            let name = format!("members-{n:06}-{index:03}.tsmb");
-            let count = blobs.len() as u32;
-            let bytes = tessera_store::membership::pack(ordinal_lo, &blobs);
-            tessera_store::write_and_fsync(&dir.join(&name), &bytes)?;
-            entries.push(tessera_store::manifest::MembershipExtent {
-                path: format!("partitions/{partition}/members/{name}"),
-                layer,
-                level,
-                ordinal_lo,
-                count,
-            });
-        }
-        tessera_store::fsync_dir(&dir)?;
-        Ok(entries)
+        pack_membership_extents(prefix_dir, partition, n, ready)
     }
 
     /// Compose and write this prefix's containment partitions, one file per `(layer, level)`.
@@ -16149,41 +16163,7 @@ impl Executor {
                  not published; they stay WAL-durable and the log stays pinned"
             );
         }
-        if ready.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        let dir = prefix_dir
-            .join("partitions")
-            .join(partition)
-            .join("members");
-        std::fs::create_dir_all(&dir).map_err(|source| tessera_store::StoreError::Io {
-            path: dir.clone(),
-            source,
-        })?;
-
-        let mut entries = Vec::with_capacity(ready.len());
-        for (index, (layer, level, ordinal_lo, blobs)) in ready.into_iter().enumerate() {
-            // **The layer name never reaches the filename.** It is path-shaped — `clusters/a` — so
-            // a name-derived path would escape the directory or collide after escaping. The
-            // manifest entry carries the name; the file is addressed by the publication that
-            // introduced it and its index within that publication.
-            let name = format!("members-{n:06}-{index:03}.tsmb");
-            let count = blobs.len() as u32;
-            let bytes = tessera_store::membership::pack(ordinal_lo, &blobs);
-            tessera_store::write_and_fsync(&dir.join(&name), &bytes)?;
-            entries.push(tessera_store::manifest::MembershipExtent {
-                path: format!("partitions/{partition}/members/{name}"),
-                layer,
-                level,
-                ordinal_lo,
-                count,
-            });
-        }
-        // The directory entry itself has to be durable, or a crash leaves a manifest naming a file
-        // whose name was never written — the same rule every other publication here follows.
-        tessera_store::fsync_dir(&dir)?;
-        Ok(entries)
+        pack_membership_extents(prefix_dir, partition, n, ready)
     }
 
     /// **Publication by rebase** (§1.2): apply a completed flush to the **then-current**
