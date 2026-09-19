@@ -1163,7 +1163,7 @@ impl Executor {
                         analyser,
                     })
                 })
-                .collect::<Result<Vec<_>, crate::flush::FlushFailed>>()
+                .collect::<Result<Vec<_>, crate::flush::MaintenanceFailed>>()
             {
                 Ok(schema) => schema,
                 Err(e) => {

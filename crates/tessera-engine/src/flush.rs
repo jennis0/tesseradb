@@ -48,7 +48,7 @@ use tessera_lifecycle::{BufferedItem, Overlay};
 use tessera_spatial::tiler::{ScalarType, ScalarValue};
 use tessera_store::manifest::{DictExtent, FileDigest, Quantisation, RecordExtent};
 use tessera_store::permutation::SegmentExtent;
-use tessera_store::read::{ColumnsRef, MortonSlice, SegmentData};
+use tessera_store::read::SegmentData;
 use tessera_store::{write_flush_segment, FlushInput, FlushRow};
 use tessera_types::{EntityId, IdentityKey, TermId};
 
@@ -59,7 +59,7 @@ use crate::Generation;
 /// [`tessera_authz::write_delta_tier`]). Taken from the bundle's own `small_term_threshold` would
 /// be better still; it is a constant here because a flush's postings are small by construction
 /// (one tick's arrivals) and the threshold only decides an encoding, never a content.
-const SMALL_TERM_THRESHOLD: u32 = 32;
+pub(crate) const SMALL_TERM_THRESHOLD: u32 = 32;
 
 /// The stages of one flush, for attribution under `bench-timing`.
 ///
@@ -902,7 +902,7 @@ pub(crate) fn execute_flush(
     plan: FlushPlan,
     ctx: FlushContext,
     laps: &mut FlushLaps,
-) -> Result<CompletedFlush, FlushFailed> {
+) -> Result<CompletedFlush, MaintenanceFailed> {
     let wall = StageMark::now();
     let mut mark = wall;
     let result = execute_flush_stages(plan, ctx, laps, &mut mark);
@@ -922,7 +922,7 @@ fn execute_flush_stages(
     ctx: FlushContext,
     laps: &mut FlushLaps,
     mark: &mut StageMark,
-) -> Result<CompletedFlush, FlushFailed> {
+) -> Result<CompletedFlush, MaintenanceFailed> {
     let consumed: Vec<EntityId> = plan.items.iter().map(|(entity, _)| *entity).collect();
     let filled = plan.consumed_fills.clone();
     let filled_scoped = plan.consumed_scoped_fills.clone();
@@ -961,7 +961,7 @@ fn execute_flush_stages(
         // order the writer's own schema names them; its suffix is `scoped_render`'s, below.
         for &index in &ctx.render_indices {
             let value = item.scalars.get(index).ok_or_else(|| {
-                FlushFailed(format!(
+                MaintenanceFailed(format!(
                     "a buffered row carries {} scalars, but a render column is declared at \
                      position {index}",
                     item.scalars.len()
@@ -1018,7 +1018,7 @@ fn execute_flush_stages(
                     row_base: ctx.row_base,
                 },
             )
-            .map_err(|e| FlushFailed(format!("segment: {e}")))?,
+            .map_err(|e| MaintenanceFailed(format!("segment: {e}")))?,
         )
     };
     *mark = laps.lap(FlushStage::Segment, *mark);
@@ -1040,9 +1040,10 @@ fn execute_flush_stages(
         );
         let tier_path = ctx.prefix_dir.join(&tier_rel);
         write_delta_tier(&tier_path, &promotion.postings, SMALL_TERM_THRESHOLD)
-            .map_err(|e| FlushFailed(format!("delta tier: {e}")))?;
-        let tier =
-            Arc::new(DeltaTier::open(&tier_path).map_err(|e| FlushFailed(format!("tier: {e}")))?);
+            .map_err(|e| MaintenanceFailed(format!("delta tier: {e}")))?;
+        let tier = Arc::new(
+            DeltaTier::open(&tier_path).map_err(|e| MaintenanceFailed(format!("tier: {e}")))?,
+        );
         Some((tier, tier_rel, tier_tally))
     } else {
         None
@@ -1178,7 +1179,7 @@ fn execute_flush_stages(
     for rel in to_digest {
         files.insert(
             rel.clone(),
-            digest_of(&ctx.prefix_dir.join(&rel)).map_err(FlushFailed)?,
+            digest_of(&ctx.prefix_dir.join(&rel))?,
         );
     }
     *mark = laps.lap(FlushStage::Digests, *mark);
@@ -1187,19 +1188,10 @@ fn execute_flush_stages(
         None => None,
         Some(out) => {
             let seg_dir = segment_dir(&ctx);
-            Some(SegmentData {
-                seg_id: ctx.seg_id.clone(),
-                row_count: out.segment.row_count,
-                morton: MortonSlice::load(&seg_dir.join("morton.u32"))
-                    .map_err(|e| FlushFailed(format!("morton: {e}")))?,
-                cuts: tessera_store::read::CutIndex::load(
-                    &seg_dir.join(tessera_store::read::CutIndex::FILE),
-                    out.segment.row_count,
-                )
-                .map_err(|e| FlushFailed(format!("cuts: {e}")))?,
-                columns: ColumnsRef::load(&seg_dir.join("columns.arrow"))
-                    .map_err(|e| FlushFailed(format!("columns: {e}")))?,
-            })
+            Some(
+                SegmentData::load(&seg_dir, &ctx.seg_id, out.segment.row_count)
+                    .map_err(|e| MaintenanceFailed(e.to_string()))?,
+            )
         }
     };
     *mark = laps.lap(FlushStage::Reopen, *mark);
@@ -1285,13 +1277,14 @@ fn execute_flush_stages(
     Ok(completed)
 }
 
-/// Why a flush produced nothing. **Every failure is "nothing happened, retry next tick"** (§10):
-/// the side-manifest is the only commit point, so a failure before it leaves orphan files nothing
-/// references and a failure after it cannot happen — there is nothing left to fail.
+/// Why a background pass — a flush, a merge, a coalesce or a fold — produced nothing. **Every
+/// failure is "nothing happened, retry next tick"**: a manifest is the only commit point, so a
+/// failure before it leaves orphan files nothing references and the consumed entries stand, and a
+/// failure after it cannot happen — there is nothing left to fail.
 #[derive(Debug)]
-pub(crate) struct FlushFailed(pub(crate) String);
+pub(crate) struct MaintenanceFailed(pub(crate) String);
 
-impl std::fmt::Display for FlushFailed {
+impl std::fmt::Display for MaintenanceFailed {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.0)
     }
@@ -1335,7 +1328,7 @@ struct Promotion {
 /// only grows, and rotation retains the WAL records of anything still buffered, so replay
 /// re-interns every id a plan can name — but silently dropping a term is precisely the bug this
 /// function existed to have, and it must not survive as the error path.
-fn promote(plan: &FlushPlan, ctx: &FlushContext) -> Result<Promotion, FlushFailed> {
+fn promote(plan: &FlushPlan, ctx: &FlushContext) -> Result<Promotion, MaintenanceFailed> {
     let dict_len = ctx.dict.len();
     let mut by_term: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
     // Descriptors this flush interns, in assignment order — the extent file's contents, and the
@@ -1348,7 +1341,7 @@ fn promote(plan: &FlushPlan, ctx: &FlushContext) -> Result<Promotion, FlushFaile
     let mut per_entity: Vec<(u32, Vec<u32>)> = Vec::with_capacity(plan.items.len());
     for (entity, item) in plan.entity_space_items() {
         let Ok(entity) = u32::try_from(entity.raw()) else {
-            return Err(FlushFailed(format!(
+            return Err(MaintenanceFailed(format!(
                 "entity {} does not fit the u32 posting space (I9's ceiling)",
                 entity.raw()
             )));
@@ -1362,7 +1355,7 @@ fn promote(plan: &FlushPlan, ctx: &FlushContext) -> Result<Promotion, FlushFaile
                 ordinal
             } else {
                 let descriptor = ctx.novel_descriptors.get(term).ok_or_else(|| {
-                    FlushFailed(format!(
+                    MaintenanceFailed(format!(
                         "extension term {} has no descriptor in this flush's snapshot — see \
                          promote()'s doc; a term must never be dropped silently",
                         term.raw()
@@ -1383,7 +1376,7 @@ fn promote(plan: &FlushPlan, ctx: &FlushContext) -> Result<Promotion, FlushFaile
                         // retained, ingest sheds at its own bound, which is the intended
                         // backpressure.
                         if next >= ctx.max_distinct_terms {
-                            return Err(FlushFailed(format!(
+                            return Err(MaintenanceFailed(format!(
                                 "promoting this flush's novel descriptors would carry the \
                                  dictionary to {next}, at or past the plugin's declared \
                                  max_distinct_terms of {}; refusing rather than assigning an \
@@ -1433,14 +1426,15 @@ fn promote(plan: &FlushPlan, ctx: &FlushContext) -> Result<Promotion, FlushFaile
     }
 
     let seg_dir = segment_dir(ctx);
-    std::fs::create_dir_all(&seg_dir).map_err(|e| FlushFailed(format!("dict extent dir: {e}")))?;
+    std::fs::create_dir_all(&seg_dir)
+        .map_err(|e| MaintenanceFailed(format!("dict extent dir: {e}")))?;
     let mut writer = DictStreamWriter::new(&seg_dir);
     for descriptor in &interned {
         writer.append(descriptor);
     }
     writer
         .finish()
-        .map_err(|e| FlushFailed(format!("dict extent: {e}")))?;
+        .map_err(|e| MaintenanceFailed(format!("dict extent: {e}")))?;
 
     Ok(Promotion {
         // **Built from the same sequence that named the tier, never re-read from the file just
@@ -1523,7 +1517,7 @@ pub(crate) struct FlushedExtent {
 fn write_filter_extents(
     plan: &FlushPlan,
     ctx: &FlushContext,
-) -> Result<Vec<FlushedExtent>, FlushFailed> {
+) -> Result<Vec<FlushedExtent>, MaintenanceFailed> {
     let mut out = Vec::with_capacity(ctx.filter_schema.len());
     for spec in &ctx.filter_schema {
         let column = extent_values(spec, entity_scoped_rows(spec, plan)?)?;
@@ -1536,16 +1530,16 @@ fn write_filter_extents(
             &column.presence,
             column.dict_keys.as_deref(),
         )
-        .map_err(|e| FlushFailed(format!("filter extent for '{}': {e}", spec.name)))?;
+        .map_err(|e| MaintenanceFailed(format!("filter extent for '{}': {e}", spec.name)))?;
         // Derived from the paths just written rather than formatted a second time: the manifest
         // names what is on disk, or it names nothing.
-        let rel = |path: &PathBuf| -> Result<String, FlushFailed> {
+        let rel = |path: &PathBuf| -> Result<String, MaintenanceFailed> {
             path.strip_prefix(&ctx.prefix_dir)
                 .ok()
                 .and_then(|p| p.to_str())
                 .map(|p| p.to_string())
                 .ok_or_else(|| {
-                    FlushFailed(format!(
+                    MaintenanceFailed(format!(
                         "filter extent path {} is not under the prefix",
                         path.display()
                     ))
@@ -1556,14 +1550,14 @@ fn write_filter_extents(
             &presence_path,
             tessera_filter::Access::Mapped,
         )
-        .map_err(|e| FlushFailed(format!("filter extent for '{}': {e}", spec.name)))?;
+        .map_err(|e| MaintenanceFailed(format!("filter extent for '{}': {e}", spec.name)))?;
         let dict = dict_path
             .as_ref()
             .map(|path| {
                 tessera_filter::SortedDict::open(path, tessera_filter::Access::Mapped)
                     .map(Arc::new)
                     .map_err(|e| {
-                        FlushFailed(format!("keyword dictionary for '{}': {e}", spec.name))
+                        MaintenanceFailed(format!("keyword dictionary for '{}': {e}", spec.name))
                     })
             })
             .transpose()?;
@@ -1599,13 +1593,13 @@ fn write_filter_extents(
 fn extent_values<'a>(
     spec: &FilterColumnSpec,
     entities: Vec<(u32, &'a WalScalar)>,
-) -> Result<ExtentColumn<'a>, FlushFailed> {
+) -> Result<ExtentColumn<'a>, MaintenanceFailed> {
     use tessera_filter::Codes;
 
     let mut presence = croaring::Bitmap::new();
 
     let wrong = |value: &WalScalar| {
-        FlushFailed(format!(
+        MaintenanceFailed(format!(
             "column '{}' is declared {:?} but a buffered row carries {value:?}",
             spec.name, spec.ty
         ))
@@ -1636,7 +1630,7 @@ fn extent_values<'a>(
         let mut ordinals = Vec::with_capacity(held.len());
         for text in held {
             let ordinal = keys.binary_search(&text).map_err(|_| {
-                FlushFailed(format!(
+                MaintenanceFailed(format!(
                     "column '{}': the value {text:?} is absent from the dictionary built from it",
                     spec.name
                 ))
@@ -1748,17 +1742,17 @@ fn extent_values<'a>(
 fn entity_scoped_rows<'a>(
     spec: &FilterColumnSpec,
     plan: &'a FlushPlan,
-) -> Result<Vec<(u32, &'a WalScalar)>, FlushFailed> {
+) -> Result<Vec<(u32, &'a WalScalar)>, MaintenanceFailed> {
     let mut out = Vec::with_capacity(plan.items.len() + plan.fills.len());
     for (entity, item) in plan.value_rows() {
         let entity = u32::try_from(entity.raw()).map_err(|_| {
-            FlushFailed(format!(
+            MaintenanceFailed(format!(
                 "entity {} does not fit the u32 entity space (I9's ceiling)",
                 entity.raw()
             ))
         })?;
         let value = item.scalars.get(spec.index).ok_or_else(|| {
-            FlushFailed(format!(
+            MaintenanceFailed(format!(
                 "a buffered row carries {} scalars, but column '{}' is declared at position {}",
                 item.scalars.len(),
                 spec.name,
@@ -1781,11 +1775,11 @@ fn entity_scoped_rows<'a>(
 fn scoped_rows<'a>(
     spec: &ScopedColumnSpec,
     plan: &'a FlushPlan,
-) -> Result<Vec<(u32, &'a WalScalar)>, FlushFailed> {
+) -> Result<Vec<(u32, &'a WalScalar)>, MaintenanceFailed> {
     let mut out = Vec::with_capacity(plan.items.len() + plan.fills.len());
     for (entity, item) in plan.scoped_value_rows() {
         let entity = u32::try_from(entity.raw()).map_err(|_| {
-            FlushFailed(format!(
+            MaintenanceFailed(format!(
                 "entity {} does not fit the u32 entity space (I9's ceiling)",
                 entity.raw()
             ))
@@ -1932,7 +1926,7 @@ fn write_text_extents(
     ctx: &FlushContext,
     laps: &mut FlushLaps,
     mark: StageMark,
-) -> Result<Vec<tessera_store::manifest::TextExtent>, FlushFailed> {
+) -> Result<Vec<tessera_store::manifest::TextExtent>, MaintenanceFailed> {
     if ctx.text_schema.is_empty() {
         return Ok(Vec::new());
     }
@@ -1942,7 +1936,7 @@ fn write_text_extents(
         let mut rows = Vec::with_capacity(plan.items.len() + plan.fills.len());
         for (entity, row) in plan.value_rows() {
             let entity = u32::try_from(entity.raw()).map_err(|_| {
-                FlushFailed(format!(
+                MaintenanceFailed(format!(
                     "entity {} does not fit the u32 entity space (I9's ceiling)",
                     entity.raw()
                 ))
@@ -2017,9 +2011,10 @@ fn write_text_layer(
     rows: Vec<(u32, &WalScalar)>,
     target: TextTarget<'_>,
     mut sub: Option<TextLaps<'_>>,
-) -> Result<Option<tessera_store::manifest::TextExtent>, FlushFailed> {
+) -> Result<Option<tessera_store::manifest::TextExtent>, MaintenanceFailed> {
     let dir = target.prefix_dir.join(rel_dir);
-    std::fs::create_dir_all(&dir).map_err(|e| FlushFailed(format!("{}: {e}", dir.display())))?;
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| MaintenanceFailed(format!("{}: {e}", dir.display())))?;
     text_lap(&mut sub, FlushStage::TextRows);
 
     let mut terms: std::collections::BTreeMap<String, Vec<u32>> = std::collections::BTreeMap::new();
@@ -2032,7 +2027,7 @@ fn write_text_layer(
             // disagrees with the declaration, which the flush refuses rather than guesses at.
             WalScalar::Null => continue,
             other => {
-                return Err(FlushFailed(format!(
+                return Err(MaintenanceFailed(format!(
                     "column '{column}' is text but a buffered row carries {other:?}"
                 )))
             }
@@ -2065,7 +2060,7 @@ fn write_text_layer(
         &target.prefix_dir.join(&dict_rel),
         terms.keys().map(String::as_str),
     )
-    .map_err(|e| FlushFailed(format!("{dict_rel}: {e}")))?;
+    .map_err(|e| MaintenanceFailed(format!("{dict_rel}: {e}")))?;
     text_lap(&mut sub, FlushStage::TextDict);
     let per_term: Vec<Vec<u32>> = terms.into_values().collect();
     tessera_authz::postings::write_postings(
@@ -2073,13 +2068,13 @@ fn write_text_layer(
         &per_term,
         tessera_types::SMALL_TERM_THRESHOLD_DEFAULT,
     )
-    .map_err(|e| FlushFailed(format!("{postings_rel}: {e}")))?;
+    .map_err(|e| MaintenanceFailed(format!("{postings_rel}: {e}")))?;
     text_lap(&mut sub, FlushStage::TextPostings);
     std::fs::write(
         target.prefix_dir.join(&presence_rel),
         presence.serialize::<croaring::Portable>(),
     )
-    .map_err(|e| FlushFailed(format!("{presence_rel}: {e}")))?;
+    .map_err(|e| MaintenanceFailed(format!("{presence_rel}: {e}")))?;
     text_lap(&mut sub, FlushStage::TextPresence);
 
     Ok(Some(tessera_store::manifest::TextExtent {
@@ -2136,7 +2131,10 @@ fn scoped_column_rel(ctx: &FlushContext, column: &str) -> String {
 /// oversight (`scoped_rows`): a scoped value belongs to the `(entity, view)` pair this flush is
 /// giving a row, so a row joining an entity into a second view of the group is exactly the row
 /// that carries that view's value.
-fn write_scoped_extents(plan: &FlushPlan, ctx: &FlushContext) -> Result<ScopedWrite, FlushFailed> {
+fn write_scoped_extents(
+    plan: &FlushPlan,
+    ctx: &FlushContext,
+) -> Result<ScopedWrite, MaintenanceFailed> {
     let mut extents = Vec::new();
     let mut texts = Vec::new();
     let mut created = Vec::new();
@@ -2164,14 +2162,14 @@ fn write_scoped_extents(plan: &FlushPlan, ctx: &FlushContext) -> Result<ScopedWr
         let column_rel = scoped_column_rel(ctx, &spec.name);
         let column_dir = ctx.prefix_dir.join(&column_rel);
         std::fs::create_dir_all(&column_dir)
-            .map_err(|e| FlushFailed(format!("scoped column dir '{column_rel}': {e}")))?;
-        let rel_of = |path: &std::path::Path| -> Result<String, FlushFailed> {
+            .map_err(|e| MaintenanceFailed(format!("scoped column dir '{column_rel}': {e}")))?;
+        let rel_of = |path: &std::path::Path| -> Result<String, MaintenanceFailed> {
             path.strip_prefix(&ctx.prefix_dir)
                 .ok()
                 .and_then(|p| p.to_str())
                 .map(str::to_string)
                 .ok_or_else(|| {
-                    FlushFailed(format!(
+                    MaintenanceFailed(format!(
                         "scoped extent path {} is not under the prefix",
                         path.display()
                     ))
@@ -2217,20 +2215,20 @@ fn write_scoped_extents(plan: &FlushPlan, ctx: &FlushContext) -> Result<ScopedWr
             &column.presence,
             column.dict_keys.as_deref(),
         )
-        .map_err(|e| FlushFailed(format!("scoped extent for '{}': {e}", spec.name)))?;
+        .map_err(|e| MaintenanceFailed(format!("scoped extent for '{}': {e}", spec.name)))?;
         let values = tessera_filter::open_extent(
             &values_path,
             &presence_path,
             tessera_filter::Access::Mapped,
         )
-        .map_err(|e| FlushFailed(format!("scoped extent for '{}': {e}", spec.name)))?;
+        .map_err(|e| MaintenanceFailed(format!("scoped extent for '{}': {e}", spec.name)))?;
         let dict = dict_path
             .as_ref()
             .map(|path| {
                 tessera_filter::SortedDict::open(path, tessera_filter::Access::Mapped)
                     .map(Arc::new)
                     .map_err(|e| {
-                        FlushFailed(format!("scoped keyword dictionary '{}': {e}", spec.name))
+                        MaintenanceFailed(format!("scoped keyword dictionary '{}': {e}", spec.name))
                     })
             })
             .transpose()?;
@@ -2268,9 +2266,9 @@ pub(crate) struct ScopedWrite {
 fn write_empty_scoped_base(
     column_dir: &std::path::Path,
     spec: &ScopedColumnSpec,
-) -> Result<(), FlushFailed> {
+) -> Result<(), MaintenanceFailed> {
     let failed = |what: &str, e: &dyn std::fmt::Display| {
-        FlushFailed(format!("scoped base for '{}' ({what}): {e}", spec.name))
+        MaintenanceFailed(format!("scoped base for '{}' ({what}): {e}", spec.name))
     };
     if spec.analyser.is_some() {
         // Text: a dictionary of no terms and postings over it, and no value column at all.
@@ -2361,11 +2359,11 @@ fn empty_codes(ty: ScalarType, category: bool) -> tessera_filter::Codes {
 fn write_entity_terms_extent(
     per_entity: &[(u32, Vec<u32>)],
     ctx: &FlushContext,
-) -> Result<tessera_store::manifest::EntityTermsExtent, FlushFailed> {
+) -> Result<tessera_store::manifest::EntityTermsExtent, MaintenanceFailed> {
     let extents_rel = format!("partitions/{}/entities/terms/extents", ctx.partition);
     let extents_dir = ctx.prefix_dir.join(&extents_rel);
     std::fs::create_dir_all(&extents_dir)
-        .map_err(|e| FlushFailed(format!("entity-terms extent dir: {e}")))?;
+        .map_err(|e| MaintenanceFailed(format!("entity-terms extent dir: {e}")))?;
     let extent = tessera_store::manifest::EntityTermsExtent {
         hasrow: format!("{extents_rel}/{}.hasrow.roaring", ctx.seg_id),
         offsets: format!("{extents_rel}/{}.offsets.u32", ctx.seg_id),
@@ -2378,15 +2376,15 @@ fn write_entity_terms_extent(
         &ctx.prefix_dir.join(&extent.terms),
         &ctx.prefix_dir.join(&extent.bases),
     )
-    .map_err(|e| FlushFailed(format!("entity-terms extent: {e}")))?;
+    .map_err(|e| MaintenanceFailed(format!("entity-terms extent: {e}")))?;
     for (entity, terms) in per_entity {
         writer
             .push(*entity, terms)
-            .map_err(|e| FlushFailed(format!("entity-terms extent: {e}")))?;
+            .map_err(|e| MaintenanceFailed(format!("entity-terms extent: {e}")))?;
     }
     writer
         .finish()
-        .map_err(|e| FlushFailed(format!("entity-terms extent: {e}")))?;
+        .map_err(|e| MaintenanceFailed(format!("entity-terms extent: {e}")))?;
     Ok(extent)
 }
 
@@ -2397,7 +2395,7 @@ fn push_record_row(
     writer: &mut tessera_filter_write::RecordBlobWriter,
     entity: Option<u32>,
     fields: &[tessera_filter::RecordField],
-) -> Result<(), FlushFailed> {
+) -> Result<(), MaintenanceFailed> {
     let Some(entity) = entity else {
         return Ok(());
     };
@@ -2415,7 +2413,7 @@ fn push_record_row(
                     value,
                 })
                 .ok_or_else(|| {
-                    FlushFailed(format!(
+                    MaintenanceFailed(format!(
                         "record extent: entity {entity} carries a list at field tag {}; the \
                          multi surface has not landed (records §5)",
                         field.tag
@@ -2425,20 +2423,20 @@ fn push_record_row(
         .collect::<Result<_, _>>()?;
     writer
         .push_row(entity, &borrowed)
-        .map_err(|e| FlushFailed(format!("record extent: {e}")))
+        .map_err(|e| MaintenanceFailed(format!("record extent: {e}")))
 }
 
 fn write_record_extent(
     plan: &FlushPlan,
     ctx: &FlushContext,
-) -> Result<Option<RecordExtent>, FlushFailed> {
+) -> Result<Option<RecordExtent>, MaintenanceFailed> {
     if ctx.record_schema.is_empty() {
         return Ok(None);
     }
     let extents_rel = format!("partitions/{}/attrs/record/extents", ctx.partition);
     let extents_dir = ctx.prefix_dir.join(&extents_rel);
     std::fs::create_dir_all(&extents_dir)
-        .map_err(|e| FlushFailed(format!("record extent dir: {e}")))?;
+        .map_err(|e| MaintenanceFailed(format!("record extent dir: {e}")))?;
     let extent = RecordExtent {
         blocks: format!("{extents_rel}/{}.blocks.bin", ctx.seg_id),
         hasrow: format!("{extents_rel}/{}.hasrow.roaring", ctx.seg_id),
@@ -2453,7 +2451,7 @@ fn write_record_extent(
         &directory_path,
         tessera_filter::RECORD_BLOCK_TARGET,
     )
-    .map_err(|e| FlushFailed(format!("record extent: {e}")))?;
+    .map_err(|e| MaintenanceFailed(format!("record extent: {e}")))?;
 
     // **One row per entity, however many of the plan's rows carry its cells.** A fill and the
     // buffered row of the entity it fills are two rows of one entity (`ingest.md` §1.4), and a
@@ -2464,7 +2462,7 @@ fn write_record_extent(
     let mut open: Option<u32> = None;
     for (entity, item) in plan.value_rows() {
         let entity = u32::try_from(entity.raw()).map_err(|_| {
-            FlushFailed(format!(
+            MaintenanceFailed(format!(
                 "entity {} does not fit the u32 entity space (I9's ceiling)",
                 entity.raw()
             ))
@@ -2476,7 +2474,7 @@ fn write_record_extent(
         }
         for spec in &ctx.record_schema {
             let value = item.scalars.get(spec.index).ok_or_else(|| {
-                FlushFailed(format!(
+                MaintenanceFailed(format!(
                     "a buffered row carries {} scalars, but column '{}' is declared at position {}",
                     item.scalars.len(),
                     spec.name,
@@ -2487,7 +2485,7 @@ fn write_record_extent(
                 continue;
             };
             let tag = u16::try_from(spec.index).map_err(|_| {
-                FlushFailed(format!(
+                MaintenanceFailed(format!(
                     "column '{}' is declared at position {}, past the u16 field-tag space",
                     spec.name, spec.index
                 ))
@@ -2498,14 +2496,14 @@ fn write_record_extent(
     push_record_row(&mut writer, open, &fields)?;
     writer
         .finish()
-        .map_err(|e| FlushFailed(format!("record extent: {e}")))?;
+        .map_err(|e| MaintenanceFailed(format!("record extent: {e}")))?;
     tessera_filter::RecordBlob::open(
         &blocks_path,
         &hasrow_path,
         &directory_path,
         tessera_filter::Access::Mapped,
     )
-    .map_err(|e| FlushFailed(format!("record extent does not reopen: {e}")))?;
+    .map_err(|e| MaintenanceFailed(format!("record extent does not reopen: {e}")))?;
     Ok(Some(extent))
 }
 
@@ -2520,10 +2518,10 @@ fn write_record_extent(
 fn record_value_of(
     value: &WalScalar,
     spec: &RecordColumnSpec,
-) -> Result<Option<tessera_filter::RecordValue>, FlushFailed> {
+) -> Result<Option<tessera_filter::RecordValue>, MaintenanceFailed> {
     use tessera_filter::RecordValue;
     let wrong = || {
-        FlushFailed(format!(
+        MaintenanceFailed(format!(
             "column '{}' is declared {:?} but a buffered row carries {value:?}",
             spec.name, spec.ty
         ))
@@ -2606,14 +2604,12 @@ fn to_scalar_value(scalar: &WalScalar) -> ScalarValue {
 /// One file's size and hex SHA-256, by reading it back — `tessera_store::digest_of` with this
 /// crate's error type.
 ///
-/// **One definition, in the crate that owns the manifest format.** Three copies of this existed,
-/// here, in `coalesce.rs` and in `tessera-store`, and all three read the whole file into memory;
-/// the fold's pass 5 is where that stopped being affordable (probe P1), and a fix applied to one
-/// copy would have left the other two. `pub(crate)` because compaction's pass 5 digests its own
-/// outputs the same way — see `crate::compact::execute`, which states why the digest is taken from
-/// a re-read rather than computed as the bytes are written.
-pub(crate) fn digest_of(path: &Path) -> Result<FileDigest, String> {
-    tessera_store::digest_of(path).map_err(|e| format!("digest {}: {e}", path.display()))
+/// `pub(crate)` because every background pass digests its own outputs the same way — see
+/// `crate::compact::execute`, which states why the digest is taken from a re-read rather than
+/// computed as the bytes are written.
+pub(crate) fn digest_of(path: &Path) -> Result<FileDigest, MaintenanceFailed> {
+    tessera_store::digest_of(path)
+        .map_err(|e| MaintenanceFailed(format!("digest {}: {e}", path.display())))
 }
 
 /// Whether `entity` is deleted as of this overlay.

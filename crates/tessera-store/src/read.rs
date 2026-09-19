@@ -83,6 +83,51 @@ pub struct SegmentData {
     pub columns: ColumnsRef,
 }
 
+impl SegmentData {
+    /// Opens a segment's three files from its directory. The error names the one that failed.
+    pub fn load(
+        dir: &Path,
+        seg_id: &str,
+        row_count: u32,
+    ) -> std::result::Result<Self, SegmentLoadError> {
+        Ok(SegmentData {
+            seg_id: seg_id.to_string(),
+            row_count,
+            morton: MortonSlice::load(&dir.join("morton.u32")).map_err(|source| {
+                SegmentLoadError {
+                    file: "morton",
+                    source,
+                }
+            })?,
+            cuts: CutIndex::load(&dir.join(CutIndex::FILE), row_count).map_err(|source| {
+                SegmentLoadError {
+                    file: "cuts",
+                    source,
+                }
+            })?,
+            columns: ColumnsRef::load(&dir.join("columns.arrow")).map_err(|source| {
+                SegmentLoadError {
+                    file: "columns",
+                    source,
+                }
+            })?,
+        })
+    }
+}
+
+/// Which of a segment's files would not open, and why.
+#[derive(Debug)]
+pub struct SegmentLoadError {
+    pub file: &'static str,
+    pub source: StoreError,
+}
+
+impl std::fmt::Display for SegmentLoadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", self.file, self.source)
+    }
+}
+
 /// One loaded partition: its verified side-manifest, the `n` that manifest was found at, the
 /// highest `n` present in the partition directory, and every view it names.
 ///
@@ -718,9 +763,9 @@ fn open_prefix(
                 }
             }
 
-            let morton = MortonSlice::load(&morton_path)?;
-            let cuts = CutIndex::load(&cuts_path, seg_desc.row_count)?;
-            let columns = ColumnsRef::load(&columns_path)?;
+            let segment = SegmentData::load(&seg_dir, &seg_desc.seg_id, seg_desc.row_count)
+                .map_err(|e| e.source)?;
+            let (morton, columns) = (&segment.morton, &segment.columns);
 
             if morton.len() as u32 != seg_desc.row_count
                 || columns.row_count() != seg_desc.row_count
@@ -822,13 +867,7 @@ fn open_prefix(
                     })?;
             }
 
-            view_entry.segments.push(Arc::new(SegmentData {
-                seg_id: seg_desc.seg_id.clone(),
-                row_count: seg_desc.row_count,
-                morton,
-                cuts,
-                columns,
-            }));
+            view_entry.segments.push(Arc::new(segment));
         }
 
         // **Every declared view is a view, with or without rows** (`views.md` §3.2). The map
