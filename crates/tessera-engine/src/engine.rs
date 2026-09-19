@@ -304,6 +304,115 @@ fn open_filter_columns(
     )
 }
 
+/// One partition's base postings under a prefix. Mmap-backed: a generation holds this reader for
+/// its whole life, so paying the mmap setup once beats reading the whole file into memory.
+fn open_postings(prefix_dir: &Path, phash: &str) -> std::io::Result<Arc<PostingsReader>> {
+    PostingsReader::open(
+        &prefix_dir
+            .join("partitions")
+            .join(phash)
+            .join("terms")
+            .join("postings.arrow"),
+        true,
+    )
+    .map(Arc::new)
+}
+
+/// Everything the live prefix is read through, opened together at [`Engine::open`]: the prefix
+/// `CURRENT` names, the readers over its files, and the two values a generation carries from the
+/// side manifest it was built from.
+pub(crate) struct PrefixReaders {
+    pub(crate) prefix: String,
+    pub(crate) prefix_dir: PathBuf,
+    pub(crate) bundle_identity: [u8; 32],
+    /// The geometry version, seeded from the served filename and process-local thereafter: bumped
+    /// only by a geometry publication, never by a manifest written for deny state alone.
+    pub(crate) segments_version: u64,
+    pub(crate) watermark: u64,
+    pub(crate) dict: Arc<Dict>,
+    pub(crate) postings: Arc<PostingsReader>,
+    pub(crate) delta_postings: Vec<Arc<DeltaTier>>,
+    pub(crate) external_index: Arc<ExternalIdIndex>,
+    /// The deployment's `tessera_id` key. `IdentityKey::from_hex` rejects a degenerate key,
+    /// refusing a bundle rather than blinding identities with a collapsed round schedule.
+    pub(crate) identity_key: IdentityKey,
+}
+
+impl PrefixReaders {
+    fn open(bundle_root: &Path, bundle: &Bundle) -> Result<PrefixReaders> {
+        let current = read_current(bundle_root)?;
+        let prefix = current.prefix.clone();
+        let bundle_identity = hex_decode_32(&current.manifest_digest).ok_or_else(|| {
+            EngineError::Malformed(format!(
+                "CURRENT manifest_digest '{}' is not 64 hex characters",
+                current.manifest_digest
+            ))
+        })?;
+
+        let prefix_dir = bundle_root.join(&prefix);
+
+        // One partition today; take whichever is present rather than hard-coding its phash.
+        let (phash, partition) = bundle
+            .partitions
+            .iter()
+            .next()
+            .map(|(k, v)| (k.clone(), v))
+            .ok_or_else(|| EngineError::Malformed("bundle has no partitions".to_string()))?;
+
+        let dict_paths: Vec<PathBuf> = partition
+            .manifest
+            .dict_extents
+            .iter()
+            .map(|e| prefix_dir.join(&e.path))
+            .collect();
+        let dict = Arc::new(Dict::load(&dict_paths).map_err(EngineError::Io)?);
+
+        let postings = open_postings(&prefix_dir, &phash).map_err(EngineError::Io)?;
+
+        // Every live delta postings tier, reopened; without this, every item flushed since the
+        // last compaction would silently vanish from every principal's map after a restart. Every
+        // path must be digest-named in one of the two `files` maps, since `open_bundle` verifies
+        // only what those maps carry.
+        let mut delta_postings: Vec<Arc<DeltaTier>> = Vec::new();
+        for rel in &partition.manifest.deltas {
+            if !partition.manifest.files.contains_key(rel)
+                && !bundle.manifest.files.contains_key(rel)
+            {
+                return Err(EngineError::Malformed(format!(
+                    "the side-manifest lists delta tier '{rel}' which no files map digests, so \
+                     opening it would serve unverified postings"
+                )));
+            }
+            delta_postings.push(Arc::new(
+                DeltaTier::open(&prefix_dir.join(rel)).map_err(EngineError::Io)?,
+            ));
+        }
+
+        // Lazy for real: nothing here is opened, mapped or verified. The constructor only reads
+        // already-parsed JSON manifest data (paths and digests), never the filesystem.
+        let external_index = Arc::new(
+            ExternalIdIndex::open(&bundle.manifest, &partition.manifest, &prefix_dir)
+                .map_err(EngineError::Store)?,
+        );
+
+        let identity_key = IdentityKey::from_hex(&bundle.manifest.identity.key)
+            .map_err(|e| EngineError::Malformed(format!("MANIFEST identity.key: {e}")))?;
+
+        Ok(PrefixReaders {
+            prefix,
+            prefix_dir,
+            bundle_identity,
+            segments_version: partition.segments_n,
+            watermark: partition.manifest.watermark,
+            dict,
+            postings,
+            delta_postings,
+            external_index,
+            identity_key,
+        })
+    }
+}
+
 impl Engine {
     /// This engine's resolved configuration, exposed so `/v1/meta` can publish the selection
     /// constants directly from here.
@@ -374,79 +483,18 @@ impl Engine {
             );
         }
 
-        let current = read_current(bundle_root)?;
-        let prefix = current.prefix.clone();
-        let bundle_identity = hex_decode_32(&current.manifest_digest).ok_or_else(|| {
-            EngineError::Malformed(format!(
-                "CURRENT manifest_digest '{}' is not 64 hex characters",
-                current.manifest_digest
-            ))
-        })?;
-
-        let prefix_dir = bundle_root.join(&prefix);
-
-        // One partition today; take whichever is present rather than hard-coding its phash.
-        let (phash, partition) = bundle
-            .partitions
-            .iter()
-            .next()
-            .map(|(k, v)| (k.clone(), v))
-            .ok_or_else(|| EngineError::Malformed("bundle has no partitions".to_string()))?;
-
-        // The geometry version is seeded from the served filename and is process-local thereafter,
-        // bumped only by a geometry publication, never by a manifest written for deny state alone.
-        let segments_version = partition.segments_n;
-        let watermark = partition.manifest.watermark;
-
-        let dict_paths: Vec<PathBuf> = partition
-            .manifest
-            .dict_extents
-            .iter()
-            .map(|e| prefix_dir.join(&e.path))
-            .collect();
-        let dict = Arc::new(Dict::load(&dict_paths).map_err(EngineError::Io)?);
-
-        let postings_path = prefix_dir
-            .join("partitions")
-            .join(&phash)
-            .join("terms")
-            .join("postings.arrow");
-        // Mmap-backed: the engine holds this reader for the process lifetime, so paying the mmap
-        // setup cost once at open beats reading the whole file into memory.
-        let postings =
-            Arc::new(PostingsReader::open(&postings_path, true).map_err(EngineError::Io)?);
-
-        // Every live delta postings tier, reopened; without this, every item flushed since the
-        // last compaction would silently vanish from every principal's map after a restart. Every
-        // path must be digest-named in one of the two `files` maps, since `open_bundle` verifies
-        // only what those maps carry.
-        let mut delta_postings: Vec<Arc<DeltaTier>> = Vec::new();
-        for rel in &partition.manifest.deltas {
-            if !partition.manifest.files.contains_key(rel)
-                && !bundle.manifest.files.contains_key(rel)
-            {
-                return Err(EngineError::Malformed(format!(
-                    "the side-manifest lists delta tier '{rel}' which no files map digests, so \
-                     opening it would serve unverified postings"
-                )));
-            }
-            delta_postings.push(Arc::new(
-                DeltaTier::open(&prefix_dir.join(rel)).map_err(EngineError::Io)?,
-            ));
-        }
-
-        // Lazy for real: nothing here is opened, mapped or verified. The constructor only reads
-        // already-parsed JSON manifest data (paths and digests), never the filesystem.
-        let external_index = Arc::new(
-            ExternalIdIndex::open(&bundle.manifest, &partition.manifest, &prefix_dir)
-                .map_err(EngineError::Store)?,
-        );
-
-        // The deployment's `tessera_id` key, held for the process lifetime. `IdentityKey::from_hex`
-        // rejects a degenerate key, refusing a bundle rather than blinding identities with a
-        // collapsed round schedule.
-        let identity_key = IdentityKey::from_hex(&bundle.manifest.identity.key)
-            .map_err(|e| EngineError::Malformed(format!("MANIFEST identity.key: {e}")))?;
+        let PrefixReaders {
+            prefix,
+            prefix_dir,
+            bundle_identity,
+            segments_version,
+            watermark,
+            dict,
+            postings,
+            delta_postings,
+            external_index,
+            identity_key,
+        } = PrefixReaders::open(bundle_root, &bundle)?;
 
         // Every piece of state from durable storage is rebuilt behind one call. The side-manifest's
         // deny state travels with it: a `SEGMENTS-<n>.json` is complete current state for its
@@ -976,17 +1024,8 @@ pub(crate) fn open_rotation(
             )
         })?;
 
-    let postings = Arc::new(
-        PostingsReader::open(
-            &prefix_dir
-                .join("partitions")
-                .join(&phash)
-                .join("terms")
-                .join("postings.arrow"),
-            true,
-        )
-        .map_err(|e| PublishGeometryError::PrefixNotOpenable(e.to_string()))?,
-    );
+    let postings = open_postings(&prefix_dir, &phash)
+        .map_err(|e| PublishGeometryError::PrefixNotOpenable(e.to_string()))?;
     let external_index = Arc::new(
         ExternalIdIndex::open(&bundle.manifest, &partition.manifest, &prefix_dir)
             .map_err(|e| PublishGeometryError::PrefixNotOpenable(e.to_string()))?,
