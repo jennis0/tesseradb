@@ -3159,6 +3159,123 @@ fn a_deleted_entitys_value_leaves_the_column_and_every_predicate() {
     assert!(members.contains(survivor as u32));
 }
 
+/// **A session established before a fold is never offered the value only the retired entity
+/// carried**, on any of the three surfaces that derive it: the legend, the suggestion page and a
+/// filtered viewport.
+///
+/// A fold retires the deletion's tombstone and rotates the bundle identity without moving the
+/// watermark, so the session's own fragment — frozen at authorise — still names the retired entity
+/// and the overlay no longer denies it. `/v1/categories` and its suggest form derive a `derived`
+/// column's visible values from that fragment **in entity space**, with no row projection between
+/// them and the answer; a filtered viewport crosses into row space. `ops` is declared and carried
+/// by nothing in the build, so the ingested entity is its only member and the value is exactly as
+/// visible as that one entity.
+#[test]
+fn a_session_from_before_a_fold_is_never_offered_the_retired_entitys_only_value() {
+    let fx = fixture();
+    let cache = fx._dir.path().join("cache-fold-derived");
+    let wal = fx._dir.path().join("wal-fold-derived");
+    let engine = open_engine_publishing(&fx.bundle, &cache, &wal);
+    // A refresh pass rebuilds each resident session's fragment, which would make a request path
+    // that failed to notice the rotation indistinguishable from one that noticed.
+    engine.set_background_refresh_for_test(false);
+
+    let doomed = ingest_and_flush_with(
+        &engine,
+        "ops-1",
+        WalScalar::Utf8("ops".to_string()),
+        WalScalar::U8(0),
+        "ops-paper",
+        9,
+        WalScalar::Null,
+    );
+
+    // Authorised after the flush, so nothing but the fold's identity rotation can invalidate this
+    // fragment: its watermark is already the live one.
+    let session = engine.authorise(&full_coverage_credential()).unwrap();
+
+    let ops = AttrLocalId::new(fx.codes["ops"]);
+    let eng = AttrLocalId::new(fx.codes["eng"]);
+    let served = |operand: AttrLocalId| {
+        engine
+            .viewport(
+                &session,
+                ViewportRequest::new("s0", 0, FULL_VIEWPORT, 10_000)
+                    .filter(leaf("department", FilterOperand::Equals(operand))),
+            )
+            .expect("a filtered viewport answers")
+    };
+    let suggested = || {
+        let page = engine
+            .suggest(&session, "department", "", 20, false, 100_000, 0)
+            .expect("the column suggests")
+            .expect("the column is a category");
+        page.values
+            .iter()
+            .map(|v| v.key.clone())
+            .collect::<Vec<String>>()
+    };
+
+    assert!(offered(&engine, &session, "department", 4).contains(&"ops".to_string()));
+    assert!(suggested().contains(&"ops".to_string()));
+    let before = served(ops);
+    assert_eq!(
+        before.points.len(),
+        1,
+        "the ingested entity is the value's only member, or the assertions below hold vacuously"
+    );
+
+    engine
+        .accept_change(
+            tessera_types::EntityId::new(doomed),
+            tessera_lifecycle::wal::ChangeOp::Delete,
+        )
+        .expect("a delete is accepted");
+    assert!(
+        !offered(&engine, &session, "department", 4).contains(&"ops".to_string()),
+        "the overlay's tombstone alone withdraws the value while it stands"
+    );
+
+    fold(&engine);
+    assert_eq!(engine.generation().prefix, "v00001");
+    assert_eq!(
+        engine.overlay_depth(),
+        0,
+        "the tombstone retired, so nothing but the folded corpus withholds the value now"
+    );
+
+    // The premise, without which every assertion below holds for the wrong reason: the fragment
+    // this session authorised with still names the retired entity, and the overlay no longer
+    // does, so an answer derived from that fragment alone would carry the value.
+    assert!(
+        session.fragment.view().contains(doomed as u32),
+        "the frozen fragment must still name the retired entity"
+    );
+
+    // The same session, never re-authorised.
+    assert!(
+        !offered(&engine, &session, "department", 4).contains(&"ops".to_string()),
+        "the legend offered a value whose only member the fold retired"
+    );
+    assert!(
+        !suggested().contains(&"ops".to_string()),
+        "the suggestion page offered a value whose only member the fold retired"
+    );
+    let after = served(ops);
+    assert!(after.points.tessera_ids.is_empty(), "and nothing is drawn");
+    assert_eq!(
+        after.tiles.iter().map(|tile| tile.matched).sum::<u64>(),
+        0,
+        "and the count is zero, not one"
+    );
+
+    // A value the fold left alone is still offered and still filters, so "gone" is not satisfied
+    // by an empty answer everywhere.
+    assert!(offered(&engine, &session, "department", 4).contains(&"eng".to_string()));
+    assert!(suggested().contains(&"eng".to_string()));
+    assert!(!served(eng).points.tessera_ids.is_empty());
+}
+
 /// **A suppression changes no attribute artefact at all** (Rule S), and the fold is where that is
 /// most easily got wrong — the two removal rules have been conflated twice in this project's review
 /// history, and giving a suppression any retirement route is fail-open.
