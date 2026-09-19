@@ -1077,6 +1077,18 @@ fn initial_vocabularies_of(bundle: &Bundle) -> Result<Vocabularies> {
     .map_err(|e| EngineError::Malformed(e.to_string()))
 }
 
+/// What every partition's side manifest carries, concatenated in the partitions' own order.
+fn across_partitions<'a, T, I: IntoIterator<Item = T>>(
+    bundle: &'a Bundle,
+    of: impl Fn(&'a tessera_store::manifest::SegmentsManifest) -> I,
+) -> Vec<T> {
+    bundle
+        .partitions
+        .values()
+        .flat_map(|partition| of(&partition.manifest))
+        .collect()
+}
+
 impl Engine {
     /// This engine's resolved configuration.
     ///
@@ -1289,49 +1301,31 @@ impl Engine {
         // is `alloc::allocator_floor`, named rather than spelled out here so the property test
         // can exercise it instead of restating it: an id handed out twice grants the new item
         // every access the old one had.
-        let side_manifest_high_waters: Vec<u64> = bundle
-            .partitions
-            .values()
-            .map(|partition| partition.manifest.entity_id_high_water)
-            .collect();
+        let side_manifest_high_waters: Vec<u64> =
+            across_partitions(&bundle, |m| [m.entity_id_high_water]);
         // **The row-less mark's homes are the side manifests only**, and `SEGMENTS-0.json` is one
         // of them — a build whose declaration carries layers spends row-less ids and records the mark there, so
         // this is where a built layer's claim is honoured. `MANIFEST.json` carries no such field at
         // all, and folding the ceiling in as the bundle term is what says "nothing row-less yet"
         // without inventing one.
-        let side_manifest_low_waters: Vec<u64> = bundle
-            .partitions
-            .values()
-            .map(|partition| partition.manifest.entity_id_low_water)
-            .collect();
+        let side_manifest_low_waters: Vec<u64> =
+            across_partitions(&bundle, |m| [m.entity_id_low_water]);
         // One partition today, so this concatenation is the whole registry; at more than one it is
         // the union, and a layer registered against one partition is a layer of the deployment
         // (⊘ **I13b's obligation lands here at the first second partition** — the registry itself
         // is partition-independent, but nothing yet checks that two partitions agree about a name).
-        let manifest_layers: Vec<tessera_types::layer::RegisteredLayer> = bundle
-            .partitions
-            .values()
-            .flat_map(|partition| partition.manifest.layers.iter().cloned())
-            .collect();
-        let manifest_layer_tombstones: Vec<String> = bundle
-            .partitions
-            .values()
-            .flat_map(|partition| partition.manifest.layer_tombstones.iter().cloned())
-            .collect();
+        let manifest_layers: Vec<tessera_types::layer::RegisteredLayer> =
+            across_partitions(&bundle, |m| m.layers.iter().cloned());
+        let manifest_layer_tombstones: Vec<String> =
+            across_partitions(&bundle, |m| m.layer_tombstones.iter().cloned());
         // **The roster's runtime half, unioned on `manifest_layers`' argument** (`views.md` §3.2):
         // a view is a deployment-level object — its key is the group's, not a partition's — so
         // the creations and the tombstones belong to the deployment whichever
         // partition's manifest published them. With one partition this is that partition's list.
-        let manifest_created_views: Vec<tessera_types::view::CreatedView> = bundle
-            .partitions
-            .values()
-            .flat_map(|partition| partition.manifest.views.iter().cloned())
-            .collect();
-        let manifest_dead_incarnations: Vec<tessera_types::view::DeadIncarnation> = bundle
-            .partitions
-            .values()
-            .flat_map(|partition| partition.manifest.dead_view_incarnations.iter().cloned())
-            .collect();
+        let manifest_created_views: Vec<tessera_types::view::CreatedView> =
+            across_partitions(&bundle, |m| m.views.iter().cloned());
+        let manifest_dead_incarnations: Vec<tessera_types::view::DeadIncarnation> =
+            across_partitions(&bundle, |m| m.dead_view_incarnations.iter().cloned());
         // The views the *build* declared, whose keys a create must not reissue.
         let declared_views: Vec<(String, String)> = bundle
             .manifest
@@ -1348,23 +1342,14 @@ impl Engine {
         // deployment-level object with an entity of its own, so its membership belongs to the
         // deployment rather than to whichever partition's manifest happens to name the extent.
         // With one partition this is that partition's list.
-        let manifest_membership_extents: Vec<tessera_store::manifest::MembershipExtent> = bundle
-            .partitions
-            .values()
-            .flat_map(|partition| partition.manifest.membership_extents.iter().cloned())
-            .collect();
+        let manifest_membership_extents: Vec<tessera_store::manifest::MembershipExtent> =
+            across_partitions(&bundle, |m| m.membership_extents.iter().cloned());
         // The two lists that make a level's derived structures placeable across a restart, unioned
         // on the same argument.
-        let manifest_level_versions: Vec<tessera_store::manifest::LevelVersion> = bundle
-            .partitions
-            .values()
-            .flat_map(|partition| partition.manifest.level_versions.iter().cloned())
-            .collect();
-        let manifest_derived_extents: Vec<tessera_store::manifest::DerivedExtent> = bundle
-            .partitions
-            .values()
-            .flat_map(|partition| partition.manifest.derived_extents.iter().cloned())
-            .collect();
+        let manifest_level_versions: Vec<tessera_store::manifest::LevelVersion> =
+            across_partitions(&bundle, |m| m.level_versions.iter().cloned());
+        let manifest_derived_extents: Vec<tessera_store::manifest::DerivedExtent> =
+            across_partitions(&bundle, |m| m.derived_extents.iter().cloned());
         let (overlay, buffer, write_state) = WritePath::reconstruct(
             wal_path,
             crate::write::ManifestSeed {
@@ -1465,12 +1450,12 @@ impl Engine {
         // The incarnation travels with the pair: a column of a dead incarnation is on disc under
         // the same path a key created again would use, and `with_scoped_columns` drops it rather
         // than publishing the predecessor's values as the new view's (decision 0115).
-        let scoped_columns: Vec<(String, String, tessera_types::view::ViewIncarnation)> = bundle
-            .partitions
-            .values()
-            .flat_map(|p| p.manifest.scoped_columns.iter())
-            .map(|c| (c.column.clone(), c.view.clone(), c.incarnation))
-            .collect();
+        let scoped_columns: Vec<(String, String, tessera_types::view::ViewIncarnation)> =
+            across_partitions(&bundle, |m| {
+                m.scoped_columns
+                    .iter()
+                    .map(|c| (c.column.clone(), c.view.clone(), c.incarnation))
+            });
         let bundle = if created_views.is_empty()
             && dead_incarnations.is_empty()
             && scoped_columns.is_empty()
