@@ -2134,3 +2134,50 @@ async fn a_gate_failed_view_is_absent_from_the_drill_down_and_its_key_is_not() {
         "the key is a view's address, and `quarter_map:2026-Q2` holds it"
     );
 }
+
+/// A group-scoped value is addressed by its view's key, so a fill waiting for the tick when that
+/// view is dropped goes with it: the drop says how many, and none of them holds the log.
+#[tokio::test]
+async fn a_scoped_fill_goes_with_its_dropped_view_and_the_drop_counts_it() {
+    use base64::Engine as _;
+    let served = serve().await;
+    let id = base64::engine::general_purpose::STANDARD.encode(external_id_of(3));
+    let resp = served
+        .server
+        .client
+        .post(served.server.control_url("/control/values"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .header("x-tessera-batch-id", "fill-then-drop")
+        .header("x-tessera-view", "quarter:2026-Q1")
+        .json(&json!([{ "external_id": id, "tag": 5.0 }]))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "the fill is accepted");
+
+    let resp = served
+        .server
+        .client
+        .delete(served.server.control_url("/control/views/quarter/2026-Q1"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "the drop is accepted");
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["fills_dropped"], json!(1), "{body}");
+    assert_eq!(
+        served.server.state.engine.generation().buffer.oldest_wal_pos(),
+        None,
+        "nothing buffered holds the log"
+    );
+
+    let Served { server, _tmp, bundle, .. } = served;
+    server.shutdown().await;
+    let server = spawn_server(&bundle, &_tmp.path().join("cache"), &_tmp.path().join("wal.log")).await;
+    assert_eq!(
+        server.state.engine.generation().buffer.oldest_wal_pos(),
+        None,
+        "and a restart does not buffer the fill again"
+    );
+}

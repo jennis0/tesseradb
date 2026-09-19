@@ -140,6 +140,15 @@ pub(crate) struct VocabularyValues {
     pub(crate) titles: u64,
 }
 
+/// What a view drop did beside dropping the view.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ViewDropped {
+    /// Entities `delete_dangling` submitted for deletion.
+    pub deleted: u64,
+    /// Group-scoped fills not yet flushed, which addressed the dropped view and went with it.
+    pub fills_dropped: u64,
+}
+
 /// One unit of work for the write executor, and the channel it is answered on.
 ///
 /// A command carries what the caller sent, unvalidated and unallocated. Whether a name or key is
@@ -188,12 +197,12 @@ pub(crate) enum Command {
     },
     /// Drop a view of a view group. Its key is never issued again. With `delete_dangling`, the
     /// entities that hold a row in no other view are submitted as ordinary deletions, which retire
-    /// at the fold like any other; the answer is how many.
+    /// at the fold like any other.
     DropView {
         group: String,
         key: String,
         delete_dangling: bool,
-        reply: Reply<u64>,
+        reply: Reply<ViewDropped>,
     },
     /// Declare an attribute column. The answer is whether an identical declaration already held the
     /// name.

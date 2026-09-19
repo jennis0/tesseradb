@@ -4241,13 +4241,16 @@ async fn drop_view(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let wait = WaitQuery { wait: query.wait };
     let engine = Arc::clone(&state);
-    let deleted = tokio::task::spawn_blocking(move || {
+    let dropped = tokio::task::spawn_blocking(move || {
         engine.engine.drop_view(group, key, query.delete_dangling)
     })
     .await
     .map_err(crate::error::map_join_error)?
     .map_err(crate::error::map_accept_error)?;
-    let mut body = serde_json::json!({ "deleted": deleted });
+    let mut body = serde_json::json!({
+        "deleted": dropped.deleted,
+        "fills_dropped": dropped.fills_dropped,
+    });
     declaration_ack(&state, &wait).await?.merge(&mut body);
     Ok(Json(body))
 }
