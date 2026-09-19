@@ -2,42 +2,29 @@ use super::*;
 
 /// The bundle's declared scalar tail, as the segment writer wants it.
 ///
-/// **Infallible, because an unwritable declaration cannot reach an open bundle.**
-/// `DeclaredScalar::arrow_type` is a `ScalarType`, so a manifest naming a type this build cannot
-/// store fails to deserialise and the bundle never opens (`manifest::scalar_type_name`). This
-/// returned `None` while the field was a string, and a flush, an ingest and a fold each carried an
-/// arm for that case — three guards against a state no loaded generation can be in.
+/// Infallible: `DeclaredScalar::arrow_type` is a `ScalarType`, so a manifest naming a type this
+/// build cannot store fails to deserialise and the bundle never opens.
 pub(crate) fn scalar_schema_of(
     manifest: &tessera_store::manifest::Manifest,
 ) -> Vec<(String, ScalarType)> {
-    // **Render columns only.** A `filter`-only column is entity-space; giving it a slot in every
-    // row is the cost §10.3's routing exists to avoid, and — since `gather_scalars` refuses a
-    // segment missing a declared column — a schema built from the full list would make a merge
-    // refuse the build's own segment for correctly omitting one.
+    // Render columns only. A filter-only column carries no row slot. Including it here would make
+    // gather_scalars refuse the build's own segment for correctly omitting it.
     manifest
         .render_scalars()
         .map(|d| (d.name.clone(), d.arrow_type))
         .collect()
 }
 
-/// Every view's **group-scoped** attribute families, keyed by view id (`views.md` §5).
+/// Every view's group-scoped attribute families, keyed by view id.
 ///
-/// **The families whose owning group's key set holds this view's key** — the owner's own views,
-/// and the same keys under every group declaring `members` of it (§3.3, decision 0116). A family
-/// belongs to the group that owns the keys (a `members` group's list is always empty), and a batch
-/// into any view addressing one of those keys carries its values under their plain names, because
-/// the address of a scoped value is `(attribute → its group, key)` and never the view.
+/// A family belongs to the group that owns the keys; a `members` group's own list is always
+/// empty. A view in a `members` group resolves to the owning group's families for the same key,
+/// via [`scoped_owner_view_of`], so a batch into either view writes the same columns under the
+/// same names. The cell itself is written once: `admit` dedupes an identical repeated value and
+/// refuses a differing one.
 ///
-/// The sharing door was refused until 2026-09-01 on the argument that two views of one key would
-/// put two extents over one entity. That is withdrawn: the cell is written once — `admit`'s cell
-/// arm dedupes an identical second value and refuses a differing one — and the extent it is written
-/// into is addressed by [`scoped_owner_view_of`], which is the owner's view id whichever door the
-/// row came through.
-///
-/// **This is the one derivation, and three callers take it**: the ingest boundary parses a batch's
-/// schema against it, the commit window mints a scoped category's keys against it, and the flush
-/// writes a row's values into the columns it names. A second copy would let a row's positional
-/// tail be built against one list and read against another.
+/// The ingest boundary, the commit window and the flush each take this one derivation, so a row's
+/// positional tail is built and read against the same list.
 pub(crate) fn scoped_families_by_view(
     manifest: &tessera_store::manifest::Manifest,
 ) -> FxHashMap<String, Vec<tessera_store::manifest::ScopedScalar>> {
@@ -61,13 +48,11 @@ pub(crate) fn scoped_families_by_view(
     out
 }
 
-/// One view's **group-scoped** families — [`scoped_families_by_view`]'s rule, asked of one view.
+/// One view's group-scoped families: [`scoped_families_by_view`]'s rule, for a single view.
 ///
-/// **The rule itself lives here and the map is built from it**, so a caller that wants one view's
-/// answer does not walk every group to get it and cannot derive a second, differing list. The
-/// families are the **owning** group's, in that group's manifest order, which is the order a
-/// buffered row's `scoped` list is positional against; empty for a plain view, for a view whose key
-/// the owning group does not carry, and for a group that owns no family.
+/// Returns the owning group's families, in that group's manifest order, the order a buffered
+/// row's `scoped` list is positional against. Empty for a plain view, for a view whose key the
+/// owning group does not carry, and for a group that owns no family.
 pub(crate) fn scoped_families_of_view<'a>(
     manifest: &'a tessera_store::manifest::Manifest,
     view: &str,
@@ -80,21 +65,20 @@ pub(crate) fn scoped_families_of_view<'a>(
     let Some(group) = manifest.groups.iter().find(|g| g.name == owner_group) else {
         return NONE;
     };
-    // A sharing group's roster carries the owner's keys by construction, so the key is matched
-    // rather than assumed: a key the owning group does not carry addresses no cell.
+    // A sharing group's roster carries the owner's keys. The key is matched, not assumed: a key
+    // the owning group does not carry addresses no cell.
     if !group.views.iter().any(|v| v.key == key) {
         return NONE;
     }
     &group.scoped_scalars
 }
 
-/// The view id a scoped value written through `view` is **addressed by** — the owning group's view
-/// of the same key (`views.md` §5, decision 0116).
+/// The view id a scoped value written through `view` is addressed by: the owning group's view of
+/// the same key.
 ///
-/// Equal to `view` itself for every view of the owning group, and for every view in no scope at
-/// all; a sharing group's view resolves to the owner's. This is the one place a door becomes an
-/// address, so a row that arrived through the sharing spelling writes the byte-identical extent,
-/// under the byte-identical column name, that the owner's door would have written.
+/// Equal to `view` for every view of the owning group, and for every view in no scope at all. A
+/// sharing group's view resolves to the owner's, so a row written through the sharing view lands
+/// under the same column name the owner's view would have used.
 pub(crate) fn scoped_owner_view_of(
     manifest: &tessera_store::manifest::Manifest,
     view: &str,
@@ -111,19 +95,18 @@ pub(crate) fn scoped_owner_view_of(
     format!("{owner}{}{key}", tessera_store::GROUP_SEPARATOR)
 }
 
-/// One view's writer schema: the bundle-wide render tail, then the **group-scoped** render lanes
-/// that view's rows carry (`views.md` §5).
+/// One view's writer schema: the bundle-wide render tail, then the group-scoped render lanes that
+/// view's rows carry.
 ///
-/// **Every producer of a segment takes this, and taking the bundle-wide list alone was the
-/// defect.** A build writes a scoped family's lane into the row tail of every view of its group;
-/// a merge or a fold that rewrote such a segment from `scalar_schema_of` alone wrote the
-/// entity-scoped tail and nothing per family, so values served correctly before the rewrite came
-/// back as the type's zero afterwards — indistinguishable from absence, with no error anywhere.
-/// The lanes are appended after the declared ones, which is the order the build writes them in.
+/// Every producer of a segment must take this rather than `scalar_schema_of` alone. A build
+/// writes a scoped family's lane into the row tail of every view in its group; rewriting such a
+/// segment from the bundle-wide list alone would drop the per-family lanes, so a value that
+/// served correctly before the rewrite would read back as the type's zero, with no error. The
+/// lanes are appended after the declared ones, in the order the build writes them.
 ///
-/// **No gate here, deliberately.** A writer has no principal; which lanes a row space holds is a
-/// property of the bundle, and narrowing it by a session's sight would drop a lane the build
-/// wrote. `viewport::scoped_render_scalars` is the read half, and it narrows the same list.
+/// This function applies no gate: a writer has no principal, and narrowing the lane list by a
+/// session's visibility would drop a lane the build wrote. `viewport::scoped_render_scalars` is
+/// the read half, and narrows the same list.
 pub(crate) fn view_scalar_schema_of(
     manifest: &tessera_store::manifest::Manifest,
     view: &str,
@@ -139,9 +122,9 @@ pub(crate) fn view_scalar_schema_of(
 
 /// The columns of one view's writer schema an input segment may lawfully lack, for a merge or a
 /// fold of segments written before them (`tessera_store::segment_cursor::gather_scalars`): the
-/// group-scoped render lanes, which begin at `entity_scoped` in the schema (`views.md` §5), and
-/// the entity-scoped columns declared at a running service and not yet folded (`ingest.md` §6.3).
-/// Every other column of the schema is one every input holds, and one missing is a torn segment.
+/// group-scoped render lanes, which begin at `entity_scoped` in the schema, and the entity-scoped
+/// columns declared at a running service and not yet folded. Every other column of the schema is
+/// one every input holds, and one missing is a torn segment.
 pub(crate) fn lawful_absences(
     schema: &[(String, ScalarType)],
     entity_scoped: usize,
@@ -159,20 +142,18 @@ pub(crate) fn lawful_absences(
 
 /// The filterable columns, with the position each occupies in a buffered row's scalar list.
 ///
-/// **Positional against the full `declared_scalars`, not against the render tail.** A row's scalars
-/// are indexed positionally against the whole declaration (that is how the commit window finds a
-/// category key's vocabulary), and `scalar_schema_of` deliberately narrows to render columns — so
-/// building this from that list would read a filter column's value out of a neighbouring column's
-/// slot wherever the two differ, which is most schemas.
+/// Positional against the full `declared_scalars`, not against the render tail. A row's scalars
+/// are indexed positionally against the whole declaration, which is how the commit window finds a
+/// category key's vocabulary. `scalar_schema_of` narrows to render columns, so building this list
+/// from that one would read a filter column's value out of a neighbouring column's slot wherever
+/// the two differ.
 ///
-/// **A `visibility = "derived"` category is here whether or not it is declared filterable**, and
-/// that is the same rule the build applies when it decides which columns owe a value column and
-/// derived postings (`filter-index.md` §2.3). Its member sets are what `/v1/categories` derives
-/// value visibility from, and the postings cover the build alone — so without an extent, a value
-/// carried only by entities ingested since the build would never be offered to a principal who can
-/// see one of them. The set of columns a flush writes extents for and the set the reader composes
-/// are the same predicate, `filter::owes_value_column`, or the reader refuses an extent for a
-/// column it does not hold.
+/// A `visibility = "derived"` category is included whether or not it is declared filterable: its
+/// member sets are what `/v1/categories` derives value visibility from, and without an extent a
+/// value carried only by entities ingested since the build would never be offered to a principal
+/// who can see one of them. The columns a flush writes extents for and the columns the reader
+/// composes are the same predicate, `filter::owes_value_column`, so the reader refuses an extent
+/// for a column it does not hold.
 pub(crate) fn filter_schema_of(
     manifest: &tessera_store::manifest::Manifest,
 ) -> Vec<crate::flush::FilterColumnSpec> {
@@ -180,9 +161,9 @@ pub(crate) fn filter_schema_of(
         .declared_scalars
         .iter()
         .enumerate()
-        // **Text is not here, and `owes_value_column` is where that is decided** — it owes no value
-        // column, so there is no attribute extent for this pass to write. Its flush track is
-        // `text_schema_of`, whose extent is a dictionary and postings instead.
+        // Text is not here: `owes_value_column` decides it owes no value column, so this pass
+        // writes no attribute extent for it. Its flush track is `text_schema_of`, whose extent is
+        // a dictionary and postings instead.
         .filter(|(_, d)| crate::filter::owes_value_column(d, &manifest.vocabularies))
         .map(|(index, d)| crate::flush::FilterColumnSpec {
             index,
@@ -193,13 +174,14 @@ pub(crate) fn filter_schema_of(
         .collect()
 }
 
-/// The indexed `text` columns, each with the analyser its declaration named — resolved once per
-/// dispatch rather than per row, because constructing one deserialises the segmenter's dictionaries.
+/// The indexed `text` columns, each with the analyser its declaration named. Resolved once per
+/// dispatch rather than per row, because constructing an analyser deserialises the segmenter's
+/// dictionaries.
 ///
-/// **Refuses rather than defaults when the binary does not carry the recorded analyser.** A flush
+/// Refuses rather than defaults when the binary does not carry the recorded analyser. A flush
 /// that indexed a batch with a different pipeline than the base build used would leave one column
-/// whose two layers disagree about what a word is, and a `match` would answer from whichever layer
-/// happened to hold the entity — a wrong answer with no error anywhere.
+/// whose two layers disagree about what a word is, and a match query would answer from whichever
+/// layer happened to hold the entity, with no error.
 pub(crate) fn text_schema_of(
     manifest: &tessera_store::manifest::Manifest,
 ) -> Result<Vec<crate::flush::TextColumnSpec>, crate::flush::FlushFailed> {
@@ -219,7 +201,7 @@ pub(crate) fn text_schema_of(
             .ok_or_else(|| {
                 crate::flush::FlushFailed(format!(
                     "column '{}' was indexed by analyser '{identity}', which this binary does not \
-                     carry — a flush cannot extend an index whose terms it cannot reproduce",
+                     carry. A flush cannot extend an index whose terms it cannot reproduce.",
                     d.name
                 ))
             })?;
@@ -248,21 +230,21 @@ pub(in crate::write) fn analyser_of(
         .ok_or_else(|| {
             crate::flush::FlushFailed(format!(
                 "the scoped column family '{}' was indexed by analyser '{identity}', which this \
-                 binary does not carry — a flush cannot extend an index whose terms it cannot \
-                 reproduce",
+                 binary does not carry. A flush cannot extend an index whose terms it cannot \
+                 reproduce.",
                 family.name
             ))
         })
 }
 
-/// The blob-resident columns, with each one's position in a buffered row's scalar list — which is
-/// also its field tag (records §3).
+/// The blob-resident columns, with each one's position in a buffered row's scalar list, which is
+/// also its field tag.
 ///
-/// **The predicate must be the build's**, [`crate::filter::blob_resident`], because this is the
-/// third placement pass and the three have to partition the same schema the same way. A flush that
+/// The predicate must be the build's, [`crate::filter::blob_resident`], because this is the third
+/// placement pass and the three passes must partition the same schema the same way. A flush that
 /// placed a field differently from the build would drop an ingested value the build stores: the
-/// buffered scalar is read by exactly three consumers — the render indices, the filter schema and
-/// this one — and a column no consumer claims is acknowledged and then lost.
+/// buffered scalar is read by exactly three consumers, the render indices, the filter schema and
+/// this one, and a column no consumer claims is acknowledged and then lost.
 pub(crate) fn record_schema_of(
     manifest: &tessera_store::manifest::Manifest,
 ) -> Vec<crate::flush::RecordColumnSpec> {
@@ -279,18 +261,11 @@ pub(crate) fn record_schema_of(
         .collect()
 }
 
-/// A vocabulary code, at its column's declared width. Mirrors `tessera-server`'s own `category_code`
-/// helper of the same shape, which cannot be reused here: that one lives on the other side of the
-/// ingest boundary and returns an `ApiError`, where a mint failure here is `Executor`-internal and
-/// has already been dispositioned by the time a code is being written.
-///
-/// `is_category_width` (checked at schema parse) admits `u8`/`u16`/`u32` only, so the fallthrough is
-/// `u32` — the widest, which cannot truncate a code the other two could hold.
 /// The category-width code a row's scalar carries, or `None` where it carries none.
 ///
-/// **The three category widths and nothing else** — `tessera_spatial::ScalarType::is_category_width`
+/// Only the three category widths carry a code: `tessera_spatial::ScalarType::is_category_width`
 /// is what the declaration is checked against, so a wider or non-integer column never names a
-/// predicate layer and a value of one reaching here is a schema that never validated.
+/// predicate layer, and a value of one reaching here is a schema that never validated.
 pub(in crate::write) fn scalar_code(scalar: &WalScalar) -> Option<u32> {
     match scalar {
         WalScalar::U8(v) => Some(u32::from(*v)),
@@ -300,6 +275,12 @@ pub(in crate::write) fn scalar_code(scalar: &WalScalar) -> Option<u32> {
     }
 }
 
+/// A vocabulary code, at its column's declared width. Mirrors `tessera-server`'s own
+/// `category_code` helper: that one cannot be reused here because it lives on the other side of
+/// the ingest boundary and returns an `ApiError`, where a mint failure here is `Executor`-internal.
+///
+/// `is_category_width` (checked at schema parse) admits `u8`/`u16`/`u32` only, so the fallthrough
+/// is `u32`, the widest, which cannot truncate a code the other two could hold.
 pub(in crate::write) fn code_at_declared_width(width: ScalarType, code: u32) -> WalScalar {
     match width {
         ScalarType::U8 => WalScalar::U8(code as u8),
@@ -314,17 +295,15 @@ mod segment_schema_tests {
     use tessera_plugin::Plugin;
     use tessera_store::manifest::DeclaredScalar;
 
-    /// **A segment's writer schema is the render columns, and this guards the one line that makes
-    /// it so.**
+    /// A segment's writer schema is the render columns; this guards the line that makes it so.
     ///
     /// `scalar_schema_of` feeds flush, merge, fold and compact. `gather_scalars` refuses a segment
-    /// missing a declared column, so a schema built from the *full* `declared_scalars` — which
-    /// includes `filter`-only columns, deliberately absent from `columns.arrow` — makes a merge
-    /// refuse the build's own segment. Nothing is wrong at either end, and an ordinary merge
-    /// reaches it.
+    /// missing a declared column, so a schema built from the full `declared_scalars`, which
+    /// includes filter-only columns absent from `columns.arrow`, would make a merge refuse the
+    /// build's own segment.
     ///
     /// This calls the production function rather than re-deriving its filter, because a test that
-    /// re-implements the predicate passes with the fix reverted.
+    /// re-implements the predicate passes even when the production filter is wrong.
     #[test]
     pub(in crate::write) fn a_segments_writer_schema_omits_filter_only_columns() {
         let manifest = tessera_store::manifest::Manifest {
@@ -374,8 +353,8 @@ mod segment_schema_tests {
             "a filter-only column must not reach the segment writer"
         );
 
-        // And the full list is untouched — the ingest plane supplies values for every declared
-        // column, filterable ones included.
+        // The full list is untouched: the ingest plane supplies values for every declared column,
+        // filterable ones included.
         assert_eq!(manifest.declared_scalars.len(), 2);
     }
 }
