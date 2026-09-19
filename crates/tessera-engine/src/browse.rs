@@ -300,7 +300,7 @@ impl crate::Engine {
         let geometry =
             self.session_geometry(session, &generation, view, view_data, &None, &mut _probe)?;
         let denied = generation
-            .denied
+            .denied()
             .get(view)
             .ok_or_else(|| EngineError::DenyMaskMissing {
                 view: view.to_string(),

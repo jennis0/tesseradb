@@ -2993,7 +2993,7 @@ impl Engine {
         // here" would publish suppressed and deleted rows on the map with no error anywhere —
         // the same shape as `SegmentWithoutRowBase`, and refused the same way.
         let denied = generation
-            .denied
+            .denied()
             .get(view)
             .ok_or_else(|| EngineError::DenyMaskMissing {
                 view: view.to_string(),
@@ -5187,7 +5187,7 @@ impl Engine {
         let geometry =
             self.session_geometry(session, &generation, view, view_data, &None, &mut probe)?;
         let denied = generation
-            .denied
+            .denied()
             .get(view)
             .ok_or_else(|| EngineError::DenyMaskMissing {
                 view: view.to_string(),
@@ -5233,7 +5233,7 @@ impl Engine {
                 self.session_geometry(session, &generation, view, view_data, &None, &mut probe)?;
             let denied =
                 generation
-                    .denied
+                    .denied()
                     .get(view)
                     .ok_or_else(|| EngineError::DenyMaskMissing {
                         view: view.to_string(),
@@ -5702,7 +5702,7 @@ impl Engine {
         let geometry =
             self.session_geometry(session, &generation, view, view_data, &None, &mut probe)?;
         let denied = generation
-            .denied
+            .denied()
             .get(view)
             .ok_or_else(|| EngineError::DenyMaskMissing {
                 view: view.to_string(),
@@ -6281,7 +6281,7 @@ impl Engine {
         // as *nothing is denied here* would let the containment partition serve content generated
         // from suppressed and deleted documents, with no error anywhere.
         let denied = generation
-            .denied
+            .denied()
             .get(view)
             .ok_or_else(|| EngineError::DenyMaskMissing {
                 view: view.to_string(),

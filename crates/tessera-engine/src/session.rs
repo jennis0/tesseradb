@@ -1473,10 +1473,6 @@ impl Engine {
 
         // `Arc`-wrapped from the start: the `Engine` and its `WritePath` share this one
         // pointer, so a swap published by an acceptance is the swap every read path observes.
-        // The mask this engine opens with, derived from the overlay replay reconstructed and the
-        // row space the bundle carries — the same derivation every later publication repeats
-        // (`compose::derive_denied`). A node restarting into a live suppression set gets it here,
-        // not on its first request.
         // **The bundle as the roster makes it** (`views.md` §3.2): the views a build declared,
         // plus every view created while the service ran and replayed just now, minus every key
         // dropped. Applied here, before the first generation is built, because everything below
@@ -1522,7 +1518,6 @@ impl Engine {
                 .with_scoped_columns(&scoped_columns);
             Arc::new(bundle).with_views(manifest)
         };
-        let denied = Arc::new(crate::compose::derive_denied(&overlay, &bundle));
 
         // The filter artefact belongs to the published prefix, so it is opened here with the
         // bundle and carried forward by every generation successor. The build's column plus every
@@ -1632,7 +1627,9 @@ impl Engine {
             &pool,
         ));
 
-        let generation = Arc::new(ArcSwap::new(Arc::new(Generation {
+        // `Generation::new` derives the deny mask, so a node restarting into a live suppression
+        // set has it before its first request.
+        let generation = Arc::new(ArcSwap::new(Arc::new(Generation::new(crate::GenerationParts {
             prefix,
             suggest,
             segments_version,
@@ -1648,8 +1645,7 @@ impl Engine {
             buffer: Arc::new(buffer),
             vocabularies: Arc::new(vocabularies),
             filter_columns,
-            denied,
-        })));
+        }))));
 
         // Unbounded until `set_cache_bounds` is called. `tessera-server` calls it immediately
         // after `open`, having validated the figure; every other embedder (tests, benches,

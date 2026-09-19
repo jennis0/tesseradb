@@ -2633,16 +2633,16 @@ fn is_deleted(overlay: &Overlay, entity: EntityId) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
+    
 
-    use std::collections::{BTreeMap, HashMap};
+    
 
     use tessera_lifecycle::wal::{ChangeOp, WalRow, WalScalar};
     use tessera_lifecycle::IngestBuffer;
-    use tessera_plugin::Plugin;
-    use tessera_store::manifest::{IdentityDescriptor, Manifest};
-    use tessera_store::Bundle;
-    use tessera_types::{TermId, IDENTITY_CONSTRUCTION, IDENTITY_ROUNDS};
+    
+    
+    
+    use tessera_types::TermId;
 
     const VIEW: &str = "s0";
 
@@ -2695,58 +2695,7 @@ mod tests {
     }
 
     fn generation_of(overlay: Overlay, buffer: IngestBuffer) -> Generation {
-        let manifest = Manifest {
-            bundle_format: 3,
-            created_at: "2026-08-02T00:00:00Z".to_string(),
-            data_plugin_hash: tessera_plugin::Passthrough::new().data_plugin_hash(),
-            declared_bounds: serde_json::json!({}),
-            declared_scalars: vec![],
-            vocabularies: vec![],
-            small_term_threshold: 32,
-            entity_id_high_water: 0,
-            identity: IdentityDescriptor {
-                construction: IDENTITY_CONSTRUCTION.to_string(),
-                rounds: IDENTITY_ROUNDS,
-                key: "0123456789abcdef0123456789abcdef".to_string(),
-                shard_id: 0,
-                idset: 1,
-            },
-            groups: Vec::new(),
-            views: vec![],
-            partitions: vec![],
-            provenance: serde_json::json!({}),
-            files: BTreeMap::new(),
-        };
-        let dir = tempfile::TempDir::new().expect("a temp dir");
-        let postings_path = dir.path().join("postings.arrow");
-        tessera_authz::write_postings(&postings_path, &[], 32).expect("an empty postings file");
-        let (fragments, external_index) = crate::synthetic_generation_parts();
-        Generation {
-            // A test fixture's schema declares nothing filterable, so there is nothing to open.
-            filter_columns: Arc::new(crate::filter::FilterColumns::default()),
-            // And nothing categorical, so no vocabulary has an index.
-            suggest: Arc::new(crate::suggest::SuggestIndexes::default()),
-            prefix: "v00000".to_string(),
-            vocabularies: Arc::new(tessera_store::vocabulary::Vocabularies::default()),
-            segments_version: 0,
-            watermark: 0,
-            bundle: Arc::new(Bundle {
-                manifest,
-                partitions: HashMap::new(),
-            }),
-            dict: Arc::new(tessera_authz::Dict::load(&[]).expect("an empty dict")),
-            postings: Arc::new(
-                tessera_authz::PostingsReader::open(&postings_path, false).expect("it opens"),
-            ),
-            fragments,
-            external_index,
-            delta_postings: Vec::new(),
-            overlay_version: 0,
-            overlay: Arc::new(overlay),
-            buffer: Arc::new(buffer),
-            // The fixture bundle carries no views, so a fresh derivation is empty.
-            denied: Arc::new(crate::DenyMask::default()),
-        }
+        Generation::synthetic("v00000", 0, 0, overlay, buffer)
     }
 
     fn plan(generation: &Generation) -> Result<FlushPlan, NoFlush> {

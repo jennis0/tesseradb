@@ -416,10 +416,9 @@ impl Executor {
     #[cfg(feature = "fault-injection")]
     pub(super) fn forget_suggestion_index(&mut self, vocabulary: &str) {
         let live = self.generation.load_full();
-        let next = Generation {
-            suggest: Arc::new(live.suggest.without(vocabulary)),
-            ..Generation::clone(&live)
-        };
+        let next = live.with(|g| {
+            g.suggest = Arc::new(live.suggest.without(vocabulary));
+        });
         // Nothing acknowledged anything — the hook's own channel is what the caller waits on — so
         // the token is dropped here as the rebuild's is.
         self.publish(next, std::time::Instant::now());
@@ -485,10 +484,9 @@ impl Executor {
                 completed.index,
                 completed.covered_through,
             ));
-            let next = Generation {
-                suggest,
-                ..Generation::clone(&generation)
-            };
+            let next = generation.with(|g| {
+                g.suggest = suggest;
+            });
             // Nothing acknowledged anything: a rebuild answers no caller, so the token is
             // dropped here as the coalesce's is.
             self.publish(next, std::time::Instant::now());
@@ -689,18 +687,12 @@ impl Executor {
                 )
             });
         }
-        // **Re-derived over the new row space, because row ids changed meaning inside the span.**
-        // Carrying the mask forward would leave denied rows pointing at whichever entities now
-        // occupy those ids — the one way this mask can silently re-expose a deleted item.
-        let denied = Arc::new(crate::compose::derive_denied(&live.overlay, &next_bundle));
 
-        let next = Arc::new(Generation {
-            segments_version,
-            bundle: next_bundle,
-            denied,
+        let next = Arc::new(live.with(|g| {
+            g.segments_version = segments_version;
+            g.bundle = next_bundle;
             // The consumed segments' delta tiers carry: their entities still have rows, in the merged segment.
-            ..Generation::clone(&live)
-        });
+        }));
         // The claim names the generation it is for, so a pass that is superseded mid-flight
         // releases nothing when it ends — see `refresh::clear_if_current`.
         self.refresh
@@ -1020,22 +1012,21 @@ impl Executor {
             delta_postings.push(tier);
         }
 
-        let next = Generation {
+        let next = live.with(|g| {
             // The live columns with each consumed window replaced by the layer that carries its
             // values — the same set of `(entity, value)` pairs in fewer files, so a request holding
             // the old and one holding the new agree on every answer.
-            filter_columns,
-            bundle: next_bundle,
+            g.filter_columns = filter_columns;
+            g.bundle = next_bundle;
             // **The sidecar rides the swap, rather than being stored beside it.** It used to be an
             // `ArcSwap` on the `Engine`, stored one statement after this publication; that was
             // sound here because a coalesce is content-preserving, and it is not sound for a fold,
             // which drops the retired entities' keys and writes into a new prefix. One pointer
             // now carries both, so no request can ever hold a generation and a sidecar from two
             // publications.
-            external_index: Arc::new(next_index),
-            delta_postings,
-            ..Generation::clone(&live)
-        };
+            g.external_index = Arc::new(next_index);
+            g.delta_postings = delta_postings;
+        });
         // **The outgoing sidecar is remembered before it stops being live.** A coalesce is the one
         // publication that builds a *new* one over the same prefix, so from here a generation
         // holding the old one is invisible to the sidecar count reclamation takes — see
@@ -2410,10 +2401,6 @@ impl Executor {
         let mut delta_postings = live.delta_postings.clone();
         delta_postings.extend(tier);
 
-        // **Rebuilt against the segment this flush just added**, which is what gives a suppressed
-        // or deleted item its place in the mask the moment it acquires a row: until now it was
-        // buffered, had no row, and so appeared in no mask at all.
-        let denied = Arc::new(crate::compose::derive_denied(&live.overlay, &next_bundle));
         *mark = self
             .health
             .flush_lap(crate::flush::FlushStage::Denied, *mark);
@@ -2468,19 +2455,17 @@ impl Executor {
             .health
             .flush_lap(crate::flush::FlushStage::Artifacts, *mark);
 
-        let next = Arc::new(Generation {
+        let next = Arc::new(live.with(|g| {
             // The live columns with this flush's extents composed on — the whole of what makes an
             // entity ingested since the build answer a filter on its own value.
-            filter_columns,
-            segments_version,
-            watermark,
-            bundle: next_bundle,
-            dict: completed.dict,
-            delta_postings,
-            buffer: Arc::new(buffer),
-            denied,
-            ..Generation::clone(&live)
-        });
+            g.filter_columns = filter_columns;
+            g.segments_version = segments_version;
+            g.watermark = watermark;
+            g.bundle = next_bundle;
+            g.dict = completed.dict;
+            g.delta_postings = delta_postings;
+            g.buffer = Arc::new(buffer);
+        }));
         // **Armed before the swap, and that ordering is the mechanism** (decision 0044 D1; review
         // finding F5). A request landing between the swap and the pool task's first insert must
         // find the flag set, or it takes rung 3 of the ladder as a *build* — the measured 1 277 ms

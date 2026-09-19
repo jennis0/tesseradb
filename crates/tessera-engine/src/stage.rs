@@ -217,7 +217,7 @@ fn run(
     else {
         return;
     };
-    let Some(denied) = generation.denied.get(&task.view) else {
+    let Some(denied) = generation.denied().get(&task.view) else {
         return;
     };
     let Ok(segments) = crate::viewport::segments_with_row_bases(&task.view, view_data) else {

@@ -3507,18 +3507,17 @@ impl Executor {
             .buffered_items
             .store(buffer.len(), Ordering::SeqCst);
 
-        let next = Generation {
-            overlay_version: generation.overlay_version + 1,
-            buffer: Arc::new(buffer),
-            vocabularies: Arc::new(vocabularies),
+        let next = generation.with(|g| {
+            g.overlay_version = generation.overlay_version + 1;
+            g.buffer = Arc::new(buffer);
+            g.vocabularies = Arc::new(vocabularies);
             // **The one publication that changes the suggestion index**, and it changes it by the
             // same mints that changed the bindings above: a novel key gets its code here, and a
             // viewer typing its prefix on the next keystroke must be offered it rather than
             // waiting for the next rebuild (`value-suggestion.md` §6.1). Every other publication
             // carries the index forward.
-            suggest,
-            ..Generation::clone(&generation)
-        };
+            g.suggest = suggest;
+        });
         self.publish(next, started);
         self.health.lap(WriteStage::ApplySwap, mark);
     }
@@ -3590,30 +3589,6 @@ impl Executor {
             );
         }
 
-        // **The deny mask, by the cheaper of the two licensed modes** (`derive_denied`). A window
-        // of `Delete`/`Suppress` only grows the union, so adding each entity's row is provably
-        // equal to re-deriving and costs the window rather than the whole deny set. A window
-        // carrying an `Unsuppress` re-derives — subtracting the row would re-expose an entity that
-        // `deleted` still holds, which is the one way this mask can fail open.
-        let denied = if unsuppressed {
-            Arc::new(crate::compose::derive_denied(&overlay, &generation.bundle))
-        } else {
-            let mut denied = (*generation.denied).clone();
-            for partition in generation.bundle.partitions.values() {
-                for (view, view_data) in &partition.views {
-                    let Some(rows) = denied.get_mut(view) else {
-                        continue;
-                    };
-                    for entity in &newly_denied {
-                        if let Some(row) = view_data.row_space.row_of(*entity) {
-                            rows.add(row.raw());
-                        }
-                    }
-                }
-            }
-            Arc::new(denied)
-        };
-
         // **A deleted row leaves the buffer here** — the runtime half of `replay`'s end-of-pass
         // rule, and the reason a `delete` issued before the item's first flush does not pin the
         // WAL for ever (`IngestBuffer::oldest_wal_pos` is the rotation's reclaim bound, and
@@ -3643,12 +3618,21 @@ impl Executor {
             Arc::new(buffer)
         };
 
-        let next = Generation {
-            overlay_version: generation.overlay_version + 1,
-            overlay: Arc::new(overlay),
-            buffer,
-            denied,
-            ..Generation::clone(&generation)
+        // A window of deletes and suppressions only grows the mask, so their rows are added. An
+        // unsuppress derives it afresh: subtracting a row would re-expose an entity that is still
+        // deleted.
+        let overlay_version = generation.overlay_version + 1;
+        let next = if unsuppressed {
+            generation.with(|g| {
+                g.overlay_version = overlay_version;
+                g.overlay = Arc::new(overlay);
+                g.buffer = buffer;
+            })
+        } else {
+            generation.with_denies(Arc::new(overlay), &newly_denied, |g| {
+                g.overlay_version = overlay_version;
+                g.buffer = buffer;
+            })
         };
         self.publish(next, started)
     }
@@ -3946,47 +3930,39 @@ impl Executor {
             _ => (Arc::clone(&previous.overlay), previous.overlay_version),
         };
 
-        // Rebuilt against the new row space: row ids mean something only within one
-        // `segments_version`, so a geometry publication invalidates every row in the old mask
-        // (`derive_denied`). Derived from the **retired** overlay, not the previous one, or the
-        // retired entities would keep their rows in the mask over a row space that no longer holds
-        // them. Taken before `bundle` moves into the generation.
-        let denied = Arc::new(crate::compose::derive_denied(&overlay, &bundle));
 
-        let next = Generation {
-            prefix,
+        let next = previous.with(|g| {
+            g.prefix = prefix;
             // **A rotation carries the new prefix's own columns**, opened over it by
             // `open_rotation`; every other publication stays within the live prefix and carries
             // the live ones. Cloning the previous generation's across a rotation would serve the
             // superseded prefix's mappings — pre-fold values, the blanking missing, out of files
             // the reclamation is about to unlink (`filter-index.md` §6.2).
-            filter_columns: rotation.as_ref().map_or_else(
+            g.filter_columns = rotation.as_ref().map_or_else(
                 || Arc::clone(&previous.filter_columns),
                 |r| Arc::clone(&r.filter_columns),
-            ),
-            segments_version,
-            watermark,
-            bundle,
-            dict,
-            postings: rotation.as_ref().map_or_else(
+            );
+            g.segments_version = segments_version;
+            g.watermark = watermark;
+            g.bundle = bundle;
+            g.dict = dict;
+            g.postings = rotation.as_ref().map_or_else(
                 || Arc::clone(&previous.postings),
                 |r| Arc::clone(&r.postings),
-            ),
-            fragments: rotation.as_ref().map_or_else(
+            );
+            g.fragments = rotation.as_ref().map_or_else(
                 || Arc::clone(&previous.fragments),
                 |r| Arc::clone(&r.fragments),
-            ),
-            external_index: rotation.as_ref().map_or_else(
+            );
+            g.external_index = rotation.as_ref().map_or_else(
                 || Arc::clone(&previous.external_index),
                 |r| Arc::clone(&r.external_index),
-            ),
-            delta_postings,
-            overlay_version,
-            overlay,
-            denied,
+            );
+            g.delta_postings = delta_postings;
+            g.overlay_version = overlay_version;
+            g.overlay = overlay;
             // The suggestion index carries across a rotation: a fold retires entities, never values.
-            ..Generation::clone(&previous)
-        };
+        });
         // **Listed before the swap, deleted after it** (compaction §8). At this instant every
         // persisted fragment is under the identity about to be superseded, so the listing *is* the
         // set §8 names — which is not selectable by name, since a cache entry is a SHA-256 over the
@@ -4048,19 +4024,6 @@ impl Executor {
     /// [`Self::publish`] over a generation the caller already holds by `Arc` — a geometry
     /// publication needs the same value afterwards, to hand the background refresh.
     pub(super) fn publish_arc(&self, next: Arc<Generation>, started: std::time::Instant) {
-        // **The deny mask's derivation rule, enforced at the one place a generation becomes live.**
-        // `crate::compose::derive_denied` states the rule; every build site — the incremental
-        // addition on a deny window, the rebuild at each geometry publication, the carry-forward
-        // when neither the overlay nor the row space moved — is licensed only if it lands on the
-        // same value. Checked here rather than trusted, in debug only because it is O(denies): a
-        // site that gets it wrong then fails the suite instead of silently re-exposing a deleted
-        // item in a viewer's map, which is the one failure this mask can produce.
-        debug_assert!(
-            *next.denied == crate::compose::derive_denied(&next.overlay, &next.bundle),
-            "the deny mask does not equal a fresh derivation — a build site broke the rule at \
-             `derive_denied`; an unsuppress subtracting a row while `deleted` still holds the \
-             entity is the classic way"
-        );
         self.generation.store(next);
         // The overlay/buffer clone above is O(total buffered items). This counter is what makes
         // the deny-ack floor measurable rather than asserted — see

@@ -942,10 +942,9 @@ impl Executor {
         self.health
             .buffered_items
             .store(buffer.len(), Ordering::SeqCst);
-        let next = Generation {
-            buffer: Arc::new(buffer),
-            ..Generation::clone(&generation)
-        };
+        let next = generation.with(|g| {
+            g.buffer = Arc::new(buffer);
+        });
         self.publish(next, started);
         // A values batch allocates no entity, so the index records none: the batch id and the
         // body hash are the whole of what a retry is answered off. Indexed at the values record's
@@ -1085,15 +1084,12 @@ impl Executor {
             _ => Arc::clone(&generation.suggest),
         };
         let bundle = generation.bundle.with_views(manifest);
-        let denied = Arc::new(crate::compose::derive_denied(&generation.overlay, &bundle));
-        let next = Generation {
-            bundle,
-            vocabularies,
-            filter_columns,
-            suggest,
-            denied,
-            ..Generation::clone(&generation)
-        };
+        let next = generation.with(|g| {
+            g.bundle = bundle;
+            g.vocabularies = vocabularies;
+            g.filter_columns = filter_columns;
+            g.suggest = suggest;
+        });
         self.publish(next, started);
         // Durable in the log and not yet in a manifest, and a rotation reclaims the log: the
         // declaration reaches `SEGMENTS-<n>.json` on the mechanism a deny already uses.
@@ -1216,12 +1212,9 @@ impl Executor {
         started: std::time::Instant,
     ) {
         let bundle = generation.bundle.with_views(manifest);
-        let denied = Arc::new(crate::compose::derive_denied(&generation.overlay, &bundle));
-        let next = Generation {
-            bundle,
-            denied,
-            ..Generation::clone(generation)
-        };
+        let next = generation.with(|g| {
+            g.bundle = bundle;
+        });
         self.publish(next, started)
     }
 
@@ -1307,13 +1300,10 @@ impl Executor {
             .manifest
             .with_vocabularies(std::slice::from_ref(&compiled));
         let bundle = generation.bundle.with_views(manifest);
-        let denied = Arc::new(crate::compose::derive_denied(&generation.overlay, &bundle));
-        let next = Generation {
-            bundle,
-            vocabularies: Arc::new(vocabularies),
-            denied,
-            ..Generation::clone(&generation)
-        };
+        let next = generation.with(|g| {
+            g.bundle = bundle;
+            g.vocabularies = Arc::new(vocabularies);
+        });
         self.publish(next, started);
         // Durable in the log and not yet in a manifest, and a rotation reclaims the log: the
         // declaration reaches `SEGMENTS-<n>.json` on the mechanism a deny already uses.
@@ -1455,10 +1445,9 @@ impl Executor {
         }
         let mut vocabularies: Vocabularies = (*generation.vocabularies).clone();
         vocabularies.insert(minter);
-        let next = Generation {
-            vocabularies: Arc::new(vocabularies),
-            ..Generation::clone(&generation)
-        };
+        let next = generation.with(|g| {
+            g.vocabularies = Arc::new(vocabularies);
+        });
         self.publish(next, started);
         // A binding of a *built* vocabulary reaches the manifest as a `vocabulary_extensions`
         // entry and one of a runtime-declared vocabulary as a value of its own runtime entry;
@@ -1607,16 +1596,10 @@ impl Executor {
                 .store(buffer.len(), Ordering::SeqCst);
             Arc::new(buffer)
         };
-        // **Re-derived, never carried**: the mask holds one entry per view of the bundle and its
-        // own contract is that a missing one means the mask and the bundle disagree — which is
-        // exactly the state carrying it forward across a create would produce.
-        let denied = Arc::new(crate::compose::derive_denied(&generation.overlay, &bundle));
-        let next = Generation {
-            bundle,
-            buffer,
-            denied,
-            ..Generation::clone(generation)
-        };
+        let next = generation.with(|g| {
+            g.bundle = bundle;
+            g.buffer = buffer;
+        });
         self.publish(next, started)
     }
 

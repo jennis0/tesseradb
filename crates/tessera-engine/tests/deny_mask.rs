@@ -109,7 +109,7 @@ fn visible_count(engine: &Engine, session: &tessera_engine::Session) -> u64 {
 fn denied_rows(engine: &Engine) -> croaring::Bitmap {
     engine
         .generation()
-        .denied
+        .denied()
         .get("s0")
         .expect("every view the bundle carries has an entry")
         .clone()
