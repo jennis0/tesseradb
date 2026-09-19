@@ -3287,48 +3287,54 @@ impl Engine {
         queue_bound: usize,
     ) -> std::result::Result<(), crate::write::ExecutorStartError> {
         let generation = Arc::clone(&self.generation);
+        let deps = self.maintenance_deps();
         self.write.start_executor(
             generation,
             Arc::clone(&self.row_projection_cache),
             queue_bound,
-            crate::write::MaintenanceDeps {
-                max_age_secs: self.config.flush_max_age_secs,
-                max_items: self.config.flush_max_items,
-                coalesce: coalesce_policy(&self.config),
-                merge: merge_policy(&self.config),
-                artifact_projections: Arc::clone(&self.artifact_projections),
-                region_cache: Arc::clone(&self.region_cache),
-                shapes: Arc::clone(&self.shapes),
-                lineages: Arc::clone(&self.lineages),
-                level_contents: Arc::clone(&self.level_contents),
-                // The **configured** value, not the resolved policy's: compaction §4 step 3
-                // re-checks write-path §7's base-segment relation against the fold's own output,
-                // and `tessera-server`'s loader checks only an explicitly set one.
-                configured_merge_bytes: self.config.max_merged_segment_bytes,
-                suggest_dir: self.suggest_dir.clone(),
-                compaction: self.config.compaction,
-                coalesce_enabled: Arc::clone(&self.coalesce_enabled),
-                merge_enabled: Arc::clone(&self.merge_enabled),
-                fold_paused: Arc::clone(&self.fold_paused),
-                fold_publication_paused: Arc::clone(&self.fold_publication_paused),
-                merge_publication_paused: Arc::clone(&self.merge_publication_paused),
-                refresh: crate::refresh::RefreshDeps {
-                    cache: Arc::clone(&self.row_projection_cache),
-                    pool: Arc::clone(&self.pool),
-                    in_flight: Arc::clone(&self.refresh_in_flight),
-                    refreshes: Arc::clone(&self.refreshes),
-                    enabled: Arc::clone(&self.refresh_enabled),
-                    paused: Arc::clone(&self.refresh_paused),
-                    projection_routes: Arc::clone(&self.projection_routes),
-                },
-                bundle_root: self.bundle_root.clone(),
-                identity_key: self.identity_key,
-                pool: Arc::clone(&self.pool),
-                max_distinct_terms: self.plugin.declared_bounds().max_distinct_terms,
-            },
+            deps,
             #[cfg(feature = "fault-injection")]
             None,
         )
+    }
+
+    /// The executor's maintenance dependencies, as both starters hand them over.
+    fn maintenance_deps(&self) -> crate::write::MaintenanceDeps {
+        crate::write::MaintenanceDeps {
+            max_age_secs: self.config.flush_max_age_secs,
+            max_items: self.config.flush_max_items,
+            coalesce: coalesce_policy(&self.config),
+            merge: merge_policy(&self.config),
+            artifact_projections: Arc::clone(&self.artifact_projections),
+            region_cache: Arc::clone(&self.region_cache),
+            shapes: Arc::clone(&self.shapes),
+            lineages: Arc::clone(&self.lineages),
+            level_contents: Arc::clone(&self.level_contents),
+            // The **configured** value, not the resolved policy's: compaction §4 step 3
+            // re-checks write-path §7's base-segment relation against the fold's own output,
+            // and `tessera-server`'s loader checks only an explicitly set one.
+            configured_merge_bytes: self.config.max_merged_segment_bytes,
+            suggest_dir: self.suggest_dir.clone(),
+            compaction: self.config.compaction,
+            coalesce_enabled: Arc::clone(&self.coalesce_enabled),
+            merge_enabled: Arc::clone(&self.merge_enabled),
+            fold_paused: Arc::clone(&self.fold_paused),
+            fold_publication_paused: Arc::clone(&self.fold_publication_paused),
+            merge_publication_paused: Arc::clone(&self.merge_publication_paused),
+            refresh: crate::refresh::RefreshDeps {
+                cache: Arc::clone(&self.row_projection_cache),
+                pool: Arc::clone(&self.pool),
+                in_flight: Arc::clone(&self.refresh_in_flight),
+                refreshes: Arc::clone(&self.refreshes),
+                enabled: Arc::clone(&self.refresh_enabled),
+                paused: Arc::clone(&self.refresh_paused),
+                projection_routes: Arc::clone(&self.projection_routes),
+            },
+            bundle_root: self.bundle_root.clone(),
+            identity_key: self.identity_key,
+            pool: Arc::clone(&self.pool),
+            max_distinct_terms: self.plugin.declared_bounds().max_distinct_terms,
+        }
     }
 
     /// As [`Engine::start_write_executor`], with a fault switchboard armed. Test builds only.
@@ -3339,45 +3345,12 @@ impl Engine {
         faults: Arc<tessera_lifecycle::faults::FaultSwitchboard>,
     ) -> std::result::Result<(), crate::write::ExecutorStartError> {
         let generation = Arc::clone(&self.generation);
+        let deps = self.maintenance_deps();
         self.write.start_executor(
             generation,
             Arc::clone(&self.row_projection_cache),
             queue_bound,
-            crate::write::MaintenanceDeps {
-                max_age_secs: self.config.flush_max_age_secs,
-                max_items: self.config.flush_max_items,
-                coalesce: coalesce_policy(&self.config),
-                merge: merge_policy(&self.config),
-                artifact_projections: Arc::clone(&self.artifact_projections),
-                region_cache: Arc::clone(&self.region_cache),
-                shapes: Arc::clone(&self.shapes),
-                lineages: Arc::clone(&self.lineages),
-                level_contents: Arc::clone(&self.level_contents),
-                // The **configured** value, not the resolved policy's: compaction §4 step 3
-                // re-checks write-path §7's base-segment relation against the fold's own output,
-                // and `tessera-server`'s loader checks only an explicitly set one.
-                configured_merge_bytes: self.config.max_merged_segment_bytes,
-                suggest_dir: self.suggest_dir.clone(),
-                compaction: self.config.compaction,
-                coalesce_enabled: Arc::clone(&self.coalesce_enabled),
-                merge_enabled: Arc::clone(&self.merge_enabled),
-                fold_paused: Arc::clone(&self.fold_paused),
-                fold_publication_paused: Arc::clone(&self.fold_publication_paused),
-                merge_publication_paused: Arc::clone(&self.merge_publication_paused),
-                refresh: crate::refresh::RefreshDeps {
-                    cache: Arc::clone(&self.row_projection_cache),
-                    pool: Arc::clone(&self.pool),
-                    in_flight: Arc::clone(&self.refresh_in_flight),
-                    refreshes: Arc::clone(&self.refreshes),
-                    enabled: Arc::clone(&self.refresh_enabled),
-                    paused: Arc::clone(&self.refresh_paused),
-                    projection_routes: Arc::clone(&self.projection_routes),
-                },
-                bundle_root: self.bundle_root.clone(),
-                identity_key: self.identity_key,
-                pool: Arc::clone(&self.pool),
-                max_distinct_terms: self.plugin.declared_bounds().max_distinct_terms,
-            },
+            deps,
             Some(faults),
         )
     }
