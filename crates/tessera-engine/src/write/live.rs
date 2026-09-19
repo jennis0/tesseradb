@@ -51,11 +51,6 @@ pub(crate) struct LiveState {
     pub(in crate::write) registry: Mutex<LayerRegistry>,
     /// Every artifact's entity-space membership, on the registry's contract: written only by the
     /// executor, read by the request path.
-    ///
-    /// Beside the registry rather than inside it, because their lifetimes differ. A layer's
-    /// declaration is small, published into every manifest and rebuilt from one. A membership is
-    /// large and, until the packaging question is settled, lives only in the log. Folding them
-    /// into one structure would put the second's durability problem onto the first.
     pub(in crate::write) artifacts: Mutex<ArtifactStore>,
     /// The view roster, on the registry's contract: written only by the executor, a create is a
     /// WAL append followed by an apply, on the one thread that also holds the allocator. Read by
@@ -104,11 +99,10 @@ impl LiveState {
 
     /// Runs `f` with both the registry and the allocator held, in that lock order.
     ///
-    /// One critical section, because a registration reads one and writes both. Taking them
-    /// separately would let a second registration allocate between the name check and the run
-    /// allocation, and the pair would then disagree about which ids a layer holds. The order,
-    /// registry then allocator, is the only order taken anywhere, which is what keeps it from
-    /// deadlocking against [`LiveState::registry_for_publication`].
+    /// One critical section: a registration reads one and writes both, and taking them separately
+    /// would let a second registration allocate between the name check and the run allocation.
+    /// This order is the only one taken anywhere, so it cannot deadlock against
+    /// [`LiveState::registry_for_publication`].
     pub(in crate::write) fn with_registry_and_allocator<R>(
         &self,
         f: impl FnOnce(&mut LayerRegistry, &mut Allocator) -> R,
@@ -124,13 +118,10 @@ impl LiveState {
 
     /// Runs `f` with the registry, the artifact store and the allocator held, in that lock order.
     ///
-    /// One critical section over all three, extending `with_registry_and_allocator`'s order. A
-    /// publication reads the level's cursor from the store, checks its keys, allocates against the
-    /// registry's runs and writes both, so two batches taking the locks separately would be handed
-    /// the same ordinals and the second would overwrite the first's artifacts in place.
-    ///
-    /// The order, registry then store then allocator, extends the existing one rather than
-    /// interleaving with it, which is what keeps the two from deadlocking against each other.
+    /// Extends `with_registry_and_allocator`'s order: a publication reads the level's cursor,
+    /// allocates against the registry's runs and writes both, so two batches taking the locks
+    /// separately would be handed the same ordinals. This order is taken everywhere the three are
+    /// held together, so it cannot deadlock.
     pub(in crate::write) fn with_publication_state<R>(
         &self,
         f: impl FnOnce(&mut LayerRegistry, &mut ArtifactStore, &mut Allocator) -> R,
@@ -171,10 +162,9 @@ impl LiveState {
 
     /// Record every level as published to its current extent, and with that release the log.
     ///
-    /// Called only once the manifest naming the extents is durable. The recomputation is over
-    /// what the store holds now rather than over what was packed: the executor is the only
-    /// writer, so nothing has been added since the pack, and recomputing is one fewer thing to
-    /// keep in step than threading the packed ranges back through.
+    /// Called only once the manifest naming the extents is durable. Recomputes from what the
+    /// store holds now, rather than threading the packed ranges through, since the executor is
+    /// the only writer and nothing has been added since the pack.
     pub(in crate::write) fn mark_memberships_published(&self) {
         let mut artifacts = lock_recover(&self.artifacts);
         let levels: Vec<(String, u32, u32)> = artifacts
@@ -189,9 +179,8 @@ impl LiveState {
     /// Record that the content extent carrying every pending content fill is named by a durable
     /// manifest. See [`tessera_lifecycle::membership::ArtifactStore::mark_content_published`].
     ///
-    /// Called from the overlay publication and not from the fold. The publication writes the
-    /// content extent (`write_content_extent`) before its manifest; the fold carries content
-    /// extents forward unchanged, so a fill pending at a fold is still pending after it.
+    /// Called from the overlay publication, not the fold: the fold carries content extents
+    /// forward unchanged, so a fill pending at a fold is still pending after it.
     pub(in crate::write) fn mark_content_published(&self) {
         lock_recover(&self.artifacts).mark_content_published();
     }
@@ -199,39 +188,22 @@ impl LiveState {
     /// Release the log from every growth the fold's whole rewrite has just made durable. See
     /// [`tessera_lifecycle::membership::ArtifactStore::mark_growth_packed`].
     ///
-    /// Called from the fold and from nowhere else. `mark_memberships_published` is the
-    /// append-only packer's mark and covers only the tail above each level's high-water; a growth
-    /// lands below it. Releasing the pin there would leave a join durable nowhere the next
-    /// restart reads.
+    /// Called from the fold only: `mark_memberships_published` covers only the tail above each
+    /// level's high-water, and a growth lands below it.
     pub(in crate::write) fn mark_growth_packed(&self) {
         lock_recover(&self.artifacts).mark_growth_packed();
     }
 
     /// Read the resident memberships back through the extents a publication has just written, so
-    /// each one is a view over the live prefix rather than a heap bitmap or a view into a prefix
-    /// that is about to be unlinked.
+    /// each one is a view over the live prefix rather than a heap bitmap or a stale mapping.
     ///
-    /// This follows the same rule `Engine::open` uses to seed a membership, applied here to a
-    /// rewrite. A membership seeded from the previous prefix holds that prefix's pack alive:
-    /// reclamation unlinks the directory, the mapping survives the directory entry, and the
-    /// file's blocks stay allocated with no name to see them under. Rehousing onto the extents
-    /// this fold wrote drops those packs at the moment the fold makes them redundant, and
-    /// re-maps every membership the retirement copied to the heap through `Members::to_mut`.
-    ///
-    /// Called after the resident retirement, never before. [`ArtifactStore::rehouse_members`]
+    /// Called after the resident retirement, never before: [`ArtifactStore::rehouse_members`]
     /// refuses a membership whose cardinality differs from the one it replaces, and what the
-    /// extent holds is the post-retirement set. Running it first would refuse every artifact
-    /// this fold took a member from and leave those on the heap.
+    /// extent holds is the post-retirement set. Running it first would refuse every artifact this
+    /// fold took a member from and leave those on the heap.
     ///
-    /// Returns how many memberships took and how many did not. A pack that will not open leaves
-    /// its level on the heap and alarms; a blob the store cannot match is the caller's alarm to
-    /// raise, and what it means is in the call sites.
-    ///
-    /// The cost is one file mapping per extent and one checked decode per record, under the
-    /// artifacts mutex. The decode is [`Members::mapped`]'s own validation, which walks a
-    /// bitmap's header region rather than its values, and the whole pass is `O(artifacts in the
-    /// extents)`, every artifact the node holds, at a fold. Nothing reads the store while it
-    /// runs. The stall at large artifact counts is not measured.
+    /// Returns how many memberships took and how many did not; a pack that will not open leaves
+    /// its level on the heap and alarms.
     pub(in crate::write) fn rehouse_memberships(
         &self,
         prefix_dir: &std::path::Path,
@@ -283,11 +255,9 @@ impl LiveState {
         (rehoused, kept)
     }
 
-    /// Apply the fold's executed deletions to the resident artifact store. The second half of the
-    /// artifact pass, run once the prefix carrying the rewritten extents is live. Retired
-    /// artifacts leave their levels, retired members leave the memberships that survive, and
-    /// every content whose generating set lost a source is withdrawn. Returns the levels the
-    /// retirement moved, which the fold compares with what it stamped.
+    /// Apply the fold's executed deletions to the resident artifact store: retired artifacts leave
+    /// their levels, retired members leave the memberships that survive, and orphaned content is
+    /// withdrawn. Returns the levels the retirement moved.
     pub(in crate::write) fn retire_artifacts(&self, retired: &croaring::Bitmap) -> Vec<(String, u32)> {
         lock_recover(&self.artifacts).retire(retired)
     }
@@ -310,12 +280,8 @@ impl LiveState {
         lock_recover(&self.registry).resolve_for(is_satisfied, resolve_label)
     }
 
-    /// Every registered layer, as the registry holds it. The declarations, never a decision:
-    /// `registered_layer`'s rule over the whole set, and the caller applies the gate.
-    ///
-    /// Its one caller is `Engine::warm_artifact_projections`, which has no principal to resolve
-    /// against: it builds a level's row form, which is the same structure for every principal, and
-    /// the gate is applied to what is served from it on the request that asks.
+    /// Every registered layer, as the registry holds it: the declarations, never a decision. The
+    /// caller applies the gate; this has no principal to resolve against.
     pub(crate) fn registered_layers(&self) -> Vec<tessera_types::layer::RegisteredLayer> {
         lock_recover(&self.registry).snapshot().0
     }
@@ -339,12 +305,8 @@ impl LiveState {
     /// Every `membership = { attribute = f }` layer, with the declared-scalar index of `f` and the
     /// vocabulary that column's values are named by: `(layer, index, vocabulary)`.
     ///
-    /// A layer whose column this bundle does not declare is skipped, which mints nothing. Such a
-    /// declaration is refused at registration, so an absence here is one that never validated,
-    /// and the fail-closed reading is that the layer holds no values.
-    ///
-    /// `column_of` is the caller's. The manifest's `declared_scalars` is a generation's, and this
-    /// holds the registry rather than a generation.
+    /// A layer whose column this bundle does not declare is skipped: such a declaration is refused
+    /// at registration, so an absence here is fail-closed to "the layer holds no values".
     pub(in crate::write) fn predicate_columns(
         &self,
         column_of: impl Fn(&str) -> Option<(usize, Option<String>)>,
@@ -479,20 +441,10 @@ impl LiveState {
 
     /// The descriptor bytes behind `terms`, read out of the resolver's extension map.
     ///
-    /// This is the inverse the flush needs, and it is why promotion costs no format change.
-    /// `BufferedItem` holds resolved `TermId`s, so a flush looking at the buffer alone cannot
-    /// turn an extension id back into a descriptor. The resolver has held the bytes all along,
-    /// one entry per distinct descriptor rather than per item, kept for the process's lifetime
-    /// so the assignment stays continuous across replay and live accepts.
-    ///
-    /// Total for any id a flush plan can name, which is what lets `promote` treat a miss as a
-    /// failed flush rather than a dropped term: rotation reclaims only WAL members below the
-    /// oldest buffered row, so a buffered item's record always survives, and replay re-interns
-    /// its descriptors before the item goes back into the buffer.
-    ///
-    /// Walks the map rather than indexing it, because it is keyed by descriptor and the caller
-    /// wants the other direction. `O(distinct novel descriptors this process has seen)`, paid
-    /// only by a dispatch that actually carries one.
+    /// `BufferedItem` holds resolved `TermId`s only, so a flush needs this to recover a
+    /// descriptor. Total for any id a flush plan can name: replay always re-interns a buffered
+    /// item's descriptors before it re-enters the buffer, so `promote` may treat a miss as a
+    /// failed flush rather than a dropped term.
     pub(in crate::write) fn descriptors_of(&self, terms: &FxHashSet<TermId>) -> FxHashMap<TermId, Vec<u8>> {
         let state = lock_recover(&self.resolver_state);
         state
@@ -512,35 +464,12 @@ impl LiveState {
         ids
     }
 
-    /// How many of `rows` name an external id the live map already holds.
+    /// How many of `rows` name an external id the live map already holds. Backstops a race the
+    /// executor's queue creates against the handler's own check in `control.rs`.
     ///
-    /// The backstop for a race the executor's own queue creates. The handler's own duplicate
-    /// check (`control.rs`) reads this same map, but `established` is written at apply time, a
-    /// whole queue drain later. A client retry under a fresh `batch_id` therefore passes the
-    /// handler check twice, gets two entity ids for one external id, and the second `insert`
-    /// overwrites the first. A later `suppress` then resolves to the second only: the first stays
-    /// visible, is a byte-identical copy of a suppressed document, and is nameable by no external
-    /// id at all, so no deny can ever reach it.
-    ///
-    /// Checked here, on the one thread that also performs the insert, so check and apply cannot be
-    /// separated. Only the live map needs re-checking: the bundle's sidecar is immutable, so the
-    /// handler's bundle-side check cannot go stale.
-    ///
-    /// Returns a count, never the ids: this value reaches a 409 body, and an external id is caller
-    /// data that `error.rs`'s standing rule keeps out of response bodies. The handler's own check
-    /// is the one that names them, to a caller who supplied them.
-    ///
-    /// `is_deleted` is the overlay's verdict on the current holder. An external id whose holder is
-    /// deleted does not collide: an edit is a delete followed by a re-ingest, and keeping a dead
-    /// binding around must never refuse a user's write. Its row allocates fresh, which is what
-    /// makes the re-ingest land. A suppressed holder still collides: suppression is temporary
-    /// hiding, and re-ingesting past one is the byte-identical-copy hole this check exists to
-    /// close.
-    ///
-    /// The join rule: a known external id is a collision only where the entity it names already
-    /// has a row in the view this batch names. Anywhere else it is a join, and the row is stamped
-    /// with the entity it joins, here rather than in the handler's answer, because this map and
-    /// this generation are the ones the apply will clone from.
+    /// Returns a count, never the ids: an external id must not reach a response body. A deleted
+    /// holder does not collide and allocates fresh; otherwise a known external id is a join, and
+    /// the row is stamped with the entity it joins.
     pub(in crate::write) fn established_collisions(
         &self,
         rows: &mut [UnallocatedRow],
@@ -570,28 +499,17 @@ impl LiveState {
     }
 
     /// Drop every retired entity's external-id binding from the live map: the other half of a
-    /// deletion's retirement (Rule F), and without it retirement 409s a lawful re-ingest.
-    ///
-    /// Compaction drops the retired entities' keys from the folded run, and also removes them
-    /// from the live external-id map: either alone leaves the other path answering. This is that
-    /// other path. Both duplicate checks, the handler's in `control.rs` and
-    /// [`Self::established_collisions`] here, exempt a holder only while
-    /// `overlay.is_deleted(holder)` is true, and retirement is precisely what makes it false. A
-    /// binding left standing therefore turns a re-ingest of that external id into a 409 the
-    /// moment the fold publishes, refusing a user's write permanently, since nothing else ever
-    /// removes a key.
+    /// deletion's retirement (Rule F). Without it, retirement 409s a lawful re-ingest, since
+    /// compaction drops the same keys from the folded run and either alone leaves the other path
+    /// answering.
     ///
     /// Called before the swap, not after, at the one site that also retires
-    /// ([`Executor::publish_geometry`]). Between a prune and a retirement the key is simply
-    /// absent from the live map and the bundle's own sidecar still answers for it, whose holder
-    /// is still deleted, so the check still exempts and the write is still allowed. The other
-    /// order has a window in which the key resolves to an entity that is no longer deleted,
-    /// which is the 409 this exists to close, narrowed but not removed.
+    /// ([`Executor::publish_geometry`]): between a prune and a retirement the sidecar still
+    /// answers deleted for the key, so the check still exempts it. The other order has a window
+    /// where the key resolves to an entity that is no longer deleted.
     ///
-    /// A rebind is not disturbed. An edit is a delete followed by a re-ingest, so an external id
-    /// whose deleted holder has already been re-ingested maps to the new entity here. The
-    /// forward entry is removed only when it still names the retired entity, so retiring the
-    /// forgotten holder cannot unbind the live one.
+    /// A rebind is not disturbed: the forward entry is removed only when it still names the
+    /// retired entity.
     pub(in crate::write) fn forget_established(&self, retired: &croaring::Bitmap) -> usize {
         if retired.is_empty() {
             return 0;
@@ -641,12 +559,10 @@ impl LiveState {
     }
 
     /// Forget every batch whose record lay below `retained_from`: the rotation half of the
-    /// horizon.
+    /// idempotency horizon.
     ///
-    /// A restart rebuilds this index from the members that survive, so a live process that went on
-    /// answering a replay from a record rotation has deleted would answer differently on either
-    /// side of a restart. Dropping the entries here is what makes the horizon the retained log in
-    /// both cases. Returns how many entries went, for the rotation's own line.
+    /// A restart rebuilds this index from the members that survive, so dropping entries here
+    /// keeps the horizon the same on both sides of a restart. Returns how many entries went.
     pub(in crate::write) fn forget_batches_below(&self, retained_from: u64) -> usize {
         let mut index = lock_recover(&self.accepted_batches);
         let before = index.len();
