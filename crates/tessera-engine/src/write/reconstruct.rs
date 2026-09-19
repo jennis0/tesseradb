@@ -446,6 +446,21 @@ impl WritePath {
         // schema, so this runs here. A batch whose cells a flush already wrote is re-buffered;
         // `plan_flush` consumes the fill and stops pinning the log.
         for (record, position) in records.iter().zip(wal.replayed_positions()) {
+            // In log order, as a drop treats buffered rows: the group-scoped fills addressed to
+            // the dropped key go with it, and one accepted under a later view of that key stays.
+            if let WalRecord::ViewDrop { view } = record {
+                let owner_view =
+                    format!("{}{}{}", view.group, tessera_store::GROUP_SEPARATOR, view.key);
+                let orphaned: Vec<EntityId> = buffer
+                    .scoped_fills()
+                    .filter(|((_, held), _)| *held == owner_view)
+                    .map(|((entity, _), _)| *entity)
+                    .collect();
+                for entity in orphaned {
+                    buffer.remove_scoped_fill(entity, &owner_view);
+                }
+                continue;
+            }
             let WalRecord::ValuesBatch {
                 view,
                 columns,
@@ -465,6 +480,13 @@ impl WritePath {
             };
             let families = scoped_families_of_view(&served, view);
             let owner_view = scoped_owner_view_of(&served, view);
+            // Empty unless the served manifest no longer carries the view's key: the group's
+            // families, whose cells went with the view.
+            let dropped_families: &[tessera_store::manifest::ScopedScalar] = owner_view
+                .split_once(tessera_store::GROUP_SEPARATOR)
+                .and_then(|(group, _)| served.groups.iter().find(|g| g.name == group))
+                .filter(|_| families.is_empty())
+                .map_or(&[], |group| &group.scoped_scalars);
             for row in rows {
                 // A deleted entity's fill is never flushed, and would hold the log where it sits.
                 if overlay.is_deleted(row.entity_id) {
@@ -492,6 +514,9 @@ impl WritePath {
                     if let Some(position) = families.iter().position(|f| &f.name == name) {
                         scoped[position] = value.clone();
                         any_scoped = true;
+                        continue;
+                    }
+                    if dropped_families.iter().any(|f| &f.name == name) {
                         continue;
                     }
                     // A column the served schema no longer carries. The values are unreadable

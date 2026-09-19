@@ -26,6 +26,7 @@ mod reconstruct;
 mod schema;
 
 pub(crate) use command::*;
+pub use command::ViewDropped;
 pub use executor::*;
 pub use health::*;
 pub(crate) use live::*;
@@ -720,14 +721,13 @@ impl WritePath {
         })
     }
 
-    /// Drop a view, freeing its key and killing its incarnation, and answer how many entities
-    /// `delete_dangling` submitted for deletion.
+    /// Drop a view, freeing its key and killing its incarnation.
     pub(crate) fn drop_view(
         &self,
         group: String,
         key: String,
         delete_dangling: bool,
-    ) -> Result<u64, AcceptError> {
+    ) -> Result<ViewDropped, AcceptError> {
         self.submit(|reply| Command::DropView {
             group,
             key,

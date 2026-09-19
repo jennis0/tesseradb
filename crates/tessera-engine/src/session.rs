@@ -3933,15 +3933,13 @@ impl Engine {
         self.write.create_view(group, key, visibility, metadata)
     }
 
-    /// Drop a view. Its key is tombstoned and refused on recreation for ever, and the answer is
-    /// how many entities `delete_dangling` submitted for deletion — zero unless it was asked for
-    /// (`views.md` §3.4).
+    /// Drop a view. Its key is tombstoned and refused on recreation for ever.
     pub fn drop_view(
         &self,
         group: String,
         key: String,
         delete_dangling: bool,
-    ) -> std::result::Result<u64, crate::write::AcceptError> {
+    ) -> std::result::Result<crate::write::ViewDropped, crate::write::AcceptError> {
         self.write.drop_view(group, key, delete_dangling)
     }
 

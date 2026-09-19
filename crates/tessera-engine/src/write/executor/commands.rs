@@ -1459,7 +1459,7 @@ impl Executor {
         group: String,
         key: String,
         delete_dangling: bool,
-        reply: Reply<u64>,
+        reply: Reply<ViewDropped>,
     ) {
         let started = std::time::Instant::now();
         let generation = self.generation.load_full();
@@ -1495,7 +1495,7 @@ impl Executor {
             return;
         }
         self.live.with_roster(|roster| roster.apply(&record));
-        self.publish_roster(&generation, started, &ids);
+        let fills_dropped = self.publish_roster(&generation, started, &ids);
         self.deny_dirty = true;
         // Ordinary deletions, through the ordinary lane. They are appended, fsynced and applied by
         // the same path a `/control/changes` delete takes, so they retire at the fold and nowhere
@@ -1519,7 +1519,10 @@ impl Executor {
             self.cascade_dependents(&mut entries);
             self.commit_denies(entries);
         }
-        reply.ack(deleted);
+        reply.ack(ViewDropped {
+            deleted,
+            fills_dropped,
+        });
     }
 
     /// Publish the generation a create or a drop makes: the bundle as the live roster describes
@@ -1531,18 +1534,23 @@ impl Executor {
     /// left in the buffer for a view no flush will plan pins `oldest_wal_pos`, and with it every
     /// WAL member after it, for the life of the process. Their entities are untouched: an entity
     /// left in no view is exactly what a drop produces.
+    ///
+    /// A group-scoped fill addressed to a dropped view goes the same way, and the answer is how
+    /// many did. An entity-scoped fill stays: its value is no view's, and a surviving view's flush
+    /// writes it.
     pub(super) fn publish_roster(
         &self,
         generation: &Arc<Generation>,
         started: std::time::Instant,
         dropped: &[String],
-    ) {
+    ) -> u64 {
         let (created, tombstones) = self.live.roster_for_publication();
         let manifest = generation
             .bundle
             .manifest
             .with_roster(&created, &tombstones);
         let bundle = generation.bundle.with_views(manifest);
+        let mut fills_dropped = 0;
         let buffer = if dropped.is_empty() {
             Arc::clone(&generation.buffer)
         } else {
@@ -1559,6 +1567,18 @@ impl Executor {
             for (entity, view) in orphaned {
                 buffer.remove_in_view(entity, &view);
             }
+            let orphaned_fills: Vec<(EntityId, String)> = generation
+                .buffer
+                .scoped_fills()
+                .filter(|((_, owner_view), fill)| {
+                    dropped.contains(owner_view) || dropped.contains(&fill.view)
+                })
+                .map(|(cell, _)| cell.clone())
+                .collect();
+            fills_dropped = orphaned_fills.len() as u64;
+            for (entity, owner_view) in orphaned_fills {
+                buffer.remove_scoped_fill(entity, &owner_view);
+            }
             self.health
                 .buffered_items
                 .store(buffer.len(), Ordering::SeqCst);
@@ -1568,7 +1588,8 @@ impl Executor {
             g.bundle = bundle;
             g.buffer = buffer;
         });
-        self.publish(next, started)
+        self.publish(next, started);
+        fills_dropped
     }
 
 }

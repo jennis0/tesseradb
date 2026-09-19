@@ -13,7 +13,8 @@ Things found during the cleanup that are not yet done. One line each; delete a l
 
 - View metadata: a build widens an integer where a float is declared; a running service refuses it.
 
-- A values fill whose view is dropped before the next tick is never consumed by a flush, so it holds the log at its position and its value is never written. Needs a decision: an entity-scoped value is not the view's, so dropping the fill with the view loses an acknowledged write, and keeping it needs a flush that does not name a view.
+- An entity-scoped fill whose view is dropped waits for a flush of some surviving view. If the drop leaves no view at all, it holds the log until one is created.
+- `DELETE /control/views/{group}/{key}` is in the HTTP API only: not in `docs/openapi/tessera.yaml`, the Python client, the TypeScript client or the CLI.
 
 ## Structure
 
