@@ -889,9 +889,9 @@ fn open_scoped_column(
     // a reader would see if that ever stopped being true, rather than another column's field.
     let declared_index = usize::MAX;
     // **Text opens with no value column at all**, per view exactly as bundle-wide: its artefacts
-    // are the token dictionary and the positional postings over it. The base's layer is opened
-    // here; a flush's layers are appended by the composition, which is where every text extent
-    // enters whatever its scope.
+    // are the token dictionary and the positional postings over it. The base's layer alone is
+    // opened here; each caller appends the published extents this view's column has taken since —
+    // [`FilterColumns::open`] from the manifest, and a flush from what it wrote.
     if scoped_family == Family::Text {
         let text = vec![text_layer(
             SortedDict::open_dir(&dir, request_access(mmap))?,
@@ -1117,6 +1117,32 @@ fn text_layer(
         present,
         dict_rel,
     })
+}
+
+/// The layers a run of published text extents opens as, in the order the manifest lists them —
+/// what a column's base is followed by at [`FilterColumns::open`], entity-scoped and group-scoped
+/// alike. `column` is the name the column is held under, which for a group-scoped family is
+/// [`scoped_column_name`]'s resolved form.
+fn text_extent_layers<'a>(
+    prefix_dir: &Path,
+    extents: impl Iterator<Item = &'a tessera_store::manifest::TextExtent>,
+    column: &str,
+    mmap: bool,
+) -> std::io::Result<Vec<TextLayer>> {
+    extents
+        .map(|extent| {
+            text_layer(
+                SortedDict::open(&prefix_dir.join(&extent.dict), request_access(mmap))?,
+                ColumnPostings::open(&prefix_dir.join(&extent.postings), mmap)?,
+                column,
+                &extent.dict,
+                Bitmap::deserialize::<croaring::Portable>(&std::fs::read(
+                    prefix_dir.join(&extent.presence),
+                )?),
+                Some(extent.dict.clone()),
+            )
+        })
+        .collect()
 }
 
 /// The three files one published text extent names, resolved to paths.
@@ -1863,21 +1889,14 @@ impl FilterColumns {
                     Bitmap::new(),
                     None,
                 )?];
-                for extent in text_extents
-                    .iter()
-                    .filter(|e| e.column == scalar.name && e.view.is_none())
-                {
-                    text_layers.push(text_layer(
-                        SortedDict::open(&prefix_dir.join(&extent.dict), request_access(mmap))?,
-                        ColumnPostings::open(&prefix_dir.join(&extent.postings), mmap)?,
-                        &scalar.name,
-                        &extent.dict,
-                        Bitmap::deserialize::<croaring::Portable>(&std::fs::read(
-                            prefix_dir.join(&extent.presence),
-                        )?),
-                        Some(extent.dict.clone()),
-                    )?);
-                }
+                text_layers.extend(text_extent_layers(
+                    prefix_dir,
+                    text_extents
+                        .iter()
+                        .filter(|e| e.column == scalar.name && e.view.is_none()),
+                    &scalar.name,
+                    mmap,
+                )?);
                 let analyser = Some(resolve_analyser(&scalar.name, scalar.analyser.as_deref())?);
                 columns.insert(
                     scalar.name.clone(),
@@ -1976,7 +1995,7 @@ impl FilterColumns {
                 let Some(incarnation) = view_incarnation(view_id) else {
                     continue;
                 };
-                let (name, placement, layers) = open_scoped_column(
+                let (name, placement, mut layers) = open_scoped_column(
                     &partition_dir,
                     family,
                     view_id,
@@ -1984,6 +2003,25 @@ impl FilterColumns {
                     vocabularies,
                     mmap,
                 )?;
+                // A text family's flushed layers are added here; every other family's arrive
+                // through `compose` below. A key created again shares `(column, view)` with its
+                // predecessor, whose extents stay listed until a fold.
+                if layers.family == Family::Text {
+                    layers.text.extend(text_extent_layers(
+                        prefix_dir,
+                        text_extents.iter().filter(|e| {
+                            e.column == family.name
+                                && e.view.as_deref() == Some(view_id.as_str())
+                                && carries_live_view(
+                                    view_incarnation,
+                                    e.view.as_deref(),
+                                    e.incarnation,
+                                )
+                        }),
+                        &name,
+                        mmap,
+                    )?);
+                }
                 if scoped_is_filterable(family) {
                     placements.insert(name.clone(), placement);
                 }
