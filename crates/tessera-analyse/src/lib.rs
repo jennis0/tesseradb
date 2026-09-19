@@ -148,6 +148,16 @@ impl Analyser {
         }
     }
 
+    /// The declared name that selects this analyser.
+    pub fn name(&self) -> &'static str {
+        UNICODE
+    }
+
+    /// The first two stages without the segmenter.
+    pub fn fold(&self) -> &Fold {
+        &self.fold
+    }
+
     /// `<name>/<version>`, recorded in the manifest against every column this analyser indexed.
     pub fn identity(&self) -> String {
         format!("{UNICODE}/{UNICODE_VERSION}")
@@ -199,23 +209,40 @@ pub struct TokenScratch {
 
 /// NFKC, then full Unicode case folding: the analyser's first two stages, which the suggestion
 /// index applies to its entries and queries too, so both surfaces fold by one rule.
-struct Fold {
+pub struct Fold {
     nfkc: ComposingNormalizerBorrowed<'static>,
     case: CaseMapperBorrowed<'static>,
 }
 
+impl Default for Fold {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl std::fmt::Debug for Fold {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Fold({UNICODE}/{UNICODE_VERSION})")
+    }
+}
+
 impl Fold {
-    fn new() -> Self {
+    pub fn new() -> Self {
         Fold {
             nfkc: ComposingNormalizer::new_nfkc(),
             case: CaseMapper::new(),
         }
     }
 
-    /// `text` folded, with the normalised copy written into a buffer the caller reuses. The case
+    /// `text`, NFKC-normalised and then case-folded.
+    pub fn fold(&self, text: &str) -> String {
+        self.fold_into(text, &mut String::new()).into_owned()
+    }
+
+    /// [`Self::fold`], with the normalised copy written into a buffer the caller reuses. The case
     /// folder allocates its own output where the text is not already folded: writing it into a
     /// buffer needs the `writeable` crate as a direct dependency tracking icu4x's version.
-    fn fold_into<'a>(&self, text: &str, normalised: &'a mut String) -> Cow<'a, str> {
+    pub fn fold_into<'a>(&self, text: &str, normalised: &'a mut String) -> Cow<'a, str> {
         // `normalize` would borrow an already-normalised input, but finding that out costs a full
         // normalising pass, so the copy is written unconditionally.
         normalised.clear();
@@ -313,6 +340,11 @@ impl SuggestionFold {
             fold: Fold::new(),
             classes: Classes::new(),
         }
+    }
+
+    /// The shared fold, without the entry rules.
+    pub fn fold(&self) -> &Fold {
+        &self.fold
     }
 
     /// The entry string for `text`: folded, runs of whitespace collapsed to one space, trimmed.
@@ -422,10 +454,7 @@ impl SuggestionFold {
 /// The character index at which the whole-string entry begins in `served`: past the leading
 /// whitespace the entry fold trims.
 fn served_start(served: &str) -> usize {
-    served
-        .chars()
-        .position(|c| !c.is_whitespace())
-        .unwrap_or(0)
+    served.chars().position(|c| !c.is_whitespace()).unwrap_or(0)
 }
 
 /// Runs of whitespace collapsed to one space, and the result trimmed.
@@ -488,7 +517,10 @@ mod tests {
         let s = SuggestionFold::new();
         for (served, want) in [
             ("(cs.LG)", vec!["lg)"]),
-            ("[Draft] Machine Learning", vec!["machine learning", "learning"]),
+            (
+                "[Draft] Machine Learning",
+                vec!["machine learning", "learning"],
+            ),
             ("  ...cs.LG", vec!["lg"]),
         ] {
             let entries = s.entries_of("k", Some(served));
@@ -504,7 +536,8 @@ mod tests {
     #[test]
     fn a_script_without_spaces_has_no_word_starts() {
         let s = SuggestionFold::new();
-        for sample in ["中文分词测试", "日本語のテキスト", "ภาษาไทยเป็นภาษา"] {
+        for sample in ["中文分词测试", "日本語のテキスト", "ภาษาไทยเป็นภาษา"]
+        {
             assert!(word_starts(&s, &s.entry(sample)).is_empty(), "{sample:?}");
         }
     }
@@ -516,7 +549,12 @@ mod tests {
             rows(&s.entries_of("cs.LG", Some("Machine Learning"))),
             vec![
                 ("cs.lg", EntryKind::Key, SuggestionField::Key, 0),
-                ("machine learning", EntryKind::Title, SuggestionField::Title, 0),
+                (
+                    "machine learning",
+                    EntryKind::Title,
+                    SuggestionField::Title,
+                    0
+                ),
                 ("learning", EntryKind::WordStart, SuggestionField::Title, 8),
             ]
         );
@@ -563,7 +601,10 @@ mod tests {
     fn a_value_whose_fold_moves_a_boundary_indexes_no_word_starts() {
         let s = SuggestionFold::new();
         let entries = s.entries_of("k", Some("a¼b"));
-        assert!(entries.iter().all(|e| e.kind != EntryKind::WordStart), "{entries:?}");
+        assert!(
+            entries.iter().all(|e| e.kind != EntryKind::WordStart),
+            "{entries:?}"
+        );
         assert!(entries.iter().any(|e| e.kind == EntryKind::Title));
     }
 

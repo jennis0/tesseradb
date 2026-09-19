@@ -13,11 +13,16 @@ use tessera_analyse::{
 fn vector_sets() -> Vec<serde_json::Value> {
     let doc: serde_json::Value =
         serde_json::from_str(include_str!("vectors/golden.json")).expect("the vector file parses");
-    doc["analysers"].as_array().expect("an analyser array").clone()
+    doc["analysers"]
+        .as_array()
+        .expect("an analyser array")
+        .clone()
 }
 
 fn text<'a>(value: &'a serde_json::Value, field: &str) -> &'a str {
-    value[field].as_str().unwrap_or_else(|| panic!("a string `{field}`"))
+    value[field]
+        .as_str()
+        .unwrap_or_else(|| panic!("a string `{field}`"))
 }
 
 fn tokens(vector: &serde_json::Value) -> Vec<&str> {
@@ -41,8 +46,16 @@ fn a_name_this_binary_does_not_carry_is_refused() {
 fn an_identity_resolves_only_at_the_version_this_binary_carries() {
     let identity = Analyser::new().identity();
     assert!(analyser_with_identity(&identity).is_some());
-    for stale in ["", "unicode", "unicode/icu4x-1.0/p1", "standard/icu4x-2.2/p1"] {
-        assert!(analyser_with_identity(stale).is_none(), "{stale:?} resolved");
+    for stale in [
+        "",
+        "unicode",
+        "unicode/icu4x-1.0/p1",
+        "standard/icu4x-2.2/p1",
+    ] {
+        assert!(
+            analyser_with_identity(stale).is_none(),
+            "{stale:?} resolved"
+        );
     }
 }
 
@@ -57,7 +70,10 @@ fn analysers_vector_sets_and_digests_name_each_other() {
     digested.sort_unstable();
     carried.sort_unstable();
     assert_eq!(named, carried, "vector sets against ANALYSER_NAMES");
-    assert_eq!(digested, carried, "ANALYSER_VECTOR_DIGESTS against ANALYSER_NAMES");
+    assert_eq!(
+        digested, carried,
+        "ANALYSER_VECTOR_DIGESTS against ANALYSER_NAMES"
+    );
 }
 
 #[test]
