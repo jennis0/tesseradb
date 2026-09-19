@@ -1057,13 +1057,9 @@ struct ColumnJob {
     postings: bool,
 }
 
-/// The incarnation an extent must carry to belong to this job: the view's live one for a column
-/// of a scoped family, and `None` for an entity-scoped column, whose extents are stamped with
-/// neither a view nor an incarnation (decision 0115).
-///
-/// **A key dropped and created again leaves its predecessor's extents under the same view id**,
-/// and the job writes into the live incarnation's directory — so an extent filter on the view
-/// alone would fold the dead incarnation's values into the new view's column.
+/// The incarnation an extent must carry to belong to this job: the view's live one for a scoped
+/// column, `None` for an entity-scoped one. A key dropped and created again leaves its
+/// predecessor's extents listed under the same view id.
 fn job_incarnation(
     ctx: &FoldContext,
     job: &ColumnJob,
