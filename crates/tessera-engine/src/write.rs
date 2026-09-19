@@ -5557,7 +5557,7 @@ fn fold_rebases(
 /// and a segment stamped with the dead incarnation would serve the new view the predecessor's
 /// points. Without the filter every fold after such a drop is discarded by the base check, so
 /// compaction stops for the life of the bundle and nothing ever retires.
-struct Flight<'a> {
+struct CarriedExtents<'a> {
     segments: Vec<&'a tessera_store::manifest::SegmentDescriptor>,
     tiers: Vec<String>,
     runs: Vec<String>,
@@ -5593,7 +5593,7 @@ fn carried_forward<'a>(
     live_manifest: &'a SegmentsManifest,
     live_incarnations: &FxHashMap<&str, tessera_types::view::ViewIncarnation>,
     consumed_segments: &FxHashSet<(&str, &str)>,
-) -> Flight<'a> {
+) -> CarriedExtents<'a> {
     // Owned, because the log that reports them outlives the generation this borrows from.
     let mut omitted_views: Vec<String> = Vec::new();
     let mut omitted_segments = 0usize;
@@ -5647,7 +5647,7 @@ fn carried_forward<'a>(
             extent.incarnation,
         )
     });
-    Flight {
+    CarriedExtents {
         segments,
         tiers: live_manifest
             .deltas
@@ -5708,10 +5708,10 @@ fn carried_forward<'a>(
 fn carried_files(
     partition: &str,
     live_manifest: &SegmentsManifest,
-    flight: &Flight,
+    forward: &CarriedExtents,
 ) -> std::collections::BTreeSet<String> {
     let mut rels: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-    for descriptor in &flight.segments {
+    for descriptor in &forward.segments {
         let segment_prefix = format!(
             "partitions/{}/{}/segments/{}",
             partition,
@@ -5734,27 +5734,27 @@ fn carried_files(
                 .cloned(),
         );
     }
-    rels.extend(flight.runs.iter().cloned());
-    rels.extend(flight.locators.iter().map(|e| e.path.clone()));
-    rels.extend(flight.tiers.iter().cloned());
-    for extent in &flight.attrs {
+    rels.extend(forward.runs.iter().cloned());
+    rels.extend(forward.locators.iter().map(|e| e.path.clone()));
+    rels.extend(forward.tiers.iter().cloned());
+    for extent in &forward.attrs {
         rels.insert(extent.values.clone());
         rels.insert(extent.presence.clone());
         rels.extend(extent.dict.iter().cloned());
         rels.extend(extent.postings.iter().cloned());
         rels.extend(extent.offsets.iter().cloned());
     }
-    for extent in &flight.records {
+    for extent in &forward.records {
         rels.insert(extent.blocks.clone());
         rels.insert(extent.hasrow.clone());
         rels.insert(extent.directory.clone());
     }
-    for extent in &flight.texts {
+    for extent in &forward.texts {
         rels.insert(extent.dict.clone());
         rels.insert(extent.postings.clone());
         rels.insert(extent.presence.clone());
     }
-    for extent in &flight.entity_terms {
+    for extent in &forward.entity_terms {
         rels.insert(extent.hasrow.clone());
         rels.insert(extent.offsets.clone());
         rels.insert(extent.terms.clone());
@@ -7563,7 +7563,7 @@ impl Executor {
             .iter()
             .map(|v| (v.id.as_str(), v.incarnation))
             .collect();
-        let flight = carried_forward(plan, live_manifest, &live_incarnations, &consumed_segments);
+        let forward = carried_forward(plan, live_manifest, &live_incarnations, &consumed_segments);
 
         // **Every carried-forward extent must begin at or above the fold's own base**, per view.
         // `RowSpace::with_extent` refuses an extent below the base permutation's bound and
@@ -7573,7 +7573,7 @@ impl Executor {
         // state's-clothes). Both would be discovered *after* `CURRENT` had flipped, so they are
         // checked before anything is written. The relation holds for every publication that
         // cleared the live row space's own floor; this refuses to be the place it is assumed.
-        for descriptor in &flight.segments {
+        for descriptor in &forward.segments {
             let Some(view) = plan.views.iter().find(|s| s.view == descriptor.view) else {
                 // **A view that arrived during the flight**, and the only way to reach this now:
                 // a view created and flushed since the plan was taken has a segment and no base
@@ -7603,7 +7603,7 @@ impl Executor {
         // those per-view bounds and is therefore at or below that high-water. A view whose own
         // bound is lower cannot produce an extent beneath the maximum, because it does not get to
         // choose its ids.
-        if flight
+        if forward
             .locators
             .iter()
             .any(|extent| extent.entity_lo < plan.entity_bound)
@@ -7617,17 +7617,17 @@ impl Executor {
         // the *base locator's* path from that entry's directory, so it would take a flush's
         // entity-range extent for the full-length base locator. Discarded rather than published;
         // the next fold's snapshot holds the run and emits a proper base for it.
-        if completed.external_id_run.is_none() && !flight.runs.is_empty() {
+        if completed.external_id_run.is_none() && !forward.runs.is_empty() {
             discard("the deployment gained its first external-id run during the fold's flight");
             return;
         }
 
         // ---- retirement: compaction §5, evaluated here and nowhere earlier ---------------------
         let mut carried = crate::compact::CarriedForward::new();
-        for descriptor in &flight.segments {
+        for descriptor in &forward.segments {
             carried.add_segment(descriptor);
         }
-        for extent in &flight.locators {
+        for extent in &forward.locators {
             carried.add_locator_extent(extent);
         }
         let executed = crate::compact::executed(&plan.tombstones, &carried);
@@ -7854,20 +7854,20 @@ impl Executor {
         // Each view's fold base first and its carried extents after it, because the reader takes
         // the first segment listed for a view as the one `permutation.bin` addresses and every
         // later one as an extent above it.
-        let mut segments = Vec::with_capacity(completed.segments.len() + flight.segments.len());
+        let mut segments = Vec::with_capacity(completed.segments.len() + forward.segments.len());
         for base in &completed.segments {
             segments.push(base.clone());
             segments.extend(
-                flight
+                forward
                     .segments
                     .iter()
                     .filter(|d| d.view == base.view)
                     .map(|d| (*d).clone()),
             );
         }
-        let mut external_id_runs = Vec::with_capacity(1 + flight.runs.len());
+        let mut external_id_runs = Vec::with_capacity(1 + forward.runs.len());
         external_id_runs.extend(completed.external_id_run.clone());
-        external_id_runs.extend(flight.runs.iter().cloned());
+        external_id_runs.extend(forward.runs.iter().cloned());
 
         // **The executed entries leave `tombstones` here as well as the overlay**, and the two must
         // be one decision: the manifest is the overlay's other durable home (write-path §4.5), so a
@@ -7907,7 +7907,7 @@ impl Executor {
             // index. A flush publishing during the fold indexed entities the new base does not
             // hold, and dropping its entry would answer every `match` over that batch's prose with
             // silence — the words are simply not in the base the fold wrote.
-            text_extents: flight.texts.clone(),
+            text_extents: forward.texts.clone(),
             // **Live, and untouched.** Deriving either from the fold's inputs moves the watermark
             // backwards past every post-snapshot entity, and composition treats an entity at or
             // above it as buffered rather than rowed — so the gap goes invisible to every principal
@@ -7961,7 +7961,7 @@ impl Executor {
                 .collect(),
             artifact_record_extents: self.artifact_record_extents.clone(),
             segments,
-            deltas: flight.tiers.clone(),
+            deltas: forward.tiers.clone(),
             // **Verbatim, and the live list rather than the plan's**: a flush that promoted during
             // the fold's flight appended an extent whose ordinals the live dictionary already
             // holds, and dropping it would shift every ordinal after it.
@@ -7973,11 +7973,11 @@ impl Executor {
             // cleanly and silently answers filters without every post-snapshot entity's value — a
             // wrong answer with no symptom, and strictly worse than a refusal to open. The two
             // halves are written here, in one manifest write.
-            attr_extents: flight.attrs.clone(),
-            record_extents: flight.records.clone(),
-            entity_terms_extents: flight.entity_terms.clone(),
+            attr_extents: forward.attrs.clone(),
+            record_extents: forward.records.clone(),
+            entity_terms_extents: forward.entity_terms.clone(),
             external_id_runs,
-            locator_extents: flight.locators.clone(),
+            locator_extents: forward.locators.clone(),
             ..SegmentsManifest::empty()
         };
         write_deny_state(&mut segments_manifest, &published_overlay);
@@ -7985,7 +7985,7 @@ impl Executor {
         // ---- the new `MANIFEST.json` ----------------------------------------------------------
         let mut bundle_manifest = self.fold_bundle_manifest(&live, &completed, plan);
 
-        let carried_rels = carried_files(&plan.partition, live_manifest, &flight);
+        let carried_rels = carried_files(&plan.partition, live_manifest, &forward);
         for rel in &carried_rels {
             // A hard link changes nothing about a file's content, so the digest it earned under the
             // old prefix's path is still correct under the new one — nothing is re-hashed. A file
@@ -8201,7 +8201,7 @@ impl Executor {
         // readers themselves are the live `Arc`s — their mappings are of the same inodes the
         // carry-forward just gave a second name, so they survive the old prefix's deletion exactly
         // as `reclaim_prefix` argues.
-        let mut delta_postings: Vec<Arc<DeltaTier>> = Vec::with_capacity(flight.tiers.len());
+        let mut delta_postings: Vec<Arc<DeltaTier>> = Vec::with_capacity(forward.tiers.len());
         for rel in &segments_manifest.deltas {
             let Some(tier) = held_tier(&live.delta_postings, &live_manifest.deltas, rel) else {
                 self.diverge_from_current(&completed.prefix);
@@ -8225,7 +8225,7 @@ impl Executor {
                 // Live, and untouched — see the manifest's own note above.
                 live.watermark,
                 bundle,
-                // Carried forward, never renumbered and never shrunk (compaction §3, pass 4).
+                // CarriedExtents forward, never renumbered and never shrunk (compaction §3, pass 4).
                 Arc::clone(&live.dict),
                 delta_postings,
             )
@@ -8325,11 +8325,11 @@ impl Executor {
         //
         // Owned first: the rest of the carry-forward set borrows the generation being moved here,
         // and the log below still has to say what was left behind.
-        let Flight {
+        let CarriedExtents {
             omitted_views,
             omitted_segments,
             ..
-        } = flight;
+        } = forward;
         self.pending_reclaim.push(PendingReclaim {
             generation: live,
             prefix_dir: from_prefix_dir,
@@ -8901,11 +8901,15 @@ impl Executor {
                 None => held_tier(&live.delta_postings, &partition_data.manifest.deltas, rel),
             };
             let Some(tier) = held else {
+                // The manifest is already committed, as at the sidecar exit above.
+                self.health
+                    .coalesce_failures
+                    .fetch_add(1, Ordering::Relaxed);
                 tracing::error!(
                     tier = %rel,
-                    "ALARM: a coalesce's manifest names a delta tier this process does not hold \
-                     open; abandoning the swap rather than serving a fragment built from fewer \
-                     tiers than the manifest declares"
+                    "ALARM: a coalesce's manifest committed and names a delta tier this process \
+                     does not hold open, so the swap is abandoned; a restart opens the committed \
+                     manifest"
                 );
                 return;
             };
@@ -15581,7 +15585,7 @@ impl Executor {
         // mark and everything it covers go with them.
         self.write_live_state(&mut manifest, &live.vocabularies);
         // **And the group-scoped columns this flush gave a view its first of** (`views.md` §5).
-        // Carried forward and appended to, never restated: the list is what a *restart* recovers
+        // CarriedExtents forward and appended to, never restated: the list is what a *restart* recovers
         // `scoped_scalars[..].views` from, and a render-only family writes no extent for the
         // derivation to find. `manifest` is the live side-manifest cloned, so the earlier pairs
         // are already here.
