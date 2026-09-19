@@ -982,89 +982,6 @@ pub struct Engine {
 /// currently stands, so an unsuppressed entity is simply absent from it; inventing an
 /// `Unsuppress` for an absent entity would let an older manifest clear a suppression the WAL
 /// still holds.
-/// The runtime attribute columns the side manifests carry (`ingest.md` §6.3), **in one order**.
-///
-/// A column's position in the served list is what every buffered row, record-blob tag and
-/// segment tail is positional against, so the order the manifests' lists are appended in decides
-/// which column a value is read under. The partitions are a hash map; they are walked by key,
-/// ascending, so two opens of one bundle build the same list. With one partition this is that
-/// partition's lists; with several, every declaration is a deployment-level fact every partition
-/// publishes alike, and a name met again is skipped by `Manifest::with_attributes`.
-/// The view groups and plain views the side manifests carry (`ingest.md` §1.3), on
-/// [`side_manifest_vocabularies`]' rule: the partitions are walked by key, ascending, and a name
-/// met again is skipped by the manifest merge.
-fn side_manifest_view_declarations(
-    bundle: &Bundle,
-) -> (
-    Vec<tessera_store::manifest::GroupDescriptor>,
-    Vec<tessera_store::manifest::ViewDescriptor>,
-) {
-    let mut keys: Vec<&String> = bundle.partitions.keys().collect();
-    keys.sort();
-    let mut groups: Vec<tessera_store::manifest::GroupDescriptor> = Vec::new();
-    let mut plain: Vec<tessera_store::manifest::ViewDescriptor> = Vec::new();
-    for key in keys {
-        let manifest = &bundle.partitions[key].manifest;
-        for group in &manifest.groups {
-            if !groups.iter().any(|held| held.name == group.name) {
-                groups.push(group.clone());
-            }
-        }
-        for view in &manifest.plain_views {
-            if !plain.iter().any(|held| held.id == view.id) {
-                plain.push(view.clone());
-            }
-        }
-    }
-    (groups, plain)
-}
-
-fn side_manifest_vocabularies(bundle: &Bundle) -> Vec<tessera_store::manifest::ManifestVocabulary> {
-    let mut keys: Vec<&String> = bundle.partitions.keys().collect();
-    keys.sort();
-    let mut out: Vec<tessera_store::manifest::ManifestVocabulary> = Vec::new();
-    for key in keys {
-        for vocabulary in &bundle.partitions[key].manifest.vocabularies {
-            if !out.iter().any(|held| held.name == vocabulary.name) {
-                out.push(vocabulary.clone());
-            }
-        }
-    }
-    out
-}
-
-fn side_manifest_attributes(
-    bundle: &Bundle,
-) -> (
-    Vec<tessera_store::manifest::DeclaredScalar>,
-    Vec<tessera_store::manifest::ScopedScalar>,
-) {
-    let mut keys: Vec<&String> = bundle.partitions.keys().collect();
-    keys.sort();
-    let mut attributes = Vec::new();
-    let mut scoped = Vec::new();
-    for key in keys {
-        let manifest = &bundle.partitions[key].manifest;
-        for d in &manifest.attributes {
-            if !attributes
-                .iter()
-                .any(|held: &tessera_store::manifest::DeclaredScalar| held.name == d.name)
-            {
-                attributes.push(d.clone());
-            }
-        }
-        for f in &manifest.scoped_attributes {
-            if !scoped
-                .iter()
-                .any(|held: &tessera_store::manifest::ScopedScalar| held.name == f.name)
-            {
-                scoped.push(f.clone());
-            }
-        }
-    }
-    (attributes, scoped)
-}
-
 fn initial_deny_of(bundle: &Bundle) -> Vec<(EntityId, ChangeOp)> {
     let mut out = Vec::new();
     for partition in bundle.partitions.values() {
@@ -1076,6 +993,65 @@ fn initial_deny_of(bundle: &Bundle) -> Vec<(EntityId, ChangeOp)> {
         }
     }
     out
+}
+
+/// One of the side manifests' lists, concatenated: the partitions by key ascending, an item whose
+/// key is already held skipped.
+fn side_manifest_items<T: Clone>(
+    bundle: &Bundle,
+    list: impl Fn(&tessera_store::manifest::SegmentsManifest) -> &[T],
+    key: impl Fn(&T) -> &str,
+) -> Vec<T> {
+    let mut partition_keys: Vec<&String> = bundle.partitions.keys().collect();
+    partition_keys.sort();
+    let mut out: Vec<T> = Vec::new();
+    for partition_key in partition_keys {
+        for item in list(&bundle.partitions[partition_key].manifest) {
+            if !out.iter().any(|held| key(held) == key(item)) {
+                out.push(item.clone());
+            }
+        }
+    }
+    out
+}
+
+/// The view groups and plain views the side manifests carry (`ingest.md` §1.3), on
+/// [`side_manifest_vocabularies`]' rule: the partitions are walked by key, ascending, and a name
+/// met again is skipped by the manifest merge.
+fn side_manifest_view_declarations(
+    bundle: &Bundle,
+) -> (
+    Vec<tessera_store::manifest::GroupDescriptor>,
+    Vec<tessera_store::manifest::ViewDescriptor>,
+) {
+    (
+        side_manifest_items(bundle, |m| &m.groups, |group| &group.name),
+        side_manifest_items(bundle, |m| &m.plain_views, |view| &view.id),
+    )
+}
+
+fn side_manifest_vocabularies(bundle: &Bundle) -> Vec<tessera_store::manifest::ManifestVocabulary> {
+    side_manifest_items(bundle, |m| &m.vocabularies, |vocabulary| &vocabulary.name)
+}
+
+/// The runtime attribute columns the side manifests carry (`ingest.md` §6.3), **in one order**.
+///
+/// A column's position in the served list is what every buffered row, record-blob tag and
+/// segment tail is positional against, so the order the manifests' lists are appended in decides
+/// which column a value is read under. The partitions are a hash map; they are walked by key,
+/// ascending, so two opens of one bundle build the same list. With one partition this is that
+/// partition's lists; with several, every declaration is a deployment-level fact every partition
+/// publishes alike, and a name met again is skipped by `Manifest::with_attributes`.
+fn side_manifest_attributes(
+    bundle: &Bundle,
+) -> (
+    Vec<tessera_store::manifest::DeclaredScalar>,
+    Vec<tessera_store::manifest::ScopedScalar>,
+) {
+    (
+        side_manifest_items(bundle, |m| &m.attributes, |d| &d.name),
+        side_manifest_items(bundle, |m| &m.scoped_attributes, |f| &f.name),
+    )
 }
 
 /// The live category bindings, seeded from every durable home the bundle carries
