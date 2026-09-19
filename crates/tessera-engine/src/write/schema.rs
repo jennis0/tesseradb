@@ -165,15 +165,13 @@ pub(crate) fn text_schema_of(
                 d.name
             ))
         })?;
-        let analyser = tessera_analyse::analyser(identity.split('/').next().unwrap_or_default())
-            .filter(|a| a.identity() == identity)
-            .ok_or_else(|| {
-                crate::flush::MaintenanceFailed(format!(
-                    "column '{}' was indexed by analyser '{identity}', which this binary does not \
+        let analyser = tessera_analyse::analyser_with_identity(identity).ok_or_else(|| {
+            crate::flush::MaintenanceFailed(format!(
+                "column '{}' was indexed by analyser '{identity}', which this binary does not \
                      carry. A flush cannot extend an index whose terms it cannot reproduce.",
-                    d.name
-                ))
-            })?;
+                d.name
+            ))
+        })?;
         out.push(crate::flush::TextColumnSpec {
             index,
             name: d.name.clone(),
@@ -194,16 +192,14 @@ pub(in crate::write) fn analyser_of(
             family.name
         ))
     })?;
-    tessera_analyse::analyser(identity.split('/').next().unwrap_or_default())
-        .filter(|a| a.identity() == identity)
-        .ok_or_else(|| {
-            crate::flush::MaintenanceFailed(format!(
-                "the scoped column family '{}' was indexed by analyser '{identity}', which this \
+    tessera_analyse::analyser_with_identity(identity).ok_or_else(|| {
+        crate::flush::MaintenanceFailed(format!(
+            "the scoped column family '{}' was indexed by analyser '{identity}', which this \
                  binary does not carry. A flush cannot extend an index whose terms it cannot \
                  reproduce.",
-                family.name
-            ))
-        })
+            family.name
+        ))
+    })
 }
 
 /// The blob-resident columns, with each one's position in a buffered row's scalar list.
