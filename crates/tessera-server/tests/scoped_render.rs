@@ -1228,6 +1228,117 @@ async fn fold(served: &Served) {
     }
 }
 
+/// **A key created again carries none of its predecessor's scoped values** (`views.md` §5,
+/// decision 0115).
+///
+/// The same entity holds a value in the first incarnation of `quarter:2026-Q3`, the key is dropped
+/// and created again, and the entity rejoins the new view with no value of its own. Its row
+/// renders the placeholder before the fold, and after the fold that rewrites the family's column
+/// it renders the placeholder and answers no leaf over the family — the dead incarnation's extents
+/// being listed under the same view id the live one writes into.
+///
+/// A second entity carries a value in the new incarnation, which is what gives it a column of the
+/// family at all; its own value is checked, so the column is being read rather than missing.
+#[tokio::test]
+async fn a_recreated_view_adopts_no_scoped_value_of_its_predecessor() {
+    let served = serve().await;
+    const REJOINS: u64 = 9_901;
+    const FRESH: u64 = 9_902;
+    /// Create the key, which is a `201` whether or not it has been held before.
+    async fn create(served: &Served) {
+        let resp = served
+            .server
+            .client
+            .put(served.server.control_url("/control/views/quarter/2026-Q3"))
+            .bearer_auth(OPERATOR_CREDENTIAL)
+            .json(&json!({}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 201, "the view is created");
+    }
+    create(&served).await;
+    // A session resolves its visible views once, so every read below takes a fresh one.
+    let token = authorise(&served.server, &["0", "1"]).await["token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    ingest_with_heat(
+        &served,
+        "heat-first-incarnation",
+        "quarter:2026-Q3",
+        &[(external_id_of(REJOINS), 250.0, 250.0, "0")],
+        // Above the threshold, so a value adopted by the next incarnation answers the leaf.
+        &[Some(90.0)],
+    )
+    .await;
+    flush(&served).await;
+    let (_, values) = settled_points(&served, &token, "quarter:2026-Q3", 1).await;
+    assert_eq!(
+        by_entity(&served, &token, &values).await[&REJOINS],
+        90.0,
+        "the first incarnation renders the value its batch carried"
+    );
+
+    let resp = served
+        .server
+        .client
+        .delete(served.server.control_url("/control/views/quarter/2026-Q3"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 200, "the drop is accepted");
+    create(&served).await;
+    let token = authorise(&served.server, &["0", "1"]).await["token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    ingest_with_heat(
+        &served,
+        "heat-second-incarnation",
+        "quarter:2026-Q3",
+        &[
+            (external_id_of(REJOINS), 250.0, 250.0, "0"),
+            (external_id_of(FRESH), 350.0, 350.0, "0"),
+        ],
+        &[None, Some(5.0)],
+    )
+    .await;
+    flush(&served).await;
+
+    /// The rendered rows of the new incarnation: the rejoining entity's placeholder and the
+    /// fresh entity's own value.
+    async fn rendered(served: &Served, token: &str, rejoins: u64, fresh: u64) {
+        let (names, values) = settled_points(served, token, "quarter:2026-Q3", 2).await;
+        assert!(
+            names.contains(&"heat".to_string()),
+            "the new incarnation has a column of the family: {names:?}"
+        );
+        let by_entity = by_entity(served, token, &values).await;
+        assert_eq!(
+            by_entity[&rejoins], 0.0,
+            "the rejoining entity takes the render placeholder"
+        );
+        assert_eq!(by_entity[&fresh], 5.0, "and the new value is served");
+    }
+    rendered(&served, &token, REJOINS, FRESH).await;
+
+    fold(&served).await;
+    // A fold rewrites the whole prefix, so a session authorised against the old one is asking
+    // about a bundle that has gone.
+    let token = authorise(&served.server, &["0", "1"]).await["token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    rendered(&served, &token, REJOINS, FRESH).await;
+    assert_eq!(
+        filtered_entities(&served, &token, "quarter:2026-Q3", range("heat")).await,
+        BTreeSet::new(),
+        "and the folded column holds no value of the predecessor to answer the leaf"
+    );
+}
+
 /// **A principal who reaches a sharing group's view and not the owner's is told the truth about
 /// both** (`views.md` §3.3, §6). `quarter:2026-Q2` is gated and `quarter_map:2026-Q2` is not, so
 /// for a principal holding neither term the column arrives under an id the family's own
