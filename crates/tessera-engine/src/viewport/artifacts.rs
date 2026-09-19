@@ -348,19 +348,16 @@ impl Engine {
     /// whose layer this principal does not reach or which is suppressed, one on another view, and
     /// one below its layer's existence criterion are one answer — C17's posture, and what keeps
     /// the leaf by artifact from being an oracle over shapes a viewer was not served.
-    #[allow(clippy::too_many_arguments)]
     pub(super) fn gated_artifact(
         &self,
-        session: &Session,
-        generation: &crate::Generation,
-        view: &str,
-        view_data: &tessera_store::read::ViewData,
-        segments: &[(&SegmentData, u32)],
+        served: &ServedView<'_>,
         mask: &EffectiveMask,
-        denied: &croaring::Bitmap,
-        mask_identity: crate::histogram::MaskIdentity,
         id: TesseraId,
     ) -> Result<Option<GatedArtifact>> {
+        let (session, generation) = (served.session, served.generation);
+        let (view, view_data) = (served.name, served.data);
+        let (segments, denied) = (&served.segments[..], served.denied);
+        let mask_identity = served.mask_identity;
         let (shard, entity) = self.identity_key.invert(id);
         if shard != generation.bundle.manifest.identity.shard_id {
             return Ok(None);
@@ -577,20 +574,18 @@ impl Engine {
             &view_data.row_space,
             denied,
         );
-        let segments = segments_with_row_bases(view, view_data)?;
         let mask_identity = self.mask_identity(session, &generation, &geometry);
-        // The one predicate, shared with the viewport and with the region leaf by artifact.
-        let Some(gated) = self.gated_artifact(
+        let served = ServedView {
             session,
-            &generation,
-            view,
-            view_data,
-            &segments,
-            &mask,
+            generation: &generation,
+            name: view,
+            data: view_data,
+            segments: segments_with_row_bases(view, view_data)?,
             denied,
             mask_identity,
-            id,
-        )?
+        };
+        // The one predicate, shared with the viewport and with the region leaf by artifact.
+        let Some(gated) = self.gated_artifact(&served, &mask, id)?
         else {
             return Ok(None);
         };
@@ -1085,17 +1080,13 @@ impl Engine {
         move |attachment| self.dependency_served(ctx, attachment, DEPENDENCY_CHAIN_MAX)
     }
 
-    // Ten, and every one is a thing the artifact pass genuinely needs from the request it is part
-    // of: the session, the generation, the view and its data, the resolved tile ranges, the
-    // composed mask, and the request's own three artifact parameters. Bundling them into a struct
-    // would name the same ten things one call earlier.
+    // Six past the request's view, and every one of them varies within the response the pass is
+    // part of: the resolved tile ranges, the composed mask, the request's own artifact parameters
+    // and the depth it draws at.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn serve_artifacts(
         &self,
-        session: &Session,
-        generation: &crate::Generation,
-        view: &str,
-        view_data: &tessera_store::ViewData,
+        served: &ServedView<'_>,
         ranges: &[Vec<(usize, Range<u32>)>],
         mask: &crate::compose::EffectiveMask,
         requested: LayerSelection<'_>,
@@ -1107,7 +1098,6 @@ impl Engine {
         // The request's tile depth, which `LevelSelection::Declared` joins against each layer's
         // declared per-level zoom ranges. The two are the same 0–16 coordinate.
         zoom: u8,
-        mask_identity: crate::histogram::MaskIdentity,
         artifact_rows: ArtifactRows,
         // D-C: checked once per artifact served. The derived sweep is the response's dominant
         // CPU and it runs between two flushes, so without a checkpoint here a client that has
@@ -1116,6 +1106,9 @@ impl Engine {
         // (2026-08-28), deriving geometry nobody would read.
         cancel: &Option<CancelToken>,
     ) -> Result<(Vec<ArtifactOut>, Vec<ServedLayer>)> {
+        let (session, generation) = (served.session, served.generation);
+        let (view, view_data) = (served.name, served.data);
+        let mask_identity = served.mask_identity;
         // Which layers this principal may know exist — one set probe for a gate-failed name and a
         // never-registered one alike (`LayerRegistry::resolve_for`).
         let reachable = self.write.live().resolve_layers(

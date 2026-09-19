@@ -313,8 +313,17 @@ impl crate::Engine {
             &view_data.row_space,
             denied,
         );
-        let segments = segments_with_row_bases(view, view_data)?;
-        let mask_identity = self.mask_identity(session, &generation, &geometry);
+        let served = crate::viewport::ServedView {
+            session,
+            generation: &generation,
+            name: view,
+            data: view_data,
+            segments: segments_with_row_bases(view, view_data)?,
+            denied,
+            mask_identity: self.mask_identity(session, &generation, &geometry),
+        };
+        let segments = &served.segments[..];
+        let mask_identity = served.mask_identity;
 
         // **The filter, evaluated once for the request and over the whole view.** Every route it
         // may take is asked for its whole-view answer: an entity-space verdict is projected whole,
@@ -323,17 +332,7 @@ impl crate::Engine {
         // this design adds.
         let filter_rows = match &req.filter {
             None => None,
-            Some(expr) => Some(self.browse_filter_rows(
-                session,
-                &generation,
-                view,
-                view_data,
-                &segments,
-                &mask,
-                denied,
-                mask_identity,
-                expr,
-            )?),
+            Some(expr) => Some(self.browse_filter_rows(&served, &mask, expr)?),
         };
 
         // **The gate, over every artifact of every level of the layer, before any page.** Every
@@ -362,7 +361,7 @@ impl crate::Engine {
                     &generation,
                     view,
                     view_data,
-                    &segments,
+                    segments,
                     &code_of_key,
                     &self.shapes,
                     store,
@@ -676,25 +675,18 @@ impl crate::Engine {
     }
 
     /// The request's filter as a **whole-view** row set — see this module's doc on §9 (d).
-    #[allow(clippy::too_many_arguments)]
     fn browse_filter_rows(
         &self,
-        session: &crate::Session,
-        generation: &crate::Generation,
-        view: &str,
-        view_data: &tessera_store::read::ViewData,
-        segments: &[(&tessera_store::read::SegmentData, u32)],
+        served: &crate::viewport::ServedView<'_>,
         mask: &crate::compose::EffectiveMask,
-        denied: &Bitmap,
-        mask_identity: crate::histogram::MaskIdentity,
         expr: &FilterExpr,
     ) -> Result<Bitmap> {
-        let fragment = self.fragment_for(session, generation)?;
+        let fragment = self.fragment_for(served.session, served.generation)?;
         let candidate = crate::filter::candidate(
             &fragment,
-            session.satisfied(),
-            &generation.overlay,
-            &generation.buffer,
+            served.session.satisfied(),
+            &served.generation.overlay,
+            &served.generation.buffer,
         );
         // **`Engine::browse` takes no cancellation token, and could not usefully hold one**: the
         // row route's `scan_rows` carries no checkpoint on any path — the viewport's own
@@ -704,41 +696,19 @@ impl crate::Engine {
         // duration (`highlight-and-hierarchy.md` §7, which prices that). Making it interruptible
         // is a change to the shared row route rather than to this verb.
         let cancel = None;
-        let regions = |leaf: &crate::filter::RegionLeaf| {
-            self.resolve_region(
-                leaf,
-                session,
-                generation,
-                view,
-                view_data,
-                segments,
-                mask,
-                denied,
-                mask_identity,
-                &cancel,
-            )
-        };
-        let members = |leaf: &crate::filter::MemberOfLeaf| {
-            self.resolve_member_of(
-                leaf,
-                session,
-                generation,
-                view,
-                view_data,
-                segments,
-                mask,
-                denied,
-                mask_identity,
-            )
-        };
+        let regions =
+            |leaf: &crate::filter::RegionLeaf| self.resolve_region(leaf, served, mask, &cancel);
+        let members =
+            |leaf: &crate::filter::MemberOfLeaf| self.resolve_member_of(leaf, served, mask);
         let resolvers = crate::filter::RowLeafResolvers {
             regions: &regions,
             members: &members,
         };
-        let total_rows = view_data.row_space.total_rows();
+        let total_rows = served.data.row_space.total_rows();
         // `prefer_row = false`: browse has no tile ranges to make the row route cheaper, so a
         // both-routes column takes the entity route and only a render-only column reaches the scan.
-        let routed = generation
+        let routed = served
+            .generation
             .filter_columns
             .evaluate_routed(expr, &candidate, false, &resolvers)
             .map_err(|e| {
@@ -750,7 +720,7 @@ impl crate::Engine {
                 }
             })?;
         Ok(match routed {
-            RoutedFilter::Entity(entities) => view_data.row_space.project(&entities),
+            RoutedFilter::Entity(entities) => served.data.row_space.project(&entities),
             RoutedFilter::Row(tree) => {
                 // The whole view as the one domain: the row route's predicate runs over every row
                 // rather than over a request's ranges, which is what makes the count exact off the
@@ -760,17 +730,9 @@ impl crate::Engine {
                     end: u32::try_from(total_rows).unwrap_or(u32::MAX),
                 })
                 .to_vec();
-                self.evaluate_row_route(
-                    &tree,
-                    &view_data.row_space,
-                    segments,
-                    &whole,
-                    total_rows,
-                    total_rows,
-                    false,
-                )?
-                .rows()
-                .clone()
+                self.evaluate_row_route(&tree, served, &whole, total_rows, false)?
+                    .rows()
+                    .clone()
             }
         })
     }

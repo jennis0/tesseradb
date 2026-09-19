@@ -84,6 +84,7 @@ mod meta;
 mod out;
 mod request;
 mod row_filter;
+mod served;
 mod sweep;
 
 pub use item::{ItemField, ItemOut, ItemScoped, ItemView};
@@ -101,6 +102,7 @@ pub(crate) use artifacts::response_rungs;
 pub(crate) use item::flushed_row_scalar;
 pub(crate) use meta::owning_key_of;
 pub(crate) use row_filter::{predicate_source, predicate_vocabulary};
+pub(crate) use served::ServedView;
 pub(crate) use sweep::{scoped_render_families, segment_row_of};
 
 use out::{CollectSink, FilterBits};
@@ -423,6 +425,19 @@ impl Engine {
                 view: view.to_string(),
             })?;
 
+        // Everything this request's view fixes, named once — see [`ServedView`]. The composed mask
+        // is not part of it: the filter below holds the pre-filter mask and the narrowed one at the
+        // same time.
+        let served = ServedView {
+            session,
+            generation: &generation,
+            name: view,
+            data: view_data,
+            segments,
+            denied,
+            mask_identity,
+        };
+
         let mask = compose(
             session.satisfied(),
             &generation.overlay,
@@ -579,7 +594,7 @@ impl Engine {
             None => Threshold::at_depth(
                 v_total,
                 self.config.theta_target_marks,
-                self.occupied_tiles(&mask_identity, view, &segments, &mask, zoom),
+                self.occupied_tiles(&mask_identity, view, &served.segments, &mask, zoom),
             ),
         };
         probe.lap(|t| &mut t.theta_occupancy_ns);
@@ -625,7 +640,8 @@ impl Engine {
         //
         // A view with zero segments (an empty build) has nothing visible in any tile: every
         // tile's part list is empty, and the response is empty — as before.
-        let per_segment: Vec<Vec<Range<u32>>> = segments
+        let per_segment: Vec<Vec<Range<u32>>> = served
+            .segments
             .iter()
             .map(|&(segment, _)| tile_ranges_all(segment, &tiles))
             .collect();
@@ -721,41 +737,18 @@ impl Engine {
             // generation-keyed decomposition cache, its boundary rows tested under **this
             // request's composed mask**; a published shape through the artifact's own verdict.
             // Closed over the mask so the boundary path cannot run without one.
-            let regions = |leaf: &crate::filter::RegionLeaf| {
-                self.resolve_region(
-                    leaf,
-                    session,
-                    &generation,
-                    view,
-                    view_data,
-                    &segments,
-                    &mask,
-                    denied,
-                    mask_identity,
-                    &cancel,
-                )
-            };
+            let regions =
+                |leaf: &crate::filter::RegionLeaf| self.resolve_region(leaf, &served, &mask, &cancel);
             // The `member_of` leaves' resolver, closed over the same mask for the same
             // reason: the answer is `membership ∩ M_auth`, and a resolver that could be
             // called without one would be a route to the unmasked membership.
-            let members = |leaf: &crate::filter::MemberOfLeaf| {
-                self.resolve_member_of(
-                    leaf,
-                    session,
-                    &generation,
-                    view,
-                    view_data,
-                    &segments,
-                    &mask,
-                    denied,
-                    mask_identity,
-                )
-            };
+            let members =
+                |leaf: &crate::filter::MemberOfLeaf| self.resolve_member_of(leaf, &served, &mask);
             let resolvers = crate::filter::RowLeafResolvers {
                 regions: &regions,
                 members: &members,
             };
-            let row_bases: Vec<u32> = segments.iter().map(|&(_, base)| base).collect();
+            let row_bases: Vec<u32> = served.segments.iter().map(|&(_, base)| base).collect();
             let domain = crossing_domain(&ranges, &row_bases);
             // One transcription of the evaluate-route-cross sequence, called for each expression,
             // so the two positions of a clause cannot drift apart. `per_tile_only` is the
@@ -790,10 +783,9 @@ impl Engine {
                         }
                         (
                             self.cross_filter_into_row_space(
-                                &view_data.row_space,
+                                &served,
                                 &entities,
                                 &ranges,
-                                &segments,
                                 rows_in_ranges,
                                 per_tile_only,
                             ),
@@ -804,11 +796,9 @@ impl Engine {
                         let verdict = tree.region_verdict();
                         let rows = self.evaluate_row_route(
                             &tree,
-                            &view_data.row_space,
-                            &segments,
+                            &served,
                             &domain,
                             rows_in_ranges,
-                            view_data.row_space.total_rows(),
                             per_tile_only,
                         )?;
                         self.counters.filter_row_routed.fetch_add(1, Ordering::Relaxed);
@@ -926,7 +916,7 @@ impl Engine {
                 tile,
                 tile_parts,
                 &mask,
-                &segments,
+                &served.segments,
                 &params,
                 zoom,
                 underlay_offset,
@@ -998,10 +988,7 @@ impl Engine {
         // The artifacts frame, after the counts and before any point. It is an aggregate channel,
         // not a point one — a cluster's masked count belongs beside a tile's, not beside a mark.
         let (artifacts, served_layers) = self.serve_artifacts(
-            session,
-            &generation,
-            view,
-            view_data,
+            &served,
             &ranges,
             &mask,
             req_layers,
@@ -1009,7 +996,6 @@ impl Engine {
             req_levels,
             req_computed,
             zoom,
-            mask_identity,
             artifact_rows,
             &cancel,
         )?;
