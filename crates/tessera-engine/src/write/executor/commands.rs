@@ -1538,6 +1538,9 @@ impl Executor {
     /// A group-scoped fill addressed to a dropped view goes the same way, and the answer is how
     /// many did. An entity-scoped fill stays: its value is no view's, and a surviving view's flush
     /// writes it.
+    ///
+    /// The dropped views' group-scoped columns go with them, so a key created again opens its own
+    /// base at its first flush rather than answering from its predecessor's.
     pub(super) fn publish_roster(
         &self,
         generation: &Arc<Generation>,
@@ -1587,6 +1590,10 @@ impl Executor {
         let next = generation.with(|g| {
             g.bundle = bundle;
             g.buffer = buffer;
+            if !dropped.is_empty() {
+                g.filter_columns =
+                    Arc::new(generation.filter_columns.without_scoped_columns(dropped));
+            }
         });
         self.publish(next, started);
         fills_dropped

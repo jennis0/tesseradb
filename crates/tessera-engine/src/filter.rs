@@ -745,6 +745,28 @@ pub fn extent_column_name(column: &str, view: Option<&str>) -> String {
     }
 }
 
+/// Is this extent's `(view, incarnation)` pair one the roster still declares?
+///
+/// `(None, None)` (entity-scoped) is always live. A half-stamped pair matches nothing and is
+/// omitted: fail-closed rather than served under a guessed incarnation.
+///
+/// **Beside [`extent_column_name`], because it is the other half of the same question.** That
+/// function says which column an extent composes onto and carries no incarnation, so a dead
+/// incarnation's extent would compose onto the column a key created again answers from. A fold
+/// asks this of the manifest it is rebasing and an open asks it of the roster it is serving; two
+/// spellings of the rule would let one carry forward what the other drops.
+pub(crate) fn carries_live_view(
+    incarnation_of: &dyn Fn(&str) -> Option<tessera_types::view::ViewIncarnation>,
+    view: Option<&str>,
+    incarnation: Option<tessera_types::view::ViewIncarnation>,
+) -> bool {
+    match (view, incarnation) {
+        (None, None) => true,
+        (Some(view), Some(incarnation)) => incarnation_of(view) == Some(incarnation),
+        _ => false,
+    }
+}
+
 /// Is this group-scoped family on the filter surface — published by `/v1/meta`'s
 /// `filter_operands` and resolvable by a leaf (`views.md` §5)?
 ///
@@ -2030,6 +2052,13 @@ impl FilterColumns {
             entity_terms: Arc::new(entity_terms),
         };
         for extent in extents {
+            // **Only what this roster still declares.** An extent is named by `(column, view)`,
+            // which a key created again shares with its predecessor, so an extent of a dead
+            // incarnation would compose onto the new view's column and answer its leaves and its
+            // drill-down. The base is placed per live incarnation above, by the same question.
+            if !carries_live_view(view_incarnation, extent.view.as_deref(), extent.incarnation) {
+                continue;
+            }
             let column = tessera_filter::open_extent(
                 &prefix_dir.join(&extent.values),
                 &prefix_dir.join(&extent.presence),
@@ -2316,6 +2345,31 @@ impl FilterColumns {
             next.columns.insert(name, layers);
         }
         Ok(next)
+    }
+
+    /// This generation's columns with every group-scoped column of `views` removed — the
+    /// successor generation's, after a drop (`views.md` §5).
+    ///
+    /// **A dropped view's column does not wait for the fold that reclaims its files.** The name a
+    /// scoped column is held under is `(column, view)` and carries no incarnation, so a column
+    /// left standing is the one [`FilterColumns::with_scoped_columns`] finds already present when
+    /// the key is created again and flushes — and the predecessor's base and extents would answer
+    /// the new incarnation's leaves and its drill-down.
+    pub(crate) fn without_scoped_columns(&self, views: &[String]) -> FilterColumns {
+        let dead = |name: &String| {
+            name.split_once(PIN)
+                .is_some_and(|(_, view)| views.iter().any(|dropped| dropped == view))
+        };
+        let mut next = FilterColumns {
+            columns: self.columns.clone(),
+            placements: self.placements.clone(),
+            access: self.access,
+            records: Arc::clone(&self.records),
+            entity_terms: Arc::clone(&self.entity_terms),
+        };
+        next.columns.retain(|name, _| !dead(name));
+        next.placements.retain(|name, _| !dead(name));
+        next
     }
 
     /// This generation's columns with one flush's extents added — the successor generation's.
