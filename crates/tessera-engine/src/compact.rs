@@ -1870,7 +1870,7 @@ pub(crate) fn execute(plan: FoldPlan, ctx: FoldContext) -> Result<CompletedFold,
                 )
                 .map_err(|e| failed("pass 4a (record blob: an extent)", &e))?,
             );
-            for rel in [&extent.blocks, &extent.hasrow, &extent.directory] {
+            for rel in extent.files() {
                 attr_read += file_len(&ctx.from_prefix_dir.join(rel));
             }
         }
@@ -1950,12 +1950,7 @@ pub(crate) fn execute(plan: FoldPlan, ctx: FoldContext) -> Result<CompletedFold,
                 terms: ctx.from_prefix_dir.join(&extent.terms),
                 bases: ctx.from_prefix_dir.join(&extent.bases),
             });
-            for rel in [
-                &extent.hasrow,
-                &extent.offsets,
-                &extent.terms,
-                &extent.bases,
-            ] {
+            for rel in extent.files() {
                 attr_read += file_len(&ctx.from_prefix_dir.join(rel));
             }
         }
@@ -2221,9 +2216,9 @@ fn fold_text_columns(
                 )
                 .map_err(|e| failed("pass 4a (text: an extent's postings)", &e))?,
             );
-            *attr_read += file_len(&ctx.from_prefix_dir.join(&extent.dict))
-                + file_len(&ctx.from_prefix_dir.join(&extent.postings))
-                + file_len(&ctx.from_prefix_dir.join(&extent.presence));
+            for rel in extent.files() {
+                *attr_read += file_len(&ctx.from_prefix_dir.join(rel));
+            }
         }
         let dict_rel = format!("{column_rel}/{}", tessera_filter::DICT_FILE);
         let postings_rel = format!("{column_rel}/postings.arrow");

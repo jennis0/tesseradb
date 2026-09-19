@@ -294,8 +294,10 @@ pub(crate) fn plan_coalesce(
     // partition, and it is what keeps two views' interleaved flushes from being coalesced
     // together.
     let locator_size = |extent: &LocatorExtent| -> Option<u64> {
-        (!is_build(&extent.path) && !is_build(&extent.external_id_run))
-            .then(|| size_of(&extent.path) + size_of(&extent.external_id_run))
+        extent
+            .files()
+            .all(|rel| !is_build(rel))
+            .then(|| extent.files().map(&size_of).sum())
     };
     if let Some(window) = select_window(
         &manifest.locator_extents,
@@ -384,9 +386,7 @@ pub(crate) fn plan_coalesce(
     // own subsequence. No build guard, for the attribute axis's reason — a built bundle's list is
     // empty, the base blob living in `MANIFEST.files`.
     {
-        let size = |extent: &RecordExtent| {
-            Some(size_of(&extent.blocks) + size_of(&extent.hasrow) + size_of(&extent.directory))
-        };
+        let size = |extent: &RecordExtent| Some(extent.files().map(&size_of).sum());
         if let Some(window) = widest_window(&manifest.record_extents, policy, size) {
             plan.records = manifest.record_extents[window].to_vec();
         }
@@ -408,7 +408,7 @@ pub(crate) fn plan_coalesce(
     // one half would bound the postings while the vocabulary — which for prose is the larger half
     // at a long singleton tail — grew unwatched.
     plan.texts = column_windows(&manifest.text_extents, policy, is_live, |extent| {
-        Some(size_of(&extent.dict) + size_of(&extent.postings) + size_of(&extent.presence))
+        Some(extent.files().map(&size_of).sum())
     });
 
     // ---- entity→term extents: the seventh axis, the record blob's policy over its own list ----
@@ -418,14 +418,7 @@ pub(crate) fn plan_coalesce(
     // reason: a built bundle's list is empty, the base layer living under `entities/terms/` and
     // named in `MANIFEST.files`.
     {
-        let size = |extent: &EntityTermsExtent| {
-            Some(
-                size_of(&extent.hasrow)
-                    + size_of(&extent.offsets)
-                    + size_of(&extent.terms)
-                    + size_of(&extent.bases),
-            )
-        };
+        let size = |extent: &EntityTermsExtent| Some(extent.files().map(&size_of).sum());
         if let Some(window) = widest_window(&manifest.entity_terms_extents, policy, size) {
             plan.terms = manifest.entity_terms_extents[window].to_vec();
         }
@@ -901,8 +894,8 @@ pub(crate) fn execute_coalesce(
             tessera_filter::RECORD_BLOCK_TARGET,
         )
         .map_err(|e| CoalesceFailed(format!("record coalesce: {e}")))?;
-        for rel in [&extent.blocks, &extent.hasrow, &extent.directory] {
-            files.insert(rel.clone(), digest_of(&ctx.prefix_dir.join(rel))?);
+        for rel in extent.files() {
+            files.insert(rel.to_string(), digest_of(&ctx.prefix_dir.join(rel))?);
         }
         // Reopened before the manifest can name it, the flush's posture: a merge defect refuses
         // the pass here rather than publishing an extent the fail-closed reader refuses on every
@@ -1005,8 +998,8 @@ pub(crate) fn execute_coalesce(
         drop(postings);
         drop(dicts);
 
-        for rel in [&extent.dict, &extent.postings, &extent.presence] {
-            files.insert(rel.clone(), digest_of(&ctx.prefix_dir.join(rel))?);
+        for rel in extent.files() {
+            files.insert(rel.to_string(), digest_of(&ctx.prefix_dir.join(rel))?);
         }
         // Reopened before the manifest can name it, the record axis's posture: the two halves are
         // checked against each other here, so a merge defect refuses the pass rather than
@@ -1086,13 +1079,8 @@ pub(crate) fn execute_coalesce(
                  {expected}"
             )));
         }
-        for rel in [
-            &extent.hasrow,
-            &extent.offsets,
-            &extent.terms,
-            &extent.bases,
-        ] {
-            files.insert(rel.clone(), digest_of(&ctx.prefix_dir.join(rel))?);
+        for rel in extent.files() {
+            files.insert(rel.to_string(), digest_of(&ctx.prefix_dir.join(rel))?);
         }
         // Reopened before the manifest can name it, the record axis's posture: a merge defect
         // refuses the pass here rather than publishing a layer the fail-closed reader refuses on
@@ -1218,24 +1206,17 @@ pub(crate) fn rebase_into(manifest: &mut SegmentsManifest, completed: &Completed
         .texts
         .iter()
         .flat_map(|w| w.extents.iter())
-        .flat_map(|e| [e.dict.clone(), e.postings.clone(), e.presence.clone()])
+        .flat_map(|e| e.files().map(String::from))
         .collect();
     let record_files: Vec<String> = plan
         .records
         .iter()
-        .flat_map(|e| [e.blocks.clone(), e.hasrow.clone(), e.directory.clone()])
+        .flat_map(|e| e.files().map(String::from))
         .collect();
     let terms_files: Vec<String> = plan
         .terms
         .iter()
-        .flat_map(|e| {
-            [
-                e.hasrow.clone(),
-                e.offsets.clone(),
-                e.terms.clone(),
-                e.bases.clone(),
-            ]
-        })
+        .flat_map(|e| e.files().map(String::from))
         .collect();
     for rel in plan
         .tiers
@@ -2660,7 +2641,7 @@ mod tests {
             .texts
             .iter()
             .flat_map(|w| w.extents.iter())
-            .flat_map(|e| [e.dict.clone(), e.postings.clone(), e.presence.clone()])
+            .flat_map(|e| e.files().map(String::from))
             .collect();
         let untouched: Vec<String> = manifest
             .text_extents
@@ -2766,7 +2747,7 @@ mod tests {
         let consumed: Vec<String> = plan
             .records
             .iter()
-            .flat_map(|e| [e.blocks.clone(), e.hasrow.clone(), e.directory.clone()])
+            .flat_map(|e| e.files().map(String::from))
             .collect();
 
         let coalesced = RecordExtent {

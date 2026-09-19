@@ -1099,13 +1099,8 @@ fn execute_flush_stages(
     //
     // Written from the promotion, so its ordinals are the durable ones the tier beside it carries.
     let entity_terms_extent = write_entity_terms_extent(&promotion.per_entity, &ctx)?;
-    for rel in [
-        &entity_terms_extent.hasrow,
-        &entity_terms_extent.offsets,
-        &entity_terms_extent.terms,
-        &entity_terms_extent.bases,
-    ] {
-        to_digest.push(rel.clone());
+    for rel in entity_terms_extent.files() {
+        to_digest.push(rel.to_string());
     }
     *mark = laps.lap(FlushStage::EntityTerms, *mark);
 
@@ -1156,8 +1151,8 @@ fn execute_flush_stages(
     // ---- the record-blob extent (records §7) ------------------------------------------------
     let record_extent = write_record_extent(&plan, &ctx)?;
     if let Some(extent) = &record_extent {
-        for rel in [&extent.blocks, &extent.hasrow, &extent.directory] {
-            to_digest.push(rel.clone());
+        for rel in extent.files() {
+            to_digest.push(rel.to_string());
         }
     }
     *mark = laps.lap(FlushStage::RecordExtent, *mark);
@@ -1173,8 +1168,8 @@ fn execute_flush_stages(
     // own dictionary, and its presence is what stops an entity whose prose analysed to no terms
     // reading as absent.
     for extent in &text_extents {
-        for rel in [&extent.dict, &extent.postings, &extent.presence] {
-            to_digest.push(rel.clone());
+        for rel in extent.files() {
+            to_digest.push(rel.to_string());
         }
     }
     *mark = laps.lap(FlushStage::TextExtents, *mark);
