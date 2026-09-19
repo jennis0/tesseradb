@@ -15,46 +15,34 @@ use values::*;
 // =================================================================================================
 
 /// What `/control/ingest`'s batch id means to this executor: durably accepted, held in the open
-/// commit window, or never seen. Computed by [`BatchState::of`] on the executor thread only;
-/// `tessera-lifecycle` does not know this type, since the durable half lives on [`LiveState`] and
-/// the window is a container that knows nothing about idempotency policy.
+/// commit window, or never seen. Computed by [`BatchState::of`] on the executor thread only.
 pub(super) enum BatchState {
     /// Durably accepted: the WAL record is fsynced, the rows are applied and the ids are recorded.
     /// Same bytes replays these ids; different bytes is a `409`.
-    ///
-    /// The ids are carried rather than re-derived: a row with no `external_id` is addressable only
-    /// by its `tessera_id`, which appears in no map keyed by anything a retry sends.
     Accepted {
         body_hash: [u8; 32],
         entity_ids: Vec<EntityId>,
     },
-    /// Held in the open commit window, not yet acknowledged. Its ids do not exist yet, since
-    /// allocation happens at the close, so a byte-identical retry joins the queue of waiters the
-    /// entry will ack.
+    /// Held in the open commit window, not yet acknowledged. Allocation happens at the close, so a
+    /// byte-identical retry joins the queue of waiters the entry will ack.
     ///
-    /// `window_seq` is the window the entry was found in. There is exactly one open window, so
-    /// this is read only by a `debug_assert!`.
+    /// `window_seq` is the window the entry was found in; there is exactly one open window.
     Held {
         window_seq: u64,
         body_hash: [u8; 32],
     },
     /// Never seen. A new entry.
     ///
-    /// This is also what a batch that was in fact accepted regresses to once the WAL member
-    /// holding its record is reclaimed by rotation (`accepted_batches` is a cache of the WAL,
-    /// rebuilt from replay and trimmed at rotation). A retry carrying an `external_id` then 409s
-    /// on the duplicate check; a retry with none is re-ingested silently as a new entity, leaving
-    /// a second copy that no external id names and no deny can reach. The horizon is the retained
-    /// log, about one flush; a client that needs a longer one carries its own id column.
+    /// Also what an accepted batch regresses to once WAL rotation reclaims its member: a retry with
+    /// an `external_id` then 409s on the duplicate check, but one with none is re-ingested as a new
+    /// entity. The horizon is about one flush; a client needing longer carries its own id column.
     Unknown,
 }
 
 impl BatchState {
-    /// Look `batch_id` up: the durable index, then the open window, then unknown.
-    ///
-    /// The two sets are disjoint: a batch id enters `accepted_batches` only at `close_window`,
-    /// which consumes the window holding it, and a durably-accepted batch is refused before it
-    /// can be pushed. Durable is checked first because it is the half that survives a restart.
+    /// Look `batch_id` up: the durable index, then the open window, then unknown. The two sets are
+    /// disjoint: a batch id enters `accepted_batches` only at `close_window`. Durable is checked
+    /// first because it is the half that survives a restart.
     pub(super) fn of<W>(live: &LiveState, window: &CommitWindow<W>, batch_id: &str) -> BatchState {
         if let Some((body_hash, entity_ids)) = live.accepted_batch(batch_id) {
             return BatchState::Accepted {
@@ -85,56 +73,35 @@ pub(super) enum Admission {
 }
 
 /// The most entries one deny window may hold, and the most changes `/control/changes` enqueues
-/// before it collects.
-///
-/// Bounds two things: the drain terminates even under sustained deny arrival rather than never
-/// closing (see [`Executor::run_deny_pass`]), and `/control/changes`'s pending receipts stay
-/// bounded, since it enqueues in chunks of this size. Below this ceiling a larger value only
-/// reduces fsyncs and overlay clones, so it is a constant rather than a configuration key.
+/// before it collects. Bounds the drain so it terminates under sustained deny arrival. Raising it
+/// reduces fsyncs and overlay clones at the cost of larger pending-receipt bursts.
 pub const DENY_WINDOW_MAX_ENTRIES: usize = 1_000;
 
 /// How many deny windows may pass before the overlay publishes regardless of whether the drain has
-/// closed.
-///
-/// A liveness floor, not a latency bound: the drain loops while the deny lane is non-empty, so
-/// without a floor the newest manifest could trail live state indefinitely. A deny's ack stays
-/// coupled to its own window's fsync and swap, upstream of publication, so this floor only delays
-/// when the complete deny state reaches a side-manifest, at ≤ 64,000 dispositions, all durable in
-/// the WAL and recovered by any WAL-bearing restart.
+/// closed. A liveness floor: without it the newest manifest could trail live state indefinitely
+/// under sustained deny arrival. Bounds the side-manifest lag to at most 64,000 dispositions,
+/// already durable in the WAL and recovered by any restart.
 pub(super) const OVERLAY_PUBLICATION_MAX_WINDOWS: u64 = 64;
 
-/// How often the executor re-checks for a completed flush while one is in flight or completed
-/// but not yet drained.
-///
-/// The pool cannot ring the doorbell: an executor holding a clone of its own bell sender would
-/// keep the channel alive and block `WritePath::drop`'s join. So the wake-up is a poll, armed only
-/// while there is something to wait for; a quiescent executor sleeps the full tick, and this
-/// interval is what keeps `POST /control/flush` prompt on an idle node.
+/// How often the executor re-checks for a completed flush while one is in flight or completed but
+/// not yet drained. A poll, not a push: the pool cannot hold the doorbell sender, since that would
+/// block `WritePath::drop`'s join. Armed only while something is outstanding.
 pub(super) const FLUSH_COMPLETION_POLL: std::time::Duration = std::time::Duration::from_millis(20);
 
-/// How long after a cycle failed to publish the next retry may come.
-///
-/// A failed cycle stays open and re-arms its request, which would otherwise retry at
-/// [`FLUSH_COMPLETION_POLL`]'s rate for as long as the condition stands. A period tick and a row
-/// trip are not held back by it.
+/// How long after a cycle failed to publish the next retry may come. Without this floor a failed
+/// cycle would retry at [`FLUSH_COMPLETION_POLL`]'s rate. A period tick and a row trip are not held
+/// back by it.
 pub(super) const FAILED_CYCLE_RETRY: std::time::Duration = std::time::Duration::from_secs(1);
 
-/// How often the executor looks for a completed fold while one is running.
-///
-/// Coarser than [`FLUSH_COMPLETION_POLL`] because a fold runs for minutes to hours rather than
-/// seconds, so the faster poll would spin the loop for no benefit. Once the fold has sent,
-/// `fold_completed_pending` puts the wait back on the fast poll.
+/// How often the executor looks for a completed fold while one is running. Coarser than
+/// [`FLUSH_COMPLETION_POLL`] since a fold runs minutes to hours, not seconds. Once the fold has
+/// sent, `fold_completed_pending` puts the wait back on the fast poll.
 pub(super) const FOLD_COMPLETION_POLL: std::time::Duration = std::time::Duration::from_millis(200);
 
 /// How long the executor waits before each re-attempt at making a deny window durable, and
-/// therefore how many attempts there are: the first sync, plus one per entry here.
-///
-/// The deny lane is FIFO on a single thread, so this delay is paid by every deny queued behind a
-/// failing window, not once by the caller who hit it. Two re-attempts, because the repair is
-/// re-dirtying the pages and syncing again (`tessera_lifecycle::wal::Wal::retry_durability`),
-/// which converts a transient writeback error but nothing about a device that is actually
-/// failing. The delays are non-zero because the other failure a retry plausibly converts is a
-/// short-lived `ENOSPC`, for which an immediate retry is the one schedule guaranteed not to help.
+/// therefore how many attempts there are: the first sync, plus one per entry here. The deny lane
+/// is FIFO on a single thread, so this delay is paid by every deny queued behind a failing window.
+/// Non-zero because an immediate retry cannot help a short-lived `ENOSPC`.
 pub(super) const DENY_DURABILITY_BACKOFF: [std::time::Duration; 2] = [
     std::time::Duration::from_millis(50),
     std::time::Duration::from_millis(200),
@@ -148,24 +115,11 @@ pub const DENY_DURABILITY_ATTEMPTS: usize = DENY_DURABILITY_BACKOFF.len() + 1;
 
 /// The levels a fold's retirement is about to move, and the set it retires.
 ///
-/// A fold writes its manifest before it retires: the retirement is not reversible, so a manifest
-/// that would not commit must leave it undone. Between the two, the store holds the pre-retirement
-/// records while the prefix being written holds the post-retirement ones. The retirement removes a
-/// retired entity's own artifact, drops it from every surviving artifact's membership, and drops or
-/// shrinks a generating set that lost a member.
-///
-/// A row column and a tile index need only the first: a retired entity has no row in the space this
-/// fold wrote, so a surviving artifact projects to the same rows before and after its membership
-/// shrinks. The fold composes both from the store's records without the retired artifacts
-/// ([`Self::records`]) and stamps them with the version the level will carry once the retirement
-/// has run ([`Self::version_after`]); a containment partition and a spatial level's row forms stay
-/// omitted for a pending level and recompose on first use, since a dropped content shifts ranks and
-/// a retirement removes the shapes a row form is resolved from.
-///
-/// A fold discarded between the manifest and the flip leaves a prefix `CURRENT` never names, which
-/// nothing opens. A process that dies after the flip restarts from the manifest, whose records and
-/// stamped version are the post-retirement ones; any record the log replays over them moves the
-/// version and is refused at the version check. In every case the level recomposes on first use.
+/// A fold writes its manifest before it retires, since the retirement is not reversible: a
+/// manifest that would not commit must leave it undone. [`Self::records`] composes a level's
+/// records without the retired artifacts, and [`Self::version_after`] stamps them with the version
+/// the level will carry once the retirement has run. A containment partition and a spatial level's
+/// row forms are omitted for a pending level and recompose on first use.
 pub(super) struct PendingRetirement {
     levels: Vec<(String, u32)>,
     retired: croaring::Bitmap,
@@ -214,10 +168,9 @@ pub(super) struct FoldDerived<'a> {
 
 /// Every level's version, and the derived files of `held` stamped with their level's version.
 ///
-/// A file whose level has moved is dropped here, so a manifest never names one nothing could
-/// adopt. For a level in `pending_retirement` (the fold's own case, see [`PendingRetirement`]) the
-/// version is the store's plus one: what the level will carry once the retirement has run, and
-/// what the fold stamped the files it composed for it with.
+/// A file whose level has moved is dropped, so a manifest never names one nothing could adopt. For
+/// a level in `pending_retirement` the version is the store's plus one: what the level will carry
+/// once the retirement has run.
 pub(super) fn artifact_coordinates(
     store: &ArtifactStore,
     held: &[tessera_store::manifest::DerivedExtent],
@@ -293,16 +246,11 @@ impl std::fmt::Display for ManifestCommitRefused {
     }
 }
 
-/// Replace a manifest's deny fields with the overlay's live state.
-///
-/// Serialised fresh at every write, never carried forward from another manifest: a side-manifest
-/// is complete current state, and these two fields are the only ones whose truth lives outside the
-/// files the manifest names. Copying them forward would publish whatever was true when the earlier
-/// manifest was written, and an unsuppress would never reach disc.
-///
-/// The two fields are taken from the two bitmaps separately, never from `Overlay::denied`'s union:
-/// a deletion and a suppression retire under different rules, and publishing the union under one
-/// field would make every deletion look retirable by an unsuppress.
+/// Replace a manifest's deny fields with the overlay's live state. Serialised fresh at every
+/// write, never carried forward: copying an earlier manifest's fields forward would leave an
+/// unsuppress never reaching disc. The two fields are taken from the two bitmaps separately, never
+/// from `Overlay::denied`'s union, since publishing the union would make every deletion look
+/// retirable by an unsuppress.
 pub(super) fn write_deny_state(manifest: &mut SegmentsManifest, overlay: &Overlay) {
     manifest.deny = overlay
         .suppressed_entities()
@@ -317,16 +265,9 @@ pub(super) fn write_deny_state(manifest: &mut SegmentsManifest, overlay: &Overla
 
 /// Carry the live vocabulary bindings into a manifest's `vocabulary_extensions`,
 /// `write_deny_state`'s sibling, called beside it at every publication site except the fold's.
-///
-/// Union, never restate: `manifest` already carries every extension a previous publication wrote,
-/// and `extensions_beyond` gives only what the build's `MANIFEST.vocabularies` does not already
-/// carry, appended into what is held rather than replacing it. Unlike `write_deny_state`, a binding
-/// must never shrink, so restating it fresh each time is exactly the shape that could silently
-/// drop one.
-///
-/// The fold does not call this: it folds every served `vocabulary_extensions` directly into the new
-/// prefix's `MANIFEST.vocabularies` and writes an empty extension set on purpose, since restating
-/// the same bindings here too would bind each key twice.
+/// Union, never restate: a binding must never shrink, so this appends only what
+/// `extensions_beyond` gives beyond what the manifest already carries. The fold does not call
+/// this: it folds every served extension into `MANIFEST.vocabularies` directly.
 pub(super) fn write_vocabulary_extensions(
     manifest: &mut SegmentsManifest,
     vocabularies: &Vocabularies,
@@ -368,10 +309,8 @@ mod vocabulary_extensions_tests {
         }
     }
 
-    /// A carried binding must survive even when the live view has nothing to say about it.
-    /// `extensions_beyond` only emits an entry for a vocabulary its own `by_name` tracks, so a
-    /// manifest that already carries an extension for one the live view does not must not have
-    /// that carried entry erased by a write that touches an unrelated vocabulary.
+    /// A carried binding must survive even when the live view has nothing to say about it: a write
+    /// touching an unrelated vocabulary must not erase an extension already held.
     #[test]
     pub(super) fn a_carried_extension_survives_a_write_the_live_view_recomputes_nothing_for() {
         let mut manifest = SegmentsManifest::empty();
@@ -398,8 +337,7 @@ mod vocabulary_extensions_tests {
         assert_eq!(legacy.values[0].code, 7);
     }
 
-    /// The ordinary case beside it: a fresh mint is appended beside what is already carried, and a
-    /// binding restated identically is not duplicated.
+    /// A fresh mint is appended beside what is already carried, and a restated binding is not duplicated.
     #[test]
     pub(super) fn a_fresh_binding_is_appended_beside_what_is_already_carried_and_not_duplicated() {
         let mut manifest = SegmentsManifest::empty();
@@ -414,7 +352,6 @@ mod vocabulary_extensions_tests {
 
         let mut vocabularies =
             Vocabularies::seed(&[empty_vocabulary("department")], &[], &[]).unwrap();
-        // Restates the binding the manifest already holds, plus one genuinely new one.
         vocabularies
             .get_mut("department")
             .unwrap()
@@ -443,18 +380,15 @@ mod vocabulary_extensions_tests {
     }
 }
 
-/// The one plan a dispatch sends, chosen by oldest unflushed row.
-///
-/// Free and pure so the choice can be tested without an executor, since it is the choice, not the
-/// dispatch, that carries the property. See `Executor::dispatch_flushes` for why one plan.
+/// The one plan a dispatch sends, chosen by oldest unflushed row. Free and pure so the choice can
+/// be tested without an executor. See `Executor::dispatch_flushes` for why one plan.
 pub(super) fn plan_to_dispatch(
     plans: Vec<(String, crate::flush::FlushPlan)>,
 ) -> Option<(String, crate::flush::FlushPlan)> {
     plans.into_iter().min_by_key(|(_, plan)| {
-        // `items` is ascending by entity id and ids are issued monotonically, so the first is this
-        // view's oldest waiting row. An empty plan cannot occur (`plan_flush` returns
-        // `NothingToFlush`), and sorting it last rather than first keeps a hypothetical one from
-        // winning every tick.
+        // `items` is ascending by entity id, so the first is this view's oldest waiting row. An
+        // empty plan cannot occur (`plan_flush` returns `NothingToFlush`); sorting it last keeps a
+        // hypothetical one from winning every tick.
         plan.items
             .first()
             .map_or(u64::MAX, |(entity, _)| entity.raw())
@@ -464,9 +398,9 @@ pub(super) fn plan_to_dispatch(
 /// Whether a completed flush's dictionary moved under it. See the call site in
 /// [`Executor::publish_flush`].
 ///
-/// Pure so the scoping is testable: a flush that promoted nothing (`None`) is never discarded
-/// however far the dictionary has moved, because its tier names only ordinals below the length it
-/// planned against and append-only extension preserves those.
+/// A flush that promoted nothing (`None`) is never discarded however far the dictionary has moved:
+/// its tier names only ordinals below the length it planned against, which append-only extension
+/// preserves.
 pub(super) fn dictionary_moved_under(promoted_from_dict_len: Option<u32>, live_len: u32) -> bool {
     promoted_from_dict_len.is_some_and(|planned| planned != live_len)
 }
@@ -483,9 +417,8 @@ pub(super) struct PendingReclaim {
 
 /// Seconds since the Unix epoch, or `None` if the clock is before it.
 ///
-/// `None` reads as "no fold has ended yet", which switches the interval floor off rather than
-/// jamming it on: the safe direction for a clock this absurd, and the same answer a fresh process
-/// gives.
+/// `None` reads as "no fold has ended yet", switching the interval floor off rather than jamming it
+/// on: the safe direction, and the same answer a fresh process gives.
 pub(super) fn unix_now() -> Option<u64> {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -507,21 +440,17 @@ pub(super) fn artifact_level_of(record: &WalRecord) -> Option<(&str, u32)> {
 /// The growth records one closed window owes, with the index of the entry to blame if an append
 /// fails, in the order they are to be appended.
 ///
-/// One record per `(layer, level)` for the whole window, not one per entry: entries in a window are
-/// already committed together under one fsync, and several batches naming one cluster are the
-/// ordinary shape of parallel ingest, so merging costs one union and saves a record and a pin per
-/// batch. A join still carries its own `(layer, level, ordinal)`, so nothing infers one from
-/// another's.
+/// One record per `(layer, level)` for the whole window, not one per entry: several batches naming
+/// one cluster merge into a union. A join still carries its own `(layer, level, ordinal)`.
 ///
 /// The entities are `entity_ids[row]`, the assignment this window just made, in the caller's own
-/// row order, which puts a point's membership in the same commit as the point.
+/// row order.
 pub(super) fn growth_records<W>(closed: &[tessera_lifecycle::ClosedEntry<W>]) -> Vec<(WalRecord, usize)> {
     use std::collections::BTreeMap;
     /// One `(layer, level)`'s joins: the entry to blame for the append, and a bitmap per ordinal.
     pub(super) type Level = (usize, BTreeMap<u32, croaring::Bitmap>);
-    // Ordered, so the records a window appends do not depend on hash iteration order: two nodes
-    // replaying one log must read the same sequence, and a test comparing two runs is entitled to
-    // the same one.
+    // Ordered, so replay order does not depend on hash iteration: two nodes replaying one log must
+    // read the same sequence.
     let mut by_level: BTreeMap<(&str, u32), Level> = BTreeMap::new();
     for (index, entry) in closed.iter().enumerate() {
         for join in &entry.memberships {
@@ -556,28 +485,13 @@ pub(super) fn growth_records<W>(closed: &[tessera_lifecycle::ClosedEntry<W>]) ->
 /// The artifacts a closed window's rows named and no artifact holds: the records that create them,
 /// in the order they must be appended, and how many each entry is to be told it created.
 ///
-/// Minting is a publication, and it happens here rather than at admission: an ordinal is claimed
-/// from the level's own cursor and is durable only in the record that claims it, so a claim made at
-/// admission would be held, unappended, across everything the executor does before the window
-/// closes. Here the window is already closed, so there is nothing to interleave with.
-///
-/// One artifact per key per level, for the whole window: the keys are gathered into one map before
-/// anything is prepared, so two points naming the same unknown key mint once and join the one
-/// artifact. A key a live artifact already holds is not minted at all: it is re-resolved here
-/// against `ArtifactStore::ordinal_of_key`, since a publication may have landed between the batch's
-/// admission and this close, and it grows instead.
-///
-/// A minted artifact is published carrying its members, not published empty and then grown, so the
-/// join needs no second record and no log pin of its own; `growth_records` skips a membership whose
-/// ordinal is `None` for that reason.
-///
-/// This is the one route by which the wire creates a lineage edge: a growth adds members and never
-/// lineage, so an edge naming an artifact that already exists can only be checked, and one naming
-/// an artifact that does not yet exist is settled at the publication that creates it. The chain
-/// arrives parent before child, in the only two shapes a column can spell: a nested lineage is one
-/// level and one record, where `prepare_publish` resolves a sibling's ordinal within its own batch;
-/// a tiered chain is a record per level, coarse first, where the parent's ordinal was fixed by the
-/// record before and is answered by `pending`.
+/// Minting happens here, at the close, not at admission: an ordinal is claimed from the level's own
+/// cursor and is durable only in the record that claims it. One artifact per key per level for the
+/// whole window, re-resolved against `ArtifactStore::ordinal_of_key` in case a publication landed
+/// since admission, in which case it grows instead of minting. A minted artifact is published
+/// carrying its members, so `growth_records` skips a membership whose ordinal is `None`. This is
+/// the one route by which the wire creates a lineage edge: a growth never creates one, so the edge
+/// arrives parent before child.
 pub(super) fn mint_plan<W>(
     closed: &[tessera_lifecycle::ClosedEntry<W>],
 ) -> Option<(MintPlan, Vec<tessera_lifecycle::BatchEdge>)> {
@@ -590,8 +504,7 @@ pub(super) fn mint_plan<W>(
             }
             let (_, members) = wanted
                 .entry((join.layer.clone(), join.level, join.key.clone()))
-                // The first entry that named the key owns the mint, which makes the per-batch
-                // count sum to the window's, since `growth_records` blames an append the same way.
+                // The first entry that named the key owns the mint.
                 .or_insert_with(|| (index, croaring::Bitmap::new()));
             for row in &join.rows {
                 // Entity space is `u32`-wide, so the narrowing is total.
@@ -613,18 +526,15 @@ pub(super) fn mint_plan<W>(
 /// entities joining it.
 pub(super) type MintPlan = std::collections::BTreeMap<(String, u32, String), (usize, croaring::Bitmap)>;
 
-/// A key that acquired an artifact between its resolution and its preparation grows into it, rather
-/// than minting a second artifact for a key a live one already holds.
+/// A key that acquired an artifact between its resolution and its preparation grows into it rather
+/// than minting a second one.
 ///
-/// [`Executor::prepare_mints`] re-resolves every key it is given against the store, and answers
-/// the ones that turned out to be held; this writes those ordinals back onto the memberships, so
-/// [`growth_records`] and `values_growth_records` carry them as ordinary joins. A membership left
-/// with no ordinal is one the preparation is about to mint, and its publication carries the rows.
-///
-/// It can only find something at the ingest door, where a window stays open across a
-/// `PublishArtifacts` command that takes the work lane between an entry's admission and the
-/// window's close. At the values door the resolution and the preparation are two statements with
-/// nothing between them, so `resolved` is always empty and this is a no-op there.
+/// [`Executor::prepare_mints`] re-resolves every key against the store and answers the ones that
+/// turned out held; this writes those ordinals back onto the memberships, so `growth_records`
+/// carries them as ordinary joins. A membership left with no ordinal is one the preparation is
+/// about to mint. Only the ingest door can find something here, since a window can stay open across
+/// a `PublishArtifacts` command between admission and close; at the values door `resolved` is
+/// always empty.
 pub(super) fn settle_resolved_ordinals(
     memberships: &mut [tessera_lifecycle::ResolvedMembership],
     resolved: &std::collections::BTreeMap<(String, u32, String), u32>,
@@ -653,28 +563,24 @@ pub(super) type PreparedMints = Result<
     String,
 >;
 
-/// A second is short against the interval an operator or an orchestrator would take to notice, and
-/// long enough that a genuinely dead device is retried sixty times a minute rather than continuously.
+/// How often a degraded node retries WAL recovery. A second is short against the interval an
+/// operator would take to notice, and long enough that a genuinely dead device is retried sixty
+/// times a minute rather than continuously.
 ///
-/// It is not a latency bound on anything a caller sees: a degraded node still answers denies
-/// immediately, and traffic arriving at any point wakes the loop through the doorbell as usual, so
-/// a busy node attempts recovery far more often than this.
+/// Not a latency bound on anything a caller sees: a degraded node still answers denies immediately.
 pub(super) const WAL_RECOVERY_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// One deny in an open window: its record, and everything needed to apply it and answer its caller.
 ///
-/// `record` is built at the drain rather than at the append so the window is a list of things
-/// that are ready to be written: the append loop does no work that can be got wrong per entry.
+/// `record` is built at the drain rather than at the append so the window is a list of things that
+/// are ready to be written: the append loop does no work that can be got wrong per entry.
 pub(super) struct DenyEntry {
     record: WalRecord,
     entity: EntityId,
     op: ChangeOp,
-    /// The waiter, or `None` for an entry nobody asked for.
-    ///
-    /// `None` is the cascade (`Executor::cascade_dependents`): deleting an artifact deletes the
-    /// artifacts depending on it, and those deletions have no caller to answer. They are entries in
-    /// every other respect: their own WAL record, applied in the same window, retired at the same
-    /// fold. The ack is the only thing that distinguishes them.
+    /// The waiter, or `None` for a cascaded deletion (`Executor::cascade_dependents`), which has no
+    /// caller to answer but is otherwise an ordinary entry: its own WAL record, applied in the same
+    /// window, retired at the same fold.
     reply: Option<Reply<()>>,
 }
 
@@ -685,9 +591,7 @@ pub(super) struct Executor {
     /// The only publishing capability in the write path. Not in [`LiveState`], which the handler
     /// side shares.
     pub(super) generation: Arc<GenerationHandle>,
-    /// The row-projection cache, shared for the one thing this thread does with it: dropping the
-    /// projections of generations now older than the retention depth. Runs at the swap. See
-    /// `RowProjectionCache::prune_generations_below`.
+    /// The row-projection cache, pruned of generations older than the retention depth at the swap.
     pub(super) row_projection_cache: Arc<RowProjectionCache>,
     /// See [`MaintenanceDeps::region_cache`].
     pub(super) region_cache: Arc<
@@ -696,59 +600,46 @@ pub(super) struct Executor {
             crate::region::RegionDecomposition,
         >,
     >,
-    /// The artifact row forms, rebuilt here at the fold, and read by every viewport. See
-    /// [`MaintenanceDeps::artifact_projections`].
+    /// The artifact row forms, rebuilt here at the fold, and read by every viewport.
     pub(super) artifact_projections: Arc<crate::artifacts::ArtifactProjections>,
     /// See [`MaintenanceDeps::shapes`].
     pub(super) shapes: Arc<crate::shapes::ShapeStore>,
     /// The lineages, rebuilt beside them and for the same reason.
     pub(super) lineages: Arc<crate::cut::Lineages>,
-    /// The supplied-content tables, held for the layer drop below. Not warmed at the fold: a
-    /// table is read from the blob the fold has just rewritten, and reading every level's is a
-    /// pass over the whole of it. Where a row form is rebuilt there because row space renumbered
-    /// under it, this one is merely stale and the first request that wants a level pays for that
-    /// level alone.
+    /// The supplied-content tables. Not warmed at the fold: a level is merely stale after one, and
+    /// the first request that wants it pays to read it.
     pub(super) level_contents: Arc<crate::artifact_content::LevelContents>,
     pub(super) queues: LifecycleQueues,
     pub(super) health: Arc<ExecutorHealth>,
-    /// The last window's sequence number. [`BatchState::Held`] is what it is for; all it has to be
-    /// is distinct per window.
+    /// The last window's sequence number; all it has to be is distinct per window.
     pub(super) window_seq: u64,
     /// `flush_max_age_secs`, the tick's period.
     pub(super) flush_max_age_secs: u64,
     /// `flush_max_items`, buffered rows at which the tick comes due ahead of its period.
     pub(super) flush_max_items: usize,
-    /// Distinguishes two flush attempts at the same `segments_version`. See the `seg_id` this
-    /// feeds.
+    /// Distinguishes two flush attempts at the same `segments_version`.
     pub(super) flush_attempt: u64,
-    /// The next `SEGMENTS-<n>.json` number. Every writer of a side-manifest takes its number here,
-    /// at the moment it writes: a number taken when a flush is planned is stale by the time it
-    /// lands. [`Executor::allocate_manifest_n`] also raises it over the files on disc, because a
-    /// counter only knows what this executor wrote.
+    /// The next `SEGMENTS-<n>.json` number, taken at the moment a writer writes rather than when a
+    /// flush is planned. [`Executor::allocate_manifest_n`] also raises it over the files on disc.
     pub(super) next_manifest_n: u64,
-    /// Whether live state holds something no side-manifest carries yet. Cleared only by a
-    /// successful publication, so a node that was poisoned or diverged publishes once on recovery.
+    /// Whether live state holds something no side-manifest carries yet.
     pub(super) deny_dirty: bool,
     /// Deny windows applied since the last publication, the counter
     /// [`OVERLAY_PUBLICATION_MAX_WINDOWS`] floors.
     pub(super) windows_since_publication: u64,
-    /// The bundle root, not the prefix directory. A fold moves the prefix, so
-    /// [`Executor::prefix_dir`] derives the directory from the live generation at each use.
+    /// The bundle root, not the prefix directory: a fold moves the prefix, so
+    /// [`Executor::prefix_dir`] derives it at each use.
     pub(super) bundle_root: PathBuf,
     pub(super) identity_key: IdentityKey,
-    /// The shared compute pool a flush executes on, and the handle it submits its completed unit
-    /// back through.
+    /// The shared compute pool a flush executes on.
     pub(super) pool: Arc<rayon::ThreadPool>,
     /// See [`MaintenanceDeps::max_distinct_terms`].
     pub(super) max_distinct_terms: u64,
-    /// Completed flushes arriving from the pool. Its own channel: a completed flush's files are
-    /// durable and may not be shed, and a pool task cannot hold the handle. Drained after the deny
-    /// lane, so a suppression never queues behind a flush's publication.
+    /// Completed flushes arriving from the pool. Drained after the deny lane, so a suppression
+    /// never queues behind a flush's publication.
     pub(super) flush_done: Receiver<crate::flush::CompletedFlush>,
-    /// The entity-space coalesce's policy, its in-flight flag, its attempt counter and its own
-    /// completion channel: the same three-part shape a flush has, and separate from a flush's
-    /// because the two halves of merge are independent work; coupling them would make the cheap
-    /// one wait on the expensive one.
+    /// The entity-space coalesce's policy, in-flight flag, attempt counter and completion channel:
+    /// separate from a flush so the cheap one does not wait on the expensive one.
     pub(super) coalesce_policy: crate::coalesce::CoalescePolicy,
     pub(super) coalesce_in_flight: Arc<AtomicBool>,
     pub(super) coalesce_attempt: u64,
@@ -756,10 +647,8 @@ pub(super) struct Executor {
     pub(super) coalesce_submit: Sender<crate::coalesce::CompletedCoalesce>,
     /// The background refresh's dependencies. See [`crate::refresh`].
     pub(super) refresh: crate::refresh::RefreshDeps,
-    /// The row-space merge's policy, its in-flight flag, its attempt counter and its own
-    /// completion channel. Separate from both the flush's and the coalesce's: a merge publishes as
-    /// its own swap, since coupling it to the flush's cadence would make the flush's zero-cost path
-    /// carry the merge's refresh.
+    /// The row-space merge's policy, in-flight flag, attempt counter and completion channel:
+    /// separate from the flush and the coalesce, since a merge publishes its own swap.
     pub(super) coalesce_enabled: Arc<AtomicBool>,
     pub(super) merge_policy: MergePolicy,
     pub(super) merge_enabled: Arc<AtomicBool>,
@@ -773,11 +662,8 @@ pub(super) struct Executor {
     pub(super) fold_attempt: u64,
     pub(super) fold_done: Receiver<crate::compact::CompletedFold>,
     pub(super) fold_submit: Sender<crate::compact::CompletedFold>,
-    /// The suggestion index's rebuild, on the same in-flight / channel shape as the three passes
-    /// above, and the smallest of them: it reads a vocabulary out of the generation and writes
-    /// files the manifest does not name, so it has no plan, no gate and nothing to refuse. One at a
-    /// time across every vocabulary, since the cost it bounds is the sort's memory, not its
-    /// latency.
+    /// The suggestion index's rebuild. No plan, no gate, nothing to refuse: it reads a vocabulary
+    /// out of the generation and writes files the manifest does not name.
     pub(super) suggest_dir: PathBuf,
     pub(super) suggest_in_flight: Arc<AtomicBool>,
     pub(super) suggest_build: u64,
@@ -794,52 +680,42 @@ pub(super) struct Executor {
     /// See [`crate::compact::CompactionSchedule`]. Consulted at the tick, beside the flush's own.
     pub(super) compaction: crate::compact::CompactionSchedule,
     /// When the last fold attempt started, as a unix second. Stamped by every dispatch whatever the
-    /// attempt then does, so the interval limits attempts: several discard causes are persistent,
-    /// and each discarded fold leaves a whole prefix on disc. See [`Executor::fold_floor_from`].
+    /// attempt then does, so the interval limits attempts.
     pub(super) last_fold_start_unix: Option<u64>,
-    /// Every external-id sidecar replaced over the live prefix, weakly. A coalesce builds a new
-    /// sidecar over the same prefix, so a generation still holding the old one is invisible to the
-    /// strong counts [`Executor::reclaim_superseded_prefixes`] reads; a `Weak` answers whether one
-    /// is still alive without keeping its mappings. Moved into the [`PendingReclaim`] at a fold.
+    /// Every external-id sidecar replaced over the live prefix, weakly held: a `Weak` answers
+    /// whether one is still alive without keeping its mappings alive itself. Moved into
+    /// [`PendingReclaim`] at a fold.
     pub(super) superseded_sidecars: Vec<std::sync::Weak<crate::session::ExternalIdIndex>>,
-    /// Every membership extent this node has published: the complete list, not a diff. Held here
-    /// because a publication starts from a clone of the live generation's manifest, which a
-    /// side-manifest write does not refresh; extending the clone would drop earlier entries.
+    /// Every membership extent this node has published: the complete list, not a diff, since a
+    /// publication clones a manifest that may be stale and extending that clone would drop entries.
     pub(super) membership_extents: Vec<tessera_store::manifest::MembershipExtent>,
-    /// Every derived file the current prefix holds. Held here because a publication clones a
-    /// manifest that may be stale. What reaches a manifest is this list filtered to the files the
-    /// store's level versions still make adoptable ([`artifact_coordinates`]); the fold replaces
-    /// it wholesale, its paths being relative to the prefix the fold publishes.
+    /// Every derived file the current prefix holds. What reaches a manifest is this list filtered
+    /// to the files the store's level versions still make adoptable ([`artifact_coordinates`]); a
+    /// fold replaces it wholesale.
     pub(super) derived_extents: Vec<tessera_store::manifest::DerivedExtent>,
-    /// Every artifact content extent this node has published, complete current state, held for
-    /// the reason above and written the same way. The two lists travel together: a membership
-    /// without its content leaves an artifact whose description cannot be read, which withholds it.
+    /// Every artifact content extent, held and written like `membership_extents`, which it travels
+    /// with: a membership without its content withholds the artifact.
     pub(super) artifact_record_extents: Vec<tessera_store::manifest::RecordExtent>,
     /// Superseded prefixes awaiting reclamation, each held by the generation that named it. A
-    /// prefix is deleted only once nothing else holds that generation or its external-id sidecar,
-    /// because the sidecar opens its files lazily and a request could still be about to. A process
-    /// that exits first leaves the tree for the startup sweep.
+    /// prefix is deleted only once nothing else holds that generation or its external-id sidecar. A
+    /// process that exits first leaves the tree for the startup sweep.
     pub(super) pending_reclaim: Vec<PendingReclaim>,
     /// The sender pool tasks are given a clone of. Nothing rings the doorbell when a flush
-    /// completes: it is picked up at the next tick, and an executor holding its own doorbell sender
-    /// would never see the disconnect that shuts it down.
+    /// completes: it is picked up at the next tick.
     pub(super) flush_submit: Sender<crate::flush::CompletedFlush>,
     /// When the last tick fired. Started at construction, so the first tick is one period after
     /// the executor starts rather than immediately at startup.
     pub(super) last_tick: std::time::Instant,
     /// What every accepted write since the last tick did to each level's row forms, applied at the
-    /// next tick. One level's deltas carry consecutive level versions. A level the fold rewrites
-    /// has its entry dropped with its forms.
+    /// next tick. One level's deltas carry consecutive level versions.
     pub(super) pending_forms: std::collections::BTreeMap<(String, u32), Vec<crate::artifacts::LevelDelta>>,
-    /// The WAL's sequence position after the last rotation (or at start), so a tick can tell
-    /// whether the log has grown since: the deny-only regime's rotation trigger. An idle node
-    /// whose position has not moved rotates nothing.
+    /// The WAL's sequence position after the last rotation, so a tick can tell whether the log has
+    /// grown since: the deny-only regime's rotation trigger.
     pub(super) wal_position_at_last_rotation: u64,
     /// When [`Executor::sample_wal_gauge`] last began a walk, or `None` before the first one.
-    /// The rate limit on that walk is stated there; this is the clock it reads.
     pub(super) last_wal_sample: Option<std::time::Instant>,
-    /// Walks [`Executor::sample_wal_gauge`] has taken, published as [`WalGauge::samples`] so a
-    /// reader can tell a reading that was refreshed from one the rate limit held back.
+    /// Walks taken, published as [`WalGauge::samples`] so a reader can tell a refreshed reading
+    /// from one the rate limit held back.
     pub(super) wal_samples: u64,
     #[cfg(feature = "fault-injection")]
     pub(super) faults: Option<Arc<tessera_lifecycle::faults::FaultSwitchboard>>,
@@ -847,10 +723,8 @@ pub(super) struct Executor {
 
 /// The parent each child in these edges is named under, refusing a child named under two.
 ///
-/// A list column declares the edges, so two rows naming different parents for one artifact are two
-/// hierarchies and which of them was published would be the order the rows arrived in. The child is
-/// keyed by its own level, which a levelled taxonomy needs: one key legitimately sits at two levels
-/// and carries a different parent at each.
+/// The child is keyed by its own level, which a levelled taxonomy needs: one key legitimately sits
+/// at two levels and carries a different parent at each.
 pub(super) fn parent_of_each_child(
     edges: &[tessera_lifecycle::BatchEdge],
 ) -> Result<std::collections::BTreeMap<(&str, u32, &str), &str>, String> {
@@ -883,35 +757,15 @@ impl Executor {
     /// Drain deny to empty, then execute at most one work item, then repeat, blocking only once
     /// both queues have been observed empty.
     ///
-    /// Blocking only when both queues were observed empty is what makes the capacity-one bell
-    /// safe: a token is only ever discarded as `Full` while a job is still visible to the
-    /// `try_recv` below, so no job is left asleep.
-    ///
-    /// Deny is drained to empty at the top of every iteration, and [`Executor::run_work_pass`]
-    /// returns as soon as it closes a window, so a deny's wait is bounded by the window in front
-    /// of it (at most two) rather than by queue depth. A sustained deny flood starves ingest
-    /// completely, and the deny queue is unbounded in memory.
-    ///
-    /// A deny may overtake a queued ingest safely: `/control/changes` resolves its `external_id`
-    /// against the live map in the handler and 404s if the item is not established yet, and an
-    /// item is established only at apply. So no deny naming a still-queued ingest's item can be
-    /// submitted at all, and WAL append order still equals apply order. An operator issuing
-    /// `suppress D` while D's ingest is still held gets a 404 and must retry once D lands.
-    ///
-    /// Shutdown drains and executes; it does not discard. The loop leaves only from `bell.recv()`,
-    /// after both `try_recv`s, so the disconnect iteration has already drained deny to empty and
-    /// run one work item; anything left queued beyond that is dropped with the receivers and had
-    /// no waiter left to ack.
+    /// [`Executor::run_work_pass`] returns as soon as it closes a window, so a deny's wait is
+    /// bounded by the window in front of it, not by queue depth. A deny may overtake a queued
+    /// ingest safely: an item is established only at apply, so append order still equals apply
+    /// order. Shutdown drains and executes rather than discarding.
     pub(super) fn run(&mut self) {
-        // Sampled once here so a node that has just restarted onto a replayed log does not
-        // publish "no members, no bytes" for a whole tick period, which reads as an empty log
-        // rather than an unsampled one.
         self.sample_wal_gauge();
         loop {
             self.recover_wal();
-            // Completed flushes are applied before the tick plans another: until a flush is
-            // published its items are still in the buffer, so a tick that planned first would
-            // re-plan the rows the completed unit already wrote.
+            // Applied before the tick plans another, or it would re-plan rows already written.
             let published = self.publish_completed_flushes()
                 | self.publish_completed_coalesces()
                 | self.publish_completed_merges()
@@ -919,10 +773,6 @@ impl Executor {
                 | self.publish_completed_suggests();
             self.tick_if_due();
             while self.run_deny_pass() {}
-            // One write covers a burst of consecutive windows rather than one per window, so a
-            // bulk revocation does not rewrite a growing complete state once per 1,000 entries.
-            // Runs on every iteration, so a node whose publication was refused while poisoned
-            // publishes as soon as it recovers.
             self.publish_overlay_state();
             if self.run_work_pass() || published {
                 continue;
@@ -935,36 +785,13 @@ impl Executor {
 
     /// The flush tick: the one cadence on which geometry is published.
     ///
-    /// Runs at the top of the loop, before the deny drain, so a tick is never delayed by work
-    /// that arrived after it came due, and after the drain, so a tick that publishes does not
-    /// preempt a deny already queued.
-    ///
-    /// Three triggers reach this cadence and none publishes off it: the period, the buffered-row
-    /// count, and `POST /control/flush`, accepted at any time and executed here (its 202 already
-    /// means "accepted, not yet done").
-    ///
-    /// The row trigger bounds the commit window's cost. Every close deep-copies the buffer, so
-    /// with `B` rows buffered between publications and a close every `W` a flush interval pays
-    /// `B²/2W`; under the age tick alone `B` is the arrival rate times the period, unbounded in
-    /// the rate. `flush_max_items` bounds `B` directly.
-    ///
-    /// It also drives `reclaim`, being the periodic publisher that stage needs.
+    /// Runs at the top of the loop, before the deny drain, so a tick is never delayed by work that
+    /// arrived after it came due, and after the drain, so a tick that publishes does not preempt a
+    /// deny already queued. Three triggers reach this cadence and none publishes off it: the
+    /// period, the buffered-row count, and `POST /control/flush`. It also drives `reclaim`.
     pub(super) fn tick_if_due(&mut self) {
         let period = std::time::Duration::from_secs(self.flush_max_age_secs);
-        // A requested flush pulls the deadline forward; it does not publish off the cadence.
-        // `POST /control/flush` sets the flag and rings the doorbell, and the tick fires here, on
-        // this one path, at the next loop iteration, so everything a tick guarantees holds for an
-        // operator-triggered flush exactly as for a scheduled one. A write sent with
-        // `wait=visible` requests a tick too; the parameter is for a single writer reading back
-        // what it just wrote, and a loader sends its pages without it and one flush at the end.
-        // The occupancy the executor itself maintains, not a count derived from a generation this
-        // thread would have to load: `apply_window` and every flush publication store it, so the
-        // trigger reads the same figure `/control/ingest`'s 429 is checked against.
         let rows_due = self.health.buffered_items.load(Ordering::SeqCst) >= self.flush_max_items;
-        // A row trip is a tick, with the period restarted under it, not a second cadence beside
-        // the period: a loader fast enough to trip the rows publishes on the rows and the age
-        // clock never comes due, and a loader slow enough never to trip them publishes on the age
-        // exactly as before.
         let period_due = self.last_tick.elapsed() >= period;
         let due = period_due || rows_due;
         let requested = self.health.flush_requested.load(Ordering::SeqCst);
@@ -972,57 +799,25 @@ impl Executor {
         if !due && !requested && !fold_requested {
             return;
         }
-        // A re-armed retry is floored ([`FAILED_CYCLE_RETRY`]): a tick fired while a failure is
-        // outstanding is a retry, and retrying at the completion poll's rate would re-plan the
-        // buffer fifty times a second. A period tick and a row trip come through regardless.
+        // Floored ([`FAILED_CYCLE_RETRY`]) so a retry does not re-plan the buffer at the
+        // completion-poll rate.
         if !due && self.health.failed_cycle_backoff().is_some() {
             return;
         }
-        // At most one flush in flight, read once here and not again below: a tick that will skip
-        // publishes into the cycle the running flush already opened, and a tick that will go on
-        // to dispatch opens one of its own before it publishes anything. Two reads could
-        // disagree; the value goes stale only in the direction of a flush having landed, which
-        // costs the skipped tick nothing it did not already risk.
         let flush_in_flight = self.health.flush_in_flight.load(Ordering::SeqCst);
         if !flush_in_flight {
-            // The cycle opens before anything is published, and consumes the flush request it
-            // honours in the same lock. Everything below belongs to this cycle, and its number is
-            // not reached until the last of it is applied.
             self.health.open_publication_cycle();
         }
-        // The WAL's size and its rotation bound, sampled here because nothing off this thread can
-        // read them: the log is owned by the executor. Sampled before this tick's own
-        // publication, so the reading is what the tick found rather than what it left, on both
-        // the flushing and the flush-skipped path. `sample_wal_gauge` rate-limits itself to once
-        // per `flush_max_age_secs` whatever the tick does.
         self.sample_wal_gauge();
-        // Reclamation is checked at every tick, ahead of the flush's in-flight gate, because it
-        // is the one maintenance step whose readiness depends on nothing this executor does: it
-        // waits on request threads finishing against a superseded generation.
+        // Ahead of the flush's in-flight gate: these wait on nothing this executor does.
         self.reclaim_superseded_prefixes();
-        // On the same argument: owed to residency rather than to any request, and waits on
-        // nothing this thread does.
         self.dispatch_suggest_rebuild();
-        // The row forms of every level a write touched, published here and nowhere else, ahead of
-        // the flush's in-flight gate on reclamation's argument: a tick that found a flush running
-        // still owes the interval's writes their publication. A request builds no form, so a
-        // level whose deltas are not yet published is served as last published, up to a tick
-        // stale, with counts understating and never the reverse.
         self.publish_row_forms();
 
         let generation = self.generation.load_full();
 
-        // At most one flush in flight, checked before any plan is built. A period tick arriving
-        // while one runs is skipped, not queued: two concurrent flushes would double-consume the
-        // buffer range, and a skipped tick must not pay the plan either, since a plan deep-clones
-        // every buffered item. Skips are counted and alarmed, because a flush persistently slower
-        // than the tick is a visibility-latency breach that `flush_max_age_secs` would otherwise
-        // miss.
-        //
-        // A requested flush is not consumed by a skip: the flag stays armed and a requested-only
-        // wake returns without counting a tick, so the request executes at the first iteration
-        // after the in-flight flush lands. Consuming it here would drop an operator's "drain now"
-        // whenever it raced a scheduled flush.
+        // A period tick arriving while a flush runs is skipped, not queued. A requested flush is
+        // not consumed by a skip: the flag stays armed for the first iteration after it lands.
         if flush_in_flight {
             if due {
                 self.last_tick = std::time::Instant::now();
@@ -1036,11 +831,7 @@ impl Executor {
                 self.health
                     .flushable_items
                     .store(flushable, Ordering::SeqCst);
-                // A skipped row trip is not the alarm the skipped period is: the row trigger
-                // asks for a publication as soon as `flush_max_items` have buffered, and a
-                // loader fast enough will ask again while the last one is still writing, which
-                // is the trigger working under backpressure. A missed period is the
-                // visibility-latency breach `flush_max_age_secs` guarantees against.
+                // A missed period is the visibility-latency breach `flush_max_age_secs` guards.
                 if flushable > 0 && period_due {
                     self.health.flush_skips.fetch_add(1, Ordering::Relaxed);
                     tracing::warn!(
@@ -1056,16 +847,7 @@ impl Executor {
         self.last_tick = std::time::Instant::now();
         self.health.mark_tick(self.last_tick);
         self.health.ticks.fetch_add(1, Ordering::Relaxed);
-        // A requested flush was consumed at the open above, whether or not there is anything to
-        // flush: a `POST /control/flush` against an empty buffer is satisfied by the tick it
-        // triggered rather than held until something arrives.
 
-        // Planned on this thread, executed on the pool. The plan, which buffered items acquire
-        // geometry and what the three dispositions do to them, is taken against the live
-        // generation here; the segment write and the publication follow through
-        // `dispatch_flushes`. The count it produces is what an operator needs to see a stalled
-        // flush: items that would acquire geometry at this tick, which stays at zero on a gated
-        // node and grows on one whose flush is failing.
         let mark = StageMark::now();
         let mut flushable = 0usize;
         let mut gated = false;
@@ -1084,9 +866,7 @@ impl Executor {
                 Err(crate::flush::NoFlush::NothingToFlush) => {}
                 Err(refusal) => {
                     gated = true;
-                    // Once per period. The refusal stands until an operator acts, and the cycle
-                    // it holds open re-arms its request, so the tick comes round at the retry
-                    // floor.
+                    // Once per period: the refusal stands until an operator acts.
                     if self.health.refusal_log_due() {
                         tracing::warn!(
                             view = %view,
@@ -1103,44 +883,26 @@ impl Executor {
             .store(flushable, Ordering::SeqCst);
 
         if plans.is_empty() {
-            // Nothing to flush, so nothing is left over either: a view whose rows stopped being
-            // flushable takes its plan out of the running, and a flag left standing would hold
-            // the cycle open with nothing coming to close it.
             self.health.deferred_plans.store(false, Ordering::SeqCst);
-            // Nothing to flush, so no publication is coming to rotate the log: the deny-only
-            // regime. See `rotate_if_grown`.
             self.rotate_if_grown();
             if gated {
-                // A refused plan leaves an unpublished cycle: the rows are still buffered and the
-                // overlay still holds what a publication would have carried, so the cycle stays
-                // open and the request stays armed until the refusal clears.
                 self.note_publication_failure();
             } else {
-                // Every view answered "nothing buffered", so this cycle's publication is the
-                // empty one and everything it was asked to publish is served.
                 self.health.close_publication_cycle();
             }
         } else if !self.dispatch_flushes(&generation, plans) {
-            // Every plan was dropped before it reached the pool, so this cycle published nothing
-            // it was asked to: it stays open and its request stays armed.
             self.note_publication_failure();
         }
-        // The fold is dispatched before the two it suspends, so a tick that starts one does not
-        // also start a merge that the flip would orphan.
+        // Dispatched before the two it suspends, so a tick that starts a fold does not also start
+        // a merge that the flip would orphan.
         self.dispatch_fold(&generation);
-        // The entity-space coalesce shares the tick and nothing else. It is independent of the
-        // flush: it consumes what earlier ticks published, so a tick that dispatched a flush may
-        // dispatch one too, and a gated node, which publishes no geometry, still bounds the axes
-        // a coalesce owns.
         self.dispatch_coalesce(&generation);
         self.dispatch_merge(&generation);
         drop(generation);
     }
 
-    /// Record that this cycle published nothing it was asked to publish.
-    ///
-    /// A thin wrapper so every site that drops a plan reads the same, and so the one rule stays
-    /// in one place: the cycle stays open, the request is re-armed, and the retry is floored.
+    /// Record that this cycle published nothing it was asked to publish: the cycle stays open, the
+    /// request is re-armed, and the retry is floored.
     pub(super) fn note_publication_failure(&self) {
         self.health.fail_publication_cycle();
     }
@@ -1157,24 +919,10 @@ impl Executor {
 
     /// If the WAL is degraded and the degradation is one a discard can end, end it.
     ///
-    /// The causes are transient at least as often as they are terminal: a filesystem that filled
-    /// and was relieved, a device that stumbled. Denies are never blocked by a poisoned WAL, since
-    /// they are applied in memory and answered 500 regardless, but a node that will not take reads
-    /// again until someone notices is just down, not fail-closed.
-    ///
-    /// By the time this runs, every caller above the durable boundary has been told its write is
-    /// not durable. Making those bytes durable afterwards is fail-open: a refused ingest would
-    /// reappear, and an exhausted deny window's `unsuppress`, appended but deliberately not
-    /// applied in memory, would take effect at the next replay and undo a suppression the operator
-    /// was told still stood. So the region is discarded instead, exactly what a restart would do
-    /// with the same file (`tessera_lifecycle::wal::Wal::discard_undurable`).
-    ///
-    /// A torn append does not recover: there is no repair for it here, so such a node stays
-    /// `WalPoisoned` until restarted, since a partial `write_all` leaves neither the file's
-    /// contents nor the descriptor's position known.
-    ///
-    /// Costs a healthy node one bool read per loop iteration; everything below the guard is
-    /// unreachable while the WAL is fine.
+    /// By the time this runs every caller has been told its write is not durable, so making those
+    /// bytes durable afterwards would be fail-open: an exhausted deny window's `unsuppress` would
+    /// undo a suppression the operator was told still stood. The region is discarded instead. A
+    /// torn append does not recover: such a node stays `WalPoisoned` until restarted.
     pub(super) fn recover_wal(&mut self) {
         if !self.wal.is_poisoned() {
             return;
@@ -1182,16 +930,11 @@ impl Executor {
         if !self.wal.is_recoverable() {
             return;
         }
-        // A failure here leaves the handle exactly as it was, so the next pass tries again. It is
-        // deliberately silent about failing: this runs on a timer while degraded, and a log line per
-        // attempt would turn one storage fault into an unbounded stream of them.
+        // Deliberately silent about failing: a log line per attempt would turn one storage fault
+        // into an unbounded stream of them.
         if self.wal.discard_undurable().is_ok() {
-            // The overlay has now diverged from the durable WAL, and stays diverged. The discard
-            // did not un-apply anything, so every deletion and suppression applied under the
-            // apply-anyway rule is in force in memory with no record behind it. Publishing a
-            // flush manifest or rotating the WAL from that overlay would make a 500'd, never-acked
-            // deny permanent, so the node keeps serving and keeps applying denies, and publishes
-            // nothing, until an operator restarts it.
+            // The discard did not un-apply anything: every deletion and suppression applied under
+            // the apply-anyway rule is in force in memory with no record behind it.
             if !self.health.overlay_diverged.swap(true, Ordering::SeqCst) {
                 tracing::error!(
                     "ALARM: this node recovered its WAL in process, so its overlay now holds \
@@ -1206,26 +949,17 @@ impl Executor {
 
     /// Block until something may be waiting, and report whether the executor should keep running.
     ///
-    /// While the WAL is degraded this wakes on a timer as well as on the doorbell, because
-    /// otherwise recovery would be reachable only by traffic: a node whose disk recovered during a
-    /// quiet period would stay unready until something arrived to wake it, and `/readyz` steers
-    /// traffic away from exactly that node. The poll runs only while degraded.
-    ///
-    /// Shutdown still leaves only from here, after both queues have been observed empty: a timeout
-    /// resumes the loop, and only a disconnect ends it.
+    /// While the WAL is degraded this also wakes on a timer, since `/readyz` steers traffic away
+    /// from a degraded node and recovery would otherwise be reachable only by traffic. Shutdown
+    /// leaves only from here, after both queues have been observed empty: a timeout resumes the
+    /// loop, and only a disconnect ends it.
     pub(super) fn wait_for_work(&self) -> bool {
-        // Bounded by the next tick, always: an unbounded `recv` would make visibility latency a
-        // function of load rather than of `flush_max_age_secs`, and would leave reclaim un-run on
-        // a quiescent node.
-        //
-        // A poisoned WAL wants a shorter wait than the tick, so the two take the smaller.
+        // Bounded by the next tick, always, so a quiescent node still runs reclaim.
         let until_tick = std::time::Duration::from_secs(self.flush_max_age_secs)
             .saturating_sub(self.last_tick.elapsed());
         let wait = if self.wal.is_poisoned() {
             until_tick.min(WAL_RECOVERY_POLL_INTERVAL)
         } else if let Some(backoff) = self.health.failed_cycle_backoff() {
-            // A cycle is open and unpublished, its request is armed, and the retry is not due
-            // yet. Waiting out the floor costs one wake instead of fifty a second.
             until_tick.min(backoff)
         } else if self.health.flush_requested.load(Ordering::SeqCst)
             || outstanding(
@@ -1236,21 +970,14 @@ impl Executor {
             || self.merge_outstanding()
             || self.health.fold_completed_pending.load(Ordering::SeqCst)
         {
-            // A flush or a coalesce is executing on the pool, or its completed unit is waiting in
-            // the corresponding channel, or a `POST /control/flush` is still unconsumed. The pool
-            // cannot ring the doorbell (see `flush_submit`), so this poll is what bounds
-            // publication latency on an idle node.
+            // The pool cannot ring the doorbell (see `flush_submit`).
             until_tick.min(FLUSH_COMPLETION_POLL)
         } else if self.fold_in_flight.load(Ordering::SeqCst) {
-            // A fold is running on its own thread, which like the pool cannot ring the doorbell.
-            // Coarser than the arm above because a fold runs for minutes to hours where a flush
-            // runs for seconds, so the faster poll would spin the loop for no benefit.
+            // Coarser, since a fold runs minutes to hours, not seconds.
             until_tick.min(FOLD_COMPLETION_POLL)
         } else {
             until_tick
         };
-        // Shutdown is unchanged and still leaves only from here, after both queues have been
-        // observed empty: a timeout resumes the loop, and only a disconnect ends it.
         !matches!(
             self.queues.bell.recv_timeout(wait),
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected)
@@ -1259,28 +986,12 @@ impl Executor {
 
     /// The deny window: gather the queued denies into one committable unit and commit it. Returns
     /// whether anything was found, which is what keeps [`Executor::run`] draining before it blocks.
-    ///
-    /// A window amortises the two costs an item-at-a-time path pays per entry: an fsync, and a
-    /// full clone of [`Overlay`] (which shrinks only at a fold, so an N-item revocation would
-    /// otherwise copy Θ(N²) entries). It takes two halves to get that: this gathers the window,
-    /// and `/control/changes` enqueues its whole request before collecting any receipt
-    /// (`LifecycleHandle::enqueue`), so the queue never holds more than one job per requesting
-    /// thread and this function gathers exactly one entry per thread.
+    /// Amortises an item-at-a-time path's per-entry fsync and full [`Overlay`] clone (which shrinks
+    /// only at a fold, so an N-item revocation would otherwise copy Θ(N²) entries).
     ///
     /// The window closes when the queue is observed empty or [`DENY_WINDOW_MAX_ENTRIES`] entries
-    /// are reached, whichever comes first. No linger, no age bound, no timer. The bound is checked
-    /// inside the drain: every entry pulled is one a concurrent submitter can replace, so "drain
-    /// until the queue is empty" terminates only when arrival slows, and an unbounded window is
-    /// not a large window, it is no deny ever being acked.
-    ///
-    /// A linger, holding the window open to gather company, is declined: after the enqueue split a
-    /// request's denies are already in the queue with nothing to wait for, so a linger would only
-    /// gather denies from a different request arriving milliseconds behind, at a latency cost paid
-    /// by every single-deny revocation on an idle node.
-    ///
-    /// The deny lane itself is unchanged by any of this: still unbounded, still drained to empty
-    /// before any work, still never refused for load. The bound above closes a window; it refuses
-    /// nothing.
+    /// are reached, checked inside the drain since every entry pulled is one a concurrent submitter
+    /// can replace. No linger: the deny lane stays unbounded and drained to empty before any work.
     pub(super) fn run_deny_pass(&mut self) -> bool {
         let mut entries: Vec<DenyEntry> = Vec::new();
 
@@ -1289,12 +1000,9 @@ impl Executor {
                 break;
             };
             let Command::Change { entity, op, reply } = command else {
-                // Unreachable while the lane follows the command (`Command::is_never_shed`): only a
-                // `Change` rides the deny queue. Executed rather than dropped, so a future variant
-                // that lands here is answered instead of silently losing its waiter, and the
-                // window gathered so far is committed first, since this arm applies immediately
-                // and would otherwise be applied ahead of denies that arrived before it. Append
-                // order must equal apply order.
+                // Only a `Change` rides the deny queue; this arm applies immediately, so the
+                // window gathered so far is committed first to keep append order equal to apply
+                // order.
                 if !entries.is_empty() {
                     self.commit_denies(std::mem::take(&mut entries));
                 }
@@ -1322,19 +1030,10 @@ impl Executor {
 
     /// Add a deletion for every artifact that depends on one this window deletes.
     ///
-    /// Extra entries in the window, and nothing else: a cascaded deletion is a deletion. It gets
-    /// its own `ChangeByEntity` record in the same append, is applied to the same overlay clone,
-    /// hides its artifact at the same ack, and retires at the compaction fold that executes it, by
-    /// the same route as the deletion that caused it. There is no second removal rule here.
-    ///
-    /// Added before the append, so a restart agrees with the live node: the records are in the
-    /// log, so replay rebuilds the same overlay rather than re-deriving the cascade from a store
-    /// whose edges a later publication may have changed.
-    ///
-    /// Only `Delete` cascades. A suppression is reversible and retires only on unsuppress, so
-    /// cascading one would need an inverse nothing carries, and the dependent is withheld while
-    /// its target is suppressed anyway, by the serving predicate's dependency term rather than by
-    /// any state.
+    /// A cascaded deletion is an ordinary entry: its own `ChangeByEntity` record in the same
+    /// append, applied to the same overlay clone, retired at the same fold. Added before the
+    /// append, so a restart rebuilds the same cascade from the log rather than re-deriving it. Only
+    /// `Delete` cascades: a suppressed dependent is withheld by the serving predicate instead.
     pub(super) fn cascade_dependents(&mut self, entries: &mut Vec<DenyEntry>) {
         let deleted: Vec<EntityId> = entries
             .iter()
@@ -1361,42 +1060,15 @@ impl Executor {
     }
 
     /// `append × k → one fsync → apply → one swap → ack × k`, with the apply-anyway exception for
-    /// deny ops folded per entry.
+    /// deny ops folded per entry. Append order is entries order is apply order, so a `suppress D`
+    /// and a later `unsuppress D` in the same window resolve as they would have as two commands.
     ///
-    /// ## Order
-    ///
-    /// Append order is entries order is apply order, and entries order is the deny lane's FIFO
-    /// arrival order: one vector, built once and iterated forwards, so a `suppress D` and a later
-    /// `unsuppress D` in the same window resolve exactly as they would have as two separate
-    /// commands.
-    ///
-    /// A sync failure and an append failure are different events. Every append having landed means
-    /// the window's records are exactly the log's undurable region, which is the precondition for
-    /// repairing it: the executor re-writes them and syncs again, a bounded number of times
-    /// ([`Executor::retry_deny_durability`]). If a re-attempt succeeds the window is durable and
-    /// takes the ordinary path: apply, one swap, 200 to every waiter.
-    ///
-    /// On an unrepaired append or fsync failure anywhere in the window, every [`ChangeOp::Delete`]
-    /// and [`ChangeOp::Suppress`] in the window is applied anyway (the items are hidden
-    /// immediately) and every waiter still gets an error; every [`ChangeOp::Unsuppress`] applies
-    /// nothing. This scope is not uniform, unlike the ingest window's failure path
-    /// (`Executor::fail_window_wal` applies nothing at all): applying everything would re-expose an
-    /// item that replay still hides, behind a 500 whose body says nothing was applied; applying
-    /// nothing would leave a requested suppression unapplied, which this lane may never do.
-    /// Position in the window is not a term in this rule; it is about the op, not about whether a
-    /// record happened to be appended before the failure.
-    ///
-    /// Replay reads only the log's durable prefix, so every record this window appended is
-    /// discarded on restart: the `Unsuppress` that was correctly refused stays refused, and the
-    /// `Suppress` that was applied in memory comes back unhidden. That is the honest reading of the
-    /// 500 the waiters received: durability was not achieved, it is owed, and the caller must
-    /// retry. It agrees with the append-failure case, since a `Suppress` whose append failed leaves
-    /// no bytes to replay either.
-    ///
-    /// The in-memory rule is untouched by that, and must stay so: the item is hidden from the
-    /// moment the disposition is accepted until the process ends, and the node stops claiming
-    /// readiness for the rest of it. Nothing else may come to depend on an under-durable deny, so
-    /// that no other node can observe a suppression a restart here would drop.
+    /// On an unrepaired append or fsync failure, every [`ChangeOp::Delete`] and
+    /// [`ChangeOp::Suppress`] in the window is applied anyway, hiding the items immediately, and
+    /// every waiter still gets an error; every [`ChangeOp::Unsuppress`] applies nothing. Replay
+    /// discards every record the window appended, so the applied `Suppress` comes back unhidden on
+    /// restart: durability was owed and not reached, and the caller must retry. The item stays
+    /// hidden in memory until then, and the node stops claiming readiness.
     pub(super) fn commit_denies(&mut self, entries: Vec<DenyEntry>) {
         let mut failed_at: Option<(usize, WalError)> = None;
         for (i, entry) in entries.iter().enumerate() {
@@ -1408,9 +1080,6 @@ impl Executor {
         // One fsync for the whole window. Every entry is durable when it returns, or none is.
         if failed_at.is_none() {
             if let Err(e) = self.wal.fsync() {
-                // Every append landed cleanly, so the window's records are exactly the undurable
-                // region and the sync can be attempted again. Only if that gives up does this
-                // become a failure: the first waiter gets the real error and the rest `Poisoned`.
                 if let Err(e) = self.retry_deny_durability(&entries, e) {
                     failed_at = Some((0, e));
                 }
@@ -1419,17 +1088,14 @@ impl Executor {
         self.observe_wal();
 
         if let Some((index, error)) = failed_at {
-            // The apply-anyway exception, per entry. See this function's doc.
             let applied: Vec<(EntityId, ChangeOp)> = entries
                 .iter()
                 .filter(|e| matches!(e.op, ChangeOp::Delete | ChangeOp::Suppress))
                 .map(|e| (e.entity, e.op))
                 .collect();
             if !applied.is_empty() {
-                // Deliberately does not mark the overlay dirty. These entries were applied under
-                // the apply-anyway rule and then answered 500: they are in force in memory with no
-                // durable record behind them, and a restart drops them. Publishing them would make
-                // a never-acked deny permanent on every restore.
+                // Deliberately does not mark the overlay dirty: publishing these would make a
+                // never-acked deny permanent, since no durable record backs them.
                 self.apply_changes(applied);
             }
             let mut real = Some(error);
@@ -1451,21 +1117,16 @@ impl Executor {
 
         let applied: Vec<(EntityId, ChangeOp)> = entries.iter().map(|e| (e.entity, e.op)).collect();
 
-        // One overlay clone, one generation, one swap for every entry in the window. Every one of
-        // the three remaining ops moves state a `SEGMENTS-<n>.json` carries, and a window is never
-        // empty, so every window owes the disc a publication.
         self.apply_changes(applied);
         self.deny_dirty = true;
         self.windows_since_publication += 1;
-        // The liveness floor: a drain that never closes still publishes. See
-        // `OVERLAY_PUBLICATION_MAX_WINDOWS`.
         if self.windows_since_publication >= OVERLAY_PUBLICATION_MAX_WINDOWS {
             self.publish_overlay_state();
         }
 
-        // A death partway through this loop leaves some waiters acked and some not; every
-        // un-acked one gets `SubmitError::ReceiptLost` → 500, never `ExecutorDead` → 503, because
-        // its change is durably in force.
+        // A death partway through this loop leaves some waiters unacked; each gets
+        // `SubmitError::ReceiptLost` → 500, never `ExecutorDead` → 503, since its change is
+        // durably in force.
         for entry in entries {
             if let Some(reply) = &entry.reply {
                 reply.ack(());
@@ -1476,31 +1137,17 @@ impl Executor {
     /// A deny window's sync failed. Re-write its records and sync again, up to
     /// [`DENY_DURABILITY_ATTEMPTS`] times in total, and report whether durability was reached.
     ///
-    /// The deny lane retries and the ingest lane does not, because the two failure paths are not
-    /// symmetric: an ingest window whose durability fails applies nothing, so a restart agrees with
-    /// the caller and there is nothing for a retry to rescue. A deny window's failure applies its
-    /// deletions and suppressions anyway, so the live node hides an item that a restart un-hides:
-    /// the one case in the write path where reaching durability late changes what the system is,
-    /// not only what it says.
-    ///
-    /// A bare second `fsync` is not a retry on Linux: after a writeback error the kernel may mark
-    /// the page clean and report the error exactly once, so the second call returns success with
-    /// the data gone. `Wal::retry_durability` rewinds to the last durable offset and writes the
-    /// window's records again, re-dirtying exactly the pages that may have been dropped, which
-    /// leaves one copy of each record rather than two.
-    ///
-    /// The retry runs before the window is applied, not after, which delays the apply-anyway rule
-    /// by up to the retry schedule's total. Applying first and retrying second would keep the
-    /// hiding immediate, but it would split one window's application in two, and this window's
-    /// ordering guarantee is that entries order is apply order, which a `suppress D` followed by an
-    /// `unsuppress D` in one window depends on.
+    /// The deny lane retries and the ingest lane does not: a deny window's failure applies its
+    /// deletions and suppressions anyway, so a retry here can still change what the live node shows
+    /// before a restart un-hides them. A bare second `fsync` is not a retry on Linux, since the
+    /// kernel may report a writeback error exactly once; `Wal::retry_durability` rewinds to the
+    /// last durable offset and re-writes the records instead. Runs before the window is applied,
+    /// since entries order must stay apply order for a `suppress D` followed by an `unsuppress D`.
     pub(super) fn retry_deny_durability(
         &mut self,
         entries: &[DenyEntry],
         first: WalError,
     ) -> std::result::Result<(), WalError> {
-        // Cloned only on the failure path, and this is the one place the executor needs the window's
-        // records as a slice. A window is at most `DENY_WINDOW_MAX_ENTRIES` small records.
         let records: Vec<WalRecord> = entries.iter().map(|e| e.record.clone()).collect();
         let mut last = first;
         for delay in DENY_DURABILITY_BACKOFF {
@@ -1513,42 +1160,13 @@ impl Executor {
         Err(last)
     }
 
-    /// The commit window: drain the work queue into one window and close it. Returns whether
-    /// anything was done, which is what tells [`Executor::run`] to re-drain the deny lane rather
-    /// than block.
+    /// Drains the work queue into one commit window and closes it. Returns whether anything was
+    /// done, so [`Executor::run`] re-drains the deny lane instead of blocking.
     ///
-    /// Two close triggers. The row bound (`commit_window_max_rows`) is checked inside the drain,
-    /// not after it: every entry pulled frees a bounded-queue slot that a concurrent submitter
-    /// refills at once, so under sustained load "close when the queue is empty" bounds nothing on
-    /// its own. Tripping the row bound returns rather than looping, for the same reason: a pass
-    /// that kept draining after closing would not come back to the deny lane until load stopped.
-    /// The work queue observed empty is the other trigger, structural rather than a policy; the
-    /// deny lane is not consulted here at all. A third close is forced by an entry naming an
-    /// external id the window already holds (`CommitWindow::holds_external_id_of`), which keeps
-    /// the unreachable-duplicate hole closed across a window, and it also yields.
-    ///
-    /// There is no age bound, and `ingest.commit_window_max_age_ms` is deleted: an age bound is
-    /// the safety cap on a linger, and this executor has no linger. A window is local to this
-    /// function and every exit disposes of it, so the interval an age bound would terminate does
-    /// not exist. A joined retry (`Executor::admit_ingest`'s `Held` arm) consumes a work-queue
-    /// slot and adds zero rows, so on a stream of nothing but retries the row bound cannot trip;
-    /// what still bounds the loop is one entry, or one joined waiter, per concurrently-blocked
-    /// submitting thread, since every submitter blocks on its receipt.
-    ///
-    /// The deny lane is drained to empty before this is called and again as soon as it returns,
-    /// and the window holds ingest only. So a deny waits at most for the window in front of it,
-    /// but only because every close in this function yields: while work keeps arriving, this
-    /// function decides how long the deny lane waits by returning at each close.
-    /// `a_deny_is_never_queued_behind_work_with_group_commit_disabled` holds the row-bound path
-    /// and `a_deny_is_never_queued_behind_a_conflict_forced_window_split` holds the conflict path.
-    ///
-    /// The honest bound: a deny waits for the deny entries ahead of it (FIFO, unbounded) plus at
-    /// most two window closes, in practice one, since the replacement a conflict opens is closed
-    /// empty on every path where the first close succeeded. What those closes cost is one
-    /// `assign_sorted` run over the window's rows, one append per entry, one fsync, and one
-    /// `IngestBuffer` clone that is O(total buffered items), bounded by `ingest_buffer_max_items`
-    /// now that flush drains it. This is a starvation bound, not a latency target: the window in
-    /// front may be arbitrarily slow, and nothing here is sized to make it fast.
+    /// A window closes when it reaches `commit_window_max_rows`, when the queue is empty, or when an
+    /// entry names an external id the window already holds. The row bound is checked inside the
+    /// drain, because under load the queue never empties. Every close returns to the run loop, which
+    /// is what bounds a deny's wait to the window in front of it: do not keep draining after a close.
     pub(super) fn run_work_pass(&mut self) -> bool {
         let max_rows = self.health.commit_window_max_rows();
         let mut window: CommitWindow<Reply<Ingested>> = CommitWindow::new(self.next_window_seq());
@@ -1556,11 +1174,6 @@ impl Executor {
 
         loop {
             if window.rows() >= max_rows {
-                // Return rather than keep draining: a concurrent submitter refills a freed
-                // queue slot at once, so a pass that closed a window and carried on draining
-                // would never yield to `Executor::run`'s deny drain for as long as ingest kept
-                // arriving, and the deny lane's bound would be the load rather than the window in
-                // front of it.
                 self.close_window(window);
                 return true;
             }
@@ -1573,10 +1186,7 @@ impl Executor {
                     publication,
                     respond,
                 } => {
-                    // The open window closes first: a publication swaps the whole generation, so
-                    // performing it while a window holds unapplied ingest would publish geometry
-                    // against a buffer the window is about to replace, and the window's own swap
-                    // would then carry the pre-publication bundle forward, losing the publication.
+                    // A publication swaps the whole generation, so the open window closes first.
                     if !window.is_empty() {
                         window = self.close_and_reopen(window);
                     }
@@ -1590,10 +1200,6 @@ impl Executor {
                     vocabulary,
                     respond,
                 } => {
-                    // The open window closes first, on the arm above's reasoning: this swaps the
-                    // whole generation, and doing it under a window that has not applied its
-                    // ingest would have the window's own swap carry the pre-drop indexes forward,
-                    // losing the drop.
                     if !window.is_empty() {
                         window = self.close_and_reopen(window);
                     }
@@ -1607,10 +1213,8 @@ impl Executor {
                     vocabulary,
                     respond,
                 } => {
-                    // The open window closes first, on the arm above's reasoning: the rebuild
-                    // reads the live minter, and a window holding an ingest that mints has not
-                    // published its value yet, so a rebuild taken under it would omit exactly the
-                    // value the caller asked for the rebuild to pick up.
+                    // The rebuild reads the live minter, which a window holding a minting ingest
+                    // has not published yet.
                     if !window.is_empty() {
                         window = self.close_and_reopen(window);
                     }
@@ -1628,25 +1232,10 @@ impl Executor {
                 reply,
             } = command
             else {
-                // Every command but `Ingest` and `Change` arrives here: the layer registrations,
-                // the publications and the growths. A `Change` is unreachable here, since only a
-                // `Change` takes the deny queue; it is executed rather than dropped so a future
-                // variant is answered instead of silently losing its waiter.
-                //
-                // This arm applies immediately, while a window holding earlier-arriving ingest is
-                // still open, so WAL append order stops equalling submission order. That is
-                // tolerable for the variants that reach it: each appends, fsyncs and applies its
-                // own record, none touches the buffer or swaps the generation, and neither
-                // registry nor artifact state depends on ingest that has not been allocated. It is
-                // not tolerable for a deny-shaped variant, whose out-of-order apply this deny
-                // priority rule forbids, so such a variant must close the window first instead.
-                //
-                // A publication executing here claims ordinals from a level's cursor while a
-                // window is open, which is why an ingest batch's minted key claims its own at the
-                // close and not at admission (`Executor::mint_records`).
+                // Applies immediately while a window holding earlier ingest is still open, so WAL
+                // append order stops equalling submission order: tolerable here since none of
+                // these touch the buffer or swap the generation.
                 self.execute(command);
-                // This job was counted at submission on the work lane and `execute` counts
-                // nothing, so it is counted here or `work_depth` drifts up one per occurrence.
                 self.health.note_work_refused();
                 did_work = true;
                 continue;
@@ -1672,17 +1261,9 @@ impl Executor {
 
     /// Close `window` and return its replacement.
     ///
-    /// One function so the ordering is not a statement order two edits apart. `CommitWindow::new`
-    /// must stamp the replacement's `opened_at` after `close_window` runs, not before: stamped
-    /// first, a replacement would charge its predecessor's whole service (append, fsync, apply,
-    /// swap, acks) to itself, doubling `record_window_service` and the `retry_after_s` a shed
-    /// client is told. The two lines below must stay in this order.
-    ///
-    /// This is the only construction site of a replacement window; its callers are the
-    /// external-id conflict arm of [`Executor::admit_ingest`], where the drain loop breaks in the
-    /// same iteration so no later entry can ever enter the replacement, and the
-    /// geometry-publication arm of [`Executor::run_work_pass`], which does not admit an entry into
-    /// the replacement at all.
+    /// `CommitWindow::new` must stamp the replacement's `opened_at` after `close_window` runs, not
+    /// before: stamped first, a replacement would charge its predecessor's whole service to itself,
+    /// doubling `record_window_service` and the `retry_after_s` a shed client is told.
     pub(super) fn close_and_reopen(&mut self, window: CommitWindow<Reply<Ingested>>) -> CommitWindow<Reply<Ingested>> {
         self.close_window(window);
         CommitWindow::new(self.next_window_seq())
@@ -1691,27 +1272,17 @@ impl Executor {
     /// The prefix directory to write into, derived from the generation the caller is publishing
     /// against rather than remembered.
     ///
-    /// Every write inside a bundle belongs to one prefix, and which prefix that is changes when a
-    /// fold flips `CURRENT`. A stored `PathBuf` rotated at the flip would have to be got right at
-    /// every site that uses it; the one that would be missed is not the flush path but
-    /// `Executor::publish_deny_state`, where the first deny published after a flip would write its
-    /// side-manifest into the prefix reclamation is about to delete: acked deny state, absent from
-    /// the restore path, no error anywhere. A derived value cannot be missed.
-    ///
-    /// Every caller already holds the generation it is acting on, so this costs one `join` and no
-    /// lookup.
+    /// A fold flips `CURRENT`, changing which prefix is live. A stored `PathBuf` rotated at the
+    /// flip would have to be got right at every site that uses it; a derived value cannot be missed.
     pub(super) fn prefix_dir(&self, generation: &Generation) -> PathBuf {
         self.bundle_root.join(&generation.prefix)
     }
 
     /// Take the next side-manifest number: this executor's counter, raised over every
-    /// `SEGMENTS-<n>.json` present under the bundle root. See [`Executor::next_manifest_n`] for why
-    /// the counter alone is not enough, and `tessera_store::highest_side_manifest_n` for what the
-    /// scan covers.
+    /// `SEGMENTS-<n>.json` present under the bundle root.
     ///
-    /// One publication, one scan. A caller allocating several numbers at once, the overlay
-    /// publication, which takes one per partition, raises the floor itself and then takes each
-    /// number from [`Executor::take_manifest_n`], so the scan does not run once per partition.
+    /// One publication, one scan: a caller allocating several numbers at once raises the floor
+    /// itself and then takes each number from [`Executor::take_manifest_n`].
     pub(super) fn allocate_manifest_n(&mut self) -> tessera_store::Result<u64> {
         self.raise_manifest_floor()?;
         Ok(self.take_manifest_n())
@@ -1719,16 +1290,11 @@ impl Executor {
 
     /// Raise the counter over every `SEGMENTS-<n>.json` on disc, and alarm if it moved.
     ///
-    /// The scan is a `readdir` per prefix and per partition directory, paid once per publication.
-    ///
     /// A floor above the counter is positive evidence of a second writer: in single-writer
-    /// operation the highest number on disc is the last one this executor took, so the two are
-    /// equal at every allocation. Raising the floor keeps this node publishing rather than
-    /// colliding at every number it re-plans at, which makes the state survivable, not safe: the
-    /// other writer is publishing complete current state over the manifests this one rebases on.
+    /// operation the two are equal at every allocation. Raising the floor keeps this node
+    /// publishing rather than colliding at every number it re-plans at.
     ///
-    /// A bundle root that cannot be listed fails the allocation, and so the publication: an
-    /// allocator that cannot see which files are present cannot say a number is free. The caller
+    /// A bundle root that cannot be listed fails the allocation and so the publication: the caller
     /// discards, its files are orphans, and the next tick re-plans.
     pub(super) fn raise_manifest_floor(&mut self) -> tessera_store::Result<()> {
         let on_disk = tessera_store::highest_side_manifest_n(&self.bundle_root)?;
@@ -1757,11 +1323,11 @@ impl Executor {
         n
     }
 
-    /// Commits one partition's side-manifest. Every publication writes its manifest through
-    /// here, so two things are done here once: the manifest's ordered scalars are checked against
-    /// `live_manifest` ([`crate::geometry::check_manifest_publishable`]), because a manifest is
-    /// assembled by editing a clone that may be stale; and the level versions and derived files
-    /// are stamped ([`artifact_coordinates`]). A refusal writes nothing.
+    /// Commits one partition's side-manifest. Every publication writes its manifest through here,
+    /// so two things are done once: the manifest's ordered scalars are checked against
+    /// `live_manifest` ([`crate::geometry::check_manifest_publishable`]), since a manifest is
+    /// assembled by editing a clone that may be stale; and the level versions and derived files are
+    /// stamped ([`artifact_coordinates`]). A refusal writes nothing.
     pub(super) fn commit_side_manifest(
         &self,
         live_manifest: &tessera_store::manifest::SegmentsManifest,
@@ -1795,16 +1361,12 @@ impl Executor {
 
     /// The batch-id state machine, evaluated on the executor.
     ///
-    /// Takes the open window by value and hands it back, possibly replaced. By value
-    /// deliberately: a `&mut` signature would force a `mem::replace` on the conflict path, which
-    /// constructs the replacement before the close it replaces, the exact mis-stamp
-    /// [`Executor::close_and_reopen`] exists to prevent.
+    /// Takes the open window by value and hands it back, possibly replaced, so the conflict path
+    /// cannot construct the replacement before the close it replaces.
     ///
-    /// Lookup order is durable index, then open window, then unknown, and it runs here rather than
-    /// in the handler because the two are not the same question at two different times: between a
-    /// handler check and the enqueue the window can close, so a retry that saw unknown and then
-    /// enqueued into a fresh window would have double-allocated. `control.rs` keeps its pre-submit
-    /// check as the early, well-messaged path; it is advisory and this is the decision.
+    /// Lookup order is durable index, then open window, then unknown, evaluated here rather than in
+    /// the handler: between a handler check and the enqueue the window can close, so a retry that
+    /// saw unknown and then enqueued into a fresh window would have double-allocated.
     pub(super) fn admit_ingest(
         &mut self,
         mut window: CommitWindow<Reply<Ingested>>,
@@ -1820,9 +1382,7 @@ impl Executor {
                 entity_ids,
             } => {
                 if prev_hash == body_hash {
-                    // A replay mints nothing, and the zero says so: the artifacts this batch's
-                    // keys created were created when it was first accepted, and this submission
-                    // created none.
+                    // A replay mints nothing: this batch's keys were created when first accepted.
                     reply.ack(Ingested {
                             entity_ids,
                             minted: 0,
@@ -1847,42 +1407,22 @@ impl Executor {
                     let joined = window.join(&batch_id, reply);
                     debug_assert!(joined, "`held` just answered for this batch id");
                 } else {
-                    // The 409 reaches the retry, not the held original: the original was accepted
-                    // and its waiters are blocked on the acknowledgement it is owed, so discarding
-                    // it because a different submission arrived with different bytes would break
-                    // the durability promise for a caller who did nothing wrong, and would hand
-                    // any client that can guess a batch id a cancellation primitive for someone
-                    // else's in-flight write.
+                    // The 409 reaches the retry, not the held original, which is still owed its ack.
                     reply.fail(ExecError::BatchConflict { batch_id });
                 }
-                // Either way this job occupied a work-queue slot and was counted at submission,
-                // while `record_window_service` counts one completion per entry and a join adds
-                // no entry. Without this, `work_depth` drifts up by one per retry forever.
                 self.health.note_work_refused();
                 (window, Admission::Answered)
             }
             BatchState::Unknown => {
                 let mut admission = Admission::Admitted;
-                // A conflicting entry closes the window first, and is then evaluated against the
-                // state that close just published. Only external ids reach here: a held batch id
-                // was answered above, without closing anything.
+                // Only external ids reach here: a held batch id was answered above.
                 if window.holds_external_id_of(&rows) {
                     window = self.close_and_reopen(window);
-                    // And yield once this entry is handled. Without the yield, a pass could close
-                    // unboundedly many windows without ever returning to `Executor::run`'s deny
-                    // drain, which is the deny-queued-behind-work case the priority rule forbids.
-                    // Reachable at the shipped defaults from a client re-ingesting an
-                    // `external_id` that a still-open window already holds. The entry is handled
-                    // first rather than yielding here, because it has already been taken off the
-                    // queue and its waiter must be answered.
                     admission = Admission::YieldedAfterClose;
                 }
                 if let Some(entry) = self.admit(rows, batch_id, body_hash, artifacts, reply) {
                     if window.is_empty() {
-                        // The in-flight gauge is armed at the first entry, never at window
-                        // construction: an empty window is never closed, so a gauge armed there
-                        // would never be cleared and `service_nanos_for_estimate` would grow
-                        // without bound on an idle node.
+                        // Armed at the first entry: an empty window is never closed.
                         self.health.mark_work_started(window.opened_at());
                     }
                     window.push(entry);
@@ -1893,23 +1433,12 @@ impl Executor {
     }
 
     /// The external-id admission check, on the one thread that also performs the inserts. `None`
-    /// means the caller has already been answered.
+    /// means the caller has already been answered. This check reads state written at apply, which
+    /// is why an entry naming an external id the open window holds must close it first.
     ///
-    /// This check reads state written at apply, which is why an entry naming an external id the
-    /// open window holds must close it before reaching here (see the caller).
-    ///
-    /// The membership column's keys resolve here too, and a bad one refuses this batch alone. A
-    /// batch naming an artifact that does not exist on a closed layer is refused naming the key,
-    /// and nothing it carried is admitted, the whole batch or none of it. It happens here rather
-    /// than at the close because a window holds several callers' batches: one caller's typo may
-    /// not refuse another caller's rows, and after the allocation there is no per-entry refusal
-    /// left to make.
-    ///
-    /// On an open layer the same key mints, and the ordinal it will hold is not claimed here; see
-    /// `Executor::mint_records` for why the claim belongs at the close. What is decided here is
-    /// everything about that key which can still refuse one batch on its own: whether the layer's
-    /// declaration admits an artifact carrying nothing but a name, and whether the batch's own
-    /// column named one child under two parents.
+    /// The membership column's keys resolve here too, and a bad one refuses the whole batch: one
+    /// caller's typo must not refuse another caller's rows in the same window. On an open layer the
+    /// same key mints, but its ordinal is not claimed here; see `Executor::mint_records`.
     pub(super) fn admit(
         &mut self,
         rows: Vec<UnallocatedRow>,
@@ -1918,19 +1447,15 @@ impl Executor {
         artifacts: tessera_lifecycle::BatchArtifacts,
         reply: Reply<Ingested>,
     ) -> Option<WindowEntry<Reply<Ingested>>> {
-        // The fail-closed backstop for the widened check-to-apply race. See
-        // `LiveState::established_collisions`. The overlay read here is the same generation the
-        // apply below will clone from, on the same thread, so the deleted-holder exemption cannot
-        // race its own delete.
+        // The fail-closed backstop for the widened check-to-apply race, read from the same
+        // generation the apply below clones from, so the deleted-holder exemption cannot race
+        // its own delete.
         let generation = self.generation.load();
         let mut rows = rows;
         let collisions = self.live.established_collisions(
             &mut rows,
             |e| generation.overlay.is_deleted(e),
             |entity, view| {
-                // The same predicate the handler answered with, read from the generation this
-                // apply will clone from: the view's permutation, and the buffer beside it for the
-                // rows an earlier window accepted and no flush has taken yet.
                 generation.bundle.partitions.values().any(|partition| {
                     partition
                         .views
@@ -1939,10 +1464,6 @@ impl Executor {
                 }) || generation.buffer.contains_in_view(entity, view)
             },
         );
-        // The join rule's arms, evaluated on the one thread that settles join-ness, after
-        // `established_collisions` above has decided which rows are joins. `settle_joins` also
-        // completes an accepted join, dropping its descriptors and terms and backfilling its
-        // omitted `render` values, in the same per-row pass over the same sources.
         if collisions == 0 {
             if let Err(detail) = settle_joins(&generation, &mut rows) {
                 drop(generation);
@@ -1982,13 +1503,11 @@ impl Executor {
     ///
     /// Returns the memberships, each carrying the ordinal it resolved to or `None` where an open
     /// layer will mint it at the close, and the edges whose child is one of those mints, which are
-    /// the only edges this route creates rather than checks.
+    /// the only edges this route creates rather than checks. `Err` is the refusal text the caller
+    /// is answered with, whole batch without effect.
     ///
-    /// `Err` is the refusal text the caller is answered with, whole batch without effect.
-    ///
-    /// The memberships resolve first, and that order is what the edge checks rest on: a key is
-    /// created only by being a membership, so the set of keys this batch is about to mint is known
-    /// once they are done, and neither a child nor a parent can be minted without appearing there.
+    /// The memberships resolve first: neither a child nor a parent can be minted without appearing
+    /// in the resolved set the edge checks read.
     pub(super) fn resolve_memberships(
         &self,
         artifacts: &tessera_lifecycle::BatchArtifacts,
@@ -2002,9 +1521,7 @@ impl Executor {
         if artifacts.is_empty() {
             return Ok((Vec::new(), Vec::new()));
         }
-        // One line per batch, not one per edge: a lineage over a large cluster tree whose roster
-        // was published without parents would otherwise emit one formatted write per edge. The
-        // count is the signal and the examples are what an operator acts on.
+        // One line per batch, not one per edge.
         let mut unrecorded: Vec<String> = Vec::new();
         let mut unrecorded_total = 0usize;
         let resolved = self.live.with_publication_state(|registry, store, _| {
@@ -2024,11 +1541,9 @@ impl Executor {
                         .map_err(|e| e.to_string())
                 })
                 .collect::<Result<_, String>>()?;
-            // Two indexes of one set, since an edge asks two different questions of it: a child's
-            // level is the edge's own, so it is asked precisely; a parent's is whatever the
-            // layer's shape says to look at, so it is asked of the layer. A levelled taxonomy
-            // legitimately carries one key at two levels, and one index would treat a key
-            // minting at one of them as minting at both.
+            // Two indexes of one set: a child's level is the edge's own, asked precisely; a
+            // parent's is asked of the layer. A levelled taxonomy legitimately carries one key at
+            // two levels, and one index would treat minting at one as minting at both.
             let minting: std::collections::BTreeSet<(&str, u32, &str)> = memberships
                 .iter()
                 .filter(|m| m.ordinal.is_none())
@@ -2039,11 +1554,8 @@ impl Executor {
                 .map(|(layer, _, key)| (*layer, *key))
                 .collect();
 
-            // A child named under two parents refuses the batch, over the batch's own column,
-            // because that is the whole check for a minted child, whose parent nothing else has
-            // an opinion about yet. Only a `nested` or `tiered` list column declares edges; a
-            // `dag` layer's several parents arrive on its artifact rows' `parent` list by the
-            // publish route, never here.
+            // Only a `nested` or `tiered` list column declares edges; a `dag` layer's several
+            // parents arrive on its artifact rows' `parent` list by the publish route, never here.
             parent_of_each_child(&artifacts.edges)?;
 
             let mut mints = Vec::new();
@@ -2056,14 +1568,11 @@ impl Executor {
                     &|key| anywhere.contains(&(layer, key)),
                 ) {
                     Ok(tessera_lifecycle::EdgeCheck::Agrees) => {}
-                    // The child does not exist yet, so this edge is its parent rather than a claim
-                    // about a stored one, carried to the close, where the artifact is created and
-                    // where lineage is settled.
+                    // The child does not exist yet, so this edge is carried to the close, where
+                    // the artifact is created and lineage is settled.
                     Ok(tessera_lifecycle::EdgeCheck::Mints) => mints.push(edge.clone()),
-                    // Reported, not refused: the membership half of the same entry is unambiguous
-                    // and lands; what is lost is an edge this route cannot create, and an operator
-                    // who published a roster without its parents needs to be told rather than
-                    // blocked.
+                    // Reported, not refused: the membership half of the same entry lands; only the
+                    // edge this route cannot create is lost.
                     Ok(tessera_lifecycle::EdgeCheck::Unrecorded) => {
                         unrecorded_total += 1;
                         if unrecorded.len() < 5 {
@@ -2092,26 +1601,13 @@ impl Executor {
 
     /// The artifacts this window's values named and nothing holds: one per
     /// `membership = { attribute = f }` layer whose column carried a value the level has no
-    /// artifact for.
+    /// artifact for. Uses the same key rule as a build's mint
+    /// (`tessera_types::layer::attribute_value_key`). Runs after the vocabulary mint: a novel
+    /// category key is a string in the row until that pass draws it a code.
     ///
-    /// A value exists because a point carries it, at both entry points: a build mints from the
-    /// column it has just read, and an ingest mints from the rows that have just arrived. The two
-    /// use the same rule for the key (`tessera_types::layer::attribute_value_key`), so they agree
-    /// about which artifact a value names.
-    ///
-    /// Runs after the vocabulary mint, and that ordering is load-bearing: a novel category key is
-    /// a string in the row until the pass above draws it a code, so reading the row before that
-    /// would name the artifact after a code nobody had assigned yet.
-    ///
-    /// Suppression-blindness carries over unchanged: the lookup is
-    /// [`ArtifactStore::ordinal_of_key`], the store's key index, which loses a key at exactly one
-    /// event, the fold retiring the artifact's own entity. A suppressed value's key therefore
-    /// still resolves and mints nothing, so a suppression cannot be defeated by ingesting a point
-    /// carrying the value; a deleted one does mint again, since the new artifact is a new object
-    /// with a new entity.
-    ///
-    /// Publication into such a layer stays refused; this is not that route. What is created here
-    /// is an identity the rule produces, carrying its key and nothing else.
+    /// A suppressed value's key still resolves and mints nothing, since
+    /// [`ArtifactStore::ordinal_of_key`] loses a key only when the fold retires the artifact's own
+    /// entity; a deleted one does mint again, since the new artifact is a new entity.
     pub(super) fn derive_records(
         &mut self,
         closed: &[tessera_lifecycle::ClosedEntry<Reply<Ingested>>],
@@ -2119,9 +1615,7 @@ impl Executor {
     ) -> Result<Vec<WalRecord>, String> {
         use tessera_types::layer::attribute_value_key;
 
-        // Which declared scalar each predicate layer reads, resolved once. A layer naming a column
-        // this bundle does not declare is refused at registration, so an absence here is a
-        // declaration that never validated, skipped rather than guessed at, which mints nothing.
+        // Which declared scalar each predicate layer reads, resolved once.
         let generation = self.generation.load();
         let declared = &generation.bundle.manifest.declared_scalars;
         let predicates: Vec<(String, usize, Option<String>)> =
@@ -2135,9 +1629,7 @@ impl Executor {
 
         let mut records = Vec::new();
         for (layer, index, vocabulary) in predicates {
-            // `code → key`, for the values this window actually carried. Walked from the live
-            // bindings rather than inverted per row: a vocabulary is a map from key to code, so a
-            // per-row reverse lookup would rebuild this per point.
+            // `code → key`, walked from the live bindings rather than inverted per row.
             let mut key_of_code: std::collections::BTreeMap<u32, String> = Default::default();
             if let Some(name) = &vocabulary {
                 if let Some(minter) = vocabularies.get(name) {
@@ -2169,8 +1661,7 @@ impl Executor {
             let prepared = self.live.with_publication_state(|registry, store, alloc| {
                 let fresh: Vec<String> = wanted
                     .iter()
-                    // A predicate layer is entity-scoped: `LayerRegistry::prepare_derive`
-                    // refuses a group-scoped one, so the key sits in the one set.
+                    // A predicate layer is entity-scoped, so the key sits in the one set.
                     .filter(|key| store.ordinal_of_key(&layer, 0, None, key).is_none())
                     .cloned()
                     .collect();
@@ -2192,15 +1683,10 @@ impl Executor {
     /// Prepare the publications that create every artifact this window's rows named and nothing
     /// holds. See [`mint_plan`] for what is minted and why it is minted here.
     ///
-    /// Patches the memberships whose key resolved since admission to the ordinal it resolved to,
-    /// so they grow rather than mint; leaves a minted key's ordinal `None`, which is what tells
-    /// [`growth_records`] the publication carried the join.
-    ///
-    /// `Err` is the refusal text every waiter in the window is answered with. It costs the window,
-    /// which is the price of a decision that can only be made once the batches are together: the
-    /// two shapes that reach it are a lineage two batches disagree about, and an allocator that
-    /// could not supply the reserved run. Everything a single batch can be refused for on its own
-    /// was refused at its admission.
+    /// Patches the memberships whose key resolved since admission to the ordinal it resolved to, so
+    /// they grow rather than mint; leaves a minted key's ordinal `None`, which is what tells
+    /// [`growth_records`] the publication carried the join. `Err` is the refusal text every waiter
+    /// is answered with: everything a single batch can be refused for alone was refused at admission.
     pub(super) fn mint_records(
         &mut self,
         closed: &mut [tessera_lifecycle::ClosedEntry<Reply<Ingested>>],
@@ -2212,8 +1698,7 @@ impl Executor {
         let (records, resolved, minted) = self.prepare_mints(&wanted, &edges)?;
 
         // A key that acquired an artifact between its batch's admission and this close is an
-        // ordinary growth, and `growth_records` takes it from there. See
-        // [`settle_resolved_ordinals`], which the values door settles by too.
+        // ordinary growth. See [`settle_resolved_ordinals`].
         for entry in closed.iter_mut() {
             settle_resolved_ordinals(&mut entry.memberships, &resolved);
         }
@@ -2229,14 +1714,12 @@ impl Executor {
     /// and no artifact holds.
     ///
     /// One implementation across the doors: `/control/ingest` reaches it through
-    /// [`Executor::mint_records`] at its window's close, and `POST /control/values` through
-    /// `values_mint_plan` at its own commit, so a key arriving at either door creates the same
-    /// artifact, with the same lineage and the same refusals.
+    /// [`Executor::mint_records`] and `POST /control/values` through `values_mint_plan`, so a key
+    /// arriving at either door creates the same artifact, with the same lineage and refusals.
     ///
-    /// The three answers: the records to append in the order given, ascending level, coarse first,
-    /// so a tiered chain's parent is fixed by the record before its child's; the keys that turned
-    /// out to be held after all, which their caller grows into instead; and the keys this run
-    /// minted.
+    /// The three answers: the records to append in order, ascending level, coarse first; the keys
+    /// that turned out to be held after all, which their caller grows into instead; and the keys
+    /// this run minted.
     pub(super) fn prepare_mints(
         &self,
         wanted: &MintPlan,
@@ -2244,19 +1727,15 @@ impl Executor {
     ) -> PreparedMints {
         use std::collections::BTreeMap;
         self.live.with_publication_state(|registry, store, alloc| {
-            // A child named under two parents refuses, across the window as it does within a
-            // batch. Checked before anything is prepared, so a refusal spends nothing.
+            // Checked before anything is prepared, so a refusal spends nothing.
             let parents = parent_of_each_child(edges)?;
-            // Re-resolved here and not trusted from admission: a publication executes between an
-            // admission and this close (it takes the work lane, and the window is open across
-            // it), so a key that named nothing then may name an artifact now, and a key a live
-            // artifact holds is never minted again.
+            // Re-resolved here, not trusted from admission: a publication may execute between an
+            // admission and this close.
             let mut resolved: BTreeMap<(String, u32, String), u32> = BTreeMap::new();
             let mut to_mint: BTreeMap<(&str, u32), Vec<(&str, &croaring::Bitmap)>> =
                 BTreeMap::new();
             for ((layer, level, key), (_, members)) in wanted {
-                // The ingest route carries no artifact view; `resolve_or_mint` refuses a
-                // group-scoped layer there, so the key sits in the one set.
+                // The ingest route carries no artifact view, so the key sits in the one set.
                 match store.ordinal_of_key(layer, *level, None, key) {
                     Some(ordinal) => {
                         resolved.insert((layer.clone(), *level, key.clone()), ordinal);
@@ -2269,9 +1748,7 @@ impl Executor {
             }
 
             // Ascending level, one record each, coarse first: a tiered chain's parent sits one
-            // level up and is fixed by the record before this one; a nested lineage is level 0
-            // alone, one record, and `prepare_publish` resolves a parent that is a sibling of its
-            // own batch.
+            // level up and is fixed by the record before this one.
             let mut assigned: BTreeMap<(&str, u32, &str), u32> = BTreeMap::new();
             let mut records = Vec::new();
             for ((layer, level), keys) in &to_mint {
@@ -2279,30 +1756,19 @@ impl Executor {
                     .iter()
                     .map(|(key, members)| tessera_lifecycle::IncomingArtifact {
                         key: Some((*key).to_string()),
-                        // Entity-scoped: a group-scoped layer is refused at admission, a point's
-                        // layer column carrying no artifact view.
                         view: None,
                         members: (*members).clone(),
                         excluding: None,
-                        // Nothing but its name: a layer declaring supplied content or a
-                        // dependency refuses the key at admission rather than minting an artifact
-                        // that could not be served.
                         contents: Vec::new(),
                         attached_to: None,
                         parent_keys: parents
                             .get(&(*layer, *level, *key))
                             .map(|parent| vec![(*parent).to_string()])
                             .unwrap_or_default(),
-                        // A layer declaring a `shape` publishes boxes an author wrote, so a point
-                        // naming a key on such a layer has nothing to mint one from: the layer is
-                        // a predicate and `resolve_or_mint` refuses the key at admission.
                         shape: None,
                     })
                     .collect();
-                // One level up and no further: entry k of a list is the parent of entry k+1, so a
-                // chain minted from one names its parent exactly one level coarser; searching the
-                // levels above that would invent an edge across a gap the reader does not read
-                // past.
+                // One level up and no further: entry k of a list is the parent of entry k+1.
                 let pending = |key: &str| {
                     let coarser = level.checked_sub(1)?;
                     assigned.get(&(*layer, coarser, key)).map(|ordinal| {
@@ -2318,9 +1784,7 @@ impl Executor {
                 let WalRecord::ArtifactPublish { artifacts, .. } = &record else {
                     unreachable!("prepare_publish returns an ArtifactPublish");
                 };
-                // Read back off the record rather than recomputed from the level's cursor: what a
-                // finer level's parent resolves to is what this record actually claimed. The order
-                // is `incoming`'s, which is `keys`', which is why the two zip.
+                // Read back off the record, not recomputed: it is what this record actually claimed.
                 for ((key, _), artifact) in keys.iter().zip(artifacts) {
                     debug_assert_eq!(artifact.key.as_deref(), Some(*key));
                     assigned.insert((*layer, *level, key), artifact.ordinal);
@@ -2336,27 +1800,15 @@ impl Executor {
     }
 
     /// Close a commit window: one signature-sorted allocation run, one WAL record per entry, one
-    /// fsync, one generation swap, then every waiter is acked.
-    ///
-    /// Allocation itself is unchanged: ids are still issued monotonically from the high-water by
-    /// one `Allocator::allocate`, still never reused, still ordered by `(signature, external_id)`
-    /// through `assign_sorted`. What widens is the input set: the sort scope becomes the window
-    /// rather than whatever chunk a client happened to POST.
+    /// fsync, one generation swap, then every waiter is acked. Allocation is unchanged from a
+    /// single batch's, except that the sort scope is the window.
     ///
     /// A failed window burns entity ids, exactly as a failed batch did: assignment precedes the
-    /// append, so ids given to a window whose append then fails are never issued again, and ids
-    /// stay strictly monotone with each issued once.
+    /// append, so ids given to a window whose append then fails are never issued again.
     ///
-    /// An append or fsync failure applies nothing, in deliberate contrast to the deny path:
-    /// applying un-fsynced ingest would make items appear and vanish across a crash, and the
-    /// apply-anyway rule is written for `Delete`/`Suppress` only. The window carries ingest alone,
-    /// so this rule is uniform over every entry in it.
-    ///
-    /// A restart does not undo the refusal. Replay reads only the log's durable prefix, so the
-    /// window's records, which by construction lie past the last fsync, are discarded rather than
-    /// replayed. Without that, an ingest refused for want of durability would exist after the next
-    /// restart: the caller was told it had nothing, so a caller retrying under a fresh batch
-    /// identifier would end up holding two.
+    /// An append or fsync failure applies nothing, in deliberate contrast to the deny path: the
+    /// apply-anyway rule is written for `Delete`/`Suppress` only. A restart does not undo the
+    /// refusal: replay discards every record past the last fsync.
     pub(super) fn close_window(&mut self, window: CommitWindow<Reply<Ingested>>) {
         let entries = window.len() as u64;
         let started = window.opened_at();
@@ -2364,16 +1816,12 @@ impl Executor {
 
         let closed = match self.live.with_allocator(|a| window.allocate(a)) {
             Ok((closed, tally)) => {
-                // Recorded here, at the allocation, rather than after the append: the figure
-                // describes the assignment, which is made and complete by this point. A window
-                // that allocates and then fails its append has still fragmented the entity axis
-                // exactly this much, since the ids are issued and `Allocator` never reuses one.
+                // Recorded at the allocation rather than after the append: a window that allocates
+                // and then fails its append has still fragmented the entity axis this much.
                 self.health.record_fragmentation(tally);
                 closed
             }
             Err((e, waiters)) => {
-                // `allocate` leaves the high-water mark unchanged on this path, so the window has
-                // no effect at all.
                 self.fail_window_alloc(e, waiters, entries, started);
                 return;
             }
@@ -2382,34 +1830,22 @@ impl Executor {
         mark = self.health.lap(WriteStage::Allocate, mark);
 
         // Mint every novel discovered-vocabulary key this window's rows carry, in place, before
-        // anything is appended. A discovered vocabulary's key travels as `WalScalar::Utf8` from
-        // the ingest boundary, which must not mint itself, since two requests racing one novel key
-        // would each draw and split the key across two codes. The commit-window close is where
-        // minting happens, against a mutable copy of the published bindings that becomes the next
-        // generation's if the window survives, and is discarded untouched if it does not.
-        //
-        // One `Vocabularies` copy for the whole window, not one per row: `mint` is view-first, so
-        // a second row naming an already-minted-this-window key sees the first row's binding and
-        // returns `Existing` rather than drawing again, which keeps two rows sharing one novel key
-        // inside a window down to one `VocabularyMint` record.
+        // anything is appended, against a mutable copy of the published bindings that becomes the
+        // next generation's if the window survives. One copy for the whole window, not one per
+        // row: a second row naming an already-minted-this-window key sees the first row's binding.
         let generation = self.generation.load_full();
         let mut vocabularies: Vocabularies = (*generation.vocabularies).clone();
         let declared_scalars = generation.bundle.manifest.declared_scalars.clone();
-        // The arity is this generation's, and a row admitted under an earlier one is padded here:
-        // a column declared between a batch's admission and this close appended at the tail of
-        // `declared_scalars`, so the row's own positions keep their meaning and the positions it
-        // lacks are columns it holds nothing for. Padded before the mint pass below indexes
-        // `row.scalars` by declared position, and before the append, so the log carries every row
-        // at the schema its flush will write.
+        // A row admitted under an earlier generation is padded here: a column declared since
+        // admission appended at the tail of `declared_scalars`. Padded before the mint pass below
+        // indexes by declared position, and before the append.
         let mut closed = closed;
         for entry in closed.iter_mut() {
             for row in entry.rows_mut() {
                 crate::attributes::pad_to_schema(&mut row.scalars, &declared_scalars);
             }
         }
-        // The group-scoped families, by the view a row names. A row's scoped tail is positional
-        // against the families of the group that owns its view, so the mint pass below needs the
-        // same list the boundary parsed against, derived once for the window rather than per row.
+        // The group-scoped families, by the view a row names, derived once for the window.
         let scoped_by_view: FxHashMap<String, Vec<tessera_store::manifest::ScopedScalar>> =
             scoped_families_by_view(&generation.bundle.manifest);
         let mut fresh_bindings: Vec<(String, String, u32)> = Vec::new();
@@ -2418,21 +1854,13 @@ impl Executor {
             for row in entry.rows_mut() {
                 for (index, declared) in declared_scalars.iter().enumerate() {
                     let Some(vocabulary) = declared.vocabulary.as_deref() else {
-                        // A plain scalar, or a category column already at its bound width: either
-                        // way, nothing for this site to resolve.
                         continue;
                     };
                     let WalScalar::Utf8(key) = &row.scalars[index] else {
-                        // Already a code: either a declared vocabulary (the handler resolved it) or
-                        // a discovered one this row's earlier pass through this same loop resolved.
                         continue;
                     };
                     let key = key.clone();
                     let minter = vocabularies.get_mut(vocabulary).unwrap_or_else(|| {
-                        // `Vocabularies::seed` refuses to open a bundle whose `declared_scalars`
-                        // names a vocabulary `MANIFEST.vocabularies` does not carry, so a live
-                        // generation cannot disagree with its own declaration. Reaching this is a
-                        // defect in that invariant, not reachable input.
                         panic!(
                             "column '{}' names vocabulary '{vocabulary}', which the live bindings \
                              do not carry",
@@ -2453,10 +1881,7 @@ impl Executor {
                         }
                     }
                 }
-                // The same mint, over the row's scoped tail. A scoped category is a category: its
-                // key travels from the boundary exactly as an entity-scoped one's does, and this
-                // is the one place a novel key becomes a code. A row whose view is in no scope has
-                // an empty list here and the loop does nothing.
+                // The same mint, over the row's scoped tail.
                 let Some(families) = scoped_by_view.get(row.view.as_str()) else {
                     continue;
                 };
@@ -2492,9 +1917,7 @@ impl Executor {
             }
         }
         if let Some(e) = mint_failed {
-            // Nothing has been appended yet, so, exactly as a failed allocation, the window has
-            // no effect: the mutated `vocabularies` copy is dropped with it, and every waiter gets
-            // the same refusal.
+            // Nothing has been appended yet, so the window has no effect.
             let detail = e.to_string();
             self.fail_window(
                 closed,
@@ -2507,9 +1930,7 @@ impl Executor {
             return;
         }
 
-        // The artifacts this window's rows named and nothing holds, created here. Prepared before
-        // anything is appended, so a refusal spends nothing; a failure past that point has spent
-        // reserved ids, exactly as a failed window's rows have.
+        // Prepared before anything is appended, so a refusal spends nothing.
         let (mut mint_records, minted_per_entry) = match self.mint_records(&mut closed) {
             Ok(minted) => minted,
             Err(detail) => {
@@ -2524,10 +1945,8 @@ impl Executor {
                 return;
             }
         };
-        // The artifacts this window's values named, one per attribute-predicate layer whose column
-        // carried a value nothing holds. Runs after the vocabulary mint above, since a novel
-        // category key is a code only once that pass has drawn it, and the key an artifact is
-        // named by is the value's key.
+        // Runs after the vocabulary mint above, since a novel category key is a code only once
+        // that pass has drawn it, and the key an artifact is named by is the value's key.
         match self.derive_records(&closed, &vocabularies) {
             Ok(records) => mint_records.extend(records),
             Err(detail) => {
@@ -2543,30 +1962,24 @@ impl Executor {
             }
         }
 
-        // One record per entry, batch identity preserved through the window (which is what a
-        // joined retry is answered off), appended in entries order, which is also apply order.
+        // One record per entry, appended in entries order, which is also apply order.
         let mut failed_at: Option<(usize, WalError)> = None;
 
         // Mint records land first, ahead of every batch record, inside the one fsync below, so a
-        // mint is durable in the same commit as the rows it colours. Not tracked in `positions`:
-        // that vector is rotation's per-batch-entry index, and a mint record belongs to no entry.
+        // mint is durable in the same commit as the rows it colours.
         for (vocabulary, key, code) in &fresh_bindings {
             if let Err(e) = self.wal.append(&WalRecord::VocabularyMint {
                 vocabulary: vocabulary.clone(),
                 key: key.clone(),
                 code: *code,
             }) {
-                // No entry has been attempted yet, so there is no "the entry whose append failed"
-                // to single out: the same arbitrary choice the fsync failure below makes.
                 failed_at = Some((0, e));
                 break;
             }
         }
 
-        // The position before each append is where that record lands, and it is the only moment it
-        // can be read: afterwards the log has moved on, and after the window it is one number for
-        // several records. A row's position is what a rotation reclaims below, so an entry whose
-        // append failed contributes none.
+        // The position before each append is the only moment it can be read: afterwards the log
+        // has moved on. A rotation reclaims by it below, so a failed append contributes none.
         let mut positions: Vec<u64> = Vec::with_capacity(closed.len());
         if failed_at.is_none() {
             for (i, entry) in closed.iter().enumerate() {
@@ -2579,24 +1992,14 @@ impl Executor {
             }
         }
 
-        // The joins this window's rows declared, in the same commit as the rows: one record per
-        // `(layer, level)` over every entry, appended behind the batch records and inside the one
-        // fsync below. Built after the allocation, since that is the first moment a row has an
-        // entity to join with, and the ordinals were resolved at admission.
-        //
-        // Each record's position is read before its append and carried to the apply: a growth
-        // below its level's published high-water is held in the log by that position until a fold
-        // rewrites the level whole.
-        //
-        // The publications that minted come first, since replay applies this sequence in order and
-        // an artifact must exist before anything addresses it.
+        // The joins this window's rows declared, appended behind the batch records. The
+        // publications that minted come first, since an artifact must exist before anything
+        // addresses it.
         let mut minted: Vec<(WalRecord, u64)> = Vec::new();
         if failed_at.is_none() {
             for record in mint_records {
                 let at = self.wal.position();
                 if let Err(e) = self.wal.append(&record) {
-                    // No entry is more to blame than another for a record the whole window's keys
-                    // produced; the first waiter gets the real error, as the fsync arm does.
                     failed_at = Some((0, e));
                     break;
                 }
@@ -2618,8 +2021,7 @@ impl Executor {
         // One fsync for the whole window: the amortisation half of group commit.
         if failed_at.is_none() {
             if let Err(e) = self.wal.fsync() {
-                // Every entry appended cleanly, so there is no "the entry whose append failed"
-                // here: the first waiter gets the real error arbitrarily and the rest `Poisoned`.
+                // The first waiter gets the real error arbitrarily and the rest `Poisoned`.
                 failed_at = Some((0, e));
             }
         }
@@ -2632,14 +2034,9 @@ impl Executor {
 
         // Durable, not yet in force. See `pause_point`.
         self.pause_point(PauseSiteArg::AfterFsync);
-        // One buffer clone, one generation, one swap for every entry in the window, carrying the
-        // mutated `vocabularies`, so the next generation publishes this window's mints and not
-        // merely its rows.
         self.apply_window(&mut closed, &positions, vocabularies, &fresh_bindings);
 
-        // After the rows are in force, never before: a membership is projected through rows, so a
-        // store that held the join while the generation still lacked the row would describe an
-        // artifact by a point nothing could yet see.
+        // After the rows are in force, never before: a membership is projected through rows.
         let (artifact_records, artifact_positions): (Vec<&WalRecord>, Vec<u64>) = minted
             .iter()
             .chain(growth.iter())
@@ -2647,15 +2044,10 @@ impl Executor {
             .unzip();
         self.apply_artifact_records(&artifact_records, &artifact_positions);
 
-        // Recorded after the swap, so a concurrent replay of a batch id can never observe a window
-        // where the generation has swapped but the idempotency index has not caught up.
+        // Recorded after the swap, so a replay can never see it swapped but not yet indexed.
         let m = StageMark::now();
         for (entry, wal_pos) in closed.iter().zip(&positions) {
             let (batch_id, body_hash) = entry.batch_key();
-            // The index is a cache of the record just appended, so what goes in is what the record
-            // says. Asserted rather than read from the record, the entry already holding both in
-            // the form the ack needs; a record kind whose identity this function could not derive
-            // would fail `batch_identity`'s own exhaustive match first.
             debug_assert_eq!(
                 tessera_lifecycle::batch_identity(&entry.record),
                 Some(tessera_lifecycle::BatchIdentity {
@@ -2675,10 +2067,8 @@ impl Executor {
         self.health.lap(WriteStage::RecordBatch, m);
         self.observe_wal();
 
-        // What a batch minted is reported to the batch that minted it. Under `value_set = "open"`
-        // a typo creates a permanent object rather than being refused, and the mitigation is that
-        // it is visible: the caller is told the count in its own 200, and the operator gets this
-        // line.
+        // Under `value_set = "open"` a typo creates a permanent object rather than being refused,
+        // so the caller is told the count in its own 200 and the operator gets this line.
         let created: u64 = minted_per_entry.iter().sum();
         if created > 0 {
             tracing::info!(
@@ -2700,18 +2090,15 @@ impl Executor {
             );
         }
 
-        // A death partway through this loop leaves some waiters acked and some not; every
-        // un-acked one gets `SubmitError::ReceiptLost` → 500, never `ExecutorDead` → 503, because
-        // its ingest is durably in force.
+        // A death partway through this loop leaves some waiters unacked; each gets
+        // `SubmitError::ReceiptLost` → 500, never `ExecutorDead` → 503, since its ingest is
+        // durably in force.
         for (entry, minted) in closed.into_iter().zip(minted_per_entry) {
             let ClosedEntry {
                 entity_ids,
                 mut waiters,
                 ..
             } = entry;
-            // The last waiter takes the ids; a joined retry is what puts a second one here, and it
-            // clones. Popping rather than an `Option` dance: `waiters` is never empty, and cloning
-            // it unconditionally would be a real per-row cost for the common case of one waiter.
             let last = waiters
                 .pop()
                 .expect("an entry always has at least one waiter");
@@ -2789,18 +2176,13 @@ impl Executor {
             .record_window_service(entries, started.elapsed().as_nanos() as u64);
     }
 
-    /// Hold one accepted write's delta until the tick.
+    /// Hold one accepted write's delta until the tick. Every route that changes a level's records
+    /// arrives here with the level version it followed, and the level's row forms take the run of
+    /// them at the next tick.
     ///
-    /// Every route that changes a level's records, a publication, a growth, a page of a generating
-    /// set, a fill, arrives here with the level version it followed, and the level's row forms
-    /// take the run of them at the next tick. A record naming no level's forms is held all the
-    /// same: which views hold a form is not this thread's question until it publishes.
-    ///
-    /// `refused` names the growth entries the store did not take, by their position in the record,
-    /// and they are held for nothing: a form that unioned an entity the records refused would
-    /// count a member no artifact has. A record whose every entry was refused is still held,
-    /// empty, since it moved the level's version and the versions of an interval's deltas must
-    /// stay consecutive.
+    /// `refused` names the growth entries the store did not take; they are held for nothing. A
+    /// record whose every entry was refused is still held, empty, since the versions of an
+    /// interval's deltas must stay consecutive.
     pub(super) fn hold_delta(&mut self, record: &WalRecord, before: u64, refused: &[usize]) {
         let (layer, level, kind) = match record {
             WalRecord::ArtifactPublish {
@@ -2820,9 +2202,6 @@ impl Executor {
                 level,
                 growth,
             } => {
-                // The log's own bytes decoded, so what reaches the row forms is what reached the
-                // records: a set that does not decode is skipped and nothing else is, matching
-                // what `ArtifactStore::apply_growth` does with it.
                 let mut joins = Vec::new();
                 let mut pages = Vec::new();
                 for (index, grown) in growth.iter().enumerate() {
@@ -2840,9 +2219,7 @@ impl Executor {
                         }
                         tessera_lifecycle::wal::GrownSet::GeneratingSet { rank, cardinality } => {
                             // A leave, or a withdrawal, re-derives the operator whole: a union
-                            // cannot express a leave, and the withdrawal an emptied set makes
-                            // moves every rank above it. A page of joins alone is unioned into the
-                            // operator that is served.
+                            // cannot express a leave.
                             let leaves =
                                 tessera_lifecycle::membership::deserialise_leaving(&grown.leaving)
                                     .is_none_or(|leaving| !leaving.is_empty());
@@ -2949,24 +2326,13 @@ impl Executor {
         self.deny_dirty = true;
     }
 
-    /// Clone the buffer once, insert every entry in the window, publish once.
+    /// Clone the buffer once, insert every entry in the window, publish once. The clone is
+    /// O(total buffered items), so a window of k entries pays it once instead of k times.
     ///
-    /// The amortisation this buys is the one that grows: the clone is O(total buffered items) and
-    /// the buffer grows until the next tick drains it, so a window of k entries pays it once
-    /// instead of k times. This reduces the clone's count, not its cost: at the shipped defaults a
-    /// maximal batch is a one-entry window and gets no amortisation at all, and the operand is
-    /// bounded by one tick's arrivals in the steady state (flush drains the buffer each tick) and
-    /// by `ingest_buffer_max_items` when flush is failing.
-    ///
-    /// `terms` is taken out of each entry rather than borrowed: each row's resolved set is moved
-    /// into the buffer, where borrowing would force one `Vec<TermId>` clone per row on the one
-    /// thread every write is serialised through. An entry's `terms` is empty after this and
-    /// nothing downstream reads it; the ack needs `entity_ids`, not terms.
-    ///
-    /// `vocabularies` is `close_window`'s locally mutated copy, the live bindings plus this
-    /// window's mints, and is published verbatim rather than `Arc::clone(&generation.vocabularies)`
-    /// as every other unmoved field is: cloning the old `Arc` here would silently discard every
-    /// code this window just drew.
+    /// `terms` is taken out of each entry rather than borrowed, since the ack needs `entity_ids`,
+    /// not terms. `vocabularies` is `close_window`'s locally mutated copy, published verbatim
+    /// rather than `Arc::clone(&generation.vocabularies)`: cloning the old `Arc` here would
+    /// silently discard every code this window just drew.
     pub(super) fn apply_window(
         &self,
         closed: &mut [ClosedEntry<Reply<Ingested>>],
@@ -2978,9 +2344,7 @@ impl Executor {
         let mut mark = StageMark::now();
         let generation = self.generation.load_full();
         // The suggestion index's side map, grown by exactly the keys this window minted. Nothing
-        // is rebuilt: the base index and every other vocabulary's are carried behind their `Arc`s,
-        // and the fold's handles are borrows of data baked into the binary rather than a
-        // deserialisation.
+        // is rebuilt: every other vocabulary's index is carried behind its `Arc`.
         let suggest = generation.suggest.with_mints(
             &tessera_analyse::SuggestionFold::new(),
             &vocabularies,
@@ -2993,16 +2357,10 @@ impl Executor {
         // Updated together in one critical section, so a `/control/changes` lookup and a
         // `/v1/items` drill-down can never disagree about the same item.
         let mut established_inverse = lock_recover(&self.live.established_inverse);
-        // Entries are appended and applied in the same order, and nothing observable depends on
-        // which order that is. `CommitWindow::holds_external_id_of` forces a close rather than
-        // admit a second entry naming an external id the window already holds, and a row with no
-        // external id establishes nothing (the `if let Some` below), so no two entries in one
-        // window can write the same key.
         for (entry, wal_pos) in closed.iter_mut().zip(positions) {
             let terms = std::mem::take(&mut entry.terms);
             for (row, row_terms) in entry.rows().iter().zip(terms) {
-                // No external id means nothing to establish. `None` must never collide with
-                // `None`, so this skips rather than inserting under a shared empty key.
+                // No external id means nothing to establish.
                 let mut m = StageMark::now();
                 if let Some(external_id) = &row.external_id {
                     established.insert(external_id.clone(), row.entity_id);
@@ -3020,10 +2378,8 @@ impl Executor {
         drop(established_inverse);
         mark = self.health.lap(WriteStage::ApplyRows, mark);
 
-        // Published here, and at every other place buffer occupancy changes (the flush's
-        // publication and the deny lane's), so `/control/ingest`'s occupancy bound reads a figure
-        // the executor maintains rather than one a handler derives from a generation it would
-        // have to load.
+        // Published here, and at every other place buffer occupancy changes, so
+        // `/control/ingest`'s occupancy bound reads a figure the executor maintains.
         self.health
             .buffered_items
             .store(buffer.len(), Ordering::SeqCst);
@@ -3033,35 +2389,24 @@ impl Executor {
             g.buffer = Arc::new(buffer);
             g.vocabularies = Arc::new(vocabularies);
             // The one publication that changes the suggestion index, by the same mints that
-            // changed the bindings above: a novel key gets its code here, and a viewer typing its
-            // prefix on the next keystroke must be offered it rather than waiting for the next
-            // rebuild. Every other publication carries the index forward.
+            // changed the bindings above. Every other publication carries the index forward.
             g.suggest = suggest;
         });
         self.publish(next, started);
         self.health.lap(WriteStage::ApplySwap, mark);
     }
 
-    /// Clone the overlay once, apply every change in the window, publish once.
+    /// Clone the overlay once, apply every change in the window, publish once. [`Overlay`] never
+    /// shrinks except at a fold, so the clone is O(overlay depth). Changes are applied in the
+    /// window's entries order, the deny lane's FIFO order, so a `suppress` and a later `unsuppress`
+    /// of the same item resolve as two separate commands would have.
     ///
-    /// The amortisation this buys is the one that grows: [`Overlay`] never shrinks, since entries
-    /// survive `suppress → unsuppress` and shrink only at a fold, so the clone is O(overlay depth)
-    /// and the depth rises by one per new item denied. Applying an N-item revocation one command
-    /// at a time therefore copies Θ(N²) entries; a window of k pays the clone once for the k.
-    ///
-    /// Changes are applied in view order, which is the window's entries order, which is the deny
-    /// lane's FIFO arrival order, so a `suppress` and a later `unsuppress` of the same item resolve
-    /// as they would have as two separate commands.
-    ///
-    /// Pins are never invalidated by this: a pin fixes `(prefix, segments_version)`, and this
-    /// bumps `overlay_version` instead, so a suppression applies to a pinned request the moment it
-    /// is accepted, without expiring the pin.
+    /// Pins are never invalidated by this: a pin fixes `(prefix, segments_version)`, and this bumps
+    /// `overlay_version` instead, so a suppression applies to a pinned request the moment accepted.
     pub(super) fn apply_changes(&self, changes: Vec<(EntityId, ChangeOp)>) {
         let started = std::time::Instant::now();
         let generation = self.generation.load_full();
         let mut overlay: Overlay = (*generation.overlay).clone();
-        // What the window did, for the mask below: which entities it denied, and whether any
-        // removal happened at all.
         let mut newly_denied: Vec<EntityId> = Vec::new();
         let mut deleted: Vec<EntityId> = Vec::new();
         let mut unsuppressed = false;
@@ -3077,15 +2422,9 @@ impl Executor {
             overlay.apply(entity, op);
         }
 
-        // It alarms on the union; the schedule acts on the deletions. `overlay_soft_limit` gauges
-        // `deleted ∪ suppressed`, which is what an operator should see, while the fold trigger it
-        // seeds keys on the retirable part, since a suppression never retires and a fold
-        // dispatched on the union would rewrite the corpus to retire nothing.
+        // `overlay_soft_limit` gauges `deleted ∪ suppressed`, since a suppression never retires and
+        // a fold dispatched on the union would rewrite the corpus to retire nothing.
         //
-        // This is the only place the overlay grows at runtime; it is not the only place it grows.
-        // `WritePath::reconstruct` builds one from WAL replay before this executor exists, so a
-        // node restarting already over the limit is caught by
-        // `Engine::set_overlay_soft_limit`'s own one-shot evaluation instead.
         // Edge-triggered: the depth never decreases, so a level-triggered check would emit this
         // WARN on every subsequent deny, forever, with no path back.
         let depth = overlay.len();
@@ -3094,24 +2433,18 @@ impl Executor {
             tracing::warn!(
                 overlay_depth = depth,
                 overlay_soft_limit = limit,
-                "ALARM: the overlay has crossed its configured soft limit. A compaction fold is \
-                 the lever, retiring the executed deletions (Rule F), but nothing schedules one: \
-                 the automatic trigger and POST /control/compact are unbuilt, so the depth \
-                 comes down only when something calls for a fold. This line is edge-triggered, so \
-                 it will NOT repeat while the overlay stays over. Overlay depth grows every deny's \
-                 ack latency, since each acceptance clones the overlay; watch overlay.depth on \
-                 /control/status"
+                "ALARM: the overlay has crossed its configured soft limit. A compaction fold \
+                 retires the executed deletions, but nothing schedules one automatically; watch \
+                 overlay.depth on /control/status"
             );
         }
 
-        // A deleted row leaves the buffer here, which is the reason a `delete` issued before the
-        // item's first flush does not pin the WAL for ever: `plan_flush` never consumes a deleted
-        // row, so nothing else would ever remove it.
+        // A deleted row leaves the buffer here: `plan_flush` never consumes a deleted row, so
+        // nothing else would ever remove it, and a `delete` issued before the item's first flush
+        // would otherwise pin the WAL forever.
         //
-        // The clone is paid only when a buffered row is actually dropped, and this is the deny
-        // lane, so paying it per window would put a flush-sized stall in front of every
-        // revocation. Deleting an entity that already has geometry, which is the ordinary case,
-        // costs one hash lookup per entry and no clone at all.
+        // The clone is paid only when a buffered row is actually dropped. Deleting an entity that
+        // already has geometry, the ordinary case, costs one hash lookup and no clone.
         let buffer = if !generation.buffer.holds_any(&deleted) {
             Arc::clone(&generation.buffer)
         } else {
@@ -3145,14 +2478,12 @@ impl Executor {
     }
 
     /// Restate the live row-less state into a side-manifest about to be committed: the registry
-    /// and its low-water mark, the roster, the runtime attribute columns, the runtime vocabularies
-    /// with their values, and the view groups and plain views.
+    /// and its low-water mark, the roster, the attribute columns, the vocabularies, and the view
+    /// groups and plain views.
     ///
-    /// Restated from live state, never carried forward from the clone: the manifest a publication
-    /// starts from may be several publications behind, so a registration, a create or a
-    /// declaration that landed since would be dropped by carrying it forward, and a rotation would
-    /// then make that permanent. `min`, not `max`, for the mark: the row-less region grows
-    /// downward.
+    /// Restated from live state, never carried forward from the clone: a manifest a publication
+    /// starts from may be several behind, so carrying a stale value forward would drop a
+    /// registration. `min`, not `max`, for the mark: the row-less region grows downward.
     pub(super) fn write_live_state(&self, manifest: &mut SegmentsManifest, vocabularies: &Vocabularies) {
         let (layers, layer_tombstones, low_water) = self.live.registry_for_publication();
         manifest.entity_id_low_water = manifest.entity_id_low_water.min(low_water);
@@ -3171,25 +2502,13 @@ impl Executor {
     }
 
     /// Reclaim what the publication just made redundant: after the generation swap and never
-    /// before it, since rotation writes its snapshot before any deletion.
+    /// before it, since rotation writes its snapshot before any deletion. The reclaim bound is the
+    /// buffer's oldest surviving row (`IngestBuffer::oldest_wal_pos`), refusing (`None`) rather
+    /// than guessing if any buffered row does not know its own position.
     ///
-    /// The reclaim bound is the buffer's oldest surviving row. Rows acked during the flush were
-    /// appended after its snapshot point, were never consumed, and carry entity ids at or above
-    /// the new watermark; reclaiming past them would delete them and recovery would then
-    /// reconstruct them from nothing, acked ingest silently lost at the next restart.
-    /// `IngestBuffer::oldest_wal_pos` answers it from the post-publication buffer, the rows that
-    /// still have no geometry, and refuses (`None`) if any of them does not know its own
-    /// position, which reclaims nothing rather than guessing. With an empty buffer the whole
-    /// durable prefix is reclaimable.
-    ///
-    /// Two gates, neither the one `plan_flush` applies. A poisoned WAL cannot be appended to at
-    /// all. A node whose overlay has diverged from its durable WAL must rotate nothing:
-    /// `Wal::discard_undurable` deliberately does not un-apply, so such a node holds dispositions
-    /// no record backs, and writing a snapshot from that overlay would make a 500'd, never-acked
-    /// deny permanent.
-    ///
-    /// Nothing here is fatal. A failure leaves the log longer than it needs to be, which the next
-    /// tick retries; the publication itself is already durable and already swapped.
+    /// Two gates: a poisoned WAL cannot be appended to at all, and a node whose overlay has
+    /// diverged from its durable WAL must rotate nothing, since writing a snapshot from that
+    /// overlay would make a 500'd, never-acked deny permanent. Nothing here is fatal.
     pub(super) fn rotate_wal(&mut self) {
         if self.wal.is_poisoned() {
             return;
@@ -3204,8 +2523,7 @@ impl Executor {
 
         let generation = self.generation.load();
         // A stepped-down node reclaims nothing: its WAL members are the only recovery material
-        // for whatever the step-down shadowed, and freezing reclamation is the fail-closed
-        // direction while an operator repairs the damaged newest manifest.
+        // for whatever the step-down shadowed.
         if generation
             .bundle
             .partitions
@@ -3219,21 +2537,17 @@ impl Executor {
             return;
         }
         let reclaim_below = match generation.buffer.oldest_wal_pos() {
-            // Nothing buffered: every ingest row has geometry, so everything below the current
-            // position, the whole durable prefix, is reclaimable.
+            // Nothing buffered: every ingest row has geometry, so the whole durable prefix is
+            // reclaimable.
             None => self.wal.position(),
             Some(Some(oldest)) => oldest,
-            // A buffered row of unknown position pins the log. Fail-safe and loud by construction:
-            // the sequence grows, which is visible, rather than a record vanishing, which is not.
+            // A buffered row of unknown position pins the log: fail-safe by construction, since the
+            // sequence grows visibly rather than a record vanishing.
             Some(None) => 0,
         };
-        // The oldest artifact publication pins the log too, and today that means from the first
-        // publication onwards. A membership has no home outside the WAL: segments carry rows and
-        // postings, manifests carry the registry, and neither carries a Roaring bitmap of who
-        // belongs to a cluster, so reclaiming a member holding one destroys the only copy, leaving
-        // the artifact registered, still addressable by a `tessera_id` a caller holds, and served
-        // as absent. This is the fail-closed direction: a log that grows is noticed where a
-        // membership that vanishes is not.
+        // The oldest artifact publication pins the log too: a membership has no home outside the
+        // WAL, so reclaiming a member holding one destroys the only copy. Fail-closed: a log that
+        // grows is noticed where a membership that vanishes is not.
         let reclaim_below = match self.live.artifacts_oldest_wal_pos() {
             Some(oldest) => reclaim_below.min(oldest),
             None => reclaim_below,
@@ -3246,10 +2560,9 @@ impl Executor {
                 // after the snapshot this rotation just wrote.
                 self.wal_position_at_last_rotation = self.wal.position();
                 if !deleted.is_empty() {
-                    // The idempotency index follows the log it caches: a restart rebuilds it from
-                    // the surviving members, so the entries whose records lay in the members just
-                    // deleted go now, otherwise this process would answer a batch id as a replay
-                    // that the same node would call unknown after a restart.
+                    // The idempotency index follows the log it caches, so entries whose records
+                    // lay in the members just deleted go now: otherwise this process would answer
+                    // a batch id as a replay that the same node would call unknown after a restart.
                     let forgotten = self.live.forget_batches_below(self.wal.retained_from());
                     tracing::info!(
                         members = ?self.wal.members(),
@@ -3266,18 +2579,12 @@ impl Executor {
     }
 
     /// Rotate at the tick when the log has grown and no flush publication is coming to do it: the
-    /// deny-only regime's rotation.
-    ///
-    /// Without this, a node that took denies without ever flushing (a loaded bundle with no live
-    /// ingest, the natural state after a bulk load) would seal nothing, snapshot nothing and
-    /// reclaim nothing: an unbounded log on the one lane that structurally cannot be shed,
-    /// replayed in full at every restart.
+    /// deny-only regime's rotation. Without this, a node that took denies without ever flushing
+    /// would seal nothing, snapshot nothing and reclaim nothing: an unbounded log replayed in full
+    /// at every restart.
     ///
     /// Gated on growth, so an idle node rotates nothing: a rotation writes an O(overlay) snapshot
-    /// and a new member, and doing that per tick on a quiet deployment would be churn for no
-    /// reclaim. `rotate_wal` re-checks every safety gate (poisoned, diverged, stepped-down) itself,
-    /// and the snapshot restates the whole overlay before anything is deleted, so nothing acked is
-    /// lost at any crash point.
+    /// and a new member, which would be churn for no reclaim on a quiet deployment.
     pub(super) fn rotate_if_grown(&mut self) {
         if self.wal.position() == self.wal_position_at_last_rotation {
             return;
@@ -3286,22 +2593,11 @@ impl Executor {
     }
 
     /// Read the WAL's size and its rotation bound into [`ExecutorHealth::wal_gauge`], at most once
-    /// per tick period.
+    /// per tick period. Rotates nothing, compares nothing against a limit, returns no decision.
     ///
-    /// A read of state this thread already owns, and nothing else: it rotates nothing, compares
-    /// nothing against a limit and returns no decision.
-    ///
-    /// The cost is O(members): two `stat`s per surviving member, the log file and its `.sync`
-    /// sidecar, plus one artifact-store lock and two O(1) reads. Steady-state retention is two
-    /// members. Under a `growth` or `fill` pin nothing below the pin is reclaimed, so a member
-    /// accumulates per rotation for as long as the fold that would release it is refused, which is
-    /// the condition this gauge exists to make visible; the walk gets dearer as the problem gets
-    /// worse. The rate limit below bounds the walk to one per `flush_max_age_secs` whatever the
-    /// tick does.
-    ///
-    /// Called from both the flushing and the flush-skipped path, so a node whose flush is stalled
-    /// still reports the log growing under it, and once at [`Executor::run`]'s entry so a
-    /// restarted node does not report an unsampled zero for its first period.
+    /// The cost is O(members): under a `growth` or `fill` pin a member accumulates per rotation for
+    /// as long as the fold that would release it is refused, so the walk gets dearer as the problem
+    /// gets worse. The rate limit below bounds it to once per `flush_max_age_secs`.
     pub(super) fn sample_wal_gauge(&mut self) {
         let period = std::time::Duration::from_secs(self.flush_max_age_secs);
         if let Some(last) = self.last_wal_sample {
@@ -3325,19 +2621,14 @@ impl Executor {
     }
 
     /// Publish new geometry: check, swap, prune. The executor's own arm of the swap-only
-    /// publication step.
+    /// publication step. On this thread there is nothing to race, so there is no
+    /// compare-and-swap retry loop: one load, one check, one store.
     ///
-    /// On this thread there is nothing to race, so there is no compare-and-swap retry loop: one
-    /// load, one check, one store. `check_publishable` is evaluated against the generation
-    /// actually being replaced, which is the one loaded here, because this is the only thread
-    /// that can replace it.
-    ///
-    /// The one swap carries: prefix, `segments_version`, watermark, bundle, dictionary and tier
-    /// list always; and, when the publication carries a `PrefixRotation`, the base postings, the
-    /// fragment cache and the identity it keys, the external-id sidecar, and the retirement of the
-    /// executed deletions, all through the single `store` below. Not a sequence of stores that a
-    /// request could land between: a request loads one pointer and gets a geometry, a term index,
-    /// a fragment identity and a sidecar that agree.
+    /// The one swap carries prefix, `segments_version`, watermark, bundle, dictionary and tier list
+    /// always, and, when the publication carries a `PrefixRotation`, also the base postings, the
+    /// fragment cache and identity it keys, the external-id sidecar, and the retirement of the
+    /// executed deletions, all through the single `store` below: not a sequence a request could
+    /// land between.
     pub(super) fn publish_geometry(
         &mut self,
         publication: GeometryPublication,
@@ -3355,19 +2646,13 @@ impl Executor {
         let previous = self.generation.load_full();
         check_publishable(&previous, &prefix, segments_version, watermark)?;
 
-        // Rule F, in the fold's own swap and nowhere else: an entry withdrawn while the old
-        // geometry is still live re-exposes the item for the width of that window, so the overlay
-        // is cloned, retired against, and published, never mutated in place on a shared `Arc`
-        // which the read path is holding.
-        //
-        // `overlay_version` moves only when something actually retired: a geometry-only swap that
-        // bumped it would falsely signal a change on the security-state axis the cache keys read;
-        // a retirement that did not bump it would be a real change to that state, invisible to
-        // the same keys.
+        // Rule F, in the fold's own swap and nowhere else: the overlay is cloned, retired against,
+        // and published, never mutated in place on a shared `Arc` the read path is holding.
+        // `overlay_version` moves only when something actually retired, since a geometry-only swap
+        // that bumped it would falsely signal a change on the security-state axis cache keys read.
         let (overlay, overlay_version) = match rotation.as_ref().map(|r| &r.retired) {
             Some(retired) if !retired.is_empty() => {
-                // The live external-id map loses the retired bindings first, see
-                // `LiveState::forget_established` for why before the retirement rather than after.
+                // The live external-id map loses the retired bindings first.
                 let forgotten = self.live.forget_established(retired);
                 let mut overlay = (*previous.overlay).clone();
                 let count = overlay.retire(retired);
@@ -3385,10 +2670,8 @@ impl Executor {
 
         let next = previous.with(|g| {
             g.prefix = prefix;
-            // A rotation carries the new prefix's own columns, opened over it by `open_rotation`;
-            // every other publication stays within the live prefix and carries the live ones.
-            // Cloning the previous generation's across a rotation would serve the superseded
-            // prefix's mappings out of files the reclamation is about to unlink.
+            // A rotation carries the new prefix's own columns; cloning the previous generation's
+            // would serve the superseded prefix's mappings out of files reclamation is unlinking.
             g.filter_columns = rotation.as_ref().map_or_else(
                 || Arc::clone(&previous.filter_columns),
                 |r| Arc::clone(&r.filter_columns),
@@ -3414,12 +2697,8 @@ impl Executor {
             g.overlay = overlay;
             // The suggestion index carries across a rotation: a fold retires entities, never values.
         });
-        // Listed before the swap, deleted after it. At this instant every persisted fragment is
-        // under the identity about to be superseded, which is not selectable by name since a
-        // cache entry is a SHA-256 over the identity and a hash does not invert. Taking it here
-        // and deleting below closes both hazards at once: a listing taken before the swap can
-        // never name an entry a request wrote after it, and nothing is deleted at all if the swap
-        // does not happen.
+        // Listed before the swap, deleted after it: a listing taken before the swap can never name
+        // an entry a request wrote after it, and nothing is deleted if the swap does not happen.
         let superseded = rotation
             .as_ref()
             .map(|_| previous.fragments.superseded_entries())
@@ -3428,11 +2707,8 @@ impl Executor {
         let next = Arc::new(next);
         self.publish_arc(Arc::clone(&next), started);
 
-        // A rotation refreshes after the swap and does not arm the shed. The pass still runs,
-        // most-recently-used first, so a resident session's projection is rebuilt proactively
-        // rather than on its next request, but it is no longer load-bearing: shed only while the
-        // refresh pass is shorter than the rebuild it would save, and a fold inverts that. After a
-        // fold a missing projection is an ordinary cache miss.
+        // A rotation refreshes after the swap and does not arm the shed: after a fold a missing
+        // projection is an ordinary cache miss.
         if rotation.is_some() {
             self.refresh.spawn(next);
         }
@@ -3447,9 +2723,7 @@ impl Executor {
             );
         }
 
-        // The retention pass, at the swap rather than at a reclaim. See
-        // `RowProjectionCache::prune_generations_below` for why depth 1 rather than depth 0, which
-        // would delete the input to the very patch it exists to enable.
+        // The retention pass, at the swap rather than at a reclaim.
         self.row_projection_cache
             .prune_generations_below(segments_version.saturating_sub(KEEP_SUPERSEDED_GENERATIONS));
         self.prune_region_cache(segments_version);
@@ -3458,12 +2732,10 @@ impl Executor {
 
     /// The generation swap. The only `store` in the write path.
     ///
-    /// `load_full` + `store` is safe here for one reason: this is the sole thread that can
-    /// publish. A flush would be a second publisher and must not `store` directly; it submits a
-    /// command and is applied here. A flush that stored directly would lose geometry
-    /// publications, and a lost one leaves the live generation on the pin drain list, where the
-    /// cache's prune evicts projections still in use. `scripts/check-layers.sh` refuses any
-    /// non-atomic `.store(` in this crate's sources outside this file.
+    /// `load_full` + `store` is safe here because this is the sole thread that can publish: a
+    /// flush must not `store` directly; it submits a command and is applied here.
+    /// `scripts/check-layers.sh` refuses any non-atomic `.store(` in this crate's sources outside
+    /// this file.
     pub(super) fn publish(&self, next: Generation, started: std::time::Instant) {
         self.publish_arc(Arc::new(next), started)
     }
@@ -3472,8 +2744,6 @@ impl Executor {
     /// publication needs the same value afterwards, to hand the background refresh.
     pub(super) fn publish_arc(&self, next: Arc<Generation>, started: std::time::Instant) {
         self.generation.store(next);
-        // The overlay/buffer clone above is O(total buffered items). This counter is what makes
-        // the deny-ack floor measurable rather than asserted.
         self.health
             .record_apply(started.elapsed().as_nanos() as u64);
         #[cfg(feature = "fault-injection")]
@@ -3484,21 +2754,16 @@ impl Executor {
 
     /// Mirror the WAL's own poison flag into the posture, in both directions.
     ///
-    /// Asked of the WAL rather than remembered from the last error this loop happened to see: a
-    /// posture derived from the executor's bookkeeping can drift from the thing it describes. It
-    /// is a plain store, and the WAL is the only thing that decides: a torn handle never reports
-    /// healthy because it never becomes healthy, not because anything here refuses to lower the
-    /// flag.
+    /// Asked of the WAL rather than remembered from the last error this loop happened to see, so
+    /// the posture cannot drift from the thing it describes.
     pub(super) fn observe_wal(&self) {
         self.health.mirror_wal(self.wal.is_poisoned());
     }
 
     /// Reach an armed pause site, if any. Fault-injection builds only; a no-op otherwise.
     ///
-    /// The sites are `faults::PauseSite`'s: two discriminate the ack contract's ordering, and
-    /// three park this thread at the write path's publication seams for the correctness suite's
-    /// crash modifier. Every call site holds no lock: a pause inside one would wedge this thread
-    /// against its own waiters.
+    /// Every call site holds no lock: a pause inside one would wedge this thread against its own
+    /// waiters.
     #[cfg(feature = "fault-injection")]
     pub(super) fn pause_point(&self, site: PauseSiteArg) {
         use tessera_lifecycle::faults::PauseAction;
