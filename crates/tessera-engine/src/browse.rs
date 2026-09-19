@@ -382,7 +382,7 @@ impl crate::Engine {
                     recorded,
                     predicate.as_ref(),
                     generation.segments_version,
-                    self.serves_column_only(req.layer),
+                    crate::artifacts::serves_column_only(&layer.declaration),
                 )
             });
             let counts = self.masked_counts(
