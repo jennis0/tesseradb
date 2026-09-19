@@ -30,7 +30,6 @@ use tessera_types::layer::{
 };
 use tessera_types::EntityId;
 
-const WHOLE_MAP: [f64; 4] = [0.0, 0.0, 1000.0, 1000.0];
 const LAYER: &str = "clusters/scattered";
 
 /// Rows enough for eleven Roaring containers — a container is 65 536 ids, and the threshold the
@@ -64,27 +63,6 @@ fn declaration() -> LayerDeclaration {
         // **No pin.** The whole point is that the fold's own observation moves the record.
         layout: None,
         shape: None,
-    }
-}
-
-fn fold(engine: &Engine) {
-    let before = engine.write_executor_stats();
-    engine.request_fold();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
-    loop {
-        let now = engine.write_executor_stats();
-        assert_eq!(
-            now.fold_failures, before.fold_failures,
-            "the fold was discarded rather than published"
-        );
-        if now.folds > before.folds {
-            return;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the fold never published"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(20));
     }
 }
 

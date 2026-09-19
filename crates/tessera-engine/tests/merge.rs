@@ -64,16 +64,10 @@ use tessera_engine::{Engine, EngineConfig, ViewportRequest};
 use tessera_lifecycle::{ChangeOp, UnallocatedRow};
 use tessera_types::EntityId;
 
+const WAIT: Duration = Duration::from_secs(30);
+
 /// `MergePolicy::tier_width` — how many adjacent, same-tier extents select a merge.
 const TIER_WIDTH: usize = 4;
-
-fn wait_until(what: &str, mut cond: impl FnMut() -> bool) {
-    let deadline = Instant::now() + Duration::from_secs(30);
-    while !cond() {
-        assert!(Instant::now() < deadline, "timed out waiting: {what}");
-        std::thread::sleep(Duration::from_millis(5));
-    }
-}
 
 fn open_engine_at(tmp: &std::path::Path, root: &std::path::Path) -> Engine {
     Engine::open(
@@ -236,7 +230,7 @@ fn flush_interleaved_segments(engine: &Engine) -> Vec<Vec<(EntityId, String)>> {
             .expect("ingest is accepted");
         let flushes = engine.write_executor_stats().flushes;
         engine.request_flush();
-        wait_until("the flush to publish", || {
+        wait_until("the flush to publish", WAIT, || {
             engine.write_executor_stats().flushes > flushes
         });
         by_segment.push(entities.into_iter().zip(items).collect());
@@ -273,7 +267,7 @@ fn run_merge(engine: &Engine, entities: &[EntityId]) {
     let before = rows_of(engine, entities);
     engine.set_merge_for_test(true);
     engine.request_flush();
-    wait_until("the merge to publish", || {
+    wait_until("the merge to publish", WAIT, || {
         engine.write_executor_stats().merges >= 1
     });
     let after = rows_of(engine, entities);
@@ -525,7 +519,7 @@ fn a_suppression_racing_a_merge_is_in_force_once_both_have_landed() {
     engine
         .accept_change(entity, ChangeOp::Suppress)
         .expect("a suppression is accepted");
-    wait_until("the merge to publish", || {
+    wait_until("the merge to publish", WAIT, || {
         engine.write_executor_stats().merges >= 1
     });
 
@@ -580,7 +574,7 @@ fn a_suppression_accepted_inside_a_merges_flight_survives_its_publication() {
     engine.set_merge_publication_paused_for_test(true);
     engine.set_merge_for_test(true);
     engine.request_flush();
-    wait_until("the merge to complete and hold", || {
+    wait_until("the merge to complete and hold", WAIT, || {
         engine.merge_publication_is_held_for_test()
     });
     // Off again, so nothing dispatches a second merge over the same extents.
@@ -598,7 +592,7 @@ fn a_suppression_accepted_inside_a_merges_flight_survives_its_publication() {
     assert!(engine.generation().overlay.is_suppressed(entity));
 
     engine.set_merge_publication_paused_for_test(false);
-    wait_until("the merge to publish", || {
+    wait_until("the merge to publish", WAIT, || {
         engine.write_executor_stats().merges >= 1
     });
 
@@ -704,7 +698,7 @@ fn a_merge_moves_geometry_and_the_refresh_replaces_every_projection() {
         "a merge permutes row space, so it must bump the geometry version — the only safe \
          discriminator a row-space artefact may key on"
     );
-    wait_until("the refresh to replace the entry", || {
+    wait_until("the refresh to replace the entry", WAIT, || {
         engine.refreshes() >= 1
     });
 
@@ -811,7 +805,7 @@ fn a_reboot_after_a_merge_reads_back_the_watermark_the_process_served() {
         engine.set_merge_publication_paused_for_test(true);
         engine.set_merge_for_test(true);
         engine.request_flush();
-        wait_until("the merge to complete and hold", || {
+        wait_until("the merge to complete and hold", WAIT, || {
             engine.merge_publication_is_held_for_test()
         });
         // Off again, so the tick that publishes the flush below does not dispatch a second merge
@@ -840,13 +834,13 @@ fn a_reboot_after_a_merge_reads_back_the_watermark_the_process_served() {
             .expect("ingest is accepted");
         let flushes = engine.write_executor_stats().flushes;
         engine.request_flush();
-        wait_until("the late flush to publish", || {
+        wait_until("the late flush to publish", WAIT, || {
             engine.write_executor_stats().flushes > flushes
         });
         let watermark_served = engine.generation().watermark;
 
         engine.set_merge_publication_paused_for_test(false);
-        wait_until("the merge to publish", || {
+        wait_until("the merge to publish", WAIT, || {
             engine.write_executor_stats().merges >= 1
         });
 
@@ -916,7 +910,7 @@ fn a_racer_inside_a_merges_refresh_window_is_shed_rather_than_rebuilding() {
 
     // Released, the window closes and the same request is served.
     engine.set_refresh_paused_for_test(false);
-    wait_until("the refresh to land", || engine.refreshes() >= 1);
+    wait_until("the refresh to land", WAIT, || engine.refreshes() >= 1);
     let served = viewport(&engine, &session);
     assert_eq!(
         served.tiles.iter().map(|t| t.visible).sum::<u64>(),
@@ -1016,7 +1010,7 @@ fn flush_one_segment(engine: &Engine, tag: usize, rows: usize) -> Vec<EntityId> 
         .expect("ingest is accepted");
     let flushes = engine.write_executor_stats().flushes;
     engine.request_flush();
-    wait_until("the flush to publish", || {
+    wait_until("the flush to publish", WAIT, || {
         engine.write_executor_stats().flushes > flushes
     });
     entities
@@ -1073,7 +1067,7 @@ fn a_configured_tier_width_reaches_selection_and_changes_when_a_merge_fires() {
 
     engine.set_merge_for_test(true);
     engine.request_flush();
-    wait_until("the width-2 merge to publish", || {
+    wait_until("the width-2 merge to publish", WAIT, || {
         engine.write_executor_stats().merges >= 1
     });
     assert_eq!(
@@ -1135,7 +1129,7 @@ fn a_configured_segment_floor_reaches_selection_and_changes_which_segments_merge
 
     engine.set_merge_for_test(true);
     engine.request_flush();
-    wait_until("the same-class merge to publish", || {
+    wait_until("the same-class merge to publish", WAIT, || {
         engine.write_executor_stats().merges >= 1
     });
 
@@ -1236,7 +1230,7 @@ fn the_merge_publication_seam_parks_the_executor_between_execution_and_publicati
 
     // Proceeds: release, and the publication lands whole.
     faults.release();
-    wait_until("the released merge publishes", || {
+    wait_until("the released merge publishes", WAIT, || {
         engine.write_executor_stats().merges >= 1
     });
     assert!(

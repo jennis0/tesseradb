@@ -15,44 +15,12 @@
 
 mod common;
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use common::*;
 use tessera_engine::{Engine, EngineConfig, ViewportRequest};
-use tessera_lifecycle::UnallocatedRow;
-use tessera_types::EntityId;
 
-fn wait_until(what: &str, mut cond: impl FnMut() -> bool) {
-    let deadline = Instant::now() + Duration::from_secs(20);
-    while !cond() {
-        assert!(Instant::now() < deadline, "timed out waiting: {what}");
-        std::thread::sleep(Duration::from_millis(5));
-    }
-}
-
-fn engine_at(tmp: &std::path::Path, root: &std::path::Path, tick_secs: u64) -> Engine {
-    let mut engine = Engine::open(
-        root,
-        &tmp.join("cache"),
-        &tmp.join("wal.log"),
-        tessera_plugin::Passthrough::new(),
-        EngineConfig {
-            flush_max_age_secs: tick_secs,
-            // The shipped row trigger, four commit windows (`DEFAULT_FLUSH_MAX_ITEMS`):
-            // what bounds the window close's O(buffered) copy. Nothing here reaches it.
-            flush_max_items: 40_000,
-            max_merged_segment_bytes: None,
-            // Compaction §9's trigger is off unless a deployment configures one.
-            compaction: tessera_engine::CompactionSchedule::off(),
-            ..config()
-        },
-    )
-    .expect("engine opens");
-    engine
-        .start_write_executor(64)
-        .expect("the executor starts once");
-    engine
-}
+const WAIT: Duration = Duration::from_secs(20);
 
 /// The same engine **without a write executor**: one executor owns a bundle root (write-path
 /// §1.2), and a reopen that runs beside a live publisher is a reader. What it proves is unchanged —
@@ -73,44 +41,17 @@ fn reader_at(tmp: &std::path::Path, root: &std::path::Path) -> Engine {
     .expect("engine opens")
 }
 
-fn fixture(tmp: &std::path::Path) -> std::path::PathBuf {
-    let root = tmp.join("bundle");
-    build_fixture(
-        &root,
-        &tmp.join("points.parquet"),
-        &tmp.join("pairs.parquet"),
-    );
-    root
-}
-
-fn ingest(engine: &Engine, external_id: &str) -> EntityId {
-    let row = UnallocatedRow {
-        external_id: Some(external_id.as_bytes().to_vec()),
-        view: "s0".to_string(),
-        join: None,
-        descriptors: vec![b"0".to_vec()],
-        x: 5.0,
-        y: 5.0,
-        scalars: Vec::new(),
-        terms: engine.resolve_terms(&[b"0".to_vec()]),
-        scoped: Vec::new(),
-    };
-    engine
-        .accept_ingest(vec![row], external_id.to_string(), [0u8; 32])
-        .expect("ingest is accepted")[0]
-}
-
 /// The tick plans what it would flush, and the gauge separates a stalled flush from healthy
 /// backlog: `flushable_items` is the buffer minus what the three dispositions exclude (§3.5).
 #[test]
 fn the_tick_plans_what_it_would_flush() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let engine = engine_at(tmp.path(), &fixture(tmp.path()), 1);
+    let engine = engine_at(tmp.path(), &fixture_in(tmp.path()), 1);
 
     ingest(&engine, "ext-1");
     ingest(&engine, "ext-2");
 
-    wait_until("the tick to plan", || {
+    wait_until("the tick to plan", WAIT, || {
         engine.write_executor_stats().flushable_items == 2
     });
 }
@@ -120,9 +61,11 @@ fn the_tick_plans_what_it_would_flush() {
 #[test]
 fn an_idle_tick_plans_nothing() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let engine = engine_at(tmp.path(), &fixture(tmp.path()), 1);
+    let engine = engine_at(tmp.path(), &fixture_in(tmp.path()), 1);
 
-    wait_until("several ticks", || engine.write_executor_stats().ticks >= 3);
+    wait_until("several ticks", WAIT, || {
+        engine.write_executor_stats().ticks >= 3
+    });
     assert_eq!(engine.write_executor_stats().flushable_items, 0);
     assert_eq!(engine.generation().segments_version, 0);
 }
@@ -137,11 +80,11 @@ fn an_idle_tick_plans_nothing() {
 #[test]
 fn a_published_flush_is_a_bundle_a_restart_opens() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let root = fixture(tmp.path());
+    let root = fixture_in(tmp.path());
     let engine = engine_at(tmp.path(), &root, 1);
 
     let id = ingest(&engine, "ext-1");
-    wait_until("the flush to publish", || {
+    wait_until("the flush to publish", WAIT, || {
         engine.write_executor_stats().flushes >= 1
     });
 
@@ -210,12 +153,12 @@ fn a_published_flush_is_a_bundle_a_restart_opens() {
 #[test]
 fn a_reopened_engine_does_not_re_buffer_rows_that_already_have_geometry() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let root = fixture(tmp.path());
+    let root = fixture_in(tmp.path());
 
     let id = {
         let engine = engine_at(tmp.path(), &root, 1);
         let id = ingest(&engine, "ext-1");
-        wait_until("the flush to publish", || {
+        wait_until("the flush to publish", WAIT, || {
             engine.write_executor_stats().flushes >= 1
         });
         assert!(!engine.generation().buffer.contains(id));
@@ -255,12 +198,12 @@ fn a_reopened_engine_does_not_re_buffer_rows_that_already_have_geometry() {
 #[test]
 fn the_allocator_floor_comes_from_the_side_manifest() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let root = fixture(tmp.path());
+    let root = fixture_in(tmp.path());
 
     let flushed = {
         let engine = engine_at(tmp.path(), &root, 1);
         let id = ingest(&engine, "ext-1");
-        wait_until("the flush to publish", || {
+        wait_until("the flush to publish", WAIT, || {
             engine.write_executor_stats().flushes >= 1
         });
         id
@@ -307,7 +250,7 @@ fn the_allocator_floor_comes_from_the_side_manifest() {
 #[test]
 fn a_flushed_item_is_visible_in_a_viewport() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let root = fixture(tmp.path());
+    let root = fixture_in(tmp.path());
     let engine = engine_at(tmp.path(), &root, 1);
 
     // The ingested item sits at (5, 5) — see `ingest`.
@@ -322,7 +265,7 @@ fn a_flushed_item_is_visible_in_a_viewport() {
     let visible_before = before.tiles.iter().map(|t| t.visible).sum::<u64>();
 
     let id = ingest(&engine, "ext-1");
-    wait_until("the flush to publish", || {
+    wait_until("the flush to publish", WAIT, || {
         engine.write_executor_stats().flushes >= 1
     });
 

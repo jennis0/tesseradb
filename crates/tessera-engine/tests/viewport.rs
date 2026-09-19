@@ -26,7 +26,7 @@ use tessera_build::{build, BuildArgs};
 use tessera_engine::select::{decode_tier, DecodeTier};
 use tessera_engine::viewport::{ViewportRequest, SERIAL_FALLBACK_MAX_ROWS};
 use tessera_engine::{
-    default_compute_threads, CancelToken, Engine, EngineConfig, EngineError, Session,
+    CancelToken, Engine, EngineConfig, EngineError, Session,
 };
 use tessera_lifecycle::wal::{ChangeOp, Wal, WalRecord};
 use tessera_plugin::{Passthrough, Plugin};
@@ -362,25 +362,9 @@ fn theta_does_not_move_when_the_viewport_pans() {
         &tmp.path().join("wal.log"),
         Passthrough::new(),
         EngineConfig {
-            token_max_lifetime_secs: 3600,
-            max_k: 200,
-            k_min: 2,
             k_max_marks: 128,
             theta_target_marks: 16,
-            max_underlay_offset: 4,
-            max_underlay_cells: 8192,
-            max_tiles_per_request: 262_144,
-            compute_threads: default_compute_threads(),
-            flush_max_age_secs: 90,
-            // The shipped row trigger, four commit windows (`DEFAULT_FLUSH_MAX_ITEMS`):
-            // what bounds the window close's O(buffered) copy. Nothing here reaches it.
-            flush_max_items: 40_000,
-            max_merged_segment_bytes: None,
-            tier_width: None,
-            segment_floor_bytes: None,
-            coalesce_width: None,
-            // Compaction §9's trigger is off unless a deployment configures one.
-            compaction: tessera_engine::CompactionSchedule::off(),
+            ..config()
         },
     )
     .unwrap();
@@ -445,23 +429,9 @@ fn no_visible_tile_is_ever_served_empty() {
         &tmp.path().join("wal.log"),
         Passthrough::new(),
         EngineConfig {
-            token_max_lifetime_secs: 3600,
-            max_k: 200,
-            k_min: 2,
             k_max_marks: 128,
             theta_target_marks: 16,
-            max_underlay_offset: 4,
-            max_underlay_cells: 8192,
-            max_tiles_per_request: 262_144,
-            compute_threads: default_compute_threads(),
-            flush_max_age_secs: 90,
-            flush_max_items: 40_000,
-            max_merged_segment_bytes: None,
-            tier_width: None,
-            segment_floor_bytes: None,
-            coalesce_width: None,
-            // Compaction §9's trigger is off unless a deployment configures one.
-            compaction: tessera_engine::CompactionSchedule::off(),
+            ..config()
         },
     )
     .unwrap();
@@ -1365,7 +1335,6 @@ fn latency_sanity_at_2_4m_p99_under_50ms() {
         &tmp.path().join("wal.log"),
         Passthrough::new(),
         EngineConfig {
-            token_max_lifetime_secs: 3600,
             // **Production defaults, deliberately.** Everything else in this file saturates theta
             // so that masking assertions do not also depend on the density rule — but this is the
             // only latency gate in the tree, and under saturation the threshold clause never binds,
@@ -1373,21 +1342,9 @@ fn latency_sanity_at_2_4m_p99_under_50ms() {
             // It would have measured a path the server does not take. Keep these in step with
             // `tessera-server`'s DEFAULT_* constants.
             max_k: 1_000,
-            k_min: 2,
             k_max_marks: 500,
             theta_target_marks: 16,
-            max_underlay_offset: 4,
-            max_underlay_cells: 8192,
-            max_tiles_per_request: 262_144,
-            compute_threads: default_compute_threads(),
-            flush_max_age_secs: 90,
-            flush_max_items: 40_000,
-            max_merged_segment_bytes: None,
-            tier_width: None,
-            segment_floor_bytes: None,
-            coalesce_width: None,
-            // Compaction §9's trigger is off unless a deployment configures one.
-            compaction: tessera_engine::CompactionSchedule::off(),
+            ..config()
         },
     )
     .expect("engine should open the 2.4M bundle");

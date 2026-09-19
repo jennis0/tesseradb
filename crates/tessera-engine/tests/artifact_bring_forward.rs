@@ -19,14 +19,13 @@ mod common;
 
 use common::*;
 use tessera_engine::viewport::ViewportRequest;
-use tessera_engine::{ArtifactOut, Engine};
+use tessera_engine::Engine;
 use tessera_lifecycle::{IncomingArtifact, IncomingGrowth};
 use tessera_types::layer::{
     ContentDeclaration, Hierarchy, HierarchyKind, LayerDeclaration, MembershipSource, ServingLayout,
 };
 use tessera_types::EntityId;
 
-const WHOLE_MAP: [f64; 4] = [0.0, 0.0, 1000.0, 1000.0];
 const LAYER: &str = "clusters/a";
 const LABELS: &str = "topics/a";
 
@@ -82,29 +81,6 @@ fn open_declaration(name: &str, layout: Option<ServingLayout>) -> LayerDeclarati
     }
 }
 
-struct Fixture {
-    _tmp: tempfile::TempDir,
-    root: std::path::PathBuf,
-    cache: std::path::PathBuf,
-    wal: std::path::PathBuf,
-}
-
-fn fixture() -> Fixture {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let root = tmp.path().join("bundle");
-    build_fixture(
-        &root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    Fixture {
-        root,
-        cache: tmp.path().join("cache"),
-        wal: tmp.path().join("wal.log"),
-        _tmp: tmp,
-    }
-}
-
 impl Fixture {
     fn open(&self) -> Engine {
         let engine = open_engine_publishing(&self.root, &self.cache, &self.wal);
@@ -125,21 +101,10 @@ impl Fixture {
     }
 }
 
-fn artifacts_of(engine: &Engine) -> Vec<ArtifactOut> {
-    let session = engine.authorise(&full_coverage_credential()).unwrap();
-    engine
-        .viewport(
-            &session,
-            ViewportRequest::new("s0", 0, WHOLE_MAP, N_ITEMS as usize),
-        )
-        .expect("a viewport over the whole map")
-        .artifacts
-}
-
 /// Every served artifact's key and masked count, ascending by key — what a viewer is told, which
 /// is what every assertion here is finally about.
 fn served(engine: &Engine) -> Vec<(String, u64)> {
-    let mut out: Vec<(String, u64)> = artifacts_of(engine)
+    let mut out: Vec<(String, u64)> = artifacts_of(engine, &full_coverage_credential())
         .into_iter()
         .map(|a| (a.key.unwrap_or_default(), a.masked_count))
         .collect();
@@ -297,40 +262,6 @@ fn ingest_naming(engine: &Engine, batch: &str, names: &[&str]) -> u64 {
         .expect("points naming artifacts of an open layer are an ordinary write");
     tick(engine);
     minted
-}
-
-fn flush(engine: &Engine) {
-    let before = engine.write_executor_stats().flushes;
-    engine.request_flush();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-    while engine.write_executor_stats().flushes == before {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the flush never published"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
-}
-
-fn fold(engine: &Engine) {
-    let before = engine.write_executor_stats();
-    engine.request_fold();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-    loop {
-        let now = engine.write_executor_stats();
-        assert_eq!(
-            now.fold_failures, before.fold_failures,
-            "the fold was discarded rather than published"
-        );
-        if now.folds > before.folds {
-            return;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the fold never published"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
 }
 
 /// Flush enough times to fill the merge policy's tier, then let one merge publish — the one

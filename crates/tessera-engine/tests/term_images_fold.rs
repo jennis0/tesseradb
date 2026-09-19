@@ -222,28 +222,6 @@ fn engine_over_fixture(tmp: &Path, root: &Path) -> Engine {
     engine
 }
 
-/// Request a fold and block until it has published, asserting it was not discarded.
-fn fold(engine: &Engine) {
-    let before = engine.write_executor_stats();
-    engine.request_fold();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
-    loop {
-        let now = engine.write_executor_stats();
-        assert_eq!(
-            now.fold_failures, before.fold_failures,
-            "the fold was discarded rather than published"
-        );
-        if now.folds > before.folds {
-            return;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the fold never published"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
-}
-
 /// The ordinal the dictionary gives one of the fixture's descriptors.
 ///
 /// **Resolved rather than assumed to be the number in the pairs file.** A term id in the input is

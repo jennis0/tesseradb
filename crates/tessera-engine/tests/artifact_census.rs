@@ -43,7 +43,6 @@ const SEED: u64 = 0x5EED;
 /// level, which is checked to publish nothing rather than skipped.
 const LAYER: u64 = 3;
 const LEVEL: u32 = 0;
-const WHOLE_MAP: [f64; 4] = [0.0, 0.0, 1000.0, 1000.0];
 
 /// The principal this census is taken by, in the generator's own term space.
 ///
@@ -149,27 +148,6 @@ fn served_counts(engine: &Engine) -> BTreeMap<String, u64> {
             )
         })
         .collect()
-}
-
-fn fold(engine: &Engine) {
-    let before = engine.write_executor_stats();
-    engine.request_fold();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-    loop {
-        let now = engine.write_executor_stats();
-        assert_eq!(
-            now.fold_failures, before.fold_failures,
-            "the fold was discarded rather than published"
-        );
-        if now.folds > before.folds {
-            return;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the fold never published"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
 }
 
 /// **The census.** The generator says what every artifact holds and what holds every entity; the

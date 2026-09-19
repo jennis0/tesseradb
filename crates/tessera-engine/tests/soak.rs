@@ -23,18 +23,12 @@ use tessera_engine::{Engine, EngineConfig, ViewportRequest};
 use tessera_lifecycle::UnallocatedRow;
 use tessera_types::EntityId;
 
+const WAIT: Duration = Duration::from_secs(60);
+
 /// Flush rounds. Enough that an unbounded axis is unmistakable against the ceilings below, and
 /// small enough that the suite stays a suite.
 const ROUNDS: usize = 40;
 const CORPUS: u64 = 64;
-
-fn wait_until(what: &str, mut cond: impl FnMut() -> bool) {
-    let deadline = Instant::now() + Duration::from_secs(60);
-    while !cond() {
-        assert!(Instant::now() < deadline, "timed out waiting: {what}");
-        std::thread::sleep(Duration::from_millis(2));
-    }
-}
 
 fn viewport(
     engine: &Engine,
@@ -125,7 +119,7 @@ fn sustained_ingest_leaves_every_axis_bounded_and_every_item_visible() {
 
         let flushes = engine.write_executor_stats().flushes;
         engine.request_flush();
-        wait_until("the flush to publish", || {
+        wait_until("the flush to publish", WAIT, || {
             engine.write_executor_stats().flushes > flushes
         });
         // A request every round, so the cache stays resident and the refresh has work — the
@@ -289,7 +283,7 @@ fn without_maintenance_every_axis_grows_one_per_flush() {
             .expect("ingest is accepted");
         let flushes = engine.write_executor_stats().flushes;
         engine.request_flush();
-        wait_until("the flush to publish", || {
+        wait_until("the flush to publish", WAIT, || {
             engine.write_executor_stats().flushes > flushes
         });
     }

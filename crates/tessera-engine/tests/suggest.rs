@@ -809,19 +809,6 @@ index      = true
 vocabulary = "team"
 "#;
 
-fn flush(engine: &Engine) {
-    let before = engine.write_executor_stats().flushes;
-    engine.request_flush();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-    while engine.write_executor_stats().flushes == before {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the flush never published"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
-}
-
 /// **A value whose last visible member is suppressed stops being offered, on the next request** —
 /// membership-derivation self-retiring, which is §3.3's whole argument for deriving per request
 /// rather than maintaining a set.

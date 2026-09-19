@@ -37,7 +37,6 @@ use tessera_build::BuildArgs;
 use tessera_engine::{LayerSelection, ViewportRequest};
 use tessera_types::layer::ServingLayout;
 
-const WHOLE_MAP: [f64; 4] = [0.0, 0.0, 1000.0, 1000.0];
 const SPREAD: &str = "clusters/spread";
 const CLUMPED: &str = "clusters/clumped";
 const N: u64 = 12_000;
@@ -154,13 +153,6 @@ fn clumped_members() -> (Vec<String>, Vec<(String, u64)>) {
         }
     }
     (keys, rows)
-}
-
-struct Fixture {
-    _tmp: tempfile::TempDir,
-    root: std::path::PathBuf,
-    cache: std::path::PathBuf,
-    wal: std::path::PathBuf,
 }
 
 fn fixture() -> Fixture {

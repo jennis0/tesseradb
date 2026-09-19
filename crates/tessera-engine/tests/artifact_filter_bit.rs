@@ -47,7 +47,6 @@ const SEED: u64 = 0x5EED;
 const BY_LIST: &str = "generator/partition-enumerated";
 const BY_RULE: &str = "generator/partition-attribute";
 
-const WHOLE_MAP: [f64; 4] = [0.0, 0.0, 1000.0, 1000.0];
 /// The depth the narrow viewports are asked at — at zoom 0 a bbox resolves to the one tile covering
 /// the grid and narrows nothing.
 const VIEWPORT_ZOOM: u8 = 4;
@@ -86,16 +85,6 @@ fn tag_is_absent() -> FilterExpr {
 
 fn corpus() -> Corpus {
     Corpus::new(SEED, N, extent()).expect("the generator accepts the fixture's extent")
-}
-
-fn credential(grant: &str) -> Vec<u8> {
-    let terms: Vec<String> = Grant::parse(grant)
-        .expect("the grant is inside the generator's term space")
-        .terms()
-        .iter()
-        .map(|t| format!("\"{}\"", t.raw()))
-        .collect();
-    format!("{{\"terms\": [{}]}}", terms.join(", ")).into_bytes()
 }
 
 /// The principals this is checked for. A viewer seeing everything would compare two unmasked
@@ -140,7 +129,7 @@ fn lit(
     filter: Option<FilterExpr>,
     highlight: Option<FilterExpr>,
 ) -> BTreeMap<String, (u64, Option<bool>, Option<bool>)> {
-    let session = engine.authorise(&credential(grant)).unwrap();
+    let session = engine.authorise(&grant_credential(grant)).unwrap();
     let names = [layer];
     let mut request = ViewportRequest::new("s0", zoom, bbox, N as usize);
     request.layers = tessera_engine::LayerSelection::Named(&names);
@@ -479,7 +468,7 @@ fn a_label_carries_its_targets_bits() {
     let both = |filter: Option<FilterExpr>,
                 highlight: Option<FilterExpr>|
      -> BTreeMap<(String, String), Row> {
-        let session = fx.engine.authorise(&credential(grant)).unwrap();
+        let session = fx.engine.authorise(&grant_credential(grant)).unwrap();
         let names = [CLUSTERS, LABELS];
         let mut request = ViewportRequest::new("s0", 0, WHOLE_MAP, N as usize);
         request.layers = tessera_engine::LayerSelection::Named(&names);
@@ -609,7 +598,7 @@ fn described_served(
     grant: &str,
     filter: Option<FilterExpr>,
 ) -> BTreeMap<String, (u64, Vec<String>)> {
-    let session = engine.authorise(&credential(grant)).unwrap();
+    let session = engine.authorise(&grant_credential(grant)).unwrap();
     let names = [DESCRIBED];
     let mut request = ViewportRequest::new("s0", 0, WHOLE_MAP, N as usize);
     request.layers = tessera_engine::LayerSelection::Named(&names);

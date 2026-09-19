@@ -15,7 +15,7 @@ mod ring;
 
 use common::*;
 use tessera_engine::derived::DerivedContent;
-use tessera_engine::{ArtifactOut, Engine, ViewportRequest};
+use tessera_engine::Engine;
 use tessera_lifecycle::membership::IncomingContent;
 use tessera_lifecycle::IncomingArtifact;
 use tessera_spatial::morton::fixed32;
@@ -24,8 +24,6 @@ use tessera_types::layer::{
     MembershipSource,
 };
 use tessera_types::EntityId;
-
-const WHOLE_MAP: [f64; 4] = [0.0, 0.0, 1000.0, 1000.0];
 
 fn declaration(name: &str, derived: &[&str]) -> LayerDeclaration {
     LayerDeclaration {
@@ -50,29 +48,6 @@ fn declaration(name: &str, derived: &[&str]) -> LayerDeclaration {
         levels: Vec::new(),
         layout: None,
         shape: None,
-    }
-}
-
-struct Fixture {
-    _tmp: tempfile::TempDir,
-    root: std::path::PathBuf,
-    cache: std::path::PathBuf,
-    wal: std::path::PathBuf,
-}
-
-fn fixture() -> Fixture {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let root = tmp.path().join("bundle");
-    build_fixture(
-        &root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    Fixture {
-        root,
-        cache: tmp.path().join("cache"),
-        wal: tmp.path().join("wal.log"),
-        _tmp: tmp,
     }
 }
 
@@ -115,17 +90,6 @@ fn visible_to_subset(source_ids: impl Iterator<Item = u64>) -> Vec<u64> {
     source_ids
         .filter(|s| terms_of(*s).contains(&SUBSET_TERM))
         .collect()
-}
-
-fn artifacts_of(engine: &Engine, credential: &[u8]) -> Vec<ArtifactOut> {
-    let session = engine.authorise(credential).unwrap();
-    engine
-        .viewport(
-            &session,
-            ViewportRequest::new("s0", 0, WHOLE_MAP, N_ITEMS as usize),
-        )
-        .expect("a viewport over the whole map")
-        .artifacts
 }
 
 fn publish(engine: &Engine, layer: &str, fx: &Fixture, sources: impl Iterator<Item = u64>) {
@@ -516,31 +480,6 @@ fn corpus_independent_content_is_served_to_everyone_who_reaches_the_layer() {
     }
 }
 
-/// Delete every member of the WAL sequence — the log is a sequence beside the configured base
-/// path, and the base path itself is never a file.
-fn remove_the_whole_log(fx: &Fixture) {
-    let dir = fx.wal.parent().expect("the log has a directory");
-    let stem = fx.wal.file_stem().expect("the log has a stem").to_owned();
-    let mut removed = 0usize;
-    for entry in std::fs::read_dir(dir)
-        .expect("the log's directory exists")
-        .flatten()
-    {
-        let name = entry.file_name();
-        if name
-            .to_string_lossy()
-            .starts_with(&format!("{}-", stem.to_string_lossy()))
-        {
-            std::fs::remove_file(entry.path()).expect("a log member is removable");
-            removed += 1;
-        }
-    }
-    assert!(
-        removed > 0,
-        "no log member was found to delete — the test would prove nothing"
-    );
-}
-
 /// Wait for the executor's drain close to publish at least `want` artifact content extents.
 fn content_extents(fx: &Fixture, want: usize) -> Vec<std::path::PathBuf> {
     let dir = fx
@@ -621,7 +560,7 @@ fn two_publications_of_content_both_survive_the_loss_of_the_whole_log() {
         content_extents(&fx, 2);
     }
 
-    remove_the_whole_log(&fx);
+    remove_the_whole_log(&fx.wal);
     let engine = fx.open();
     let served = artifacts_of(&engine, &full_coverage_credential());
     assert_eq!(
@@ -795,7 +734,7 @@ fn published_and_log_free(fx: &Fixture, labels: &[&str]) {
             .unwrap();
         content_extents(fx, 1);
     }
-    remove_the_whole_log(fx);
+    remove_the_whole_log(&fx.wal);
 }
 
 /// **Every artifact keeps its own text when the level is read a level at a time.**
