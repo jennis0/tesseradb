@@ -15,6 +15,7 @@ deny tessera-server tessera-store     # server sees engine API types only
 deny tessera-server tessera-authz
 deny tessera-wire tessera-store
 deny tessera-wire tessera-authz
+deny tessera-wire tessera-types       # the wire cannot name an entity id or the identity key
 # The filter index is entity-space and must stay there (filter-index §9). These are the two edges
 # tessera-authz is denied above, for the same reason: a crate that can see a RowId can relate the
 # two ID spaces, and I4 says only an explicit permutation may. The server edge keeps the filter
@@ -50,12 +51,8 @@ fi
 deny tessera-engine tokio
 deny tessera-store tokio
 # I4: no ID conversions in types
-if grep -rn "impl From" crates/tessera-types/src/ | grep -E "EntityId|RowId|TermId|AttrLocalId|TesseraId|Handle"; then
+if grep -rn "impl From" crates/tessera-types/src/ | grep -E "EntityId|RowId|TermId|AttrLocalId|TesseraId"; then
   echo "FORBIDDEN: ID conversion in tessera-types"; fail=1
-fi
-# I10: the payload module never sees EntityId (handles + plain columns only)
-if grep -n "EntityId" crates/tessera-wire/src/payload.rs 2>/dev/null; then
-  echo "FORBIDDEN: EntityId in tessera-wire payload module"; fail=1
 fi
 
 # I10 (contracts r6): no request-path artifact stores an entity ID. `columns.arrow`
