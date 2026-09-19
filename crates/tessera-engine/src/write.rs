@@ -6338,6 +6338,78 @@ fn carried_forward<'a>(
     }
 }
 
+/// Exactly the files the new manifest names that the fold did not write, deduplicated: a carried
+/// segment's run and locator are already in the run and locator lists, and linking one path twice
+/// is what `hard_link_forward` refuses.
+///
+/// **Every file an entry names, never a subset.** A segment carries its morton, cut index and
+/// columns and a `presence/<column>.roaring` per rendered column that has an absence — one missing
+/// reads as every-row-present. An attribute extent carries its values and presence always, and its
+/// dictionary, postings and offsets wherever the entry names them; a record extent all three files;
+/// a text extent all three; a transpose extent all four. An entry naming a file the link set omits
+/// is a prefix that refuses to open, whatever the file is for.
+///
+/// Taken from the manifest and not from a directory scan: a scan finds what is there, and the
+/// manifest says what must be.
+fn carried_files(
+    partition: &str,
+    live_manifest: &SegmentsManifest,
+    flight: &Flight,
+) -> std::collections::BTreeSet<String> {
+    let mut rels: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for descriptor in &flight.segments {
+        let segment_prefix = format!(
+            "partitions/{}/{}/segments/{}",
+            partition,
+            tessera_store::view_rel(&descriptor.view),
+            descriptor.seg_id
+        );
+        for name in [
+            "morton.u32",
+            tessera_store::read::CutIndex::FILE,
+            "columns.arrow",
+        ] {
+            rels.insert(format!("{segment_prefix}/{name}"));
+        }
+        let presence_prefix = format!("{segment_prefix}/{}/", RENDER_PRESENCE_DIR);
+        rels.extend(
+            live_manifest
+                .files
+                .keys()
+                .filter(|rel| rel.starts_with(&presence_prefix))
+                .cloned(),
+        );
+    }
+    rels.extend(flight.runs.iter().cloned());
+    rels.extend(flight.locators.iter().map(|e| e.path.clone()));
+    rels.extend(flight.tiers.iter().cloned());
+    for extent in &flight.attrs {
+        rels.insert(extent.values.clone());
+        rels.insert(extent.presence.clone());
+        rels.extend(extent.dict.iter().cloned());
+        rels.extend(extent.postings.iter().cloned());
+        rels.extend(extent.offsets.iter().cloned());
+    }
+    for extent in &flight.records {
+        rels.insert(extent.blocks.clone());
+        rels.insert(extent.hasrow.clone());
+        rels.insert(extent.directory.clone());
+    }
+    for extent in &flight.texts {
+        rels.insert(extent.dict.clone());
+        rels.insert(extent.postings.clone());
+        rels.insert(extent.presence.clone());
+    }
+    for extent in &flight.entity_terms {
+        rels.insert(extent.hasrow.clone());
+        rels.insert(extent.offsets.clone());
+        rels.insert(extent.terms.clone());
+        rels.insert(extent.bases.clone());
+    }
+    rels.extend(live_manifest.dict_extents.iter().map(|e| e.path.clone()));
+    rels
+}
+
 /// A record extent's files, resolved against the prefix directory that holds them. All three, and
 /// any one missing is a refusal to open rather than "those entities have no record".
 fn record_extent_paths(
@@ -8147,8 +8219,6 @@ impl Executor {
     /// still holds mapped. That is compaction §7's "crash between `CURRENT` and the swap", reached
     /// without a crash.
     fn publish_fold(&mut self, completed: crate::compact::CompletedFold) {
-        use std::collections::BTreeSet;
-
         let started = std::time::Instant::now();
         // The fold thread's staircase, continued here for the publication's phases so the gauges
         // on `/control/status` cover the whole fold (`compact::Staircase`). A discard below drops
@@ -8746,86 +8816,7 @@ impl Executor {
             &carried_bindings,
         );
 
-        // Exactly the files the new manifest names, deduplicated: a carried segment's run and
-        // locator are already in the run and locator lists, and linking one path twice is what
-        // `hard_link_forward` refuses.
-        let mut carried_rels: BTreeSet<String> = BTreeSet::new();
-        for descriptor in &flight.segments {
-            let segment_prefix = format!(
-                "partitions/{}/{}/segments/{}",
-                plan.partition,
-                tessera_store::view_rel(&descriptor.view),
-                descriptor.seg_id
-            );
-            for name in [
-                "morton.u32",
-                tessera_store::read::CutIndex::FILE,
-                "columns.arrow",
-            ] {
-                carried_rels.insert(format!("{segment_prefix}/{name}"));
-            }
-            // **And every render column's presence bitmap the live manifest names for it**
-            // (decision 0064). A fixed list of two files was right while a segment held exactly
-            // two; a segment now holds a `presence/<column>.roaring` per rendered column that has
-            // an absence, and a carried segment that arrived without one would read as
-            // every-row-present — an item with no number matching a range containing zero, which
-            // is the 2026-08-11 defect reached by the fold's carry-forward rather than by the
-            // scan. Taken from the manifest, not from a directory scan, for the reason
-            // `AttrExtent` gives: a scan finds what is there, and the manifest says what must be.
-            let presence_prefix = format!("{segment_prefix}/{}/", RENDER_PRESENCE_DIR);
-            carried_rels.extend(
-                live_manifest
-                    .files
-                    .keys()
-                    .filter(|rel| rel.starts_with(&presence_prefix))
-                    .cloned(),
-            );
-        }
-        carried_rels.extend(flight.runs.iter().cloned());
-        carried_rels.extend(flight.locators.iter().map(|e| e.path.clone()));
-        carried_rels.extend(flight.tiers.iter().cloned());
-        // **Every file a carried attribute extent's entry names**, not the two a numeric one has.
-        // The values and the presence bitmap always; the sorted dictionary whenever the entry names
-        // one, which is exactly when the column is a keyword — its values are ordinals into *that
-        // layer's* dictionary and nothing else numbers them, so a carried extent without it is an
-        // entry pointing at a file that is not there. The whole prefix then refuses to open, which
-        // is how this was found. `postings` and `offsets` ride along for the same reason: an entry
-        // naming a file the link set omits is a bundle that will not open, whatever the file is
-        // for (`filter-index.md` §2.5; records §4.3, §7).
-        for extent in &flight.attrs {
-            carried_rels.insert(extent.values.clone());
-            carried_rels.insert(extent.presence.clone());
-            carried_rels.extend(extent.dict.iter().cloned());
-            carried_rels.extend(extent.postings.iter().cloned());
-            carried_rels.extend(extent.offsets.iter().cloned());
-        }
-        // All three files of every carried record extent: the blocks and both addressing files,
-        // any of whose absence is a refusal to open rather than "those entities have no record"
-        // (records §7).
-        for extent in &flight.records {
-            carried_rels.insert(extent.blocks.clone());
-            carried_rels.insert(extent.hasrow.clone());
-            carried_rels.insert(extent.directory.clone());
-        }
-        // All three files of every carried text extent, under the same rule: the dictionary and
-        // the postings are one record — an ordinal names a position in *this* dictionary — and the
-        // presence half is what stops an entity whose prose analysed to no terms reading as absent.
-        for extent in &flight.texts {
-            carried_rels.insert(extent.dict.clone());
-            carried_rels.insert(extent.postings.clone());
-            carried_rels.insert(extent.presence.clone());
-        }
-        // All four files of every carried transpose extent, under the same rule: the offsets and
-        // their block bases address the terms and the has-row bitmap ranks them, so any one
-        // missing is a refusal at open rather than a shorter label set
-        // (`tessera_store::entity_terms`).
-        for extent in &flight.entity_terms {
-            carried_rels.insert(extent.hasrow.clone());
-            carried_rels.insert(extent.offsets.clone());
-            carried_rels.insert(extent.terms.clone());
-            carried_rels.insert(extent.bases.clone());
-        }
-        carried_rels.extend(live_manifest.dict_extents.iter().map(|e| e.path.clone()));
+        let carried_rels = carried_files(&plan.partition, live_manifest, &flight);
         for rel in &carried_rels {
             // A hard link changes nothing about a file's content, so the digest it earned under the
             // old prefix's path is still correct under the new one — nothing is re-hashed. A file
