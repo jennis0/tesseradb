@@ -292,6 +292,14 @@ pub(super) fn fold_rebases(
         })
 }
 
+/// What [`Executor::fold_still_applies`] found: what the fold carries forward from the live
+/// manifest, the deletions it retires, and how many entities the carried extents hold.
+struct FoldApplies<'a> {
+    forward: CarriedExtents<'a>,
+    executed: croaring::Bitmap,
+    carried_entities: u64,
+}
+
 /// What a fold carries forward: everything the live manifest still lists that the fold did not
 /// consume — what published during its flight.
 ///
@@ -866,6 +874,159 @@ impl Executor {
         any
     }
 
+    /// Whether a completed fold still applies to the live bundle, asked before anything is
+    /// written: what it carries forward from the live manifest and the deletions it retires, or
+    /// why it is discarded.
+    fn fold_still_applies<'a>(
+        &self,
+        completed: &crate::compact::CompletedFold,
+        live: &'a Generation,
+    ) -> Result<FoldApplies<'a>, String> {
+        let plan = &completed.plan;
+        // **The durability gates are asked again here, hours after the plan asked them.** A fold's
+        // flight is the widest window in the write path, and what it publishes at the end of it is
+        // a side-manifest carrying `tombstones` and `deny` serialised from the live overlay. If the
+        // WAL poisoned or the overlay diverged meanwhile, that overlay holds dispositions no
+        // durable record backs — the apply-anyway entries of write-path §5.5, in force behind a
+        // 500 and never acked — and writing them into a manifest makes them permanent on every
+        // restore, which is the outcome the gate exists to prevent. `plan_fold` refuses for exactly
+        // this reason; every other manifest writer re-asks at its own dispatch, and only this one
+        // had a window long enough for the answer to change.
+        //
+        // The divergence half is already asked by `may_publish` above; this is the WAL's own.
+        if self.wal.is_poisoned() {
+            return Err("the WAL poisoned during its flight, so its manifest would publish deny state \
+                     no durable record backs"
+                .to_string());
+        }
+
+        if live.prefix != plan.prefix {
+            return Err("it was planned against a superseded prefix".to_string());
+        }
+        let Some(partition_data) = live.bundle.partitions.get(&plan.partition) else {
+            return Err("the live bundle no longer carries the partition it folded".to_string());
+        };
+        let live_manifest = &partition_data.manifest;
+
+        // ---- step 1: rebase or discard --------------------------------------------------------
+        //
+        // ABA-safe because ids are never reused, so an artefact still listed is the same artefact
+        // the fold consumed. [`Executor::fold_outstanding`] makes a merge or a coalesce publishing
+        // under a fold unreachable; this stays as defence in depth, being one set comparison
+        // against a manifest already in hand on a path that has just spent hours of IO.
+        let consumed_segments: FxHashSet<(&str, &str)> = plan
+            .views
+            .iter()
+            .flat_map(|view| {
+                view.segments
+                    .iter()
+                    .map(move |segment| (view.view.as_str(), segment.seg_id.as_str()))
+            })
+            .collect();
+        if !fold_rebases(plan, live_manifest, &consumed_segments) {
+            return Err("an artefact it consumed is no longer listed in the live manifest".to_string());
+        }
+
+        // ---- the carry-forward set ------------------------------------------------------------
+        //
+        // **The `MANIFEST.json` roster decides which incarnations are live, not the partition's
+        // view map.** The map is a cache of open row spaces; the roster read here is the same
+        // snapshot the new manifest is written from, so what is carried and what is declared cannot
+        // disagree.
+        let live_incarnations: FxHashMap<&str, tessera_types::view::ViewIncarnation> = live
+            .bundle
+            .manifest
+            .views
+            .iter()
+            .map(|v| (v.id.as_str(), v.incarnation))
+            .collect();
+        let forward = carried_forward(plan, live_manifest, &live_incarnations, &consumed_segments);
+
+        // **Every carried-forward extent must begin at or above the fold's own base**, per view.
+        // `RowSpace::with_extent` refuses an extent below the base permutation's bound and
+        // `ExternalIdSidecar` gives the base locator absolute priority below its own length — so a
+        // violation here is a prefix that either will not open or answers "this item has no
+        // external id" for items that have one (contracts §2.4's wrong-answer-wearing-a-legitimate-
+        // state's-clothes). Both would be discovered *after* `CURRENT` had flipped, so they are
+        // checked before anything is written. The relation holds for every publication that
+        // cleared the live row space's own floor; this refuses to be the place it is assumed.
+        for descriptor in &forward.segments {
+            let Some(view) = plan.views.iter().find(|s| s.view == descriptor.view) else {
+                // **A view that arrived during the flight**, and the only way to reach this now:
+                // a view created and flushed since the plan was taken has a segment and no base
+                // in it. That is transient and self-healing — the next fold plans over a bundle
+                // that holds the view, and nothing is lost meanwhile but this fold's work — which
+                // is why it is said here rather than left under the sentence below. The other
+                // reader of this line was a **dropped** view, whose segments the carry-forward
+                // now omits (`views.md` §3.4), and that one did not self-heal: it discarded every
+                // fold of the bundle for ever.
+                return Err("a carried-forward segment names a view created since the plan was taken, so \
+                     the fold has no base for it; the next fold plans over a bundle that has it"
+                    .to_string());
+            };
+            if descriptor.entity_lo < view.permutation_bound {
+                return Err("a carried-forward segment begins below the fold's own base permutation".to_string());
+            }
+        }
+        // **Partition-wide here where the segment loop above is per-view, and that is correct
+        // rather than a coarsening.** `ext-locator.u32` is one array per partition (§3, pass 3), so
+        // there is no per-view bound to compare against — but the reason it cannot falsely fire is
+        // the allocator, not the file: entity ids are issued monotonically from **one** bundle-wide
+        // high-water (I9), so a locator extent published after the fold's snapshot begins above
+        // every entity that had a row at it, in every view. `plan.entity_bound` is the maximum of
+        // those per-view bounds and is therefore at or below that high-water. A view whose own
+        // bound is lower cannot produce an extent beneath the maximum, because it does not get to
+        // choose its ids.
+        if forward
+            .locators
+            .iter()
+            .any(|extent| extent.entity_lo < plan.entity_bound)
+        {
+            return Err("a carried-forward locator extent begins below the fold's own base locator".to_string());
+        }
+        // The fold emits no run 0 for a deployment that held no external ids at its snapshot
+        // (contracts §2.4 r6: no runs, no locator). If one arrived during the flight, a
+        // carried-forward flush run would become `external_id_runs[0]` — and the sidecar derives
+        // the *base locator's* path from that entry's directory, so it would take a flush's
+        // entity-range extent for the full-length base locator. Discarded rather than published;
+        // the next fold's snapshot holds the run and emits a proper base for it.
+        if completed.external_id_run.is_none() && !forward.runs.is_empty() {
+            return Err("the deployment gained its first external-id run during the fold's flight".to_string());
+        }
+
+        // ---- retirement: compaction §5, evaluated here and nowhere earlier ---------------------
+        let mut carried = crate::compact::CarriedForward::new();
+        for descriptor in &forward.segments {
+            carried.add_segment(descriptor);
+        }
+        for extent in &forward.locators {
+            carried.add_locator_extent(extent);
+        }
+        let executed = crate::compact::executed(&plan.tombstones, &carried);
+        // ---- step 3: the merge-size relation, against the fold's own output --------------------
+        //
+        // `max_merged_segment_bytes` must stay strictly below the base segment's bytes or the
+        // *next startup* refuses the configuration (write-path §7). A fold normally satisfies it
+        // more comfortably — it folds every extent into the base — and the case to catch is the
+        // small corpus where it does not. Refused here, loudly, rather than at the restart that
+        // discovers it.
+        if let Some(configured) = self.configured_merge_bytes {
+            if completed.base_segment_bytes > 0 && configured >= completed.base_segment_bytes {
+                return Err(format!(
+                    "merge.max_merged_segment_bytes ({configured}) is not strictly below the \
+                     folded base segment's {} bytes, so the next startup would refuse the \
+                     deployment; lower it before the next fold",
+                    completed.base_segment_bytes
+                ));
+            }
+        }
+        Ok(FoldApplies {
+            carried_entities: carried.len(),
+            forward,
+            executed,
+        })
+    }
+
     /// **Publish a fold: compaction §4's seven steps, in order, and the reclamation §8 owes.**
     ///
     /// Rebase or discard → assemble `SEGMENTS-<n>` from the live partition manifest → check the
@@ -923,172 +1084,31 @@ impl Executor {
             }
         };
 
-        // **The durability gates are asked again here, hours after the plan asked them.** A fold's
-        // flight is the widest window in the write path, and what it publishes at the end of it is
-        // a side-manifest carrying `tombstones` and `deny` serialised from the live overlay. If the
-        // WAL poisoned or the overlay diverged meanwhile, that overlay holds dispositions no
-        // durable record backs — the apply-anyway entries of write-path §5.5, in force behind a
-        // 500 and never acked — and writing them into a manifest makes them permanent on every
-        // restore, which is the outcome the gate exists to prevent. `plan_fold` refuses for exactly
-        // this reason; every other manifest writer re-asks at its own dispatch, and only this one
-        // had a window long enough for the answer to change.
-        //
-        // The divergence half is already asked by `may_publish` above; this is the WAL's own.
-        if self.wal.is_poisoned() {
-            discard(
-                "the WAL poisoned during its flight, so its manifest would publish deny state \
-                     no durable record backs",
-            );
-            return;
-        }
-
-        if live.prefix != plan.prefix {
-            discard("it was planned against a superseded prefix");
-            return;
-        }
-        let Some(partition_data) = live.bundle.partitions.get(&plan.partition) else {
-            discard("the live bundle no longer carries the partition it folded");
-            return;
-        };
-        let live_manifest = &partition_data.manifest;
-
-        // ---- step 1: rebase or discard --------------------------------------------------------
-        //
-        // ABA-safe because ids are never reused, so an artefact still listed is the same artefact
-        // the fold consumed. [`Executor::fold_outstanding`] makes a merge or a coalesce publishing
-        // under a fold unreachable; this stays as defence in depth, being one set comparison
-        // against a manifest already in hand on a path that has just spent hours of IO.
-        let consumed_segments: FxHashSet<(&str, &str)> = plan
-            .views
-            .iter()
-            .flat_map(|view| {
-                view.segments
-                    .iter()
-                    .map(move |segment| (view.view.as_str(), segment.seg_id.as_str()))
-            })
-            .collect();
-        if !fold_rebases(plan, live_manifest, &consumed_segments) {
-            discard("an artefact it consumed is no longer listed in the live manifest");
-            return;
-        }
-
-        // ---- the carry-forward set ------------------------------------------------------------
-        //
-        // **The `MANIFEST.json` roster decides which incarnations are live, not the partition's
-        // view map.** The map is a cache of open row spaces; the roster read here is the same
-        // snapshot the new manifest is written from, so what is carried and what is declared cannot
-        // disagree.
-        let live_incarnations: FxHashMap<&str, tessera_types::view::ViewIncarnation> = live
-            .bundle
-            .manifest
-            .views
-            .iter()
-            .map(|v| (v.id.as_str(), v.incarnation))
-            .collect();
-        let forward = carried_forward(plan, live_manifest, &live_incarnations, &consumed_segments);
-
-        // **Every carried-forward extent must begin at or above the fold's own base**, per view.
-        // `RowSpace::with_extent` refuses an extent below the base permutation's bound and
-        // `ExternalIdSidecar` gives the base locator absolute priority below its own length — so a
-        // violation here is a prefix that either will not open or answers "this item has no
-        // external id" for items that have one (contracts §2.4's wrong-answer-wearing-a-legitimate-
-        // state's-clothes). Both would be discovered *after* `CURRENT` had flipped, so they are
-        // checked before anything is written. The relation holds for every publication that
-        // cleared the live row space's own floor; this refuses to be the place it is assumed.
-        for descriptor in &forward.segments {
-            let Some(view) = plan.views.iter().find(|s| s.view == descriptor.view) else {
-                // **A view that arrived during the flight**, and the only way to reach this now:
-                // a view created and flushed since the plan was taken has a segment and no base
-                // in it. That is transient and self-healing — the next fold plans over a bundle
-                // that holds the view, and nothing is lost meanwhile but this fold's work — which
-                // is why it is said here rather than left under the sentence below. The other
-                // reader of this line was a **dropped** view, whose segments the carry-forward
-                // now omits (`views.md` §3.4), and that one did not self-heal: it discarded every
-                // fold of the bundle for ever.
-                discard(
-                    "a carried-forward segment names a view created since the plan was taken, so \
-                     the fold has no base for it; the next fold plans over a bundle that has it",
-                );
-                return;
-            };
-            if descriptor.entity_lo < view.permutation_bound {
-                discard("a carried-forward segment begins below the fold's own base permutation");
+        let FoldApplies {
+            forward,
+            executed,
+            carried_entities,
+        } = match self.fold_still_applies(&completed, &live) {
+            Ok(applies) => applies,
+            Err(reason) => {
+                discard(&reason);
                 return;
             }
-        }
-        // **Partition-wide here where the segment loop above is per-view, and that is correct
-        // rather than a coarsening.** `ext-locator.u32` is one array per partition (§3, pass 3), so
-        // there is no per-view bound to compare against — but the reason it cannot falsely fire is
-        // the allocator, not the file: entity ids are issued monotonically from **one** bundle-wide
-        // high-water (I9), so a locator extent published after the fold's snapshot begins above
-        // every entity that had a row at it, in every view. `plan.entity_bound` is the maximum of
-        // those per-view bounds and is therefore at or below that high-water. A view whose own
-        // bound is lower cannot produce an extent beneath the maximum, because it does not get to
-        // choose its ids.
-        if forward
-            .locators
-            .iter()
-            .any(|extent| extent.entity_lo < plan.entity_bound)
-        {
-            discard("a carried-forward locator extent begins below the fold's own base locator");
-            return;
-        }
-        // The fold emits no run 0 for a deployment that held no external ids at its snapshot
-        // (contracts §2.4 r6: no runs, no locator). If one arrived during the flight, a
-        // carried-forward flush run would become `external_id_runs[0]` — and the sidecar derives
-        // the *base locator's* path from that entry's directory, so it would take a flush's
-        // entity-range extent for the full-length base locator. Discarded rather than published;
-        // the next fold's snapshot holds the run and emits a proper base for it.
-        if completed.external_id_run.is_none() && !forward.runs.is_empty() {
-            discard("the deployment gained its first external-id run during the fold's flight");
-            return;
-        }
-
-        // ---- retirement: compaction §5, evaluated here and nowhere earlier ---------------------
-        let mut carried = crate::compact::CarriedForward::new();
-        for descriptor in &forward.segments {
-            carried.add_segment(descriptor);
-        }
-        for extent in &forward.locators {
-            carried.add_locator_extent(extent);
-        }
-        let executed = crate::compact::executed(&plan.tombstones, &carried);
+        };
+        let live_manifest = &live.bundle.partitions[&plan.partition].manifest;
         let retired_count = executed.cardinality();
         // Allocated here rather than beside the manifest write, so the artifact pass below can name
         // its files after the publication that introduces them — one sequence, not two.
         let manifest_n = match self.allocate_manifest_n() {
             Ok(n) => n,
             Err(e) => {
-                tracing::error!(
-                    error = %e,
-                    "ALARM: a completed fold's side-manifest number could not be allocated; its \
-                     prefix is unpublished and the next tick re-plans"
-                );
+                discard(&format!(
+                    "its side-manifest number could not be allocated ({e})"
+                ));
                 return;
             }
         };
 
-        // ---- step 3: the merge-size relation, against the fold's own output --------------------
-        //
-        // `max_merged_segment_bytes` must stay strictly below the base segment's bytes or the
-        // *next startup* refuses the configuration (write-path §7). A fold normally satisfies it
-        // more comfortably — it folds every extent into the base — and the case to catch is the
-        // small corpus where it does not. Refused here, loudly, rather than at the restart that
-        // discovers it.
-        if let Some(configured) = self.configured_merge_bytes {
-            if completed.base_segment_bytes > 0 && configured >= completed.base_segment_bytes {
-                self.health.fold_failures.fetch_add(1, Ordering::Relaxed);
-                tracing::error!(
-                    max_merged_segment_bytes = configured,
-                    base_segment_bytes = completed.base_segment_bytes,
-                    "ALARM: publishing this fold would leave a deployment the next startup \
-                     refuses to open — merge.max_merged_segment_bytes is not strictly below the \
-                     folded base segment's size. The fold is discarded and the configuration \
-                     needs lowering before the next one"
-                );
-                return;
-            }
-        }
 
         // ---- step 3a: the artifact pass --------------------------------------------------------
         //
@@ -1829,7 +1849,7 @@ impl Executor {
             prefix = %completed.prefix,
             segments_version,
             retired = retired_count,
-            carried_entities = carried.len(),
+            carried_entities,
             elapsed_ms = started.elapsed().as_millis() as u64,
             passes = %passes,
             fold_secs,
