@@ -318,7 +318,7 @@ impl Executor {
                     },
                     entity,
                     op,
-                    respond: Some(reply),
+                    reply: Some(reply),
                 }];
                 // The cascade rides this path too — a window of one is still a window, and a
                 // deletion admitted here that skipped it would strand every artifact depending on
@@ -1537,7 +1537,7 @@ impl Executor {
                     },
                     entity,
                     op: tessera_lifecycle::ChangeOp::Delete,
-                    respond: None,
+                    reply: None,
                 })
                 .collect();
             self.cascade_dependents(&mut entries);

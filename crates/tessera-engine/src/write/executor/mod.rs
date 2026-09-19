@@ -786,7 +786,7 @@ pub(super) struct DenyEntry {
     /// the artifacts depending on it, and those deletions have no caller to answer. They are
     /// entries in every other respect — their own WAL record, applied in the same window, retired
     /// at the same fold — so the ack is the only thing that distinguishes them.
-    respond: Option<Reply<()>>,
+    reply: Option<Reply<()>>,
 }
 
 /// The single writer. One per partition, on its own thread, owning the WAL by value.
@@ -1526,7 +1526,7 @@ impl Executor {
                 },
                 entity,
                 op,
-                respond: Some(reply),
+                reply: Some(reply),
             });
         }
 
@@ -1577,7 +1577,7 @@ impl Executor {
                 },
                 entity,
                 op: ChangeOp::Delete,
-                respond: None,
+                reply: None,
             });
         }
     }
@@ -1694,8 +1694,8 @@ impl Executor {
                 } else {
                     WalError::Poisoned
                 };
-                if let Some(respond) = &entry.respond {
-                    self.ack_failed(respond, ExecError::Wal(e));
+                if let Some(reply) = &entry.reply {
+                    self.ack_failed(reply, ExecError::Wal(e));
                 }
             }
             return;
@@ -1726,8 +1726,8 @@ impl Executor {
         // some not; every un-acked one gets `SubmitError::ReceiptLost` → 500, never `ExecutorDead`
         // → 503, because its change is durably in force.
         for entry in entries {
-            if let Some(respond) = &entry.respond {
-                self.ack(respond, ());
+            if let Some(reply) = &entry.reply {
+                self.ack(reply, ());
             }
         }
     }
@@ -2190,7 +2190,7 @@ impl Executor {
         batch_id: String,
         body_hash: [u8; 32],
         artifacts: tessera_lifecycle::BatchArtifacts,
-        respond: Reply<Ingested>,
+        reply: Reply<Ingested>,
     ) -> (CommitWindow<Reply<Ingested>>, Admission) {
         match BatchState::of(&self.live, &window, &batch_id) {
             BatchState::Accepted {
@@ -2202,14 +2202,14 @@ impl Executor {
                     // keys created were created when it was first accepted, and this submission
                     // created none.
                     self.ack(
-                        &respond,
+                        &reply,
                         Ingested {
                             entity_ids,
                             minted: 0,
                         },
                     );
                 } else {
-                    self.ack_failed(&respond, ExecError::BatchConflict { batch_id });
+                    self.ack_failed(&reply, ExecError::BatchConflict { batch_id });
                 }
                 self.health.note_work_refused();
                 (window, Admission::Answered)
@@ -2224,7 +2224,7 @@ impl Executor {
                     "the entry must be joined to the window it was found in"
                 );
                 if prev_hash == body_hash {
-                    let joined = window.join(&batch_id, respond);
+                    let joined = window.join(&batch_id, reply);
                     debug_assert!(joined, "`held` just answered for this batch id");
                 } else {
                     // **The 409 reaches the retry and NOT the held original, and this is the one
@@ -2246,7 +2246,7 @@ impl Executor {
                     // skipped by `CommitWindow::allocate` and by `held`) and fail its waiters. Not
                     // an entry *removal* — `by_batch` stores indices into `entries` and the
                     // external-id set has no refcounts, so removing one entry means repairing both.
-                    self.ack_failed(&respond, ExecError::BatchConflict { batch_id });
+                    self.ack_failed(&reply, ExecError::BatchConflict { batch_id });
                 }
                 // Either way this job occupied a work-queue slot and was counted at submission,
                 // while `record_window_service` counts one completion per *entry* and a join adds
@@ -2279,7 +2279,7 @@ impl Executor {
                     // joins rather than closing.
                     admission = Admission::YieldedAfterClose;
                 }
-                if let Some(entry) = self.admit(rows, batch_id, body_hash, artifacts, respond) {
+                if let Some(entry) = self.admit(rows, batch_id, body_hash, artifacts, reply) {
                     if window.is_empty() {
                         // The in-flight gauge is armed at the **first entry**, never at window
                         // construction: an empty window is never closed, so a gauge armed there
@@ -2327,7 +2327,7 @@ impl Executor {
         batch_id: String,
         body_hash: [u8; 32],
         artifacts: tessera_lifecycle::BatchArtifacts,
-        respond: Reply<Ingested>,
+        reply: Reply<Ingested>,
     ) -> Option<WindowEntry<Reply<Ingested>>> {
         // The fail-closed backstop for the widened check-to-apply race — see
         // `LiveState::established_collisions`. The overlay read here is the same generation the
@@ -2361,7 +2361,7 @@ impl Executor {
         if collisions == 0 {
             if let Err(detail) = settle_joins(&generation, &mut rows) {
                 drop(generation);
-                self.ack_failed(&respond, ExecError::JoinRefused { detail });
+                self.ack_failed(&reply, ExecError::JoinRefused { detail });
                 self.health.note_work_refused();
                 return None;
             }
@@ -2369,7 +2369,7 @@ impl Executor {
         drop(generation);
         if collisions > 0 {
             self.ack_failed(
-                &respond,
+                &reply,
                 ExecError::DuplicateExternalId { count: collisions },
             );
             self.health.note_work_refused();
@@ -2379,7 +2379,7 @@ impl Executor {
         let (memberships, edges) = match self.resolve_memberships(&artifacts) {
             Ok(resolved) => resolved,
             Err(detail) => {
-                self.ack_failed(&respond, ExecError::LayerRefused { detail });
+                self.ack_failed(&reply, ExecError::LayerRefused { detail });
                 self.health.note_work_refused();
                 return None;
             }
@@ -2391,7 +2391,7 @@ impl Executor {
             body_hash,
             memberships,
             edges,
-            waiters: vec![respond],
+            waiters: vec![reply],
         })
     }
 
