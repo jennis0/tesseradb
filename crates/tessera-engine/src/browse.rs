@@ -242,14 +242,14 @@ impl crate::Engine {
         // gate-failed name and a never-registered one alike, so a `422` here confirms nothing this
         // principal was not already told by `/v1/meta`.
         let refuse_layer = || EngineError::BrowseRefused(BrowseRefused::UnknownLayer(req.layer.to_string()));
-        let reachable = self.write.resolve_layers(
+        let reachable = self.write.live().resolve_layers(
             |term| session.satisfied.contains(&term),
             |label| generation.dict.lookup(label.as_bytes()),
         );
         if !reachable.contains(req.layer) {
             return Err(refuse_layer());
         }
-        let layer = self.write.registered_layer(req.layer).ok_or_else(refuse_layer)?;
+        let layer = self.write.live().registered_layer(req.layer).ok_or_else(refuse_layer)?;
         if !layer.declaration.views.iter().any(|s| s == view)
             || generation.overlay.is_deleted(layer.entity)
             || generation.overlay.is_suppressed(layer.entity)
@@ -356,7 +356,7 @@ impl crate::Engine {
         for (walked, runs) in layer.runs.iter().enumerate() {
             let walked = walked as u32;
             let recorded = layer.layout_of(walked);
-            let (rows, level_version) = self.write.with_artifacts(|store| {
+            let (rows, level_version) = self.write.live().with_artifacts(|store| {
                 let predicate = crate::viewport::predicate_source(
                     &layer.declaration,
                     &generation,
@@ -488,6 +488,7 @@ impl crate::Engine {
                 keys.insert(
                     (walked, ordinal),
                     self.write
+                        .live()
                         .with_artifacts(|store| store.get(req.layer, walked, ordinal)?.key.clone()),
                 );
                 gated.push(Gated {

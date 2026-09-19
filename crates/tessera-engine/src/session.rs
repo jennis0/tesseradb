@@ -2077,6 +2077,7 @@ impl Engine {
     /// reading of a name the registry cannot resolve.
     pub(crate) fn serves_column_only(&self, layer: &str) -> bool {
         self.write
+            .live()
             .registered_layer(layer)
             .is_some_and(|registered| crate::artifacts::serves_column_only(&registered.declaration))
     }
@@ -2227,7 +2228,7 @@ impl Engine {
     /// Delegates to `WritePath::allocator_high_water`, which owns the allocator; see that
     /// method's doc.
     pub fn allocator_high_water(&self) -> u64 {
-        self.write.allocator_high_water()
+        self.write.live().allocator_high_water()
     }
 
     /// Publish a new row-space geometry. **The outgoing one is not retained**: nothing holds it
@@ -2483,6 +2484,7 @@ impl Engine {
         level: u32,
     ) -> Option<tessera_types::layer::ServingLayout> {
         self.write
+            .live()
             .registered_layer(layer)
             .map(|registered| registered.layout_of(level))
     }
@@ -3051,6 +3053,7 @@ impl Engine {
     /// page is not an obligation a caller can honour.)*
     pub fn resolve_terms(&self, descriptors: &[Descriptor]) -> Vec<TermId> {
         self.write
+            .live()
             .resolve_terms(&self.generation.load().dict, descriptors)
     }
 
@@ -3067,7 +3070,7 @@ impl Engine {
         &self,
         external_id: &[u8],
     ) -> std::result::Result<Option<EntityId>, StoreError> {
-        if let Some(entity) = self.write.established_entity(external_id) {
+        if let Some(entity) = self.write.live().established_entity(external_id) {
             return Ok(Some(entity));
         }
         self.generation.load().external_index.resolve(external_id)
@@ -3186,7 +3189,7 @@ impl Engine {
         &self,
         external_ids: &[Vec<u8>],
     ) -> std::result::Result<Vec<Option<EntityId>>, StoreError> {
-        let mut results: Vec<Option<EntityId>> = self.write.established_entities(external_ids);
+        let mut results: Vec<Option<EntityId>> = self.write.live().established_entities(external_ids);
 
         let residual_positions: Vec<usize> = results
             .iter()
@@ -3239,7 +3242,7 @@ impl Engine {
         generation: &Generation,
         entity: EntityId,
     ) -> std::result::Result<Option<Vec<u8>>, StoreError> {
-        if let Some(external_id) = self.write.established_external_id(entity) {
+        if let Some(external_id) = self.write.live().established_external_id(entity) {
             return Ok(Some(external_id));
         }
         generation
@@ -3255,7 +3258,7 @@ impl Engine {
     /// the only place it can be race-free (see `WritePath`'s executor). A handler consulting this
     /// is saving a queue round-trip on the common case, not deciding anything.
     pub fn accepted_batch(&self, batch_id: &str) -> Option<([u8; 32], Vec<EntityId>)> {
-        self.write.accepted_batch(batch_id)
+        self.write.live().accepted_batch(batch_id)
     }
 
     /// Compute the wire `tessera_id` for `entity` under this deployment's current shard id and
@@ -3725,7 +3728,7 @@ impl Engine {
     /// live. This one exists for `/control/ingest`, which must decide whether a column names a
     /// layer, and for a caller already holding the operator credential that registered it.
     pub fn registered_layer(&self, name: &str) -> Option<tessera_types::layer::RegisteredLayer> {
-        self.write.registered_layer(name)
+        self.write.live().registered_layer(name)
     }
 
     /// Register an annotation layer, returning its `tessera_id`.
@@ -4247,13 +4250,13 @@ impl Engine {
     /// entered it — same answer, and by the same route the request path already takes for a point.
     pub fn visible_layers(&self, session: &Session) -> Vec<tessera_types::layer::RegisteredLayer> {
         let generation = self.generation();
-        let resolved = self.write.resolve_layers(
+        let resolved = self.write.live().resolve_layers(
             |term| session.satisfied.contains(&term),
             |label| generation.dict.lookup(label.as_bytes()),
         );
         resolved
             .names()
-            .filter_map(|name| self.write.registered_layer(name))
+            .filter_map(|name| self.write.live().registered_layer(name))
             .filter(|layer| {
                 // **The live half, and it is asked per call.** A layer's own entity carries its
                 // suppression, so this is the same deleted-beats-suppressed composition a point
@@ -4271,7 +4274,7 @@ impl Engine {
     /// region's high-water mark on `/control/status`: the two together are how much of the entity
     /// space is left, which neither answers alone.
     pub fn allocator_low_water(&self) -> u64 {
-        self.write.allocator_low_water()
+        self.write.live().allocator_low_water()
     }
 
     /// Where an artifact's entity sits, and what was published there.
@@ -4282,8 +4285,8 @@ impl Engine {
     /// returned — a caller with a raw member set could count it, and an unmasked count over items a
     /// principal may not see is C8's row.
     pub fn locate_artifact(&self, entity: EntityId) -> Option<PublishedArtifactAddress> {
-        let (layer, level, ordinal) = self.write.locate_artifact(entity)?;
-        let key = self.write.with_artifacts(|store| {
+        let (layer, level, ordinal) = self.write.live().locate_artifact(entity)?;
+        let key = self.write.live().with_artifacts(|store| {
             store
                 .get(&layer, level, ordinal)
                 .and_then(|r| r.key.clone())
@@ -4302,7 +4305,7 @@ impl Engine {
     /// corpus-wide count over objects a principal may not individually see, which is C8's row; the
     /// total answers "is the store populated" for `/control/status` without answering that.
     pub fn published_artifacts(&self) -> usize {
-        self.write.with_artifacts(|store| store.total())
+        self.write.live().with_artifacts(|store| store.total())
     }
 
     /// How many resident memberships are held on the heap rather than read through the extent
@@ -4313,7 +4316,7 @@ impl Engine {
     #[cfg(feature = "fault-injection")]
     #[doc(hidden)]
     pub fn owned_memberships_for_test(&self) -> usize {
-        self.write.with_artifacts(|store| store.owned_memberships())
+        self.write.live().with_artifacts(|store| store.owned_memberships())
     }
 
     /// Every artifact of one level as `(ordinal, members, mapped)`, where `mapped` says the
@@ -4332,7 +4335,7 @@ impl Engine {
         layer: &str,
         level: u32,
     ) -> Vec<(u32, Vec<u32>, bool)> {
-        self.write.with_artifacts(|store| {
+        self.write.live().with_artifacts(|store| {
             store
                 .level(layer, level)
                 .map(|(ordinal, record)| {

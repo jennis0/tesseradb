@@ -4907,7 +4907,7 @@ impl Engine {
         let started = std::time::Instant::now();
         let mut warmed = WarmedProjections::default();
         let generation = self.generation.load();
-        let layers = self.write.registered_layers();
+        let layers = self.write.live().registered_layers();
         if layers.is_empty() {
             return warmed;
         }
@@ -4954,7 +4954,7 @@ impl Engine {
                     // projection's decode fans out, and a build outside `install` would take
                     // rayon's global pool rather than the one the deployment sized.
                     let ((rows, level_version), lineage_version) = self.pool.install(|| {
-                        self.write.with_artifacts(|store| {
+                        self.write.live().with_artifacts(|store| {
                             let predicate = predicate_source(
                                 &layer.declaration,
                                 &generation,
@@ -5332,10 +5332,10 @@ impl Engine {
         }
 
         // Addressing, before authorisation and cheaply: which artifact, if any, this entity is.
-        let Some((name, level, ordinal)) = self.write.locate_artifact(entity) else {
+        let Some((name, level, ordinal)) = self.write.live().locate_artifact(entity) else {
             return Ok(None);
         };
-        let Some(layer) = self.write.registered_layer(&name) else {
+        let Some(layer) = self.write.live().registered_layer(&name) else {
             return Ok(None);
         };
         if !layer.declaration.views.iter().any(|s| s == view) {
@@ -5347,14 +5347,14 @@ impl Engine {
         // cost, of one naming nothing — the two 404s are the same answer. Deciding it beside
         // `locate_artifact` rather than at the verdict closes this route whatever state a held row
         // form is in, and builds no projection and no histogram to do it.
-        if !self.write.with_artifacts(|store| {
+        if !self.write.live().with_artifacts(|store| {
             store.drawn_in_view(&name, level, ordinal, crate::artifacts::view_key(view))
         }) {
             return Ok(None);
         }
         // Reachability, then the live suppression of the layer itself — the same two steps in the
         // same order `Engine::visible_layers` and `serve_artifacts` take.
-        let reachable = self.write.resolve_layers(
+        let reachable = self.write.live().resolve_layers(
             |term| session.satisfied.contains(&term),
             |label| generation.dict.lookup(label.as_bytes()),
         );
@@ -5375,7 +5375,7 @@ impl Engine {
             Some(vocabulary) => vocabulary.code_of(key),
             None => key.parse::<u32>().ok(),
         };
-        let (rows, level_version) = self.write.with_artifacts(|store| {
+        let (rows, level_version) = self.write.live().with_artifacts(|store| {
             let predicate = predicate_source(
                 &layer.declaration,
                 generation,
@@ -5603,7 +5603,7 @@ impl Engine {
         mask_identity: crate::histogram::MaskIdentity,
     ) -> std::result::Result<croaring::Bitmap, crate::filter::FilterError> {
         use crate::filter::FilterError;
-        let reachable = self.write.resolve_layers(
+        let reachable = self.write.live().resolve_layers(
             |term| session.satisfied.contains(&term),
             |label| generation.dict.lookup(label.as_bytes()),
         );
@@ -5787,6 +5787,7 @@ impl Engine {
                 ordinal,
                 level_version: self
                     .write
+                    .live()
                     .with_artifacts(|store| store.level_version(&name, level)),
                 segments_version: mask_identity.segments_version,
                 overlay_version: mask_identity.overlay_version,
@@ -5834,7 +5835,7 @@ impl Engine {
             content,
             layer: name.clone(),
             tessera_id: id,
-            key: self.write.with_artifacts(|store| {
+            key: self.write.live().with_artifacts(|store| {
                 store.get(&name, level, ordinal).and_then(|r| r.key.clone())
             }),
             masked_count,
@@ -5902,7 +5903,7 @@ impl Engine {
                 let held = match self.shapes.get(view, layer, level) {
                     Some(held) => held,
                     // Not yet held for this view: nothing warmed the level, so it is built here.
-                    None => self.write.with_artifacts(|store| {
+                    None => self.write.live().with_artifacts(|store| {
                         self.shapes.level(
                             view,
                             layer,
@@ -5998,7 +5999,7 @@ impl Engine {
         };
         // The publication's own copy, while it is still in memory — the log is the only home the
         // content has between the publish and the manifest that carries it.
-        let held = self.write.with_artifacts(|store| {
+        let held = self.write.live().with_artifacts(|store| {
             store
                 .get(layer, level, ordinal)
                 .and_then(|record| record.contents.get(rank as usize))
@@ -6111,7 +6112,7 @@ impl Engine {
         if !ctx.reachable.contains(&attachment.layer) {
             return false;
         }
-        let Some(layer) = self.write.registered_layer(&attachment.layer) else {
+        let Some(layer) = self.write.live().registered_layer(&attachment.layer) else {
             return false;
         };
         if ctx.generation.overlay.is_deleted(layer.entity)
@@ -6124,7 +6125,7 @@ impl Engine {
         if !layer.declaration.views.iter().any(|s| s == ctx.view) {
             return false;
         }
-        let record = self.write.with_artifacts(|store| {
+        let record = self.write.live().with_artifacts(|store| {
             store
                 .get(&attachment.layer, attachment.level, attachment.ordinal)
                 .map(|record| record.entity)
@@ -6147,7 +6148,7 @@ impl Engine {
             Some(vocabulary) => vocabulary.code_of(key),
             None => key.parse::<u32>().ok(),
         };
-        let (rows, level_version) = self.write.with_artifacts(|store| {
+        let (rows, level_version) = self.write.live().with_artifacts(|store| {
             let predicate = predicate_source(
                 &layer.declaration,
                 ctx.generation,
@@ -6255,7 +6256,7 @@ impl Engine {
     ) -> Result<(Vec<ArtifactOut>, Vec<ServedLayer>)> {
         // Which layers this principal may know exist — one set probe for a gate-failed name and a
         // never-registered one alike (`LayerRegistry::resolve_for`).
-        let reachable = self.write.resolve_layers(
+        let reachable = self.write.live().resolve_layers(
             |term| session.satisfied.contains(&term),
             |label| generation.dict.lookup(label.as_bytes()),
         );
@@ -6358,7 +6359,7 @@ impl Engine {
         // cut used, so the column cannot describe a level the artifacts frame did not.
         let mut served_layers: Vec<ServedLayer> = Vec::new();
         for name in names {
-            let Some(layer) = self.write.registered_layer(&name) else {
+            let Some(layer) = self.write.live().registered_layer(&name) else {
                 // Dropped between the resolution and here. Absent is the right answer and the same
                 // one a gate failure gives.
                 continue;
@@ -6419,7 +6420,7 @@ impl Engine {
                     continue;
                 }
                 let recorded = layer.layout_of(level);
-                let ((rows, level_version), lineage_version) = self.write.with_artifacts(|store| {
+                let ((rows, level_version), lineage_version) = self.write.live().with_artifacts(|store| {
                     let predicate = predicate_source(
                         &layer.declaration,
                         generation,
@@ -6750,6 +6751,7 @@ impl Engine {
                         ArtifactRows::Identity => None,
                         ArtifactRows::Full => self
                             .write
+                            .live()
                             .with_artifacts(|store| store.get(&name, level, ordinal)?.key.clone()),
                     };
                     // Recorded, not resolved: which artifacts this response holds is not known

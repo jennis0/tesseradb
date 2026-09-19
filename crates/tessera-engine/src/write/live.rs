@@ -71,11 +71,11 @@ pub(crate) struct LiveState {
 }
 
 impl LiveState {
-    pub(in crate::write) fn established_entity(&self, external_id: &[u8]) -> Option<EntityId> {
+    pub(crate) fn established_entity(&self, external_id: &[u8]) -> Option<EntityId> {
         lock_recover(&self.established).get(external_id).copied()
     }
 
-    pub(in crate::write) fn established_entities(&self, external_ids: &[Vec<u8>]) -> Vec<Option<EntityId>> {
+    pub(crate) fn established_entities(&self, external_ids: &[Vec<u8>]) -> Vec<Option<EntityId>> {
         let established = lock_recover(&self.established);
         external_ids
             .iter()
@@ -83,17 +83,17 @@ impl LiveState {
             .collect()
     }
 
-    pub(in crate::write) fn established_external_id(&self, entity: EntityId) -> Option<Vec<u8>> {
+    pub(crate) fn established_external_id(&self, entity: EntityId) -> Option<Vec<u8>> {
         lock_recover(&self.established_inverse)
             .get(&entity)
             .cloned()
     }
 
-    pub(in crate::write) fn allocator_high_water(&self) -> u64 {
+    pub(crate) fn allocator_high_water(&self) -> u64 {
         lock_recover(&self.allocator).high_water()
     }
 
-    pub(in crate::write) fn allocator_low_water(&self) -> u64 {
+    pub(crate) fn allocator_low_water(&self) -> u64 {
         lock_recover(&self.allocator).low_water()
     }
 
@@ -433,7 +433,7 @@ impl LiveState {
         (layers, tombstones, low_water)
     }
 
-    pub(in crate::write) fn accepted_batch(&self, batch_id: &str) -> Option<([u8; 32], Vec<EntityId>)> {
+    pub(crate) fn accepted_batch(&self, batch_id: &str) -> Option<([u8; 32], Vec<EntityId>)> {
         lock_recover(&self.accepted_batches)
             .get(batch_id)
             .map(|held| (held.body_hash, held.entity_ids.clone()))
@@ -455,7 +455,7 @@ impl LiveState {
             .collect()
     }
 
-    pub(in crate::write) fn resolve_terms(&self, dict: &Dict, descriptors: &[Descriptor]) -> Vec<TermId> {
+    pub(crate) fn resolve_terms(&self, dict: &Dict, descriptors: &[Descriptor]) -> Vec<TermId> {
         let mut state = lock_recover(&self.resolver_state);
         let (extension, next_extension_id) = std::mem::take(&mut *state);
         let mut resolver = DescriptorResolver::resume(dict, extension, next_extension_id);

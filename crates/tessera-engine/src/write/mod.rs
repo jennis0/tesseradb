@@ -533,6 +533,11 @@ impl WritePath {
         }
     }
 
+    /// The maps a handler reads before submitting.
+    pub(crate) fn live(&self) -> &LiveState {
+        &self.live
+    }
+
     pub(crate) fn health(&self) -> &Arc<ExecutorHealth> {
         &self.health
     }
@@ -546,29 +551,6 @@ impl WritePath {
     }
 
     // --- read accessors ---------------------------------------------------------------------------
-
-    pub(crate) fn allocator_high_water(&self) -> u64 {
-        self.live.allocator_high_water()
-    }
-
-    pub(crate) fn established_entity(&self, external_id: &[u8]) -> Option<EntityId> {
-        self.live.established_entity(external_id)
-    }
-
-    /// Batch form, taking the map's lock once for the whole batch. Per-key locking would let an
-    /// acceptance land between two keys of one duplicate check, so the batch would be answered
-    /// from two different snapshots of the live map.
-    pub(crate) fn established_entities(&self, external_ids: &[Vec<u8>]) -> Vec<Option<EntityId>> {
-        self.live.established_entities(external_ids)
-    }
-
-    pub(crate) fn established_external_id(&self, entity: EntityId) -> Option<Vec<u8>> {
-        self.live.established_external_id(entity)
-    }
-
-    pub(crate) fn accepted_batch(&self, batch_id: &str) -> Option<([u8; 32], Vec<EntityId>)> {
-        self.live.accepted_batch(batch_id)
-    }
 
     /// Submit a geometry publication to the executor and block until it has been performed.
     ///
@@ -599,18 +581,6 @@ impl WritePath {
         self.handle
             .as_ref()
             .is_some_and(|handle| handle.rebuild_suggestion_index(vocabulary))
-    }
-
-    /// Resolve raw term descriptors to `TermId`s.
-    ///
-    /// `/control/ingest` resolves before the record carrying the descriptors is fsynced, because
-    /// signature-sorted assignment needs each item's resolved terms to compute its sort key before
-    /// any id exists. `/control/changes` resolves only after its append succeeds. An extension id
-    /// is unsatisfiable by any session's `satisfied` set, so a live/replay mismatch in which
-    /// extension id a novel descriptor got renumbers internal bookkeeping only, never a visibility
-    /// outcome.
-    pub(crate) fn resolve_terms(&self, dict: &Dict, descriptors: &[Descriptor]) -> Vec<TermId> {
-        self.live.resolve_terms(dict, descriptors)
     }
 
     // --- submission -----------------------------------------------------------------------------
@@ -779,27 +749,6 @@ impl WritePath {
         })
     }
 
-    /// Which layers a principal may know exist, resolved once per session.
-    pub(crate) fn resolve_layers(
-        &self,
-        is_satisfied: impl Fn(tessera_types::TermId) -> bool,
-        resolve_label: impl Fn(&str) -> Option<tessera_types::TermId>,
-    ) -> tessera_lifecycle::ResolvedLayers {
-        self.live.resolve_layers(is_satisfied, resolve_label)
-    }
-
-    pub(crate) fn registered_layer(
-        &self,
-        name: &str,
-    ) -> Option<tessera_types::layer::RegisteredLayer> {
-        self.live.registered_layer(name)
-    }
-
-    /// See `WriteState::registered_layers`.
-    pub(crate) fn registered_layers(&self) -> Vec<tessera_types::layer::RegisteredLayer> {
-        self.live.registered_layers()
-    }
-
     /// Publish a batch of artifacts, returning their entities in the caller's submitted order and
     /// the batch's counts ([`PublishedBatch`]).
     pub(crate) fn publish_artifacts(
@@ -830,18 +779,6 @@ impl WritePath {
             joins,
             reply,
         })
-    }
-
-    pub(crate) fn with_artifacts<R>(&self, f: impl FnOnce(&ArtifactStore) -> R) -> R {
-        self.live.with_artifacts(f)
-    }
-
-    pub(crate) fn locate_artifact(&self, entity: EntityId) -> Option<(String, u32, u32)> {
-        self.live.locate_artifact(entity)
-    }
-
-    pub(crate) fn allocator_low_water(&self) -> u64 {
-        self.live.allocator_low_water()
     }
 
     /// Submit one `/control/changes` entry and wait for its receipt.
