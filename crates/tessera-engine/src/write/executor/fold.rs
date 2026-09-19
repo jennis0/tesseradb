@@ -1615,102 +1615,26 @@ impl Executor {
         *lock_recover(&self.health.last_fold_report) = degraded;
         stairs.record("12 retire");
 
-        // ---- steps 5 and 6: open the new prefix, then one swap ---------------------------------
-        let rotation = crate::session::open_rotation(
-            &self.bundle_root,
-            &completed.prefix,
-            &live.fragments,
-            executed,
-        );
-        let (bundle, rotation) = match rotation {
-            Ok(pair) => pair,
-            Err(e) => {
-                self.diverge_from_current(&completed.prefix);
-                tracing::error!(
-                    error = %e,
-                    prefix = %completed.prefix,
-                    "ALARM: CURRENT names the folded prefix and this process could not open it. \
-                     The bundle on disc is complete and a restart serves it; until then this node \
-                     serves the superseded prefix and publishes nothing. Nothing retired"
-                );
-                return;
-            }
-        };
-
-        // **The tier list, re-derived from the committed manifest** rather than filtered
-        // positionally: `deltas` is the authority on which tiers are live (contracts §2.3 r18), and
-        // re-deriving from it is the one form that cannot drift from what a restart would open. The
-        // readers themselves are the live `Arc`s — their mappings are of the same inodes the
-        // carry-forward just gave a second name, so they survive the old prefix's deletion exactly
-        // as `reclaim_prefix` argues.
-        let mut delta_postings: Vec<Arc<DeltaTier>> = Vec::with_capacity(forward.tiers.len());
-        for rel in &segments_manifest.deltas {
-            let Some(tier) = held_tier(&live.delta_postings, &live_manifest.deltas, rel) else {
-                self.diverge_from_current(&completed.prefix);
-                tracing::error!(
-                    tier = %rel,
-                    "ALARM: the folded manifest names a delta tier this process does not hold \
-                     open; abandoning the swap rather than serving a fragment built from fewer \
-                     tiers than the manifest declares. CURRENT names the new prefix and a restart \
-                     serves it"
-                );
-                return;
-            };
-            delta_postings.push(tier);
-        }
-
         let segments_version = live.segments_version + 1;
-        if let Err(e) = self.publish_geometry(
-            GeometryPublication::within_prefix(
-                completed.prefix.clone(),
-                segments_version,
-                // Live, and untouched — see the manifest's own note above.
-                live.watermark,
-                bundle,
-                // CarriedExtents forward, never renumbered and never shrunk (compaction §3, pass 4).
-                Arc::clone(&live.dict),
-                delta_postings,
-            )
-            .rotating(rotation),
+        if let Err(reason) = self.swap_onto_folded_prefix(
+            &completed.prefix,
+            &live,
+            &live_manifest.deltas,
+            &segments_manifest.deltas,
+            executed,
         ) {
-            self.diverge_from_current(&completed.prefix);
-            tracing::error!(
-                error = %e,
-                "ALARM: CURRENT names the folded prefix and the swap was refused. A restart \
-                 serves the new bundle; until then this node serves the superseded one and \
-                 publishes nothing"
-            );
+            self.diverge_from_current(&completed.prefix, &reason);
             return;
         }
-
         stairs.record("13 open");
 
-        // **The structures this fold wrote, adopted by the process that wrote them.**
-        // `Engine::open` adopts a prefix's containment partitions, tile indexes and row columns
-        // against the store it seeded; this is the same prefix and the same store, retired above.
-        // Without it the warm below projects every level from its memberships and only a restart
-        // reads what the artifact pass wrote. After the swap, because a claim is keyed by prefix
-        // and a request on the outgoing generation would drop an entry the new one is about to
-        // ask for.
         self.live.with_artifacts(|store| {
-            self.artifact_projections.adopt_all(
+            self.artifact_projections.adopt_derived(
                 &to_prefix_dir,
                 &completed.prefix,
                 &self.derived_extents,
                 store,
-            );
-            self.artifact_projections.adopt_indexes(
-                &to_prefix_dir,
-                &completed.prefix,
-                &self.derived_extents,
-                store,
-            );
-            self.artifact_projections.adopt_columns(
-                &to_prefix_dir,
-                &completed.prefix,
-                &self.derived_extents,
-                store,
-            );
+            )
         });
         stairs.record("14 adopt");
 
@@ -1784,49 +1708,11 @@ impl Executor {
         let cost = stairs.into_cost();
 
         self.health.folds.fetch_add(1, Ordering::Relaxed);
-        // **The fold's own account of what it spent, at the one severity an operator reads.** The
-        // most expensive operation in the system had no cost record at all until it had one here:
-        // its counters said a fold happened, and nothing said what it took. The staircase is the
-        // diagnostic half — a resident set that climbs on one pass names that pass — and the two
-        // gauges below are the alarming half, on `/control/status`.
-        let passes = cost
-            .iter()
-            .map(|c| {
-                // Total and anonymous, because §3's budget is a claim about the split: a fold
-                // whose total climbs because its mapped inputs became resident is behaving as
-                // designed, and one whose *anonymous* half climbs with the corpus has a term
-                // nobody budgeted. One number cannot distinguish them.
-                format!(
-                    "{}={:?}/{:.2}GiB({:.2} anon)",
-                    c.pass,
-                    c.elapsed,
-                    c.rss as f64 / (1u64 << 30) as f64,
-                    c.anon as f64 / (1u64 << 30) as f64,
-                )
-            })
-            .collect::<Vec<_>>()
-            .join(" ");
-        // Summed before it is truncated to seconds: a fold of many sub-second rows is not a
-        // zero-second fold.
-        let fold_secs = cost
-            .iter()
-            .map(|c| c.elapsed)
-            .sum::<std::time::Duration>()
-            .as_secs();
-        let staircase_rss = cost.iter().map(|c| c.rss).max().unwrap_or(0);
-        self.health
-            .last_fold_secs
-            .store(fold_secs, Ordering::Relaxed);
-        self.health
-            .last_fold_rss
-            .store(staircase_rss, Ordering::Relaxed);
-        self.health
-            .last_fold_attr_read
-            .store(completed.attr_bytes_read, Ordering::Relaxed);
-        self.health
-            .last_fold_attr_written
-            .store(completed.attr_bytes_written, Ordering::Relaxed);
-        *lock_recover(&self.health.last_fold_passes) = cost;
+        let (passes, fold_secs, staircase_rss) = self.health.record_fold_cost(
+            cost,
+            completed.attr_bytes_read,
+            completed.attr_bytes_written,
+        );
         // **One line per view, beside the summary rather than inside it** (ruling G, decision
         // 0143): a group's keys are separate
         // views over one dictionary, each paying its own table and its own payload, and a total
@@ -1956,16 +1842,52 @@ impl Executor {
     /// The superseded prefix is deliberately **not** reclaimed on this path — it is what this
     /// process is still serving from, and `reclaim_prefix` would refuse it anyway now that
     /// `CURRENT` names the other one.
-    pub(super) fn diverge_from_current(&self, committed: &str) {
+    pub(super) fn diverge_from_current(&self, committed: &str, reason: &str) {
         self.health.fold_failures.fetch_add(1, Ordering::Relaxed);
         self.health.prefix_diverged.store(true, Ordering::SeqCst);
         tracing::error!(
             committed_prefix = %committed,
-            "ALARM: this node's live generation and its durable CURRENT disagree. It keeps serving \
-             what it has and publishes nothing — no geometry, no deny state, no WAL rotation — \
-             until it is restarted, at which point it opens the committed prefix and is correct \
-             again. Publishing from here would write acked state into a prefix no restart reads"
+            "ALARM: CURRENT names the folded prefix and this process could not swap onto it: \
+             {reason}. It keeps serving the superseded prefix and publishes nothing (no geometry, \
+             no deny state, no WAL rotation) until it is restarted, when it opens the committed \
+             prefix. Restart this node"
         );
+    }
+
+    /// Opens the prefix `CURRENT` now names and swaps onto it. The tier list is taken from the
+    /// committed manifest, which is what a restart would open; the readers are the live ones,
+    /// whose files the carry-forward gave a second name, so they outlive the old prefix.
+    fn swap_onto_folded_prefix(
+        &mut self,
+        prefix: &str,
+        live: &Arc<Generation>,
+        live_tiers: &[String],
+        folded_tiers: &[String],
+        retired: croaring::Bitmap,
+    ) -> Result<(), String> {
+        let (bundle, rotation) =
+            crate::session::open_rotation(&self.bundle_root, prefix, &live.fragments, retired)
+                .map_err(|e| format!("the folded prefix would not open ({e})"))?;
+        let delta_postings = folded_tiers
+            .iter()
+            .map(|rel| {
+                held_tier(&live.delta_postings, live_tiers, rel).ok_or_else(|| {
+                    format!("the folded manifest names delta tier {rel}, which is not held open")
+                })
+            })
+            .collect::<Result<Vec<Arc<DeltaTier>>, String>>()?;
+        self.publish_geometry(
+            GeometryPublication::within_prefix(
+                prefix.to_string(),
+                live.segments_version + 1,
+                live.watermark,
+                bundle,
+                Arc::clone(&live.dict),
+                delta_postings,
+            )
+            .rotating(rotation),
+        )
+        .map_err(|e| format!("the swap was refused ({e})"))
     }
 
     /// Delete every superseded prefix nothing is reading any more — **the reclamation event**

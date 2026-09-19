@@ -814,6 +814,46 @@ impl ExecutorHealth {
         }
     }
 
+    /// Records what the last fold cost and returns the staircase as one log field, the fold's
+    /// seconds and the highest resident set a pass boundary saw. Total and anonymous memory are
+    /// both shown: mapped inputs becoming resident is expected, anonymous growth is not.
+    pub(in crate::write) fn record_fold_cost(
+        &self,
+        cost: Vec<crate::compact::PassCost>,
+        attr_bytes_read: u64,
+        attr_bytes_written: u64,
+    ) -> (String, u64, u64) {
+        const GIB: f64 = (1u64 << 30) as f64;
+        let passes = cost
+            .iter()
+            .map(|c| {
+                format!(
+                    "{}={:?}/{:.2}GiB({:.2} anon)",
+                    c.pass,
+                    c.elapsed,
+                    c.rss as f64 / GIB,
+                    c.anon as f64 / GIB,
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        // Summed before truncating to seconds: many sub-second passes are not a zero-second fold.
+        let secs = cost
+            .iter()
+            .map(|c| c.elapsed)
+            .sum::<std::time::Duration>()
+            .as_secs();
+        let rss = cost.iter().map(|c| c.rss).max().unwrap_or(0);
+        self.last_fold_secs.store(secs, Ordering::Relaxed);
+        self.last_fold_rss.store(rss, Ordering::Relaxed);
+        self.last_fold_attr_read
+            .store(attr_bytes_read, Ordering::Relaxed);
+        self.last_fold_attr_written
+            .store(attr_bytes_written, Ordering::Relaxed);
+        *lock_recover(&self.last_fold_passes) = cost;
+        (passes, secs, rss)
+    }
+
     /// Record a fold the planner would not plan. Executor thread only, once per refusal.
     pub(in crate::write) fn record_fold_refusal(&self, reason: crate::compact::NoFold) {
         let (gate, need_bytes, had_bytes) = reason.gauge();

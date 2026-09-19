@@ -2497,6 +2497,20 @@ impl ArtifactProjections {
             .load(std::sync::atomic::Ordering::Relaxed)
     }
 
+    /// Adopts every derived file of `extents` whose level is still at the version it was written
+    /// for: containment partitions, tile indexes and row-major columns.
+    pub fn adopt_derived(
+        &self,
+        prefix_dir: &std::path::Path,
+        prefix: &str,
+        extents: &[tessera_store::manifest::DerivedExtent],
+        store: &ArtifactStore,
+    ) {
+        self.adopt_all(prefix_dir, prefix, extents, store);
+        self.adopt_indexes(prefix_dir, prefix, extents, store);
+        self.adopt_columns(prefix_dir, prefix, extents, store);
+    }
+
     /// Take the fold-written partitions this prefix's manifests name, for every level whose
     /// coordinate still holds.
     ///

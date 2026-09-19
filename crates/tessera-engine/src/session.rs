@@ -1668,27 +1668,7 @@ impl Engine {
         let artifact_projections = Arc::new(crate::artifacts::ArtifactProjections::new(
             row_column_scratch,
         ));
-        artifact_projections.adopt_all(
-            &prefix_dir,
-            generation.load().prefix.as_str(),
-            &manifest_derived_extents,
-            &write_state.artifacts,
-        );
-        // **And the tile indexes beside them, at the same point and under the same rule** — the
-        // level versions have to be the seeded ones plus the replay, and the direction of a
-        // mistaken adoption is the mirror image of the partition's: a stale index is *narrow*, and
-        // a narrow extent settles an artifact whose membership is not inside the viewport.
-        artifact_projections.adopt_indexes(
-            &prefix_dir,
-            generation.load().prefix.as_str(),
-            &manifest_derived_extents,
-            &write_state.artifacts,
-        );
-        // **And the row-major columns, at the same point and under the same rule.** A stale column
-        // is narrow in the same way an index is: a growth added rows it does not label, and an
-        // unlabelled row is one no artifact claims — so the artifact holding it stops being a
-        // candidate there and its masked count comes back short.
-        artifact_projections.adopt_columns(
+        artifact_projections.adopt_derived(
             &prefix_dir,
             generation.load().prefix.as_str(),
             &manifest_derived_extents,
