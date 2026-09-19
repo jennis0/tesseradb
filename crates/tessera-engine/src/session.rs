@@ -1884,6 +1884,8 @@ impl Engine {
     /// Unpausing wakes the executor, because the loop that would drain the fold may already have
     /// parked: the pause makes `publish_completed_folds` report that nothing happened, which is
     /// exactly what sends an otherwise-idle executor to `wait_for_work`.
+    #[cfg(feature = "fault-injection")]
+    #[doc(hidden)]
     pub fn set_fold_publication_paused_for_test(&self, paused: bool) {
         self.fold_publication_paused.store(paused, Ordering::SeqCst);
         if !paused {
@@ -1893,6 +1895,8 @@ impl Engine {
 
     /// Whether a fold has finished its passes and is holding at [`Self::set_fold_paused_for_test`].
     /// The condition a test waits on instead of guessing at the hold with a sleep.
+    #[cfg(feature = "fault-injection")]
+    #[doc(hidden)]
     pub fn fold_is_holding_for_test(&self) -> bool {
         self.write.health().fold_holding.load(Ordering::SeqCst)
     }
@@ -1902,6 +1906,8 @@ impl Engine {
     /// window and why it is a real one. [`Self::set_fold_publication_paused_for_test`]'s shape,
     /// including the wake: the executor draining nothing is what parks it, so unpausing must ring
     /// the doorbell.
+    #[cfg(feature = "fault-injection")]
+    #[doc(hidden)]
     pub fn set_merge_publication_paused_for_test(&self, paused: bool) {
         self.merge_publication_paused
             .store(paused, Ordering::SeqCst);
@@ -1914,6 +1920,8 @@ impl Engine {
     /// [`Self::set_fold_publication_paused_for_test`]'s hold — the fold's half of
     /// [`Self::merge_publication_is_held_for_test`], and the condition a test waits on rather than
     /// guessing at the hold with a sleep.
+    #[cfg(feature = "fault-injection")]
+    #[doc(hidden)]
     pub fn fold_publication_is_held_for_test(&self) -> bool {
         self.write
             .health()
@@ -1924,6 +1932,8 @@ impl Engine {
     /// Whether a completed merge is waiting, undrained, at
     /// [`Self::set_merge_publication_paused_for_test`]'s hold. The condition a test waits on
     /// instead of guessing at the hold with a sleep.
+    #[cfg(feature = "fault-injection")]
+    #[doc(hidden)]
     pub fn merge_publication_is_held_for_test(&self) -> bool {
         self.write
             .health()
@@ -1935,6 +1945,8 @@ impl Engine {
     /// `Engine::session_geometry`'s ladder sheds a racer in. Distinct from
     /// [`Self::set_background_refresh_for_test`], which models a refresh that produces nothing and
     /// *finishes*: the flag clears there, and rung 3 builds instead of refusing.
+    #[cfg(feature = "fault-injection")]
+    #[doc(hidden)]
     pub fn set_refresh_paused_for_test(&self, paused: bool) {
         self.refresh_paused.store(paused, Ordering::SeqCst);
     }
@@ -2257,6 +2269,8 @@ impl Engine {
     /// external-id run. See `tessera_lifecycle::Overlay::retire`, which states what retiring one
     /// entity too many costs. Empty is always safe: an un-retired tombstone is fail-closed, and
     /// the next fold takes it.
+    #[cfg(feature = "fault-injection")]
+    #[doc(hidden)]
     pub fn publish_rotated_prefix_for_test(
         &self,
         prefix: &str,
@@ -3350,6 +3364,8 @@ impl Engine {
     /// form on a request path would be taking whatever was last written to the cache rather than
     /// the form of the generation it is serving — the freshness argument `get_or_build` makes by
     /// reading the level's version from the store it builds from.
+    #[cfg(feature = "fault-injection")]
+    #[doc(hidden)]
     pub fn held_artifact_form_for_test(
         &self,
         view: &str,
@@ -3361,6 +3377,8 @@ impl Engine {
 
     /// Drop every derived form this engine holds for one layer, so the next request builds them —
     /// the *from scratch* half of the same differential.
+    #[cfg(feature = "fault-injection")]
+    #[doc(hidden)]
     pub fn forget_artifact_forms_for_test(&self, layer: &str) {
         self.artifact_projections.forget(layer);
     }
