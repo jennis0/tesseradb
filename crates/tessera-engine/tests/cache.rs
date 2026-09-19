@@ -447,3 +447,64 @@ fn fragment_evict_drops_the_memory_tier_not_the_sidecar() {
         "and the reopened fragment is the one that was built, not a fresh one"
     );
 }
+
+/// **Every authorise mints its own token, and the token is the bearer secret's whole shape.**
+///
+/// Two sessions over one credential share a fragment — the case above is what proves that — and
+/// share nothing else: a token repeated across two authorises would let one viewer's bearer secret
+/// name another's session, and a `token_id` repeated would hand the second session every
+/// per-session cache entry the first one warmed. The lifetime is the bound `Session::is_stale`
+/// leans on for a session that ignores the hint, so it is asserted here rather than assumed.
+#[test]
+fn every_authorise_mints_its_own_token() {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+    let engine = open_with(config(), &tmp, &bundle_root);
+
+    let now = || {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+    };
+    let before = now();
+    let first = engine.authorise(&full_coverage_credential()).unwrap();
+    let second = engine.authorise(&full_coverage_credential()).unwrap();
+    let after = now();
+
+    assert_ne!(
+        first.token, second.token,
+        "the same credential twice must not mint the same bearer secret"
+    );
+    assert_ne!(
+        first.token_id, second.token_id,
+        "nor the same per-session cache identity"
+    );
+
+    for token in [&first.token, &second.token] {
+        assert_eq!(token.len(), 64, "32 random bytes, hex-encoded: {token}");
+        assert!(
+            token
+                .chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+            "lowercase hex and nothing else: {token}"
+        );
+    }
+
+    let lifetime = config().token_max_lifetime_secs;
+    for session in [&first, &second] {
+        assert!(
+            session.expires_at >= before + lifetime && session.expires_at <= after + lifetime,
+            "a session expires exactly its configured lifetime from when it was authorised: \
+             {} against {}..={}",
+            session.expires_at,
+            before + lifetime,
+            after + lifetime
+        );
+    }
+}
