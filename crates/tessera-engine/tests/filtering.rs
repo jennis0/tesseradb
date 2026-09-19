@@ -18,7 +18,7 @@ use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use arrow::array::{Float64Array, StringArray, UInt32Array, UInt64Array};
+use arrow::array::{Float64Array, StringArray, UInt64Array};
 use arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
@@ -210,34 +210,6 @@ fn write_points(path: &Path) {
     w.close().unwrap();
 }
 
-/// The same term model `common` uses — every item carries `ALL_TERM`, every third also
-/// `SUBSET_TERM` — so `subset_credential()` is a principal seeing one item in three.
-fn write_pairs(path: &Path) {
-    let schema = Arc::new(ArrowSchema::new(vec![
-        Field::new("entity_id", DataType::UInt64, false),
-        Field::new("term_id", DataType::UInt32, false),
-    ]));
-    let mut entities: Vec<u64> = Vec::new();
-    let mut terms: Vec<u32> = Vec::new();
-    for e in 0..N {
-        for t in terms_of(e) {
-            entities.push(e);
-            terms.push(t as u32);
-        }
-    }
-    let batch = RecordBatch::try_new(
-        schema.clone(),
-        vec![
-            Arc::new(UInt64Array::from(entities)),
-            Arc::new(UInt32Array::from(terms)),
-        ],
-    )
-    .unwrap();
-    let mut w = ArrowWriter::try_new(File::create(path).unwrap(), schema, None).unwrap();
-    w.write(&batch).unwrap();
-    w.close().unwrap();
-}
-
 struct Fixture {
     _dir: tempfile::TempDir,
     bundle: std::path::PathBuf,
@@ -264,7 +236,7 @@ fn fixture() -> Fixture {
     let points = dir.path().join("points.parquet");
     let pairs = dir.path().join("pairs.parquet");
     write_points(&points);
-    write_pairs(&pairs);
+    write_pairs_n(&pairs, N);
     let bundle = dir.path().join("bundle");
 
     let schema_path = dir.path().join("schema.toml");
