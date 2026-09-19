@@ -229,7 +229,7 @@ fn a_credential_re_presented_after_a_promoting_flush_sees_the_promoted_descripto
     let credential = br#"{"terms": ["0", "novel"]}"#.to_vec();
     let stale = engine.authorise(&credential).unwrap();
     assert_eq!(resolved(&stale), 1, "the fixture must not know `novel`");
-    let before = stale.fragment.view().cardinality();
+    let before = stale.fragment_at_authorise_for_test().view().cardinality();
 
     // Ingest under the novel descriptor and flush, which promotes it and mints its term. The rows
     // are the entities the promoted term will carry — without them the promotion adds an empty
@@ -274,16 +274,16 @@ fn a_credential_re_presented_after_a_promoting_flush_sees_the_promoted_descripto
     // memo's fast path, so it is the answer the line above must agree with.
     let other = br#"{"terms": ["0", "novel", "also-unknown"]}"#.to_vec();
     let control = engine.authorise(&other).unwrap();
-    assert_eq!(control.satisfied, fresh.satisfied, "the control's premise");
+    assert_eq!(control.satisfied_for_test(), fresh.satisfied_for_test(), "the control's premise");
 
     assert_eq!(
-        fresh.fragment.view().cardinality(),
-        control.fragment.view().cardinality(),
+        fresh.fragment_at_authorise_for_test().view().cardinality(),
+        control.fragment_at_authorise_for_test().view().cardinality(),
         "two credentials with the same satisfied term set were served different visible sets; the \
          one whose bytes were seen before the promotion took a stale memo hit"
     );
     assert!(
-        fresh.fragment.view().cardinality() > before,
+        fresh.fragment_at_authorise_for_test().view().cardinality() > before,
         "the re-presented credential must gain the promoted descriptor's entities"
     );
 }
@@ -377,10 +377,10 @@ fn a_background_refresh_does_not_poison_a_later_authorise_of_the_same_credential
     let control = engine
         .authorise(br#"{"terms": ["0", "novel", "also-unknown"]}"#)
         .unwrap();
-    assert_eq!(fresh.satisfied, control.satisfied, "the control's premise");
+    assert_eq!(fresh.satisfied_for_test(), control.satisfied_for_test(), "the control's premise");
     assert_eq!(
-        fresh.fragment.view().cardinality(),
-        control.fragment.view().cardinality(),
+        fresh.fragment_at_authorise_for_test().view().cardinality(),
+        control.fragment_at_authorise_for_test().view().cardinality(),
         "the background refresh poisoned the canonical-key memo for this credential"
     );
 }
@@ -392,8 +392,8 @@ fn a_background_refresh_does_not_poison_a_later_authorise_of_the_same_credential
 /// this file's cases are not about, in every one of them.
 fn resolved(session: &tessera_engine::Session) -> usize {
     assert!(
-        session.satisfied.contains(&tessera_authz::PUBLIC_TERM),
+        session.satisfied_for_test().contains(&tessera_authz::PUBLIC_TERM),
         "every session holds the reserved `public` term"
     );
-    session.satisfied.len() - 1
+    session.satisfied_for_test().len() - 1
 }

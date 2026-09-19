@@ -124,7 +124,7 @@ fn tighten_to_one_entry(engine: &Engine, sessions: &[&Session]) -> u64 {
     let mut largest = 0u64;
     for session in sessions {
         for resident in sessions {
-            engine.prune_token(resident.token_id);
+            engine.prune_token(resident.token_id());
         }
         engine
             .viewport(session, whole_extent())
@@ -137,7 +137,7 @@ fn tighten_to_one_entry(engine: &Engine, sessions: &[&Session]) -> u64 {
         largest = largest.max(stats.bytes);
     }
     for resident in sessions {
-        engine.prune_token(resident.token_id);
+        engine.prune_token(resident.token_id());
     }
     assert!(largest > 0, "an entry must be charged something");
     engine.set_cache_bounds(largest, u64::MAX);
@@ -168,7 +168,7 @@ fn revoke_prunes_the_token() {
     assert_eq!(engine.row_projection_cache_stats().entries, 2);
 
     assert_eq!(
-        engine.prune_token(doomed.token_id),
+        engine.prune_token(doomed.token_id()),
         1,
         "exactly the revoked session's entry"
     );
@@ -418,7 +418,7 @@ fn fragment_evict_drops_the_memory_tier_not_the_sidecar() {
 
     // No sort: `canonical_key_for` sorts and dedups internally (see `canonical_key`'s doc — the key
     // must not depend on the caller's term order), and a sort here reads as if it did.
-    let satisfied: Vec<_> = session.satisfied.iter().copied().collect();
+    let satisfied: Vec<_> = session.satisfied_for_test().iter().copied().collect();
     let key = engine.fragment_canonical_key(&satisfied);
 
     assert!(engine.evict_fragment(&key), "the entry was resident");
@@ -443,7 +443,8 @@ fn fragment_evict_drops_the_memory_tier_not_the_sidecar() {
          re-union of postings"
     );
     assert_eq!(
-        again.fragment.watermark, session.fragment.watermark,
+        again.fragment_at_authorise_for_test().watermark,
+        session.fragment_at_authorise_for_test().watermark,
         "and the reopened fragment is the one that was built, not a fresh one"
     );
 }
@@ -478,15 +479,17 @@ fn every_authorise_mints_its_own_token() {
     let after = now();
 
     assert_ne!(
-        first.token, second.token,
+        first.token(),
+        second.token(),
         "the same credential twice must not mint the same bearer secret"
     );
     assert_ne!(
-        first.token_id, second.token_id,
+        first.token_id(),
+        second.token_id(),
         "nor the same per-session cache identity"
     );
 
-    for token in [&first.token, &second.token] {
+    for token in [first.token(), second.token()] {
         assert_eq!(token.len(), 64, "32 random bytes, hex-encoded: {token}");
         assert!(
             token
@@ -499,10 +502,10 @@ fn every_authorise_mints_its_own_token() {
     let lifetime = config().token_max_lifetime_secs;
     for session in [&first, &second] {
         assert!(
-            session.expires_at >= before + lifetime && session.expires_at <= after + lifetime,
+            session.expires_at() >= before + lifetime && session.expires_at() <= after + lifetime,
             "a session expires exactly its configured lifetime from when it was authorised: \
              {} against {}..={}",
-            session.expires_at,
+            session.expires_at(),
             before + lifetime,
             after + lifetime
         );

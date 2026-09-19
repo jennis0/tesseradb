@@ -226,8 +226,8 @@ fn visible(engine: &Engine, session: &Session) -> u64 {
 /// this file's cases are not about, in every one of them.
 fn resolved(session: &tessera_engine::Session) -> usize {
     assert!(
-        session.satisfied.contains(&tessera_authz::PUBLIC_TERM),
+        session.satisfied_for_test().contains(&tessera_authz::PUBLIC_TERM),
         "every session holds the reserved `public` term"
     );
-    session.satisfied.len() - 1
+    session.satisfied_for_test().len() - 1
 }

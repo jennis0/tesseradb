@@ -183,7 +183,7 @@ async fn meta(
     // resolved at authorise and fixed for the session's life. Read here rather than recomputed:
     // this document is the discovery surface, and a roster that disagreed with what a viewer verb
     // will answer is an existence oracle by subtraction.
-    let visible = &entry.session.visible_views;
+    let visible = entry.session.visible_views();
     Ok(Json(serde_json::json!({
         "api_version": meta.api_version,
         "bundle_format": meta.bundle_format,
@@ -662,7 +662,7 @@ async fn categories(
     let entry = state.authenticated_session(token)?;
 
     let meta = state.engine.meta();
-    let visible = &entry.session.visible_views;
+    let visible = entry.session.visible_views();
     let resolved =
         resolve_category_column(&meta, &column, query.view.as_deref(), visible)?;
 
@@ -866,14 +866,14 @@ async fn suggest(
     let counts = query.counts.unwrap_or(false);
 
     let meta = state.engine.meta();
-    let visible = &entry.session.visible_views;
+    let visible = entry.session.visible_views();
     let resolved = resolve_category_column(&meta, &column, query.view.as_deref(), visible)?;
 
     // **At most one walk in flight per session, refused before any work runs.** `token_id` rather
     // than the bearer token itself: the admission set is process-wide, and a token never crosses a
     // response or a log line here either way, but the id is the same handle `/session/revoke`
     // already addresses this session by.
-    let Some(_suggest_guard) = state.suggest_admission.try_begin(entry.session.token_id) else {
+    let Some(_suggest_guard) = state.suggest_admission.try_begin(entry.session.token_id()) else {
         return Err(ApiError::Backpressure);
     };
 
@@ -1454,7 +1454,7 @@ fn run_viewport_stream(
     // the same construction site, for an absent key, a name that was never declared and a view
     // this principal's gate fails. `resolve_visible_view` makes the same one set-membership probe
     // on all of them, so the three cost the same work as well as reading the same.
-    let Some(view) = meta.resolve_visible_view(&req.view, &session.visible_views) else {
+    let Some(view) = meta.resolve_visible_view(&req.view, session.visible_views()) else {
         if let Some(tx) = sink.first_tx.take() {
             let _ = tx.send(Err(ApiError::Unknown(format!(
                 "unknown view '{}'",
@@ -1543,7 +1543,7 @@ fn run_viewport_stream(
                 // through — so a column a client was told about parses, a column it was not stays
                 // the unknown-column 422, and a pinned leaf cannot mean one thing here and another
                 // on the discovery document (`views.md` §5).
-                &|leaf| meta.resolve_filter_column(leaf, &view_id, &session.visible_views),
+                &|leaf| meta.resolve_filter_column(leaf, &view_id, session.visible_views()),
                 &|column, key| {
                     // The caller's own spelling reaches here, which for a scoped family may pin a
                     // view (`views.md` §5). The pin decides which *column* is read and never which
@@ -2532,7 +2532,7 @@ async fn browse(
         let meta = state.engine.meta();
         // The same view resolution every other viewer verb takes, gate included.
         let view = meta
-            .resolve_visible_view(&req.view, &entry.session.visible_views)
+            .resolve_visible_view(&req.view, entry.session.visible_views())
             .map(|v| v.id.clone())
             .ok_or_else(|| ApiError::Unknown(format!("unknown view '{}'", req.view)))?;
         // The filter is parsed against the live schema, before any compute — the viewport's own
@@ -2565,7 +2565,7 @@ async fn browse(
                 };
                 Some(crate::filter_dto::parse(
                     value,
-                    &|leaf| meta.resolve_filter_column(leaf, &view, &entry.session.visible_views),
+                    &|leaf| meta.resolve_filter_column(leaf, &view, entry.session.visible_views()),
                     &|column, key| {
                         let name = column
                             .split_once(tessera_engine::filter::PIN)
@@ -2638,7 +2638,7 @@ async fn artifact(
         let view = state
             .engine
             .meta()
-            .resolve_visible_view(&req.view, &entry.session.visible_views)
+            .resolve_visible_view(&req.view, entry.session.visible_views())
             .map(|v| v.id.clone())
             .ok_or_else(|| ApiError::Unknown(format!("unknown view '{}'", req.view)))?;
         state

@@ -857,7 +857,7 @@ fn a_session_from_before_a_fold_counts_none_of_the_entity_the_fold_retired() {
     );
     // The premise, without which the assertions below hold for the wrong reason.
     assert!(
-        session.fragment.view().contains(doomed.raw() as u32),
+        session.fragment_at_authorise_for_test().view().contains(doomed.raw() as u32),
         "the frozen fragment must still name the retired entity"
     );
 

@@ -218,7 +218,7 @@ fn width_for_coverage(engine: &Engine, all: &[String], target: f64, universe: u6
         let s = engine
             .authorise(auth.as_bytes())
             .expect("authorise (coverage search)");
-        let card = s.fragment.view().cardinality();
+        let card = s.fragment_at_authorise_for_test().view().cardinality();
         card as f64 / universe as f64
     };
     let (mut lo, mut hi) = (1usize, all.len());
@@ -423,9 +423,12 @@ fn main() {
             .expect("view s0");
         let segment = view_data.segments.first().expect("one segment (R4)");
         let universe = segment.row_count as u64;
-        let view = session1.fragment.view();
+        let view = session1.fragment_at_authorise_for_test().view();
         let ent: &Bitmap = &view;
-        let proj = RowProjection::walk(&session1.fragment, &view_data.row_space);
+        let proj = RowProjection::walk(
+            session1.fragment_at_authorise_for_test(),
+            &view_data.row_space,
+        );
         let rows = proj.bitmap();
         let ent_card = ent.cardinality();
         let row_card = rows.cardinality();

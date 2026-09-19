@@ -29,56 +29,101 @@ use crate::Generation;
 /// struct rather than inside it, so this crate never depends on `tessera-wire`'s handle type.
 pub struct Session {
     /// Bearer token: 32 random bytes, hex-encoded.
-    pub token: String,
+    token: String,
     /// A process-local identity for this session, distinct from `token`: part of the
     /// row-projection cache key, so the cache never hashes or compares the full token string.
-    pub token_id: u64,
+    token_id: u64,
     /// The credential's granted terms, resolved to bundle-relative `TermId`s. An unknown descriptor
     /// is absent here, never an error. Resolved once, at authorise, and never re-resolved in
     /// place: see [`Session::is_stale`]. A term promoted after authorise is not added; the remedy
     /// is a new session.
-    pub satisfied: FxHashSet<TermId>,
+    satisfied: FxHashSet<TermId>,
     /// The materialised mask fragment: the union of every satisfied term's postings, over the base
     /// and every delta tier live when this session authorised. Goes stale as flushes publish delta
-    /// tiers and move the watermark: a flushed entity would be invisible to a viewer reading this
-    /// field directly until it is rebuilt. [`Engine::fragment_for`] is what brings it forward, and
-    /// the request path must go through that, not this field.
-    pub fragment: Arc<FrozenFragment>,
+    /// tiers and move the watermark: a flushed entity is invisible to a viewer served this
+    /// fragment until it is rebuilt. [`Engine::fragment_for`] is what brings it forward, and is the
+    /// only reader of this field outside a test hook.
+    fragment: Arc<FrozenFragment>,
     /// `satisfied`, sorted: the [`tessera_authz::FragmentCache`] key component, kept rather than
     /// re-sorted per request. `Arc` so the row-projection cache can carry it for the background
     /// refresh, which has no session registry to look it up in.
-    pub(crate) satisfied_sorted: Arc<Vec<TermId>>,
+    satisfied_sorted: Arc<Vec<TermId>>,
     /// The descriptor the credential presented for each satisfied term: the only route by which a
     /// term ordinal becomes a string a viewer is shown. The drill-down's `labels` array is built
     /// from this map alone, intersected with an entity's own term list, so a term absent here has
     /// no name and cannot be served: a bug here can only lose a label the viewer holds, never
     /// invent one they do not. Holds `public` too, with no credential behind it, for the same
     /// reason it is in [`Session::satisfied`].
-    pub(crate) satisfied_descriptors: Arc<FxHashMap<TermId, Vec<u8>>>,
+    satisfied_descriptors: Arc<FxHashMap<TermId, Vec<u8>>>,
     /// Every view of every group this principal may reach, resolved once at authorise and fixed
     /// for the session's life. Every view is evaluated whatever the outcome, so a gate-failed name
     /// costs the same lookup as a name nobody declared, and a view created after authorise is a
     /// 404 to this session until it re-authorises. `Arc` because every request path reads it and
     /// none may clone the set.
-    pub visible_views: Arc<crate::gate::VisibleViews>,
+    visible_views: Arc<crate::gate::VisibleViews>,
     /// `sha256(auth_data)`, which the fragment cache asks for. The credential itself is not kept.
-    pub(crate) auth_data_hash: [u8; 32],
+    auth_data_hash: [u8; 32],
     /// Unix timestamp (seconds) after which this session is no longer valid.
-    pub expires_at: u64,
-    /// How many of the credential's granted descriptors had no dictionary entry at authorise. Not
-    /// `pub`: this count says how many of the viewer's descriptors the corpus does not carry,
+    expires_at: u64,
+    /// How many of the credential's granted descriptors had no dictionary entry at authorise. No
+    /// accessor: this count says how many of the viewer's descriptors the corpus does not carry,
     /// which is more than [`Session::is_stale`]'s boolean and must not reach the wire.
-    pub(crate) unresolved_count: usize,
+    unresolved_count: usize,
     /// See [`Self::unresolved_count`].
-    pub(crate) dict_len_at_authorise: u32,
+    dict_len_at_authorise: u32,
     /// The generation `satisfied` was resolved against, which [`Engine::fragment_for`] must pass to
     /// `FragmentCache::get_or_build` alongside the frozen term set. Distinct from
     /// [`Self::dict_len_at_authorise`], which answers whether the dictionary has grown: a fold does
     /// not grow the dictionary length, so it needs this field instead.
-    pub(crate) segments_version_at_authorise: u64,
+    segments_version_at_authorise: u64,
 }
 
 impl Session {
+    /// The bearer token this session is presented with.
+    pub fn token(&self) -> &str {
+        &self.token
+    }
+
+    /// This session's process-local identity, the cache-key component.
+    pub fn token_id(&self) -> u64 {
+        self.token_id
+    }
+
+    /// The Unix timestamp (seconds) after which this session is no longer valid.
+    pub fn expires_at(&self) -> u64 {
+        self.expires_at
+    }
+
+    /// Every view of every group this principal may reach.
+    pub fn visible_views(&self) -> &crate::gate::VisibleViews {
+        &self.visible_views
+    }
+
+    /// The credential's granted terms. Term ids are internal and never reach a client.
+    pub(crate) fn satisfied(&self) -> &FxHashSet<TermId> {
+        &self.satisfied
+    }
+
+    /// [`Self::satisfied`] sorted, the fragment-cache key component.
+    pub(crate) fn satisfied_sorted(&self) -> &Arc<Vec<TermId>> {
+        &self.satisfied_sorted
+    }
+
+    /// The descriptor the credential presented for each satisfied term.
+    pub(crate) fn satisfied_descriptors(&self) -> &Arc<FxHashMap<TermId, Vec<u8>>> {
+        &self.satisfied_descriptors
+    }
+
+    /// `sha256(auth_data)`, the rest of the fragment-cache key.
+    pub(crate) fn auth_data_hash(&self) -> [u8; 32] {
+        self.auth_data_hash
+    }
+
+    /// The generation [`Self::satisfied`] was resolved against.
+    pub(crate) fn segments_version_at_authorise(&self) -> u64 {
+        self.segments_version_at_authorise
+    }
+
     /// Whether this session's mask may be behind the corpus: true iff the credential named a
     /// descriptor the dictionary did not carry at authorise, and the dictionary has grown since.
     /// A session with nothing unresolved is never hinted, and a stale session sees fewer items
@@ -227,8 +272,8 @@ impl Engine {
         self.row_projection_cache.prune_tokens(token_ids)
     }
 
-    /// `session`'s mask fragment at `generation`'s watermark — the only thing on the request path
-    /// that may stand in for `Session::fragment`.
+    /// `session`'s mask fragment at `generation`'s watermark — what the request path uses in place
+    /// of the frozen `Session::fragment`.
     ///
     /// A fragment is frozen at authorise. A flush advances the watermark, which the watermark test
     /// alone catches. A fold advances no watermark; it rewrites the term index and rotates the
@@ -302,5 +347,23 @@ impl Engine {
                     && !generation.overlay.is_suppressed(layer.entity)
             })
             .collect()
+    }
+}
+
+/// The two fields a test may read directly. They live here rather than in `crate::test_hooks`
+/// because the fields are private to this module.
+impl Session {
+    /// The fragment frozen at authorise, stale by construction after any flush or fold.
+    #[cfg(any(feature = "fault-injection", feature = "bench-timing"))]
+    #[doc(hidden)]
+    pub fn fragment_at_authorise_for_test(&self) -> &Arc<FrozenFragment> {
+        &self.fragment
+    }
+
+    /// The term set resolved at authorise.
+    #[cfg(feature = "fault-injection")]
+    #[doc(hidden)]
+    pub fn satisfied_for_test(&self) -> &FxHashSet<TermId> {
+        &self.satisfied
     }
 }

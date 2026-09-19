@@ -1355,7 +1355,7 @@ fn a_prune_drops_the_tokens_visible_value_set() {
         "one set each, or this proves nothing"
     );
 
-    engine.prune_token(doomed.token_id);
+    engine.prune_token(doomed.token_id());
     assert_eq!(engine.suggest_set_stats().entries, 1);
 
     // The survivor's own set is still there: a hit rather than a re-sweep.
@@ -1373,7 +1373,7 @@ fn a_prune_drops_the_tokens_visible_value_set() {
     assert!(!keys(&page).is_empty(), "and it is still served");
     assert_eq!(engine.suggest_set_stats().hits, hits + 1);
 
-    engine.prune_tokens(&FxHashSet::from_iter([survivor.token_id]));
+    engine.prune_tokens(&FxHashSet::from_iter([survivor.token_id()]));
     assert_eq!(
         engine.suggest_set_stats().entries,
         0,
