@@ -1,7 +1,7 @@
 //! The engine's state, the bundle open protocol and the shared compute pool.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64};
+use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
@@ -22,6 +22,8 @@ use crate::cache::RowProjectionCache;
 use crate::config::{coalesce_policy, merge_policy, EngineConfig};
 use crate::error::{EngineError, Result};
 use crate::geometry::GeometryPublication;
+use crate::status::ServeCounters;
+use crate::switches::TestSwitches;
 use crate::write::{PublishGeometryError, WritePath};
 
 /// Builds the shared compute pool with a panic handler. `install`, `join` and `scope` propagate a
@@ -146,50 +148,17 @@ pub struct Engine {
     /// collide across a restart, since `overlay_version` restarts at zero, and a client's held
     /// declaration would be honoured against a visible set it was never computed for.
     pub(crate) boot_nonce: u64,
-    /// The effective serial/parallel fan-out threshold this engine reads on every `viewport` call.
-    /// Exists so `set_serial_fallback_max_rows_for_test` has something per-`Engine` to override.
-    pub(crate) serial_fallback_max_rows: AtomicU64,
-    /// Which route each filtered viewport took to cross its result into row space. Unconditional,
-    /// not bench-gated, so it catches a deployment the routing model does not match.
-    pub(crate) filter_crossings_projected: AtomicU64,
-    pub(crate) filter_crossings_per_tile: AtomicU64,
-    /// Filtered viewports whose tree evaluated, wholly or partly, in row space rather than
-    /// crossing into it.
-    pub(crate) filter_row_routed: AtomicU64,
-    /// `member_of` leaves that read the level's row column rather than an artifact-major
-    /// membership, whose walk is measurably slower.
-    pub(crate) member_of_column_walks: AtomicU64,
-    /// Requests served from a one-generation-stale entry.
-    pub(crate) stale_serves: AtomicU64,
-    /// Entries the background refresh has produced.
-    pub(crate) refreshes: Arc<AtomicU64>,
+    /// The switches only a gated test hook writes — see [`TestSwitches`].
+    pub(crate) switches: Arc<TestSwitches>,
+    /// The serving counters an operator reads — see [`ServeCounters`].
+    pub(crate) counters: Arc<ServeCounters>,
     /// Whether a background refresh is producing the live generation's entries. Set before the
     /// swap and cleared when the pass ends.
     pub(crate) refresh_in_flight: Arc<AtomicU64>,
-    /// Whether the background refresh runs.
-    pub(crate) refresh_enabled: Arc<AtomicBool>,
-    /// Whether the background refresh holds.
-    pub(crate) refresh_paused: Arc<AtomicBool>,
-    /// Whether the entity-space coalesce runs. Always `true` in a shipped build.
-    pub(crate) coalesce_enabled: Arc<AtomicBool>,
-    /// Whether the row-space merge runs. Always `true` in a shipped build.
-    pub(crate) merge_enabled: Arc<AtomicBool>,
-    /// Whether a fold holds between finishing its passes and submitting the result. Always `false`
-    /// in a shipped build.
-    pub(crate) fold_paused: Arc<AtomicBool>,
-    /// See [`Engine::set_fold_publication_paused_for_test`]. Always `false` in a shipped build.
-    pub(crate) fold_publication_paused: Arc<AtomicBool>,
-    /// See [`Engine::set_merge_publication_paused_for_test`]. Always `false` in a shipped build.
-    pub(crate) merge_publication_paused: Arc<AtomicBool>,
-    /// How many row projections were built from the whole fragment rather than derived from the
-    /// preceding generation's. Counted unconditionally, so a test is not gated on a feature flag.
-    pub(crate) full_projection_builds: AtomicU64,
     /// Every full projection build split by the route it took. Shared with the background
-    /// refresh, so it does not sum to [`Self::full_projection_builds`], which counts the request
-    /// path alone.
+    /// refresh, so it does not sum to [`ServeCounters::full_projection_builds`], which counts the
+    /// request path alone.
     pub(crate) projection_routes: Arc<crate::compose::ProjectionRoutes>,
-    /// Walks of the mask and the Morton column that resolved a rung of `N_occ`'s ladder.
-    pub(crate) occupancy_walks: Arc<AtomicU64>,
     /// The occupancy stage — see [`crate::stage`]. `N_occ(d)` is memoised per depth; this fills the
     /// rest of the ladder on the pool once one request has.
     pub(crate) stage: crate::stage::StageDeps,
@@ -768,24 +737,18 @@ impl Engine {
         let row_projection_cache = Arc::new(RowProjectionCache::new(u64::MAX));
         let region_cache = Arc::new(crate::single_flight::SingleFlightCache::new(u64::MAX));
         let refresh_in_flight = Arc::new(AtomicU64::new(crate::refresh::NO_REFRESH));
-        let refresh_enabled = Arc::new(AtomicBool::new(true));
-        let refresh_paused = Arc::new(AtomicBool::new(false));
-        let coalesce_enabled = Arc::new(AtomicBool::new(true));
-        let merge_enabled = Arc::new(AtomicBool::new(true));
-        let fold_paused = Arc::new(AtomicBool::new(false));
-        let fold_publication_paused = Arc::new(AtomicBool::new(false));
-        let merge_publication_paused = Arc::new(AtomicBool::new(false));
+        let switches = Arc::new(TestSwitches::default());
+        let counters = Arc::new(ServeCounters::default());
         // Bounded from construction, unlike the caches `tessera_server::prepare` bounds after
         // `open`: entries are fixed-size, so there is no figure a deployment would set.
         let occupancy = Arc::new(crate::single_flight::SingleFlightCache::new(
             crate::occupancy::DEFAULT_OCCUPANCY_CACHE_BYTES,
         ));
-        let occupancy_walks = Arc::new(AtomicU64::new(0));
         let stage = crate::stage::StageDeps {
-            walks: Arc::clone(&occupancy_walks),
+            counters: Arc::clone(&counters),
             occupancy: Arc::clone(&occupancy),
             pool: Arc::clone(&pool),
-            enabled: Arc::new(AtomicBool::new(true)),
+            switches: Arc::clone(&switches),
             in_flight: Arc::new(std::sync::Mutex::new(FxHashMap::default())),
         };
 
@@ -812,24 +775,10 @@ impl Engine {
             write: WritePath::new(write_state),
             identity_key,
             boot_nonce: OsRng.next_u64(),
-            serial_fallback_max_rows: AtomicU64::new(crate::viewport::SERIAL_FALLBACK_MAX_ROWS),
-            filter_crossings_projected: AtomicU64::new(0),
-            filter_crossings_per_tile: AtomicU64::new(0),
-            member_of_column_walks: AtomicU64::new(0),
-            filter_row_routed: AtomicU64::new(0),
-            stale_serves: AtomicU64::new(0),
-            refreshes: Arc::new(AtomicU64::new(0)),
+            switches,
+            counters,
             refresh_in_flight: Arc::clone(&refresh_in_flight),
-            refresh_enabled: Arc::clone(&refresh_enabled),
-            refresh_paused: Arc::clone(&refresh_paused),
-            coalesce_enabled: Arc::clone(&coalesce_enabled),
-            merge_enabled: Arc::clone(&merge_enabled),
-            fold_paused: Arc::clone(&fold_paused),
-            fold_publication_paused: Arc::clone(&fold_publication_paused),
-            merge_publication_paused: Arc::clone(&merge_publication_paused),
-            full_projection_builds: AtomicU64::new(0),
             projection_routes: Arc::new(crate::compose::ProjectionRoutes::default()),
-            occupancy_walks: Arc::clone(&occupancy_walks),
             stage,
         };
 
@@ -942,18 +891,13 @@ impl Engine {
             configured_merge_bytes: self.config.max_merged_segment_bytes,
             suggest_dir: self.suggest_dir.clone(),
             compaction: self.config.compaction,
-            coalesce_enabled: Arc::clone(&self.coalesce_enabled),
-            merge_enabled: Arc::clone(&self.merge_enabled),
-            fold_paused: Arc::clone(&self.fold_paused),
-            fold_publication_paused: Arc::clone(&self.fold_publication_paused),
-            merge_publication_paused: Arc::clone(&self.merge_publication_paused),
+            switches: Arc::clone(&self.switches),
             refresh: crate::refresh::RefreshDeps {
                 cache: Arc::clone(&self.row_projection_cache),
                 pool: Arc::clone(&self.pool),
                 in_flight: Arc::clone(&self.refresh_in_flight),
-                refreshes: Arc::clone(&self.refreshes),
-                enabled: Arc::clone(&self.refresh_enabled),
-                paused: Arc::clone(&self.refresh_paused),
+                counters: Arc::clone(&self.counters),
+                switches: Arc::clone(&self.switches),
                 projection_routes: Arc::clone(&self.projection_routes),
             },
             bundle_root: self.bundle_root.clone(),

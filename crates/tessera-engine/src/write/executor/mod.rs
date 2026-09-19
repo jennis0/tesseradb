@@ -645,9 +645,7 @@ pub(super) struct Executor {
     pub(super) refresh: crate::refresh::RefreshDeps,
     /// The row-space merge's policy, in-flight flag, attempt counter and completion channel:
     /// separate from the flush and the coalesce, since a merge publishes its own swap.
-    pub(super) coalesce_enabled: Arc<AtomicBool>,
     pub(super) merge_policy: MergePolicy,
-    pub(super) merge_enabled: Arc<AtomicBool>,
     /// The row-space merge.
     pub(super) merge: Background<crate::merge::CompletedMerge>,
     /// The compaction fold. It runs on its own thread, not the shared pool: it takes minutes to
@@ -662,12 +660,8 @@ pub(super) struct Executor {
     pub(super) flush: Background<crate::flush::CompletedFlush>,
     /// See [`MaintenanceDeps::configured_merge_bytes`].
     pub(super) configured_merge_bytes: Option<u64>,
-    /// See [`MaintenanceDeps::fold_paused`].
-    pub(super) fold_paused: Arc<AtomicBool>,
-    /// See [`MaintenanceDeps::fold_publication_paused`].
-    pub(super) fold_publication_paused: Arc<AtomicBool>,
-    /// See [`MaintenanceDeps::merge_publication_paused`].
-    pub(super) merge_publication_paused: Arc<AtomicBool>,
+    /// See [`MaintenanceDeps::switches`].
+    pub(super) switches: Arc<crate::switches::TestSwitches>,
     /// See [`crate::compact::CompactionSchedule`]. Consulted at the tick, beside the flush's own.
     pub(super) compaction: crate::compact::CompactionSchedule,
     /// When the last fold attempt started, as a unix second. Stamped by every dispatch whatever the

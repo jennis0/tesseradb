@@ -1,11 +1,37 @@
 //! The engine's operator gauges and its cache and limit setters.
 
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use tessera_types::TermId;
 
 use crate::engine::Engine;
 use crate::Generation;
+
+/// What the serving paths count for an operator, read back through the gauges below.
+#[derive(Default)]
+pub(crate) struct ServeCounters {
+    /// Which route each filtered viewport took to cross its result into row space. Unconditional,
+    /// not bench-gated, so it catches a deployment the routing model does not match.
+    pub(crate) filter_crossings_projected: AtomicU64,
+    pub(crate) filter_crossings_per_tile: AtomicU64,
+    /// Filtered viewports whose tree evaluated, wholly or partly, in row space rather than
+    /// crossing into it.
+    pub(crate) filter_row_routed: AtomicU64,
+    /// `member_of` leaves that read the level's row column rather than an artifact-major
+    /// membership, whose walk is measurably slower.
+    pub(crate) member_of_column_walks: AtomicU64,
+    /// Requests served from a one-generation-stale entry.
+    pub(crate) stale_serves: AtomicU64,
+    /// Entries the background refresh has produced.
+    pub(crate) refreshes: AtomicU64,
+    /// How many row projections were built from the whole fragment rather than derived from the
+    /// preceding generation's. Counted unconditionally, so a test is not gated on a feature flag.
+    pub(crate) full_projection_builds: AtomicU64,
+    /// Walks of the mask and the Morton column that resolved a rung of `N_occ`'s ladder. A walk
+    /// the background fill makes is a walk of the same mask and the same column as a request's,
+    /// and counts here too.
+    pub(crate) occupancy_walks: AtomicU64,
+}
 
 /// One (partition, view)'s live segment count — [`Engine::live_segment_counts`]'s element, and
 /// what `/control/status` publishes under `segments`. Defined here, not re-exported from
@@ -97,33 +123,33 @@ impl Engine {
     /// produced. Read together: the second rising while [`Self::full_projection_builds`] does not
     /// means the refresh is keeping up.
     pub fn stale_serves(&self) -> u64 {
-        self.stale_serves.load(Ordering::Relaxed)
+        self.counters.stale_serves.load(Ordering::Relaxed)
     }
 
     /// See [`Self::stale_serves`].
     pub fn refreshes(&self) -> u64 {
-        self.refreshes.load(Ordering::Relaxed)
+        self.counters.refreshes.load(Ordering::Relaxed)
     }
 
     /// Filtered viewports served by each crossing route, `(projected, per_tile)`. Unfiltered
     /// requests are counted in neither.
     pub fn filter_crossing_routes(&self) -> (u64, u64) {
         (
-            self.filter_crossings_projected.load(Ordering::Relaxed),
-            self.filter_crossings_per_tile.load(Ordering::Relaxed),
+            self.counters.filter_crossings_projected.load(Ordering::Relaxed),
+            self.counters.filter_crossings_per_tile.load(Ordering::Relaxed),
         )
     }
 
     /// Filtered viewports that evaluated in row space. A mixed tree counts here and in whichever
     /// crossing its entity sub-trees took.
     pub fn filter_row_routes(&self) -> u64 {
-        self.filter_row_routed.load(Ordering::Relaxed)
+        self.counters.filter_row_routed.load(Ordering::Relaxed)
     }
 
     /// `member_of` leaves served by the row-column walk rather than by the artifact-major
     /// membership.
     pub fn member_of_column_walks(&self) -> u64 {
-        self.member_of_column_walks.load(Ordering::Relaxed)
+        self.counters.member_of_column_walks.load(Ordering::Relaxed)
     }
 
     /// Delegates to `WritePath::allocator_high_water`, which owns the allocator.
@@ -339,7 +365,7 @@ impl Engine {
     /// generation's by unioning the new extents' rows. Rising once per session per tick after a
     /// flush means a full build, measured at 1 277 ms at 10⁹, is on the steady-state path.
     pub fn full_projection_builds(&self) -> u64 {
-        self.full_projection_builds.load(Ordering::Relaxed)
+        self.counters.full_projection_builds.load(Ordering::Relaxed)
     }
 
     /// Projection builds split by route, in [`crate::compose::ProjectionRoute::ALL`]'s order; does
@@ -352,7 +378,7 @@ impl Engine {
     /// [`crate::occupancy`] and [`crate::stage`]. Should run about once per session per
     /// publication per view; climbing with request volume means the memo is missing.
     pub fn occupancy_walks(&self) -> u64 {
-        self.occupancy_walks.load(Ordering::Relaxed)
+        self.counters.occupancy_walks.load(Ordering::Relaxed)
     }
 
     /// Whether the external-id sidecar has opened any extent yet — exposed for tests confirming

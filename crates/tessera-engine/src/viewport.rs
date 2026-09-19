@@ -2681,7 +2681,7 @@ impl Engine {
             if let Peek::Ready(geometry) = self.row_projection_cache.peek(&stale_key) {
                 predecessor_resident = true;
                 if geometry.projection.extends_to(space) {
-                    self.stale_serves.fetch_add(1, Ordering::Relaxed);
+                    self.counters.stale_serves.fetch_add(1, Ordering::Relaxed);
                     return Ok(geometry);
                 }
             }
@@ -2748,7 +2748,7 @@ impl Engine {
                 // that supplies one, the same shared pool the tile sweep uses (D-D: no second,
                 // per-request pool).
                 probe.mark_projection_built();
-                self.full_projection_builds.fetch_add(1, Ordering::Relaxed);
+                self.counters.full_projection_builds.fetch_add(1, Ordering::Relaxed);
                 // **The route is chosen here, from this principal's own grant, before any route
                 // runs**, and every route returns the identical projection
                 // (`crate::compose::RowProjection::new`). The images are the bundle's, mapped;
@@ -3389,7 +3389,7 @@ impl Engine {
                             view_data.row_space.total_rows(),
                             per_tile_only,
                         )?;
-                        self.filter_row_routed.fetch_add(1, Ordering::Relaxed);
+                        self.counters.filter_row_routed.fetch_add(1, Ordering::Relaxed);
                         // **Not counted when a region is in the tree.** Its interior rows have
                         // not met the mask yet, so the cardinality would be a pre-mask quantity
                         // about the region — the number selection-operand §7 says may not be
@@ -3522,7 +3522,8 @@ impl Engine {
         // directly, at the cost of one `Relaxed` atomic load, negligible against the request's
         // own atomic operations elsewhere. Deliberately not `#[cfg]`-gated to a second code path
         // here too: that would cost more to audit than the load itself costs to run.
-        let serial_fallback_max_rows = self.serial_fallback_max_rows.load(Ordering::Relaxed);
+        let serial_fallback_max_rows =
+            self.switches.serial_fallback_max_rows.load(Ordering::Relaxed);
         let tile_outcomes: Vec<Result<Option<TileSweepOut>>> =
             if should_fold_serially(total_rows_in_ranges, serial_fallback_max_rows, tiles.len()) {
                 tiles
@@ -3736,12 +3737,14 @@ impl Engine {
                 .pool
                 .install(|| per_tile_crossing(row_space, entities, &domain, rows_in_ranges))
             {
-                self.filter_crossings_per_tile
+                self.counters
+                    .filter_crossings_per_tile
                     .fetch_add(1, Ordering::Relaxed);
                 return FilterRows::Viewport { rows, domain };
             }
         }
-        self.filter_crossings_projected
+        self.counters
+            .filter_crossings_projected
             .fetch_add(1, Ordering::Relaxed);
         FilterRows::Complete(row_space.project(entities))
     }
@@ -3809,7 +3812,8 @@ impl Engine {
                 .flatten();
             match walked {
                 Some(images) => {
-                    self.filter_crossings_per_tile
+                    self.counters
+                        .filter_crossings_per_tile
                         .fetch_add(1, Ordering::Relaxed);
                     // A walk over the request's rows is silent outside them, whatever else the
                     // tree holds.
@@ -3817,7 +3821,8 @@ impl Engine {
                     images
                 }
                 None => {
-                    self.filter_crossings_projected
+                    self.counters
+                        .filter_crossings_projected
                         .fetch_add(1, Ordering::Relaxed);
                     if whole_view {
                         // Projection crosses each verdict whole, and with nothing in the tree
@@ -5149,7 +5154,7 @@ impl Engine {
         // was one per depth actually visited.** The value is a `u64` and the cost is the cache's
         // per-entry floor over a key holding a view name, so the byte bound absorbs it; what it
         // buys is that the deepest walk a session makes is the only one it makes.
-        self.occupancy_walks.fetch_add(1, Ordering::Relaxed);
+        self.counters.occupancy_walks.fetch_add(1, Ordering::Relaxed);
         let ladder = crate::occupancy::occupied_tiles_ladder(mask, segments, depth);
         for rung in 0..depth {
             let mut rung_key = key.clone();
@@ -5641,7 +5646,7 @@ impl Engine {
         // **The counter says which levels take the walk**, so a deployment can see that a level
         // is answering `member_of` at the column's cost rather than the bitmap's.
         if !gated.rows.membership().rows_held() {
-            self.member_of_column_walks.fetch_add(1, Ordering::Relaxed);
+            self.counters.member_of_column_walks.fetch_add(1, Ordering::Relaxed);
         }
         Ok(gated.rows.visible_rows(gated.ordinal, mask))
     }

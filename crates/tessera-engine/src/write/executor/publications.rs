@@ -178,7 +178,7 @@ impl Executor {
         // coalesce publishing under a fold would be orphaned by the flip and would be discarded at
         // its rebase check, so running it here is wasted work, not a hazard.
         if self.coalesce_policy.width < 2
-            || !self.coalesce_enabled.load(Ordering::SeqCst)
+            || !self.switches.coalesce_enabled.load(Ordering::SeqCst)
             || self.coalesce_outstanding()
             || self.fold_outstanding()
             || !self.may_publish()
@@ -257,7 +257,7 @@ impl Executor {
     pub(super) fn dispatch_merge(&mut self, generation: &Arc<Generation>) {
         // Suspended until a fold is *published*, for the reason `dispatch_coalesce` states and on
         // the boundary `fold_outstanding` states.
-        if !self.merge_enabled.load(Ordering::SeqCst)
+        if !self.switches.merge_enabled.load(Ordering::SeqCst)
             || self.merge_outstanding()
             || self.fold_outstanding()
             || self.wal.is_poisoned()
@@ -457,8 +457,8 @@ impl Executor {
     /// Apply every completed merge waiting from the pool, and report whether any did.
     pub(super) fn publish_completed_merges(&mut self) -> bool {
         // Left in the channel rather than dropped; see
-        // `MaintenanceDeps::merge_publication_paused`. Always false in a shipped build.
-        if self.merge_publication_paused.load(Ordering::SeqCst) {
+        // `MaintenanceDeps::switches`. Always false in a shipped build.
+        if self.switches.merge_publication_paused.load(Ordering::SeqCst) {
             return false;
         }
         let mut any = false;
