@@ -167,14 +167,14 @@ pub(crate) struct CoalescePlan {
     /// a function of the schema — deliberately, and filter-index §5.2 says why: that property
     /// belongs to the flush, where an operator predicts what ingest produces, not to a maintenance
     /// pass that fires where the policy says there is work.
-    pub(crate) attrs: Vec<AttrWindow>,
+    pub(crate) attrs: Vec<ColumnWindow<AttrExtent>>,
     /// Consumed `record_extents` entries — one contiguous window, the record blob being a single
     /// pseudo-column (`record`) on the attribute axis's policy (records §7). Empty if the axis
     /// did not qualify.
     pub(crate) records: Vec<RecordExtent>,
     /// Consumed `text_extents` entries, one window per text column — the sixth axis, on the
     /// attribute axis's per-column policy over its own manifest list.
-    pub(crate) texts: Vec<TextWindow>,
+    pub(crate) texts: Vec<ColumnWindow<TextExtent>>,
     /// Consumed `entity_terms_extents` entries — one contiguous window, the transpose being a
     /// single family on the record blob's policy (`tessera_store::entity_terms`). Empty if the
     /// axis did not qualify.
@@ -204,9 +204,26 @@ type WindowKey<'a> = (
     Option<tessera_types::view::ViewIncarnation>,
 );
 
-/// One column's contiguous window of its own `attr_extents` subsequence.
+/// An extent listed under one column, on an axis whose list interleaves the columns.
+trait ColumnExtent {
+    fn key(&self) -> WindowKey<'_>;
+}
+
+impl ColumnExtent for AttrExtent {
+    fn key(&self) -> WindowKey<'_> {
+        (self.column.as_str(), self.view.as_deref(), self.incarnation)
+    }
+}
+
+impl ColumnExtent for TextExtent {
+    fn key(&self) -> WindowKey<'_> {
+        (self.column.as_str(), self.view.as_deref(), self.incarnation)
+    }
+}
+
+/// One column's contiguous window of its own subsequence of an axis's list.
 #[derive(Debug, Clone)]
-pub(crate) struct AttrWindow {
+pub(crate) struct ColumnWindow<E> {
     pub(crate) column: String,
     /// The view whose column of a **group-scoped family** this window belongs to — `None` for an
     /// ordinary entity-scoped column ([`AttrExtent::view`], `views.md` §5). The unit is
@@ -216,18 +233,7 @@ pub(crate) struct AttrWindow {
     /// The incarnation of `view` these extents belong to — the window's third key component
     /// (decision 0115), `None` exactly when `view` is.
     pub(crate) incarnation: Option<tessera_types::view::ViewIncarnation>,
-    pub(crate) extents: Vec<AttrExtent>,
-}
-
-/// One text column's contiguous window of its own `text_extents` subsequence.
-#[derive(Debug, Clone)]
-pub(crate) struct TextWindow {
-    pub(crate) column: String,
-    /// [`AttrWindow::view`]'s field, for its reason.
-    pub(crate) view: Option<String>,
-    /// [`AttrWindow::incarnation`]'s field, for its reason.
-    pub(crate) incarnation: Option<tessera_types::view::ViewIncarnation>,
-    pub(crate) extents: Vec<TextExtent>,
+    pub(crate) extents: Vec<E>,
 }
 
 impl CoalescePlan {
@@ -265,24 +271,6 @@ pub(crate) fn plan_coalesce(
             .map_or(0, |d| d.size)
     };
     let is_build = |rel: &str| build_files.contains_key(rel);
-    // **A dead incarnation's extents are not coalesced** (decision 0115). They belong to a view
-    // that was dropped and whose key may since have been created again; the fold reclaims them by
-    // omission, and merging them is not merely wasted IO — `coalesced_column_rel` derives the
-    // output path from `(column, view)` alone, so a dead window and the live one would write the
-    // same files and truncate each other's, leaving the live view serving its predecessor's values
-    // under a digest that no longer describes them.
-    //
-    // **Fail-closed on a half-stamped entry**: a `view` with no incarnation, or the reverse,
-    // matches nothing and is skipped, which costs a coalesce and never merges across a drop.
-    let live_window =
-        |view: Option<&str>, incarnation: Option<tessera_types::view::ViewIncarnation>| {
-            match (view, incarnation) {
-                // Entity-scoped: one column bundle-wide, belonging to no view.
-                (None, None) => true,
-                (Some(view), Some(incarnation)) => is_live(view, incarnation),
-                _ => false,
-            }
-        };
 
     let mut plan = CoalescePlan {
         partition: partition.to_string(),
@@ -375,44 +363,20 @@ pub(crate) fn plan_coalesce(
     // coalesce Q3's layers with Q4's into one file that then claims both views' entities. The
     // incarnation is the third component for the same reason a key apart: a dropped key may be
     // created again, and its predecessor's extents sit in this list until a fold reclaims them.
-    let mut by_column: BTreeMap<WindowKey<'_>, Vec<&AttrExtent>> = BTreeMap::new();
-    for extent in &manifest.attr_extents {
-        by_column
-            .entry((
-                extent.column.as_str(),
-                extent.view.as_deref(),
-                extent.incarnation,
-            ))
-            .or_default()
-            .push(extent);
-    }
-    for ((column, view, incarnation), extents) in by_column {
-        if !live_window(view, incarnation) {
-            continue;
-        }
-        // **A layer's dictionary counts toward the cap**, because the merge holds it: a keyword
-        // window's transient is its remap and its decode cursors, both sized by the keys those
-        // files hold, and a cap that ignored them would bound the ordinals while the dictionary —
-        // which for a near-unique column is the larger half — grew unwatched (records §7). A
-        // keyword column is otherwise selected exactly as every other column: per column, by
-        // `width`, over the size floor. Whether a window's extents carry dictionaries decides
-        // which merge `execute_coalesce` runs, never whether the window is taken.
-        let size = |extent: &&AttrExtent| {
-            Some(
-                size_of(&extent.values)
-                    + size_of(&extent.presence)
-                    + extent.dict.as_deref().map_or(0, &size_of),
-            )
-        };
-        if let Some(window) = widest_window(&extents, policy, size) {
-            plan.attrs.push(AttrWindow {
-                column: column.to_string(),
-                view: view.map(str::to_string),
-                incarnation,
-                extents: extents[window].iter().map(|e| (*e).clone()).collect(),
-            });
-        }
-    }
+    //
+    // **A layer's dictionary counts toward the cap**, because the merge holds it: a keyword
+    // window's transient is its remap and its decode cursors, both sized by the keys those files
+    // hold, and a cap that ignored them would bound the ordinals while the dictionary — which for
+    // a near-unique column is the larger half — grew unwatched (records §7). A keyword column is
+    // otherwise selected exactly as every other column. Whether a window's extents carry
+    // dictionaries decides which merge `execute_coalesce` runs, never whether the window is taken.
+    plan.attrs = column_windows(&manifest.attr_extents, policy, is_live, |extent| {
+        Some(
+            size_of(&extent.values)
+                + size_of(&extent.presence)
+                + extent.dict.as_deref().map_or(0, &size_of),
+        )
+    });
 
     // ---- record-blob extents: the fifth axis, one pseudo-column on the attribute policy -------
     //
@@ -438,39 +402,14 @@ pub(crate) fn plan_coalesce(
     // prose-carrying flush until the next fold, and every `match` pays a resolve and a posting read
     // per token *per layer* — a read cost that grows linearly in the flush count with nothing
     // reducing it between folds.
-    {
-        let mut by_column: BTreeMap<WindowKey<'_>, Vec<&TextExtent>> = BTreeMap::new();
-        for extent in &manifest.text_extents {
-            by_column
-                .entry((
-                    extent.column.as_str(),
-                    extent.view.as_deref(),
-                    extent.incarnation,
-                ))
-                .or_default()
-                .push(extent);
-        }
-        for ((column, view, incarnation), extents) in by_column {
-            if !live_window(view, incarnation) {
-                continue;
-            }
-            // All three files, for the attribute axis's reason: the merge holds a term's postings
-            // from every input at once and streams both dictionaries, so a cap that watched one
-            // half would bound the postings while the vocabulary — which for prose is the larger
-            // half at a long singleton tail — grew unwatched.
-            let size = |extent: &&TextExtent| {
-                Some(size_of(&extent.dict) + size_of(&extent.postings) + size_of(&extent.presence))
-            };
-            if let Some(window) = widest_window(&extents, policy, size) {
-                plan.texts.push(TextWindow {
-                    column: column.to_string(),
-                    view: view.map(str::to_string),
-                    incarnation,
-                    extents: extents[window].iter().map(|e| (*e).clone()).collect(),
-                });
-            }
-        }
-    }
+    //
+    // All three files count toward the cap, for the attribute axis's reason: the merge holds a
+    // term's postings from every input at once and streams both dictionaries, so a cap that watched
+    // one half would bound the postings while the vocabulary — which for prose is the larger half
+    // at a long singleton tail — grew unwatched.
+    plan.texts = column_windows(&manifest.text_extents, policy, is_live, |extent| {
+        Some(size_of(&extent.dict) + size_of(&extent.postings) + size_of(&extent.presence))
+    });
 
     // ---- entity→term extents: the seventh axis, the record blob's policy over its own list ----
     //
@@ -557,6 +496,51 @@ fn widest_window<T>(
             .rev()
             .find_map(|width| select_window(entries, width, policy, &size_of))
     })
+}
+
+/// One window per live `(column, view, incarnation)` of `entries`, over that key's own
+/// subsequence of the list.
+///
+/// **A dead incarnation's extents are not coalesced** (decision 0115). They belong to a view that
+/// was dropped and whose key may since have been created again; the fold reclaims them by
+/// omission, and merging them is not merely wasted IO — `coalesced_column_rel` derives the output
+/// path from `(column, view)` alone, so a dead window and the live one would write the same files
+/// and truncate each other's, leaving the live view serving its predecessor's values under a
+/// digest that no longer describes them.
+///
+/// **Fail-closed on a half-stamped entry**: a `view` with no incarnation, or the reverse, matches
+/// nothing and is skipped, which costs a coalesce and never merges across a drop.
+fn column_windows<E: ColumnExtent + Clone>(
+    entries: &[E],
+    policy: CoalescePolicy,
+    is_live: &dyn Fn(&str, tessera_types::view::ViewIncarnation) -> bool,
+    size_of: impl Fn(&E) -> Option<u64>,
+) -> Vec<ColumnWindow<E>> {
+    let mut by_column: BTreeMap<WindowKey<'_>, Vec<&E>> = BTreeMap::new();
+    for extent in entries {
+        by_column.entry(extent.key()).or_default().push(extent);
+    }
+    let mut windows = Vec::new();
+    for ((column, view, incarnation), extents) in by_column {
+        let live = match (view, incarnation) {
+            // Entity-scoped: one column bundle-wide, belonging to no view.
+            (None, None) => true,
+            (Some(view), Some(incarnation)) => is_live(view, incarnation),
+            _ => false,
+        };
+        if !live {
+            continue;
+        }
+        if let Some(window) = widest_window(&extents, policy, |extent: &&E| size_of(extent)) {
+            windows.push(ColumnWindow {
+                column: column.to_string(),
+                view: view.map(str::to_string),
+                incarnation,
+                extents: extents[window].iter().map(|e| (*e).clone()).collect(),
+            });
+        }
+    }
+    windows
 }
 
 /// Everything [`execute_coalesce`] needs beyond its plan — taken from the generation on the
