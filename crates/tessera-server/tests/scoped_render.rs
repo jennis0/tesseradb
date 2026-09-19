@@ -1237,6 +1237,10 @@ async fn fold(served: &Served) {
 /// it renders the placeholder and answers no leaf over the family — the dead incarnation's extents
 /// being listed under the same view id the live one writes into.
 ///
+/// The leaf and the drill-down are asked the same question at each of the three states the
+/// values can be read from: the columns this process holds after the recreated view's flush, the
+/// extents a restart composes from the side-manifest, and the folded column.
+///
 /// A second entity carries a value in the new incarnation, which is what gives it a column of the
 /// family at all; its own value is checked, so the column is being read rather than missing.
 #[tokio::test]
@@ -1324,6 +1328,59 @@ async fn a_recreated_view_adopts_no_scoped_value_of_its_predecessor() {
     }
     rendered(&served, &token, REJOINS, FRESH).await;
 
+    /// What the recreated view owes about the value its predecessor held: the leaf matches the
+    /// rejoining entity nowhere, and the drill-down serves it no value under the key — while the
+    /// fresh entity's own value is served, so an empty answer is an absence and not a missing
+    /// column.
+    async fn adopts_nothing(served: &Served, token: &str, rejoins: u64, fresh: u64, stage: &str) {
+        let id = id_of(served, token, "quarter:2026-Q3", rejoins).await;
+        let body = item(served, token, id).await;
+        let keys: Vec<String> = body["scoped"]["heat"]
+            .as_object()
+            .map(|heat| heat.keys().cloned().collect())
+            .unwrap_or_default();
+        assert!(
+            !keys.contains(&"2026-Q3".to_string()),
+            "{stage}: the drill-down serves the rejoining entity no value under the key: {body}"
+        );
+        let id = id_of(served, token, "quarter:2026-Q3", fresh).await;
+        let body = item(served, token, id).await;
+        assert_eq!(
+            body["scoped"]["heat"]["2026-Q3"],
+            json!(5.0),
+            "{stage}: and the new incarnation's own value is served: {body}"
+        );
+        assert_eq!(
+            filtered_entities(served, token, "quarter:2026-Q3", range("heat")).await,
+            BTreeSet::new(),
+            "{stage}: the predecessor's value answers no leaf under the recreated view"
+        );
+    }
+    adopts_nothing(&served, &token, REJOINS, FRESH, "in process").await;
+
+    // The same two answers after a restart, which composes the extents the side-manifest names
+    // rather than the columns this process holds.
+    let Served { server, bundle, _tmp, .. } = served;
+    server.shutdown().await;
+    let server = spawn_server(
+        &bundle,
+        &_tmp.path().join("cache"),
+        &_tmp.path().join("wal.log"),
+    )
+    .await;
+    let token = authorise(&server, &["0", "1"]).await["token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let served = Served {
+        server,
+        token: token.clone(),
+        bundle,
+        _tmp,
+    };
+    rendered(&served, &token, REJOINS, FRESH).await;
+    adopts_nothing(&served, &token, REJOINS, FRESH, "after a restart").await;
+
     fold(&served).await;
     // A fold rewrites the whole prefix, so a session authorised against the old one is asking
     // about a bundle that has gone.
@@ -1337,6 +1394,7 @@ async fn a_recreated_view_adopts_no_scoped_value_of_its_predecessor() {
         BTreeSet::new(),
         "and the folded column holds no value of the predecessor to answer the leaf"
     );
+    adopts_nothing(&served, &token, REJOINS, FRESH, "after the fold").await;
 }
 
 /// **A principal who reaches a sharing group's view and not the owner's is told the truth about

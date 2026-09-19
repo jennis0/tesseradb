@@ -148,22 +148,6 @@ pub(super) fn live_segments_of(generation: &Generation) -> usize {
         .unwrap_or(0)
 }
 
-/// Is this extent's `(view, incarnation)` pair one the live manifest still declares?
-///
-/// `(None, None)` (entity-scoped) is always live. A half-stamped pair matches nothing and is
-/// omitted: fail-closed rather than served under a guessed incarnation.
-pub(super) fn carries_live_view(
-    live: &FxHashMap<&str, tessera_types::view::ViewIncarnation>,
-    view: Option<&str>,
-    incarnation: Option<tessera_types::view::ViewIncarnation>,
-) -> bool {
-    match (view, incarnation) {
-        (None, None) => true,
-        (Some(view), Some(incarnation)) => live.get(view) == Some(&incarnation),
-        _ => false,
-    }
-}
-
 /// Whether every artefact a completed fold consumed is still listed in the live manifest.
 pub(super) fn fold_rebases(
     plan: &crate::compact::FoldPlan,
@@ -300,8 +284,8 @@ pub(super) fn carried_forward<'a>(
         |extent| extent.values.as_str(),
     );
     attrs.retain(|extent| {
-        carries_live_view(
-            live_incarnations,
+        crate::filter::carries_live_view(
+            &|view| live_incarnations.get(view).copied(),
             extent.view.as_deref(),
             extent.incarnation,
         )
@@ -316,8 +300,8 @@ pub(super) fn carried_forward<'a>(
         |extent| extent.dict.as_str(),
     );
     texts.retain(|extent| {
-        carries_live_view(
-            live_incarnations,
+        crate::filter::carries_live_view(
+            &|view| live_incarnations.get(view).copied(),
             extent.view.as_deref(),
             extent.incarnation,
         )
