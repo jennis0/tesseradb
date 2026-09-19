@@ -2002,18 +2002,15 @@ impl std::fmt::Display for ExecutorStartError {
             }
             ExecutorStartError::Spawn(kind) => write!(
                 f,
-                "the lifecycle thread could not be spawned ({kind:?}); this engine can no longer \
-                 accept writes"
+                "the write thread could not be spawned ({kind:?}), so this engine accepts no writes"
             ),
             ExecutorStartError::BundleLocked(e) => write!(
                 f,
-                "this bundle root is already being written: {e}. One executor owns a bundle root \
-                 (write-path §1.2); a second would allocate the same names from the same seed"
+                "this bundle root is already being written ({e}); stop the other writer first"
             ),
             ExecutorStartError::SideManifestScan(detail) => write!(
                 f,
-                "the side-manifest numbers already on disc could not be read ({detail}); a writer \
-                 that cannot see them cannot allocate one"
+                "the side-manifest numbers on disc could not be read ({detail})"
             ),
         }
     }
@@ -2118,9 +2115,8 @@ impl std::fmt::Display for AcceptError {
                 got,
             } => write!(
                 f,
-                "row {index} carries {got} scalars, but the schema declares {expected}. A row \
-                 carries at most one value per declared column, in declaration order; a column it \
-                 omits at the tail is absent"
+                "row {index} carries {got} scalars and the schema declares {expected}; send at \
+                 most one value per declared column, in declaration order"
             ),
             AcceptError::OutsideExtent {
                 index,
@@ -2129,26 +2125,18 @@ impl std::fmt::Display for AcceptError {
                 quantisation: q,
             } => write!(
                 f,
-                "ingest row {index} at ({x}, {y}) is outside this view's declared extent (x {}..{}, \
-                 y {}..{}). Coordinates are quantised against that extent, which is fixed for the \
-                 view's life (decision 0040), so an out-of-extent point has no cell to occupy; it \
-                 is refused here rather than clamped, because a clamped point at the boundary \
-                 cannot be told from one that belongs there. The remedy is to rebuild the view \
-                 under a corrected extent, which is a migration",
+                "row {index} at ({x}, {y}) is outside the view's declared extent (x {}..{}, y \
+                 {}..{}); rebuild the view with a wider extent to hold it",
                 q.x_min, q.x_max, q.y_min, q.y_max
             ),
             AcceptError::UnknownView { index, view } => write!(
                 f,
-                "ingest row {index} names view '{view}', which this bundle does not declare. A \
-                 view carries its own frame and its own row space (decision 0040), so a row \
-                 naming none of them has no cell to occupy and no order to be placed in"
+                "row {index} names view '{view}', which this bundle does not declare"
             ),
             AcceptError::SteppedDown => write!(
                 f,
-                "a partition is serving a stepped-down side-manifest, so ingest is refused: a \
-                 flush from this state would assemble its manifest from the older served state at \
-                 a higher n, permanently shadowing the stepped-past segment and its acked rows. \
-                 Repair or restore the damaged newest manifest's files, then retry"
+                "ingest is refused while a partition serves a stepped-down side-manifest; repair \
+                 or restore the damaged newest manifest's files, then retry"
             ),
         }
     }
@@ -3909,8 +3897,7 @@ impl std::fmt::Display for PublishGeometryError {
         match self {
             PublishGeometryError::Refused(refused) => write!(f, "{refused}"),
             PublishGeometryError::NoExecutor => f.write_str(
-                "this engine has no write executor, and a geometry publication is a swap on that \
-                 thread (lifecycle §1.3)",
+                "this engine has no write executor, so it cannot publish geometry",
             ),
             PublishGeometryError::PrefixNotCommitted { offered, current } => write!(
                 f,
