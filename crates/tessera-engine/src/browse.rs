@@ -681,13 +681,6 @@ impl crate::Engine {
         mask: &crate::compose::EffectiveMask,
         expr: &FilterExpr,
     ) -> Result<Bitmap> {
-        let fragment = self.fragment_for(served.session, served.generation)?;
-        let candidate = crate::filter::candidate(
-            &fragment,
-            served.session.satisfied(),
-            &served.generation.overlay,
-            &served.generation.buffer,
-        );
         // **`Engine::browse` takes no cancellation token, and could not usefully hold one**: the
         // row route's `scan_rows` carries no checkpoint on any path — the viewport's own
         // coarse-zoom whole-view scan is equally uninterruptible — and this is a unary JSON verb
@@ -695,45 +688,27 @@ impl crate::Engine {
         // the scan is **admission-gated and not cancellable**, and the permit is held for its
         // duration (`highlight-and-hierarchy.md` §7, which prices that). Making it interruptible
         // is a change to the shared row route rather than to this verb.
-        let cancel = None;
-        let regions =
-            |leaf: &crate::filter::RegionLeaf| self.resolve_region(leaf, served, mask, &cancel);
-        let members =
-            |leaf: &crate::filter::MemberOfLeaf| self.resolve_member_of(leaf, served, mask);
-        let resolvers = crate::filter::RowLeafResolvers {
-            regions: &regions,
-            members: &members,
-        };
         let total_rows = served.data.row_space.total_rows();
-        // `prefer_row = false`: browse has no tile ranges to make the row route cheaper, so a
-        // both-routes column takes the entity route and only a render-only column reaches the scan.
-        let routed = served
-            .generation
-            .filter_columns
-            .evaluate_routed(expr, &candidate, false, &resolvers)
-            .map_err(|e| {
-                let detail = e.to_string();
-                if e.is_callers_fault() {
-                    EngineError::FilterMalformed(detail)
-                } else {
-                    EngineError::FilterRefused(detail)
+        self.route_filters(served, mask, &None, |route| {
+            // `prefer_row = false`: browse has no tile ranges to make the row route cheaper, so a
+            // both-routes column takes the entity route and only a render-only column reaches the
+            // scan.
+            Ok(match route(expr, false)? {
+                RoutedFilter::Entity(entities) => served.data.row_space.project(&entities),
+                RoutedFilter::Row(tree) => {
+                    // The whole view as the one domain: the row route's predicate runs over every
+                    // row rather than over a request's ranges, which is what makes the count exact
+                    // off the viewport and is the cost §7 prices.
+                    let whole = std::slice::from_ref(&std::ops::Range {
+                        start: 0u32,
+                        end: u32::try_from(total_rows).unwrap_or(u32::MAX),
+                    })
+                    .to_vec();
+                    self.evaluate_row_route(&tree, served, &whole, total_rows, false)?
+                        .rows()
+                        .clone()
                 }
-            })?;
-        Ok(match routed {
-            RoutedFilter::Entity(entities) => served.data.row_space.project(&entities),
-            RoutedFilter::Row(tree) => {
-                // The whole view as the one domain: the row route's predicate runs over every row
-                // rather than over a request's ranges, which is what makes the count exact off the
-                // viewport and is the cost §7 prices.
-                let whole = std::slice::from_ref(&std::ops::Range {
-                    start: 0u32,
-                    end: u32::try_from(total_rows).unwrap_or(u32::MAX),
-                })
-                .to_vec();
-                self.evaluate_row_route(&tree, served, &whole, total_rows, false)?
-                    .rows()
-                    .clone()
-            }
+            })
         })
     }
 }

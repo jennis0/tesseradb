@@ -1123,6 +1123,72 @@ pub(crate) fn predicate_source<'a>(
 }
 
 impl Engine {
+    /// **Route this request's filter expressions against its pre-filter mask**: bring the fragment
+    /// forward, build the entity-space candidate, close the region and `member_of` resolvers over
+    /// `mask`, and hand `body` a `route` that puts one expression through them. One transcription
+    /// of the sequence, for the viewport and for browse alike.
+    ///
+    /// **The fragment is brought forward, not read off the session.** A session's own fragment is
+    /// fixed at authorise, and composition treats entities below the live watermark as
+    /// fragment-resident — so composing against the stale one silently omits every entity flushed
+    /// since, and a filtered request under a long-lived session under-reports. Narrowing, and safe
+    /// under **I12**, which is exactly what makes it the dangerous kind: the answer is
+    /// indistinguishable from a correct one. `/v1/categories` takes the same care for the same
+    /// reason. It costs nothing: `session_geometry` has already resolved the same fragment on this
+    /// request, so this is the identity short-circuit or a cache hit.
+    ///
+    /// **`mask` is the pre-filter mask and both resolvers close over it.** The region resolver
+    /// tests a drawn shape's boundary rows under it; the `member_of` resolver answers
+    /// `membership ∩ M_auth`. Neither can be called without one, which is what keeps them off the
+    /// unmasked membership — and a highlight routed against an already-filtered mask would make the
+    /// two positions of one clause mean different things.
+    ///
+    /// The candidate and the resolvers are built once however many expressions `body` routes.
+    /// **What it then does with a [`crate::filter::RoutedFilter`] is the caller's**: the viewport
+    /// crosses into its own tiles and counts what matched, browse crosses into the whole view — the
+    /// two answers §9 (d) of `highlight-and-hierarchy.md` distinguishes.
+    pub(crate) fn route_filters<T>(
+        &self,
+        served: &ServedView<'_>,
+        mask: &EffectiveMask,
+        cancel: &Option<CancelToken>,
+        body: impl FnOnce(
+            &dyn Fn(&crate::filter::FilterExpr, bool) -> Result<crate::filter::RoutedFilter>,
+        ) -> Result<T>,
+    ) -> Result<T> {
+        let fragment = self.fragment_for(served.session, served.generation)?;
+        let candidate = crate::filter::candidate(
+            &fragment,
+            served.session.satisfied(),
+            &served.generation.overlay,
+            &served.generation.buffer,
+        );
+        let regions =
+            |leaf: &crate::filter::RegionLeaf| self.resolve_region(leaf, served, mask, cancel);
+        let members =
+            |leaf: &crate::filter::MemberOfLeaf| self.resolve_member_of(leaf, served, mask);
+        let resolvers = crate::filter::RowLeafResolvers {
+            regions: &regions,
+            members: &members,
+        };
+        body(&|expr: &crate::filter::FilterExpr, prefer_row: bool| {
+            served
+                .generation
+                .filter_columns
+                .evaluate_routed(expr, &candidate, prefer_row, &resolvers)
+                .map_err(|e| {
+                    // Caller's fault or the deployment's — `FilterError` decides, at the variants,
+                    // because that is where the argument for each one lives.
+                    let detail = e.to_string();
+                    if e.is_callers_fault() {
+                        EngineError::FilterMalformed(detail)
+                    } else {
+                        EngineError::FilterRefused(detail)
+                    }
+                })
+        })
+    }
+
     /// Answer one region leaf for one request (`crate::region`; `crate::filter::RegionResolver`).
     ///
     /// A drawn shape: its decomposition from the generation-keyed cache — shared across
