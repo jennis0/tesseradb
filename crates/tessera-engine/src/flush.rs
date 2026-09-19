@@ -59,7 +59,7 @@ use crate::Generation;
 /// [`tessera_authz::write_delta_tier`]). Taken from the bundle's own `small_term_threshold` would
 /// be better still; it is a constant here because a flush's postings are small by construction
 /// (one tick's arrivals) and the threshold only decides an encoding, never a content.
-const SMALL_TERM_THRESHOLD: u32 = 32;
+pub(crate) const SMALL_TERM_THRESHOLD: u32 = 32;
 
 /// The stages of one flush, for attribution under `bench-timing`.
 ///

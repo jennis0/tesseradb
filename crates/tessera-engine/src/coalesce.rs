@@ -109,9 +109,7 @@ use tessera_store::manifest::{
 };
 use tessera_store::merge::size_tier;
 
-/// The tag rule a coalesced tier's postings use. Same constant, same reason, as
-/// `crate::flush::SMALL_TERM_THRESHOLD`: the threshold decides an encoding, never a content.
-const SMALL_TERM_THRESHOLD: u32 = 32;
+use crate::flush::SMALL_TERM_THRESHOLD;
 
 /// What a coalesce is allowed to take, per axis.
 #[derive(Debug, Clone, Copy)]
