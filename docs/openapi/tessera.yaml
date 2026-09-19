@@ -92,7 +92,7 @@ paths:
               $ref: "#/components/schemas/AuthoriseRequest"
       responses:
         "200":
-          description: A session. `expires_at` is `min(backstop, plugin not_after)`, seconds since the Unix epoch.
+          description: A session. `expires_at` is the time of the request plus the server's `token_max_lifetime_secs`, in seconds since the Unix epoch.
           content:
             application/json:
               schema:
@@ -827,7 +827,7 @@ components:
         expires_at:
           type: integer
           minimum: 0
-          description: Seconds since the Unix epoch — `min(backstop, plugin not_after)`.
+          description: Seconds since the Unix epoch: the time of the request plus the server's `token_max_lifetime_secs`.
 
     RevokeRequest:
       type: object

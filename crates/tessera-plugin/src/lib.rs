@@ -23,13 +23,10 @@ pub type Descriptor = Vec<u8>;
 /// labelling that produced it.
 const PASSTHROUGH_IDENTITY: &str = "builtin:passthrough:2";
 
-/// What `terms_of_auth` returns: the credential's descriptors and its expiry.
-///
-/// `not_after` is a Unix timestamp in seconds. `None` means the plugin declares no expiry.
+/// What `terms_of_auth` returns: the credential's descriptors.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthTerms {
     pub terms: Vec<Descriptor>,
-    pub not_after: Option<i64>,
 }
 
 /// The sizes a plugin declares. Exceeding one is counted and reported. It does not exclude an
@@ -38,7 +35,6 @@ pub struct AuthTerms {
 pub struct DeclaredBounds {
     pub max_distinct_terms: u64,
     pub max_terms_per_item: u32,
-    pub max_terms_per_token: u32,
 }
 
 /// A plugin failure. The caller refuses the request.
@@ -144,7 +140,6 @@ impl Plugin for Passthrough {
         })?;
         Ok(AuthTerms {
             terms: parsed.terms.into_iter().map(String::into_bytes).collect(),
-            not_after: None,
         })
     }
 
@@ -152,7 +147,6 @@ impl Plugin for Passthrough {
         DeclaredBounds {
             max_distinct_terms: 200_000_000,
             max_terms_per_item: 4_096,
-            max_terms_per_token: 100_000,
         }
     }
 
@@ -255,7 +249,6 @@ mod tests {
             p.terms_of_auth(br#"{"terms": ["1207", "9"]}"#).unwrap(),
             AuthTerms {
                 terms: vec![b"1207".to_vec(), b"9".to_vec()],
-                not_after: None,
             }
         );
         // A credential of no terms is valid and sees nothing; it is not the refusal below.
