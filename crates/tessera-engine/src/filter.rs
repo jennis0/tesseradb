@@ -749,12 +749,6 @@ pub fn extent_column_name(column: &str, view: Option<&str>) -> String {
 ///
 /// `(None, None)` (entity-scoped) is always live. A half-stamped pair matches nothing and is
 /// omitted: fail-closed rather than served under a guessed incarnation.
-///
-/// **Beside [`extent_column_name`], because it is the other half of the same question.** That
-/// function says which column an extent composes onto and carries no incarnation, so a dead
-/// incarnation's extent would compose onto the column a key created again answers from. A fold
-/// asks this of the manifest it is rebasing and an open asks it of the roster it is serving; two
-/// spellings of the rule would let one carry forward what the other drops.
 pub(crate) fn carries_live_view(
     incarnation_of: &dyn Fn(&str) -> Option<tessera_types::view::ViewIncarnation>,
     view: Option<&str>,
@@ -2052,10 +2046,8 @@ impl FilterColumns {
             entity_terms: Arc::new(entity_terms),
         };
         for extent in extents {
-            // **Only what this roster still declares.** An extent is named by `(column, view)`,
-            // which a key created again shares with its predecessor, so an extent of a dead
-            // incarnation would compose onto the new view's column and answer its leaves and its
-            // drill-down. The base is placed per live incarnation above, by the same question.
+            // A key created again shares `(column, view)` with its predecessor, whose extents
+            // stay listed until a fold.
             if !carries_live_view(view_incarnation, extent.view.as_deref(), extent.incarnation) {
                 continue;
             }
@@ -2347,14 +2339,9 @@ impl FilterColumns {
         Ok(next)
     }
 
-    /// This generation's columns with every group-scoped column of `views` removed — the
-    /// successor generation's, after a drop (`views.md` §5).
-    ///
-    /// **A dropped view's column does not wait for the fold that reclaims its files.** The name a
-    /// scoped column is held under is `(column, view)` and carries no incarnation, so a column
-    /// left standing is the one [`FilterColumns::with_scoped_columns`] finds already present when
-    /// the key is created again and flushes — and the predecessor's base and extents would answer
-    /// the new incarnation's leaves and its drill-down.
+    /// This generation's columns with every group-scoped column of `views` removed: the
+    /// successor generation's, after a drop. A column left standing is the one
+    /// [`FilterColumns::with_scoped_columns`] would find present when the key is created again.
     pub(crate) fn without_scoped_columns(&self, views: &[String]) -> FilterColumns {
         let dead = |name: &String| {
             name.split_once(PIN)
