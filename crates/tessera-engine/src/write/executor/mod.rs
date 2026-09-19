@@ -834,7 +834,6 @@ impl Executor {
 
         self.last_tick = std::time::Instant::now();
         self.health.mark_tick(self.last_tick);
-        self.health.ticks.fetch_add(1, Ordering::Relaxed);
 
         let mark = StageMark::now();
         let mut flushable = 0usize;
@@ -887,6 +886,9 @@ impl Executor {
         self.dispatch_coalesce(&generation);
         self.dispatch_merge(&generation);
         drop(generation);
+        // Last, so a reader that sees the count move sees everything this tick did on this
+        // thread: the plans dispatched, the log rotated.
+        self.health.ticks.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Record that this cycle published nothing it was asked to publish: the cycle stays open, the
