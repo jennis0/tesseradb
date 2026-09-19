@@ -16,7 +16,7 @@ Things found during the cleanup that are not yet done. One line each; delete a l
 - Things declared at a running service live in separate lists (`RuntimeAttributes`, `RuntimeVocabularies`, `RuntimeViewDeclarations`) until a fold writes them into `MANIFEST.json`, then are removed from those lists. Two manifests hold one schema.
 - `crates/tessera-engine/src/write.rs` is 18,000 lines.
 
-- The Python oracle's `BUNDLE_FORMAT` (`reference/oracle/harness.py`) is 11 and the Rust constant is 15, so the oracle does not accept a current bundle.
+- The Python oracle's `BUNDLE_FORMAT` (`reference/oracle/harness.py`) is 11 and the Rust constant is 16, so the oracle does not accept a current bundle.
 
 ## Documentation
 
