@@ -1150,7 +1150,13 @@ fn an_executor_panic_is_reported_dead() {
     let err = engine
         .accept_change(EntityId::new(1), ChangeOp::Suppress)
         .expect_err("a dead executor must be reported, never swallowed");
-    assert!(format!("{err}").contains("not running"), "got: {err}");
+    assert!(
+        matches!(
+            err,
+            tessera_engine::AcceptError::Submit(tessera_lifecycle::SubmitError::ExecutorDead)
+        ),
+        "got: {err}"
+    );
 
     // **`Dead` is absorbing, and it has to be asserted now that the posture is composed rather than
     // latched as one value.** The WAL this executor left behind is perfectly healthy — the panic was
@@ -1217,7 +1223,15 @@ fn a_duplicate_external_id_is_refused_on_the_executor() {
     let err = engine
         .accept_ingest(vec![row("dup")], "b2".to_string(), [8u8; 32])
         .expect_err("a duplicate external id must be refused on the executor");
-    assert!(format!("{err}").contains("already knows"), "got: {err}");
+    assert!(
+        matches!(
+            err,
+            tessera_engine::AcceptError::Exec(
+                tessera_lifecycle::ExecError::DuplicateExternalId { count: 1 }
+            )
+        ),
+        "got: {err}"
+    );
 
     assert_eq!(
         engine.resolve_external_id(b"dup").unwrap(),
