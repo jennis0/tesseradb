@@ -187,21 +187,7 @@ impl Corpus {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tessera_spatial::Bounds;
-
-    fn corpus(n: u64) -> Corpus {
-        Corpus::new(
-            0x5EED,
-            n,
-            Bounds {
-                x_min: 0.0,
-                x_max: 1000.0,
-                y_min: 0.0,
-                y_max: 1000.0,
-            },
-        )
-        .unwrap()
-    }
+    use crate::testing::{assert_census_counts_visible_members, corpus};
 
     /// **Single-valued, exhaustively**: every entity belongs to exactly one artifact, the
     /// partition's whole point — checked by building the forward relation once and comparing every
@@ -272,28 +258,16 @@ mod tests {
         }
     }
 
-    /// The census oracle agrees with the materialised relation, by brute force.
     #[test]
-    fn the_census_agrees_with_partition_members_by_brute_force() {
+    fn the_census_counts_each_artifacts_visible_members() {
         let c = corpus(10_000);
-        let grant = crate::Grant::parse("5,6,7,8").unwrap();
-        let count = c.partition_count(2);
-        let mut expected = std::collections::BTreeMap::new();
-        for a in 0..count {
-            let visible = c
-                .partition_members(2, a)
-                .into_iter()
-                .filter(|e| c.visible(*e, &grant))
-                .count() as u64;
-            if visible > 0 {
-                expected.insert(a, visible);
-            }
-        }
-        let census = c.partition_artifact_census(2, &grant);
-        let got: std::collections::BTreeMap<u64, u64> = census.into_iter().collect();
-        assert_eq!(
-            got, expected,
-            "the census and the brute-force count disagree"
+        let grant = Grant::parse("5,6,7,8").unwrap();
+        assert_census_counts_visible_members(
+            &c,
+            &grant,
+            c.partition_artifact_census(2, &grant),
+            0..c.partition_count(2),
+            |a| c.partition_members(2, a),
         );
     }
 }

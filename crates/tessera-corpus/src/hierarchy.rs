@@ -207,21 +207,7 @@ fn child_span((lo, hi): (u64, u64), index: u64) -> (u64, u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tessera_spatial::Bounds;
-
-    fn corpus(n: u64) -> Corpus {
-        Corpus::new(
-            0x5EED,
-            n,
-            Bounds {
-                x_min: 0.0,
-                x_max: 1000.0,
-                y_min: 0.0,
-                y_max: 1000.0,
-            },
-        )
-        .unwrap()
-    }
+    use crate::testing::{assert_census_counts_visible_members, corpus};
 
     /// **The property the whole arm rests on**: a child's members are a subset of its parent's.
     /// Containment is what makes rollup sound under an absolute criterion, and the build's
@@ -340,34 +326,20 @@ mod tests {
         }
     }
 
-    /// The census oracle agrees with `treed_members`, by brute force — the containment property
-    /// carried through: the root's count is the corpus's own visible total.
+    /// Every node counts its descendants' members too, so the root's count is the number of
+    /// items the grant sees in the whole corpus.
     #[test]
-    fn the_census_agrees_with_treed_members_by_brute_force() {
+    fn the_census_counts_each_nodes_visible_members() {
         let c = corpus(20_000);
-        let grant = crate::Grant::parse("0,1,2,3").unwrap();
+        let grant = Grant::parse("0,1,2,3").unwrap();
         let count = c.treed_count(8);
-        let mut expected = std::collections::BTreeMap::new();
-        for a in 0..count {
-            let visible = c
-                .treed_members(count, a)
-                .into_iter()
-                .filter(|e| c.visible(*e, &grant))
-                .count() as u64;
-            if visible > 0 {
-                expected.insert(a, visible);
-            }
-        }
         let census = c.treed_artifact_census(8, &grant);
-        let got: std::collections::BTreeMap<u64, u64> = census.into_iter().collect();
         assert_eq!(
-            got, expected,
-            "the census and the brute-force count disagree"
+            census[0],
+            (0, (0..c.n()).filter(|e| c.visible(*e, &grant)).count() as u64)
         );
-        assert_eq!(
-            got[&0],
-            (0..c.n()).filter(|e| c.visible(*e, &grant)).count() as u64,
-            "the root's masked count is not the corpus's own visible total"
-        );
+        assert_census_counts_visible_members(&c, &grant, census, 0..count, |a| {
+            c.treed_members(count, a)
+        });
     }
 }

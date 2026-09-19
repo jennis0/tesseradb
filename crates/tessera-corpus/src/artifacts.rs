@@ -306,21 +306,7 @@ fn feistel(key: u64, half: u32, mask: u64, v: u64, reverse: bool) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tessera_spatial::Bounds;
-
-    fn corpus(n: u64) -> Corpus {
-        Corpus::new(
-            0x5EED,
-            n,
-            Bounds {
-                x_min: 0.0,
-                x_max: 1000.0,
-                y_min: 0.0,
-                y_max: 1000.0,
-            },
-        )
-        .unwrap()
-    }
+    use crate::testing::{assert_census_counts_visible_members, corpus};
 
     /// **The property the census rests on**: the two directions are the same relation. Anything
     /// that made them disagree — a spill the reverse walk is too short for, an inversion that is
@@ -453,30 +439,16 @@ mod tests {
         }
     }
 
-    /// The census oracle agrees with the materialised relation, by brute force: for every
-    /// artifact, `flat_artifact_census`'s count is exactly the visible members `artifact_members`
-    /// names, and an artifact this grant sees nothing of is simply absent from the census.
     #[test]
-    fn the_census_agrees_with_artifact_members_by_brute_force() {
+    fn the_census_counts_each_artifacts_visible_members() {
         let c = corpus(10_000);
-        let grant = crate::Grant::parse("0,1,2,3").unwrap();
-        let count = c.artifacts_in(6, 0);
-        let mut expected = std::collections::BTreeMap::new();
-        for a in 0..count {
-            let visible = c
-                .artifact_members(6, 0, a)
-                .into_iter()
-                .filter(|e| c.visible(*e, &grant))
-                .count() as u64;
-            if visible > 0 {
-                expected.insert(a, visible);
-            }
-        }
-        let census = c.flat_artifact_census(6, 0, &grant);
-        let got: std::collections::BTreeMap<u64, u64> = census.into_iter().collect();
-        assert_eq!(
-            got, expected,
-            "the census and the brute-force count disagree"
+        let grant = Grant::parse("0,1,2,3").unwrap();
+        assert_census_counts_visible_members(
+            &c,
+            &grant,
+            c.flat_artifact_census(6, 0, &grant),
+            0..c.artifacts_in(6, 0),
+            |a| c.artifact_members(6, 0, a),
         );
     }
 }

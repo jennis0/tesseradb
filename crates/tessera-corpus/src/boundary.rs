@@ -114,21 +114,7 @@ impl Corpus {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tessera_spatial::Bounds;
-
-    fn corpus(n: u64) -> Corpus {
-        Corpus::new(
-            0x5EED,
-            n,
-            Bounds {
-                x_min: 0.0,
-                x_max: 1000.0,
-                y_min: 0.0,
-                y_max: 1000.0,
-            },
-        )
-        .unwrap()
-    }
+    use crate::testing::{assert_census_counts_visible_members, corpus};
 
     /// At least one tile is authored and at least one is not, at every size — otherwise the
     /// "sparse minority" shape this arm exists to exercise is untested.
@@ -189,28 +175,16 @@ mod tests {
         }
     }
 
-    /// The census oracle agrees with the materialised relation, by brute force.
     #[test]
-    fn the_census_agrees_with_boundary_members_by_brute_force() {
+    fn the_census_counts_each_artifacts_visible_members() {
         let c = corpus(10_000);
-        let grant = crate::Grant::parse("10,11,12,13").unwrap();
-        let roster = c.boundary_artifacts(4, 0);
-        let mut expected = std::collections::BTreeMap::new();
-        for &prefix in &roster {
-            let visible = c
-                .boundary_members(4, 0, prefix)
-                .into_iter()
-                .filter(|e| c.visible(*e, &grant))
-                .count() as u64;
-            if visible > 0 {
-                expected.insert(prefix, visible);
-            }
-        }
-        let census = c.boundary_artifact_census(4, 0, &grant);
-        let got: std::collections::BTreeMap<u64, u64> = census.into_iter().collect();
-        assert_eq!(
-            got, expected,
-            "the census and the brute-force count disagree"
+        let grant = Grant::parse("10,11,12,13").unwrap();
+        assert_census_counts_visible_members(
+            &c,
+            &grant,
+            c.boundary_artifact_census(4, 0, &grant),
+            c.boundary_artifacts(4, 0).into_iter(),
+            |prefix| c.boundary_members(4, 0, prefix),
         );
     }
 }

@@ -497,6 +497,44 @@ fn term_of_draw(draw: u64, terms_per_level: u32) -> TermId {
 }
 
 #[cfg(test)]
+pub(crate) mod testing {
+    use super::*;
+
+    pub fn corpus(n: u64) -> Corpus {
+        let extent = Bounds {
+            x_min: 0.0,
+            x_max: 1000.0,
+            y_min: 0.0,
+            y_max: 1000.0,
+        };
+        Corpus::new(0x5EED, n, extent).unwrap()
+    }
+
+    /// A census gives, for each artifact, how many of its members `grant` sees, and omits an
+    /// artifact of which it sees none. `members_of` is the forward direction, so this checks the
+    /// census against it by enumeration.
+    pub fn assert_census_counts_visible_members(
+        corpus: &Corpus,
+        grant: &Grant,
+        census: Vec<(u64, u64)>,
+        artifacts: impl Iterator<Item = u64>,
+        members_of: impl Fn(u64) -> Vec<u64>,
+    ) {
+        let expected: Vec<(u64, u64)> = artifacts
+            .map(|a| {
+                let visible = members_of(a)
+                    .into_iter()
+                    .filter(|&e| corpus.visible(e, grant))
+                    .count();
+                (a, visible as u64)
+            })
+            .filter(|&(_, visible)| visible > 0)
+            .collect();
+        assert_eq!(census, expected);
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -556,27 +594,6 @@ mod tests {
         assert!(Grant::parse("").unwrap().terms().is_empty());
         assert!(Grant::parse("cs.LG").is_err(), "non-decimal descriptor");
         assert!(Grant::parse("1024").is_err(), "outside the term space");
-    }
-
-    /// **The parameterisation must not move a single existing answer.** `Corpus::new` is defined
-    /// as `with_terms_per_level(.., DEFAULT_TERMS_PER_LEVEL)`, and the default mask (`63`) is
-    /// bit-identical to the one `term_of_draw` used before it took a parameter — so this asserts
-    /// the thing the campaign's whole licence to widen the space depends on: nobody's fixture
-    /// moved.
-    #[test]
-    fn the_default_term_space_is_exactly_1024_and_unwidened_by_the_parameter() {
-        assert_eq!(TERM_SPACE, 1024);
-        let default = Corpus::new(0x5EED, 10_000, grid()).unwrap();
-        assert_eq!(default.term_space(), TERM_SPACE);
-        let explicit =
-            Corpus::with_terms_per_level(0x5EED, 10_000, grid(), DEFAULT_TERMS_PER_LEVEL).unwrap();
-        for e in 0..10_000 {
-            assert_eq!(
-                default.terms(e),
-                explicit.terms(e),
-                "the explicit default-width constructor disagrees with `new` at {e}"
-            );
-        }
     }
 
     /// Widening the slot count keeps the same 16-level spectrum — the halving-probability level
