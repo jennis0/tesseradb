@@ -2373,25 +2373,13 @@ fn held_at_current_version(
 }
 
 impl WritePath {
-    /// Rebuild every piece of write-side state that comes from durable storage: open and replay
-    /// the WAL, seed the I9 allocator at `max(manifest high-water, WAL high-water)`, build the
-    /// live external-id map and its inverse, detach the descriptor resolver's extension state, and
-    /// rebuild the `/control/ingest` idempotency index from the replayed `IngestBatch` records.
+    /// Rebuilds the write-side state from durable storage: opens and replays the WAL, seeds the
+    /// allocator at the higher of the manifest's and the WAL's marks, and rebuilds the external-id
+    /// maps, the descriptor resolver's extension, the registries and the idempotency index. Returns
+    /// the first generation's overlay and buffer beside it.
     ///
-    /// Returns the first generation's `(overlay, buffer)` alongside the write-path state, because
-    /// replay produces all four in one pass and the caller needs the first two to build the
-    /// `Generation` the executor will then publish through.
-    ///
-    /// `manifest_high_water` is `max(build MANIFEST, side-manifest)` — see the caller. The WAL's
-    /// own high-water is unioned with it here, and stops being available once rotation reclaims the
-    /// records it derives from.
-    ///
-    /// `initial_deny` is the side-manifest's own deny state — its `deny` (suppressions) and
-    /// `tombstones` (deleted entities), which contracts §2.3 makes complete current state for the
-    /// partition rather than a diff. It seeds the overlay **before** replay, and WAL replay
-    /// unions on top: where the two differ the WAL is the superset and wins, and dispositions are
-    /// idempotent, so the union is well-defined. Without this seeding the reader honours `deny` in
-    /// name only — the manifest opens and every entity it names is served.
+    /// `initial_deny` is the side-manifest's deny state, which is complete for the partition. It
+    /// seeds the overlay before replay and the WAL is applied on top; dispositions are idempotent.
     pub(crate) fn reconstruct(
         wal_path: &Path,
         seed: ManifestSeed<'_>,
@@ -2415,29 +2403,11 @@ impl WritePath {
             }
         }
 
-        // **Mints apply over the manifest seed, in log order** — the same seed-before-replay rule
-        // the deny state follows below, and for the same reason: every WAL record postdates the
-        // manifests. The caller has already seeded from `MANIFEST.vocabularies` and the served
-        // side-manifests' `vocabulary_extensions`, so what remains is what was minted after the
-        // last manifest write.
-        //
-        // Bindings are append-only and never rebound, so this is order-insensitive except for
-        // conflicts — and a conflict inside the durable prefix is corruption of acked state, never
-        // a race: every row written under either binding is of unknowable colour. Refusing to open
-        // is the only answer that does not silently recolour one of them.
-        // **The vocabularies declared while the service ran, before the mints that name them**
-        // (`ingest.md` §1.3): the manifests' runtime list is the starting point and every record
-        // postdates it, on the registry's ordering rule. A record restating a vocabulary the
-        // manifests already carry identically is applied as the values it names and nothing else
-        // — what a fold that moved the declaration into `MANIFEST.json` before the log rotated
-        // leaves behind — and one carrying a different identity under a held name is a log that
-        // disagrees with the manifests about what every code of that vocabulary stands for, and
-        // refuses the open.
-        //
-        // **A page of values is one of these records too**, not a run of `VocabularyMint`s: a
-        // value's title is part of what the page acknowledged and a mint record carries none, so
-        // a page recorded as mints would come back from a restart with its bindings and without
-        // the names a client draws.
+        // Vocabularies declared while the service ran, then the mints that name them, over what the
+        // caller seeded from the manifests. Every record postdates the manifests. A record restating
+        // a vocabulary the manifests carry applies only its values (a page of values is this record
+        // too, because a mint carries no title); one that disagrees about kind, visibility, width or
+        // a binding refuses the open, since either reading would recolour acked rows.
         let mut runtime_vocabularies = seed.vocabularies;
         for record in &records {
             let WalRecord::VocabularyDeclare { declaration } = record else {
@@ -2575,17 +2545,9 @@ impl WritePath {
             roster.apply(record);
         }
 
-        // **The view groups and plain views declared while the service ran, on the registry's
-        // ordering rule** (`ingest.md` §1.3): the manifests' runtime lists are the starting point
-        // and every record postdates them. A record naming an object the served manifest already
-        // carries is applied as nothing, which is what a fold that moved the declaration into
-        // `MANIFEST.json` before the log rotated leaves behind; one this build cannot compile is
-        // a log written by a binary this one is not, and refuses the open.
-        //
-        // **Before the roster is seeded is not required and before the manifest merge is**: a
-        // create names a group, and `Manifest::with_roster` drops a record whose group the
-        // manifest does not declare, so the group has to reach the manifest first
-        // (`Engine::open`).
+        // View groups and plain views declared while the service ran. One the served manifest
+        // already carries applies as nothing. Groups must reach the manifest before the roster's
+        // creates are merged, because `Manifest::with_roster` drops a create whose group is unknown.
         let mut view_declarations = seed.view_declarations;
         for record in &records {
             match record {
@@ -2725,25 +2687,13 @@ impl WritePath {
                 };
                 match tessera_lifecycle::membership::decode_record(entity, blob) {
                     Some((mut record, shape)) => {
-                        // **The membership is read through the pack rather than copied out of
-                        // it**, which is the route the build's own publication takes over the
-                        // extent it has just written (`tessera_lifecycle::Members`). The bitmap
-                        // `decode_record` built is dropped here. Keeping it costs a serving node
-                        // one Roaring bitmap per artifact over the whole corpus for as long as it
-                        // runs: 31 GB of anonymous memory at open over the 1.6×10⁶ artifacts and
-                        // 3.4×10⁹ member entries of the GBIF corpus, for bytes already mapped.
+                        // The membership is read through the pack's mapping and the decoded bitmap is dropped: a
+                        // heap bitmap per artifact was 31 GB at open on the GBIF corpus.
                         //
-                        // SAFETY: `blob` is a slice of `pack`'s read-only mapping, `owner` is that
-                        // same pack, and the `Members` this produces holds `owner` for as long as
-                        // it holds the view. **No extent file is ever written twice**, which is
-                        // what keeps a mapped file from being truncated under a reader: an extent
-                        // is named `members-{n:06}-{index:03}` from the publication counter
-                        // (`Executor::allocate_manifest_n`), which only rises within an executor
-                        // and is seeded above every candidate any partition carries when that
-                        // executor is built (`Engine`'s executor seed). One executor owns a bundle
-                        // root, so that is the whole set of writers. The writer itself is
-                        // `tessera_store::write_and_fsync`, whose `File::create` would truncate a
-                        // name it was handed twice.
+                        // SAFETY: `blob` is a slice of `pack`'s read-only mapping and the `Members` holds `owner`
+                        // for as long as it holds the view. No extent file is written twice (names come from the
+                        // publication counter, which only rises, and one executor owns a bundle root), so a mapped
+                        // file is never truncated under a reader.
                         let mapped = unsafe {
                             tessera_lifecycle::membership::mapped_members(blob, owner.clone())
                         };
@@ -2827,27 +2777,10 @@ impl WritePath {
         let established: std::collections::HashMap<Vec<u8>, EntityId> =
             established.into_iter().collect();
 
-        // **The buffer holds exactly the rows that have no geometry, and this is where that becomes
-        // true.** Replay walks every retained WAL record, including the `IngestBatch` rows of every
-        // flush whose member has not yet been reclaimed — so without this the buffer comes back
-        // holding rows that already have segments, and the next flush writes each of them a second
-        // time under a second entity's worth of geometry.
-        //
-        // **The test is `row_of`, not a watermark.** A watermark is a cheap scalar proxy for "has a
-        // row", exact only while entity-allocation order and flush order coincide — that is, while
-        // there is one view per partition, which write-path §4.3 records as load-bearing and unenforced.
-        // The predicate below is what the watermark approximates, so it stays exact at any number of
-        // views and needs no per-view bookkeeping anywhere.
-        //
-        // It is also what `compose::verdict` now relies on. That function used to gate rule 4 on
-        // `entity < watermark` to stop a stale buffer answering for an entity the fragment already
-        // covers; the gate is gone, and this invariant is what replaces it.
-        // **Per (entity, view), because an entity may hold a row in several views** (`views.md`
-        // §4). The question is not "does this entity have geometry" — a joined entity has some,
-        // in the view it was first ingested into — but "does this *row* have geometry", and a
-        // predicate over the entity alone would drop a second view's pending row from the buffer
-        // while no segment held it. Every row is in one view, so the two questions coincide
-        // exactly while a corpus has one view, which is why the narrower one costs nothing.
+        // Replay walks every retained record, including batches whose rows a flush has already
+        // given geometry, so those rows are dropped here or the next flush would write them twice.
+        // The test is per (entity, view) and asks the row space, not a watermark: an entity may hold
+        // rows in several views, and a watermark is exact only with one view per partition.
         let already_flushed: Vec<(EntityId, String)> = buffer
             .rows()
             .map(|(entity, item)| (*entity, item.view.clone()))
@@ -2863,15 +2796,7 @@ impl WritePath {
             buffer.remove_in_view(entity, &view);
         }
 
-        // **Where each surviving row sits in the log**, so a rotation knows what it may reclaim
-        // below (write-path §4.5). Stamped after the filter rather than before it, because a row that
-        // already has geometry is gone from the buffer and stamping it would be a lookup for
-        // nothing.
-        //
-        // The positions are parallel to the records — same order, same length — which is what
-        // `Wal::replayed_positions` guarantees. An `IngestBatch` holds a whole window's rows, so
-        // every row in one record shares its position; that is exactly right, since reclaiming
-        // below the record is what would lose them.
+        // Where each surviving row sits in the log, so a rotation knows what it may reclaim below.
         for (record, position) in records.iter().zip(wal.replayed_positions()) {
             if let WalRecord::IngestBatch { rows, .. } = record {
                 for row in rows {
@@ -2880,16 +2805,9 @@ impl WritePath {
             }
         }
 
-        // **The values batches, into the buffer's fill map** (`ingest.md` §1.4). Replayed here
-        // rather than in `tessera-lifecycle`'s pass because a values record names its columns and
-        // resolving a name to a position needs the served schema — the build's declarations plus
-        // every runtime one above, which is what `served` now is.
-        //
-        // **A batch whose cells a flush already wrote is re-buffered and writes nothing.** The
-        // WAL member holding it is reclaimed on its own schedule, so a replay meets records the
-        // flush has consumed; `plan_flush` applies the fill rule to every fill against the
-        // flushed homes, drops the cells already held, and names the fill consumed anyway — so
-        // the next tick removes it and it stops pinning the log.
+        // The values batches, into the buffer's fill map. Replayed here because resolving a column
+        // name needs the served schema. A batch whose cells a flush already wrote is re-buffered;
+        // `plan_flush` drops the held cells and consumes the fill, so it stops pinning the log.
         for (record, position) in records.iter().zip(wal.replayed_positions()) {
             let WalRecord::ValuesBatch {
                 view,
