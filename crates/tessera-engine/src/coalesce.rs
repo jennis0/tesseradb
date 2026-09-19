@@ -1200,11 +1200,13 @@ pub(crate) fn rebase_into(manifest: &mut SegmentsManifest, completed: &Completed
         Some(at) => at,
         None => return false,
     };
-    // **Per column, within that column's own subsequence.** Every other axis is a contiguous window
-    // of one list; this one is a contiguous window of a *filtered* list, because `attr_extents`
-    // interleaves the columns a flush publishes for. The rebase therefore checks the window is
-    // still contiguous in the subsequence — not in the whole list, which a flush publishing another
-    // column's extent mid-window would break for no reason.
+    // **Within the window's own `(column, view, incarnation)` subsequence**, the key the planner
+    // grouped by. Every other axis is a contiguous window of one list; this one is a contiguous
+    // window of a *filtered* list, because `attr_extents` interleaves the columns a flush publishes
+    // for — and, for a group-scoped family, the views sharing one column name. The rebase therefore
+    // checks the window is still contiguous in that subsequence — not in the whole list, which a
+    // flush publishing another column's or another view's extent mid-window would break for no
+    // reason.
     if plan.attrs.len() != completed.attrs.len() {
         return false;
     }
@@ -1214,7 +1216,11 @@ pub(crate) fn rebase_into(manifest: &mut SegmentsManifest, completed: &Completed
             .attr_extents
             .iter()
             .enumerate()
-            .filter(|(_, e)| e.column == window.column)
+            .filter(|(_, e)| {
+                e.column == window.column
+                    && e.view == window.view
+                    && e.incarnation == window.incarnation
+            })
             .map(|(i, _)| i)
             .collect();
         let listed: Vec<&str> = subsequence
@@ -1244,8 +1250,8 @@ pub(crate) fn rebase_into(manifest: &mut SegmentsManifest, completed: &Completed
         None => return false,
     };
 
-    // The text axis, on the attribute axis's rule: a contiguous window of one column's own
-    // subsequence, keyed by the dictionary path — the never-reused identity a text layer is named
+    // The text axis, on the attribute axis's rule: a contiguous window of one
+    // `(column, view, incarnation)`'s own subsequence, keyed by the dictionary path — the never-reused identity a text layer is named
     // by, and the one the composition finds a layer with.
     if plan.texts.len() != completed.texts.len() {
         return false;
@@ -1256,7 +1262,11 @@ pub(crate) fn rebase_into(manifest: &mut SegmentsManifest, completed: &Completed
             .text_extents
             .iter()
             .enumerate()
-            .filter(|(_, e)| e.column == window.column)
+            .filter(|(_, e)| {
+                e.column == window.column
+                    && e.view == window.view
+                    && e.incarnation == window.incarnation
+            })
             .map(|(i, _)| i)
             .collect();
         let listed: Vec<&str> = subsequence
@@ -1735,25 +1745,29 @@ mod tests {
     fn completed_attrs(plan: &CoalescePlan, out_rel: &str) -> Vec<CoalescedAttr> {
         plan.attrs
             .iter()
-            .map(|window| CoalescedAttr {
-                extent: AttrExtent {
-                    incarnation: window.incarnation,
-                    column: window.column.clone(),
-                    view: window.view.clone(),
-                    values: format!("{out_rel}/attrs/{}/values.arrow", window.column),
-                    presence: format!("{out_rel}/attrs/{}/presence.roaring", window.column),
+            .map(|window| {
+                let column_rel =
+                    coalesced_column_rel(out_rel, &window.column, window.view.as_deref());
+                CoalescedAttr {
+                    extent: AttrExtent {
+                        incarnation: window.incarnation,
+                        column: window.column.clone(),
+                        view: window.view.clone(),
+                        values: format!("{column_rel}/values.arrow"),
+                        presence: format!("{column_rel}/presence.roaring"),
+                        dict: None,
+                        postings: None,
+                        offsets: None,
+                    },
+                    values: Arc::new(
+                        tessera_filter::ValueColumn::partial(
+                            tessera_filter::Codes::U32(Vec::<u32>::new().into()),
+                            croaring::Bitmap::new(),
+                        )
+                        .expect("an empty extent"),
+                    ),
                     dict: None,
-                    postings: None,
-                    offsets: None,
-                },
-                values: Arc::new(
-                    tessera_filter::ValueColumn::partial(
-                        tessera_filter::Codes::U32(Vec::<u32>::new().into()),
-                        croaring::Bitmap::new(),
-                    )
-                    .expect("an empty extent"),
-                ),
-                dict: None,
+                }
             })
             .collect()
     }
@@ -2580,6 +2594,206 @@ mod tests {
         let consumed = completed.plan.attrs[0].extents[1].values.clone();
         manifest.attr_extents.retain(|e| e.values != consumed);
         assert!(!rebase_into(&mut manifest, &completed));
+    }
+
+    /// **A group-scoped column's window rebases within its own view's subsequence**, which is the
+    /// `(column, view, incarnation)` the planner grouped it by. Two views of one family interleave
+    /// their extents under one column name, so a subsequence taken on the name alone holds neither
+    /// window contiguously and every finished coalesce of a scoped family is discarded.
+    #[test]
+    fn a_scoped_columns_window_rebases_within_its_own_views_extents() {
+        let (mut manifest, build_files) = manifest_with(0);
+        let views = ["quarter:2026-Q1", "quarter:2026-Q3"];
+        for i in 0..4 {
+            for view in views {
+                let extent = scoped_extent_at(PARTITION, "mood", view, &format!("flush-{i}-1"));
+                manifest.files.insert(extent.values.clone(), digest(1024));
+                manifest.files.insert(extent.presence.clone(), digest(64));
+                manifest.attr_extents.push(extent);
+            }
+        }
+        let plan =
+            plan_coalesce(PARTITION, &manifest, &build_files, policy(), &all_live).expect("a plan");
+        assert_eq!(plan.attrs.len(), 2, "one window per view");
+        let consumed: Vec<String> = plan
+            .attrs
+            .iter()
+            .flat_map(|w| w.extents.iter())
+            .flat_map(|e| [e.values.clone(), e.presence.clone()])
+            .collect();
+        let untouched: Vec<String> = manifest
+            .attr_extents
+            .iter()
+            .filter(|e| !consumed.contains(&e.values))
+            .map(|e| e.values.clone())
+            .collect();
+
+        let out_rel = "partitions/p0/coalesced/coalesce-1-1";
+        let attrs = completed_attrs(&plan, out_rel);
+        let files: BTreeMap<String, FileDigest> = attrs
+            .iter()
+            .flat_map(|a| {
+                [
+                    (a.extent.values.clone(), digest(3072)),
+                    (a.extent.presence.clone(), digest(96)),
+                ]
+            })
+            .collect();
+        let coalesced: Vec<String> = attrs.iter().map(|a| a.extent.values.clone()).collect();
+        let completed = CompletedCoalesce {
+            tier: None,
+            run: None,
+            dict: None,
+            attrs,
+            record: None,
+            texts: Vec::new(),
+            terms: None,
+            files,
+            plan,
+            prefix: "v00000".to_string(),
+        };
+        assert!(rebase_into(&mut manifest, &completed));
+
+        let listed: Vec<&str> = manifest
+            .attr_extents
+            .iter()
+            .map(|e| e.values.as_str())
+            .collect();
+        let expected: Vec<&str> = coalesced
+            .iter()
+            .chain(&untouched)
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            listed, expected,
+            "each view's coalesced extent lands where that view's window began, once, and the \
+             later flush's extents keep their order"
+        );
+        for rel in &consumed {
+            assert!(
+                !manifest.files.contains_key(rel),
+                "a consumed extent file is still digested: {rel}"
+            );
+        }
+        for extent in &manifest.attr_extents {
+            assert!(
+                manifest.files.contains_key(&extent.values),
+                "a listed extent's bytes are not digested: {}",
+                extent.values
+            );
+        }
+    }
+
+    /// **A group-scoped text column's window rebases within its own view's subsequence** — the
+    /// attribute axis's rule over `text_extents`, for its reason.
+    #[test]
+    fn a_scoped_text_columns_window_rebases_within_its_own_views_extents() {
+        let (mut manifest, build_files) = manifest_with(0);
+        let views = ["quarter:2026-Q1", "quarter:2026-Q3"];
+        for i in 0..4 {
+            for view in views {
+                let (group, key) = view.split_once(':').expect("a view of a group");
+                let dir = format!("partitions/{PARTITION}/text/notes/{group}/{key}/extents");
+                let extent = TextExtent {
+                    column: "notes".to_string(),
+                    view: Some(view.to_string()),
+                    incarnation: Some(tessera_store::manifest::DECLARED_INCARNATION),
+                    dict: format!("{dir}/flush-{i}-1.dict"),
+                    postings: format!("{dir}/flush-{i}-1.postings"),
+                    presence: format!("{dir}/flush-{i}-1.roaring"),
+                };
+                manifest.files.insert(extent.dict.clone(), digest(1024));
+                manifest.files.insert(extent.postings.clone(), digest(1024));
+                manifest.files.insert(extent.presence.clone(), digest(64));
+                manifest.text_extents.push(extent);
+            }
+        }
+        let plan =
+            plan_coalesce(PARTITION, &manifest, &build_files, policy(), &all_live).expect("a plan");
+        assert_eq!(plan.texts.len(), 2, "one window per view");
+        let consumed: Vec<String> = plan
+            .texts
+            .iter()
+            .flat_map(|w| w.extents.iter())
+            .flat_map(|e| [e.dict.clone(), e.postings.clone(), e.presence.clone()])
+            .collect();
+        let untouched: Vec<String> = manifest
+            .text_extents
+            .iter()
+            .filter(|e| !consumed.contains(&e.dict))
+            .map(|e| e.dict.clone())
+            .collect();
+
+        let out_rel = "partitions/p0/coalesced/coalesce-1-1";
+        let texts: Vec<TextExtent> = plan
+            .texts
+            .iter()
+            .map(|window| {
+                let column_rel =
+                    coalesced_column_rel(out_rel, &window.column, window.view.as_deref());
+                TextExtent {
+                    column: window.column.clone(),
+                    view: window.view.clone(),
+                    incarnation: window.incarnation,
+                    dict: format!("{column_rel}/text.dict"),
+                    postings: format!("{column_rel}/text.postings"),
+                    presence: format!("{column_rel}/text.roaring"),
+                }
+            })
+            .collect();
+        let files: BTreeMap<String, FileDigest> = texts
+            .iter()
+            .flat_map(|e| {
+                [
+                    (e.dict.clone(), digest(3072)),
+                    (e.postings.clone(), digest(3072)),
+                    (e.presence.clone(), digest(96)),
+                ]
+            })
+            .collect();
+        let coalesced: Vec<String> = texts.iter().map(|e| e.dict.clone()).collect();
+        let completed = CompletedCoalesce {
+            tier: None,
+            run: None,
+            dict: None,
+            attrs: Vec::new(),
+            record: None,
+            texts,
+            terms: None,
+            files,
+            plan,
+            prefix: "v00000".to_string(),
+        };
+        assert!(rebase_into(&mut manifest, &completed));
+
+        let listed: Vec<&str> = manifest
+            .text_extents
+            .iter()
+            .map(|e| e.dict.as_str())
+            .collect();
+        let expected: Vec<&str> = coalesced
+            .iter()
+            .chain(&untouched)
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            listed, expected,
+            "each view's coalesced extent lands where that view's window began, once, and the \
+             later flush's extents keep their order"
+        );
+        for rel in &consumed {
+            assert!(
+                !manifest.files.contains_key(rel),
+                "a consumed extent file is still digested: {rel}"
+            );
+        }
+        for extent in &manifest.text_extents {
+            assert!(
+                manifest.files.contains_key(&extent.dict),
+                "a listed extent's bytes are not digested: {}",
+                extent.dict
+            );
+        }
     }
 
     /// **The record axis selects a window of `record_extents` and replaces it in place, in both
