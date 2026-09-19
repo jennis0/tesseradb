@@ -982,89 +982,6 @@ pub struct Engine {
 /// currently stands, so an unsuppressed entity is simply absent from it; inventing an
 /// `Unsuppress` for an absent entity would let an older manifest clear a suppression the WAL
 /// still holds.
-/// The runtime attribute columns the side manifests carry (`ingest.md` §6.3), **in one order**.
-///
-/// A column's position in the served list is what every buffered row, record-blob tag and
-/// segment tail is positional against, so the order the manifests' lists are appended in decides
-/// which column a value is read under. The partitions are a hash map; they are walked by key,
-/// ascending, so two opens of one bundle build the same list. With one partition this is that
-/// partition's lists; with several, every declaration is a deployment-level fact every partition
-/// publishes alike, and a name met again is skipped by `Manifest::with_attributes`.
-/// The view groups and plain views the side manifests carry (`ingest.md` §1.3), on
-/// [`side_manifest_vocabularies`]' rule: the partitions are walked by key, ascending, and a name
-/// met again is skipped by the manifest merge.
-fn side_manifest_view_declarations(
-    bundle: &Bundle,
-) -> (
-    Vec<tessera_store::manifest::GroupDescriptor>,
-    Vec<tessera_store::manifest::ViewDescriptor>,
-) {
-    let mut keys: Vec<&String> = bundle.partitions.keys().collect();
-    keys.sort();
-    let mut groups: Vec<tessera_store::manifest::GroupDescriptor> = Vec::new();
-    let mut plain: Vec<tessera_store::manifest::ViewDescriptor> = Vec::new();
-    for key in keys {
-        let manifest = &bundle.partitions[key].manifest;
-        for group in &manifest.groups {
-            if !groups.iter().any(|held| held.name == group.name) {
-                groups.push(group.clone());
-            }
-        }
-        for view in &manifest.plain_views {
-            if !plain.iter().any(|held| held.id == view.id) {
-                plain.push(view.clone());
-            }
-        }
-    }
-    (groups, plain)
-}
-
-fn side_manifest_vocabularies(bundle: &Bundle) -> Vec<tessera_store::manifest::ManifestVocabulary> {
-    let mut keys: Vec<&String> = bundle.partitions.keys().collect();
-    keys.sort();
-    let mut out: Vec<tessera_store::manifest::ManifestVocabulary> = Vec::new();
-    for key in keys {
-        for vocabulary in &bundle.partitions[key].manifest.vocabularies {
-            if !out.iter().any(|held| held.name == vocabulary.name) {
-                out.push(vocabulary.clone());
-            }
-        }
-    }
-    out
-}
-
-fn side_manifest_attributes(
-    bundle: &Bundle,
-) -> (
-    Vec<tessera_store::manifest::DeclaredScalar>,
-    Vec<tessera_store::manifest::ScopedScalar>,
-) {
-    let mut keys: Vec<&String> = bundle.partitions.keys().collect();
-    keys.sort();
-    let mut attributes = Vec::new();
-    let mut scoped = Vec::new();
-    for key in keys {
-        let manifest = &bundle.partitions[key].manifest;
-        for d in &manifest.attributes {
-            if !attributes
-                .iter()
-                .any(|held: &tessera_store::manifest::DeclaredScalar| held.name == d.name)
-            {
-                attributes.push(d.clone());
-            }
-        }
-        for f in &manifest.scoped_attributes {
-            if !scoped
-                .iter()
-                .any(|held: &tessera_store::manifest::ScopedScalar| held.name == f.name)
-            {
-                scoped.push(f.clone());
-            }
-        }
-    }
-    (attributes, scoped)
-}
-
 fn initial_deny_of(bundle: &Bundle) -> Vec<(EntityId, ChangeOp)> {
     let mut out = Vec::new();
     for partition in bundle.partitions.values() {
@@ -1076,6 +993,65 @@ fn initial_deny_of(bundle: &Bundle) -> Vec<(EntityId, ChangeOp)> {
         }
     }
     out
+}
+
+/// One of the side manifests' lists, concatenated: the partitions by key ascending, an item whose
+/// key is already held skipped.
+fn side_manifest_items<T: Clone>(
+    bundle: &Bundle,
+    list: impl Fn(&tessera_store::manifest::SegmentsManifest) -> &[T],
+    key: impl Fn(&T) -> &str,
+) -> Vec<T> {
+    let mut partition_keys: Vec<&String> = bundle.partitions.keys().collect();
+    partition_keys.sort();
+    let mut out: Vec<T> = Vec::new();
+    for partition_key in partition_keys {
+        for item in list(&bundle.partitions[partition_key].manifest) {
+            if !out.iter().any(|held| key(held) == key(item)) {
+                out.push(item.clone());
+            }
+        }
+    }
+    out
+}
+
+/// The view groups and plain views the side manifests carry (`ingest.md` §1.3), on
+/// [`side_manifest_vocabularies`]' rule: the partitions are walked by key, ascending, and a name
+/// met again is skipped by the manifest merge.
+fn side_manifest_view_declarations(
+    bundle: &Bundle,
+) -> (
+    Vec<tessera_store::manifest::GroupDescriptor>,
+    Vec<tessera_store::manifest::ViewDescriptor>,
+) {
+    (
+        side_manifest_items(bundle, |m| &m.groups, |group| &group.name),
+        side_manifest_items(bundle, |m| &m.plain_views, |view| &view.id),
+    )
+}
+
+fn side_manifest_vocabularies(bundle: &Bundle) -> Vec<tessera_store::manifest::ManifestVocabulary> {
+    side_manifest_items(bundle, |m| &m.vocabularies, |vocabulary| &vocabulary.name)
+}
+
+/// The runtime attribute columns the side manifests carry (`ingest.md` §6.3), **in one order**.
+///
+/// A column's position in the served list is what every buffered row, record-blob tag and
+/// segment tail is positional against, so the order the manifests' lists are appended in decides
+/// which column a value is read under. The partitions are a hash map; they are walked by key,
+/// ascending, so two opens of one bundle build the same list. With one partition this is that
+/// partition's lists; with several, every declaration is a deployment-level fact every partition
+/// publishes alike, and a name met again is skipped by `Manifest::with_attributes`.
+fn side_manifest_attributes(
+    bundle: &Bundle,
+) -> (
+    Vec<tessera_store::manifest::DeclaredScalar>,
+    Vec<tessera_store::manifest::ScopedScalar>,
+) {
+    (
+        side_manifest_items(bundle, |m| &m.attributes, |d| &d.name),
+        side_manifest_items(bundle, |m| &m.scoped_attributes, |f| &f.name),
+    )
 }
 
 /// The live category bindings, seeded from every durable home the bundle carries
@@ -1099,6 +1075,63 @@ fn initial_vocabularies_of(bundle: &Bundle) -> Result<Vocabularies> {
         &extensions,
     )
     .map_err(|e| EngineError::Malformed(e.to_string()))
+}
+
+/// What every partition's side manifest carries, concatenated in the partitions' own order.
+fn across_partitions<'a, T, I: IntoIterator<Item = T>>(
+    bundle: &'a Bundle,
+    of: impl Fn(&'a tessera_store::manifest::SegmentsManifest) -> I,
+) -> Vec<T> {
+    bundle
+        .partitions
+        .values()
+        .flat_map(|partition| of(&partition.manifest))
+        .collect()
+}
+
+/// The filter artefact of the bundle's first partition: the build's columns plus every extent that
+/// partition's side manifest names.
+fn open_filter_columns(
+    prefix_dir: &Path,
+    bundle: &Bundle,
+    unfolded_attributes: &[String],
+) -> std::io::Result<crate::filter::FilterColumns> {
+    let partition = bundle.partitions.keys().next().cloned().unwrap_or_default();
+    let manifest = bundle.partitions.get(&partition).map(|p| &p.manifest);
+    crate::filter::FilterColumns::open(
+        prefix_dir,
+        &partition,
+        &bundle.manifest.declared_scalars,
+        // The scoped column families of every group, flattened: the group is already
+        // the first component of each family's view ids, so what the opener needs is
+        // the families and not the rosters (`views.md` §5).
+        &bundle.manifest.scoped_scalars(),
+        // The roster this bundle is serving, which is what places a scoped column on
+        // disc (decision 0115).
+        &|view: &str| bundle.manifest.incarnation_of(view),
+        &bundle.manifest.vocabularies,
+        manifest.map(|m| m.attr_extents.as_slice()).unwrap_or(&[]),
+        // The record blob rides the same open (records §3, §7): the base the schema owes plus
+        // every extent the side-manifest names — always the full shape, even while no flush
+        // writes one, so a restart composes whatever was published.
+        manifest.map(|m| m.record_extents.as_slice()).unwrap_or(&[]),
+        manifest
+            .map(|m| m.artifact_record_extents.as_slice())
+            .unwrap_or(&[]),
+        // The entity→term transpose rides the same open (contracts §2.4): the base the build
+        // always writes plus every extent the side-manifest names, so a restart composes the
+        // labels of everything flushed since the build rather than answering "unknown" for it.
+        manifest
+            .map(|m| m.entity_terms_extents.as_slice())
+            .unwrap_or(&[]),
+        manifest.map(|m| m.text_extents.as_slice()).unwrap_or(&[]),
+        // The columns whose base no fold has written yet (`ingest.md` §6.3).
+        unfolded_attributes,
+        // Mapped, for the reason `FilterColumns::open` gives: the engine opens every
+        // declared column at once and holds them for the process lifetime, so the
+        // alternative is tens of GB of residency at 10⁹ paid before any filter arrives.
+        true,
+    )
 }
 
 impl Engine {
@@ -1313,49 +1346,31 @@ impl Engine {
         // is `alloc::allocator_floor`, named rather than spelled out here so the property test
         // can exercise it instead of restating it: an id handed out twice grants the new item
         // every access the old one had.
-        let side_manifest_high_waters: Vec<u64> = bundle
-            .partitions
-            .values()
-            .map(|partition| partition.manifest.entity_id_high_water)
-            .collect();
+        let side_manifest_high_waters: Vec<u64> =
+            across_partitions(&bundle, |m| [m.entity_id_high_water]);
         // **The row-less mark's homes are the side manifests only**, and `SEGMENTS-0.json` is one
         // of them — a build whose declaration carries layers spends row-less ids and records the mark there, so
         // this is where a built layer's claim is honoured. `MANIFEST.json` carries no such field at
         // all, and folding the ceiling in as the bundle term is what says "nothing row-less yet"
         // without inventing one.
-        let side_manifest_low_waters: Vec<u64> = bundle
-            .partitions
-            .values()
-            .map(|partition| partition.manifest.entity_id_low_water)
-            .collect();
+        let side_manifest_low_waters: Vec<u64> =
+            across_partitions(&bundle, |m| [m.entity_id_low_water]);
         // One partition today, so this concatenation is the whole registry; at more than one it is
         // the union, and a layer registered against one partition is a layer of the deployment
         // (⊘ **I13b's obligation lands here at the first second partition** — the registry itself
         // is partition-independent, but nothing yet checks that two partitions agree about a name).
-        let manifest_layers: Vec<tessera_types::layer::RegisteredLayer> = bundle
-            .partitions
-            .values()
-            .flat_map(|partition| partition.manifest.layers.iter().cloned())
-            .collect();
-        let manifest_layer_tombstones: Vec<String> = bundle
-            .partitions
-            .values()
-            .flat_map(|partition| partition.manifest.layer_tombstones.iter().cloned())
-            .collect();
+        let manifest_layers: Vec<tessera_types::layer::RegisteredLayer> =
+            across_partitions(&bundle, |m| m.layers.iter().cloned());
+        let manifest_layer_tombstones: Vec<String> =
+            across_partitions(&bundle, |m| m.layer_tombstones.iter().cloned());
         // **The roster's runtime half, unioned on `manifest_layers`' argument** (`views.md` §3.2):
         // a view is a deployment-level object — its key is the group's, not a partition's — so
         // the creations and the tombstones belong to the deployment whichever
         // partition's manifest published them. With one partition this is that partition's list.
-        let manifest_created_views: Vec<tessera_types::view::CreatedView> = bundle
-            .partitions
-            .values()
-            .flat_map(|partition| partition.manifest.views.iter().cloned())
-            .collect();
-        let manifest_dead_incarnations: Vec<tessera_types::view::DeadIncarnation> = bundle
-            .partitions
-            .values()
-            .flat_map(|partition| partition.manifest.dead_view_incarnations.iter().cloned())
-            .collect();
+        let manifest_created_views: Vec<tessera_types::view::CreatedView> =
+            across_partitions(&bundle, |m| m.views.iter().cloned());
+        let manifest_dead_incarnations: Vec<tessera_types::view::DeadIncarnation> =
+            across_partitions(&bundle, |m| m.dead_view_incarnations.iter().cloned());
         // The views the *build* declared, whose keys a create must not reissue.
         let declared_views: Vec<(String, String)> = bundle
             .manifest
@@ -1372,23 +1387,14 @@ impl Engine {
         // deployment-level object with an entity of its own, so its membership belongs to the
         // deployment rather than to whichever partition's manifest happens to name the extent.
         // With one partition this is that partition's list.
-        let manifest_membership_extents: Vec<tessera_store::manifest::MembershipExtent> = bundle
-            .partitions
-            .values()
-            .flat_map(|partition| partition.manifest.membership_extents.iter().cloned())
-            .collect();
+        let manifest_membership_extents: Vec<tessera_store::manifest::MembershipExtent> =
+            across_partitions(&bundle, |m| m.membership_extents.iter().cloned());
         // The two lists that make a level's derived structures placeable across a restart, unioned
         // on the same argument.
-        let manifest_level_versions: Vec<tessera_store::manifest::LevelVersion> = bundle
-            .partitions
-            .values()
-            .flat_map(|partition| partition.manifest.level_versions.iter().cloned())
-            .collect();
-        let manifest_derived_extents: Vec<tessera_store::manifest::DerivedExtent> = bundle
-            .partitions
-            .values()
-            .flat_map(|partition| partition.manifest.derived_extents.iter().cloned())
-            .collect();
+        let manifest_level_versions: Vec<tessera_store::manifest::LevelVersion> =
+            across_partitions(&bundle, |m| m.level_versions.iter().cloned());
+        let manifest_derived_extents: Vec<tessera_store::manifest::DerivedExtent> =
+            across_partitions(&bundle, |m| m.derived_extents.iter().cloned());
         let (overlay, buffer, write_state) = WritePath::reconstruct(
             wal_path,
             crate::write::ManifestSeed {
@@ -1489,12 +1495,12 @@ impl Engine {
         // The incarnation travels with the pair: a column of a dead incarnation is on disc under
         // the same path a key created again would use, and `with_scoped_columns` drops it rather
         // than publishing the predecessor's values as the new view's (decision 0115).
-        let scoped_columns: Vec<(String, String, tessera_types::view::ViewIncarnation)> = bundle
-            .partitions
-            .values()
-            .flat_map(|p| p.manifest.scoped_columns.iter())
-            .map(|c| (c.column.clone(), c.view.clone(), c.incarnation))
-            .collect();
+        let scoped_columns: Vec<(String, String, tessera_types::view::ViewIncarnation)> =
+            across_partitions(&bundle, |m| {
+                m.scoped_columns
+                    .iter()
+                    .map(|c| (c.column.clone(), c.view.clone(), c.incarnation))
+            });
         let bundle = if created_views.is_empty()
             && dead_incarnations.is_empty()
             && scoped_columns.is_empty()
@@ -1526,63 +1532,8 @@ impl Engine {
         // over everything ingested since (`filter-index.md` §2.1).
         let filter_columns = {
             let partition = bundle.partitions.keys().next().cloned().unwrap_or_default();
-            let extents = bundle
-                .partitions
-                .get(&partition)
-                .map(|p| p.manifest.attr_extents.clone())
-                .unwrap_or_default();
-            // The record blob rides the same open (records §3, §7): the base the schema owes plus
-            // every extent the side-manifest names — always the full shape, even while no flush
-            // writes one, so a restart composes whatever was published.
-            let record_extents = bundle
-                .partitions
-                .get(&partition)
-                .map(|p| p.manifest.record_extents.clone())
-                .unwrap_or_default();
-            let artifact_record_extents = bundle
-                .partitions
-                .get(&partition)
-                .map(|p| p.manifest.artifact_record_extents.clone())
-                .unwrap_or_default();
-            let text_extents = bundle
-                .partitions
-                .get(&partition)
-                .map(|p| p.manifest.text_extents.clone())
-                .unwrap_or_default();
-            // The entity→term transpose rides the same open (contracts §2.4): the base the build
-            // always writes plus every extent the side-manifest names, so a restart composes the
-            // labels of everything flushed since the build rather than answering "unknown" for it.
-            let entity_terms_extents = bundle
-                .partitions
-                .get(&partition)
-                .map(|p| p.manifest.entity_terms_extents.clone())
-                .unwrap_or_default();
             Arc::new(
-                crate::filter::FilterColumns::open(
-                    &prefix_dir,
-                    &partition,
-                    &bundle.manifest.declared_scalars,
-                    // The scoped column families of every group, flattened: the group is already
-                    // the first component of each family's view ids, so what the opener needs is
-                    // the families and not the rosters (`views.md` §5).
-                    &bundle.manifest.scoped_scalars(),
-                    // The roster this bundle is serving, which is what places a scoped column on
-                    // disc (decision 0115).
-                    &|view: &str| bundle.manifest.incarnation_of(view),
-                    &bundle.manifest.vocabularies,
-                    &extents,
-                    &record_extents,
-                    &artifact_record_extents,
-                    &entity_terms_extents,
-                    &text_extents,
-                    // The columns whose base no fold has written yet (`ingest.md` §6.3).
-                    &unfolded_attributes,
-                    // Mapped, for the reason `FilterColumns::open` gives: the engine opens every
-                    // declared column at once and holds them for the process lifetime, so the
-                    // alternative is tens of GB of residency at 10⁹ paid before any filter arrives.
-                    true,
-                )
-                .map_err(|e| {
+                open_filter_columns(&prefix_dir, &bundle, &unfolded_attributes).map_err(|e| {
                     EngineError::Store(tessera_store::StoreError::Io {
                         path: prefix_dir.join("partitions").join(&partition),
                         source: e,
@@ -1826,42 +1777,6 @@ impl Engine {
         Ok(engine)
     }
 
-    /// Test-only override for the serial/parallel fan-out threshold
-    /// (`viewport::SERIAL_FALLBACK_MAX_ROWS`, 500,000,000 — see that constant's doc).
-    /// Gated behind the `bench-timing` feature both crates' integration test suites already
-    /// build with, so this does not exist at all — not even as a compiled, unreachable symbol —
-    /// in a build without it, and a shipped binary never has it
-    /// (`scripts/check-layers.sh` asserts the runtime gate is present and defaults closed).
-    ///
-    /// **Why this exists.** `SERIAL_FALLBACK_MAX_ROWS` is 500,000,000, and a fixture that
-    /// genuinely clears it is impractical to build inside a unit
-    /// test (real minutes even on the fast pipeline), which left the parallel branch's
-    /// `pool.install` sweep — the collect-order/byte-equality claim `viewport.rs`'s module doc
-    /// makes — with no test able to reach it. This is the fix: a per-`Engine` override, set once
-    /// after `Engine::open` and before issuing requests, that the byte-equality tests use to force
-    /// the fan-out to engage on a small, fast fixture without changing production behaviour at
-    /// all. **Only the SETTER below is `bench-timing`-gated; the
-    /// `serial_fallback_max_rows` field itself is present in every build and `Engine::viewport`
-    /// always pays one `Relaxed` load of it** (deliberately not `#[cfg]`-gated too — two code
-    /// paths in the hot path would cost auditability for the sake of one relaxed load of a value
-    /// production can never write, negligible against the thousands of other atomic operations a
-    /// request already does). A production build therefore always reads this field, but since
-    /// nothing outside `bench-timing` can ever write it, the load always yields
-    /// `SERIAL_FALLBACK_MAX_ROWS` — behaviourally identical to reading the constant directly.
-    ///
-    /// **Why per-`Engine`, not global or thread-local state.** `cargo test` runs tests in
-    /// parallel by default, each typically constructing its own `Engine`; a process-global would
-    /// have one test's override leak into another's concurrently-running assertions, and a
-    /// thread-local would silently stop working the moment a request is served from a different
-    /// OS thread than the one that set it (exactly what happens in `tessera-server`'s tests,
-    /// where the engine is driven from `axum`/`tokio` task threads, not the test's own). Scoping
-    /// the override to the `Engine` instance itself — already constructed once per test, already
-    /// never shared between tests — sidesteps both hazards entirely.
-    ///
-    /// **Not a deployment knob.** No `tessera.toml` field reaches this; `#[doc(hidden)]` keeps it
-    /// out of this crate's public docs even in a `bench-timing` build; `pub` (not `pub(crate)`) is
-    /// required only because `tests/*.rs` integration tests are separate crate compilation units
-    /// that cannot see `pub(crate)` items in this library crate at all.
     /// Turn the background refresh off, so a session stays in the stale-serve window.
     ///
     /// **A test hook, and gated so it cannot exist in a shipped build.** The window decision
@@ -1942,10 +1857,6 @@ impl Engine {
         self.write.rebuild_suggestion_index(vocabulary.to_string())
     }
 
-    /// Hold the background refresh, leaving it **in flight** — the window rung 3 of
-    /// `Engine::session_geometry`'s ladder sheds a racer in. Distinct from
-    /// [`Self::set_background_refresh_for_test`], which models a refresh that produces nothing and
-    /// *finishes*: the flag clears there, and rung 3 builds instead of refusing.
     #[cfg(feature = "fault-injection")]
     #[doc(hidden)]
     /// Hold a fold between its last pass and its submission, so a test can land a flush **inside
@@ -2020,6 +1931,10 @@ impl Engine {
             .load(Ordering::SeqCst)
     }
 
+    /// Hold the background refresh, leaving it **in flight** — the window rung 3 of
+    /// `Engine::session_geometry`'s ladder sheds a racer in. Distinct from
+    /// [`Self::set_background_refresh_for_test`], which models a refresh that produces nothing and
+    /// *finishes*: the flag clears there, and rung 3 builds instead of refusing.
     pub fn set_refresh_paused_for_test(&self, paused: bool) {
         self.refresh_paused.store(paused, Ordering::SeqCst);
     }
@@ -2077,6 +1992,42 @@ impl Engine {
         self.member_of_column_walks.load(Ordering::Relaxed)
     }
 
+    /// Test-only override for the serial/parallel fan-out threshold
+    /// (`viewport::SERIAL_FALLBACK_MAX_ROWS`, 500,000,000 — see that constant's doc).
+    /// Gated behind the `bench-timing` feature both crates' integration test suites already
+    /// build with, so this does not exist at all — not even as a compiled, unreachable symbol —
+    /// in a build without it, and a shipped binary never has it
+    /// (`scripts/check-layers.sh` asserts the runtime gate is present and defaults closed).
+    ///
+    /// **Why this exists.** `SERIAL_FALLBACK_MAX_ROWS` is 500,000,000, and a fixture that
+    /// genuinely clears it is impractical to build inside a unit
+    /// test (real minutes even on the fast pipeline), which left the parallel branch's
+    /// `pool.install` sweep — the collect-order/byte-equality claim `viewport.rs`'s module doc
+    /// makes — with no test able to reach it. This is the fix: a per-`Engine` override, set once
+    /// after `Engine::open` and before issuing requests, that the byte-equality tests use to force
+    /// the fan-out to engage on a small, fast fixture without changing production behaviour at
+    /// all. **Only the SETTER below is `bench-timing`-gated; the
+    /// `serial_fallback_max_rows` field itself is present in every build and `Engine::viewport`
+    /// always pays one `Relaxed` load of it** (deliberately not `#[cfg]`-gated too — two code
+    /// paths in the hot path would cost auditability for the sake of one relaxed load of a value
+    /// production can never write, negligible against the thousands of other atomic operations a
+    /// request already does). A production build therefore always reads this field, but since
+    /// nothing outside `bench-timing` can ever write it, the load always yields
+    /// `SERIAL_FALLBACK_MAX_ROWS` — behaviourally identical to reading the constant directly.
+    ///
+    /// **Why per-`Engine`, not global or thread-local state.** `cargo test` runs tests in
+    /// parallel by default, each typically constructing its own `Engine`; a process-global would
+    /// have one test's override leak into another's concurrently-running assertions, and a
+    /// thread-local would silently stop working the moment a request is served from a different
+    /// OS thread than the one that set it (exactly what happens in `tessera-server`'s tests,
+    /// where the engine is driven from `axum`/`tokio` task threads, not the test's own). Scoping
+    /// the override to the `Engine` instance itself — already constructed once per test, already
+    /// never shared between tests — sidesteps both hazards entirely.
+    ///
+    /// **Not a deployment knob.** No `tessera.toml` field reaches this; `#[doc(hidden)]` keeps it
+    /// out of this crate's public docs even in a `bench-timing` build; `pub` (not `pub(crate)`) is
+    /// required only because `tests/*.rs` integration tests are separate crate compilation units
+    /// that cannot see `pub(crate)` items in this library crate at all.
     #[cfg(feature = "bench-timing")]
     #[doc(hidden)]
     pub fn set_serial_fallback_max_rows_for_test(&self, value: u64) {
@@ -3065,14 +3016,6 @@ impl Engine {
         self.generation.load().external_index.resolve(external_id)
     }
 
-    /// Batch form of [`Self::resolve_external_id`] for `/control/ingest`'s duplicate check
-    /// (contracts §3.1 r6): live map first for the *whole* batch (Important I-8 — `established`
-    /// holds every id ingested since the build, which the sidecar cannot see at all, and is
-    /// exactly where a retried client batch's duplicate lives), then one batched, sorted sidecar
-    /// call for whatever residual keys the live map didn't resolve — each bundle extent is opened
-    /// at most once regardless of batch size, never once per row.
-    ///
-    /// Returns one `Option<EntityId>` per input, in the caller's given order.
     /// Invert `tessera_id`s to entity ids for the admin plane, all-or-nothing.
     ///
     /// **The idset is checked first, against the same generation the inversions use** — one
@@ -3174,6 +3117,14 @@ impl Engine {
         flushed_terms_of(&self.generation(), entity)
     }
 
+    /// Batch form of [`Self::resolve_external_id`] for `/control/ingest`'s duplicate check
+    /// (contracts §3.1 r6): live map first for the *whole* batch (Important I-8 — `established`
+    /// holds every id ingested since the build, which the sidecar cannot see at all, and is
+    /// exactly where a retried client batch's duplicate lives), then one batched, sorted sidecar
+    /// call for whatever residual keys the live map didn't resolve — each bundle extent is opened
+    /// at most once regardless of batch size, never once per row.
+    ///
+    /// Returns one `Option<EntityId>` per input, in the caller's given order.
     pub fn resolve_external_ids(
         &self,
         external_ids: &[Vec<u8>],
@@ -3287,48 +3238,54 @@ impl Engine {
         queue_bound: usize,
     ) -> std::result::Result<(), crate::write::ExecutorStartError> {
         let generation = Arc::clone(&self.generation);
+        let deps = self.maintenance_deps();
         self.write.start_executor(
             generation,
             Arc::clone(&self.row_projection_cache),
             queue_bound,
-            crate::write::MaintenanceDeps {
-                max_age_secs: self.config.flush_max_age_secs,
-                max_items: self.config.flush_max_items,
-                coalesce: coalesce_policy(&self.config),
-                merge: merge_policy(&self.config),
-                artifact_projections: Arc::clone(&self.artifact_projections),
-                region_cache: Arc::clone(&self.region_cache),
-                shapes: Arc::clone(&self.shapes),
-                lineages: Arc::clone(&self.lineages),
-                level_contents: Arc::clone(&self.level_contents),
-                // The **configured** value, not the resolved policy's: compaction §4 step 3
-                // re-checks write-path §7's base-segment relation against the fold's own output,
-                // and `tessera-server`'s loader checks only an explicitly set one.
-                configured_merge_bytes: self.config.max_merged_segment_bytes,
-                suggest_dir: self.suggest_dir.clone(),
-                compaction: self.config.compaction,
-                coalesce_enabled: Arc::clone(&self.coalesce_enabled),
-                merge_enabled: Arc::clone(&self.merge_enabled),
-                fold_paused: Arc::clone(&self.fold_paused),
-                fold_publication_paused: Arc::clone(&self.fold_publication_paused),
-                merge_publication_paused: Arc::clone(&self.merge_publication_paused),
-                refresh: crate::refresh::RefreshDeps {
-                    cache: Arc::clone(&self.row_projection_cache),
-                    pool: Arc::clone(&self.pool),
-                    in_flight: Arc::clone(&self.refresh_in_flight),
-                    refreshes: Arc::clone(&self.refreshes),
-                    enabled: Arc::clone(&self.refresh_enabled),
-                    paused: Arc::clone(&self.refresh_paused),
-                    projection_routes: Arc::clone(&self.projection_routes),
-                },
-                bundle_root: self.bundle_root.clone(),
-                identity_key: self.identity_key,
-                pool: Arc::clone(&self.pool),
-                max_distinct_terms: self.plugin.declared_bounds().max_distinct_terms,
-            },
+            deps,
             #[cfg(feature = "fault-injection")]
             None,
         )
+    }
+
+    /// The executor's maintenance dependencies, as both starters hand them over.
+    fn maintenance_deps(&self) -> crate::write::MaintenanceDeps {
+        crate::write::MaintenanceDeps {
+            max_age_secs: self.config.flush_max_age_secs,
+            max_items: self.config.flush_max_items,
+            coalesce: coalesce_policy(&self.config),
+            merge: merge_policy(&self.config),
+            artifact_projections: Arc::clone(&self.artifact_projections),
+            region_cache: Arc::clone(&self.region_cache),
+            shapes: Arc::clone(&self.shapes),
+            lineages: Arc::clone(&self.lineages),
+            level_contents: Arc::clone(&self.level_contents),
+            // The **configured** value, not the resolved policy's: compaction §4 step 3
+            // re-checks write-path §7's base-segment relation against the fold's own output,
+            // and `tessera-server`'s loader checks only an explicitly set one.
+            configured_merge_bytes: self.config.max_merged_segment_bytes,
+            suggest_dir: self.suggest_dir.clone(),
+            compaction: self.config.compaction,
+            coalesce_enabled: Arc::clone(&self.coalesce_enabled),
+            merge_enabled: Arc::clone(&self.merge_enabled),
+            fold_paused: Arc::clone(&self.fold_paused),
+            fold_publication_paused: Arc::clone(&self.fold_publication_paused),
+            merge_publication_paused: Arc::clone(&self.merge_publication_paused),
+            refresh: crate::refresh::RefreshDeps {
+                cache: Arc::clone(&self.row_projection_cache),
+                pool: Arc::clone(&self.pool),
+                in_flight: Arc::clone(&self.refresh_in_flight),
+                refreshes: Arc::clone(&self.refreshes),
+                enabled: Arc::clone(&self.refresh_enabled),
+                paused: Arc::clone(&self.refresh_paused),
+                projection_routes: Arc::clone(&self.projection_routes),
+            },
+            bundle_root: self.bundle_root.clone(),
+            identity_key: self.identity_key,
+            pool: Arc::clone(&self.pool),
+            max_distinct_terms: self.plugin.declared_bounds().max_distinct_terms,
+        }
     }
 
     /// As [`Engine::start_write_executor`], with a fault switchboard armed. Test builds only.
@@ -3339,45 +3296,12 @@ impl Engine {
         faults: Arc<tessera_lifecycle::faults::FaultSwitchboard>,
     ) -> std::result::Result<(), crate::write::ExecutorStartError> {
         let generation = Arc::clone(&self.generation);
+        let deps = self.maintenance_deps();
         self.write.start_executor(
             generation,
             Arc::clone(&self.row_projection_cache),
             queue_bound,
-            crate::write::MaintenanceDeps {
-                max_age_secs: self.config.flush_max_age_secs,
-                max_items: self.config.flush_max_items,
-                coalesce: coalesce_policy(&self.config),
-                merge: merge_policy(&self.config),
-                artifact_projections: Arc::clone(&self.artifact_projections),
-                region_cache: Arc::clone(&self.region_cache),
-                shapes: Arc::clone(&self.shapes),
-                lineages: Arc::clone(&self.lineages),
-                level_contents: Arc::clone(&self.level_contents),
-                // The **configured** value, not the resolved policy's: compaction §4 step 3
-                // re-checks write-path §7's base-segment relation against the fold's own output,
-                // and `tessera-server`'s loader checks only an explicitly set one.
-                configured_merge_bytes: self.config.max_merged_segment_bytes,
-                suggest_dir: self.suggest_dir.clone(),
-                compaction: self.config.compaction,
-                coalesce_enabled: Arc::clone(&self.coalesce_enabled),
-                merge_enabled: Arc::clone(&self.merge_enabled),
-                fold_paused: Arc::clone(&self.fold_paused),
-                fold_publication_paused: Arc::clone(&self.fold_publication_paused),
-                merge_publication_paused: Arc::clone(&self.merge_publication_paused),
-                refresh: crate::refresh::RefreshDeps {
-                    cache: Arc::clone(&self.row_projection_cache),
-                    pool: Arc::clone(&self.pool),
-                    in_flight: Arc::clone(&self.refresh_in_flight),
-                    refreshes: Arc::clone(&self.refreshes),
-                    enabled: Arc::clone(&self.refresh_enabled),
-                    paused: Arc::clone(&self.refresh_paused),
-                    projection_routes: Arc::clone(&self.projection_routes),
-                },
-                bundle_root: self.bundle_root.clone(),
-                identity_key: self.identity_key,
-                pool: Arc::clone(&self.pool),
-                max_distinct_terms: self.plugin.declared_bounds().max_distinct_terms,
-            },
+            deps,
             Some(faults),
         )
     }
@@ -4481,25 +4405,11 @@ pub(crate) fn open_rotation(
     // pre-fold values, missing the blanking, missing the folded extents — and the fold is exactly
     // the publication that makes that wrong (`filter-index.md` §6.2). A declared column whose
     // files are missing refuses here rather than reading as "those entities carry no value".
+    // The record blob rotates with the prefix for the reason the value columns do: the
+    // fold rewrites it, and the superseded prefix's files are pre-blanking.
     let filter_columns = Arc::new(
-        crate::filter::FilterColumns::open(
-            &prefix_dir,
-            &phash,
-            &bundle.manifest.declared_scalars,
-            &bundle.manifest.scoped_scalars(),
-            &|view: &str| bundle.manifest.incarnation_of(view),
-            &bundle.manifest.vocabularies,
-            &partition.manifest.attr_extents,
-            // The record blob rotates with the prefix for the reason the value columns do: the
-            // fold rewrites it, and the superseded prefix's files are pre-blanking.
-            &partition.manifest.record_extents,
-            &partition.manifest.artifact_record_extents,
-            &partition.manifest.entity_terms_extents,
-            &partition.manifest.text_extents,
-            &unfolded_attributes,
-            true,
-        )
-        .map_err(|e| PublishGeometryError::PrefixNotOpenable(e.to_string()))?,
+        open_filter_columns(&prefix_dir, &bundle, &unfolded_attributes)
+            .map_err(|e| PublishGeometryError::PrefixNotOpenable(e.to_string()))?,
     );
 
     Ok((
