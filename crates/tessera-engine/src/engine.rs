@@ -523,6 +523,7 @@ impl Engine {
         plugin: impl Plugin + 'static,
         config: EngineConfig,
     ) -> Result<Engine> {
+        config.check()?;
         let mut bundle = open_bundle(bundle_root).map_err(EngineError::Store)?;
 
         // **The attribute columns declared while the service ran, appended to the schema before

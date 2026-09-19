@@ -163,6 +163,8 @@ pub enum EngineError {
     /// be a silent behaviour change the D-D design (one shared pool, no second throttle) does not
     /// admit.
     ThreadPoolBuild(String),
+    /// The `EngineConfig` handed to `Engine::open` switches off something a viewer relies on.
+    ConfigRefused(String),
     /// `POST /v1/items/{tessera_id}` (contracts §2.2/§3.2 r6): the caller-supplied `idset` does
     /// not match the idset of the generation [`crate::viewport::Engine::item`] loaded
     /// for this call. Named explicitly so the idset check can run *inside* `item`, against the
@@ -239,6 +241,7 @@ impl std::fmt::Display for EngineError {
             EngineError::ThreadPoolBuild(detail) => {
                 write!(f, "failed to build the shared compute pool: {detail}")
             }
+            EngineError::ConfigRefused(detail) => write!(f, "engine config refused: {detail}"),
             EngineError::StaleIdSet => write!(f, "stale idset"),
         }
     }

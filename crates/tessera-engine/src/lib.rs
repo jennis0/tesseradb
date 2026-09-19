@@ -76,7 +76,7 @@ pub use compose::{
 // judgement, and a caller that could ask separately could also act on a stale answer.
 pub use gate::VisibleViews;
 pub use geometry::{GeometryPublication, GeometryRefused, GeometryRefusedReason};
-pub use config::{default_compute_threads, EngineConfig};
+pub use config::{default_compute_threads, EngineConfig, MIN_K_MIN, MIN_SELECTION_WIDTH};
 pub use control::{GrownMembership, PublishedArtifacts};
 pub use engine::Engine;
 pub use error::EngineError;

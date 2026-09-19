@@ -26,10 +26,7 @@ pub struct EngineConfig {
     /// memo §4), pending that memo's §0 visual experiments.
     ///
     /// **Must be at least 1.** At 0 the floor clause is switched off and a tile whose visible items
-    /// all sit above θ serves nothing — I7 gone, silently. `tessera-server`'s config loader refuses
-    /// to start on `k_min = 0` (`ConfigError::FloorClauseDisabled`) rather than clamping, so no
-    /// `tessera.toml` can reach that state; an embedder constructing this struct directly is on its
-    /// own honour, which is why the constraint is stated here rather than only in the loader.
+    /// all sit above θ serves nothing. [`Engine::open`] refuses it ([`MIN_K_MIN`]).
     pub k_min: usize,
     /// §7.2's cap clause, `K_max`: the most marks any one tile draws.
     ///
@@ -114,10 +111,8 @@ pub struct EngineConfig {
     ///
     /// **Must be at least 2 when set.** `MergePolicy::select` returns `None` below 2, so a width
     /// of 1 is not "merge eagerly" but "never merge" — segments accumulate for ever and the
-    /// failure looks like a policy that is simply never triggered. `tessera-server`'s loader
-    /// refuses widths below 2 at startup rather than letting the first tick discover them
-    /// silently; an embedder constructing this struct directly is on its own honour, which is why
-    /// the constraint is stated here as well as in the loader.
+    /// failure looks like a policy that is simply never triggered. [`Engine::open`] refuses it
+    /// ([`MIN_SELECTION_WIDTH`]).
     pub tier_width: Option<usize>,
     /// `serve.segment_floor_bytes` — sizes at or below this compare equal for merge selection, so
     /// a tail of tiny flush segments forms one tier rather than a ladder of singletons that never
@@ -134,8 +129,8 @@ pub struct EngineConfig {
     /// all, so the width was a constant nothing could reach. It gets a key because the correctness
     /// suite has to be able to make a coalesce eligible at a chosen point rather than after eight
     /// flushes (correctness-suite §12.3). **Must be at least 2 when set**, for
-    /// [`Self::tier_width`]'s reason verbatim: below 2 the pass is silently disabled, and the
-    /// server's loader refuses that at startup.
+    /// [`Self::tier_width`]'s reason: below 2 the pass is silently disabled, and
+    /// [`Engine::open`] refuses it.
     pub coalesce_width: Option<usize>,
     /// When a fold is dispatched with nobody asking for one — compaction §9's automatic trigger,
     /// as decision 0056 rules it.
@@ -145,6 +140,35 @@ pub struct EngineConfig {
     /// chose is not a decision this type may make on a caller's behalf. `tessera-server` applies
     /// §9's defaults, because it is where an operator can see and change them.
     pub compaction: crate::compact::CompactionSchedule,
+}
+
+/// The smallest `k_min`. At 0 a tile whose visible items all sit above the threshold draws nothing.
+pub const MIN_K_MIN: usize = 1;
+
+/// The smallest `tier_width` and `coalesce_width`. Below it a pass never selects anything.
+pub const MIN_SELECTION_WIDTH: usize = 2;
+
+impl EngineConfig {
+    /// Refuses the values that would leave a viewer a blank tile or stop maintenance silently.
+    pub(crate) fn check(&self) -> crate::error::Result<()> {
+        if self.k_min < MIN_K_MIN {
+            return Err(crate::error::EngineError::ConfigRefused(format!(
+                "k_min is {}; set it to {MIN_K_MIN} or more so a non-empty tile always draws a mark",
+                self.k_min
+            )));
+        }
+        for (key, width) in [
+            ("tier_width", self.tier_width),
+            ("coalesce_width", self.coalesce_width),
+        ] {
+            if let Some(width) = width.filter(|w| *w < MIN_SELECTION_WIDTH) {
+                return Err(crate::error::EngineError::ConfigRefused(format!(
+                    "{key} is {width}; set it to {MIN_SELECTION_WIDTH} or more, or leave it unset"
+                )));
+            }
+        }
+        Ok(())
+    }
 }
 
 /// The row-space merge's policy (write-path §7), with every configured knob applied.

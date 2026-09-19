@@ -142,19 +142,9 @@ impl Engine {
 
     /// Bound both caches, and the only route by which the two config keys reach them.
     ///
-    /// **Not an `EngineConfig` field, deliberately** *(and this cost a design revision)*.
-    /// `EngineConfig` is `Copy` with no `Default` and is built by *exhaustive* struct literal at
-    /// fifteen sites, three of which are in `crates/tessera-engine/tests/viewport.rs` — a file this
-    /// stage's allowlist marks `[frozen]` for every track. Adding a field there would have made the
-    /// workspace uncompilable with no in-allowlist repair. `Engine::start_write_executor` met the
-    /// same wall with `ingest_queue_bound` and answered it the same way; this follows that
-    /// precedent rather than inventing a second one.
-    ///
     /// Called by `tessera_server::prepare` immediately after [`Self::open`], *after* it has
     /// validated both figures against `expected_concurrent_sessions`. An embedder that never calls
-    /// this gets unbounded caches, which is stated here rather than
-    /// silently assumed, and is the same posture `EngineConfig::k_min` documents for a constraint
-    /// only the server's loader enforces.
+    /// this gets unbounded caches.
     pub fn set_cache_bounds(&self, row_projection_bytes: u64, fragment_bytes: u64) {
         self.row_projection_cache
             .set_bound_bytes(row_projection_bytes);
@@ -213,9 +203,6 @@ impl Engine {
 
     /// How long a request parks on another request's in-flight row-projection build before it is
     /// refused (`serve.single_flight_wait_ms`, decision 0058).
-    ///
-    /// A setter for [`Self::set_cache_bounds`]'s reason and by its route: `EngineConfig` is
-    /// exhaustively constructed at fifteen sites, three of them in frozen test files.
     ///
     /// An embedder that never calls this gets `single_flight::DEFAULT_WAIT_BUDGET_MS`, which is
     /// argued from the measured build cost it has to outlast rather than being a placeholder.
