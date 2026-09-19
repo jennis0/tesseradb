@@ -5,8 +5,8 @@ use super::*;
 pub(super) struct PlannedFills {
     /// The entity-scoped cells, one entry per entity.
     pub(super) fills: Vec<(EntityId, tessera_lifecycle::Fill)>,
-    /// The group-scoped cells, one entry per `(entity, owner view)` — the address a scoped value
-    /// has, and never the entity alone (`views.md` §5).
+    /// The group-scoped cells, one entry per `(entity, owner view)`. A scoped value's address is
+    /// the pair, never the entity alone.
     pub(super) scoped_fills: Vec<(EntityId, String, tessera_lifecycle::ScopedFill)>,
     pub(super) filled: u64,
     pub(super) held: u64,
@@ -18,12 +18,12 @@ pub(super) enum ValuesColumn {
     /// positional against.
     Entity(usize),
     /// A position in the view's group-scoped families, the space its `scoped` list is positional
-    /// against (`views.md` §5).
+    /// against.
     Scoped(usize),
 }
 
-/// The key half of an owner view id — the half a caller spelled, never the owning group, which a
-/// sharing group's caller has no business learning from a refusal.
+/// The key half of an owner view id: the half a caller spelled, never the owning group. A sharing
+/// group's caller has no business learning the owning group from a refusal.
 pub(super) fn key_of_owner_view(owner_view: &str) -> &str {
     owner_view
         .split_once(tessera_store::GROUP_SEPARATOR)
@@ -31,13 +31,12 @@ pub(super) fn key_of_owner_view(owner_view: &str) -> &str {
 }
 
 /// What this deployment already holds for one entity and one entity-scoped column: the entity's
-/// own buffered row, then `pending` — the cells an earlier values batch filled and no flush has
-/// written — then the flushed homes.
+/// own buffered row, then `pending` (the cells an earlier values batch filled and no flush has
+/// written), then the flushed homes.
 ///
-/// **Each source is asked for a *held* value, not for a slot.** A source that carries the position
-/// and holds the column's absence falls through to the next, so a cell one source left absent is
-/// not read as unheld while another holds a value for it.
-///
+/// Each source is asked for a held value, not for a slot: a source that carries the position and
+/// holds the column's absence falls through to the next, so a cell one source left absent is not
+/// read as unheld while another holds a value for it.
 pub(super) fn held_entity_value(
     generation: &Generation,
     entity: EntityId,
@@ -63,7 +62,7 @@ pub(super) fn held_entity_value(
 /// What this deployment already holds for one `(entity, attribute, key)` cell, on
 /// [`held_entity_value`]'s rule for absence.
 ///
-/// The buffered source is every row of the entity whose view addresses this same key — the cell's
+/// The buffered source is every row of the entity whose view addresses this same key: the cell's
 /// own rows, not the entity's own row, which is a different question.
 pub(super) fn held_scoped_value(
     generation: &Generation,
@@ -95,14 +94,14 @@ pub(super) fn held_scoped_value(
 /// Apply the fill rule to one values batch, producing the cells nothing holds and refusing on the
 /// first cell that is held differently.
 ///
-/// **Three sources, in the order a cell is claimed.** The entity's own buffered row, the cells an
-/// earlier values batch filled and no flush has written yet, and the flushed homes — the same
-/// three the join arm reads, plus the unflushed fills, which exist only on this route. A cell
-/// this pass leaves absent has no claimant in any of them, which is what makes the extents
+/// A cell is claimed from three sources in order: the entity's own buffered row, the cells an
+/// earlier values batch filled and no flush has written yet, and the flushed homes. These are the
+/// same three sources the join arm reads, plus the unflushed fills, which exist only on this
+/// route. A cell this pass leaves absent has no claimant in any of them, so the extents stay
 /// disjoint per column when the flush writes them.
 ///
-/// **A row index, a column name and a key reach the caller; nothing else does.** No entity id, no
-/// external id and no value on either side (**I10**).
+/// A row index, a column name and a key reach the caller; nothing else does. No entity id, no
+/// external id and no value on either side (I10).
 pub(super) fn plan_fills(
     generation: &Generation,
     request: &tessera_lifecycle::ValuesRequest,
@@ -116,10 +115,10 @@ pub(super) fn plan_fills(
     // One resolution per batch, not per row. A name in neither space is refused here as well as
     // at the door: the door reads the served schema of a generation this pass may have moved past.
     //
-    // **A `render` column cannot be filled.** A fill acquires no row, so the value never reaches
-    // the hot column, which is the only home a tile and the drill-down read a rendered value
-    // from. Where the column is not also `index` there is no other home either, so the value
-    // would be acknowledged and stored nowhere.
+    // A `render` column cannot be filled. A fill acquires no row, so the value never reaches the
+    // hot column, which is the only home a tile and the drill-down read a rendered value from.
+    // Where the column is not also `index` there is no other home either, so the value would be
+    // acknowledged and stored nowhere.
     let mut columns = Vec::with_capacity(request.columns.len());
     for name in &request.columns {
         if let Some(position) = declared.iter().position(|d| &d.name == name) {
@@ -173,17 +172,17 @@ pub(super) fn plan_fills(
             });
         }
         let buffered = generation.buffer.get(entity);
-        // The cells an earlier batch filled and no flush has written. **A lookup, not a scan** —
-        // these are asked once per row and a batch runs to `max_batch_rows`.
+        // The cells an earlier batch filled and no flush has written. A lookup, not a scan: these
+        // are asked once per row and a batch runs to `max_batch_rows`.
         let pending = generation.buffer.fill_of(entity);
         let pending_scoped = generation.buffer.scoped_fill_of(entity, &owner_view);
         // Read at most once for this row, and only if a blob-resident column asks.
         let mut blob = crate::session::BlobRow::default();
-        // **Absence in a fill's tails is `WalScalar::Null` for every family, a category
-        // included.** A category's own spelling of absence is the reserved code, which the flush's
-        // gather maps `Null` onto — using it here would make a merge of two fills unable to tell
-        // an unfilled category cell from a filled one, the reserved code being an ordinary `u8` to
-        // any predicate over the value alone.
+        // Absence in a fill's tails is `WalScalar::Null` for every family, a category included. A
+        // category's own spelling of absence is the reserved code, which the flush's gather maps
+        // `Null` onto. Using `Null` here for absence keeps a merge of two fills able to tell an
+        // unfilled category cell from a filled one; the reserved code is an ordinary `u8` to any
+        // predicate over the value alone.
         let mut scalars: Vec<WalScalar> = vec![WalScalar::Null; declared.len()];
         let mut scoped: Vec<WalScalar> = vec![WalScalar::Null; families.len()];
         let mut any_entity = false;
@@ -243,7 +242,7 @@ pub(super) fn plan_fills(
                         &owner_view,
                         pending_scoped,
                     );
-                    // **A `text` family past a flush is refused rather than compared**: the column
+                    // A `text` family past a flush is refused rather than compared: the column
                     // stores a dictionary, postings and a presence bitmap and no value per entity,
                     // so there is nothing to compare a supplied string against, and admitting it
                     // would write a second text layer stamped with the same view that `match`
@@ -318,14 +317,14 @@ pub(super) fn plan_fills(
     })
 }
 
-/// The growth records one values batch's layer columns produce (`ingest.md` §1.4).
+/// The growth records one values batch's layer columns produce.
 ///
-/// **A key with no ordinal was minted at this batch's own commit** and the publication carried
-/// these rows as its first members, so it is skipped here exactly as [`growth_records`] skips one
-/// — one record instead of a publication and a growth against it. Every other reason a key could
-/// have no ordinal was refused before this: a `closed` value set and a layer with supplied content
-/// are `LayerRegistry::resolve_or_mint`'s own refusals, made at [`Executor::resolve_memberships`]
-/// with the batch still without effect.
+/// A key with no ordinal was minted at this batch's own commit, and the publication carried these
+/// rows as its first members, so it is skipped here exactly as [`growth_records`] skips one: one
+/// record instead of a publication and a growth against it. Every other reason a key could have no
+/// ordinal was refused before this: a `closed` value set and a layer with supplied content are
+/// `LayerRegistry::resolve_or_mint`'s own refusals, made at [`Executor::resolve_memberships`] with
+/// the batch still without effect.
 pub(super) fn values_growth_records(
     memberships: &[tessera_lifecycle::ResolvedMembership],
     rows: &[tessera_lifecycle::IncomingValues],
@@ -351,20 +350,20 @@ pub(super) fn values_growth_records(
                     join.layer
                 ));
             };
-            // Entity space is `u32` by I9, so the narrowing is total.
+            // Entity space is `u32`, so the narrowing is total.
             joining.add(entity.entity.raw() as u32);
         }
     }
-    // **What the artifact already holds is not a join** (`artifacts-from-points.md` §6.1). A page
-    // restating a membership the store carries would otherwise append a record that changes
-    // nothing and pins the log at it — the log is reclaimed up to the oldest record a generation
-    // still needs, so a producer re-sending its last page keeps the whole of it. `growth_record`
-    // drops an empty set, so subtracting here is what turns a restated page into no record at
-    // all, and `new_members_of` then reports the same zero from the record that is left.
+    // What the artifact already holds is not a join. A page restating a membership the store
+    // carries would otherwise append a record that changes nothing and pins the log at it: the
+    // log is reclaimed up to the oldest record a generation still needs, so a producer re-sending
+    // its last page keeps the whole of it. `growth_record` drops an empty set, so subtracting here
+    // turns a restated page into no record at all, and `new_members_of` then reports the same zero
+    // from the record that is left.
     //
-    // Read against the store *before* the batch is applied, which is the only moment the
-    // difference exists — [`Executor::commit_values`] holds the executor's one lock across the
-    // preparation, so nothing moves between this and the append.
+    // Read against the store before the batch is applied, which is the only moment the difference
+    // exists. [`Executor::commit_values`] holds the executor's one lock across the preparation, so
+    // nothing moves between this and the append.
     for ((layer, level), ordinals) in &mut by_level {
         for (ordinal, joining) in ordinals.iter_mut() {
             if let Some(record) = store.get(layer, *level, *ordinal) {
@@ -386,19 +385,19 @@ pub(super) fn values_growth_records(
         .collect())
 }
 
-/// **The artifacts one values batch's layer columns named and no artifact holds** —
-/// [`mint_plan`]'s twin for the values door (`ingest.md` §1.4; python-sdk §11.2 F).
+/// The artifacts one values batch's layer columns named and no artifact holds: [`mint_plan`]'s
+/// twin for the values door.
 ///
 /// A table with an id column and a key column is insertable whatever the source's history, so an
 /// unknown key here means what it means at `/control/ingest`: on an `open` layer it creates the
 /// artifact it names, carrying the batch's own rows as its first members. The two plans are the
 /// same map and are consumed by the same [`Executor::prepare_mints`]; what differs is only where
-/// the entities come from — a window's fresh allocation there, and rows resolved at the boundary
+/// the entities come from: a window's fresh allocation there, and rows resolved at the boundary
 /// here, a values batch creating no member of its own.
 ///
-/// **One artifact per key per level for the whole batch**, on `mint_plan`'s rule: two rows naming
-/// one unknown key mint once and both join it. The entry index every mint is charged to is `0`,
-/// there being one batch and one caller to report to.
+/// One artifact per key per level for the whole batch, on `mint_plan`'s rule: two rows naming one
+/// unknown key mint once and both join it. The entry index every mint is charged to is `0`, there
+/// being one batch and one caller to report to.
 pub(super) fn values_mint_plan(
     memberships: &[tessera_lifecycle::ResolvedMembership],
     rows: &[tessera_lifecycle::IncomingValues],
@@ -418,15 +417,15 @@ pub(super) fn values_mint_plan(
                     join.layer
                 ));
             };
-            // Entity space is `u32` by I9, so the narrowing is total.
+            // Entity space is `u32`, so the narrowing is total.
             members.add(entity.entity.raw() as u32);
         }
     }
     Ok(wanted)
 }
 
-/// How many of one growth record's joining members the artifacts do not already hold — read
-/// **before** the record is applied, which is the only time the difference exists.
+/// How many of one growth record's joining members the artifacts do not already hold, read before
+/// the record is applied, which is the only time the difference exists.
 pub(super) fn new_members_of(record: &WalRecord, store: &tessera_lifecycle::ArtifactStore) -> u64 {
     let WalRecord::ArtifactGrow {
         layer,
@@ -452,18 +451,18 @@ pub(super) fn new_members_of(record: &WalRecord, store: &tessera_lifecycle::Arti
 }
 
 /// Settle every joining row of one batch, whose join-ness `established_collisions` has just
-/// decided — the **join rule**'s three arms (label, entity-scoped attribute, scoped cell), and
-/// then the completion an accepted join owes: its descriptors dropped and its omitted `render`
-/// values backfilled.
+/// decided: the **join rule**'s three arms (label, entity-scoped attribute, scoped cell), and then
+/// the completion an accepted join owes: its descriptors dropped and its omitted `render` values
+/// backfilled.
 ///
-/// `Err` is the refusal the caller is answered with — a `409`, whole batch without effect, taken
+/// `Err` is the refusal the caller is answered with, a `409`, whole batch without effect, taken
 /// before the WAL append so a refused batch leaves no record.
 ///
-/// **A row index and a column name reach the caller; nothing else does.** No entity id, no external
-/// id and no value on either side (**I10**).
+/// A row index and a column name reach the caller; nothing else does. No entity id, no external id
+/// and no value on either side (I10).
 ///
-/// **One pass, because the arms and the completion read the same sources.** A joining row's
-/// buffered row is fetched once and its record-blob row is decompressed at most once
+/// One pass, because the arms and the completion read the same sources. A joining row's buffered
+/// row is fetched once and its record-blob row is decompressed at most once
 /// ([`crate::session::BlobRow`]) however many blob-resident columns ask for it.
 pub(super) fn settle_joins(generation: &Generation, rows: &mut [UnallocatedRow]) -> Result<(), String> {
     if rows.iter().all(|row| row.join.is_none()) {
@@ -487,13 +486,13 @@ pub(super) fn settle_joins(generation: &Generation, rows: &mut [UnallocatedRow])
         let pending_scoped = generation.buffer.scoped_fill_of(entity, &owner_view);
         // Read at most once for this row, and only if a blob-resident column asks.
         let mut blob = crate::session::BlobRow::default();
-        // **The label arm reads the buffer first and the transpose after it, and both are exact.**
-        // The buffer holds the entity's own row until its flush; past that, `entities/terms/`
-        // holds the same set in promoted ordinals (contracts §2.4).
+        // The label arm reads the buffer first and the transpose after it, and both are exact. The
+        // buffer holds the entity's own row until its flush; past that, `entities/terms/` holds
+        // the same set in promoted ordinals.
         //
         // A novel descriptor resolves to a process-local extension id, which no stored ordinal can
-        // equal, so a batch naming a label the deployment has never interned is a mismatch — which
-        // is right: the flushed entity cannot be carrying it.
+        // equal, so a batch naming a label the deployment has never interned is a mismatch: the
+        // flushed entity cannot be carrying it.
         let held_terms: Option<Vec<u32>> = match &buffered {
             Some(buffered) => Some(buffered.terms.iter().map(|t| t.raw()).collect()),
             None => crate::session::flushed_terms_of(generation, entity)
@@ -513,15 +512,15 @@ pub(super) fn settle_joins(generation: &Generation, rows: &mut [UnallocatedRow])
                 ));
             }
         }
-        // **The attribute arm.** An entity-scoped attribute is one value per entity, so a joining
-        // row must carry the stored value or leave it absent. The sources are compared by the same
+        // The attribute arm: an entity-scoped attribute is one value per entity, so a joining row
+        // must carry the stored value or leave it absent. The sources are compared by the same
         // equality, on values normalised to the shape a batch carries (`stored_as_wal`), so the
         // buffered and the flushed arm cannot come to disagree about what "the same value" means.
         for (position, d) in declared.iter().enumerate() {
             let Some(supplied) = row.scalars.get(position) else {
                 continue;
             };
-            // **An omitted value is not a disagreement**, and is not written through as an absence
+            // An omitted value is not a disagreement, and is not written through as an absence
             // either: the backfill below fills a `render` column's omitted slot from the entity's
             // stored value, once join-ness is settled.
             if crate::session::scalar_is_absent(supplied, d) {
@@ -541,20 +540,19 @@ pub(super) fn settle_joins(generation: &Generation, rows: &mut [UnallocatedRow])
                 d.name
             ));
         }
-        // **The scoped cell arm: one value per `(entity, attribute, key)`, whichever door wrote
-        // it.** A scoped value is not the entity's, so the two arms above do not reach it; it is
-        // the *cell's*, and the cell a joining row addresses may already hold a value — put there
-        // through the owning group's view, or through any group sharing those views, in this
-        // window or a previous one. An empty cell takes the row's value, a cell holding the same
-        // value drops the row's copy so that one claimant is left, and a cell holding a different
-        // one refuses.
+        // The scoped cell arm: one value per `(entity, attribute, key)`, whichever door wrote it.
+        // A scoped value is not the entity's, so the two arms above do not reach it; it is the
+        // cell's, and the cell a joining row addresses may already hold a value, put there through
+        // the owning group's view, or through any group sharing those views, in this window or a
+        // previous one. An empty cell takes the row's value, a cell holding the same value drops
+        // the row's copy so that one claimant is left, and a cell holding a different one refuses.
         //
-        // **A `text` family past a flush is refused rather than compared.** A text column stores a
+        // A `text` family past a flush is refused rather than compared. A text column stores a
         // dictionary, postings and a presence bitmap, and no per-entity value for
         // `flushed_scoped_of` to read back; the row's value would be written as a second text
         // layer stamped with the same view, which `match` unions across, so two sets of words
-        // would answer under one column with no symptom anywhere. Occupancy is asked instead, and
-        // an occupied cell refuses a supplied string, equal or not.
+        // would answer under one column with nothing to distinguish them. Occupancy is asked
+        // instead, and an occupied cell refuses a supplied string, equal or not.
         for (position, family) in scoped_families.iter().enumerate() {
             let Some(supplied) = row.scoped.get(position) else {
                 continue;
@@ -608,30 +606,29 @@ pub(super) fn settle_joins(generation: &Generation, rows: &mut [UnallocatedRow])
 
         // ---- past this point the row is admitted, and what follows completes it ----
 
-        // **A joining row carries no descriptors and no terms, and this is where they go**
-        // (`views.md` §4). The entity's label is the one it already has: its terms are already in
-        // the postings, put there by the flush that gave it its first row, and re-writing them from
-        // this row is how a second view would come to re-label an entity with no overlay entry.
+        // A joining row carries no descriptors and no terms, and this is where they go. The
+        // entity's label is the one it already has: its terms are already in the postings, put
+        // there by the flush that gave it its first row, and re-writing them from this row is how
+        // a second view would come to re-label an entity with no overlay entry.
         //
         // Here rather than in the handler for `established_collisions`'s reason: the handler's
         // answer is a queue drain old. A row it called new and this pass calls a join would arrive
         // with its descriptors intact and re-label the entity; a row it called a join and this pass
-        // calls new — its holder deleted in between — would arrive with them already dropped and
+        // calls new, its holder deleted in between, would arrive with them already dropped and
         // allocate a fresh entity carrying no label at all, which is invisible to every principal.
         row.descriptors = Vec::new();
         row.terms = Vec::new();
 
-        // **An accepted join's omitted `render` values are backfilled here** (`views.md` §4, owner
-        // ruling 2026-08-31), and here rather than in the handler because this is where join-ness
-        // is *settled*: `established_collisions` is what finally decides which rows join and which
-        // allocate fresh, and a row that stops being a join must not carry a value it took from an
-        // entity it turned out not to be joining.
+        // An accepted join's omitted `render` values are backfilled here, and here rather than in
+        // the handler because this is where join-ness is settled: `established_collisions` is what
+        // finally decides which rows join and which allocate fresh, and a row that stops being a
+        // join must not carry a value it took from an entity it turned out not to be joining.
         //
-        // A joining row is geometry-only in entity space — no descriptors, no postings, no
-        // attribute column, no record field — but its scalars still travel in its own row tail, so
-        // an omitted `render` value would put an **absence** in the joined view's hot column while
+        // A joining row is geometry-only in entity space: no descriptors, no postings, no
+        // attribute column, no record field. But its scalars still travel in its own row tail, so
+        // an omitted `render` value would put an absence in the joined view's hot column while
         // every other view of the same entity rendered a value. An entity-scoped attribute is one
-        // value per entity (`views.md` §5); one that renders under one view and not another is not.
+        // value per entity; one that renders under one view and not another is not.
         //
         // Before the WAL append, so the log carries the value the flush will write and replay
         // reproduces it rather than re-deriving it against whatever the bundle holds by then.
