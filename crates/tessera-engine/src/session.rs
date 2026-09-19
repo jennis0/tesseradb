@@ -1089,6 +1089,51 @@ fn across_partitions<'a, T, I: IntoIterator<Item = T>>(
         .collect()
 }
 
+/// The filter artefact of the bundle's first partition: the build's columns plus every extent that
+/// partition's side manifest names.
+fn open_filter_columns(
+    prefix_dir: &Path,
+    bundle: &Bundle,
+    unfolded_attributes: &[String],
+) -> std::io::Result<crate::filter::FilterColumns> {
+    let partition = bundle.partitions.keys().next().cloned().unwrap_or_default();
+    let manifest = bundle.partitions.get(&partition).map(|p| &p.manifest);
+    crate::filter::FilterColumns::open(
+        prefix_dir,
+        &partition,
+        &bundle.manifest.declared_scalars,
+        // The scoped column families of every group, flattened: the group is already
+        // the first component of each family's view ids, so what the opener needs is
+        // the families and not the rosters (`views.md` §5).
+        &bundle.manifest.scoped_scalars(),
+        // The roster this bundle is serving, which is what places a scoped column on
+        // disc (decision 0115).
+        &|view: &str| bundle.manifest.incarnation_of(view),
+        &bundle.manifest.vocabularies,
+        manifest.map(|m| m.attr_extents.as_slice()).unwrap_or(&[]),
+        // The record blob rides the same open (records §3, §7): the base the schema owes plus
+        // every extent the side-manifest names — always the full shape, even while no flush
+        // writes one, so a restart composes whatever was published.
+        manifest.map(|m| m.record_extents.as_slice()).unwrap_or(&[]),
+        manifest
+            .map(|m| m.artifact_record_extents.as_slice())
+            .unwrap_or(&[]),
+        // The entity→term transpose rides the same open (contracts §2.4): the base the build
+        // always writes plus every extent the side-manifest names, so a restart composes the
+        // labels of everything flushed since the build rather than answering "unknown" for it.
+        manifest
+            .map(|m| m.entity_terms_extents.as_slice())
+            .unwrap_or(&[]),
+        manifest.map(|m| m.text_extents.as_slice()).unwrap_or(&[]),
+        // The columns whose base no fold has written yet (`ingest.md` §6.3).
+        unfolded_attributes,
+        // Mapped, for the reason `FilterColumns::open` gives: the engine opens every
+        // declared column at once and holds them for the process lifetime, so the
+        // alternative is tens of GB of residency at 10⁹ paid before any filter arrives.
+        true,
+    )
+}
+
 impl Engine {
     /// This engine's resolved configuration.
     ///
@@ -1487,63 +1532,8 @@ impl Engine {
         // over everything ingested since (`filter-index.md` §2.1).
         let filter_columns = {
             let partition = bundle.partitions.keys().next().cloned().unwrap_or_default();
-            let extents = bundle
-                .partitions
-                .get(&partition)
-                .map(|p| p.manifest.attr_extents.clone())
-                .unwrap_or_default();
-            // The record blob rides the same open (records §3, §7): the base the schema owes plus
-            // every extent the side-manifest names — always the full shape, even while no flush
-            // writes one, so a restart composes whatever was published.
-            let record_extents = bundle
-                .partitions
-                .get(&partition)
-                .map(|p| p.manifest.record_extents.clone())
-                .unwrap_or_default();
-            let artifact_record_extents = bundle
-                .partitions
-                .get(&partition)
-                .map(|p| p.manifest.artifact_record_extents.clone())
-                .unwrap_or_default();
-            let text_extents = bundle
-                .partitions
-                .get(&partition)
-                .map(|p| p.manifest.text_extents.clone())
-                .unwrap_or_default();
-            // The entity→term transpose rides the same open (contracts §2.4): the base the build
-            // always writes plus every extent the side-manifest names, so a restart composes the
-            // labels of everything flushed since the build rather than answering "unknown" for it.
-            let entity_terms_extents = bundle
-                .partitions
-                .get(&partition)
-                .map(|p| p.manifest.entity_terms_extents.clone())
-                .unwrap_or_default();
             Arc::new(
-                crate::filter::FilterColumns::open(
-                    &prefix_dir,
-                    &partition,
-                    &bundle.manifest.declared_scalars,
-                    // The scoped column families of every group, flattened: the group is already
-                    // the first component of each family's view ids, so what the opener needs is
-                    // the families and not the rosters (`views.md` §5).
-                    &bundle.manifest.scoped_scalars(),
-                    // The roster this bundle is serving, which is what places a scoped column on
-                    // disc (decision 0115).
-                    &|view: &str| bundle.manifest.incarnation_of(view),
-                    &bundle.manifest.vocabularies,
-                    &extents,
-                    &record_extents,
-                    &artifact_record_extents,
-                    &entity_terms_extents,
-                    &text_extents,
-                    // The columns whose base no fold has written yet (`ingest.md` §6.3).
-                    &unfolded_attributes,
-                    // Mapped, for the reason `FilterColumns::open` gives: the engine opens every
-                    // declared column at once and holds them for the process lifetime, so the
-                    // alternative is tens of GB of residency at 10⁹ paid before any filter arrives.
-                    true,
-                )
-                .map_err(|e| {
+                open_filter_columns(&prefix_dir, &bundle, &unfolded_attributes).map_err(|e| {
                     EngineError::Store(tessera_store::StoreError::Io {
                         path: prefix_dir.join("partitions").join(&partition),
                         source: e,
@@ -4415,25 +4405,11 @@ pub(crate) fn open_rotation(
     // pre-fold values, missing the blanking, missing the folded extents — and the fold is exactly
     // the publication that makes that wrong (`filter-index.md` §6.2). A declared column whose
     // files are missing refuses here rather than reading as "those entities carry no value".
+    // The record blob rotates with the prefix for the reason the value columns do: the
+    // fold rewrites it, and the superseded prefix's files are pre-blanking.
     let filter_columns = Arc::new(
-        crate::filter::FilterColumns::open(
-            &prefix_dir,
-            &phash,
-            &bundle.manifest.declared_scalars,
-            &bundle.manifest.scoped_scalars(),
-            &|view: &str| bundle.manifest.incarnation_of(view),
-            &bundle.manifest.vocabularies,
-            &partition.manifest.attr_extents,
-            // The record blob rotates with the prefix for the reason the value columns do: the
-            // fold rewrites it, and the superseded prefix's files are pre-blanking.
-            &partition.manifest.record_extents,
-            &partition.manifest.artifact_record_extents,
-            &partition.manifest.entity_terms_extents,
-            &partition.manifest.text_extents,
-            &unfolded_attributes,
-            true,
-        )
-        .map_err(|e| PublishGeometryError::PrefixNotOpenable(e.to_string()))?,
+        open_filter_columns(&prefix_dir, &bundle, &unfolded_attributes)
+            .map_err(|e| PublishGeometryError::PrefixNotOpenable(e.to_string()))?,
     );
 
     Ok((
