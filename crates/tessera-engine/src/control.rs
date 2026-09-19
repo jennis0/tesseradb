@@ -450,13 +450,45 @@ impl Engine {
         // this conversion cannot fail in practice and is unwrapped to a fail-closed refusal rather
         // than a new error shape.
         let generation = self.generation();
-        self.identity_key
-            .forward(generation.bundle.manifest.identity.shard_id, entity)
-            .map_err(|_| {
-                crate::write::AcceptError::Exec(tessera_lifecycle::ExecError::LayerRefused {
-                    detail: "the layer's entity id lies outside the identity space".to_string(),
-                })
+        self.issued_id(generation.bundle.manifest.identity.shard_id, entity)
+    }
+
+    /// The `tessera_id` of an entity a layer write just allocated, or the write's refusal.
+    fn issued_id(
+        &self,
+        shard: u32,
+        entity: EntityId,
+    ) -> std::result::Result<TesseraId, crate::write::AcceptError> {
+        self.identity_key.forward(shard, entity).map_err(|_| {
+            crate::write::AcceptError::Exec(tessera_lifecycle::ExecError::LayerRefused {
+                detail: "an allocated entity id lies outside the identity space".to_string(),
             })
+        })
+    }
+
+    /// Refuses memberships naming an entity that is not a point.
+    fn refuse_rowless<'a>(
+        &self,
+        memberships: impl Iterator<Item = &'a croaring::Bitmap>,
+    ) -> std::result::Result<(), crate::write::AcceptError> {
+        // Entity space is `u32` by I9, and both marks sit inside it — the row-less ceiling is
+        // derived from `u32::MAX` — so the narrowing is total rather than merely usually safe.
+        let high_water = self.allocator_high_water() as u32;
+        let rowless: u64 = memberships
+            .map(|m| m.cardinality() - m.range_cardinality(0..high_water))
+            .sum();
+        if rowless > 0 {
+            return Err(crate::write::AcceptError::Exec(
+                tessera_lifecycle::ExecError::LayerRefused {
+                    detail: format!(
+                        "{rowless} member(s) of this batch name no point; a membership is a set of \
+                         documents, and a member with no row would count towards the artifact's \
+                         declared size while being visible to nobody"
+                    ),
+                },
+            ));
+        }
+        Ok(())
     }
 
     /// Drop a layer. Its name is tombstoned and refused on recreation for ever.
@@ -680,24 +712,7 @@ impl Engine {
         level: u32,
         artifacts: Vec<tessera_lifecycle::IncomingArtifact>,
     ) -> std::result::Result<PublishedArtifacts, crate::write::AcceptError> {
-        // Entity space is `u32` by I9, and both marks sit inside it — the row-less ceiling is
-        // derived from `u32::MAX` — so the narrowing is total rather than merely usually safe.
-        let high_water = self.allocator_high_water() as u32;
-        let rowless: u64 = artifacts
-            .iter()
-            .map(|a| a.members.cardinality() - a.members.range_cardinality(0..high_water))
-            .sum();
-        if rowless > 0 {
-            return Err(crate::write::AcceptError::Exec(
-                tessera_lifecycle::ExecError::LayerRefused {
-                    detail: format!(
-                        "{rowless} member(s) of this batch name no point; a membership is a set of \
-                         documents, and a member with no row would count towards the artifact's \
-                         declared size while being visible to nobody"
-                    ),
-                },
-            ));
-        }
+        self.refuse_rowless(artifacts.iter().map(|a| &a.members))?;
 
         // **A declared member that is deleted refuses the batch; a suppressed one is accepted**
         // (`annotation-write-cycle.md` §3.1). The two are not near-neighbours: a deleted entity can
@@ -802,14 +817,7 @@ impl Engine {
         let tessera_ids = batch
             .entities
             .into_iter()
-            .map(|entity| {
-                self.identity_key.forward(shard, entity).map_err(|_| {
-                    crate::write::AcceptError::Exec(tessera_lifecycle::ExecError::LayerRefused {
-                        detail: "an artifact's entity id lies outside the identity space"
-                            .to_string(),
-                    })
-                })
-            })
+            .map(|entity| self.issued_id(shard, entity))
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(PublishedArtifacts {
             tessera_ids,
@@ -867,22 +875,7 @@ impl Engine {
         level: u32,
         joins: Vec<tessera_lifecycle::IncomingGrowth>,
     ) -> std::result::Result<Vec<GrownMembership>, crate::write::AcceptError> {
-        let high_water = self.allocator_high_water() as u32;
-        let rowless: u64 = joins
-            .iter()
-            .map(|j| j.joining.cardinality() - j.joining.range_cardinality(0..high_water))
-            .sum();
-        if rowless > 0 {
-            return Err(crate::write::AcceptError::Exec(
-                tessera_lifecycle::ExecError::LayerRefused {
-                    detail: format!(
-                        "{rowless} of these joining member(s) name no point; a membership is a set \
-                         of documents, and a member with no row would count towards the \
-                         artifact's declared size while being visible to nobody"
-                    ),
-                },
-            ));
-        }
+        self.refuse_rowless(joins.iter().map(|j| &j.joining))?;
 
         // A count and the key of the first join naming one, never an entity id (I10): the detail
         // is the caller's 422 body.
@@ -917,20 +910,8 @@ impl Engine {
         grown
             .into_iter()
             .map(|receipt| {
-                let tessera_id =
-                    self.identity_key
-                        .forward(shard, receipt.entity)
-                        .map_err(|_| {
-                            crate::write::AcceptError::Exec(
-                                tessera_lifecycle::ExecError::LayerRefused {
-                                    detail:
-                                        "an artifact's entity id lies outside the identity space"
-                                            .to_string(),
-                                },
-                            )
-                        })?;
                 Ok(GrownMembership {
-                    tessera_id,
+                    tessera_id: self.issued_id(shard, receipt.entity)?,
                     joined: receipt.joined,
                     filled: receipt.filled,
                     left: receipt.left,
