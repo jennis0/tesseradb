@@ -2166,6 +2166,13 @@ impl LiveState {
         lock_recover(&self.registry).get(name).cloned()
     }
 
+    /// Whether a registered layer resolves its memberships from shapes — [`spatial_membership`],
+    /// for a layer held by name.
+    pub(crate) fn spatial_layer(&self, name: &str) -> bool {
+        self.registered_layer(name)
+            .is_some_and(|registered| spatial_membership(&registered.declaration))
+    }
+
     /// Every `membership = { attribute = f }` layer, with the declared-scalar index of `f` and the
     /// vocabulary that column's values are named by — `(layer, index, vocabulary)`.
     ///
@@ -6196,6 +6203,21 @@ fn stored_membership(declaration: &tessera_types::layer::LayerDeclaration) -> bo
         declaration.membership,
         tessera_types::layer::MembershipSource::Enumerated
     ) && declaration.shape.is_none()
+}
+
+/// A layer whose memberships are resolved from shapes: spatial, with a shape declared.
+fn spatial_membership(declaration: &tessera_types::layer::LayerDeclaration) -> bool {
+    matches!(
+        declaration.membership,
+        tessera_types::layer::MembershipSource::Spatial
+    ) && declaration.shape.is_some()
+}
+
+/// Every `(layer, level)` the artifact store holds.
+fn levels_of(store: &ArtifactStore) -> impl Iterator<Item = (String, u32)> + '_ {
+    store
+        .levels_and_extents()
+        .map(|(layer, level, _)| (layer.to_string(), level))
 }
 
 /// The `(layer, level)` a record changes the artifacts of, and `None` for every other record —
@@ -13078,9 +13100,7 @@ impl Executor {
             return;
         };
         let stored = stored_membership(&registered.declaration);
-        let spatial = registered.declaration.membership
-            == tessera_types::layer::MembershipSource::Spatial
-            && registered.declaration.shape.is_some();
+        let spatial = spatial_membership(&registered.declaration);
         if !stored && !spatial {
             return;
         }
@@ -15244,10 +15264,7 @@ impl Executor {
         // Composed under one borrow with the versions they are composed at, and written outside it:
         // composing is the dear part and needs the store, writing a file does not.
         let composed: Vec<(String, u32, u64, Vec<u8>)> = self.live.with_artifacts(|store| {
-            let levels: Vec<(String, u32)> = store
-                .levels_and_extents()
-                .map(|(layer, level, _)| (layer.to_string(), level))
-                .collect();
+            let levels: Vec<(String, u32)> = levels_of(store).collect();
             levels
                 .into_iter()
                 .filter(|(layer, level)| !pending.is_pending(layer, *level))
@@ -15425,9 +15442,7 @@ impl Executor {
             return Vec::new();
         };
         let levels: Vec<(String, u32)> = self.live.with_artifacts(|store| {
-            store
-                .levels_and_extents()
-                .map(|(layer, level, _)| (layer.to_string(), level))
+            levels_of(store)
                 .filter(|(layer, level)| self.composes_row_structures(pending, layer, *level))
                 .collect()
         });
@@ -15451,9 +15466,7 @@ impl Executor {
             // under the new segment ids for the derived files this pass writes and for the row
             // forms the flip's warm builds. That is the fold's re-resolution — everything, because
             // the fold renumbered every row.
-            let spatial = registered.declaration.membership
-                == tessera_types::layer::MembershipSource::Spatial
-                && registered.declaration.shape.is_some();
+            let spatial = spatial_membership(&registered.declaration);
             let shape = self.live.with_artifacts(|store| {
                 if spatial {
                     let mut observed = None;
@@ -15762,17 +15775,9 @@ impl Executor {
         index: &mut tessera_store::derived::DerivedIndex,
     ) -> Vec<tessera_store::manifest::DerivedExtent> {
         let levels: Vec<(String, u32)> = self.live.with_artifacts(|store| {
-            store
-                .levels_and_extents()
-                .map(|(layer, level, _)| (layer.to_string(), level))
+            levels_of(store)
                 .filter(|(layer, level)| !pending.is_pending(layer, *level))
-                .filter(|(layer, _)| {
-                    self.live.registered_layer(layer).is_some_and(|registered| {
-                        registered.declaration.membership
-                            == tessera_types::layer::MembershipSource::Spatial
-                            && registered.declaration.shape.is_some()
-                    })
-                })
+                .filter(|(layer, _)| self.live.spatial_layer(layer))
                 .collect()
         });
         let mut filed: Vec<tessera_store::derived::Filed> = Vec::new();
@@ -15850,17 +15855,9 @@ impl Executor {
     ) -> Vec<tessera_store::manifest::DerivedExtent> {
         let filed: Vec<tessera_store::derived::Filed> = self.live.with_artifacts(|store| {
             let mut out = Vec::new();
-            let levels: Vec<(String, u32)> = store
-                .levels_and_extents()
-                .map(|(layer, level, _)| (layer.to_string(), level))
+            let levels: Vec<(String, u32)> = levels_of(store)
                 .filter(|(layer, level)| !pending.is_pending(layer, *level))
-                .filter(|(layer, _)| {
-                    self.live.registered_layer(layer).is_some_and(|registered| {
-                        registered.declaration.membership
-                            == tessera_types::layer::MembershipSource::Spatial
-                            && registered.declaration.shape.is_some()
-                    })
-                })
+                .filter(|(layer, _)| self.live.spatial_layer(layer))
                 .collect();
             for (layer, level) in &levels {
                 let version = store.level_version(layer, *level);
@@ -16023,12 +16020,8 @@ impl Executor {
     /// level with neither projects its memberships (`ArtifactProjections::get_or_build`).
     fn warm_artifact_caches(&self) {
         let generation = self.generation.load_full();
-        let levels: Vec<(String, u32)> = self.live.with_artifacts(|store| {
-            store
-                .levels_and_extents()
-                .map(|(layer, level, _)| (layer.to_string(), level))
-                .collect()
-        });
+        let levels: Vec<(String, u32)> =
+            self.live.with_artifacts(|store| levels_of(store).collect());
         if levels.is_empty() {
             return;
         }
@@ -16063,12 +16056,9 @@ impl Executor {
                     let membership = registered
                         .as_ref()
                         .map(|r| r.declaration.membership.clone());
-                    let spatial = matches!(
-                        membership,
-                        Some(tessera_types::layer::MembershipSource::Spatial)
-                    ) && registered
+                    let spatial = registered
                         .as_ref()
-                        .is_some_and(|r| r.declaration.shape.is_some());
+                        .is_some_and(|r| spatial_membership(&r.declaration));
                     if matches!(
                         membership,
                         Some(tessera_types::layer::MembershipSource::Attribute(_))
