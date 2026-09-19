@@ -36,7 +36,6 @@ use tessera_types::layer::{
 };
 use tessera_types::EntityId;
 
-const WHOLE_MAP: [f64; 4] = [0.0, 0.0, 1000.0, 1000.0];
 const FLAT: &str = "clusters/flat";
 const TREED: &str = "clusters/treed";
 
@@ -270,28 +269,6 @@ fn assert_same(
          comparison says nothing about containment",
         labels.len()
     );
-}
-
-/// Request a fold and block until it has published.
-fn fold(engine: &Engine) {
-    let before = engine.write_executor_stats();
-    engine.request_fold();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-    loop {
-        let now = engine.write_executor_stats();
-        assert_eq!(
-            now.fold_failures, before.fold_failures,
-            "the fold was discarded rather than published"
-        );
-        if now.folds > before.folds {
-            return;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the fold never published"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
 }
 
 fn wait_for_publication(fx: &Fixture, engine: &Engine, files: usize) {

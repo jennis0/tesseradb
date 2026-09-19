@@ -11,91 +11,24 @@
 
 mod common;
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use common::*;
-use tessera_engine::{Engine, EngineConfig};
 use tessera_lifecycle::UnallocatedRow;
 use tessera_types::EntityId;
 
-fn wait_until(what: &str, mut cond: impl FnMut() -> bool) {
-    let deadline = Instant::now() + Duration::from_secs(20);
-    while !cond() {
-        assert!(Instant::now() < deadline, "timed out waiting: {what}");
-        std::thread::sleep(Duration::from_millis(5));
-    }
-}
-
-fn fixture(tmp: &std::path::Path) -> std::path::PathBuf {
-    let root = tmp.join("bundle");
-    build_fixture(
-        &root,
-        &tmp.join("points.parquet"),
-        &tmp.join("pairs.parquet"),
-    );
-    root
-}
-
-fn engine_at(tmp: &std::path::Path, root: &std::path::Path, tick_secs: u64) -> Engine {
-    let mut engine = Engine::open(
-        root,
-        &tmp.join("cache"),
-        &tmp.join("wal.log"),
-        tessera_plugin::Passthrough::new(),
-        EngineConfig {
-            flush_max_age_secs: tick_secs,
-            // The shipped row trigger, four commit windows (`DEFAULT_FLUSH_MAX_ITEMS`):
-            // what bounds the window close's O(buffered) copy. Nothing here reaches it.
-            flush_max_items: 40_000,
-            max_merged_segment_bytes: None,
-            // Compaction §9's trigger is off unless a deployment configures one.
-            compaction: tessera_engine::CompactionSchedule::off(),
-            ..config()
-        },
-    )
-    .expect("engine opens");
-    engine
-        .start_write_executor(64)
-        .expect("the executor starts once");
-    engine
-}
-
-fn ingest(engine: &Engine, external_id: &str) -> EntityId {
-    let row = UnallocatedRow {
-        external_id: Some(external_id.as_bytes().to_vec()),
-        view: "s0".to_string(),
-        join: None,
-        descriptors: vec![b"0".to_vec()],
-        x: 5.0,
-        y: 5.0,
-        scalars: Vec::new(),
-        terms: engine.resolve_terms(&[b"0".to_vec()]),
-        scoped: Vec::new(),
-    };
-    engine
-        .accept_ingest(vec![row], external_id.to_string(), [0u8; 32])
-        .expect("ingest is accepted")[0]
-}
-
-fn wal_members(tmp: &std::path::Path) -> Vec<String> {
-    let mut names: Vec<String> = std::fs::read_dir(tmp)
-        .unwrap()
-        .filter_map(|e| e.ok())
-        .map(|e| e.file_name().to_string_lossy().into_owned())
-        .filter(|n| n.starts_with("wal-") && n.ends_with(".log"))
-        .collect();
-    names.sort();
-    names
-}
+const WAIT: Duration = Duration::from_secs(20);
 
 /// Flush, then rotate away the member that carried the ingest, then reopen. The returned id is the
 /// flushed entity, and its `IngestBatch` record no longer exists anywhere.
 fn flushed_then_rotated(tmp: &std::path::Path, root: &std::path::Path, key: &str) -> EntityId {
     let engine = engine_at(tmp, root, 1);
     let id = ingest(&engine, key);
-    wait_until("the flush", || engine.write_executor_stats().flushes >= 1);
-    wait_until("member 1 to be reclaimed", || {
-        !wal_members(tmp).contains(&"wal-000001.log".to_string())
+    wait_until("the flush", WAIT, || {
+        engine.write_executor_stats().flushes >= 1
+    });
+    wait_until("member 1 to be reclaimed", WAIT, || {
+        !wal_members(&tmp.join("wal.log")).contains(&"wal-000001.log".to_string())
     });
     id
 }
@@ -111,7 +44,7 @@ fn flushed_then_rotated(tmp: &std::path::Path, root: &std::path::Path, key: &str
 #[test]
 fn a_flushed_item_answers_items_after_rotation_and_a_restart() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let root = fixture(tmp.path());
+    let root = fixture_in(tmp.path());
     let id = flushed_then_rotated(tmp.path(), &root, "ext-1");
 
     let reopened = engine_at(tmp.path(), &root, 3600);
@@ -131,7 +64,7 @@ fn a_flushed_item_answers_items_after_rotation_and_a_restart() {
 #[test]
 fn an_item_with_no_external_id_answers_none_after_rotation_rather_than_erroring() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let root = fixture(tmp.path());
+    let root = fixture_in(tmp.path());
 
     let anonymous = {
         let engine = engine_at(tmp.path(), &root, 1);
@@ -149,9 +82,11 @@ fn an_item_with_no_external_id_answers_none_after_rotation_rather_than_erroring(
         let id = engine
             .accept_ingest(vec![row], "anon".to_string(), [0u8; 32])
             .expect("an item with no external id is accepted")[0];
-        wait_until("the flush", || engine.write_executor_stats().flushes >= 1);
-        wait_until("member 1 to be reclaimed", || {
-            !wal_members(tmp.path()).contains(&"wal-000001.log".to_string())
+        wait_until("the flush", WAIT, || {
+            engine.write_executor_stats().flushes >= 1
+        });
+        wait_until("member 1 to be reclaimed", WAIT, || {
+            !wal_members(&tmp.path().join("wal.log")).contains(&"wal-000001.log".to_string())
         });
         id
     };
@@ -179,7 +114,7 @@ fn an_item_with_no_external_id_answers_none_after_rotation_rather_than_erroring(
 #[test]
 fn a_duplicate_external_id_is_caught_against_a_flushed_run() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let root = fixture(tmp.path());
+    let root = fixture_in(tmp.path());
     flushed_then_rotated(tmp.path(), &root, "ext-1");
 
     let reopened = engine_at(tmp.path(), &root, 3600);
@@ -204,7 +139,7 @@ fn a_duplicate_external_id_is_caught_against_a_flushed_run() {
 #[test]
 fn a_batch_older_than_the_retained_wal_is_no_longer_recognised_as_a_duplicate() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let root = fixture(tmp.path());
+    let root = fixture_in(tmp.path());
     flushed_then_rotated(tmp.path(), &root, "ext-1");
 
     let reopened = engine_at(tmp.path(), &root, 3600);
@@ -225,18 +160,20 @@ fn a_batch_older_than_the_retained_wal_is_no_longer_recognised_as_a_duplicate() 
 #[test]
 fn an_accepted_batch_leaves_the_live_index_when_its_wal_member_is_rotated_away() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let root = fixture(tmp.path());
+    let root = fixture_in(tmp.path());
     let engine = engine_at(tmp.path(), &root, 1);
     ingest(&engine, "ext-1");
     assert!(
         engine.accepted_batch("ext-1").is_some(),
         "the batch was just accepted, so its id is held"
     );
-    wait_until("the flush", || engine.write_executor_stats().flushes >= 1);
-    wait_until("member 1 to be reclaimed", || {
-        !wal_members(tmp.path()).contains(&"wal-000001.log".to_string())
+    wait_until("the flush", WAIT, || {
+        engine.write_executor_stats().flushes >= 1
     });
-    wait_until("the index to follow the log", || {
+    wait_until("member 1 to be reclaimed", WAIT, || {
+        !wal_members(&tmp.path().join("wal.log")).contains(&"wal-000001.log".to_string())
+    });
+    wait_until("the index to follow the log", WAIT, || {
         engine.accepted_batch("ext-1").is_none()
     });
 }

@@ -18,7 +18,7 @@ use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use arrow::array::{Float64Array, StringArray, UInt32Array, UInt64Array};
+use arrow::array::{Float64Array, StringArray, UInt64Array};
 use arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
@@ -210,34 +210,6 @@ fn write_points(path: &Path) {
     w.close().unwrap();
 }
 
-/// The same term model `common` uses — every item carries `ALL_TERM`, every third also
-/// `SUBSET_TERM` — so `subset_credential()` is a principal seeing one item in three.
-fn write_pairs(path: &Path) {
-    let schema = Arc::new(ArrowSchema::new(vec![
-        Field::new("entity_id", DataType::UInt64, false),
-        Field::new("term_id", DataType::UInt32, false),
-    ]));
-    let mut entities: Vec<u64> = Vec::new();
-    let mut terms: Vec<u32> = Vec::new();
-    for e in 0..N {
-        for t in terms_of(e) {
-            entities.push(e);
-            terms.push(t as u32);
-        }
-    }
-    let batch = RecordBatch::try_new(
-        schema.clone(),
-        vec![
-            Arc::new(UInt64Array::from(entities)),
-            Arc::new(UInt32Array::from(terms)),
-        ],
-    )
-    .unwrap();
-    let mut w = ArrowWriter::try_new(File::create(path).unwrap(), schema, None).unwrap();
-    w.write(&batch).unwrap();
-    w.close().unwrap();
-}
-
 struct Fixture {
     _dir: tempfile::TempDir,
     bundle: std::path::PathBuf,
@@ -264,7 +236,7 @@ fn fixture() -> Fixture {
     let points = dir.path().join("points.parquet");
     let pairs = dir.path().join("pairs.parquet");
     write_points(&points);
-    write_pairs(&pairs);
+    write_pairs_n(&pairs, N);
     let bundle = dir.path().join("bundle");
 
     let schema_path = dir.path().join("schema.toml");
@@ -2807,32 +2779,6 @@ fn a_value_carried_only_since_the_build_is_offered_to_whoever_can_see_it() {
 // the manifest's `attr_extents` list — are both discharged. Doing one of those two is worse than
 // doing neither: the bundle then opens cleanly and answers filters short, which is a wrong answer
 // wearing a correct one's clothes.
-
-/// Request a fold and block until it has published, asserting it was not discarded.
-///
-/// `tests/fold.rs`'s helper, duplicated rather than shared: `common` is the fixture module and this
-/// binary's fixture is its own (the one with declared filter columns), so the alternative is
-/// widening `common` for two callers that agree about nothing else.
-fn fold(engine: &tessera_engine::Engine) {
-    let before = engine.write_executor_stats();
-    engine.request_fold();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-    loop {
-        let now = engine.write_executor_stats();
-        assert_eq!(
-            now.fold_failures, before.fold_failures,
-            "the fold was discarded rather than published"
-        );
-        if now.folds > before.folds {
-            return;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the fold never published"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
-}
 
 /// One operand per family and per route, answered against `columns` under `candidate`.
 ///

@@ -12,23 +12,16 @@
 
 mod common;
 
-use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::path::Path;
+use std::time::Duration;
 
 use common::*;
 use tessera_engine::{Engine, EngineConfig};
 use tessera_lifecycle::wal::ChangeOp;
-use tessera_lifecycle::UnallocatedRow;
 use tessera_store::manifest::SegmentsManifest;
 use tessera_types::EntityId;
 
-fn wait_until(what: &str, mut cond: impl FnMut() -> bool) {
-    let deadline = Instant::now() + Duration::from_secs(20);
-    while !cond() {
-        assert!(Instant::now() < deadline, "timed out waiting: {what}");
-        std::thread::sleep(Duration::from_millis(5));
-    }
-}
+const WAIT: Duration = Duration::from_secs(20);
 
 fn engine_at(tmp: &Path, root: &Path, tick_secs: u64) -> Engine {
     std::fs::create_dir_all(tmp).unwrap();
@@ -55,16 +48,6 @@ fn engine_at(tmp: &Path, root: &Path, tick_secs: u64) -> Engine {
     engine
 }
 
-fn fixture(tmp: &Path) -> PathBuf {
-    let root = tmp.join("bundle");
-    build_fixture(
-        &root,
-        &tmp.join("points.parquet"),
-        &tmp.join("pairs.parquet"),
-    );
-    root
-}
-
 /// The newest side-manifest on disc, read the way the reader reads it — highest `n` first.
 fn newest_manifest(root: &Path) -> (u64, SegmentsManifest) {
     let bundle = tessera_store::open_bundle(root).expect("the bundle opens");
@@ -82,23 +65,6 @@ fn entity_of_source(root: &Path, source_id: u64) -> EntityId {
     EntityId::new(source_to_new_map(root, "v00000")[&source_id])
 }
 
-fn ingest(engine: &Engine, external_id: &str) -> EntityId {
-    let row = UnallocatedRow {
-        external_id: Some(external_id.as_bytes().to_vec()),
-        view: "s0".to_string(),
-        join: None,
-        descriptors: vec![b"0".to_vec()],
-        x: 5.0,
-        y: 5.0,
-        scalars: Vec::new(),
-        terms: engine.resolve_terms(&[b"0".to_vec()]),
-        scoped: Vec::new(),
-    };
-    engine
-        .accept_ingest(vec![row], external_id.to_string(), [0u8; 32])
-        .expect("ingest is accepted")[0]
-}
-
 /// **Obligation 1.** A flush publishes the deny state of the generation it is published against —
 /// not the one it was planned against.
 ///
@@ -109,7 +75,7 @@ fn ingest(engine: &Engine, external_id: &str) -> EntityId {
 #[test]
 fn a_flush_manifest_carries_the_deny_state_at_publication() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let root = fixture(tmp.path());
+    let root = fixture_in(tmp.path());
     let engine = engine_at(tmp.path(), &root, 1);
 
     let suppressed = entity_of_source(&root, 7);
@@ -118,7 +84,7 @@ fn a_flush_manifest_carries_the_deny_state_at_publication() {
         .expect("the suppression is accepted");
 
     ingest(&engine, "ext-1");
-    wait_until("the flush to publish", || {
+    wait_until("the flush to publish", WAIT, || {
         engine.write_executor_stats().flushes >= 1
     });
 
@@ -145,7 +111,7 @@ fn a_flush_manifest_carries_the_deny_state_at_publication() {
 #[test]
 fn an_unsuppress_is_absent_from_the_next_manifest() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let root = fixture(tmp.path());
+    let root = fixture_in(tmp.path());
     let engine = engine_at(tmp.path(), &root, 1);
     let entity = entity_of_source(&root, 7);
 
@@ -153,7 +119,7 @@ fn an_unsuppress_is_absent_from_the_next_manifest() {
         .accept_change(entity, ChangeOp::Suppress)
         .expect("accepted");
     ingest(&engine, "ext-1");
-    wait_until("the first flush", || {
+    wait_until("the first flush", WAIT, || {
         engine.write_executor_stats().flushes >= 1
     });
     assert_eq!(suppressed_in(&newest_manifest(&root).1), vec![entity.raw()]);
@@ -162,7 +128,7 @@ fn an_unsuppress_is_absent_from_the_next_manifest() {
         .accept_change(entity, ChangeOp::Unsuppress)
         .expect("accepted");
     ingest(&engine, "ext-2");
-    wait_until("the second flush", || {
+    wait_until("the second flush", WAIT, || {
         engine.write_executor_stats().flushes >= 2
     });
 
@@ -177,7 +143,7 @@ fn an_unsuppress_is_absent_from_the_next_manifest() {
 #[test]
 fn a_delete_reaches_tombstones_and_a_suppress_reaches_deny() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let root = fixture(tmp.path());
+    let root = fixture_in(tmp.path());
     let engine = engine_at(tmp.path(), &root, 1);
 
     let deleted = entity_of_source(&root, 11);
@@ -190,7 +156,9 @@ fn a_delete_reaches_tombstones_and_a_suppress_reaches_deny() {
         .expect("accepted");
 
     ingest(&engine, "ext-1");
-    wait_until("the flush", || engine.write_executor_stats().flushes >= 1);
+    wait_until("the flush", WAIT, || {
+        engine.write_executor_stats().flushes >= 1
+    });
 
     let (_, manifest) = newest_manifest(&root);
     assert_eq!(suppressed_in(&manifest), vec![suppressed.raw()]);
@@ -209,7 +177,7 @@ fn a_delete_reaches_tombstones_and_a_suppress_reaches_deny() {
 #[test]
 fn a_node_restored_from_the_bundle_alone_honours_the_published_deny() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let root = fixture(tmp.path());
+    let root = fixture_in(tmp.path());
     let suppressed = entity_of_source(&root, 7);
 
     let visible_before = {
@@ -221,7 +189,7 @@ fn a_node_restored_from_the_bundle_alone_honours_the_published_deny() {
             .accept_change(suppressed, ChangeOp::Suppress)
             .expect("accepted");
         ingest(&engine, "ext-1");
-        wait_until("the flush to publish", || {
+        wait_until("the flush to publish", WAIT, || {
             engine.write_executor_stats().flushes >= 1
         });
         before
@@ -272,7 +240,7 @@ fn visible_count(engine: &Engine, session: &tessera_engine::Session) -> u64 {
 #[test]
 fn an_accepted_deny_publishes_without_moving_the_geometry_version() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let root = fixture(tmp.path());
+    let root = fixture_in(tmp.path());
     let engine = engine_at(tmp.path(), &root, 3600);
 
     let (n_before, _) = newest_manifest(&root);
@@ -282,7 +250,7 @@ fn an_accepted_deny_publishes_without_moving_the_geometry_version() {
     engine
         .accept_change(entity, ChangeOp::Suppress)
         .expect("accepted");
-    wait_until("the overlay publication", || {
+    wait_until("the overlay publication", WAIT, || {
         engine.write_executor_stats().overlay_publications >= 1
     });
 

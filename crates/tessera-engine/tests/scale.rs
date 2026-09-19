@@ -108,6 +108,8 @@ use tessera_engine::{Engine, EngineConfig, Session, ViewportRequest, WriteStage}
 use tessera_lifecycle::{ChangeOp, UnallocatedRow};
 use tessera_types::{EntityId, TesseraId};
 
+const WAIT: Duration = Duration::from_secs(600);
+
 /// Rows per `accept_ingest` call. Each acceptance is one WAL append and one fsync, so this is the
 /// batch size a real `/control/ingest` caller would choose; the measured knee is around 1,000
 /// (`arms::ingest`) and 10,000 is comfortably past it.
@@ -152,14 +154,6 @@ fn env_usize(key: &str, default: usize) -> usize {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(default)
-}
-
-fn wait_until(what: &str, mut cond: impl FnMut() -> bool) {
-    let deadline = Instant::now() + Duration::from_secs(600);
-    while !cond() {
-        assert!(Instant::now() < deadline, "timed out waiting: {what}");
-        std::thread::sleep(Duration::from_millis(5));
-    }
 }
 
 /// A config whose selection rules are switched off, so that every assertion here is about the
@@ -453,13 +447,14 @@ fn ingest_round(engine: &Engine, round: usize, batch: usize) -> (Vec<Planted>, R
     let refreshes = engine.refreshes();
     let t_publish = Instant::now();
     engine.request_flush();
-    wait_until("the round's flush to publish", || {
+    wait_until("the round's flush to publish", WAIT, || {
         engine.write_executor_stats().flushes > flushes
     });
     let publish = t_publish.elapsed();
     let t_refresh = Instant::now();
     wait_until(
         "the background refresh to replace the session's projection",
+        WAIT,
         || engine.refreshes() > refreshes,
     );
     (
@@ -947,7 +942,7 @@ fn the_flip_costs_what_the_resident_population_costs() {
         })
         .expect("five rounds all flushed themselves mid-ingest — nothing is left to time");
     engine.request_flush();
-    wait_until("the flush to publish", || {
+    wait_until("the flush to publish", WAIT, || {
         engine.write_executor_stats().flushes > flushes
     });
     let t_refresh = Instant::now();
@@ -987,9 +982,11 @@ fn the_flip_costs_what_the_resident_population_costs() {
         handles.into_iter().map(|h| h.join().unwrap()).collect()
     });
 
-    wait_until("the refresh pass to produce every resident entry", || {
-        engine.refreshes() >= refreshes_before + sessions as u64
-    });
+    wait_until(
+        "the refresh pass to produce every resident entry",
+        WAIT,
+        || engine.refreshes() >= refreshes_before + sessions as u64,
+    );
     let derive_pass = t_refresh.elapsed();
 
     // ---- `cold`: what a fold makes every entry pay ------------------------------------------
@@ -1058,7 +1055,7 @@ fn ingest_and_publish(engine: &Engine, round: usize, batch: usize) {
     ingest_rows(engine, round, batch);
     let flushes = engine.write_executor_stats().flushes;
     engine.request_flush();
-    wait_until("the round's flush to publish", || {
+    wait_until("the round's flush to publish", WAIT, || {
         engine.write_executor_stats().flushes > flushes
     });
 }
@@ -1790,7 +1787,7 @@ fn p1_one_scale(base: u64) {
     {
         let flushes = engine.write_executor_stats().flushes;
         engine.request_flush();
-        wait_until("the deletion round's flush to publish", || {
+        wait_until("the deletion round's flush to publish", WAIT, || {
             engine.write_executor_stats().flushes > flushes
         });
     }
@@ -1840,7 +1837,7 @@ fn p1_one_scale(base: u64) {
     let before = engine.write_executor_stats();
     let t_fold = Instant::now();
     engine.request_fold();
-    wait_until("the fold's passes to finish", || {
+    wait_until("the fold's passes to finish", WAIT, || {
         engine.fold_is_holding_for_test()
     });
     let passes_wall = t_fold.elapsed();
@@ -1853,7 +1850,7 @@ fn p1_one_scale(base: u64) {
     let sampler = RssSampler::start();
     let t_publish = Instant::now();
     engine.set_fold_paused_for_test(false);
-    wait_until("the fold to publish", || {
+    wait_until("the fold to publish", WAIT, || {
         let now = engine.write_executor_stats();
         assert_eq!(
             now.fold_failures, before.fold_failures,

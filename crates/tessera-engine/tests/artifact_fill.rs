@@ -13,7 +13,6 @@
 mod common;
 
 use common::*;
-use tessera_engine::viewport::ViewportRequest;
 use tessera_engine::{ArtifactOut, Engine};
 use tessera_lifecycle::membership::IncomingContent;
 use tessera_lifecycle::{IncomingArtifact, IncomingGrowth};
@@ -22,8 +21,6 @@ use tessera_types::layer::{
     SuppliedContent, SuppliedRequirement,
 };
 use tessera_types::EntityId;
-
-const WHOLE_MAP: [f64; 4] = [0.0, 0.0, 1000.0, 1000.0];
 
 /// **No existence criterion**, so a count that moved is a membership that moved and an artifact
 /// that vanished is one withheld — the two things these cases distinguish.
@@ -65,29 +62,6 @@ fn described(name: &str) -> LayerDeclaration {
     d
 }
 
-struct Fixture {
-    _tmp: tempfile::TempDir,
-    root: std::path::PathBuf,
-    cache: std::path::PathBuf,
-    wal: std::path::PathBuf,
-}
-
-fn fixture() -> Fixture {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let root = tmp.path().join("bundle");
-    build_fixture(
-        &root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    Fixture {
-        root,
-        cache: tmp.path().join("cache"),
-        wal: tmp.path().join("wal.log"),
-        _tmp: tmp,
-    }
-}
-
 impl Fixture {
     fn open(&self) -> Engine {
         let engine = open_engine_publishing(&self.root, &self.cache, &self.wal);
@@ -112,20 +86,9 @@ fn node(
     artifact
 }
 
-fn artifacts_of(engine: &Engine) -> Vec<ArtifactOut> {
-    let session = engine.authorise(&full_coverage_credential()).unwrap();
-    engine
-        .viewport(
-            &session,
-            ViewportRequest::new("s0", 0, WHOLE_MAP, N_ITEMS as usize),
-        )
-        .expect("a viewport over the whole map")
-        .artifacts
-}
-
 /// One layer's served keys with their masked counts, sorted.
 fn served(engine: &Engine, layer: &str) -> Vec<(String, u64)> {
-    let mut out: Vec<(String, u64)> = artifacts_of(engine)
+    let mut out: Vec<(String, u64)> = artifacts_of(engine, &full_coverage_credential())
         .into_iter()
         .filter(|a| a.layer == layer)
         .filter_map(|a| a.key.clone().map(|key| (key, a.masked_count)))
@@ -136,7 +99,7 @@ fn served(engine: &Engine, layer: &str) -> Vec<(String, u64)> {
 
 /// The served artifact under `key` on `layer`, if any.
 fn served_row(engine: &Engine, layer: &str, key: &str) -> Option<ArtifactOut> {
-    artifacts_of(engine)
+    artifacts_of(engine, &full_coverage_credential())
         .into_iter()
         .find(|a| a.layer == layer && a.key.as_deref() == Some(key))
 }
@@ -179,27 +142,6 @@ fn content_extents(fx: &Fixture, want: usize) {
         );
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
-}
-
-fn remove_the_whole_log(fx: &Fixture) {
-    let dir = fx.wal.parent().expect("the log has a directory");
-    let stem = fx.wal.file_stem().expect("the log has a stem").to_owned();
-    let mut removed = 0usize;
-    for entry in std::fs::read_dir(dir)
-        .expect("the log's directory exists")
-        .flatten()
-    {
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        if name.starts_with(&format!("{}-", stem.to_string_lossy())) {
-            std::fs::remove_file(entry.path()).expect("a log member is removable");
-            removed += 1;
-        }
-    }
-    assert!(
-        removed > 0,
-        "no log member was found to delete — the test would prove nothing"
-    );
 }
 
 /// **A parent fill on a held artifact is in the next request's cut, and only a parent fill
@@ -394,16 +336,16 @@ fn a_content_fill_serves_a_withheld_artifact_and_outlives_the_log() {
         // only by the fold, so the log is pinned at the fill until then: two rotations may not
         // reclaim the member holding it.
         content_extents(&fx, 1);
-        let holding = wal_members(&fx)
+        let holding = wal_members(&fx.wal)
             .pop()
             .expect("the log has at least one member");
         rotate(&engine);
         rotate(&engine);
         assert!(
-            wal_members(&fx).contains(&holding),
+            wal_members(&fx.wal).contains(&holding),
             "{holding} holds the fill and is still there: rotation may not reclaim past it while \
              the log is the record's only home. Members now: {:?}",
-            wal_members(&fx)
+            wal_members(&fx.wal)
         );
     }
 
@@ -424,7 +366,7 @@ fn a_content_fill_serves_a_withheld_artifact_and_outlives_the_log() {
     }
 
     // And with the log gone, the extents are the only home the fill has.
-    remove_the_whole_log(&fx);
+    remove_the_whole_log(&fx.wal);
     let engine = fx.open();
     let row = served_row(&engine, "topics/a", "t0").expect("served from the extents alone");
     assert_eq!(
@@ -433,25 +375,6 @@ fn a_content_fill_serves_a_withheld_artifact_and_outlives_the_log() {
         "the filled content reached the fold's rewrite and the content extent before the log \
          was released"
     );
-}
-
-/// The log's surviving members, oldest first.
-fn wal_members(fx: &Fixture) -> Vec<String> {
-    let dir = fx.wal.parent().expect("the log has a directory");
-    let stem = fx
-        .wal
-        .file_stem()
-        .expect("the log has a stem")
-        .to_string_lossy()
-        .to_string();
-    let mut found: Vec<String> = std::fs::read_dir(dir)
-        .expect("the log's directory exists")
-        .flatten()
-        .map(|e| e.file_name().to_string_lossy().to_string())
-        .filter(|n| n.starts_with(&format!("{stem}-")) && n.ends_with(".log"))
-        .collect();
-    found.sort();
-    found
 }
 
 /// A tick against an empty buffer: nothing to flush, so it rotates the log.
@@ -463,28 +386,6 @@ fn rotate(engine: &Engine) {
         assert!(
             std::time::Instant::now() < deadline,
             "the tick that rotates the log never ran"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
-}
-
-/// Request a fold and block until it has published, asserting it was not discarded.
-fn fold(engine: &Engine) {
-    let before = engine.write_executor_stats();
-    engine.request_fold();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-    loop {
-        let now = engine.write_executor_stats();
-        assert_eq!(
-            now.fold_failures, before.fold_failures,
-            "the fold was discarded rather than published"
-        );
-        if now.folds > before.folds {
-            return;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the fold never published"
         );
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
@@ -615,7 +516,7 @@ fn a_content_fill_reaches_an_artifact_published_bare_and_survives_a_fold() {
         )
         .unwrap();
     fold(&engine);
-    let mut rows: Vec<(String, Vec<String>, u64)> = artifacts_of(&engine)
+    let mut rows: Vec<(String, Vec<String>, u64)> = artifacts_of(&engine, &full_coverage_credential())
         .into_iter()
         .filter(|a| a.layer == "topics/a")
         .map(|a| (a.key.unwrap_or_default(), a.content, a.masked_count))

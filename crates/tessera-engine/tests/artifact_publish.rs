@@ -45,29 +45,6 @@ fn declaration(name: &str) -> LayerDeclaration {
     }
 }
 
-struct Fixture {
-    _tmp: tempfile::TempDir,
-    root: std::path::PathBuf,
-    cache: std::path::PathBuf,
-    wal: std::path::PathBuf,
-}
-
-fn fixture() -> Fixture {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let root = tmp.path().join("bundle");
-    build_fixture(
-        &root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    Fixture {
-        root,
-        cache: tmp.path().join("cache"),
-        wal: tmp.path().join("wal.log"),
-        _tmp: tmp,
-    }
-}
-
 impl Fixture {
     fn open(&self) -> Engine {
         open_engine_publishing(&self.root, &self.cache, &self.wal)
@@ -83,14 +60,6 @@ impl Fixture {
 
 fn artifact(key: &str, members: Vec<EntityId>) -> IncomingArtifact {
     IncomingArtifact::from_entities(Some(key.into()), members)
-}
-
-/// Invert an artifact's `tessera_id` through the admin plane's own resolver, the way
-/// `/control/changes` does — so this exercises the misdirection guard rather than going round it.
-fn artifact_entity(engine: &Engine, id: tessera_types::TesseraId) -> EntityId {
-    let idset = engine.generation().bundle.manifest.identity.idset;
-    engine.resolve_tessera_ids(&[id], idset).unwrap()[0]
-        .expect("an artifact identifier names the entity this deployment issued for it")
 }
 
 /// The batch is the commit unit, and each artifact gets an entity of its own — the address by which
@@ -280,32 +249,6 @@ fn a_publication_survives_a_restart_and_its_entities_are_not_reissued() {
     }
 }
 
-/// Delete every member of the WAL sequence.
-///
-/// The log is a **sequence** — `wal-000000.log`, `wal-000001.log`, … beside the configured base
-/// path, which itself is never a file. Removing the base path would silently succeed at deleting
-/// nothing and leave the test asserting that replay works, which it always did.
-fn remove_the_whole_log(fx: &Fixture) {
-    let dir = fx.wal.parent().expect("the log has a directory");
-    let stem = fx.wal.file_stem().expect("the log has a stem").to_owned();
-    let mut removed = 0usize;
-    for entry in std::fs::read_dir(dir)
-        .expect("the log's directory exists")
-        .flatten()
-    {
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        if name.starts_with(&format!("{}-", stem.to_string_lossy())) {
-            std::fs::remove_file(entry.path()).expect("a log member is removable");
-            removed += 1;
-        }
-    }
-    assert!(
-        removed > 0,
-        "no log member was found to delete — the test would prove nothing"
-    );
-}
-
 /// Wait for the executor's drain close to publish the memberships, and return the extent files.
 fn published_extents(fx: &Fixture) -> Vec<std::path::PathBuf> {
     let dir = fx
@@ -366,7 +309,7 @@ fn a_published_membership_survives_the_loss_of_the_whole_log() {
     };
 
     // The log goes entirely. Nothing else on disk carried a membership before this change.
-    remove_the_whole_log(&fx);
+    remove_the_whole_log(&fx.wal);
 
     let engine = fx.open();
     assert_eq!(
@@ -420,7 +363,7 @@ fn a_later_publication_appends_an_extent_and_the_two_union_at_open() {
         }
     }
 
-    remove_the_whole_log(&fx);
+    remove_the_whole_log(&fx.wal);
     let engine = fx.open();
     assert_eq!(
         engine.published_artifacts(),
@@ -489,7 +432,7 @@ fn a_membership_seeded_from_an_extent_is_read_through_it() {
     // The log goes, so nothing replays over the seed: a WAL record postdates the manifest and
     // `apply` puts that artifact's membership back on the heap, which is correct and is not what
     // this case is about.
-    remove_the_whole_log(&fx);
+    remove_the_whole_log(&fx.wal);
 
     let engine = fx.open();
     let seeded = engine.level_memberships_for_test("clusters/a", 0);

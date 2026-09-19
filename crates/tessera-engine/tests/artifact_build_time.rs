@@ -17,11 +17,10 @@ use arrow::record_batch::RecordBatch;
 use common::*;
 use parquet::arrow::ArrowWriter;
 use tessera_build::BuildArgs;
-use tessera_engine::{ArtifactOut, Engine, ViewportRequest};
+use tessera_engine::{ArtifactOut, Engine};
 use tessera_lifecycle::wal::ChangeOp;
-use tessera_types::{EntityId, TesseraId};
+use tessera_types::EntityId;
 
-const WHOLE_MAP: [f64; 4] = [0.0, 0.0, 1000.0, 1000.0];
 const CLUSTERS: &str = "clusters/a";
 const LABELS: &str = "topics/x";
 /// The cluster's membership, in source ids. Every third source id carries the subset term, so a
@@ -173,13 +172,6 @@ fn topic_members() -> Vec<(&'static str, Option<u32>, u64)> {
     rows
 }
 
-struct Fixture {
-    _tmp: tempfile::TempDir,
-    root: std::path::PathBuf,
-    cache: std::path::PathBuf,
-    wal: std::path::PathBuf,
-}
-
 /// A bundle built **with** its layers and artifacts — no control-plane call anywhere.
 fn fixture() -> Fixture {
     try_fixture(write_topics).expect("a build carrying layers")
@@ -252,24 +244,8 @@ impl Fixture {
     }
 }
 
-fn artifacts_of(engine: &Engine, credential: &[u8]) -> Vec<ArtifactOut> {
-    let session = engine.authorise(credential).unwrap();
-    engine
-        .viewport(
-            &session,
-            ViewportRequest::new("s0", 0, WHOLE_MAP, N_ITEMS as usize),
-        )
-        .expect("a viewport over the whole map")
-        .artifacts
-}
-
 fn of_layer<'a>(served: &'a [ArtifactOut], layer: &str) -> Vec<&'a ArtifactOut> {
     served.iter().filter(|a| a.layer == layer).collect()
-}
-
-fn artifact_entity(engine: &Engine, id: TesseraId) -> EntityId {
-    let idset = engine.generation().bundle.manifest.identity.idset;
-    engine.resolve_tessera_ids(&[id], idset).unwrap()[0].expect("it names what was issued")
 }
 
 /// **The headline.** A bundle that has never seen a control-plane call serves its clusters with

@@ -12,9 +12,17 @@
 // carrying their own copy — which is the drift this module exists to prevent.
 #![allow(dead_code)]
 
+mod lifecycle;
+mod wait;
+
+#[allow(unused_imports)]
+pub use lifecycle::*;
+#[allow(unused_imports)]
+pub use wait::*;
+
 use std::collections::BTreeMap;
 use std::fs::File;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use arrow::array::{Array, BinaryArray, Float64Array, UInt32Array, UInt64Array};
@@ -23,11 +31,12 @@ use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
 
 use tessera_build::{build, BuildArgs};
-use tessera_engine::{default_compute_threads, Engine, EngineConfig};
+use tessera_engine::{default_compute_threads, ArtifactOut, Engine, EngineConfig, ViewportRequest};
+use tessera_lifecycle::UnallocatedRow;
 use tessera_plugin::Passthrough;
 use tessera_spatial::Bounds;
 use tessera_store::read::open_bundle;
-use tessera_types::IdentityKey;
+use tessera_types::{EntityId, IdentityKey, TesseraId};
 
 pub const N_ITEMS: u64 = 10_000;
 pub const ALL_TERM: u64 = 0;
@@ -208,6 +217,44 @@ pub fn build_fixture_n(out: &Path, points_path: &Path, pairs_path: &Path, n: u64
 /// Build the fixture bundle at `out` through `tessera_build::build`.
 pub fn build_fixture(out: &Path, points_path: &Path, pairs_path: &Path) {
     build_fixture_n(out, points_path, pairs_path, N_ITEMS)
+}
+
+/// A built fixture bundle and the paths an engine opens it with, holding the temporary directory
+/// that owns all three.
+pub struct Fixture {
+    pub _tmp: tempfile::TempDir,
+    pub root: PathBuf,
+    pub cache: PathBuf,
+    pub wal: PathBuf,
+}
+
+/// The `N_ITEMS` fixture, built into a temporary directory of its own.
+pub fn fixture() -> Fixture {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().join("bundle");
+    build_fixture(
+        &root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+    Fixture {
+        root,
+        cache: tmp.path().join("cache"),
+        wal: tmp.path().join("wal.log"),
+        _tmp: tmp,
+    }
+}
+
+/// The same bundle, built into a caller's directory — for a case that opens the bundle more than
+/// once, or beside paths of its own.
+pub fn fixture_in(tmp: &Path) -> PathBuf {
+    let root = tmp.join("bundle");
+    build_fixture(
+        &root,
+        &tmp.join("points.parquet"),
+        &tmp.join("pairs.parquet"),
+    );
+    root
 }
 
 /// Build a bundle over inputs the **corpus generator** wrote, with the generator's own schema.
@@ -481,23 +528,80 @@ pub fn open_engine_uncapped(bundle_root: &Path, cache_dir: &Path, wal_path: &Pat
     .expect("engine should open against a freshly built bundle")
 }
 
-/// **Force a tick and wait for it** — the moment a level's row forms are published from the
-/// deltas accumulated since the last one (`ingest.md` §1.3, §10 ruling 6).
-///
-/// A write is durable at its acknowledgement and visible at the next publication, so a test that
-/// writes and then reads what a viewer sees puts this between the two. The tick is requested
-/// rather than waited for so that a test does not sit out `flush_max_age_secs`.
-pub fn tick(engine: &Engine) {
-    let before = engine.write_executor_stats().ticks;
-    engine.request_flush();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-    while engine.write_executor_stats().ticks == before {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the tick that publishes the row forms never ran"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(5));
-    }
+/// The fixture's whole extent, as a viewport request carries it.
+pub const WHOLE_MAP: [f64; 4] = [0.0, 0.0, 1000.0, 1000.0];
+
+/// The artifacts a principal is served over the whole map at depth 0.
+pub fn artifacts_of(engine: &Engine, credential: &[u8]) -> Vec<ArtifactOut> {
+    let session = engine.authorise(credential).unwrap();
+    engine
+        .viewport(
+            &session,
+            ViewportRequest::new("s0", 0, WHOLE_MAP, N_ITEMS as usize),
+        )
+        .expect("a viewport over the whole map")
+        .artifacts
+}
+
+/// The entity an artifact's served identifier names.
+pub fn artifact_entity(engine: &Engine, id: TesseraId) -> EntityId {
+    let idset = engine.generation().bundle.manifest.identity.idset;
+    engine.resolve_tessera_ids(&[id], idset).unwrap()[0].expect("it names what was issued")
+}
+
+/// A one-row ingest at the fixture's centre, carrying `ALL_TERM` — the batch id and the external
+/// id are the caller's string.
+pub fn ingest(engine: &Engine, external_id: &str) -> EntityId {
+    let row = UnallocatedRow {
+        external_id: Some(external_id.as_bytes().to_vec()),
+        view: "s0".to_string(),
+        join: None,
+        descriptors: vec![b"0".to_vec()],
+        x: 5.0,
+        y: 5.0,
+        scalars: Vec::new(),
+        terms: engine.resolve_terms(&[b"0".to_vec()]),
+        scoped: Vec::new(),
+    };
+    engine
+        .accept_ingest(vec![row], external_id.to_string(), [0u8; 32])
+        .expect("ingest is accepted")[0]
+}
+
+/// An engine over `root`, with its cache and log beside it under `tmp`, ticking every
+/// `tick_secs` and its write executor running.
+pub fn engine_at(tmp: &Path, root: &Path, tick_secs: u64) -> Engine {
+    let mut engine = Engine::open(
+        root,
+        &tmp.join("cache"),
+        &tmp.join("wal.log"),
+        Passthrough::new(),
+        EngineConfig {
+            flush_max_age_secs: tick_secs,
+            ..config()
+        },
+    )
+    .expect("engine opens");
+    engine
+        .start_write_executor(64)
+        .expect("the executor starts once");
+    engine
+}
+
+/// Whether the subset principal can see the item behind a source id.
+pub fn subset_sees(e: u64) -> bool {
+    terms_of(e).contains(&SUBSET_TERM)
+}
+
+/// A credential over the terms a generator grant names.
+pub fn grant_credential(grant: &str) -> Vec<u8> {
+    let terms: Vec<String> = tessera_corpus::Grant::parse(grant)
+        .expect("the grant is inside the generator's term space")
+        .terms()
+        .iter()
+        .map(|t| format!("\"{}\"", t.raw()))
+        .collect();
+    format!("{{\"terms\": [{}]}}", terms.join(", ")).into_bytes()
 }
 
 pub fn full_coverage_credential() -> Vec<u8> {

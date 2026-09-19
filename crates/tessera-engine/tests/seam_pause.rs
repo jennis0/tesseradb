@@ -40,7 +40,7 @@ mod common;
 
 use std::path::Path;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use common::*;
 use tessera_engine::{Engine, EngineConfig};
@@ -49,17 +49,10 @@ use tessera_lifecycle::{ChangeOp, UnallocatedRow};
 use tessera_types::EntityId;
 
 const WAIT: Duration = Duration::from_secs(30);
+
 /// Long enough that a `Stall` which failed to block would almost always have published by the
 /// time the post-settle assertion runs, short enough to cost nothing against the binary's runtime.
 const SETTLE: Duration = Duration::from_millis(50);
-
-fn wait_until(what: &str, mut cond: impl FnMut() -> bool) {
-    let deadline = Instant::now() + Duration::from_secs(30);
-    while !cond() {
-        assert!(Instant::now() < deadline, "timed out waiting: {what}");
-        std::thread::sleep(Duration::from_millis(5));
-    }
-}
 
 /// A fixture engine whose executor runs against a switchboard the test holds the other end of.
 /// The tick is held long so the test owns the clock, exactly as the driver will
@@ -90,17 +83,6 @@ fn engine_with_faults(tmp: &Path, root: &Path) -> (Engine, Arc<FaultSwitchboard>
         .start_write_executor_with_faults(8, Arc::clone(&faults))
         .expect("the executor starts once");
     (engine, faults)
-}
-
-/// The prefix `CURRENT` durably names, read from the disc rather than from the engine — the
-/// commit point is the file, and the file is what a restart would open.
-fn current_prefix(root: &Path) -> String {
-    let bytes = std::fs::read(root.join("CURRENT")).expect("CURRENT exists");
-    let json: serde_json::Value = serde_json::from_slice(&bytes).expect("CURRENT is JSON");
-    json["prefix"]
-        .as_str()
-        .expect("CURRENT names a prefix")
-        .to_string()
 }
 
 /// How many side-manifests the live prefix's default partition carries — the durable name count
@@ -160,7 +142,7 @@ fn the_current_flip_site_parks_the_fold_with_the_old_prefix_still_committed() {
 
     // Proceeds: release, and the rename lands.
     faults.release();
-    wait_until("the released fold publishes", || {
+    wait_until("the released fold publishes", WAIT, || {
         engine.write_executor_stats().folds >= 1
     });
     assert_eq!(engine.write_executor_stats().fold_failures, 0);
@@ -192,7 +174,7 @@ fn the_fold_status_covers_the_publication() {
     let held = Duration::from_millis(1_200);
     std::thread::sleep(held);
     faults.release();
-    wait_until("the released fold publishes", || {
+    wait_until("the released fold publishes", WAIT, || {
         engine.write_executor_stats().folds >= 1
     });
 
@@ -295,7 +277,7 @@ fn the_manifest_publish_site_parks_a_flush_with_its_segment_unreferenced() {
 
     // Proceeds.
     faults.release();
-    wait_until("the released flush publishes", || {
+    wait_until("the released flush publishes", WAIT, || {
         engine.write_executor_stats().flushes >= 1
     });
     assert_eq!(

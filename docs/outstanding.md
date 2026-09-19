@@ -41,7 +41,6 @@ Things found during the cleanup that are not yet done. One line each; delete a l
 - The conformance suite has no corpus with a per-view annotation layer, so nothing there checks that a view serves only its own artifacts. The Rust server tests do.
 - `distinct_key_first_viewports_overlap_instead_of_serialising` (`crates/tessera-engine/tests/viewport.rs`) asserts a timing ratio and fails when the box is loaded. It failed in four runs on 2026-09-18 and passed alone each time.
 - The coalesce unit tests (`crates/tessera-engine/src/coalesce.rs`) test the planner and the rebase separately, each on a hand-built manifest, and repeat one "replaces its window in both halves" test per axis. A plan, execute, rebase round trip per axis over one shared fixture would test the join between the halves and roughly halve the module.
-- 43 engine test files each carry their own copy of the wait, flush, fold and settle helpers. They belong in `tests/common`, once.
 - `Wal::retained_from` and `batch_identity` (`crates/tessera-lifecycle/src/wal.rs`) are tested only through the engine, and that test checks that a batch id is forgotten at rotation and not that a retained one is kept.
 - If `Wal::rotate` fails after deleting some members, the engine skips trimming its batch-id memory until the next rotation that succeeds, so a few ids are remembered longer than the log holds them.
 

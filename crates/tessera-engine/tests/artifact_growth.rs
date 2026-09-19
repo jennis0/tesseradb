@@ -30,8 +30,6 @@ use tessera_types::layer::{
 };
 use tessera_types::EntityId;
 
-const WHOLE_MAP: [f64; 4] = [0.0, 0.0, 1000.0, 1000.0];
-
 /// **No existence criterion**, deliberately, as in the fold's own cases: these assertions are about
 /// what a membership *is*, and a criterion would turn a wrong count into an absence — which is the
 /// weaker assertion of the two and the one this file exists to distinguish from a real absence.
@@ -58,29 +56,6 @@ fn declaration(name: &str) -> LayerDeclaration {
         levels: Vec::new(),
         layout: None,
         shape: None,
-    }
-}
-
-struct Fixture {
-    _tmp: tempfile::TempDir,
-    root: std::path::PathBuf,
-    cache: std::path::PathBuf,
-    wal: std::path::PathBuf,
-}
-
-fn fixture() -> Fixture {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let root = tmp.path().join("bundle");
-    build_fixture(
-        &root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    Fixture {
-        root,
-        cache: tmp.path().join("cache"),
-        wal: tmp.path().join("wal.log"),
-        _tmp: tmp,
     }
 }
 
@@ -133,21 +108,10 @@ impl Fixture {
     }
 }
 
-fn artifacts_of(engine: &Engine) -> Vec<ArtifactOut> {
-    let session = engine.authorise(&full_coverage_credential()).unwrap();
-    engine
-        .viewport(
-            &session,
-            ViewportRequest::new("s0", 0, WHOLE_MAP, N_ITEMS as usize),
-        )
-        .expect("a viewport over the whole map")
-        .artifacts
-}
-
 /// The one artifact's masked count, for a principal who can see everything — so the number is the
 /// membership's own size, and anything that moves it is the growth.
 fn count(engine: &Engine) -> u64 {
-    let artifacts = artifacts_of(engine);
+    let artifacts = artifacts_of(engine, &full_coverage_credential());
     assert_eq!(
         artifacts.len(),
         1,
@@ -210,83 +174,6 @@ fn grow(fx: &Fixture, engine: &Engine, sources: std::ops::Range<u64>) {
     tick(engine);
 }
 
-/// Request a flush and block until it has published — what gives an ingested point a base row, and
-/// therefore what makes it count towards any membership it joined.
-fn flush(engine: &Engine) {
-    let before = engine.write_executor_stats().flushes;
-    engine.request_flush();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-    while engine.write_executor_stats().flushes == before {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the flush never published"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
-}
-
-/// Request a fold and block until it has published, asserting it was not discarded.
-fn fold(engine: &Engine) {
-    let before = engine.write_executor_stats();
-    engine.request_fold();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-    loop {
-        let now = engine.write_executor_stats();
-        assert_eq!(
-            now.fold_failures, before.fold_failures,
-            "the fold was discarded rather than published"
-        );
-        if now.folds > before.folds {
-            return;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the fold never published"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
-}
-
-fn remove_the_whole_log(fx: &Fixture) {
-    let dir = fx.wal.parent().expect("the log has a directory");
-    let stem = fx.wal.file_stem().expect("the log has a stem").to_owned();
-    let mut removed = 0usize;
-    for entry in std::fs::read_dir(dir)
-        .expect("the log's directory exists")
-        .flatten()
-    {
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        if name.starts_with(&format!("{}-", stem.to_string_lossy())) {
-            std::fs::remove_file(entry.path()).expect("a log member is removable");
-            removed += 1;
-        }
-    }
-    assert!(
-        removed > 0,
-        "no log member was found to delete — the test would prove nothing"
-    );
-}
-
-/// The log's surviving members, oldest first — `wal-000000.log`, `wal-000001.log`, …
-fn wal_members(fx: &Fixture) -> Vec<String> {
-    let dir = fx.wal.parent().expect("the log has a directory");
-    let stem = fx
-        .wal
-        .file_stem()
-        .expect("the log has a stem")
-        .to_string_lossy()
-        .to_string();
-    let mut found: Vec<String> = std::fs::read_dir(dir)
-        .expect("the log's directory exists")
-        .flatten()
-        .map(|e| e.file_name().to_string_lossy().to_string())
-        .filter(|n| n.starts_with(&format!("{stem}-")) && n.ends_with(".log"))
-        .collect();
-    found.sort();
-    found
-}
-
 /// Ask for a flush against an empty buffer, which is the deny-only regime's rotation: nothing to
 /// flush, so the tick rotates the log rather than publishing geometry.
 fn rotate(engine: &Engine) {
@@ -332,11 +219,6 @@ fn resampled_gauge(engine: &Engine) -> tessera_engine::WalGauge {
         );
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
-}
-
-fn artifact_entity(engine: &Engine, id: tessera_types::TesseraId) -> EntityId {
-    let idset = engine.generation().bundle.manifest.identity.idset;
-    engine.resolve_tessera_ids(&[id], idset).unwrap()[0].expect("it names what was issued")
 }
 
 // ---- I8: what a growth may not touch ------------------------------------------------------------
@@ -502,7 +384,7 @@ fn a_growth_reaches_the_prefix_the_fold_publishes_and_outlives_the_log() {
         assert_eq!(count(&engine), 310, "the fold serves what it stored");
     }
 
-    remove_the_whole_log(&fx);
+    remove_the_whole_log(&fx.wal);
 
     let engine = fx.open();
     assert_eq!(engine.published_artifacts(), 1);
@@ -543,7 +425,7 @@ fn a_later_publication_does_not_release_the_log_from_a_growth_below_it() {
     }
 
     let engine = fx.open();
-    let artifacts = artifacts_of(&engine);
+    let artifacts = artifacts_of(&engine, &full_coverage_credential());
     assert_eq!(artifacts.len(), 2, "both artifacts came back");
     let grown = artifacts
         .iter()
@@ -572,7 +454,7 @@ fn a_rotation_may_not_reclaim_the_member_holding_a_growth() {
         publish(&fx, &engine, 0..300);
         grow(&fx, &engine, 300..310);
         // The growth is in whichever member was active when it was appended, which is the newest.
-        let holding = wal_members(&fx)
+        let holding = wal_members(&fx.wal)
             .pop()
             .expect("the log has at least one member");
 
@@ -582,10 +464,10 @@ fn a_rotation_may_not_reclaim_the_member_holding_a_growth() {
         rotate(&engine);
         rotate(&engine);
         assert!(
-            wal_members(&fx).contains(&holding),
+            wal_members(&fx.wal).contains(&holding),
             "{holding} holds the growth and is still there: rotation may not reclaim past it \
              while the log is the join's only home. Members now: {:?}",
-            wal_members(&fx)
+            wal_members(&fx.wal)
         );
     }
 
@@ -667,13 +549,13 @@ fn growing_a_suppressed_artifact_leaves_it_suppressed() {
 
     engine.accept_change(entity, ChangeOp::Suppress).unwrap();
     assert!(
-        artifacts_of(&engine).is_empty(),
+        artifacts_of(&engine, &full_coverage_credential()).is_empty(),
         "the suppression is in force at the ack"
     );
 
     grow(&fx, &engine, 300..310);
     assert!(
-        artifacts_of(&engine).is_empty(),
+        artifacts_of(&engine, &full_coverage_credential()).is_empty(),
         "and it is still in force: growth is not a route back into service"
     );
 
@@ -880,7 +762,7 @@ fn an_artifact_a_batch_minted_survives_a_restart() {
     // points have them — which is what makes this the assertion rather than the one above.
     flush(&engine);
     fold(&engine);
-    let artifacts = artifacts_of(&engine);
+    let artifacts = artifacts_of(&engine, &full_coverage_credential());
     assert_eq!(artifacts.len(), 1);
     assert_eq!(artifacts[0].key.as_deref(), Some("made-by-a-point"));
     assert_eq!(
@@ -906,10 +788,10 @@ fn a_minted_artifact_survives_the_fold_that_rewrites_its_level() {
         flush(&engine);
         fold(&engine);
     }
-    remove_the_whole_log(&fx);
+    remove_the_whole_log(&fx.wal);
 
     let engine = fx.open();
-    let artifacts = artifacts_of(&engine);
+    let artifacts = artifacts_of(&engine, &full_coverage_credential());
     assert_eq!(
         artifacts.len(),
         1,

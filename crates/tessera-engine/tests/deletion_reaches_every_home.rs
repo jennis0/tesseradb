@@ -293,29 +293,6 @@ fn engine_over(tmp: &Path, root: &Path, config: EngineConfig) -> Engine {
     engine
 }
 
-/// Request a fold and block until it has published, asserting it was not discarded — the counter
-/// is the deterministic wait, exactly as in `tests/fold.rs`.
-fn fold(engine: &Engine) {
-    let before = engine.write_executor_stats();
-    engine.request_fold();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
-    loop {
-        let now = engine.write_executor_stats();
-        assert_eq!(
-            now.fold_failures, before.fold_failures,
-            "the fold was discarded rather than published"
-        );
-        if now.folds > before.folds {
-            return;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the fold never published"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
-}
-
 /// Items a full-coverage principal is served across the whole extent.
 fn visible(engine: &Engine, session: &tessera_engine::Session) -> u64 {
     engine
@@ -328,16 +305,6 @@ fn visible(engine: &Engine, session: &tessera_engine::Session) -> u64 {
         .iter()
         .map(|tile| tile.visible)
         .sum()
-}
-
-/// The prefix `CURRENT` names — read rather than assumed, because a fold publishes into a new one
-/// and a hard-coded `v00000` would read the *pre-fold* artefacts and pass without ever looking at
-/// the fold's output.
-fn current_prefix(root: &Path) -> String {
-    let current: tessera_store::manifest::CurrentPointer =
-        serde_json::from_slice(&std::fs::read(root.join("CURRENT")).expect("CURRENT is readable"))
-            .expect("CURRENT parses");
-    current.prefix
 }
 
 fn partition_dir(root: &Path) -> PathBuf {

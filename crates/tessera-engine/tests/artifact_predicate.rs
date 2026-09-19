@@ -44,7 +44,6 @@ const SEED: u64 = 0x5EED;
 const BY_LIST: &str = "generator/partition-enumerated";
 const BY_RULE: &str = "generator/partition-attribute";
 
-const WHOLE_MAP: [f64; 4] = [0.0, 0.0, 1000.0, 1000.0];
 /// The tile depth the narrow viewports are asked at. **A request's tiles come from its own `zoom`**,
 /// so at zoom 0 a bbox resolves to the single tile covering the whole grid and narrows nothing — a
 /// viewport case asked there would be comparing the whole map with itself five times.
@@ -77,16 +76,6 @@ fn corpus() -> Corpus {
     Corpus::new(SEED, N, extent()).expect("the generator accepts the fixture's extent")
 }
 
-fn credential(grant: &str) -> Vec<u8> {
-    let terms: Vec<String> = Grant::parse(grant)
-        .expect("the grant is inside the generator's term space")
-        .terms()
-        .iter()
-        .map(|t| format!("\"{}\"", t.raw()))
-        .collect();
-    format!("{{\"terms\": [{}]}}", terms.join(", ")).into_bytes()
-}
-
 /// What one layer serves one principal at one viewport: every artifact's key against its masked
 /// count, plus whether it carried a parent — the whole of what a client can read off an artifact
 /// row that is not an identifier.
@@ -97,7 +86,7 @@ fn served(
     zoom: u8,
     bbox: [f64; 4],
 ) -> BTreeMap<String, u64> {
-    let session = engine.authorise(&credential(grant)).unwrap();
+    let session = engine.authorise(&grant_credential(grant)).unwrap();
     let names = [layer];
     let mut request = ViewportRequest::new("s0", zoom, bbox, N as usize);
     request.layers = tessera_engine::LayerSelection::Named(&names);
@@ -308,19 +297,6 @@ fn ingest_point(engine: &Engine, external_id: &str, value: u32, term: u32, x: f6
 /// This file's own declaration: one column, so `partition` is at 0.
 fn ingest_own(engine: &Engine, external_id: &str, value: u32, term: u32, x: f64, y: f64) -> u64 {
     ingest_point_into(engine, external_id, value, term, x, y, 1, 0)
-}
-
-fn flush(engine: &Engine) {
-    let before = engine.write_executor_stats().flushes;
-    engine.request_flush();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-    while engine.write_executor_stats().flushes == before {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the flush never published"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
 }
 
 /// **A point ingested with value *v* counts against *v*'s artifact on the next request, with
@@ -559,7 +535,7 @@ fn an_absolute_criterion_fires_on_an_attribute_predicate() {
 /// The entity behind a served artifact, through the admin plane's own resolver — the address a
 /// suppression names, and the one drill-down inverts.
 fn served_entity(engine: &Engine, grant: &str, layer: &str, key: &str) -> tessera_types::TesseraId {
-    let session = engine.authorise(&credential(grant)).unwrap();
+    let session = engine.authorise(&grant_credential(grant)).unwrap();
     let names = [layer];
     let mut request = ViewportRequest::new("s0", 0, WHOLE_MAP, N as usize);
     request.layers = tessera_engine::LayerSelection::Named(&names);
@@ -585,7 +561,7 @@ fn a_predicate_artifact_answers_by_identifier_as_it_does_by_viewport() {
     let id = served_entity(&fx.engine, grant, BANDS, key);
     let idset = fx.engine.generation().bundle.manifest.identity.idset;
 
-    let session = fx.engine.authorise(&credential(grant)).unwrap();
+    let session = fx.engine.authorise(&grant_credential(grant)).unwrap();
     let row = fx
         .engine
         .artifact(&session, id, Some(idset), "s0", None)
@@ -699,27 +675,6 @@ fn a_suppressed_values_key_never_mints_again() {
         !served(&fx.engine, grant, BANDS, 0, WHOLE_MAP).contains_key(&anchor),
         "the suppression was defeated by ingesting a point"
     );
-}
-
-fn fold(engine: &Engine) {
-    let before = engine.write_executor_stats();
-    engine.request_fold();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-    loop {
-        let now = engine.write_executor_stats();
-        assert_eq!(
-            now.fold_failures, before.fold_failures,
-            "the fold was discarded rather than published"
-        );
-        if now.folds > before.folds {
-            return;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the fold never published"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
 }
 
 /// **A deleted value's key mints again, and what comes back is a new object.**

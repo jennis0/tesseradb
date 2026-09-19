@@ -40,6 +40,8 @@ use tessera_engine::{Engine, EngineConfig, ViewportRequest};
 use tessera_lifecycle::UnallocatedRow;
 use tessera_types::TesseraId;
 
+const WAIT: Duration = Duration::from_secs(180);
+
 /// The one view both paths carry.
 const VIEW: &str = "s0";
 
@@ -259,14 +261,6 @@ fn open(root: &Path, dir: &Path, name: &str) -> Engine {
     .expect("the engine opens")
 }
 
-fn wait_until(what: &str, mut ready: impl FnMut() -> bool) {
-    let deadline = Instant::now() + Duration::from_secs(180);
-    while !ready() {
-        assert!(Instant::now() < deadline, "timed out waiting for {what}");
-        std::thread::sleep(Duration::from_millis(10));
-    }
-}
-
 /// Send the whole corpus through `/control/ingest`, in batches, each row naming its own
 /// descriptors.
 fn ingest_corpus(engine: &Engine) {
@@ -406,7 +400,7 @@ fn a_built_corpus_and_the_same_corpus_ingested_and_folded_agree() {
     // Before the fold: the flush's rows are served, and no image exists to serve them from.
     let flushes = ingested.write_executor_stats().flushes;
     ingested.request_flush();
-    wait_until("the first flush to publish", || {
+    wait_until("the first flush to publish", WAIT, || {
         ingested.write_executor_stats().flushes > flushes
     });
     {

@@ -37,8 +37,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use common::*;
-use tessera_engine::viewport::ViewportRequest;
-use tessera_engine::{ArtifactOut, Engine, EngineConfig};
+use tessera_engine::{Engine, EngineConfig};
 use tessera_lifecycle::faults::{FaultSwitchboard, PauseAction, PauseSite};
 use tessera_lifecycle::wal::ChangeOp;
 use tessera_lifecycle::{
@@ -49,7 +48,6 @@ use tessera_types::layer::{
 };
 use tessera_types::EntityId;
 
-const WHOLE_MAP: [f64; 4] = [0.0, 0.0, 1000.0, 1000.0];
 const LAYER: &str = "clusters/a";
 /// Generous on purpose: every wait here is on a counter the executor moves, so a timeout is a hang
 /// and never a slow machine — which makes a bound sized against a loaded box cost nothing.
@@ -85,29 +83,6 @@ fn declaration(name: &str, value_set: ValueSet) -> LayerDeclaration {
         levels: Vec::new(),
         layout: None,
         shape: None,
-    }
-}
-
-struct Fixture {
-    _tmp: tempfile::TempDir,
-    root: std::path::PathBuf,
-    cache: std::path::PathBuf,
-    wal: std::path::PathBuf,
-}
-
-fn fixture() -> Fixture {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let root = tmp.path().join("bundle");
-    build_fixture(
-        &root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    Fixture {
-        root,
-        cache: tmp.path().join("cache"),
-        wal: tmp.path().join("wal.log"),
-        _tmp: tmp,
     }
 }
 
@@ -202,24 +177,20 @@ fn park<'scope, 'env>(
 /// reached the queue" — the observation that orders one submission after another instead of
 /// betting on two threads.
 fn wait_for_queue(engine: &Engine, depth: u64) {
-    wait_until(&format!("the work lane reaches depth {depth}"), || {
-        engine.write_executor_stats().work_depth >= depth
-    });
+    wait_until(
+        &format!("the work lane reaches depth {depth}"),
+        WAIT,
+        || engine.write_executor_stats().work_depth >= depth,
+    );
 }
 
 /// Block until the deny lane has taken `n` submissions.
 fn wait_for_denies(engine: &Engine, n: u64) {
-    wait_until(&format!("the deny lane takes {n} submission(s)"), || {
-        engine.write_executor_stats().deny_submitted >= n
-    });
-}
-
-fn wait_until(what: &str, mut cond: impl FnMut() -> bool) {
-    let deadline = Instant::now() + WAIT;
-    while !cond() {
-        assert!(Instant::now() < deadline, "timed out waiting: {what}");
-        std::thread::sleep(Duration::from_millis(2));
-    }
+    wait_until(
+        &format!("the deny lane takes {n} submission(s)"),
+        WAIT,
+        || engine.write_executor_stats().deny_submitted >= n,
+    );
 }
 
 // -------------------------------------------------------------------------------------------
@@ -272,53 +243,13 @@ fn ingest_naming(engine: &Engine, batch: &str, layer: &str, key: &str, x: f64, y
         .1
 }
 
-fn artifacts_of(engine: &Engine) -> Vec<ArtifactOut> {
-    let session = engine.authorise(&full_coverage_credential()).unwrap();
-    engine
-        .viewport(
-            &session,
-            ViewportRequest::new("s0", 0, WHOLE_MAP, N_ITEMS as usize),
-        )
-        .expect("a viewport over the whole map")
-        .artifacts
-}
-
 /// One artifact's masked count for a principal who can see everything, so the number is the
 /// membership's own size. `None` where the artifact is not served at all.
 fn count_of(engine: &Engine, key: &str) -> Option<u64> {
-    artifacts_of(engine)
+    artifacts_of(engine, &full_coverage_credential())
         .into_iter()
         .find(|a| a.key.as_deref() == Some(key))
         .map(|a| a.masked_count)
-}
-
-fn artifact_entity(engine: &Engine, id: tessera_types::TesseraId) -> EntityId {
-    let idset = engine.generation().bundle.manifest.identity.idset;
-    engine.resolve_tessera_ids(&[id], idset).unwrap()[0].expect("it names what was issued")
-}
-
-/// Request a flush and block until it has published — what gives an ingested point a base row, and
-/// therefore what makes it count towards any membership it joined.
-fn flush(engine: &Engine) {
-    let before = engine.write_executor_stats().flushes;
-    engine.request_flush();
-    wait_until("the flush publishes", || {
-        engine.write_executor_stats().flushes > before
-    });
-}
-
-/// Request a fold and block until it has published, asserting it was not discarded.
-fn fold(engine: &Engine) {
-    let before = engine.write_executor_stats();
-    engine.request_fold();
-    wait_until("the fold publishes", || {
-        let now = engine.write_executor_stats();
-        assert_eq!(
-            now.fold_failures, before.fold_failures,
-            "the fold was discarded rather than published"
-        );
-        now.folds > before.folds
-    });
 }
 
 /// **Flush, then fold** — what an *ingested* point needs before it counts towards a membership it
@@ -338,49 +269,9 @@ fn settle(engine: &Engine) {
 fn rotate(engine: &Engine) {
     let before = engine.write_executor_stats().ticks;
     engine.request_flush();
-    wait_until("the tick that rotates the log runs", || {
+    wait_until("the tick that rotates the log runs", WAIT, || {
         engine.write_executor_stats().ticks > before
     });
-}
-
-/// The log's surviving members, oldest first.
-fn wal_members(fx: &Fixture) -> Vec<String> {
-    let dir = fx.wal.parent().expect("the log has a directory");
-    let stem = fx
-        .wal
-        .file_stem()
-        .expect("the log has a stem")
-        .to_string_lossy()
-        .to_string();
-    let mut found: Vec<String> = std::fs::read_dir(dir)
-        .expect("the log's directory exists")
-        .flatten()
-        .map(|e| e.file_name().to_string_lossy().to_string())
-        .filter(|n| n.starts_with(&format!("{stem}-")) && n.ends_with(".log"))
-        .collect();
-    found.sort();
-    found
-}
-
-fn remove_the_whole_log(fx: &Fixture) {
-    let dir = fx.wal.parent().expect("the log has a directory");
-    let stem = fx.wal.file_stem().expect("the log has a stem").to_owned();
-    let mut removed = 0usize;
-    for entry in std::fs::read_dir(dir)
-        .expect("the log's directory exists")
-        .flatten()
-    {
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        if name.starts_with(&format!("{}-", stem.to_string_lossy())) {
-            std::fs::remove_file(entry.path()).expect("a log member is removable");
-            removed += 1;
-        }
-    }
-    assert!(
-        removed > 0,
-        "no log member was found to delete — the test would prove nothing"
-    );
 }
 
 /// The live prefix's membership extents — the durable name count a publication's pack increments.
@@ -411,7 +302,7 @@ fn publish_and_pack(fx: &Fixture, engine: &Engine, key: &str, members: Vec<Entit
             vec![IncomingArtifact::from_entities(Some(key.into()), members)],
         )
         .expect("a publication into a registered layer");
-    wait_until("the publication reaches an extent", || {
+    wait_until("the publication reaches an extent", WAIT, || {
         membership_files(fx, engine) > before
     });
 }
@@ -650,7 +541,7 @@ fn a_growth_that_lands_after_the_folds_pack_pins_the_log_again() {
         // active member and the early growth's pin — which the fold is about to release — would
         // keep it alive whatever the late growth did.
         rotate(&engine);
-        let early_member = wal_members(&fx)
+        let early_member = wal_members(&fx.wal)
             .into_iter()
             .rev()
             .nth(1)
@@ -675,7 +566,7 @@ fn a_growth_that_lands_after_the_folds_pack_pins_the_log_again() {
                     .expect("a growth behind a parked fold is an ordinary write")
             });
             faults.release();
-            wait_until("the released fold publishes", || {
+            wait_until("the released fold publishes", WAIT, || {
                 engine.write_executor_stats().folds > before_fold
             });
             grown.join().unwrap();
@@ -687,7 +578,7 @@ fn a_growth_that_lands_after_the_folds_pack_pins_the_log_again() {
             Some(320),
             "both growths are in force"
         );
-        let late_member = wal_members(&fx)
+        let late_member = wal_members(&fx.wal)
             .pop()
             .expect("the log has at least one member");
         assert_ne!(
@@ -698,7 +589,7 @@ fn a_growth_that_lands_after_the_folds_pack_pins_the_log_again() {
         // that would find it sealed and reclaim it.
         rotate(&engine);
         rotate(&engine);
-        let members = wal_members(&fx);
+        let members = wal_members(&fx.wal);
         assert!(
             !members.contains(&early_member),
             "{early_member} holds only the growth the fold's rewrite packed, so \
@@ -759,7 +650,7 @@ fn the_membership_replays_the_same_on_either_side_of_the_folds_pack() {
     let engine = fx.open();
     fold(&engine);
     drop(engine);
-    remove_the_whole_log(&fx);
+    remove_the_whole_log(&fx.wal);
 
     let engine = fx.open();
     assert_eq!(
@@ -800,7 +691,7 @@ fn a_suppression_racing_a_join_hides_the_artifact_and_keeps_the_join() {
             )],
         )
         .unwrap()[0];
-    wait_until("the publication lands", || {
+    wait_until("the publication lands", WAIT, || {
         engine.published_artifacts() == 1
     });
     let entity = artifact_entity(&engine, id);
@@ -893,19 +784,19 @@ fn a_layers_suppression_covers_a_publication_that_landed_beside_it() {
         "both artifacts are in the store"
     );
     assert!(
-        artifacts_of(&engine).is_empty(),
+        artifacts_of(&engine, &full_coverage_credential()).is_empty(),
         "and neither is served: the layer's suppression covers the publication beside it"
     );
     fold(&engine);
     assert!(
-        artifacts_of(&engine).is_empty(),
+        artifacts_of(&engine, &full_coverage_credential()).is_empty(),
         "a fold retires deletions, never suppressions"
     );
 
     engine
         .accept_change(layer_entity, ChangeOp::Unsuppress)
         .unwrap();
-    let keys: Vec<String> = artifacts_of(&engine)
+    let keys: Vec<String> = artifacts_of(&engine, &full_coverage_credential())
         .into_iter()
         .filter_map(|a| a.key)
         .collect();
@@ -1089,7 +980,7 @@ fn a_reader_sees_the_membership_move_forward_through_whole_growths_only() {
             let deadline = Instant::now() + WAIT;
             let mut last = (0u64, 0usize);
             while !stop.load(Ordering::Relaxed) && Instant::now() < deadline {
-                let served = artifacts_of(&engine);
+                let served = artifacts_of(&engine, &full_coverage_credential());
                 let count = served
                     .iter()
                     .find(|a| a.key.as_deref() == Some("c0"))
@@ -1322,7 +1213,7 @@ fn built_fixture() -> Fixture {
 fn a_built_bundle_takes_the_mid_window_publication_without_reissuing_an_id() {
     let fx = built_fixture();
     let (engine, faults) = fx.open_with_faults();
-    let built: Vec<EntityId> = artifacts_of(&engine)
+    let built: Vec<EntityId> = artifacts_of(&engine, &full_coverage_credential())
         .iter()
         .map(|a| artifact_entity(&engine, a.tessera_id))
         .collect();
@@ -1371,7 +1262,7 @@ fn a_built_bundle_takes_the_mid_window_publication_without_reissuing_an_id() {
         "and the built artifact is untouched by any of it"
     );
 
-    let online = artifacts_of(&engine)
+    let online = artifacts_of(&engine, &full_coverage_credential())
         .iter()
         .find(|a| a.key.as_deref() == Some("k-online"))
         .map(|a| artifact_entity(&engine, a.tessera_id))

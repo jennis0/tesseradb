@@ -12,7 +12,7 @@
 mod common;
 
 use common::*;
-use tessera_engine::{ArtifactOut, Engine, ViewportRequest};
+use tessera_engine::{ArtifactOut, Engine};
 use tessera_lifecycle::membership::{IncomingAttachment, IncomingContent};
 use tessera_lifecycle::{wal::ChangeOp, IncomingArtifact};
 use tessera_types::layer::{
@@ -21,7 +21,6 @@ use tessera_types::layer::{
 };
 use tessera_types::{EntityId, TesseraId};
 
-const WHOLE_MAP: [f64; 4] = [0.0, 0.0, 1000.0, 1000.0];
 const CLUSTERS: &str = "clusters/a";
 const LABELS: &str = "topics/x";
 
@@ -83,29 +82,6 @@ fn labels() -> LayerDeclaration {
     }
 }
 
-struct Fixture {
-    _tmp: tempfile::TempDir,
-    root: std::path::PathBuf,
-    cache: std::path::PathBuf,
-    wal: std::path::PathBuf,
-}
-
-fn fixture() -> Fixture {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let root = tmp.path().join("bundle");
-    build_fixture(
-        &root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    Fixture {
-        root,
-        cache: tmp.path().join("cache"),
-        wal: tmp.path().join("wal.log"),
-        _tmp: tmp,
-    }
-}
-
 impl Fixture {
     fn open(&self) -> Engine {
         open_engine_publishing(&self.root, &self.cache, &self.wal)
@@ -158,24 +134,8 @@ fn publish_a_cluster_and_its_label(engine: &Engine, fx: &Fixture) {
         .unwrap();
 }
 
-fn artifacts_of(engine: &Engine, credential: &[u8]) -> Vec<ArtifactOut> {
-    let session = engine.authorise(credential).unwrap();
-    engine
-        .viewport(
-            &session,
-            ViewportRequest::new("s0", 0, WHOLE_MAP, N_ITEMS as usize),
-        )
-        .expect("a viewport over the whole map")
-        .artifacts
-}
-
 fn labels_in(served: &[ArtifactOut]) -> Vec<&ArtifactOut> {
     served.iter().filter(|a| a.layer == LABELS).collect()
-}
-
-fn artifact_entity(engine: &Engine, id: TesseraId) -> EntityId {
-    let idset = engine.generation().bundle.manifest.identity.idset;
-    engine.resolve_tessera_ids(&[id], idset).unwrap()[0].expect("it names what was issued")
 }
 
 /// Whether the identifier route still answers — the route that traverses no edge, and the one the
