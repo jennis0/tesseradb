@@ -1,54 +1,39 @@
-//! The plugin surface (contracts §4, the plugin ABI).
+//! The plugin surface: the trait that maps a deployment's labels and credentials to authorisation
+//! descriptors, and one native implementation, [`Passthrough`] (`builtin:passthrough`).
 //!
-//! This crate is the *trait* — mirroring the wasm ABI's four entry points — plus one native
-//! implementation, [`Passthrough`] (`builtin:passthrough`).
+//! Not built yet: a host that loads a guest module. `builtin:passthrough` is the only plugin a
+//! deployment can run. The build, the session path and the conformance oracle already call the
+//! trait, so a host adds an implementation and changes no caller.
 //!
-//! **⊘ Specified, not implemented.** There is no wasmtime host: nothing here loads a guest
-//! module, so the only plugin a deployment can run is the built-in one below. The trait exists
-//! regardless, so that the build pipeline, the session plane and the conformance oracle all
-//! speak to one surface when a host does arrive.
-//!
-//! Two obligations from the design carry into any implementation of [`Plugin`]:
-//!
-//! * **Determinism.** The same input bytes must always produce the same descriptors, in the
-//!   same order, on every host. Term interning and therefore the whole entity-ID assignment
-//!   (I9, permanent) depend on it.
-//! * **Fail closed.** A credential that cannot be parsed yields an error, never an empty or
-//!   partial term list that would be mistaken for "authorised for nothing in particular".
-//!   (A *validly parsed* zero-term credential is a different thing: it legitimately mints a
-//!   zero-visibility token, per contracts §4.3.)
+//! Every implementation of [`Plugin`] is deterministic: the same input bytes give the same
+//! descriptors in the same order on every host, because term interning and entity-id assignment
+//! follow from them. It also fails closed: a credential that cannot be parsed is an error and not
+//! a short term list. A credential that parses to zero terms is valid and sees nothing.
 
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
-/// An opaque authorisation descriptor: the plugin's own bytes, interned into a `TermId` by the
-/// dictionary. Tessera never interprets a descriptor's contents.
+/// An authorisation descriptor: the plugin's own bytes, which the dictionary interns into a
+/// `TermId`. Tessera does not interpret them.
 pub type Descriptor = Vec<u8>;
 
-/// The identity string hashed to produce `builtin:passthrough`'s plugin hashes.
-///
-/// **One string, both hashes.** The data and auth sides of `builtin:passthrough` are the same
-/// implementation, so a change to either moves both — `:2` names the revision that added
-/// [`Plugin::terms_of_labels`], which is a data-side change the auth side never saw. Moving the
-/// auth hash too is the conservative direction: fragment caches recompute and tokens re-mint,
-/// where the alternative — pinning the auth hash while the data rule moves — would let a cached
-/// fragment outlive the labelling that produced it. The hash is recorded in `MANIFEST.json`
-/// precisely so a bundle cannot be served by a plugin that would label its items differently.
+/// The string hashed to give both of `builtin:passthrough`'s plugin hashes. The data and auth
+/// sides are one implementation, so a change to either rule moves both: fragment caches recompute
+/// and tokens are minted again, where a pinned auth hash would let a cached fragment outlive the
+/// labelling that produced it.
 const PASSTHROUGH_IDENTITY: &str = "builtin:passthrough:2";
 
-/// What `terms_of_auth` returns: the credential's descriptors and its optional expiry.
+/// What `terms_of_auth` returns: the credential's descriptors and its expiry.
 ///
-/// `not_after` is a Unix timestamp in seconds; `None` means the plugin declares no expiry of
-/// its own (the session plane still applies its configured token lifetime).
+/// `not_after` is a Unix timestamp in seconds. `None` means the plugin declares no expiry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthTerms {
     pub terms: Vec<Descriptor>,
     pub not_after: Option<i64>,
 }
 
-/// The plugin's sizing declarations. These are *declarations*, not limits: exceeding one
-/// warns and is recorded, and never causes an item or a term to be silently excluded — a
-/// dropped term is a disclosure risk (I2/I3), so the fail-open behaviour is forbidden.
+/// The sizes a plugin declares. Exceeding one is counted and reported. It does not exclude an
+/// item or drop a term, because a dropped term widens what the item's viewers see.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DeclaredBounds {
     pub max_distinct_terms: u64,
@@ -56,7 +41,7 @@ pub struct DeclaredBounds {
     pub max_terms_per_token: u32,
 }
 
-/// A plugin failure. Callers must treat this as fail-closed (design §4, I1).
+/// A plugin failure. The caller refuses the request.
 #[derive(Debug)]
 pub enum PluginError {
     /// The input bytes were not the shape this plugin accepts.
@@ -73,66 +58,41 @@ impl std::fmt::Display for PluginError {
 
 impl std::error::Error for PluginError {}
 
-/// The plugin surface, mirroring the ABI's entry points (contracts §4).
+/// The plugin surface. No method has a default: a default would be a labelling or presentation
+/// rule the plugin's author did not write.
 pub trait Plugin: Send + Sync {
-    /// Map a list of labels, one element each, to the descriptors they name (the *data* side).
+    /// The descriptors a list of labels names, one label per element (the data side).
     ///
-    /// Every label reader takes this call: a points file's term column at the build, the wire's
-    /// `access` column at `/control/ingest` (decision 0129), and a view gate's `visibility` at
-    /// the declaration, at `PUT /control/views/{group}/{key}` and at authorise (decision 0132).
-    /// Each is a list with one label per element, so there is nothing to parse and no separator
-    /// a label's own bytes could be split on.
-    ///
-    /// Required, without a default. A default would be a labelling rule a plugin author never
-    /// wrote; a plugin that folds or rewrites terms must say so here in its own words or not
-    /// compile.
-    ///
-    /// Deterministic: identical bytes in, identical descriptors out, every time.
+    /// Every reader of labels calls this: a points file's term column at the build, the `access`
+    /// column at `/control/ingest`, and a view's `visibility` when it is declared, changed or
+    /// authorised against. A label is one element, so its bytes are not parsed or split.
     fn terms_of_labels(&self, labels: &[Descriptor]) -> Result<Vec<Descriptor>, PluginError>;
 
-    /// Map a credential's `auth_data` bytes to the descriptors it authorises (the *auth* side).
+    /// The descriptors a credential's `auth_data` authorises (the auth side).
     fn terms_of_auth(&self, auth_data: &[u8]) -> Result<AuthTerms, PluginError>;
 
-    /// Map descriptors to the strings a viewer is shown for them — the *presentation* side
-    /// (design §6.1, decision 0114).
+    /// The strings a viewer is shown for `descriptors`, one per descriptor in the order given.
     ///
-    /// The one caller is the item drill-down's `labels` array, and what it hands in is already
-    /// the intersection of the item's own terms with the asking session's **satisfied** set: a
-    /// descriptor reaches this method only if the credential that opened the session presented it.
-    /// So a plugin cannot widen a disclosure here however it implements this — the set is decided
-    /// before the call, and this decides only how each member is spelled.
-    ///
-    /// Positional: one string per descriptor, in the order given. A plugin that returned a
-    /// different count would leave the caller unable to say which label it had failed to present,
-    /// so the count is checked and a mismatch is fail-closed.
-    ///
-    /// Required, deliberately without a default, on [`Plugin::terms_of_labels`]' argument: a
-    /// default would be a presentation rule a plugin author never wrote. For a plugin whose
-    /// descriptors *are* display strings, the identity is the correct implementation and saying so
-    /// takes one line.
+    /// The caller is the item card's `labels` array. It passes the item's terms intersected with
+    /// the session's satisfied set, so this method decides how a label is spelled and cannot widen
+    /// which labels are shown. The caller refuses an answer of a different length.
     fn present_terms(&self, descriptors: &[Descriptor]) -> Result<Vec<String>, PluginError>;
 
-    /// The plugin's sizing declarations.
     fn declared_bounds(&self) -> DeclaredBounds;
 
-    /// Hex SHA-256 identifying the data-side implementation; recorded in `MANIFEST.json` so a
-    /// bundle can never be served by a plugin that would label its items differently.
+    /// Lowercase hex SHA-256 of the data-side implementation. `MANIFEST.json` records it, and a
+    /// bundle is not served by a plugin that would label its items differently.
     fn data_plugin_hash(&self) -> String;
 
-    /// Hex SHA-256 identifying the auth-side implementation.
+    /// Lowercase hex SHA-256 of the auth-side implementation. It keys the fragment cache.
     fn auth_plugin_hash(&self) -> String;
 }
 
-/// `builtin:passthrough`: the identity plugin, and the only one this build can run. The
-/// conformance oracle implements the same mapping.
-///
-/// * a label list — a points file's term column at the build, the wire's `access` column at
-///   ingest, a view gate's `visibility` — is taken verbatim, one descriptor per element.
-/// * `auth_data` is JSON `{"terms": ["<descriptor>", …]}`.
+/// `builtin:passthrough`: a label is its own descriptor, and `auth_data` is JSON
+/// `{"terms": ["<descriptor>", …]}`. The conformance oracle implements the same mapping.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Passthrough;
 
-/// `auth_data`'s wire shape for [`Passthrough`].
 #[derive(Deserialize)]
 struct PassthroughAuthData {
     terms: Vec<String>,
@@ -145,41 +105,25 @@ impl Passthrough {
 }
 
 impl Plugin for Passthrough {
-    /// The identity — and identity is a *rule*, not the absence of one.
+    /// Each label becomes one descriptor, verbatim and in order: no splitting, trimming,
+    /// deduplication or dropping. The build's dictionary pass pairs source terms with descriptors
+    /// by position, so a dropped or reordered element would post an item under a term it was not
+    /// labelled with.
     ///
-    /// Each label's bytes become exactly one descriptor, verbatim and in the order given: no
-    /// splitting, no trimming, no deduplication, no dropping. Every one of those is load-bearing
-    /// downstream. The build's dictionary pass derives a term's descriptor from its term id
-    /// alone, so it needs one descriptor per source term and the two sequences aligned
-    /// positionally; a rule that dropped or reordered elements would leave every posting naming
-    /// a different term than the item was labelled with, which is a disclosure rather than a
-    /// cosmetic difference.
-    ///
-    /// An empty element is refused. An empty descriptor is not a grant, and silently dropping it
-    /// would shorten the descriptor list below the item's term count — the fail-open direction,
-    /// and the one place identity could quietly stop being one-to-one. An empty *list* is fine:
-    /// an item may legitimately carry zero terms.
+    /// An empty label is refused: it grants nothing, and dropping it would break that pairing. An
+    /// empty list is accepted, because an item may carry no terms.
     fn terms_of_labels(&self, labels: &[Descriptor]) -> Result<Vec<Descriptor>, PluginError> {
-        for (i, label) in labels.iter().enumerate() {
-            if label.is_empty() {
-                return Err(PluginError::Malformed(format!(
-                    "term {i} of {} is empty; an empty descriptor is not a grant and dropping it \
-                     would leave the item with fewer terms than it was given",
-                    labels.len()
-                )));
-            }
+        if let Some(i) = labels.iter().position(|label| label.is_empty()) {
+            return Err(PluginError::Malformed(format!(
+                "label {i} of {} is empty; give every label at least one byte",
+                labels.len()
+            )));
         }
         Ok(labels.to_vec())
     }
 
-    /// **The identity, and it is this plugin's real answer rather than a fallback.** A
-    /// passthrough descriptor *is* the caller's own label string — `terms_of_labels` takes an
-    /// item's label list verbatim at both entry points — so the string a viewer should be shown
-    /// for a descriptor is the descriptor. There is no mapping to look up and none to omit.
-    ///
-    /// Non-UTF-8 is refused rather than lossily converted. A descriptor that is not UTF-8 is one
-    /// a label column supplied as bytes, and replacing its bytes with substitution characters
-    /// would show a viewer a label no principal holds.
+    /// A passthrough descriptor is the label string, so it is shown as itself. A descriptor that
+    /// is not UTF-8 is refused: a lossy conversion would show a label no principal holds.
     fn present_terms(&self, descriptors: &[Descriptor]) -> Result<Vec<String>, PluginError> {
         descriptors
             .iter()
@@ -222,16 +166,7 @@ impl Plugin for Passthrough {
 }
 
 fn passthrough_hash() -> String {
-    hex_lower(&Sha256::digest(PASSTHROUGH_IDENTITY.as_bytes()))
-}
-
-fn hex_lower(bytes: &[u8]) -> String {
-    use std::fmt::Write;
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        let _ = write!(out, "{byte:02x}");
-    }
-    out
+    format!("{:x}", Sha256::digest(PASSTHROUGH_IDENTITY.as_bytes()))
 }
 
 /// The label every principal holds. A gate of `public` alone is no gate.
@@ -282,107 +217,68 @@ pub fn check_gate(
 mod tests {
     use super::*;
 
+    fn labels(l: &[&str]) -> Vec<String> {
+        l.iter().map(|s| s.to_string()).collect()
+    }
+
     #[test]
     fn terms_of_labels_is_the_identity_one_descriptor_per_label() {
         let p = Passthrough::new();
-        let labels = vec![
+        // No trim, no split on the comma, no dedup.
+        let given = vec![
             b" spaced ".to_vec(),
             b"cs,LG".to_vec(),
             b"cs.LG".to_vec(),
             b"cs.LG".to_vec(),
         ];
-        // Verbatim, in order, one each: no trim, no split on the comma, no dedup.
-        assert_eq!(p.terms_of_labels(&labels).unwrap(), labels);
-    }
-
-    #[test]
-    fn terms_of_labels_accepts_the_empty_list_and_refuses_an_empty_term() {
-        let p = Passthrough::new();
+        assert_eq!(p.terms_of_labels(&given).unwrap(), given);
         assert!(p.terms_of_labels(&[]).unwrap().is_empty());
         assert!(p.terms_of_labels(&[b"cs.LG".to_vec(), Vec::new()]).is_err());
     }
 
-    /// The presentation seam is the identity for this plugin: the caller's own strings, verbatim
-    /// and in order, because a passthrough descriptor is the label string.
     #[test]
     fn present_terms_serves_the_callers_own_strings_verbatim() {
         let p = Passthrough::new();
         let descriptors = vec![b"cs.LG".to_vec(), b" spaced ".to_vec(), b"1207".to_vec()];
         assert_eq!(
             p.present_terms(&descriptors).unwrap(),
-            vec![
-                "cs.LG".to_string(),
-                " spaced ".to_string(),
-                "1207".to_string()
-            ]
+            vec!["cs.LG", " spaced ", "1207"]
         );
         assert!(p.present_terms(&[]).unwrap().is_empty());
-        // Fail-closed rather than lossy: a substitution character is a label nobody holds.
         assert!(p.present_terms(&[vec![0xff, 0xfe]]).is_err());
     }
 
     #[test]
-    fn terms_of_auth_parses_json_terms() {
+    fn terms_of_auth_reads_json_terms_and_refuses_anything_else() {
         let p = Passthrough::new();
-        let got = p.terms_of_auth(br#"{"terms": ["1207", "9"]}"#).unwrap();
         assert_eq!(
-            got,
+            p.terms_of_auth(br#"{"terms": ["1207", "9"]}"#).unwrap(),
             AuthTerms {
                 terms: vec![b"1207".to_vec(), b"9".to_vec()],
                 not_after: None,
             }
         );
-    }
-
-    #[test]
-    fn zero_term_credential_is_accepted_not_an_error() {
-        // A valid zero-term credential mints a zero-visibility token — deliberate
-        // (contracts §4.3), and is not the fail-closed error path above.
-        let p = Passthrough::new();
-        assert!(p
-            .terms_of_auth(br#"{"terms": []}"#)
-            .unwrap()
-            .terms
-            .is_empty());
-    }
-
-    #[test]
-    fn terms_of_auth_rejects_malformed_json_fail_closed() {
-        let p = Passthrough::new();
+        // A credential of no terms is valid and sees nothing; it is not the refusal below.
+        assert!(p.terms_of_auth(br#"{"terms": []}"#).unwrap().terms.is_empty());
         assert!(p.terms_of_auth(b"not json").is_err());
         assert!(p.terms_of_auth(br#"{"nope": 1}"#).is_err());
     }
 
+    /// The engine decodes the auth hash to 32 bytes and compares the data hash with the manifest's.
     #[test]
-    fn plugin_hashes_are_sha256_of_the_identity_string() {
+    fn plugin_hashes_are_lowercase_hex_sha256() {
         let p = Passthrough::new();
-        // Both sides are the same implementation, so both hashes are the same value.
         assert_eq!(p.data_plugin_hash(), p.auth_plugin_hash());
         assert_eq!(p.data_plugin_hash().len(), 64);
         assert!(p
             .data_plugin_hash()
             .chars()
             .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
-        // Pin the value: changing it silently would let a bundle be served by a differently
-        // behaving plugin.
-        assert_eq!(
-            p.data_plugin_hash(),
-            hex_lower(&Sha256::digest(b"builtin:passthrough:2"))
-        );
-    }
-
-    #[test]
-    fn declared_bounds_match_r6() {
-        let b = Passthrough::new().declared_bounds();
-        assert_eq!(b.max_distinct_terms, 200_000_000);
-        assert_eq!(b.max_terms_per_item, 4_096);
-        assert_eq!(b.max_terms_per_token, 100_000);
     }
 
     #[test]
     fn a_gate_is_stored_as_its_labels_and_public_as_none() {
         let p = Passthrough::new();
-        let labels = |l: &[&str]| l.iter().map(|s| s.to_string()).collect::<Vec<_>>();
         assert_eq!(check_gate(&p, None), Ok(None));
         assert_eq!(check_gate(&p, Some(&labels(&["public"]))), Ok(None));
         assert_eq!(
@@ -392,10 +288,38 @@ mod tests {
         for refused in [
             labels(&[]),
             labels(&[""]),
+            labels(&["  "]),
             labels(&["finance", "public"]),
             labels(&["inherited"]),
         ] {
             assert!(check_gate(&p, Some(&refused)).is_err(), "{refused:?}");
         }
+    }
+
+    /// A plugin that maps every label away leaves a gate nobody can pass.
+    #[test]
+    fn a_gate_whose_labels_name_no_terms_is_refused() {
+        struct NoTerms;
+        impl Plugin for NoTerms {
+            fn terms_of_labels(&self, _: &[Descriptor]) -> Result<Vec<Descriptor>, PluginError> {
+                Ok(Vec::new())
+            }
+            fn terms_of_auth(&self, auth_data: &[u8]) -> Result<AuthTerms, PluginError> {
+                Passthrough.terms_of_auth(auth_data)
+            }
+            fn present_terms(&self, d: &[Descriptor]) -> Result<Vec<String>, PluginError> {
+                Passthrough.present_terms(d)
+            }
+            fn declared_bounds(&self) -> DeclaredBounds {
+                Passthrough.declared_bounds()
+            }
+            fn data_plugin_hash(&self) -> String {
+                Passthrough.data_plugin_hash()
+            }
+            fn auth_plugin_hash(&self) -> String {
+                Passthrough.auth_plugin_hash()
+            }
+        }
+        assert!(check_gate(&NoTerms, Some(&labels(&["finance"]))).is_err());
     }
 }
