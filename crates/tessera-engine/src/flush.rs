@@ -48,7 +48,7 @@ use tessera_lifecycle::{BufferedItem, Overlay};
 use tessera_spatial::tiler::{ScalarType, ScalarValue};
 use tessera_store::manifest::{DictExtent, FileDigest, Quantisation, RecordExtent};
 use tessera_store::permutation::SegmentExtent;
-use tessera_store::read::{ColumnsRef, MortonSlice, SegmentData};
+use tessera_store::read::SegmentData;
 use tessera_store::{write_flush_segment, FlushInput, FlushRow};
 use tessera_types::{EntityId, IdentityKey, TermId};
 
@@ -1187,19 +1187,10 @@ fn execute_flush_stages(
         None => None,
         Some(out) => {
             let seg_dir = segment_dir(&ctx);
-            Some(SegmentData {
-                seg_id: ctx.seg_id.clone(),
-                row_count: out.segment.row_count,
-                morton: MortonSlice::load(&seg_dir.join("morton.u32"))
-                    .map_err(|e| FlushFailed(format!("morton: {e}")))?,
-                cuts: tessera_store::read::CutIndex::load(
-                    &seg_dir.join(tessera_store::read::CutIndex::FILE),
-                    out.segment.row_count,
-                )
-                .map_err(|e| FlushFailed(format!("cuts: {e}")))?,
-                columns: ColumnsRef::load(&seg_dir.join("columns.arrow"))
-                    .map_err(|e| FlushFailed(format!("columns: {e}")))?,
-            })
+            Some(
+                SegmentData::load(&seg_dir, &ctx.seg_id, out.segment.row_count)
+                    .map_err(|e| FlushFailed(e.to_string()))?,
+            )
         }
     };
     *mark = laps.lap(FlushStage::Reopen, *mark);

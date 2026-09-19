@@ -2289,27 +2289,16 @@ pub(super) fn fold_segments(
         let dir = tessera_store::view_path(&partition_dir, &descriptor.view)
             .join("segments")
             .join(&descriptor.seg_id);
-        let morton = tessera_store::read::MortonSlice::load(&dir.join("morton.u32"));
-        let cuts = tessera_store::read::CutIndex::load(
-            &dir.join(tessera_store::read::CutIndex::FILE),
+        match tessera_store::read::SegmentData::load(
+            &dir,
+            &descriptor.seg_id,
             descriptor.row_count,
-        );
-        let columns = tessera_store::read::ColumnsRef::load(&dir.join("columns.arrow"));
-        match (morton, cuts, columns) {
-            (Ok(morton), Ok(cuts), Ok(columns)) => out.push((
-                descriptor.view.clone(),
-                tessera_store::read::SegmentData {
-                    seg_id: descriptor.seg_id.clone(),
-                    row_count: descriptor.row_count,
-                    morton,
-                    cuts,
-                    columns,
-                },
-            )),
-            (Err(error), _, _) | (_, Err(error), _) | (_, _, Err(error)) => tracing::warn!(
+        ) {
+            Ok(segment) => out.push((descriptor.view.clone(), segment)),
+            Err(e) => tracing::warn!(
                 view = %descriptor.view,
                 seg_id = %descriptor.seg_id,
-                %error,
+                error = %e.source,
                 "the fold could not reopen a segment it just wrote; its spatial memberships are \
                  resolved at the flip instead"
             ),

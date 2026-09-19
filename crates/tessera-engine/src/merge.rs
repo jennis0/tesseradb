@@ -243,19 +243,8 @@ pub(crate) fn execute(plan: MergePlan, ctx: MergeContext) -> Result<CompletedMer
     )
     .join("segments")
     .join(&ctx.seg_id);
-    let segment = SegmentData {
-        seg_id: ctx.seg_id.clone(),
-        row_count: output.segment.row_count,
-        morton: tessera_store::read::MortonSlice::load(&seg_dir.join("morton.u32"))
-            .map_err(|e| MergeFailed(format!("morton: {e}")))?,
-        cuts: tessera_store::read::CutIndex::load(
-            &seg_dir.join(tessera_store::read::CutIndex::FILE),
-            output.segment.row_count,
-        )
-        .map_err(|e| MergeFailed(format!("cuts: {e}")))?,
-        columns: tessera_store::read::ColumnsRef::load(&seg_dir.join("columns.arrow"))
-            .map_err(|e| MergeFailed(format!("columns: {e}")))?,
-    };
+    let segment = SegmentData::load(&seg_dir, &ctx.seg_id, output.segment.row_count)
+        .map_err(|e| MergeFailed(e.to_string()))?;
 
     Ok(CompletedMerge {
         plan,
