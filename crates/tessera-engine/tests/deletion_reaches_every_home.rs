@@ -307,16 +307,6 @@ fn visible(engine: &Engine, session: &tessera_engine::Session) -> u64 {
         .sum()
 }
 
-/// The prefix `CURRENT` names — read rather than assumed, because a fold publishes into a new one
-/// and a hard-coded `v00000` would read the *pre-fold* artefacts and pass without ever looking at
-/// the fold's output.
-fn current_prefix(root: &Path) -> String {
-    let current: tessera_store::manifest::CurrentPointer =
-        serde_json::from_slice(&std::fs::read(root.join("CURRENT")).expect("CURRENT is readable"))
-            .expect("CURRENT parses");
-    current.prefix
-}
-
 fn partition_dir(root: &Path) -> PathBuf {
     root.join(current_prefix(root)).join("partitions/default")
 }

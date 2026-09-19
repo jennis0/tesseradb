@@ -181,27 +181,6 @@ fn content_extents(fx: &Fixture, want: usize) {
     }
 }
 
-fn remove_the_whole_log(fx: &Fixture) {
-    let dir = fx.wal.parent().expect("the log has a directory");
-    let stem = fx.wal.file_stem().expect("the log has a stem").to_owned();
-    let mut removed = 0usize;
-    for entry in std::fs::read_dir(dir)
-        .expect("the log's directory exists")
-        .flatten()
-    {
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        if name.starts_with(&format!("{}-", stem.to_string_lossy())) {
-            std::fs::remove_file(entry.path()).expect("a log member is removable");
-            removed += 1;
-        }
-    }
-    assert!(
-        removed > 0,
-        "no log member was found to delete — the test would prove nothing"
-    );
-}
-
 /// **A parent fill on a held artifact is in the next request's cut, and only a parent fill
 /// rebuilds the lineage: a page of members joining leaves it held.**
 #[test]
@@ -394,16 +373,16 @@ fn a_content_fill_serves_a_withheld_artifact_and_outlives_the_log() {
         // only by the fold, so the log is pinned at the fill until then: two rotations may not
         // reclaim the member holding it.
         content_extents(&fx, 1);
-        let holding = wal_members(&fx)
+        let holding = wal_members(&fx.wal)
             .pop()
             .expect("the log has at least one member");
         rotate(&engine);
         rotate(&engine);
         assert!(
-            wal_members(&fx).contains(&holding),
+            wal_members(&fx.wal).contains(&holding),
             "{holding} holds the fill and is still there: rotation may not reclaim past it while \
              the log is the record's only home. Members now: {:?}",
-            wal_members(&fx)
+            wal_members(&fx.wal)
         );
     }
 
@@ -424,7 +403,7 @@ fn a_content_fill_serves_a_withheld_artifact_and_outlives_the_log() {
     }
 
     // And with the log gone, the extents are the only home the fill has.
-    remove_the_whole_log(&fx);
+    remove_the_whole_log(&fx.wal);
     let engine = fx.open();
     let row = served_row(&engine, "topics/a", "t0").expect("served from the extents alone");
     assert_eq!(
@@ -433,25 +412,6 @@ fn a_content_fill_serves_a_withheld_artifact_and_outlives_the_log() {
         "the filled content reached the fold's rewrite and the content extent before the log \
          was released"
     );
-}
-
-/// The log's surviving members, oldest first.
-fn wal_members(fx: &Fixture) -> Vec<String> {
-    let dir = fx.wal.parent().expect("the log has a directory");
-    let stem = fx
-        .wal
-        .file_stem()
-        .expect("the log has a stem")
-        .to_string_lossy()
-        .to_string();
-    let mut found: Vec<String> = std::fs::read_dir(dir)
-        .expect("the log's directory exists")
-        .flatten()
-        .map(|e| e.file_name().to_string_lossy().to_string())
-        .filter(|n| n.starts_with(&format!("{stem}-")) && n.ends_with(".log"))
-        .collect();
-    found.sort();
-    found
 }
 
 /// A tick against an empty buffer: nothing to flush, so it rotates the log.

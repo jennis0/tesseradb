@@ -516,31 +516,6 @@ fn corpus_independent_content_is_served_to_everyone_who_reaches_the_layer() {
     }
 }
 
-/// Delete every member of the WAL sequence — the log is a sequence beside the configured base
-/// path, and the base path itself is never a file.
-fn remove_the_whole_log(fx: &Fixture) {
-    let dir = fx.wal.parent().expect("the log has a directory");
-    let stem = fx.wal.file_stem().expect("the log has a stem").to_owned();
-    let mut removed = 0usize;
-    for entry in std::fs::read_dir(dir)
-        .expect("the log's directory exists")
-        .flatten()
-    {
-        let name = entry.file_name();
-        if name
-            .to_string_lossy()
-            .starts_with(&format!("{}-", stem.to_string_lossy()))
-        {
-            std::fs::remove_file(entry.path()).expect("a log member is removable");
-            removed += 1;
-        }
-    }
-    assert!(
-        removed > 0,
-        "no log member was found to delete — the test would prove nothing"
-    );
-}
-
 /// Wait for the executor's drain close to publish at least `want` artifact content extents.
 fn content_extents(fx: &Fixture, want: usize) -> Vec<std::path::PathBuf> {
     let dir = fx
@@ -621,7 +596,7 @@ fn two_publications_of_content_both_survive_the_loss_of_the_whole_log() {
         content_extents(&fx, 2);
     }
 
-    remove_the_whole_log(&fx);
+    remove_the_whole_log(&fx.wal);
     let engine = fx.open();
     let served = artifacts_of(&engine, &full_coverage_credential());
     assert_eq!(
@@ -795,7 +770,7 @@ fn published_and_log_free(fx: &Fixture, labels: &[&str]) {
             .unwrap();
         content_extents(fx, 1);
     }
-    remove_the_whole_log(fx);
+    remove_the_whole_log(&fx.wal);
 }
 
 /// **Every artifact keeps its own text when the level is read a level at a time.**

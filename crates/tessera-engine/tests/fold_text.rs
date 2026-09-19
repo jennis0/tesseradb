@@ -226,13 +226,6 @@ fn ingest_and_flush(engine: &Engine, root: &Path) -> Vec<EntityId> {
     }
 }
 
-fn current_prefix(root: &Path) -> String {
-    let current: tessera_store::manifest::CurrentPointer =
-        serde_json::from_slice(&std::fs::read(root.join("CURRENT")).expect("CURRENT is readable"))
-            .expect("CURRENT parses");
-    current.prefix
-}
-
 fn partition_dir(root: &Path) -> PathBuf {
     root.join(current_prefix(root)).join("partitions/default")
 }

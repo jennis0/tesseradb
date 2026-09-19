@@ -174,13 +174,6 @@ fn build_text_fixture(out: &Path, tmp: &Path) {
     .expect("a bundle with an indexed text column builds");
 }
 
-fn current_prefix(root: &Path) -> String {
-    let current: tessera_store::manifest::CurrentPointer =
-        serde_json::from_slice(&std::fs::read(root.join("CURRENT")).expect("CURRENT is readable"))
-            .expect("CURRENT parses");
-    current.prefix
-}
-
 fn text_extents(root: &Path) -> Vec<tessera_store::manifest::TextExtent> {
     open_bundle(root).expect("the bundle opens").partitions["default"]
         .manifest

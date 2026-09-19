@@ -315,46 +315,6 @@ fn rotate(engine: &Engine) {
     });
 }
 
-/// The log's surviving members, oldest first.
-fn wal_members(fx: &Fixture) -> Vec<String> {
-    let dir = fx.wal.parent().expect("the log has a directory");
-    let stem = fx
-        .wal
-        .file_stem()
-        .expect("the log has a stem")
-        .to_string_lossy()
-        .to_string();
-    let mut found: Vec<String> = std::fs::read_dir(dir)
-        .expect("the log's directory exists")
-        .flatten()
-        .map(|e| e.file_name().to_string_lossy().to_string())
-        .filter(|n| n.starts_with(&format!("{stem}-")) && n.ends_with(".log"))
-        .collect();
-    found.sort();
-    found
-}
-
-fn remove_the_whole_log(fx: &Fixture) {
-    let dir = fx.wal.parent().expect("the log has a directory");
-    let stem = fx.wal.file_stem().expect("the log has a stem").to_owned();
-    let mut removed = 0usize;
-    for entry in std::fs::read_dir(dir)
-        .expect("the log's directory exists")
-        .flatten()
-    {
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        if name.starts_with(&format!("{}-", stem.to_string_lossy())) {
-            std::fs::remove_file(entry.path()).expect("a log member is removable");
-            removed += 1;
-        }
-    }
-    assert!(
-        removed > 0,
-        "no log member was found to delete — the test would prove nothing"
-    );
-}
-
 /// The live prefix's membership extents — the durable name count a publication's pack increments.
 fn membership_files(fx: &Fixture, engine: &Engine) -> usize {
     let dir = fx
@@ -622,7 +582,7 @@ fn a_growth_that_lands_after_the_folds_pack_pins_the_log_again() {
         // active member and the early growth's pin — which the fold is about to release — would
         // keep it alive whatever the late growth did.
         rotate(&engine);
-        let early_member = wal_members(&fx)
+        let early_member = wal_members(&fx.wal)
             .into_iter()
             .rev()
             .nth(1)
@@ -659,7 +619,7 @@ fn a_growth_that_lands_after_the_folds_pack_pins_the_log_again() {
             Some(320),
             "both growths are in force"
         );
-        let late_member = wal_members(&fx)
+        let late_member = wal_members(&fx.wal)
             .pop()
             .expect("the log has at least one member");
         assert_ne!(
@@ -670,7 +630,7 @@ fn a_growth_that_lands_after_the_folds_pack_pins_the_log_again() {
         // that would find it sealed and reclaim it.
         rotate(&engine);
         rotate(&engine);
-        let members = wal_members(&fx);
+        let members = wal_members(&fx.wal);
         assert!(
             !members.contains(&early_member),
             "{early_member} holds only the growth the fold's rewrite packed, so \
@@ -731,7 +691,7 @@ fn the_membership_replays_the_same_on_either_side_of_the_folds_pack() {
     let engine = fx.open();
     fold(&engine);
     drop(engine);
-    remove_the_whole_log(&fx);
+    remove_the_whole_log(&fx.wal);
 
     let engine = fx.open();
     assert_eq!(

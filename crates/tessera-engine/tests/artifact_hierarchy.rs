@@ -1706,25 +1706,6 @@ fn node_under(
     artifact
 }
 
-/// Every log member, deleted — so whatever a reopen finds came from the bundle.
-fn remove_the_whole_log(fx: &Fixture) {
-    let dir = fx.wal.parent().expect("the log has a directory");
-    let stem = fx.wal.file_stem().expect("the log has a stem").to_owned();
-    let mut removed = 0usize;
-    for entry in std::fs::read_dir(dir)
-        .expect("the log's directory exists")
-        .flatten()
-    {
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        if name.starts_with(&format!("{}-", stem.to_string_lossy())) {
-            std::fs::remove_file(entry.path()).expect("a log member is removable");
-            removed += 1;
-        }
-    }
-    assert!(removed > 0, "the log had at least one member to remove");
-}
-
 /// The parents the **bundle** holds for the artifact under `key`, read out of the live prefix's
 /// record packs by the same decoder the engine opens them with — the durable form
 /// (`dag-hierarchies.md` §7), not the served one.
@@ -1831,7 +1812,7 @@ fn a_dag_child_under_two_parents_is_published_served_and_folded_whole() {
         ids.sort();
         ids
     };
-    remove_the_whole_log(&fx);
+    remove_the_whole_log(&fx.wal);
 
     let engine = fx.open();
     let served = artifacts_of(&engine, &full_coverage_credential(), None);

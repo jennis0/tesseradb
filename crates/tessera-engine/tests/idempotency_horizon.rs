@@ -71,17 +71,6 @@ fn ingest(engine: &Engine, external_id: &str) -> EntityId {
         .expect("ingest is accepted")[0]
 }
 
-fn wal_members(tmp: &std::path::Path) -> Vec<String> {
-    let mut names: Vec<String> = std::fs::read_dir(tmp)
-        .unwrap()
-        .filter_map(|e| e.ok())
-        .map(|e| e.file_name().to_string_lossy().into_owned())
-        .filter(|n| n.starts_with("wal-") && n.ends_with(".log"))
-        .collect();
-    names.sort();
-    names
-}
-
 /// Flush, then rotate away the member that carried the ingest, then reopen. The returned id is the
 /// flushed entity, and its `IngestBatch` record no longer exists anywhere.
 fn flushed_then_rotated(tmp: &std::path::Path, root: &std::path::Path, key: &str) -> EntityId {
@@ -91,7 +80,7 @@ fn flushed_then_rotated(tmp: &std::path::Path, root: &std::path::Path, key: &str
         engine.write_executor_stats().flushes >= 1
     });
     wait_until("member 1 to be reclaimed", WAIT, || {
-        !wal_members(tmp).contains(&"wal-000001.log".to_string())
+        !wal_members(&tmp.join("wal.log")).contains(&"wal-000001.log".to_string())
     });
     id
 }
@@ -149,7 +138,7 @@ fn an_item_with_no_external_id_answers_none_after_rotation_rather_than_erroring(
             engine.write_executor_stats().flushes >= 1
         });
         wait_until("member 1 to be reclaimed", WAIT, || {
-            !wal_members(tmp.path()).contains(&"wal-000001.log".to_string())
+            !wal_members(&tmp.path().join("wal.log")).contains(&"wal-000001.log".to_string())
         });
         id
     };
@@ -234,7 +223,7 @@ fn an_accepted_batch_leaves_the_live_index_when_its_wal_member_is_rotated_away()
         engine.write_executor_stats().flushes >= 1
     });
     wait_until("member 1 to be reclaimed", WAIT, || {
-        !wal_members(tmp.path()).contains(&"wal-000001.log".to_string())
+        !wal_members(&tmp.path().join("wal.log")).contains(&"wal-000001.log".to_string())
     });
     wait_until("the index to follow the log", WAIT, || {
         engine.accepted_batch("ext-1").is_none()

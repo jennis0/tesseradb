@@ -1297,14 +1297,6 @@ fn build_record_fixture(out: &Path, tmp: &Path, n: u64) {
     build(&args).expect("a build with blob-resident columns succeeds");
 }
 
-/// The prefix `CURRENT` names — read rather than assumed, because a fold publishes into a new one.
-fn current_prefix(root: &Path) -> String {
-    let current: tessera_store::manifest::CurrentPointer =
-        serde_json::from_slice(&std::fs::read(root.join("CURRENT")).expect("CURRENT is readable"))
-            .expect("CURRENT parses");
-    current.prefix
-}
-
 /// The partition's side-manifest, as the serving path holds it.
 fn side_manifest(root: &Path) -> tessera_store::manifest::SegmentsManifest {
     let bundle = open_bundle(root).expect("the bundle opens");

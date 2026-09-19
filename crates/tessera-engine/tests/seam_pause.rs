@@ -85,17 +85,6 @@ fn engine_with_faults(tmp: &Path, root: &Path) -> (Engine, Arc<FaultSwitchboard>
     (engine, faults)
 }
 
-/// The prefix `CURRENT` durably names, read from the disc rather than from the engine — the
-/// commit point is the file, and the file is what a restart would open.
-fn current_prefix(root: &Path) -> String {
-    let bytes = std::fs::read(root.join("CURRENT")).expect("CURRENT exists");
-    let json: serde_json::Value = serde_json::from_slice(&bytes).expect("CURRENT is JSON");
-    json["prefix"]
-        .as_str()
-        .expect("CURRENT names a prefix")
-        .to_string()
-}
-
 /// How many side-manifests the live prefix's default partition carries — the durable name count
 /// a manifest publish increments.
 fn side_manifest_count(root: &Path, prefix: &str) -> usize {

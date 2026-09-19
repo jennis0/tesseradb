@@ -12,8 +12,11 @@
 // carrying their own copy — which is the drift this module exists to prevent.
 #![allow(dead_code)]
 
+mod lifecycle;
 mod wait;
 
+#[allow(unused_imports)]
+pub use lifecycle::*;
 #[allow(unused_imports)]
 pub use wait::*;
 
