@@ -1700,6 +1700,14 @@ fn a_refused_view_create_is_counted_completed_once() {
     );
     assert!(refused.is_err());
 
+    // The executor counts the job after it has answered, so wait for the count and then give a
+    // second one time to land.
+    let deadline = std::time::Instant::now() + WAIT;
+    while engine.write_executor_stats().work_completed == 0 {
+        assert!(std::time::Instant::now() < deadline, "the job was never counted");
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    std::thread::sleep(std::time::Duration::from_millis(50));
     let stats = engine.write_executor_stats();
     assert_eq!((stats.work_submitted, stats.work_completed), (1, 1));
 }
