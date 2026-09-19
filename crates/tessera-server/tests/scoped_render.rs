@@ -1275,15 +1275,18 @@ async fn a_recreated_view_adopts_no_scoped_value_of_its_predecessor() {
         .as_str()
         .unwrap()
         .to_string();
-    ingest_with_heat(
+    let (status, body) = try_ingest_families(
         &served,
         "heat-first-incarnation",
         "quarter:2026-Q3",
         &[(external_id_of(REJOINS), 250.0, 250.0, "0")],
         // Above the threshold, so a value adopted by the next incarnation answers the leaf.
-        &[Some(90.0)],
+        Some(&[Some(90.0)]),
+        Some(&[Some("peregrine")]),
+        None,
     )
     .await;
+    assert_eq!(status, 200, "the batch is accepted: {body}");
     flush(&served).await;
     let (_, values) = settled_points(&served, &token, "quarter:2026-Q3", 1).await;
     assert_eq!(
@@ -1306,7 +1309,7 @@ async fn a_recreated_view_adopts_no_scoped_value_of_its_predecessor() {
         .as_str()
         .unwrap()
         .to_string();
-    ingest_with_heat(
+    let (status, body) = try_ingest_families(
         &served,
         "heat-second-incarnation",
         "quarter:2026-Q3",
@@ -1314,9 +1317,12 @@ async fn a_recreated_view_adopts_no_scoped_value_of_its_predecessor() {
             (external_id_of(REJOINS), 250.0, 250.0, "0"),
             (external_id_of(FRESH), 350.0, 350.0, "0"),
         ],
-        &[None, Some(5.0)],
+        Some(&[None, Some(5.0)]),
+        Some(&[None, Some("linnet")]),
+        None,
     )
     .await;
+    assert_eq!(status, 200, "the batch is accepted: {body}");
     flush(&served).await;
 
     /// The rendered rows of the new incarnation: the rejoining entity's placeholder and the
@@ -1362,6 +1368,28 @@ async fn a_recreated_view_adopts_no_scoped_value_of_its_predecessor() {
             filtered_entities(served, token, "quarter:2026-Q3", range("heat")).await,
             BTreeSet::new(),
             "{stage}: the predecessor's value answers no leaf under the recreated view"
+        );
+        assert_eq!(
+            filtered_entities(
+                served,
+                token,
+                "quarter:2026-Q3",
+                json!({ "note": {"match": "peregrine"} })
+            )
+            .await,
+            BTreeSet::new(),
+            "{stage}: nor does the predecessor's text"
+        );
+        assert_eq!(
+            filtered_entities(
+                served,
+                token,
+                "quarter:2026-Q3",
+                json!({ "note": {"match": "linnet"} })
+            )
+            .await,
+            BTreeSet::from([fresh]),
+            "{stage}: while the new incarnation's own text matches"
         );
     }
     adopts_nothing(&served, &token, REJOINS, FRESH, "in process").await;
@@ -2433,15 +2461,10 @@ async fn session(served: &Served) -> String {
         .to_string()
 }
 
-/// **A flushed group-scoped text extent is not composed when the bundle is reopened**: a `match`
-/// over `note` answers nothing under a view whose values arrived by ingest, until a fold rewrites
-/// the column.
-const KNOWN_SCOPED_TEXT_LOST_AT_RESTART: bool = true;
-
 /// Everything the three families owe under every view they were written to, at one stage of the
 /// lifecycle: the rendered value, the two leaves, and the drill-down's per-key values. `tag`
 /// carries neither flag, so the drill-down is its whole surface and no leaf names it.
-async fn serves_everything(served: &Served, token: &str, stage: &str, text_composed: bool) {
+async fn serves_everything(served: &Served, token: &str, stage: &str) {
     for view in [OWNER, SHARING, RUNTIME] {
         let rows = population(view);
         let (names, values) = settled_points(served, token, view, rows.len()).await;
@@ -2474,7 +2497,7 @@ async fn serves_everything(served: &Served, token: &str, stage: &str, text_compo
             "{stage}, {view}: the range answers this view's column"
         );
 
-        for written in WRITTEN.iter().filter(|_| text_composed) {
+        for written in WRITTEN.iter() {
             // A token of another view's row is in another row space, and a token of the other key
             // is in another column: either way the answer here is empty.
             let expected = if written.view == view {
@@ -2569,7 +2592,7 @@ async fn a_scoped_column_serves_the_same_values_through_flush_coalesce_fold_and_
     }
 
     let token = session(&served).await;
-    serves_everything(&served, &token, "after the flushes", true).await;
+    serves_everything(&served, &token, "after the flushes").await;
 
     // ---- the coalesce, on one pulled tick ----------------------------------------------------
     let before = served.server.state.engine.write_executor_stats().coalesces;
@@ -2592,26 +2615,20 @@ async fn a_scoped_column_serves_the_same_values_through_flush_coalesce_fold_and_
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
     let token = session(&served).await;
-    serves_everything(&served, &token, "after a coalesce", true).await;
+    serves_everything(&served, &token, "after a coalesce").await;
 
     // ---- a restart, which composes the extents the side-manifest names ------------------------
     let served = reopen(served, config()).await;
-    serves_everything(
-        &served,
-        &served.token,
-        "after a restart",
-        !KNOWN_SCOPED_TEXT_LOST_AT_RESTART,
-    )
-    .await;
+    serves_everything(&served, &served.token, "after a restart").await;
 
     // ---- the fold, which rewrites every column the manifest names -----------------------------
     fold(&served).await;
     let token = session(&served).await;
-    serves_everything(&served, &token, "after a fold", true).await;
+    serves_everything(&served, &token, "after a fold").await;
 
     // ---- and a restart over what the fold wrote -----------------------------------------------
     let served = reopen(served, config()).await;
-    serves_everything(&served, &served.token, "after a second restart", true).await;
+    serves_everything(&served, &served.token, "after a second restart").await;
 }
 
 /// Stop the server and open the same bundle, cache and log again, under the same configuration.
