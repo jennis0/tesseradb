@@ -119,7 +119,7 @@ pub(crate) fn refresh_resident(
     cache: &RowProjectionCache,
     pool: &rayon::ThreadPool,
     generation: &Generation,
-    projection_routes: &crate::compose::ProjectionRoutes,
+    projection_routes: &crate::projection::ProjectionRoutes,
 ) -> usize {
     let mut produced = 0usize;
     for (key, previous) in cache.resident() {
@@ -206,7 +206,7 @@ pub(crate) fn refresh_resident(
                 } else {
                     // Rung 3, the only rung that chooses a route: rungs 1 and 2 derive from the
                     // projection this session already holds and read no image.
-                    let inputs = crate::compose::ProjectionInputs {
+                    let inputs = crate::projection::ProjectionInputs {
                         fragment: &fragment,
                         satisfied: &previous.satisfied_sorted,
                         postings: &generation.postings,
@@ -291,7 +291,7 @@ pub(crate) struct RefreshDeps {
     pub(crate) switches: Arc<crate::switches::TestSwitches>,
     /// The engine's projection-route counters and forced route, shared so that rung 3's builds
     /// are counted where the request path's are and a forced route reaches both.
-    pub(crate) projection_routes: Arc<crate::compose::ProjectionRoutes>,
+    pub(crate) projection_routes: Arc<crate::projection::ProjectionRoutes>,
 }
 
 impl RefreshDeps {

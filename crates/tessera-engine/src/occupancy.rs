@@ -13,7 +13,7 @@
 //! # It is a composed quantity, and I2 requires it
 //!
 //! `N_occ(d)` is counted over the **composed** mask — the [`EffectiveMask`] after the overlay
-//! diff — and never over the cached [`crate::compose::RowProjection`], which is `M_auth` *before*
+//! diff — and never over the cached [`crate::projection::RowProjection`], which is `M_auth` *before*
 //! that diff. The argument is [`EffectiveMask::visible_total`]'s, term for term: a viewer can
 //! aggregate mark counts across tiles, solve for θ, and difference it against the per-tile
 //! `visible` §7.1 discloses exactly. If either factor of θ were pre-overlay, that difference is a

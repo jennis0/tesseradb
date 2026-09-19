@@ -17,7 +17,7 @@
 use std::sync::Arc;
 
 use tessera_authz::PostingsReader;
-use tessera_engine::compose::RowProjection;
+use tessera_engine::projection::RowProjection;
 use tessera_engine::{compose, EffectiveMask};
 use tessera_lifecycle::{IngestBuffer, Overlay};
 use tessera_spatial::{tiles_for_bbox, Bounds};

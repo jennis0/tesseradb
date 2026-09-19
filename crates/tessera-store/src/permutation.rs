@@ -1715,7 +1715,7 @@ impl RowSpace {
 
     /// How many rows the base permutation covers — the boundary below which no flush and no merge
     /// moves a row, which is what makes an extents-only re-projection exact
-    /// (`tessera_engine::compose::RowProjection::rebase_extents`).
+    /// (`tessera_engine::projection::RowProjection::rebase_extents`).
     pub fn base_rows(&self) -> u32 {
         self.base_rows
     }

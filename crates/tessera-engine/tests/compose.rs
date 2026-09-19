@@ -18,7 +18,8 @@ use rustc_hash::FxHashSet;
 use tempfile::TempDir;
 
 use tessera_authz::{write_postings, FragmentCache, FrozenFragment, PostingsReader};
-use tessera_engine::compose::{compose, visible_to, EffectiveMask, RowProjection};
+use tessera_engine::compose::{compose, visible_to, EffectiveMask};
+use tessera_engine::projection::RowProjection;
 use tessera_lifecycle::{ChangeOp, IngestBuffer, Overlay};
 use tessera_store::write::write_permutation;
 use tessera_store::{Permutation, RowSpace};

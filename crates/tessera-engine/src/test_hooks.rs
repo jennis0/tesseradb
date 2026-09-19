@@ -236,7 +236,7 @@ impl Engine {
     /// and [`Self::projection_builds_by_route`] records the walk for a caller to assert on.
     #[cfg(feature = "fault-injection")]
     #[doc(hidden)]
-    pub fn force_projection_route_for_test(&self, route: Option<crate::compose::ProjectionRoute>) {
+    pub fn force_projection_route_for_test(&self, route: Option<crate::projection::ProjectionRoute>) {
         self.projection_routes.force(route);
     }
 
@@ -266,7 +266,7 @@ impl Engine {
 
     /// The same rows by the walk, built here and cached nowhere — the reference every route is
     /// compared against. Goes through `RowSpace::project` directly rather than through
-    /// [`crate::compose::ProjectionRoute::Walk`], so the reference is not the same code path
+    /// [`crate::projection::ProjectionRoute::Walk`], so the reference is not the same code path
     /// under another name.
     #[cfg(feature = "fault-injection")]
     #[doc(hidden)]
