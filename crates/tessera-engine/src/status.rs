@@ -4,9 +4,8 @@ use std::sync::atomic::Ordering;
 
 use tessera_types::TermId;
 
-#[cfg(doc)]
-use crate::Generation;
 use crate::engine::Engine;
+use crate::Generation;
 
 /// One (partition, view)'s live segment count — [`Engine::live_segment_counts`]'s element, and
 /// what `/control/status` publishes under `segments`. Defined here, not re-exported from
@@ -30,6 +29,67 @@ pub struct PartitionStatus {
     pub segments_version: u64,
     /// The highest entity id folded into published row geometry.
     pub watermark: u64,
+}
+
+/// What [`Engine::generation_status`] answers.
+#[derive(Debug, Clone)]
+pub struct GenerationStatus {
+    pub partitions: Vec<PartitionStatus>,
+    /// Sorted by `(partition, view)`.
+    pub segments: Vec<ViewSegments>,
+    pub live_rows: u64,
+    pub overlay_depth: usize,
+    pub retirable_deletions: u64,
+    pub fragment_cache: tessera_authz::fragment::CacheStats,
+    pub fragment_cache_rebuilds: u64,
+}
+
+fn live_rows_of(generation: &Generation) -> u64 {
+    generation
+        .bundle
+        .partitions
+        .values()
+        .flat_map(|partition| partition.manifest.segments.iter())
+        .map(|descriptor| u64::from(descriptor.row_count))
+        .sum()
+}
+
+/// Live segments per (partition, view). A viewport pays a measured 1.4-1.6 µs per
+/// (tile × segment). Sorted, since the generation holds them in `HashMap`s and an operator diffing
+/// two responses must not see a reordering that means nothing.
+fn segment_counts_of(generation: &Generation) -> Vec<ViewSegments> {
+    let mut counts: Vec<ViewSegments> = generation
+        .bundle
+        .partitions
+        .iter()
+        .flat_map(|(partition, data)| {
+            data.views
+                .iter()
+                .map(move |(view, view_data)| ViewSegments {
+                    partition: partition.clone(),
+                    view: view.clone(),
+                    segments: view_data.segments.len(),
+                })
+        })
+        .collect();
+    counts.sort_by(|a, b| (&a.partition, &a.view).cmp(&(&b.partition, &b.view)));
+    counts
+}
+
+/// Each partition's live `(segments_version, watermark)`, sorted by partition.
+fn partition_status_of(generation: &Generation) -> Vec<PartitionStatus> {
+    let mut rows: Vec<PartitionStatus> = generation
+        .bundle
+        .partitions
+        .keys()
+        .map(|partition| PartitionStatus {
+            partition: partition.clone(),
+            segments_version: generation.segments_version,
+            watermark: generation.watermark,
+        })
+        .collect();
+    rows.sort_by(|a, b| a.partition.cmp(&b.partition));
+    rows
 }
 
 impl Engine {
@@ -198,6 +258,21 @@ impl Engine {
         }
     }
 
+    /// Everything `/control/status` reads off the live generation, from one load, so the figures
+    /// in one response describe one publication.
+    pub fn generation_status(&self) -> GenerationStatus {
+        let generation = self.generation.load();
+        GenerationStatus {
+            partitions: partition_status_of(&generation),
+            segments: segment_counts_of(&generation),
+            live_rows: live_rows_of(&generation),
+            overlay_depth: generation.overlay.len(),
+            retirable_deletions: generation.overlay.deleted_len(),
+            fragment_cache: generation.fragments.stats(),
+            fragment_cache_rebuilds: generation.fragments.rebuild_count(),
+        }
+    }
+
     /// The live overlay's entry count, read off the current generation.
     pub fn overlay_depth(&self) -> usize {
         self.generation.load().overlay.len()
@@ -206,65 +281,13 @@ impl Engine {
     /// Rows the bundle's segments hold, tombstoned ones included: the only figure on
     /// `/control/status` giving the corpus's actual size.
     pub fn live_rows(&self) -> u64 {
-        self.generation
-            .load()
-            .bundle
-            .partitions
-            .values()
-            .flat_map(|partition| partition.manifest.segments.iter())
-            .map(|descriptor| u64::from(descriptor.row_count))
-            .sum()
+        live_rows_of(&self.generation.load())
     }
 
     /// Retirable deletions: `|deleted|`, never the union with `suppressed`. Read beside
     /// [`Engine::overlay_depth`]: this is what a fold can reduce, since a suppression never retires.
     pub fn retirable_deletions(&self) -> u64 {
         self.generation.load().overlay.deleted_len()
-    }
-
-    /// Live segments per (partition, view), read off the current generation — published as
-    /// `segments`. A viewport pays a measured 1.4-1.6 µs per (tile × segment); at 10⁹ rows that is
-    /// ~152 segments and ~73 ms on a 300-tile viewport.
-    ///
-    /// Sorted by `(partition, view)`, since the generation holds them in `HashMap`s and an operator
-    /// diffing two responses must not see a reordering that means nothing.
-    pub fn live_segment_counts(&self) -> Vec<ViewSegments> {
-        let generation = self.generation.load();
-        let mut counts: Vec<ViewSegments> = generation
-            .bundle
-            .partitions
-            .iter()
-            .flat_map(|(partition, data)| {
-                data.views
-                    .iter()
-                    .map(move |(view, view_data)| ViewSegments {
-                        partition: partition.clone(),
-                        view: view.clone(),
-                        segments: view_data.segments.len(),
-                    })
-            })
-            .collect();
-        counts.sort_by(|a, b| (&a.partition, &a.view).cmp(&(&b.partition, &b.view)));
-        counts
-    }
-
-    /// Each partition's live `(segments_version, watermark)`. One generation load for the whole
-    /// vector, so the two never straddle a publication.
-    pub fn partition_status(&self) -> Vec<PartitionStatus> {
-        let generation = self.generation.load();
-        let mut rows: Vec<PartitionStatus> = generation
-            .bundle
-            .partitions
-            .keys()
-            .map(|partition| PartitionStatus {
-                partition: partition.clone(),
-                segments_version: generation.segments_version,
-                watermark: generation.watermark,
-            })
-            .collect();
-        // Sorted for `live_segment_counts`' reason.
-        rows.sort_by(|a, b| a.partition.cmp(&b.partition));
-        rows
     }
 
     /// The row-projection cache's operator gauges, published as `projection_cache`. The fragment

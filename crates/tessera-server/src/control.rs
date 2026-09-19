@@ -5792,13 +5792,14 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::V
     // the same `is_ready` the probes call, so the three surfaces cannot drift.
     let executor = state.engine.write_executor_stats();
     let ready = is_ready(executor.posture);
-    let partitions = state.engine.partition_status();
+    let live = state.engine.generation_status();
+    let partitions = live.partitions;
     // **`tessera_engine::FragmentCacheStats`, never `tessera_authz::...`** — `check-layers.sh`
     // denies a `tessera-server → tessera-authz` edge (SA §3), and the re-export at
     // `tessera-engine`'s crate root exists precisely so this call site has a nameable type.
     let projection_cache: tessera_engine::CacheStats = state.engine.row_projection_cache_stats();
     let projection_routes = state.engine.projection_builds_by_route();
-    let fragment_cache: tessera_engine::FragmentCacheStats = state.engine.fragment_cache_stats();
+    let fragment_cache: tessera_engine::FragmentCacheStats = live.fragment_cache;
     // The four per-session caches beside the two above, and the memo. Each is keyed by `token_id`,
     // each is bounded, and until they were published here an operator reading this response saw
     // 127 MB of accounted cache on a node holding 15 GiB of anonymous memory and had nothing to
@@ -5813,7 +5814,7 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::V
     let sessions = state.sessions.lock().stats();
     // **`tessera_engine::ViewSegments`, for `FragmentCacheStats`' reason** — the server may not
     // depend on `tessera-store`, where the segment set actually lives.
-    let segments: Vec<tessera_engine::ViewSegments> = state.engine.live_segment_counts();
+    let segments: Vec<tessera_engine::ViewSegments> = live.segments;
     Ok(Json(serde_json::json!({
         "entity_id_high_water": state.engine.allocator_high_water(),
         // **The publication counter** (contracts §3.4): cycles completed since the executor
@@ -6085,8 +6086,8 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::V
         // `retirable` is the same difference made legible: a suppression-heavy deployment has a
         // deep overlay and nothing for a fold to do, and only the pair says so.
         "overlay": {
-            "depth": state.engine.overlay_depth(),
-            "retirable": state.engine.retirable_deletions(),
+            "depth": live.overlay_depth,
+            "retirable": live.retirable_deletions,
             "soft_limit_alarms": executor.overlay_soft_limit_alarms,
         },
         // **The most expensive operation in the system, and until this block its only surface was a
@@ -6155,7 +6156,7 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::V
         // the gates and is not an alarm: it is what a `POST /control/compact` against an empty
         // corpus answers.
         "compaction": {
-            "live_rows": state.engine.live_rows(),
+            "live_rows": live.live_rows,
             "folds": executor.folds,
             "fold_failures": executor.fold_failures,
             "fold_requested": executor.fold_requested,
@@ -6284,7 +6285,7 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::V
             "thrashing": fragment_cache.young_evictions > 0,
             "oversized_admissions": fragment_cache.oversized_admissions,
             // The observable that separates an in-memory eviction from a genuinely cold rebuild.
-            "rebuilds": state.engine.fragment_cache_rebuilds(),
+            "rebuilds": live.fragment_cache_rebuilds,
         },
         // The registry sheds expired sessions on a growth-triggered sweep (`SessionRegistry`), and
         // all four numbers are here because the third of them is what makes the second admissible:
