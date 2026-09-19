@@ -44,6 +44,7 @@ use tessera_build::{
     build, BuildArgs, GroupDescriptor, GroupViewDescriptor, Quantisation, ScopedColumnFamily,
     ViewArgs,
 };
+use tessera_engine::EngineConfig;
 use tessera_spatial::tiler::ScalarType;
 
 const ENTITIES: u64 = 24;
@@ -334,12 +335,19 @@ struct Served {
 }
 
 async fn serve() -> Served {
+    serve_with(default_engine_config()).await
+}
+
+/// The fixture under a caller-chosen configuration — the lifecycle test below narrows
+/// `coalesce_width` so the entity-space coalesce is reachable from a handful of flushes.
+async fn serve_with(config: EngineConfig) -> Served {
     let tmp = TempDir::new().unwrap();
     let bundle = build_bundle(tmp.path(), true);
-    let server = spawn_server(
+    let server = spawn_server_with_config(
         &bundle,
         &tmp.path().join("cache"),
         &tmp.path().join("wal.log"),
+        config,
     )
     .await;
     // Both terms, so every entity is visible and a view's answer is its population rather than a
@@ -1267,15 +1275,18 @@ async fn a_recreated_view_adopts_no_scoped_value_of_its_predecessor() {
         .as_str()
         .unwrap()
         .to_string();
-    ingest_with_heat(
+    let (status, body) = try_ingest_families(
         &served,
         "heat-first-incarnation",
         "quarter:2026-Q3",
         &[(external_id_of(REJOINS), 250.0, 250.0, "0")],
         // Above the threshold, so a value adopted by the next incarnation answers the leaf.
-        &[Some(90.0)],
+        Some(&[Some(90.0)]),
+        Some(&[Some("peregrine")]),
+        None,
     )
     .await;
+    assert_eq!(status, 200, "the batch is accepted: {body}");
     flush(&served).await;
     let (_, values) = settled_points(&served, &token, "quarter:2026-Q3", 1).await;
     assert_eq!(
@@ -1298,7 +1309,7 @@ async fn a_recreated_view_adopts_no_scoped_value_of_its_predecessor() {
         .as_str()
         .unwrap()
         .to_string();
-    ingest_with_heat(
+    let (status, body) = try_ingest_families(
         &served,
         "heat-second-incarnation",
         "quarter:2026-Q3",
@@ -1306,9 +1317,12 @@ async fn a_recreated_view_adopts_no_scoped_value_of_its_predecessor() {
             (external_id_of(REJOINS), 250.0, 250.0, "0"),
             (external_id_of(FRESH), 350.0, 350.0, "0"),
         ],
-        &[None, Some(5.0)],
+        Some(&[None, Some(5.0)]),
+        Some(&[None, Some("linnet")]),
+        None,
     )
     .await;
+    assert_eq!(status, 200, "the batch is accepted: {body}");
     flush(&served).await;
 
     /// The rendered rows of the new incarnation: the rejoining entity's placeholder and the
@@ -1354,6 +1368,28 @@ async fn a_recreated_view_adopts_no_scoped_value_of_its_predecessor() {
             filtered_entities(served, token, "quarter:2026-Q3", range("heat")).await,
             BTreeSet::new(),
             "{stage}: the predecessor's value answers no leaf under the recreated view"
+        );
+        assert_eq!(
+            filtered_entities(
+                served,
+                token,
+                "quarter:2026-Q3",
+                json!({ "note": {"match": "peregrine"} })
+            )
+            .await,
+            BTreeSet::new(),
+            "{stage}: nor does the predecessor's text"
+        );
+        assert_eq!(
+            filtered_entities(
+                served,
+                token,
+                "quarter:2026-Q3",
+                json!({ "note": {"match": "linnet"} })
+            )
+            .await,
+            BTreeSet::from([fresh]),
+            "{stage}: while the new incarnation's own text matches"
         );
     }
     adopts_nothing(&served, &token, REJOINS, FRESH, "in process").await;
@@ -2349,4 +2385,266 @@ async fn a_scoped_fill_goes_with_its_dropped_view_and_the_drop_counts_it() {
         None,
         "and a restart does not buffer the fill again"
     );
+}
+
+// ---------------------------------------------------------------------------------------------
+// One column through the whole lifecycle
+// ---------------------------------------------------------------------------------------------
+
+/// One row this test writes: the view its batch names, and the three families' values it carries.
+struct Written {
+    entity: u64,
+    view: &'static str,
+    heat: f32,
+    tag: f32,
+    note: &'static str,
+}
+
+/// The owning group's door onto `2026-Q1`.
+const OWNER: &str = "quarter:2026-Q1";
+/// The sharing group's door onto the same key, a different row space over the same cells.
+const SHARING: &str = "quarter_map:2026-Q1";
+/// A second key of the group, created while the service runs.
+const RUNTIME: &str = "quarter:2026-Q3";
+
+/// One entity per batch and one flush per batch, the three views interleaved so two views'
+/// extents of one family alternate in the manifest. Each view carries values on both sides of
+/// [`THRESHOLD`], so a `range` that answered from the wrong column would answer the wrong set
+/// rather than the whole population.
+const WRITTEN: [Written; 9] = [
+    Written { entity: 9_001, view: OWNER, heat: 100.0, tag: 11.0, note: "kestrel" },
+    Written { entity: 9_002, view: SHARING, heat: 101.0, tag: 12.0, note: "marlin" },
+    Written { entity: 9_003, view: RUNTIME, heat: 102.0, tag: 13.0, note: "ibex" },
+    Written { entity: 9_004, view: OWNER, heat: 2.5, tag: 14.0, note: "gannet" },
+    Written { entity: 9_005, view: SHARING, heat: 3.5, tag: 15.0, note: "dipper" },
+    Written { entity: 9_006, view: RUNTIME, heat: 4.5, tag: 16.0, note: "vole" },
+    Written { entity: 9_007, view: OWNER, heat: 103.0, tag: 17.0, note: "osprey" },
+    Written { entity: 9_008, view: SHARING, heat: 104.0, tag: 18.0, note: "quoll" },
+    Written { entity: 9_009, view: RUNTIME, heat: 105.0, tag: 19.0, note: "teal" },
+];
+
+/// The key a view id addresses.
+fn key_of(view: &str) -> &str {
+    view.split_once(':').expect("a view of a group").1
+}
+
+/// The slot of the build's own quarter behind `view`, where it has one — `2026-Q3` is minted at
+/// runtime and the build wrote no row of it.
+fn built_slot(view: &str) -> Option<usize> {
+    QUARTERS.iter().position(|(key, _)| *key == key_of(view))
+}
+
+/// The entities `view` serves once every row below has flushed.
+fn population(view: &str) -> BTreeSet<u64> {
+    let built = built_slot(view).into_iter().flat_map(members);
+    built
+        .chain(WRITTEN.iter().filter(|w| w.view == view).map(|w| w.entity))
+        .collect()
+}
+
+/// What `heat` renders as for `entity` under `view`.
+fn rendered_heat(view: &str, entity: u64) -> f32 {
+    match WRITTEN
+        .iter()
+        .find(|w| w.view == view && w.entity == entity)
+    {
+        Some(written) => written.heat,
+        None => heat_on_the_wire(built_slot(view).expect("a built view"), entity),
+    }
+}
+
+/// A fresh session, which is what a client holds after a publication it did not authorise against.
+async fn session(served: &Served) -> String {
+    authorise(&served.server, &["0", "1"]).await["token"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+/// Everything the three families owe under every view they were written to, at one stage of the
+/// lifecycle: the rendered value, the two leaves, and the drill-down's per-key values. `tag`
+/// carries neither flag, so the drill-down is its whole surface and no leaf names it.
+async fn serves_everything(served: &Served, token: &str, stage: &str) {
+    for view in [OWNER, SHARING, RUNTIME] {
+        let rows = population(view);
+        let (names, values) = settled_points(served, token, view, rows.len()).await;
+        assert!(
+            names.contains(&"heat".to_string()),
+            "{stage}, {view}: the rendered family has a column here: {names:?}"
+        );
+        let by_entity = by_entity(served, token, &values).await;
+        assert_eq!(
+            by_entity.keys().copied().collect::<BTreeSet<_>>(),
+            rows,
+            "{stage}, {view}: the rows served"
+        );
+        for (&entity, &value) in &by_entity {
+            assert_eq!(
+                value,
+                rendered_heat(view, entity),
+                "{stage}, {view}, entity {entity}: the rendered value"
+            );
+        }
+
+        let expected: BTreeSet<u64> = rows
+            .iter()
+            .copied()
+            .filter(|&e| f64::from(rendered_heat(view, e)) >= THRESHOLD)
+            .collect();
+        assert_eq!(
+            filtered_entities(served, token, view, range("heat")).await,
+            expected,
+            "{stage}, {view}: the range answers this view's column"
+        );
+
+        for written in WRITTEN.iter() {
+            // A token of another view's row is in another row space, and a token of the other key
+            // is in another column: either way the answer here is empty.
+            let expected = if written.view == view {
+                BTreeSet::from([written.entity])
+            } else {
+                BTreeSet::new()
+            };
+            let leaf = json!({ "note": {"match": written.note} });
+            assert_eq!(
+                filtered_entities(served, token, view, leaf).await,
+                expected,
+                "{stage}, {view}: `{}` matches the rows that hold it",
+                written.note
+            );
+        }
+    }
+
+    for written in WRITTEN.iter() {
+        let key = key_of(written.view);
+        let id = id_of(served, token, written.view, written.entity).await;
+        let body = item(served, token, id).await;
+        for (family, value) in [("heat", written.heat), ("tag", written.tag)] {
+            let entity = written.entity;
+            let served_keys: Vec<String> = body["scoped"][family]
+                .as_object()
+                .unwrap_or_else(|| panic!("{stage}: entity {entity} has {family}: {body}"))
+                .keys()
+                .cloned()
+                .collect();
+            assert_eq!(
+                served_keys,
+                vec![key.to_string()],
+                "{stage}, entity {}: {family} under its own key alone",
+                written.entity
+            );
+            assert_eq!(
+                body["scoped"][family][key],
+                json!(f64::from(value)),
+                "{stage}, entity {}: {family}'s value under {key}",
+                written.entity
+            );
+        }
+    }
+}
+
+/// **One group-scoped column serves the same values at every step of the lifecycle**
+/// (`views.md` §5): a flush per extent, a coalesce over the stack, a restart that composes the
+/// side-manifest, a fold that rewrites the column, and a restart over what the fold wrote.
+///
+/// Three views write into two keys of one group — the owning group's door, the sharing group's
+/// door onto the same cells, and a key minted while the service runs — so each stage reads a
+/// manifest in which two views' extents of one family interleave. What is asserted at each is
+/// everything the families owe a client: the rendered value in the row tail, the `range` the
+/// rendered family licences, the `match` the indexed text family licences, and the drill-down's
+/// values under the key that holds them and no other.
+#[tokio::test]
+async fn a_scoped_column_serves_the_same_values_through_flush_coalesce_fold_and_restart() {
+    // Width two, so a column holding three extents is eligible: the pass is the subject, not its
+    // policy.
+    let config = || EngineConfig {
+        coalesce_width: Some(2),
+        ..default_engine_config()
+    };
+    let served = serve_with(config()).await;
+    let resp = served
+        .server
+        .client
+        .put(served.server.control_url("/control/views/quarter/2026-Q3"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 201, "the second key is created");
+
+    // Held off while the extents accumulate, so the pass below runs over all of them at once
+    // rather than partly on the executor's own clock.
+    served.server.state.engine.set_coalesce_for_test(false);
+    for (round, written) in WRITTEN.iter().enumerate() {
+        let (status, body) = try_ingest_families(
+            &served,
+            &format!("lifecycle-{round}"),
+            written.view,
+            &[(external_id_of(written.entity), 250.0 + round as f32, 250.0, "0")],
+            Some(&[Some(written.heat)]),
+            Some(&[Some(written.note)]),
+            Some(&[Some(written.tag)]),
+        )
+        .await;
+        assert_eq!(status, 200, "round {round} is accepted: {body}");
+        flush(&served).await;
+    }
+
+    let token = session(&served).await;
+    serves_everything(&served, &token, "after the flushes").await;
+
+    // ---- the coalesce, on one pulled tick ----------------------------------------------------
+    let before = served.server.state.engine.write_executor_stats().coalesces;
+    served.server.state.engine.set_coalesce_for_test(true);
+    let resp = served
+        .server
+        .client
+        .post(served.server.control_url("/control/flush"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 202);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while served.server.state.engine.write_executor_stats().coalesces == before {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "no coalesce published over three extents per column at width two"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    let token = session(&served).await;
+    serves_everything(&served, &token, "after a coalesce").await;
+
+    // ---- a restart, which composes the extents the side-manifest names ------------------------
+    let served = reopen(served, config()).await;
+    serves_everything(&served, &served.token, "after a restart").await;
+
+    // ---- the fold, which rewrites every column the manifest names -----------------------------
+    fold(&served).await;
+    let token = session(&served).await;
+    serves_everything(&served, &token, "after a fold").await;
+
+    // ---- and a restart over what the fold wrote -----------------------------------------------
+    let served = reopen(served, config()).await;
+    serves_everything(&served, &served.token, "after a second restart").await;
+}
+
+/// Stop the server and open the same bundle, cache and log again, under the same configuration.
+async fn reopen(served: Served, config: EngineConfig) -> Served {
+    let Served { server, bundle, _tmp, .. } = served;
+    server.shutdown().await;
+    let server = spawn_server_with_config(
+        &bundle,
+        &_tmp.path().join("cache"),
+        &_tmp.path().join("wal.log"),
+        config,
+    )
+    .await;
+    let token = authorise(&server, &["0", "1"]).await["token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    Served { server, token, bundle, _tmp }
 }
