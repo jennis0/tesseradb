@@ -434,24 +434,20 @@ impl Corpus {
     /// the grant rule, count" outweighs a parallel gather nobody has measured a need for.
     pub fn census(&self, zoom: u8, grant: &Grant) -> Vec<(TileId, u64)> {
         assert!(zoom <= 16, "census: zoom {zoom} exceeds grid depth 16");
+        self.bucket_census(grant, |e| [self.tile_of(e, zoom)])
+    }
+
+    /// The depth-`zoom` tile that item `e`'s position falls in, by the build's own `cell` and
+    /// `interleave_bits`.
+    pub(crate) fn tile_of(&self, e: u64, zoom: u8) -> TileId {
         let shift = 16 - u32::from(zoom);
-        let mut counts: HashMap<TileId, u64> = HashMap::new();
-        for e in 0..self.n {
-            if !self.visible(e, grant) {
-                continue;
-            }
-            let x = self.axis(SALT_X, e, self.extent.x_min, self.extent.x_max);
-            let y = self.axis(SALT_Y, e, self.extent.y_min, self.extent.y_max);
-            let cx = cell(x, self.extent.x_min, self.extent.x_max);
-            let cy = cell(y, self.extent.y_min, self.extent.y_max);
-            // Widened before the shift: at zoom 0 the shift is the full 16 bits, which a `u16`
-            // cannot express.
-            let tile = interleave_bits(u32::from(cx) >> shift, u32::from(cy) >> shift, zoom);
-            *counts.entry(tile).or_insert(0) += 1;
-        }
-        let mut out: Vec<(TileId, u64)> = counts.into_iter().collect();
-        out.sort_unstable();
-        out
+        let x = self.axis(SALT_X, e, self.extent.x_min, self.extent.x_max);
+        let y = self.axis(SALT_Y, e, self.extent.y_min, self.extent.y_max);
+        let cx = cell(x, self.extent.x_min, self.extent.x_max);
+        let cy = cell(y, self.extent.y_min, self.extent.y_max);
+        // Widened before the shift: at zoom 0 the shift is the full 16 bits, which a `u16`
+        // cannot express.
+        interleave_bits(u32::from(cx) >> shift, u32::from(cy) >> shift, zoom)
     }
 
     /// The artifact census's shared driver (`artifacts.rs`, `partition.rs`, `boundary.rs`): one
@@ -462,10 +458,10 @@ impl Corpus {
     /// every entity once, exactly as an engine answering "which artifacts does this masked session
     /// see, and how much of each" would, so an artifact absent from the output is one this grant
     /// sees nothing of — never a zero-count row (spec §9.2's rule, restated per artifact).
-    pub(crate) fn bucket_census(
+    pub(crate) fn bucket_census<I: IntoIterator<Item = u64>>(
         &self,
         grant: &Grant,
-        holders_of: impl Fn(u64) -> Vec<u64>,
+        holders_of: impl Fn(u64) -> I,
     ) -> Vec<(u64, u64)> {
         let mut counts: HashMap<u64, u64> = HashMap::new();
         for e in 0..self.n {

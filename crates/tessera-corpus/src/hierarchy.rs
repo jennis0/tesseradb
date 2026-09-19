@@ -146,16 +146,17 @@ impl Corpus {
             return Vec::new();
         }
         let mut holders = vec![0];
-        let mut node = 0;
+        let mut span = (0, self.n());
         loop {
-            let next = self.artifact_children(count, node).into_iter().find(|&c| {
-                let (lo, hi) = self.treed_interval(count, c);
-                e >= lo && e < hi
-            });
+            let node = holders[holders.len() - 1];
+            let next = (0u64..)
+                .zip(self.artifact_children(count, node))
+                .map(|(index, child)| (child, child_span(span, index)))
+                .find(|&(_, (lo, hi))| e >= lo && e < hi);
             match next {
-                Some(child) => {
+                Some((child, child_span)) => {
                     holders.push(child);
-                    node = child;
+                    span = child_span;
                 }
                 None => return holders,
             }

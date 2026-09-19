@@ -180,7 +180,7 @@ impl Corpus {
     /// The partition census: one O(*n*) pass, per-artifact visible counts — see
     /// [`crate::Corpus::bucket_census`].
     pub fn partition_artifact_census(&self, layer: u64, grant: &Grant) -> Vec<(u64, u64)> {
-        self.bucket_census(grant, |e| vec![self.partition_artifact_of(layer, e)])
+        self.bucket_census(grant, |e| [self.partition_artifact_of(layer, e)])
     }
 }
 

@@ -24,8 +24,6 @@
 //! Because the rule reads only a tile prefix and the two salts that key it, nothing here depends on
 //! `n` at all — the strongest form of prefix stability any arm in this crate has.
 
-use tessera_spatial::{cell, interleave_bits};
-
 use crate::artifacts::layer_salt;
 use crate::{keyed, Corpus, Grant};
 
@@ -85,12 +83,7 @@ impl Corpus {
         if e >= self.n() {
             return None;
         }
-        let item = self.item(e);
-        let depth = self.boundary_depth(layer, level);
-        let shift = 16 - u32::from(depth);
-        let cx = cell(item.x, self.extent().x_min, self.extent().x_max);
-        let cy = cell(item.y, self.extent().y_min, self.extent().y_max);
-        let prefix = interleave_bits(u32::from(cx) >> shift, u32::from(cy) >> shift, depth);
+        let prefix = self.tile_of(e, self.boundary_depth(layer, level));
         self.boundary_is_authored(layer, level, prefix)
             .then_some(prefix)
     }
@@ -114,11 +107,7 @@ impl Corpus {
         level: u32,
         grant: &Grant,
     ) -> Vec<(u64, u64)> {
-        self.bucket_census(grant, |e| {
-            self.boundary_artifact_of(layer, level, e)
-                .into_iter()
-                .collect()
-        })
+        self.bucket_census(grant, |e| self.boundary_artifact_of(layer, level, e))
     }
 }
 

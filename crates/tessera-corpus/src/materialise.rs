@@ -20,14 +20,14 @@ use std::path::Path;
 use std::sync::Arc;
 
 use arrow::array::{
-    ArrayRef, BinaryBuilder, Float64Builder, ListBuilder, StringBuilder,
-    TimestampMicrosecondBuilder, UInt32Builder, UInt64Builder,
+    ArrayRef, BinaryBuilder, Float64Array, ListBuilder, StringArray, StringBuilder,
+    TimestampMicrosecondArray, UInt32Array, UInt64Array,
 };
 use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
 
-use crate::Corpus;
+use crate::{Corpus, Item};
 
 /// Rows per streamed chunk: 2¹⁶ rows keeps every builder's transient a few megabytes while giving
 /// the parquet writer full row groups to accumulate.
@@ -232,6 +232,66 @@ require_member_visibility = "none"
   source = "treed_members"
 "#;
 
+/// The declared scalar columns, in declared order. The points file and the ingest body both carry
+/// them after their own identity and position columns, and ingest refuses a body that lacks one.
+fn scalar_fields() -> Vec<Field> {
+    vec![
+        Field::new("fx_key", DataType::UInt64, false),
+        Field::new("weight", DataType::UInt32, true),
+        Field::new(
+            "seen_at",
+            DataType::Timestamp(TimeUnit::Microsecond, None),
+            true,
+        ),
+        Field::new("bay", DataType::Utf8, true),
+        Field::new("tag", DataType::Utf8, true),
+        Field::new("blurb", DataType::Utf8, true),
+        Field::new("partition", DataType::UInt32, false),
+    ]
+}
+
+fn position_fields() -> [Field; 2] {
+    [
+        Field::new("x", DataType::Float64, false),
+        Field::new("y", DataType::Float64, false),
+    ]
+}
+
+fn position_columns(items: &[Item]) -> [ArrayRef; 2] {
+    let x: Float64Array = items.iter().map(|item| Some(item.x)).collect();
+    let y: Float64Array = items.iter().map(|item| Some(item.y)).collect();
+    [Arc::new(x), Arc::new(y)]
+}
+
+/// Write `rows` to a parquet file, [`CHUNK_ROWS`] at a time, and return how many there were.
+/// `columns` builds one chunk's arrays in `schema`'s order.
+fn write_parquet<R>(
+    path: &Path,
+    schema: Schema,
+    rows: impl Iterator<Item = R>,
+    columns: impl Fn(&[R]) -> Vec<ArrayRef>,
+) -> io::Result<u64> {
+    let schema = Arc::new(schema);
+    let mut writer = ArrowWriter::try_new(File::create(path)?, schema.clone(), None)
+        .map_err(io::Error::other)?;
+    let mut rows = rows.peekable();
+    let mut total = 0u64;
+    while rows.peek().is_some() {
+        let chunk: Vec<R> = rows.by_ref().take(CHUNK_ROWS as usize).collect();
+        total += chunk.len() as u64;
+        let batch = RecordBatch::try_new(schema.clone(), columns(&chunk))
+            .expect("every column is built from the same chunk");
+        writer.write(&batch).map_err(io::Error::other)?;
+    }
+    writer.close().map_err(io::Error::other)?;
+    Ok(total)
+}
+
+fn keys(rows: impl Iterator<Item = u64>) -> ArrayRef {
+    let keys: StringArray = rows.map(|key| Some(key.to_string())).collect();
+    Arc::new(keys)
+}
+
 impl Corpus {
     /// The config the build compiles for this corpus — the declared columns, including the
     /// planted join column, and the one vocabulary they draw on.
@@ -239,79 +299,49 @@ impl Corpus {
         CONFIG_TOML
     }
 
+    fn items(&self, entities: impl Iterator<Item = u64>) -> Vec<Item> {
+        entities.map(|e| self.item(e)).collect()
+    }
+
+    /// One array per field of [`scalar_fields`]. A category is written as its value key, a
+    /// timestamp as `timestamp[us]`, and an absent value as null.
+    fn scalar_columns(&self, items: &[Item]) -> Vec<ArrayRef> {
+        let fx_key: UInt64Array = items.iter().map(|item| Some(item.fx_key)).collect();
+        let weight: UInt32Array = items.iter().map(|item| item.weight).collect();
+        let seen_at: TimestampMicrosecondArray = items.iter().map(|item| item.seen_at).collect();
+        let bay: StringArray = items.iter().map(|item| item.bay).collect();
+        let tag: StringArray = items.iter().map(|item| item.tag.as_deref()).collect();
+        let blurb: StringArray = items.iter().map(|item| item.blurb.as_deref()).collect();
+        let partition: UInt32Array = items
+            .iter()
+            .map(|item| Some(self.partition_artifact_of(PARTITION_LAYER, item.e) as u32))
+            .collect();
+        vec![
+            Arc::new(fx_key),
+            Arc::new(weight),
+            Arc::new(seen_at),
+            Arc::new(bay),
+            Arc::new(tag),
+            Arc::new(blurb),
+            Arc::new(partition),
+        ]
+    }
+
     /// Write the build's points input: `entity_id`, `x`, `y`, and every declared column in the
     /// form the build's scan reads it (a category as its value *key*, a timestamp as
     /// `timestamp[us]`, absence as null). Rows `0..n`, in item order, streamed.
     pub fn write_points_parquet(&self, path: &Path) -> io::Result<()> {
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("entity_id", DataType::UInt64, false),
-            Field::new("x", DataType::Float64, false),
-            Field::new("y", DataType::Float64, false),
-            Field::new("fx_key", DataType::UInt64, false),
-            Field::new("weight", DataType::UInt32, true),
-            Field::new(
-                "seen_at",
-                DataType::Timestamp(TimeUnit::Microsecond, None),
-                true,
-            ),
-            Field::new("bay", DataType::Utf8, true),
-            Field::new("tag", DataType::Utf8, true),
-            Field::new("blurb", DataType::Utf8, true),
-            // The partition arm's value (`partition.rs`), single-valued and never absent — every
-            // entity in `0..n` resolves to exactly one artifact. Read by
-            // `membership = { attribute = "partition" }` in `CONFIG_TOML`; unreferenced by every
-            // other consumer of this file, so an existing caller sees an extra column and nothing
-            // else.
-            Field::new("partition", DataType::UInt32, false),
-        ]));
-        let mut writer = ArrowWriter::try_new(File::create(path)?, schema.clone(), None)
-            .map_err(io::Error::other)?;
-        let mut lo = 0u64;
-        while lo < self.n() {
-            let hi = (lo + CHUNK_ROWS).min(self.n());
-            let mut entity_id = UInt64Builder::with_capacity((hi - lo) as usize);
-            let mut x = Float64Builder::with_capacity((hi - lo) as usize);
-            let mut y = Float64Builder::with_capacity((hi - lo) as usize);
-            let mut fx_key = UInt64Builder::with_capacity((hi - lo) as usize);
-            let mut weight = UInt32Builder::with_capacity((hi - lo) as usize);
-            let mut seen_at = TimestampMicrosecondBuilder::with_capacity((hi - lo) as usize);
-            let mut bay = StringBuilder::new();
-            let mut tag = StringBuilder::new();
-            let mut blurb = StringBuilder::new();
-            let mut partition = UInt32Builder::with_capacity((hi - lo) as usize);
-            for e in lo..hi {
-                let item = self.item(e);
-                entity_id.append_value(e);
-                x.append_value(item.x);
-                y.append_value(item.y);
-                fx_key.append_value(item.fx_key);
-                weight.append_option(item.weight);
-                seen_at.append_option(item.seen_at);
-                bay.append_option(item.bay);
-                tag.append_option(item.tag.as_deref());
-                blurb.append_option(item.blurb.as_deref());
-                partition.append_value(self.partition_artifact_of(PARTITION_LAYER, e) as u32);
-            }
-            let batch = RecordBatch::try_new(
-                schema.clone(),
-                vec![
-                    Arc::new(entity_id.finish()) as ArrayRef,
-                    Arc::new(x.finish()),
-                    Arc::new(y.finish()),
-                    Arc::new(fx_key.finish()),
-                    Arc::new(weight.finish()),
-                    Arc::new(seen_at.finish()),
-                    Arc::new(bay.finish()),
-                    Arc::new(tag.finish()),
-                    Arc::new(blurb.finish()),
-                    Arc::new(partition.finish()),
-                ],
-            )
-            .expect("columns built to one length from one loop");
-            writer.write(&batch).map_err(io::Error::other)?;
-            lo = hi;
-        }
-        writer.close().map_err(io::Error::other)?;
+        let mut fields = vec![Field::new("entity_id", DataType::UInt64, false)];
+        fields.extend(position_fields());
+        fields.extend(scalar_fields());
+        write_parquet(path, Schema::new(fields), 0..self.n(), |entities| {
+            let items = self.items(entities.iter().copied());
+            let entity_id: UInt64Array = entities.iter().copied().map(Some).collect();
+            let mut columns: Vec<ArrayRef> = vec![Arc::new(entity_id)];
+            columns.extend(position_columns(&items));
+            columns.extend(self.scalar_columns(&items));
+            columns
+        })?;
         Ok(())
     }
 
@@ -320,35 +350,20 @@ impl Corpus {
     /// the dictionary's descriptors under `builtin:passthrough` — the same ids [`crate::Grant`]
     /// names.
     pub fn write_pairs_parquet(&self, path: &Path) -> io::Result<()> {
-        let schema = Arc::new(Schema::new(vec![
+        let schema = Schema::new(vec![
             Field::new("entity_id", DataType::UInt64, false),
             Field::new("term_id", DataType::UInt32, false),
-        ]));
-        let mut writer = ArrowWriter::try_new(File::create(path)?, schema.clone(), None)
-            .map_err(io::Error::other)?;
-        let mut lo = 0u64;
-        while lo < self.n() {
-            let hi = (lo + CHUNK_ROWS).min(self.n());
-            let mut entity_id = UInt64Builder::new();
-            let mut term_id = UInt32Builder::new();
-            for e in lo..hi {
-                for term in self.terms(e) {
-                    entity_id.append_value(e);
-                    term_id.append_value(term.raw());
-                }
-            }
-            let batch = RecordBatch::try_new(
-                schema.clone(),
-                vec![
-                    Arc::new(entity_id.finish()) as ArrayRef,
-                    Arc::new(term_id.finish()),
-                ],
-            )
-            .expect("two columns built to one length from one loop");
-            writer.write(&batch).map_err(io::Error::other)?;
-            lo = hi;
-        }
-        writer.close().map_err(io::Error::other)?;
+        ]);
+        write_parquet(path, schema, 0..self.n(), |entities| {
+            let pairs = || {
+                entities
+                    .iter()
+                    .flat_map(|&e| self.terms(e).into_iter().map(move |term| (e, term.raw())))
+            };
+            let entity_id: UInt64Array = pairs().map(|(e, _)| Some(e)).collect();
+            let term_id: UInt32Array = pairs().map(|(_, term)| Some(term)).collect();
+            vec![Arc::new(entity_id), Arc::new(term_id)]
+        })?;
         Ok(())
     }
 
@@ -361,85 +376,32 @@ impl Corpus {
     /// `range` may start at `n`: the lookups are defined for every `e`, which is how a driver
     /// ingests items beyond the built prefix from the same functions (spec §12.1's "the same
     /// corpus feeds every way in").
-    ///
-    /// Every column emits the type the manifest declares for it
-    /// (`DeclaredScalar::wire_type`), which is the only shape ingest accepts — a substitute (an
-    /// `i64` for a `timestamp_us`, say) is refused as a declared-type mismatch. `seen_at` was
-    /// un-ingestable when this was written, ingest having inferred types by downcast and knowing
-    /// no timestamp; the decode is driven by the declaration now and the set is exhaustive.
     pub fn ingest_batch(&self, range: Range<u64>) -> RecordBatch {
-        let rows = usize::try_from(range.end.saturating_sub(range.start))
-            .expect("an ingest batch fits in memory by construction");
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("external_id", DataType::Binary, false),
-            Field::new("x", DataType::Float64, false),
-            Field::new("y", DataType::Float64, false),
-            Field::new(
-                "access",
-                DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
-                false,
-            ),
-            Field::new("fx_key", DataType::UInt64, false),
-            Field::new("weight", DataType::UInt32, true),
-            Field::new(
-                "seen_at",
-                DataType::Timestamp(TimeUnit::Microsecond, None),
-                true,
-            ),
-            Field::new("bay", DataType::Utf8, true),
-            Field::new("tag", DataType::Utf8, true),
-            Field::new("blurb", DataType::Utf8, true),
-            // Declared last, and so emitted last: ingest reads the declared scalars in declared
-            // order and refuses a body missing one. `Corpus::partition_artifact_of` answers for
-            // any `e`, this batch's `range` past the built prefix included, because the stride it
-            // divides by is a constant rather than a function of `n` (`partition.rs`).
-            Field::new("partition", DataType::UInt32, false),
-        ]));
+        let mut fields = vec![Field::new("external_id", DataType::Binary, false)];
+        fields.extend(position_fields());
+        fields.push(Field::new(
+            "access",
+            DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
+            false,
+        ));
+        fields.extend(scalar_fields());
+
+        let items = self.items(range);
         let mut external_id = BinaryBuilder::new();
-        let mut x = Float64Builder::with_capacity(rows);
-        let mut y = Float64Builder::with_capacity(rows);
         let mut access = ListBuilder::new(StringBuilder::new());
-        let mut fx_key = UInt64Builder::with_capacity(rows);
-        let mut weight = UInt32Builder::with_capacity(rows);
-        let mut seen_at = TimestampMicrosecondBuilder::with_capacity(rows);
-        let mut bay = StringBuilder::new();
-        let mut tag = StringBuilder::new();
-        let mut blurb = StringBuilder::new();
-        let mut partition = UInt32Builder::with_capacity(rows);
-        for e in range {
-            let item = self.item(e);
-            external_id.append_value(e.to_le_bytes());
-            x.append_value(item.x);
-            y.append_value(item.y);
-            for t in self.terms(e) {
-                access.values().append_value(t.raw().to_string());
+        for item in &items {
+            external_id.append_value(item.e.to_le_bytes());
+            for term in self.terms(item.e) {
+                access.values().append_value(term.raw().to_string());
             }
             access.append(true);
-            fx_key.append_value(item.fx_key);
-            weight.append_option(item.weight);
-            seen_at.append_option(item.seen_at);
-            bay.append_option(item.bay);
-            tag.append_option(item.tag.as_deref());
-            blurb.append_option(item.blurb.as_deref());
-            partition.append_value(self.partition_artifact_of(PARTITION_LAYER, e) as u32);
         }
-        RecordBatch::try_new(
-            schema,
-            vec![
-                Arc::new(external_id.finish()) as ArrayRef,
-                Arc::new(x.finish()),
-                Arc::new(y.finish()),
-                Arc::new(access.finish()),
-                Arc::new(fx_key.finish()),
-                Arc::new(weight.finish()),
-                Arc::new(seen_at.finish()),
-                Arc::new(bay.finish()),
-                Arc::new(tag.finish()),
-                Arc::new(blurb.finish()),
-                Arc::new(partition.finish()),
-            ],
-        )
-        .expect("columns built to one length from one loop")
+        let mut columns: Vec<ArrayRef> = vec![Arc::new(external_id.finish())];
+        columns.extend(position_columns(&items));
+        columns.push(Arc::new(access.finish()));
+        columns.extend(self.scalar_columns(&items));
+        RecordBatch::try_new(Arc::new(Schema::new(fields)), columns)
+            .expect("every column is built from the same items")
     }
 
     /// One artifact roster: `key` only, one row per artifact, ascending
@@ -451,132 +413,47 @@ impl Corpus {
     /// statement of which keys exist, never something either declaration names.
     fn write_artifact_roster_parquet(
         path: &Path,
-        keys: impl Iterator<Item = u64>,
+        artifacts: impl Iterator<Item = u64>,
     ) -> io::Result<()> {
-        let schema = Arc::new(Schema::new(vec![Field::new("key", DataType::Utf8, false)]));
-        let mut writer = ArrowWriter::try_new(File::create(path)?, schema.clone(), None)
-            .map_err(io::Error::other)?;
-        let mut key = StringBuilder::new();
-        let mut buffered = 0u64;
-        for k in keys {
-            key.append_value(k.to_string());
-            buffered += 1;
-            if buffered >= CHUNK_ROWS {
-                let batch = RecordBatch::try_new(schema.clone(), vec![Arc::new(key.finish())])
-                    .expect("one column, built to its own length");
-                writer.write(&batch).map_err(io::Error::other)?;
-                buffered = 0;
-            }
-        }
-        if buffered > 0 {
-            let batch = RecordBatch::try_new(schema.clone(), vec![Arc::new(key.finish())])
-                .expect("one column, built to its own length");
-            writer.write(&batch).map_err(io::Error::other)?;
-        }
-        writer.close().map_err(io::Error::other)?;
+        let schema = Schema::new(vec![Field::new("key", DataType::Utf8, false)]);
+        write_parquet(path, schema, artifacts, |chunk| {
+            vec![keys(chunk.iter().copied())]
+        })?;
         Ok(())
     }
 
     /// The treed arm's own roster: `(key, parent)`, one row per node — `parent` null at the root,
     /// which is `generator/treed`'s `nested` lineage (`configuration.md` §1's canonical `parent`
     /// field, so no `fields` remap is needed).
-    fn write_treed_roster_parquet(
-        path: &Path,
-        count: u64,
-        parent_of: impl Fn(u64) -> Option<u64>,
-    ) -> io::Result<()> {
-        let schema = Arc::new(Schema::new(vec![
+    fn write_treed_roster_parquet(&self, path: &Path, count: u64) -> io::Result<()> {
+        let schema = Schema::new(vec![
             Field::new("key", DataType::Utf8, false),
             Field::new("parent", DataType::Utf8, true),
-        ]));
-        let mut writer = ArrowWriter::try_new(File::create(path)?, schema.clone(), None)
-            .map_err(io::Error::other)?;
-        let mut key = StringBuilder::new();
-        let mut parent = StringBuilder::new();
-        let mut buffered = 0u64;
-        for a in 0..count {
-            key.append_value(a.to_string());
-            parent.append_option(parent_of(a).map(|p| p.to_string()));
-            buffered += 1;
-            if buffered >= CHUNK_ROWS {
-                let batch = RecordBatch::try_new(
-                    schema.clone(),
-                    vec![
-                        Arc::new(key.finish()) as ArrayRef,
-                        Arc::new(parent.finish()),
-                    ],
-                )
-                .expect("two columns built to one length from one loop");
-                writer.write(&batch).map_err(io::Error::other)?;
-                buffered = 0;
-            }
-        }
-        if buffered > 0 {
-            let batch = RecordBatch::try_new(
-                schema.clone(),
-                vec![
-                    Arc::new(key.finish()) as ArrayRef,
-                    Arc::new(parent.finish()),
-                ],
-            )
-            .expect("two columns built to one length from one loop");
-            writer.write(&batch).map_err(io::Error::other)?;
-        }
-        writer.close().map_err(io::Error::other)?;
+        ]);
+        write_parquet(path, schema, 0..count, |nodes| {
+            let parent: StringArray = nodes
+                .iter()
+                .map(|&a| self.artifact_parent(a).map(|p| p.to_string()))
+                .collect();
+            vec![keys(nodes.iter().copied()), Arc::new(parent)]
+        })?;
         Ok(())
     }
 
     /// One membership relation: `(key, entity)`, one row per pair — the file a `[layer.members]`
-    /// reads. Streamed in [`CHUNK_ROWS`] batches over whatever `pairs` yields, so a relation the
-    /// size of the corpus itself (the partition arm's, which is exhaustive) costs no more memory
-    /// than the points file does.
-    /// Returns the row count written, so a caller streaming the relation through does not have to
-    /// walk it a second time just to report how many rows a build should see.
+    /// reads. Returns the row count written.
     fn write_membership_parquet(
         path: &Path,
         pairs: impl Iterator<Item = (u64, u64)>,
     ) -> io::Result<u64> {
-        let schema = Arc::new(Schema::new(vec![
+        let schema = Schema::new(vec![
             Field::new("key", DataType::Utf8, false),
             Field::new("entity", DataType::UInt64, false),
-        ]));
-        let mut writer = ArrowWriter::try_new(File::create(path)?, schema.clone(), None)
-            .map_err(io::Error::other)?;
-        let mut key = StringBuilder::new();
-        let mut entity = UInt64Builder::new();
-        let mut buffered = 0u64;
-        let mut total = 0u64;
-        for (k, e) in pairs {
-            key.append_value(k.to_string());
-            entity.append_value(e);
-            buffered += 1;
-            total += 1;
-            if buffered >= CHUNK_ROWS {
-                let batch = RecordBatch::try_new(
-                    schema.clone(),
-                    vec![
-                        Arc::new(key.finish()) as ArrayRef,
-                        Arc::new(entity.finish()),
-                    ],
-                )
-                .expect("two columns built to one length from one loop");
-                writer.write(&batch).map_err(io::Error::other)?;
-                buffered = 0;
-            }
-        }
-        if buffered > 0 {
-            let batch = RecordBatch::try_new(
-                schema.clone(),
-                vec![
-                    Arc::new(key.finish()) as ArrayRef,
-                    Arc::new(entity.finish()),
-                ],
-            )
-            .expect("two columns built to one length from one loop");
-            writer.write(&batch).map_err(io::Error::other)?;
-        }
-        writer.close().map_err(io::Error::other)?;
-        Ok(total)
+        ]);
+        write_parquet(path, schema, pairs, |chunk| {
+            let entity: UInt64Array = chunk.iter().map(|&(_, e)| Some(e)).collect();
+            vec![keys(chunk.iter().map(|&(a, _)| a)), Arc::new(entity)]
+        })
     }
 
     /// Every file the artifact scale campaign's fixture needs beside `points.parquet`,
@@ -620,9 +497,7 @@ impl Corpus {
         )?;
 
         let treed_count = self.treed_count(TREED_LAYER);
-        Self::write_treed_roster_parquet(&dir.join("treed_artifacts.parquet"), treed_count, |a| {
-            self.artifact_parent(a)
-        })?;
+        self.write_treed_roster_parquet(&dir.join("treed_artifacts.parquet"), treed_count)?;
         let treed_member_rows = Self::write_membership_parquet(
             &dir.join("treed_members.parquet"),
             (0..treed_count).flat_map(|a| {

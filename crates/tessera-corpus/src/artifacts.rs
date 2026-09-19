@@ -245,22 +245,19 @@ impl Corpus {
     /// power of two: an image outside `[0, n)` is fed back in, which terminates because the walk is
     /// a permutation of a finite set and cannot cycle without returning to its start.
     fn shuffle(&self, key: u64, x: u64) -> u64 {
-        let (half, mask) = self.feistel_shape();
-        let mut v = x;
-        loop {
-            v = feistel(self.seed() ^ SALT_A_FEISTEL ^ key, half, mask, v, false);
-            if v < self.n() {
-                return v;
-            }
-        }
+        self.walk(key, x, false)
     }
 
     /// The exact inverse of [`Self::shuffle`], walking the same cycle backwards.
     fn unshuffle(&self, key: u64, y: u64) -> u64 {
+        self.walk(key, y, true)
+    }
+
+    fn walk(&self, key: u64, start: u64, reverse: bool) -> u64 {
         let (half, mask) = self.feistel_shape();
-        let mut v = y;
+        let mut v = start;
         loop {
-            v = feistel(self.seed() ^ SALT_A_FEISTEL ^ key, half, mask, v, true);
+            v = feistel(self.seed() ^ SALT_A_FEISTEL ^ key, half, mask, v, reverse);
             if v < self.n() {
                 return v;
             }
@@ -293,20 +290,15 @@ pub(crate) fn layer_salt(layer: u64, level: u32) -> u64 {
 fn feistel(key: u64, half: u32, mask: u64, v: u64, reverse: bool) -> u64 {
     let mut l = (v >> half) & mask;
     let mut r = v & mask;
-    for round in 0..4u64 {
-        let round = if reverse { 3 - round } else { round };
-        let f = mix64(key ^ mix64(round.wrapping_add(1)) ^ r) & mask;
-        if reverse {
-            // Undo `(l, r) -> (r, l ^ f(r))`: the pre-image of this round has `r` on the left.
-            let previous_r = l;
-            let previous_l = r ^ (mix64(key ^ mix64(round.wrapping_add(1)) ^ previous_r) & mask);
-            l = previous_l;
-            r = previous_r;
+    for step in 0..4u64 {
+        let round = if reverse { 3 - step } else { step };
+        let f = |half_value: u64| mix64(key ^ mix64(round + 1) ^ half_value) & mask;
+        // A round is `(l, r) -> (r, l ^ f(r))`, and its inverse is `(l, r) -> (r ^ f(l), l)`.
+        (l, r) = if reverse {
+            (r ^ f(l), l)
         } else {
-            let next = l ^ f;
-            l = r;
-            r = next;
-        }
+            (r, l ^ f(r))
+        };
     }
     (l << half) | r
 }
