@@ -881,9 +881,13 @@ pub fn compose(
                     fail_rows.push(row.raw());
                 }
             }
-            // A buffered entity has no row by definition — that is what being buffered means — so
-            // this always takes the "no row" path above. The branch is kept and tested against a
-            // synthetic permutation, for the day buffered items get provisional rows.
+            // A buffered entity usually has no row, and this takes the "no row" path above. It
+            // has one where a flush of another view has published a row for it while its own
+            // row is still buffered: a flush is planned per view and one view publishes per
+            // tick, so an entity ingested into one view and joined to a second can have the
+            // second's row published first. A join writes no postings, so the entity is in no
+            // fragment and the `plus` branch is the only thing that draws its mark there
+            // (`tests/deny_mask.rs`).
         }
     }
 

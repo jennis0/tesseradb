@@ -4,8 +4,10 @@
 //! assertions can be read directly against entity ids), two granted terms (0, 1) whose postings
 //! cover entities `[0, 510)` — the base fragment — and entity ids `[10_000, 10_005)` reserved,
 //! unpermutted-in-the-bundle-sense but *do* have rows in this synthetic permutation, standing in
-//! for buffered entities. They are exercised against a synthetic permutation even though real
-//! buffered items never have a row, so that the branch that would handle one is covered.
+//! for buffered entities. A real buffered entity has a row wherever a flush of another view has
+//! published one for it — an entity joined to a second view, whose join row flushes before its
+//! own (`tests/deny_mask.rs`) — and the synthetic permutation puts every case here on that
+//! branch rather than only the cases a two-view fixture could reach.
 
 use std::collections::HashSet;
 use std::ops::Range;

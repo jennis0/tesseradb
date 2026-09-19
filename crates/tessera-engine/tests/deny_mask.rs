@@ -316,3 +316,142 @@ fn a_deep_deny_set_changes_no_answer() {
         "and the composed count is exactly the walk's answer, at depth"
     );
 }
+
+/// **A join row can publish before the entity's own row**, and the entity's mark in the joined
+/// view is drawn only by the buffer's `plus`.
+///
+/// A flush is planned per view and one view publishes per tick, so an entity ingested into `s0`
+/// and joined to `s1` can have `s1`'s row published while its own row is still buffered. A join
+/// writes no postings, so until `s0` flushes the entity is in no session's fragment and its `s1`
+/// row is outside the cached projection: what puts the mark on the map is the walk over the
+/// buffer in `compose`, which finds a row for a buffered entity here.
+///
+/// The executor is parked at the second flush's manifest seam, so the state is assembled rather
+/// than waited for.
+#[test]
+fn a_join_published_before_the_entitys_own_row_is_drawn_from_the_buffer() {
+    use tessera_lifecycle::faults::{FaultSwitchboard, PauseAction, PauseSite};
+
+    const JOINED_VIEW: &str = "s1";
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = fixture(tmp.path());
+    let mut engine = Engine::open(
+        &root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+        tessera_plugin::Passthrough::new(),
+        EngineConfig {
+            flush_max_age_secs: 3600,
+            flush_max_items: usize::MAX,
+            max_merged_segment_bytes: None,
+            compaction: tessera_engine::CompactionSchedule::off(),
+            ..config_uncapped()
+        },
+    )
+    .expect("engine opens");
+    let faults = std::sync::Arc::new(FaultSwitchboard::new());
+    engine
+        .start_write_executor_with_faults(64, std::sync::Arc::clone(&faults))
+        .expect("the executor starts once");
+
+    engine
+        .create_plain_view(tessera_engine::PlainViewDeclaration {
+            name: JOINED_VIEW.to_string(),
+            title: None,
+            projection: "none".to_string(),
+            frame: tessera_engine::DeclaredFrame {
+                x_min: 0.0,
+                x_max: 1000.0,
+                y_min: 0.0,
+                y_max: 1000.0,
+            },
+            visibility: None,
+            point_default: None,
+        })
+        .expect("the view is created");
+    tick(&engine);
+
+    // One row into each view, in one window, so both views have a plan at the same tick. The
+    // anchor holds the older entity id — ids are assigned by signature then external id, and
+    // "anchor" sorts below "joiner" — so `s1`'s plan is the one the dispatch sends first.
+    let ingest_into = |batch: &str, view: &str, external_id: &str, descriptors: Vec<Vec<u8>>| {
+        let row = UnallocatedRow {
+            external_id: Some(external_id.as_bytes().to_vec()),
+            view: view.to_string(),
+            join: None,
+            x: 5.0,
+            y: 5.0,
+            scalars: Vec::new(),
+            terms: engine.resolve_terms(&descriptors),
+            descriptors,
+            scoped: Vec::new(),
+        };
+        engine
+            .accept_ingest(vec![row], batch.to_string(), [0u8; 32])
+            .expect("ingest is accepted")[0]
+    };
+    ingest_into("b-anchor", JOINED_VIEW, "anchor", vec![b"0".to_vec(), b"1".to_vec()]);
+    let joiner = ingest_into("b-own", "s0", "joiner", vec![b"0".to_vec()]);
+    // The same external id in the other view: the admission resolves it to `joiner` and the row
+    // becomes a join, carrying geometry and no terms of its own.
+    ingest_into("b-join", JOINED_VIEW, "joiner", vec![b"0".to_vec()]);
+
+    // Let `s1`'s flush publish and park `s0`'s before it commits its side-manifest.
+    faults.arm_pause_after(PauseSite::BeforeManifestPublish, PauseAction::Stall, 1);
+    engine.request_flush();
+    faults.await_arrivals(
+        PauseSite::BeforeManifestPublish,
+        2,
+        Duration::from_secs(30),
+    );
+
+    let generation = engine.generation();
+    let view_of = |view: &str| {
+        generation
+            .bundle
+            .partitions
+            .values()
+            .find_map(|p| p.views.get(view))
+            .expect("the view is in the generation")
+    };
+    assert!(
+        view_of(JOINED_VIEW).row_space.row_of(joiner).is_some(),
+        "the join row published, so the entity has a row in the joined view"
+    );
+    assert!(
+        view_of("s0").row_space.row_of(joiner).is_none(),
+        "its own row is still buffered: `s0` is the plan parked at the seam"
+    );
+
+    let whole = |view: &'static str| {
+        ViewportRequest::new(view, 4, [0.0, 0.0, 1000.0, 1000.0], N_ITEMS as usize)
+    };
+    let entitled = engine.authorise(&full_coverage_credential()).unwrap();
+    let unentitled = engine.authorise(&subset_credential()).unwrap();
+    let served = |session: &tessera_engine::Session| {
+        let response = engine
+            .viewport(session, whole(JOINED_VIEW))
+            .expect("a viewport");
+        let counted: u64 = response.tiles.iter().map(|t| t.visible).sum();
+        let drawn: std::collections::HashSet<u64> =
+            response.points.iter().map(|(id, _)| id.raw()).collect();
+        (counted, drawn)
+    };
+    let mark = engine.tessera_id_of(joiner).unwrap().raw();
+
+    let (counted, drawn) = served(&entitled);
+    assert!(
+        drawn.contains(&mark),
+        "the entity's mark is drawn in the joined view before its own row's flush"
+    );
+    assert_eq!(counted, 2, "and it is counted beside the anchor");
+
+    let (counted, drawn) = served(&unentitled);
+    assert!(
+        !drawn.contains(&mark),
+        "a session holding none of the entity's terms is served no mark for it"
+    );
+    assert_eq!(counted, 1, "and counts only the anchor");
+
+    faults.release();
+}
