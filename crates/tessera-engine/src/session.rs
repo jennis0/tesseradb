@@ -1777,42 +1777,6 @@ impl Engine {
         Ok(engine)
     }
 
-    /// Test-only override for the serial/parallel fan-out threshold
-    /// (`viewport::SERIAL_FALLBACK_MAX_ROWS`, 500,000,000 — see that constant's doc).
-    /// Gated behind the `bench-timing` feature both crates' integration test suites already
-    /// build with, so this does not exist at all — not even as a compiled, unreachable symbol —
-    /// in a build without it, and a shipped binary never has it
-    /// (`scripts/check-layers.sh` asserts the runtime gate is present and defaults closed).
-    ///
-    /// **Why this exists.** `SERIAL_FALLBACK_MAX_ROWS` is 500,000,000, and a fixture that
-    /// genuinely clears it is impractical to build inside a unit
-    /// test (real minutes even on the fast pipeline), which left the parallel branch's
-    /// `pool.install` sweep — the collect-order/byte-equality claim `viewport.rs`'s module doc
-    /// makes — with no test able to reach it. This is the fix: a per-`Engine` override, set once
-    /// after `Engine::open` and before issuing requests, that the byte-equality tests use to force
-    /// the fan-out to engage on a small, fast fixture without changing production behaviour at
-    /// all. **Only the SETTER below is `bench-timing`-gated; the
-    /// `serial_fallback_max_rows` field itself is present in every build and `Engine::viewport`
-    /// always pays one `Relaxed` load of it** (deliberately not `#[cfg]`-gated too — two code
-    /// paths in the hot path would cost auditability for the sake of one relaxed load of a value
-    /// production can never write, negligible against the thousands of other atomic operations a
-    /// request already does). A production build therefore always reads this field, but since
-    /// nothing outside `bench-timing` can ever write it, the load always yields
-    /// `SERIAL_FALLBACK_MAX_ROWS` — behaviourally identical to reading the constant directly.
-    ///
-    /// **Why per-`Engine`, not global or thread-local state.** `cargo test` runs tests in
-    /// parallel by default, each typically constructing its own `Engine`; a process-global would
-    /// have one test's override leak into another's concurrently-running assertions, and a
-    /// thread-local would silently stop working the moment a request is served from a different
-    /// OS thread than the one that set it (exactly what happens in `tessera-server`'s tests,
-    /// where the engine is driven from `axum`/`tokio` task threads, not the test's own). Scoping
-    /// the override to the `Engine` instance itself — already constructed once per test, already
-    /// never shared between tests — sidesteps both hazards entirely.
-    ///
-    /// **Not a deployment knob.** No `tessera.toml` field reaches this; `#[doc(hidden)]` keeps it
-    /// out of this crate's public docs even in a `bench-timing` build; `pub` (not `pub(crate)`) is
-    /// required only because `tests/*.rs` integration tests are separate crate compilation units
-    /// that cannot see `pub(crate)` items in this library crate at all.
     /// Turn the background refresh off, so a session stays in the stale-serve window.
     ///
     /// **A test hook, and gated so it cannot exist in a shipped build.** The window decision
@@ -1893,10 +1857,6 @@ impl Engine {
         self.write.rebuild_suggestion_index(vocabulary.to_string())
     }
 
-    /// Hold the background refresh, leaving it **in flight** — the window rung 3 of
-    /// `Engine::session_geometry`'s ladder sheds a racer in. Distinct from
-    /// [`Self::set_background_refresh_for_test`], which models a refresh that produces nothing and
-    /// *finishes*: the flag clears there, and rung 3 builds instead of refusing.
     #[cfg(feature = "fault-injection")]
     #[doc(hidden)]
     /// Hold a fold between its last pass and its submission, so a test can land a flush **inside
@@ -1971,6 +1931,10 @@ impl Engine {
             .load(Ordering::SeqCst)
     }
 
+    /// Hold the background refresh, leaving it **in flight** — the window rung 3 of
+    /// `Engine::session_geometry`'s ladder sheds a racer in. Distinct from
+    /// [`Self::set_background_refresh_for_test`], which models a refresh that produces nothing and
+    /// *finishes*: the flag clears there, and rung 3 builds instead of refusing.
     pub fn set_refresh_paused_for_test(&self, paused: bool) {
         self.refresh_paused.store(paused, Ordering::SeqCst);
     }
@@ -2028,6 +1992,42 @@ impl Engine {
         self.member_of_column_walks.load(Ordering::Relaxed)
     }
 
+    /// Test-only override for the serial/parallel fan-out threshold
+    /// (`viewport::SERIAL_FALLBACK_MAX_ROWS`, 500,000,000 — see that constant's doc).
+    /// Gated behind the `bench-timing` feature both crates' integration test suites already
+    /// build with, so this does not exist at all — not even as a compiled, unreachable symbol —
+    /// in a build without it, and a shipped binary never has it
+    /// (`scripts/check-layers.sh` asserts the runtime gate is present and defaults closed).
+    ///
+    /// **Why this exists.** `SERIAL_FALLBACK_MAX_ROWS` is 500,000,000, and a fixture that
+    /// genuinely clears it is impractical to build inside a unit
+    /// test (real minutes even on the fast pipeline), which left the parallel branch's
+    /// `pool.install` sweep — the collect-order/byte-equality claim `viewport.rs`'s module doc
+    /// makes — with no test able to reach it. This is the fix: a per-`Engine` override, set once
+    /// after `Engine::open` and before issuing requests, that the byte-equality tests use to force
+    /// the fan-out to engage on a small, fast fixture without changing production behaviour at
+    /// all. **Only the SETTER below is `bench-timing`-gated; the
+    /// `serial_fallback_max_rows` field itself is present in every build and `Engine::viewport`
+    /// always pays one `Relaxed` load of it** (deliberately not `#[cfg]`-gated too — two code
+    /// paths in the hot path would cost auditability for the sake of one relaxed load of a value
+    /// production can never write, negligible against the thousands of other atomic operations a
+    /// request already does). A production build therefore always reads this field, but since
+    /// nothing outside `bench-timing` can ever write it, the load always yields
+    /// `SERIAL_FALLBACK_MAX_ROWS` — behaviourally identical to reading the constant directly.
+    ///
+    /// **Why per-`Engine`, not global or thread-local state.** `cargo test` runs tests in
+    /// parallel by default, each typically constructing its own `Engine`; a process-global would
+    /// have one test's override leak into another's concurrently-running assertions, and a
+    /// thread-local would silently stop working the moment a request is served from a different
+    /// OS thread than the one that set it (exactly what happens in `tessera-server`'s tests,
+    /// where the engine is driven from `axum`/`tokio` task threads, not the test's own). Scoping
+    /// the override to the `Engine` instance itself — already constructed once per test, already
+    /// never shared between tests — sidesteps both hazards entirely.
+    ///
+    /// **Not a deployment knob.** No `tessera.toml` field reaches this; `#[doc(hidden)]` keeps it
+    /// out of this crate's public docs even in a `bench-timing` build; `pub` (not `pub(crate)`) is
+    /// required only because `tests/*.rs` integration tests are separate crate compilation units
+    /// that cannot see `pub(crate)` items in this library crate at all.
     #[cfg(feature = "bench-timing")]
     #[doc(hidden)]
     pub fn set_serial_fallback_max_rows_for_test(&self, value: u64) {
@@ -3016,14 +3016,6 @@ impl Engine {
         self.generation.load().external_index.resolve(external_id)
     }
 
-    /// Batch form of [`Self::resolve_external_id`] for `/control/ingest`'s duplicate check
-    /// (contracts §3.1 r6): live map first for the *whole* batch (Important I-8 — `established`
-    /// holds every id ingested since the build, which the sidecar cannot see at all, and is
-    /// exactly where a retried client batch's duplicate lives), then one batched, sorted sidecar
-    /// call for whatever residual keys the live map didn't resolve — each bundle extent is opened
-    /// at most once regardless of batch size, never once per row.
-    ///
-    /// Returns one `Option<EntityId>` per input, in the caller's given order.
     /// Invert `tessera_id`s to entity ids for the admin plane, all-or-nothing.
     ///
     /// **The idset is checked first, against the same generation the inversions use** — one
@@ -3125,6 +3117,14 @@ impl Engine {
         flushed_terms_of(&self.generation(), entity)
     }
 
+    /// Batch form of [`Self::resolve_external_id`] for `/control/ingest`'s duplicate check
+    /// (contracts §3.1 r6): live map first for the *whole* batch (Important I-8 — `established`
+    /// holds every id ingested since the build, which the sidecar cannot see at all, and is
+    /// exactly where a retried client batch's duplicate lives), then one batched, sorted sidecar
+    /// call for whatever residual keys the live map didn't resolve — each bundle extent is opened
+    /// at most once regardless of batch size, never once per row.
+    ///
+    /// Returns one `Option<EntityId>` per input, in the caller's given order.
     pub fn resolve_external_ids(
         &self,
         external_ids: &[Vec<u8>],
