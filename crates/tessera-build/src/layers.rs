@@ -585,11 +585,7 @@ pub struct PublishedLayers {
     pub store: ArtifactStore,
     /// The derived structures the post-bundle pass wrote, for `SEGMENTS-0.json`. Empty until it
     /// runs.
-    pub tile_index_extents: Vec<tessera_store::manifest::TileIndexExtent>,
-    pub row_column_extents: Vec<tessera_store::manifest::RowColumnExtent>,
-    pub containment_extents: Vec<tessera_store::manifest::ContainmentExtent>,
-    pub shape_rows_extents: Vec<tessera_store::manifest::ShapeRowsExtent>,
-    pub shape_held_extents: Vec<tessera_store::manifest::ShapeHeldExtent>,
+    pub derived_extents: Vec<tessera_store::manifest::DerivedExtent>,
 }
 
 impl Default for PublishedLayers {
@@ -608,11 +604,7 @@ impl Default for PublishedLayers {
             unclustered: Vec::new(),
             minted: BTreeMap::new(),
             store: ArtifactStore::new(),
-            tile_index_extents: Vec::new(),
-            row_column_extents: Vec::new(),
-            shape_rows_extents: Vec::new(),
-            shape_held_extents: Vec::new(),
-            containment_extents: Vec::new(),
+            derived_extents: Vec::new(),
         }
     }
 }

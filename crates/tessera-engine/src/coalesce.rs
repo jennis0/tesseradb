@@ -1476,44 +1476,12 @@ mod tests {
         .collect();
 
         let mut manifest = SegmentsManifest {
-            watermark: 0,
-            entity_id_high_water: 0,
-            entity_id_low_water: tessera_types::layer::ROWLESS_CEILING,
-            layers: Vec::new(),
-            layer_tombstones: Vec::new(),
-            views: Vec::new(),
-            scoped_columns: Vec::new(),
-            attributes: Vec::new(),
-            scoped_attributes: Vec::new(),
-            vocabularies: Vec::new(),
-            groups: Vec::new(),
-            plain_views: Vec::new(),
-            dead_view_incarnations: Vec::new(),
-            membership_extents: Vec::new(),
-            level_versions: Vec::new(),
-            containment_extents: Vec::new(),
-            tile_index_extents: Vec::new(),
-            row_column_extents: Vec::new(),
-            shape_rows_extents: Vec::new(),
-            shape_held_extents: Vec::new(),
-            term_image_extents: Vec::new(),
-            artifact_record_extents: Vec::new(),
-            segments: Vec::new(),
-            deltas: Vec::new(),
             dict_extents: vec![DictExtent {
                 path: "terms/terms-0.dict".to_string(),
                 records: 4,
             }],
-            attr_extents: Vec::new(),
-            record_extents: Vec::new(),
-            entity_terms_extents: Vec::new(),
-            text_extents: Vec::new(),
             external_id_runs: vec!["entities/external-ids-0.arrow".to_string()],
-            locator_extents: Vec::new(),
-            tombstones: Vec::new(),
-            deny: Vec::new(),
-            vocabulary_extensions: Vec::new(),
-            files: BTreeMap::new(),
+            ..SegmentsManifest::empty()
         };
         for i in 0..flushes {
             let seg = format!("partitions/{PARTITION}/views/s0/segments/flush-{i}-1");

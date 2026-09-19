@@ -949,12 +949,12 @@ fn check_whole(args: &Args, fixture: &Fixture, shard: &ShardBuild, index: &TileI
         .iter()
         .find(|v| v.layer == args.layer && v.level == args.level)
         .map(|v| v.version);
-    if let Some(extent) = fixture
-        .manifest
-        .tile_index_extents
-        .iter()
-        .find(|e| e.layer == args.layer && e.level == args.level && e.view == fixture.view)
-    {
+    if let Some(extent) = fixture.manifest.derived_extents.iter().find(|e| {
+        e.form == tessera_store::manifest::DerivedForm::TileIndex
+            && e.layer == args.layer
+            && e.level == args.level
+            && e.view.as_deref() == Some(fixture.view.as_str())
+    }) {
         let written = TileIndex::open(&fixture.prefix_dir.join(&extent.path))
             .expect("fold-written index opens");
         let bytes_identical = written.as_bytes() == index.as_bytes();

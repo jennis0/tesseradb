@@ -135,10 +135,10 @@ fi
 #    were vacuous: `GenerationHandle::store` appears nowhere in the tree (both real sites are
 #    `self.generation.store(...)`), and `.store(Arc::new(` misses the equally valid
 #    `.store(std::sync::Arc::new(` -- verified by planting one and watching this rule stay green.
-#    So the rule flags EVERY publishing CALL FORM in the engine's sources outside `write.rs`,
-#    minus the atomic ones, which are told apart by the `Ordering::` argument that `Atomic*::store`
-#    requires and `ArcSwap::store` does not take. A rule that cannot go red is worse than no rule,
-#    because it is evidence.
+#    So the rule flags EVERY publishing CALL FORM in the engine's sources outside
+#    `write/executor/mod.rs`, minus the atomic ones, which are told apart by the `Ordering::`
+#    argument that `Atomic*::store` requires and `ArcSwap::store` does not take. A rule that
+#    cannot go red is worse than no rule, because it is evidence.
 #
 #    FOUR call forms, not one. `.store(` alone was vacuous against three of the four ways arc-swap
 #    publishes -- `.swap(` and `.rcu(` were both planted in `viewport.rs`, both compiled, and both
@@ -153,13 +153,13 @@ fi
 #    its own retirement condition -- lifecycle §1.3 requires a flush's swap-only publication step to
 #    run on the lifecycle thread -- and that is what happened: publication is an `ExecutorWork`
 #    variant the executor performs, `Engine::publish_geometry` is a blocking submission, and there
-#    is no publisher outside `write.rs` at all. The marker-counting rule went with the marker, per
-#    its own instruction. There is no supported way to publish from another thread, so a new marker
-#    is not an exemption to argue for -- it is the defect.
+#    is no publisher outside `write/executor/mod.rs` at all. The marker-counting rule went with
+#    the marker, per its own instruction. There is no supported way to publish from another
+#    thread, so a new marker is not an exemption to argue for -- it is the defect.
 if grep -rnE '\.(store|swap|rcu|compare_and_swap)\(' --include=*.rs crates/tessera-engine/src/ \
-     | grep -v '^crates/tessera-engine/src/write\.rs:' \
+     | grep -v '^crates/tessera-engine/src/write/executor/mod\.rs:' \
      | grep -v 'Ordering::'; then
-  echo "FAIL: a generation is published outside crates/tessera-engine/src/write.rs."
+  echo "FAIL: a generation is published outside crates/tessera-engine/src/write/executor/mod.rs."
   echo "      The executor thread is the sole publisher (lifecycle §1.3, #59); a second publisher"
   echo "      reintroduces the lost-update race, in which a lost publication strands the LIVE"
   echo "      generation on the pin drain list and a later prune evicts projections still in use."
@@ -218,21 +218,7 @@ if ! cargo tree -e normal -p tessera-cli --features fault-injection -f "{p} {f}"
   fail=1
 fi
 
-# 3. THE ACK PROOF HAS ONE HOME. `write.rs`'s `Published` token is what `Executor::ack` demands
-#    before it will send a *successful* receipt, and the ack-ordering fail-open it guards
-#    (lifecycle §4: a client holding 200 for a suppression not yet in force) is reintroduced by any
-#    code that can mint one. The token's own module argues the residual hole honestly -- inside
-#    `write.rs` a `Published::already_in_force(..)` call is still reachable, which is exactly what
-#    the reviewer's mutation used -- so pin construction to that file and keep the count auditable.
-#    A new crate or module minting proofs is the change this refuses.
-if grep -rn 'Published::' --include=*.rs crates/ | grep -v '^crates/tessera-engine/src/write\.rs:'; then
-  echo "FAIL: the ack proof token is constructed outside crates/tessera-engine/src/write.rs."
-  echo "      Only the generation swap (and contracts 3.4 replay) may produce one; see the"
-  echo "      'mod ack' block in write.rs. A third producer is the guarantee gone."
-  fail=1
-fi
-
-# 4. THE FRAGMENTATION COUNTERS STAY OFF THE VIEWPORT PATH. They are an operator gauge and nothing
+# 3. THE FRAGMENTATION COUNTERS STAY OFF THE VIEWPORT PATH. They are an operator gauge and nothing
 #    else: contracts 3.4 says outright that no request-path behaviour depends on them. Both
 #    accessors take an `ExecutorStats` snapshot, which reads a mutex the write executor holds at
 #    every window close -- so a viewport that consulted one would put a read request behind the

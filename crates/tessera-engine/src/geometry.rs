@@ -339,74 +339,24 @@ pub(crate) fn check_manifest_publishable(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::{BTreeMap, HashMap};
-    use std::sync::Arc;
+    
+    
 
     use tessera_lifecycle::{IngestBuffer, Overlay};
-    use tessera_plugin::Plugin;
-    use tessera_store::manifest::{IdentityDescriptor, Manifest};
-    use tessera_store::Bundle;
+    
+    
+    
 
     use super::*;
 
-    fn empty_postings() -> tessera_authz::PostingsReader {
-        let dir = tempfile::TempDir::new().expect("a temp dir");
-        let path = dir.path().join("postings.arrow");
-        tessera_authz::write_postings(&path, &[], 32).expect("an empty postings file");
-        tessera_authz::PostingsReader::open(&path, false).expect("it opens")
-    }
-
-    /// A `Generation` over an empty synthetic bundle. `check_publishable` reads three scalars off
-    /// it, so an empty partition map is enough and building a real one would make this test about
-    /// the fixture instead.
     fn generation_at(prefix: &str, segments_version: u64, watermark: u64) -> Generation {
-        let manifest = Manifest {
-            bundle_format: 3,
-            created_at: "2026-07-31T00:00:00Z".to_string(),
-            data_plugin_hash: tessera_plugin::Passthrough::new().data_plugin_hash(),
-            declared_bounds: serde_json::json!({}),
-            declared_scalars: vec![],
-            vocabularies: vec![],
-            small_term_threshold: 32,
-            entity_id_high_water: 0,
-            identity: IdentityDescriptor {
-                construction: "siphash-2-4".to_string(),
-                rounds: 1,
-                key: "0123456789abcdef0123456789abcdef".to_string(),
-                shard_id: 0,
-                idset: 1,
-            },
-            groups: Vec::new(),
-            views: vec![],
-            partitions: vec![],
-            provenance: serde_json::json!({}),
-            files: BTreeMap::new(),
-        };
-        let (fragments, external_index) = crate::synthetic_generation_parts();
-        Generation {
-            // A test fixture's schema declares nothing filterable, so there is nothing to open.
-            filter_columns: Arc::new(crate::filter::FilterColumns::default()),
-            // And nothing categorical, so no vocabulary has an index.
-            suggest: Arc::new(crate::suggest::SuggestIndexes::default()),
-            prefix: prefix.to_string(),
-            vocabularies: Arc::new(tessera_store::vocabulary::Vocabularies::default()),
+        Generation::synthetic(
+            prefix,
             segments_version,
             watermark,
-            bundle: Arc::new(Bundle {
-                manifest,
-                partitions: HashMap::new(),
-            }),
-            dict: Arc::new(tessera_authz::Dict::load(&[]).expect("an empty dict needs no file")),
-            postings: Arc::new(empty_postings()),
-            fragments,
-            external_index,
-            delta_postings: Vec::new(),
-            overlay_version: 0,
-            overlay: Arc::new(Overlay::new()),
-            buffer: Arc::new(IngestBuffer::new()),
-            // The fixture bundle carries no views, so a fresh derivation is empty.
-            denied: Arc::new(crate::DenyMask::default()),
-        }
+            Overlay::new(),
+            IngestBuffer::new(),
+        )
     }
 
     #[test]
@@ -474,39 +424,7 @@ mod tests {
         tessera_store::manifest::SegmentsManifest {
             watermark,
             entity_id_high_water,
-            entity_id_low_water: tessera_types::layer::ROWLESS_CEILING,
-            layers: Vec::new(),
-            layer_tombstones: Vec::new(),
-            views: Vec::new(),
-            scoped_columns: Vec::new(),
-            attributes: Vec::new(),
-            scoped_attributes: Vec::new(),
-            vocabularies: Vec::new(),
-            groups: Vec::new(),
-            plain_views: Vec::new(),
-            dead_view_incarnations: Vec::new(),
-            membership_extents: Vec::new(),
-            level_versions: Vec::new(),
-            containment_extents: Vec::new(),
-            tile_index_extents: Vec::new(),
-            row_column_extents: Vec::new(),
-            shape_rows_extents: Vec::new(),
-            shape_held_extents: Vec::new(),
-            term_image_extents: Vec::new(),
-            artifact_record_extents: Vec::new(),
-            segments: Vec::new(),
-            deltas: Vec::new(),
-            dict_extents: Vec::new(),
-            attr_extents: Vec::new(),
-            record_extents: Vec::new(),
-            entity_terms_extents: Vec::new(),
-            text_extents: Vec::new(),
-            external_id_runs: Vec::new(),
-            locator_extents: Vec::new(),
-            tombstones: Vec::new(),
-            deny: Vec::new(),
-            vocabulary_extensions: Vec::new(),
-            files: BTreeMap::new(),
+            ..tessera_store::manifest::SegmentsManifest::empty()
         }
     }
 

@@ -28,7 +28,7 @@ paths = [
   "crates/tessera-engine/src/coalesce.rs",
   "crates/tessera-engine/src/compose.rs",
   "crates/tessera-engine/src/filter.rs",
-  "crates/tessera-engine/src/write.rs",
+  "crates/tessera-engine/src/write/*",
   "crates/tessera-engine/src/lib.rs",
   "crates/tessera-engine/tests/*",
   "crates/tessera-store/src/manifest.rs",
@@ -45,7 +45,7 @@ paths = [
 paths = [
   "crates/tessera-server/src/*",
   "crates/tessera-server/tests/*",
-  "crates/tessera-engine/src/write.rs",
+  "crates/tessera-engine/src/write/*",
   "crates/tessera-engine/src/session.rs",
   "crates/tessera-engine/tests/*",
   "conformance/tests/test_restart_replay.py",
@@ -137,7 +137,7 @@ paths = [
 [track.fix-batch-id]
 paths = [
   "clients/py/*",
-  "crates/tessera-engine/src/write.rs",
+  "crates/tessera-engine/src/write/*",
   "crates/tessera-engine/tests/*",
   "crates/tessera-lifecycle/src/*",
   "crates/tessera-server/tests/*",

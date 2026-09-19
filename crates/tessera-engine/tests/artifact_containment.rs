@@ -707,11 +707,14 @@ fn a_partition_is_adopted_at_its_own_coordinate_and_at_no_other() {
     store.seed_level_version(LAYER, 0, 7);
     let composed_at = store.level_version(LAYER, 0);
     assert_eq!(composed_at, 7);
-    let entry = |version: u64| tessera_store::manifest::ContainmentExtent {
+    let entry = |version: u64| tessera_store::manifest::DerivedExtent {
         path: rel.to_string(),
         layer: LAYER.to_string(),
         level: 0,
         level_version: version,
+        view: None,
+        incarnation: None,
+        form: tessera_store::manifest::DerivedForm::Containment,
     };
     let source = PartitionSource {
         postings: &fx.postings,
@@ -794,11 +797,14 @@ fn an_adopted_partition_does_not_answer_under_another_prefix() {
     projections.adopt_all(
         tmp.path(),
         "v00000",
-        &[tessera_store::manifest::ContainmentExtent {
+        &[tessera_store::manifest::DerivedExtent {
             path: rel.to_string(),
             layer: LAYER.to_string(),
             level: 0,
             level_version: fx.store.level_version(LAYER, 0),
+            view: None,
+            incarnation: None,
+            form: tessera_store::manifest::DerivedForm::Containment,
         }],
         &fx.store,
     );

@@ -232,11 +232,7 @@ fn two_views_derived_files_do_not_collide() {
     // **Every derived path is named once.** Two entries naming one file is the defect itself: one
     // of them describes bytes that are not there any more.
     let mut paths: Vec<&str> = Vec::new();
-    paths.extend(manifest.tile_index_extents.iter().map(|e| e.path.as_str()));
-    paths.extend(manifest.row_column_extents.iter().map(|e| e.path.as_str()));
-    paths.extend(manifest.containment_extents.iter().map(|e| e.path.as_str()));
-    paths.extend(manifest.shape_rows_extents.iter().map(|e| e.path.as_str()));
-    paths.extend(manifest.shape_held_extents.iter().map(|e| e.path.as_str()));
+    paths.extend(manifest.derived_extents.iter().map(|e| e.path.as_str()));
     paths.extend(manifest.term_image_extents.iter().map(|e| e.path.as_str()));
     let total = paths.len();
     paths.sort_unstable();
@@ -246,7 +242,7 @@ fn two_views_derived_files_do_not_collide() {
         total,
         "two derived manifest entries name one file: {:?}",
         manifest
-            .row_column_extents
+            .derived_extents
             .iter()
             .map(|e| (&e.view, &e.layer, e.level, &e.path))
             .collect::<Vec<_>>()
@@ -255,8 +251,9 @@ fn two_views_derived_files_do_not_collide() {
     // **A containment partition is not per view**, so the two views share the level's one file
     // rather than each writing its own.
     let containment: Vec<(&str, u32)> = manifest
-        .containment_extents
+        .derived_extents
         .iter()
+        .filter(|e| e.form == tessera_store::manifest::DerivedForm::Containment)
         .map(|e| (e.layer.as_str(), e.level))
         .collect();
     let mut once = containment.clone();
@@ -271,11 +268,17 @@ fn two_views_derived_files_do_not_collide() {
     // **Each column is its own view's.** `wide` is 60 rows and `narrow` 25; before the counter
     // both entries named a 25-row column.
     let columns: Vec<(&str, u32)> = manifest
-        .row_column_extents
+        .derived_extents
         .iter()
+        .filter(|e| {
+            matches!(
+                e.form,
+                tessera_store::manifest::DerivedForm::RowColumn { .. }
+            )
+        })
         .map(|e| {
             (
-                e.view.as_str(),
+                e.view.as_deref().expect("a column names its view"),
                 column_rows(&out.join(PREFIX).join(&e.path)),
             )
         })

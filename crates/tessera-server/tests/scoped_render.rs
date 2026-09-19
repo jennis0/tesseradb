@@ -1609,6 +1609,77 @@ async fn a_second_door_naming_one_cell_dedupes_an_equal_value_and_refuses_a_diff
     }
 }
 
+/// A cell filled through the values route and not yet flushed is held, so a joining row naming
+/// it dedupes an equal value and is refused a different one, and the flush that follows publishes.
+#[tokio::test]
+async fn a_join_naming_a_cell_a_pending_fill_holds_dedupes_or_is_refused() {
+    use base64::Engine as _;
+    let served = serve().await;
+    const AGREES: u64 = 9_601;
+    const DISAGREES: u64 = 9_602;
+    const VALUE: f32 = 5.0;
+    ingest_with_heat(
+        &served,
+        "pending-first",
+        "quarter:2026-Q1",
+        &[
+            (external_id_of(AGREES), 260.0, 260.0, "0"),
+            (external_id_of(DISAGREES), 261.0, 261.0, "0"),
+        ],
+        &[None, None],
+    )
+    .await;
+    flush(&served).await;
+
+    let id = |e: u64| base64::engine::general_purpose::STANDARD.encode(external_id_of(e));
+    let resp = served
+        .server
+        .client
+        .post(served.server.control_url("/control/values"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .header("x-tessera-batch-id", "pending-fill")
+        .header("x-tessera-view", "quarter:2026-Q1")
+        .json(&json!([
+            {"external_id": id(AGREES), "tag": VALUE},
+            {"external_id": id(DISAGREES), "tag": VALUE},
+        ]))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "the fill is accepted");
+
+    let (status, body) = try_ingest_families(
+        &served,
+        "pending-agrees",
+        "quarter_map:2026-Q1",
+        &[(external_id_of(AGREES), 310.0, 310.0, "0")],
+        None,
+        None,
+        Some(&[Some(VALUE)]),
+    )
+    .await;
+    assert_eq!(status, 200, "an equal value joins: {body}");
+    let (status, body) = try_ingest_families(
+        &served,
+        "pending-disagrees",
+        "quarter_map:2026-Q1",
+        &[(external_id_of(DISAGREES), 311.0, 311.0, "0")],
+        None,
+        None,
+        Some(&[Some(VALUE + 1.0)]),
+    )
+    .await;
+    assert_eq!(status, 409, "one cell holds one value: {body}");
+
+    let failures = served.server.state.engine.write_executor_stats().flush_failures;
+    flush(&served).await;
+    assert_eq!(
+        served.server.state.engine.write_executor_stats().flush_failures,
+        failures,
+        "the flush publishes the cell once"
+    );
+}
+
 /// **A `text` cell that has flushed takes no second value through either door** (`views.md` §5,
 /// decision 0116; review finding F1).
 ///

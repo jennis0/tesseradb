@@ -1796,18 +1796,11 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
     );
     report_hierarchies(&published_layers.hierarchy_shapes);
     published_layers
-        .tile_index_extents
-        .clone_from(&artifact_pass.tile_index_extents);
+        .derived_extents
+        .clone_from(&artifact_pass.derived_extents);
     published_layers
-        .row_column_extents
-        .clone_from(&artifact_pass.row_column_extents);
-    published_layers.containment_extents = containment_extents;
-    published_layers
-        .shape_rows_extents
-        .clone_from(&artifact_pass.shape_rows_extents);
-    published_layers
-        .shape_held_extents
-        .clone_from(&artifact_pass.shape_held_extents);
+        .derived_extents
+        .extend(containment_extents.iter().cloned());
 
     // ---- 8c. the view's term images (`crate::term_images_pass`) ------------------------
     //
@@ -1846,8 +1839,7 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
             .map(|images| images.path.clone()),
     );
     other_paths.extend(
-        published_layers
-            .containment_extents
+        containment_extents
             .iter()
             .map(|entry| args.out.join(PREFIX).join(&entry.path)),
     );
@@ -1987,27 +1979,12 @@ fn write_manifests(
         // the untouched region rather than a default standing in for a lost value.
         entity_id_low_water: published_layers.low_water,
         layers: published_layers.layers.clone(),
-        // Nothing a build writes has ever been dropped: a tombstone is a control-plane act against
-        // a running node, and a build produces a bundle rather than editing one.
-        layer_tombstones: Vec::new(),
-        views: Vec::new(),
-        scoped_columns: Vec::new(),
-        attributes: Vec::new(),
-        scoped_attributes: Vec::new(),
-        vocabularies: Vec::new(),
-        groups: Vec::new(),
-        plain_views: Vec::new(),
-        dead_view_incarnations: Vec::new(),
         membership_extents: published_layers.membership_extents.clone(),
         level_versions: published_layers.level_versions.clone(),
         // **The post-bundle artifact pass's output** (`crate::artifact_pass`). Empty only where
         // the build published no artifacts, or where a derived structure would not compose — each
         // of which leaves the level composing it on first use, exactly as before the pass existed.
-        containment_extents: published_layers.containment_extents.clone(),
-        tile_index_extents: published_layers.tile_index_extents.clone(),
-        row_column_extents: published_layers.row_column_extents.clone(),
-        shape_rows_extents: published_layers.shape_rows_extents.clone(),
-        shape_held_extents: published_layers.shape_held_extents.clone(),
+        derived_extents: published_layers.derived_extents.clone(),
         // One entry per view that has images, in the order the views were built
         // (`crate::term_images_pass`). A view with no rows, and a build over a dictionary with no
         // terms, have none.
@@ -2027,21 +2004,9 @@ fn write_manifests(
                 ..descriptor.clone()
             })
             .collect(),
-        deltas: Vec::new(),
         dict_extents,
-        attr_extents: Vec::new(),
-        record_extents: Vec::new(),
-        // The base transpose covers every entity the build knows about, exactly as the base
-        // record blob does; a flush's slices are the extents.
-        entity_terms_extents: Vec::new(),
-        text_extents: Vec::new(),
         external_id_runs,
-        locator_extents: Vec::new(),
-        tombstones: Vec::new(),
-        deny: Vec::new(),
-        // Nothing has been added since MANIFEST.json — see the note above.
-        vocabulary_extensions: Vec::new(),
-        files: BTreeMap::new(),
+        ..SegmentsManifest::empty()
     };
     let segments_path = partition_dir.join("SEGMENTS-0.json");
     write_json(&segments_path, &segments)?;

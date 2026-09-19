@@ -670,11 +670,17 @@ fn a_fold_over_a_row_major_level_writes_its_column_and_changes_no_answer() {
         .bundle
         .partitions
         .values()
-        .flat_map(|p| p.manifest.row_column_extents.iter().cloned())
+        .flat_map(|p| p.manifest.derived_extents.iter().cloned())
+        .filter(|e| matches!(e.form, tessera_store::manifest::DerivedForm::RowColumn { .. }))
         .collect();
     assert_eq!(extents.len(), fx.row_column_files(&engine).len());
     for extent in &extents {
-        assert_eq!(extent.layout, ServingLayout::RowMajorLabel);
+        assert_eq!(
+            extent.form,
+            tessera_store::manifest::DerivedForm::RowColumn {
+                layout: ServingLayout::RowMajorLabel
+            }
+        );
         assert!(fx
             .root
             .join(&engine.generation().prefix)

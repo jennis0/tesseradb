@@ -464,11 +464,11 @@ fn a_built_bundle_carries_its_containment_partitions_and_the_first_request_claim
         .manifest;
     assert!(
         manifest
-            .containment_extents
+            .derived_extents
             .iter()
-            .any(|e| e.layer == LABELS),
+            .any(|e| e.form == tessera_store::manifest::DerivedForm::Containment && e.layer == LABELS),
         "the label layer's generating sets have a partition the build composed: {:?}",
-        manifest.containment_extents
+        manifest.derived_extents
     );
 
     // The gauges: one adopted at the open, none composed by the request that used it.

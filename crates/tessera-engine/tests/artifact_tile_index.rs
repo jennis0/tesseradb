@@ -702,13 +702,14 @@ fn a_tile_index_is_claimed_at_its_own_coordinate_and_at_no_other() {
     let mut store = fx.store.clone();
     store.seed_level_version(LAYER, 0, 11);
     let projected_at = store.level_version(LAYER, 0);
-    let entry = |view: &str, version: u64| tessera_store::manifest::TileIndexExtent {
-        incarnation: 0,
+    let entry = |view: &str, version: u64| tessera_store::manifest::DerivedExtent {
+        incarnation: Some(0),
         path: rel.to_string(),
-        view: view.to_string(),
+        view: Some(view.to_string()),
         layer: LAYER.to_string(),
         level: 0,
         level_version: version,
+        form: tessera_store::manifest::DerivedForm::TileIndex,
     };
 
     // The coordinate holds: claimed, and the level's first request derives nothing.
@@ -921,22 +922,25 @@ fn an_entry_held_for_the_published_prefix_survives_a_claim_under_the_outgoing_on
     store.seed_level_version(LAYER, 0, 11);
     let mut later = fx.store.clone();
     later.seed_level_version(LAYER, 0, 12);
-    let index_entry = |version: u64| tessera_store::manifest::TileIndexExtent {
-        incarnation: 0,
+    let index_entry = |version: u64| tessera_store::manifest::DerivedExtent {
+        incarnation: Some(0),
         path: index_rel.to_string(),
-        view: "s0".to_string(),
+        view: Some("s0".to_string()),
         layer: LAYER.to_string(),
         level: 0,
         level_version: version,
+        form: tessera_store::manifest::DerivedForm::TileIndex,
     };
-    let column_entry = |version: u64| tessera_store::manifest::RowColumnExtent {
-        incarnation: 0,
+    let column_entry = |version: u64| tessera_store::manifest::DerivedExtent {
+        incarnation: Some(0),
         path: column_rel.to_string(),
-        view: "s0".to_string(),
+        view: Some("s0".to_string()),
         layer: LAYER.to_string(),
         level: 0,
         level_version: version,
-        layout: ServingLayout::RowMajorLabel,
+        form: tessera_store::manifest::DerivedForm::RowColumn {
+            layout: ServingLayout::RowMajorLabel,
+        },
     };
     let build = |projections: &ArtifactProjections,
                  prefix: &str,

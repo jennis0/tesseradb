@@ -202,7 +202,8 @@ fn the_fold_flips_a_scattered_level_and_the_answers_do_not_move() {
         .bundle
         .partitions
         .values()
-        .flat_map(|p| p.manifest.row_column_extents.iter().cloned())
+        .flat_map(|p| p.manifest.derived_extents.iter().cloned())
+        .filter(|e| matches!(e.form, tessera_store::manifest::DerivedForm::RowColumn { .. }))
         .collect();
     assert_eq!(
         extents.len(),
@@ -210,7 +211,12 @@ fn the_fold_flips_a_scattered_level_and_the_answers_do_not_move() {
         "the manifest and the files agree"
     );
     for extent in &extents {
-        assert_eq!(extent.layout, ServingLayout::RowMajorList);
+        assert_eq!(
+            extent.form,
+            tessera_store::manifest::DerivedForm::RowColumn {
+                layout: ServingLayout::RowMajorList
+            }
+        );
         assert!(root
             .join(&engine.generation().prefix)
             .join(&extent.path)
@@ -221,7 +227,13 @@ fn the_fold_flips_a_scattered_level_and_the_answers_do_not_move() {
         .bundle
         .partitions
         .values()
-        .map(|p| p.manifest.tile_index_extents.len())
+        .map(|p| {
+            p.manifest
+                .derived_extents
+                .iter()
+                .filter(|e| e.form == tessera_store::manifest::DerivedForm::TileIndex)
+                .count()
+        })
         .sum();
     assert_eq!(
         index_extents, 0,

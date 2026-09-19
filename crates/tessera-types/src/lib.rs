@@ -177,9 +177,11 @@ pub struct GenerationStamp {
 // layer's offsets past the first block would be read as relative to a base they already include
 // and every list after the first 65,536 ranks would name the wrong ordinals. The number is what
 // stops a 13 layer opening.
+// 16: a partition's five lists of derived artifact files are one list, `derived_extents`, whose
+// entries name their form. A 15 side-manifest carries the five and is refused as malformed.
 // Each bump makes a stale local bundle a loud refusal rather than a silent misread — a fail-closed
 // guard, not compatibility (decision 0048).
-pub const BUNDLE_FORMAT: u32 = 15;
+pub const BUNDLE_FORMAT: u32 = 16;
 pub const API_VERSION: u32 = 1;
 pub const ABI_VERSION: u32 = 1;
 pub const ROW_ABSENT: u32 = 0xFFFF_FFFF;

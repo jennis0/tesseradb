@@ -1150,7 +1150,13 @@ fn an_executor_panic_is_reported_dead() {
     let err = engine
         .accept_change(EntityId::new(1), ChangeOp::Suppress)
         .expect_err("a dead executor must be reported, never swallowed");
-    assert!(format!("{err}").contains("not running"), "got: {err}");
+    assert!(
+        matches!(
+            err,
+            tessera_engine::AcceptError::Submit(tessera_lifecycle::SubmitError::ExecutorDead)
+        ),
+        "got: {err}"
+    );
 
     // **`Dead` is absorbing, and it has to be asserted now that the posture is composed rather than
     // latched as one value.** The WAL this executor left behind is perfectly healthy — the panic was
@@ -1217,7 +1223,15 @@ fn a_duplicate_external_id_is_refused_on_the_executor() {
     let err = engine
         .accept_ingest(vec![row("dup")], "b2".to_string(), [8u8; 32])
         .expect_err("a duplicate external id must be refused on the executor");
-    assert!(format!("{err}").contains("already knows"), "got: {err}");
+    assert!(
+        matches!(
+            err,
+            tessera_engine::AcceptError::Exec(
+                tessera_lifecycle::ExecError::DuplicateExternalId { count: 1 }
+            )
+        ),
+        "got: {err}"
+    );
 
     assert_eq!(
         engine.resolve_external_id(b"dup").unwrap(),
@@ -1684,6 +1698,32 @@ fn a_duplicate_external_id_across_one_window_is_still_refused() {
         "every job taken off the work queue must be counted completed, refusals included: {stats:?}"
     );
     assert_eq!(stats.work_depth, 0);
+}
+
+/// A refused command that is not an ingest is counted completed once, as an accepted one is.
+#[test]
+fn a_refused_view_create_is_counted_completed_once() {
+    let tmp = TempDir::new().unwrap();
+    let (engine, _faults) = engine_with_faults(&tmp, 64);
+
+    let refused = engine.create_view(
+        "no-such-group".to_string(),
+        "k".to_string(),
+        None,
+        Default::default(),
+    );
+    assert!(refused.is_err());
+
+    // The executor counts the job after it has answered, so wait for the count and then give a
+    // second one time to land.
+    let deadline = std::time::Instant::now() + WAIT;
+    while engine.write_executor_stats().work_completed == 0 {
+        assert!(std::time::Instant::now() < deadline, "the job was never counted");
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    let stats = engine.write_executor_stats();
+    assert_eq!((stats.work_submitted, stats.work_completed), (1, 1));
 }
 
 /// **An empty window is never opened**, and the in-flight gauge is armed at the first entry rather
@@ -2560,10 +2600,9 @@ const PUBLICATION_FLOOR_WINDOWS: usize = 64;
 /// Park the executor inside a new deny window, at `AfterFsync` — the entry is durable and not yet
 /// applied.
 ///
-/// This is also the **barrier** every count below is read behind. The drain-close publication runs
-/// after the drain empties and before the loop takes its next deny, so an executor parked in a new
-/// window is proof that the previous burst's close publication has already landed. Reading the
-/// gauge without one races it.
+/// Parking holds the publication count still while it is read. It does not wait for the previous
+/// burst's close publication: a deny submitted while the drain is still looking at its lane joins
+/// that drain. [`await_overlay_publications`] is the wait.
 fn park_on_a_new_deny_window(
     engine: &Engine,
     faults: &FaultSwitchboard,
@@ -2575,6 +2614,18 @@ fn park_on_a_new_deny_window(
         .expect("the deny lane accepts");
     faults.await_arrivals(PauseSite::AfterFsync, 1, WAIT);
     pending
+}
+
+/// Waits for the drain's close publication, so that the next deny opens a new drain.
+fn await_overlay_publications(engine: &Engine, at_least: u64) {
+    let deadline = std::time::Instant::now() + WAIT;
+    while engine.write_executor_stats().overlay_publications < at_least {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the drain's close never published"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
 }
 
 /// Drive exactly `windows` deny windows through **one drain that never closes**, the first of them
@@ -2655,7 +2706,7 @@ fn a_deny_drain_that_never_closes_publishes_at_the_liveness_floor() {
         parked,
     );
 
-    // Behind the barrier — see `park_on_a_new_deny_window`.
+    await_overlay_publications(&engine, 1);
     let parked = park_on_a_new_deny_window(&engine, &faults, entities[0]);
     assert_eq!(
         engine.write_executor_stats().overlay_publications,
@@ -2672,6 +2723,7 @@ fn a_deny_drain_that_never_closes_publishes_at_the_liveness_floor() {
         parked,
     );
 
+    await_overlay_publications(&engine, 3);
     let parked = park_on_a_new_deny_window(&engine, &faults, entities[0]);
     assert_eq!(
         engine.write_executor_stats().overlay_publications,

@@ -1266,7 +1266,14 @@ fn a_row_longer_than_the_schema_is_refused_and_a_shorter_one_is_padded() {
         .accept_ingest(vec![long], "batch-long".to_string(), [1u8; 32])
         .expect_err("a long row is refused");
     assert!(
-        format!("{err}").contains("carries 6 scalars, but the schema declares 5"),
+        matches!(
+            err,
+            tessera_engine::AcceptError::ScalarArity {
+                expected: 5,
+                got: 6,
+                ..
+            }
+        ),
         "{err}"
     );
 

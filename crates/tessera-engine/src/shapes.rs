@@ -56,7 +56,7 @@ use std::time::Instant;
 use croaring::Bitmap;
 use tessera_lifecycle::membership::ArtifactStore;
 use tessera_store::derived::{resolve_segment, HeldEntry, HeldShape, ShapeIndex};
-use tessera_store::manifest::{RowColumnExtent, ShapeHeldExtent, ShapeRowsExtent};
+use tessera_store::manifest::{DerivedExtent, DerivedForm};
 use tessera_store::read::{Bundle, SegmentData, ViewData};
 use tessera_types::layer::{MembershipSource, RegisteredLayer};
 
@@ -616,9 +616,7 @@ pub struct WarmReport {
 #[derive(Clone, Copy, Default)]
 pub struct PersistedPieces<'a> {
     pub prefix_dir: Option<&'a std::path::Path>,
-    pub shape_rows: &'a [ShapeRowsExtent],
-    pub row_columns: &'a [RowColumnExtent],
-    pub shape_held: &'a [ShapeHeldExtent],
+    pub extents: &'a [DerivedExtent],
 }
 
 impl PersistedPieces<'_> {
@@ -641,11 +639,12 @@ impl PersistedPieces<'_> {
         let Some(prefix_dir) = self.prefix_dir else {
             return Vec::new();
         };
-        let Some(extent) = self
-            .shape_held
-            .iter()
-            .find(|e| e.view == view && e.layer == layer && e.level == level)
-        else {
+        let Some(extent) = self.extents.iter().find(|e| {
+            e.form == DerivedForm::ShapeHeld
+                && e.view.as_deref() == Some(view)
+                && e.layer == layer
+                && e.level == level
+        }) else {
             return Vec::new();
         };
         if extent.level_version != version {
@@ -685,16 +684,21 @@ impl PersistedPieces<'_> {
         store: &ArtifactStore,
     ) -> Option<Vec<Option<Bitmap>>> {
         let prefix_dir = self.prefix_dir?;
-        let same_level = |view: &str, layer: &str, lvl: u32| {
-            view == level.view && layer == level.layer && lvl == level.level
+        let same_level = |e: &DerivedExtent| {
+            e.view.as_deref() == Some(level.view.as_str())
+                && e.layer == level.layer
+                && e.level == level.level
         };
-        if let Some(extent) = self
-            .shape_rows
-            .iter()
-            .find(|e| same_level(&e.view, &e.layer, e.level) && e.seg_id == segment.seg_id)
-        {
-            if extent.level_version != level.level_version || extent.row_count != segment.row_count
+        let shape_rows = self.extents.iter().find_map(|e| match &e.form {
+            DerivedForm::ShapeRows { seg_id, row_count }
+                if same_level(e) && *seg_id == segment.seg_id =>
             {
+                Some((e, *row_count))
+            }
+            _ => None,
+        });
+        if let Some((extent, row_count)) = shape_rows {
+            if extent.level_version != level.level_version || row_count != segment.row_count {
                 tracing::warn!(
                     layer = %level.layer,
                     level = level.level,
@@ -702,7 +706,7 @@ impl PersistedPieces<'_> {
                     seg_id = %segment.seg_id,
                     written_at = extent.level_version,
                     now = level.level_version,
-                    written_rows = extent.row_count,
+                    written_rows = row_count,
                     rows = segment.row_count,
                     "a persisted shape row form is refused: its key is not this level version \
                      and this segment; the segment is resolved again from the geometry"
@@ -742,11 +746,11 @@ impl PersistedPieces<'_> {
         // The column is the base's piece: it is addressed in the view's base row space, which is
         // exactly one segment at row base zero. A segment whose row count is not the column's is
         // not that segment.
-        if let Some(extent) = self
-            .row_columns
-            .iter()
-            .find(|e| same_level(&e.view, &e.layer, e.level))
-        {
+        let column = self.extents.iter().find_map(|e| match &e.form {
+            DerivedForm::RowColumn { layout } if same_level(e) => Some((e, *layout)),
+            _ => None,
+        });
+        if let Some((extent, layout)) = column {
             if extent.level_version != level.level_version {
                 tracing::warn!(
                     layer = %level.layer,
@@ -759,7 +763,7 @@ impl PersistedPieces<'_> {
                 );
                 return None;
             }
-            let column = match RowColumn::open(&prefix_dir.join(&extent.path), extent.layout) {
+            let column = match RowColumn::open(&prefix_dir.join(&extent.path), layout) {
                 Ok(column) => column,
                 Err(error) => {
                     tracing::warn!(
