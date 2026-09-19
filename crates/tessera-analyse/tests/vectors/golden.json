@@ -1,5 +1,5 @@
 {
-  "note": "Known answers per script family. These pin the analyser: a change to any of them is a change to every text index built with it, so a diff here must be accompanied by a bump to ANALYSER_VERSION and a rebuild. They were produced by the shipped Analyser and read back by a human against the design's rules, not copied from a second library. Keyed by analyser name: every analyser owes its own set before a column may declare it (decision 0070).",
+  "note": "Known answers per script family. A change to any of them changes every text index built with the analyser, so a diff here moves the analyser's version in src/lib.rs and is a rebuild. The answers were produced by the shipped analyser and read by a person against the token rule; they are not copied from a second library. Each analyser has its own set.",
   "analysers": [
     {
       "name": "unicode",
