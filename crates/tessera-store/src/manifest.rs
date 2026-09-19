@@ -763,6 +763,22 @@ pub struct Manifest {
     pub files: BTreeMap<String, FileDigest>,
 }
 
+/// Everything a side manifest or the write-ahead log can add to a [`Manifest`] after it was
+/// written, gathered so one call merges it — see [`Manifest::with_declarations`]. A list left
+/// empty adds nothing.
+#[derive(Default)]
+pub struct Declarations<'a> {
+    pub groups: &'a [GroupDescriptor],
+    pub plain_views: &'a [ViewDescriptor],
+    pub vocabularies: &'a [ManifestVocabulary],
+    pub attributes: &'a [DeclaredScalar],
+    pub scoped_attributes: &'a [ScopedScalar],
+    pub created_views: &'a [CreatedView],
+    pub dead_incarnations: &'a [DeadIncarnation],
+    /// `(column, view, incarnation)`, as [`Manifest::with_scoped_columns`] takes them.
+    pub scoped_columns: &'a [(String, String, ViewIncarnation)],
+}
+
 impl Manifest {
     /// The frame a named view's positions are quantised against, or `None` for a view this bundle
     /// does not declare.
@@ -1193,6 +1209,23 @@ impl Manifest {
             }
         }
         manifest
+    }
+
+    /// This manifest with every list in `declarations` merged, in the one order that keeps them
+    /// all: groups, plain views, vocabularies, attributes, roster, scoped columns.
+    ///
+    /// Each step drops what the manifest cannot place, so a step reached too early loses a
+    /// declaration that arrived in the same value. A roster creation whose group the manifest
+    /// does not yet declare is dropped; a column naming a vocabulary the manifest does not yet
+    /// carry refuses to seed; a scoped column extends a family's list, which the attributes step
+    /// puts there and the roster step decides the live incarnation of.
+    pub fn with_declarations(&self, declarations: &Declarations<'_>) -> Manifest {
+        self.with_groups(declarations.groups)
+            .with_plain_views(declarations.plain_views)
+            .with_vocabularies(declarations.vocabularies)
+            .with_attributes(declarations.attributes, declarations.scoped_attributes)
+            .with_roster(declarations.created_views, declarations.dead_incarnations)
+            .with_scoped_columns(declarations.scoped_columns)
     }
 
     pub fn quantisation_of(&self, view: &str) -> Option<Quantisation> {
@@ -2515,5 +2548,100 @@ mod tests {
         let b = identity_key_fingerprint("100f0e0d0c0b0a090807060504030201");
         assert_ne!(a, b);
         assert!(a.starts_with("fp:") && a.len() == 3 + 8);
+    }
+
+    fn bare_manifest() -> Manifest {
+        Manifest {
+            bundle_format: tessera_types::BUNDLE_FORMAT,
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            data_plugin_hash: "builtin".to_string(),
+            declared_bounds: serde_json::json!({}),
+            declared_scalars: Vec::new(),
+            vocabularies: Vec::new(),
+            small_term_threshold: 32,
+            entity_id_high_water: 0,
+            identity: descriptor(),
+            views: Vec::new(),
+            groups: Vec::new(),
+            partitions: Vec::new(),
+            provenance: serde_json::json!({}),
+            files: BTreeMap::new(),
+        }
+    }
+
+    /// A group, a family over it, a view of it and a column of that view all arriving together
+    /// survive the merge — which they do only in [`Manifest::with_declarations`]' order. Each of
+    /// the three assertions fails under a merge that ran its step before the one it depends on:
+    /// the roster drops a creation whose group is not yet declared, the scoped column drops a
+    /// pair whose family or whose view is not yet there.
+    #[test]
+    fn a_group_its_family_its_view_and_its_column_all_land_from_one_declarations() {
+        let group = GroupDescriptor {
+            name: "quarter".to_string(),
+            title: None,
+            members_of: None,
+            quantisation: Quantisation {
+                x_min: 0.0,
+                x_max: 1.0,
+                y_min: 0.0,
+                y_max: 1.0,
+            },
+            projection: Projection::None,
+            metadata: Vec::new(),
+            visibility: None,
+            point_default: None,
+            views: Vec::new(),
+            scoped_scalars: Vec::new(),
+        };
+        let family = ScopedScalar {
+            name: "rank".to_string(),
+            group: "quarter".to_string(),
+            arrow_type: ScalarType::I32,
+            vocabulary: None,
+            analyser: None,
+            index: true,
+            render: false,
+            views: Vec::new(),
+        };
+        let created = CreatedView {
+            group: "quarter".to_string(),
+            key: "2026-Q1".to_string(),
+            incarnation: 1,
+            visibility: None,
+            metadata: BTreeMap::new(),
+        };
+        let view_id = format!("quarter{}2026-Q1", crate::GROUP_SEPARATOR);
+
+        let merged = bare_manifest().with_declarations(&Declarations {
+            groups: std::slice::from_ref(&group),
+            scoped_attributes: std::slice::from_ref(&family),
+            created_views: std::slice::from_ref(&created),
+            scoped_columns: &[("rank".to_string(), view_id.clone(), 1)],
+            ..Declarations::default()
+        });
+
+        let group = merged
+            .groups
+            .iter()
+            .find(|g| g.name == "quarter")
+            .expect("the declared group");
+        assert!(
+            group.views.iter().any(|v| v.key == "2026-Q1"),
+            "the creation lands on the group that arrived with it"
+        );
+        assert!(
+            merged.views.iter().any(|v| v.id == view_id),
+            "and the view it names is declared"
+        );
+        assert_eq!(
+            group
+                .scoped_scalars
+                .iter()
+                .find(|f| f.name == "rank")
+                .expect("the declared family")
+                .views,
+            vec![view_id],
+            "and the column of that view is on the family's list"
+        );
     }
 }

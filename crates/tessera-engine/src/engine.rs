@@ -12,7 +12,7 @@ use tessera_authz::{DeltaTier, Dict, FragmentCache, PostingsReader};
 use tessera_lifecycle::wal::ChangeOp;
 use tessera_plugin::Plugin;
 use tessera_store::{Bundle, StoreError};
-use tessera_store::manifest::CurrentPointer;
+use tessera_store::manifest::{CurrentPointer, Declarations};
 use tessera_store::read::open_bundle;
 use tessera_store::vocabulary::Vocabularies;
 use tessera_types::{EntityId, IdentityKey};
@@ -304,82 +304,119 @@ fn open_filter_columns(
     )
 }
 
-impl Engine {
-    /// This engine's resolved configuration, exposed so `/v1/meta` can publish the selection
-    /// constants directly from here.
-    pub fn config(&self) -> &EngineConfig {
-        &self.config
+/// What the side manifests declare, merged into the manifest and then kept: [`ManifestSeed`]
+/// seeds the runtime registries from the same lists, so replay appends to what is already served.
+///
+/// [`ManifestSeed`]: crate::write::ManifestSeed
+struct SideDeclarations {
+    groups: Vec<tessera_store::manifest::GroupDescriptor>,
+    plain_views: Vec<tessera_store::manifest::ViewDescriptor>,
+    vocabularies: Vec<tessera_store::manifest::ManifestVocabulary>,
+    attributes: Vec<tessera_store::manifest::DeclaredScalar>,
+    scoped_attributes: Vec<tessera_store::manifest::ScopedScalar>,
+}
+
+/// Everything declared while the service ran, merged into the schema before anything reads it.
+/// The side manifests are the declaration's durable home; `MANIFEST.json` carries the build's
+/// columns and those a fold has since written.
+fn merge_side_declarations(bundle: &mut Bundle) -> SideDeclarations {
+    let (groups, plain_views) = side_manifest_view_declarations(bundle);
+    let vocabularies = side_manifest_vocabularies(bundle);
+    let (attributes, scoped_attributes) = side_manifest_attributes(bundle);
+    bundle.manifest = bundle.manifest.with_declarations(&Declarations {
+        groups: &groups,
+        plain_views: &plain_views,
+        vocabularies: &vocabularies,
+        attributes: &attributes,
+        scoped_attributes: &scoped_attributes,
+        ..Declarations::default()
+    });
+    SideDeclarations {
+        groups,
+        plain_views,
+        vocabularies,
+        attributes,
+        scoped_attributes,
+    }
+}
+
+/// The plugin that serves a bundle must be the plugin that labelled it: every posting is that
+/// implementation's output, and serving under a different one mislabels every item invisibly, with
+/// no downstream failure. An empty or absent manifest hash also refuses. Only the data hash is
+/// checked; the auth module's hash is not recorded in the manifest.
+fn check_serving_plugin(
+    manifest: &tessera_store::manifest::Manifest,
+    plugin: &dyn Plugin,
+) -> Result<()> {
+    let served_hash = plugin.data_plugin_hash();
+    if manifest.data_plugin_hash != served_hash {
+        let recorded = if manifest.data_plugin_hash.is_empty() {
+            "<empty>"
+        } else {
+            &manifest.data_plugin_hash
+        };
+        return Err(EngineError::Malformed(format!(
+            "MANIFEST data_plugin_hash is '{recorded}' but this process serves with plugin \
+             '{served_hash}': the bundle's postings were labelled by a different rule, so \
+             serving them here would mislabel every one of them. Rebuild the bundle with \
+             this plugin, or serve it with the plugin that built it."
+        )));
     }
 
-    /// Open the bundle at `bundle_root`, replay the WAL at `wal_path`, seed the entity-id
-    /// allocator, and build the first [`Generation`]. `cache_dir` is the engine-local (never
-    /// in-bundle) fragment cache directory.
-    pub fn open(
-        bundle_root: &Path,
-        cache_dir: &Path,
-        wal_path: &Path,
-        plugin: impl Plugin + 'static,
-        config: EngineConfig,
-    ) -> Result<Engine> {
-        config.check()?;
-        let mut bundle = open_bundle(bundle_root).map_err(EngineError::Store)?;
+    // The containment partition answers `G ⊆ M_auth` from term signatures, sound only when
+    // authorisation is signature-shaped, true of the builtin plugin, unverifiable for any
+    // other. Under a foreign plugin containment falls back to asking `M_auth` directly per
+    // request instead: correct and fail-closed, but otherwise invisible, so logged.
+    if !crate::containment::signature_shaped(&served_hash) {
+        tracing::warn!(
+            data_plugin_hash = %served_hash,
+            "this bundle is served by a plugin other than the builtin, so the containment \
+             partition is not built: the expression it interns is over term signatures, which \
+             is sound only where an entity's visibility is decided by its own term set, and a \
+             foreign plugin's rule cannot be shown to be. Containment is answered per artifact \
+             per request against the composed mask instead — the same answer, at the cost the \
+             partition exists to remove"
+        );
+    }
+    Ok(())
+}
 
-        // The attribute columns declared while the service ran, appended to the schema before
-        // anything reads it. The side manifests are the declaration's durable home; `MANIFEST.json`
-        // carries the build's columns and those a fold has since written.
-        // The view groups and plain views declared while the service ran, before the roster:
-        // `Manifest::with_roster` drops a creation whose group the manifest does not declare.
-        let (side_groups, side_plain_views) = side_manifest_view_declarations(&bundle);
-        bundle.manifest = bundle
-            .manifest
-            .with_groups(&side_groups)
-            .with_plain_views(&side_plain_views);
+/// One partition's base postings under a prefix. Mmap-backed: a generation holds this reader for
+/// its whole life, so paying the mmap setup once beats reading the whole file into memory.
+fn open_postings(prefix_dir: &Path, phash: &str) -> std::io::Result<Arc<PostingsReader>> {
+    PostingsReader::open(
+        &prefix_dir
+            .join("partitions")
+            .join(phash)
+            .join("terms")
+            .join("postings.arrow"),
+        true,
+    )
+    .map(Arc::new)
+}
 
-        // The vocabularies declared while the service ran, before the columns that name them: a
-        // runtime column over a runtime vocabulary refuses to seed otherwise.
-        let side_vocabularies = side_manifest_vocabularies(&bundle);
-        bundle.manifest = bundle.manifest.with_vocabularies(&side_vocabularies);
+/// Everything the live prefix is read through, opened together at [`Engine::open`]: the prefix
+/// `CURRENT` names, the readers over its files, and the two values a generation carries from the
+/// side manifest it was built from.
+pub(crate) struct PrefixReaders {
+    pub(crate) prefix: String,
+    pub(crate) prefix_dir: PathBuf,
+    pub(crate) bundle_identity: [u8; 32],
+    /// The geometry version, seeded from the served filename and process-local thereafter: bumped
+    /// only by a geometry publication, never by a manifest written for deny state alone.
+    pub(crate) segments_version: u64,
+    pub(crate) watermark: u64,
+    pub(crate) dict: Arc<Dict>,
+    pub(crate) postings: Arc<PostingsReader>,
+    pub(crate) delta_postings: Vec<Arc<DeltaTier>>,
+    pub(crate) external_index: Arc<ExternalIdIndex>,
+    /// The deployment's `tessera_id` key. `IdentityKey::from_hex` rejects a degenerate key,
+    /// refusing a bundle rather than blinding identities with a collapsed round schedule.
+    pub(crate) identity_key: IdentityKey,
+}
 
-        let (side_attributes, side_scoped_attributes) = side_manifest_attributes(&bundle);
-        bundle.manifest = bundle
-            .manifest
-            .with_attributes(&side_attributes, &side_scoped_attributes);
-
-        // The plugin that serves a bundle must be the plugin that labelled it: every posting is
-        // that implementation's output, and serving under a different one mislabels every item
-        // invisibly, with no downstream failure. An empty or absent manifest hash also refuses.
-        // Only the data hash is checked; the auth module's hash is not recorded in the manifest.
-        let served_hash = plugin.data_plugin_hash();
-        if bundle.manifest.data_plugin_hash != served_hash {
-            let recorded = if bundle.manifest.data_plugin_hash.is_empty() {
-                "<empty>"
-            } else {
-                &bundle.manifest.data_plugin_hash
-            };
-            return Err(EngineError::Malformed(format!(
-                "MANIFEST data_plugin_hash is '{recorded}' but this process serves with plugin \
-                 '{served_hash}': the bundle's postings were labelled by a different rule, so \
-                 serving them here would mislabel every one of them. Rebuild the bundle with \
-                 this plugin, or serve it with the plugin that built it."
-            )));
-        }
-
-        // The containment partition answers `G ⊆ M_auth` from term signatures, sound only when
-        // authorisation is signature-shaped, true of the builtin plugin, unverifiable for any
-        // other. Under a foreign plugin containment falls back to asking `M_auth` directly per
-        // request instead: correct and fail-closed, but otherwise invisible, so logged.
-        if !crate::containment::signature_shaped(&served_hash) {
-            tracing::warn!(
-                data_plugin_hash = %served_hash,
-                "this bundle is served by a plugin other than the builtin, so the containment \
-                 partition is not built: the expression it interns is over term signatures, which \
-                 is sound only where an entity's visibility is decided by its own term set, and a \
-                 foreign plugin's rule cannot be shown to be. Containment is answered per artifact \
-                 per request against the composed mask instead — the same answer, at the cost the \
-                 partition exists to remove"
-            );
-        }
-
+impl PrefixReaders {
+    fn open(bundle_root: &Path, bundle: &Bundle) -> Result<PrefixReaders> {
         let current = read_current(bundle_root)?;
         let prefix = current.prefix.clone();
         let bundle_identity = hex_decode_32(&current.manifest_digest).ok_or_else(|| {
@@ -399,11 +436,6 @@ impl Engine {
             .map(|(k, v)| (k.clone(), v))
             .ok_or_else(|| EngineError::Malformed("bundle has no partitions".to_string()))?;
 
-        // The geometry version is seeded from the served filename and is process-local thereafter,
-        // bumped only by a geometry publication, never by a manifest written for deny state alone.
-        let segments_version = partition.segments_n;
-        let watermark = partition.manifest.watermark;
-
         let dict_paths: Vec<PathBuf> = partition
             .manifest
             .dict_extents
@@ -412,15 +444,7 @@ impl Engine {
             .collect();
         let dict = Arc::new(Dict::load(&dict_paths).map_err(EngineError::Io)?);
 
-        let postings_path = prefix_dir
-            .join("partitions")
-            .join(&phash)
-            .join("terms")
-            .join("postings.arrow");
-        // Mmap-backed: the engine holds this reader for the process lifetime, so paying the mmap
-        // setup cost once at open beats reading the whole file into memory.
-        let postings =
-            Arc::new(PostingsReader::open(&postings_path, true).map_err(EngineError::Io)?);
+        let postings = open_postings(&prefix_dir, &phash).map_err(EngineError::Io)?;
 
         // Every live delta postings tier, reopened; without this, every item flushed since the
         // last compaction would silently vanish from every principal's map after a restart. Every
@@ -448,130 +472,380 @@ impl Engine {
                 .map_err(EngineError::Store)?,
         );
 
-        // The deployment's `tessera_id` key, held for the process lifetime. `IdentityKey::from_hex`
-        // rejects a degenerate key, refusing a bundle rather than blinding identities with a
-        // collapsed round schedule.
         let identity_key = IdentityKey::from_hex(&bundle.manifest.identity.key)
             .map_err(|e| EngineError::Malformed(format!("MANIFEST identity.key: {e}")))?;
 
-        // Every piece of state from durable storage is rebuilt behind one call. The side-manifest's
-        // deny state travels with it: a `SEGMENTS-<n>.json` is complete current state for its
-        // partition, so a manifest that opened and whose deny state went nowhere would serve every
-        // entity it names.
-        let initial_deny = initial_deny_of(&bundle);
-        let mut vocabularies = initial_vocabularies_of(&bundle)?;
-        // The allocator floor comes from the side-manifest, never the build manifest alone: every
-        // flush raises `entity_id_high_water` past the ids it consumed, while `MANIFEST.json`'s
-        // value is frozen at build. An id handed out twice would grant the new item every access
-        // the old one had.
-        let side_manifest_high_waters: Vec<u64> =
-            across_partitions(&bundle, |m| [m.entity_id_high_water]);
-        // The row-less mark's homes are the side manifests only; `MANIFEST.json` carries no such
-        // field.
-        let side_manifest_low_waters: Vec<u64> =
-            across_partitions(&bundle, |m| [m.entity_id_low_water]);
-        // One partition today, so this concatenation is the whole registry; at more than one it is
-        // the union.
-        let manifest_layers: Vec<tessera_types::layer::RegisteredLayer> =
-            across_partitions(&bundle, |m| m.layers.iter().cloned());
-        let manifest_layer_tombstones: Vec<String> =
-            across_partitions(&bundle, |m| m.layer_tombstones.iter().cloned());
-        // A view's key is the group's, not a partition's, so these belong to the deployment
-        // whichever partition's manifest published them.
-        let manifest_created_views: Vec<tessera_types::view::CreatedView> =
-            across_partitions(&bundle, |m| m.views.iter().cloned());
-        let manifest_dead_incarnations: Vec<tessera_types::view::DeadIncarnation> =
-            across_partitions(&bundle, |m| m.dead_view_incarnations.iter().cloned());
-        // The views the *build* declared, whose keys a create must not reissue.
-        let declared_views: Vec<(String, String)> = bundle
-            .manifest
-            .groups
-            .iter()
-            .flat_map(|group| {
-                group
-                    .views
-                    .iter()
-                    .map(|view| (group.name.clone(), view.key.clone()))
-            })
-            .collect();
-        // The union across partitions: an artifact's membership belongs to the deployment, not
-        // whichever partition's manifest happens to name the extent.
-        let manifest_membership_extents: Vec<tessera_store::manifest::MembershipExtent> =
-            across_partitions(&bundle, |m| m.membership_extents.iter().cloned());
-        // The two lists that make a level's derived structures placeable across a restart.
-        let manifest_level_versions: Vec<tessera_store::manifest::LevelVersion> =
-            across_partitions(&bundle, |m| m.level_versions.iter().cloned());
-        let manifest_derived_extents: Vec<tessera_store::manifest::DerivedExtent> =
-            across_partitions(&bundle, |m| m.derived_extents.iter().cloned());
-        let (overlay, buffer, write_state) = WritePath::reconstruct(
-            wal_path,
-            crate::write::ManifestSeed {
-                high_water: tessera_lifecycle::alloc::allocator_floor(
-                    bundle.manifest.entity_id_high_water,
-                    &side_manifest_high_waters,
-                ),
-                low_water: tessera_lifecycle::alloc::allocator_ceiling(
-                    tessera_types::layer::ROWLESS_CEILING,
-                    &side_manifest_low_waters,
-                ),
-                layers: &manifest_layers,
-                tombstones: &manifest_layer_tombstones,
-                created_views: &manifest_created_views,
-                dead_view_incarnations: &manifest_dead_incarnations,
-                declared_views,
-                // So replay's `ViewDrop` arm prunes every id the key names, or a sharing group's
-                // buffered rows would flush into whatever takes the key next.
-                view_ids_of_key: &|group: &str, key: &str| {
-                    bundle.manifest.view_ids_for_key(group, key)
-                },
-                membership_extents: &manifest_membership_extents,
-                level_versions: &manifest_level_versions,
-                prefix_dir: prefix_dir.clone(),
-                manifest: &bundle.manifest,
-                attributes: crate::attributes::RuntimeAttributes::seed(
-                    side_attributes.clone(),
-                    side_scoped_attributes.clone(),
-                ),
-                vocabularies: crate::vocabularies::RuntimeVocabularies::seed(
-                    side_vocabularies.clone(),
-                ),
-                view_declarations: crate::view_declarations::RuntimeViewDeclarations::seed(
-                    side_groups.clone(),
-                    side_plain_views.clone(),
-                ),
-            },
-            &dict,
-            &initial_deny,
-            &mut vocabularies,
-            // Does this row's own view hold it, not "does any view": an entity may hold a row in
-            // several views at once, and a predicate over the entity alone would discard a
-            // pending row of a second view already flushed for the first.
-            |entity, view| {
-                bundle.partitions.values().any(|partition| {
-                    partition
-                        .views
-                        .get(view)
-                        .is_some_and(|data| data.row_space.row_of(entity).is_some())
-                })
-            },
-        )?;
+        Ok(PrefixReaders {
+            prefix,
+            prefix_dir,
+            bundle_identity,
+            segments_version: partition.segments_n,
+            watermark: partition.manifest.watermark,
+            dict,
+            postings,
+            delta_postings,
+            external_index,
+            identity_key,
+        })
+    }
+}
 
-        // The vocabularies and attributes the log holds past the last publication.
-        let runtime_vocabularies = write_state.vocabularies.snapshot(&vocabularies);
-        bundle.manifest = bundle.manifest.with_vocabularies(&runtime_vocabularies);
-        let (runtime_attributes, runtime_scoped_attributes) = write_state.attributes.snapshot();
-        let unfolded_attributes = write_state.attributes.entity_names();
+/// What a reconstruction of the write path leaves behind: the first generation's overlay and
+/// buffer, the write-side state the engine keeps, and the category bindings replay minted into.
+struct ReconstructedWrites {
+    overlay: tessera_lifecycle::Overlay,
+    buffer: tessera_lifecycle::IngestBuffer,
+    state: crate::write::WritePathState,
+    vocabularies: Vocabularies,
+}
+
+/// Every piece of write-side state from durable storage, rebuilt behind one call. The
+/// side-manifest's deny state travels with it: a `SEGMENTS-<n>.json` is complete current state for
+/// its partition, so a manifest that opened and whose deny state went nowhere would serve every
+/// entity it names.
+fn reconstruct_writes(
+    wal_path: &Path,
+    bundle: &Bundle,
+    readers: &PrefixReaders,
+    side: SideDeclarations,
+) -> Result<ReconstructedWrites> {
+    let initial_deny = initial_deny_of(bundle);
+    let mut vocabularies = initial_vocabularies_of(bundle)?;
+    // The allocator floor comes from the side-manifest, never the build manifest alone: every
+    // flush raises `entity_id_high_water` past the ids it consumed, while `MANIFEST.json`'s
+    // value is frozen at build. An id handed out twice would grant the new item every access
+    // the old one had.
+    let side_manifest_high_waters: Vec<u64> =
+        across_partitions(bundle, |m| [m.entity_id_high_water]);
+    // The row-less mark's homes are the side manifests only; `MANIFEST.json` carries no such
+    // field.
+    let side_manifest_low_waters: Vec<u64> = across_partitions(bundle, |m| [m.entity_id_low_water]);
+    // One partition today, so this concatenation is the whole registry; at more than one it is
+    // the union.
+    let manifest_layers: Vec<tessera_types::layer::RegisteredLayer> =
+        across_partitions(bundle, |m| m.layers.iter().cloned());
+    let manifest_layer_tombstones: Vec<String> =
+        across_partitions(bundle, |m| m.layer_tombstones.iter().cloned());
+    // A view's key is the group's, not a partition's, so these belong to the deployment
+    // whichever partition's manifest published them.
+    let manifest_created_views: Vec<tessera_types::view::CreatedView> =
+        across_partitions(bundle, |m| m.views.iter().cloned());
+    let manifest_dead_incarnations: Vec<tessera_types::view::DeadIncarnation> =
+        across_partitions(bundle, |m| m.dead_view_incarnations.iter().cloned());
+    // The views the *build* declared, whose keys a create must not reissue.
+    let declared_views: Vec<(String, String)> = bundle
+        .manifest
+        .groups
+        .iter()
+        .flat_map(|group| {
+            group
+                .views
+                .iter()
+                .map(|view| (group.name.clone(), view.key.clone()))
+        })
+        .collect();
+    // The union across partitions: an artifact's membership belongs to the deployment, not
+    // whichever partition's manifest happens to name the extent.
+    let manifest_membership_extents: Vec<tessera_store::manifest::MembershipExtent> =
+        across_partitions(bundle, |m| m.membership_extents.iter().cloned());
+    // The list that makes a level's derived structures placeable across a restart.
+    let manifest_level_versions: Vec<tessera_store::manifest::LevelVersion> =
+        across_partitions(bundle, |m| m.level_versions.iter().cloned());
+    let (overlay, buffer, state) = WritePath::reconstruct(
+        wal_path,
+        crate::write::ManifestSeed {
+            high_water: tessera_lifecycle::alloc::allocator_floor(
+                bundle.manifest.entity_id_high_water,
+                &side_manifest_high_waters,
+            ),
+            low_water: tessera_lifecycle::alloc::allocator_ceiling(
+                tessera_types::layer::ROWLESS_CEILING,
+                &side_manifest_low_waters,
+            ),
+            layers: &manifest_layers,
+            tombstones: &manifest_layer_tombstones,
+            created_views: &manifest_created_views,
+            dead_view_incarnations: &manifest_dead_incarnations,
+            declared_views,
+            // So replay's `ViewDrop` arm prunes every id the key names, or a sharing group's
+            // buffered rows would flush into whatever takes the key next.
+            view_ids_of_key: &|group: &str, key: &str| bundle.manifest.view_ids_for_key(group, key),
+            membership_extents: &manifest_membership_extents,
+            level_versions: &manifest_level_versions,
+            prefix_dir: readers.prefix_dir.clone(),
+            manifest: &bundle.manifest,
+            attributes: crate::attributes::RuntimeAttributes::seed(
+                side.attributes,
+                side.scoped_attributes,
+            ),
+            vocabularies: crate::vocabularies::RuntimeVocabularies::seed(side.vocabularies),
+            view_declarations: crate::view_declarations::RuntimeViewDeclarations::seed(
+                side.groups,
+                side.plain_views,
+            ),
+        },
+        &readers.dict,
+        &initial_deny,
+        &mut vocabularies,
+        // Does this row's own view hold it, not "does any view": an entity may hold a row in
+        // several views at once, and a predicate over the entity alone would discard a
+        // pending row of a second view already flushed for the first.
+        |entity, view| {
+            bundle.partitions.values().any(|partition| {
+                partition
+                    .views
+                    .get(view)
+                    .is_some_and(|data| data.row_space.row_of(entity).is_some())
+            })
+        },
+    )?;
+    Ok(ReconstructedWrites {
+        overlay,
+        buffer,
+        state,
+        vocabularies,
+    })
+}
+
+/// The bundle as the log leaves it: the vocabularies, columns, groups and plain views the log
+/// holds past the last publication, and the roster — the views a build declared, plus every view
+/// created while the service ran, minus every key dropped. Applied before the first generation is
+/// built, since a created view absent from the manifest comes back from a restart as a 404.
+fn served_bundle(
+    mut bundle: Bundle,
+    state: &crate::write::WritePathState,
+    vocabularies: &Vocabularies,
+) -> Arc<Bundle> {
+    let runtime_vocabularies = state.vocabularies.snapshot(vocabularies);
+    let (runtime_attributes, runtime_scoped_attributes) = state.attributes.snapshot();
+    let (runtime_groups, runtime_plain_views) = state.view_declarations.snapshot();
+    let (created_views, dead_incarnations) = state.roster.snapshot();
+    // And the group-scoped columns a flush wrote: `with_scoped_columns` drops a column of a
+    // dead incarnation rather than publishing its values as the new view's.
+    let scoped_columns: Vec<(String, String, tessera_types::view::ViewIncarnation)> =
+        across_partitions(&bundle, |m| {
+            m.scoped_columns
+                .iter()
+                .map(|c| (c.column.clone(), c.view.clone(), c.incarnation))
+        });
+    let manifest = bundle.manifest.with_declarations(&Declarations {
+        groups: &runtime_groups,
+        plain_views: &runtime_plain_views,
+        vocabularies: &runtime_vocabularies,
+        attributes: &runtime_attributes,
+        scoped_attributes: &runtime_scoped_attributes,
+        created_views: &created_views,
+        dead_incarnations: &dead_incarnations,
+        scoped_columns: &scoped_columns,
+    });
+    // Only the view lists move the per-view map, so a log that declared none keeps the bundle
+    // `open_bundle` built rather than rebuilding every partition's map to the same thing.
+    if created_views.is_empty()
+        && dead_incarnations.is_empty()
+        && scoped_columns.is_empty()
+        && runtime_attributes.is_empty()
+        && runtime_scoped_attributes.is_empty()
+        && runtime_groups.is_empty()
+        && runtime_plain_views.is_empty()
+    {
+        bundle.manifest = manifest;
+        Arc::new(bundle)
+    } else {
+        Arc::new(bundle).with_views(manifest)
+    }
+}
+
+/// The generation this engine starts serving: the prefix's filter columns, this run's suggestion
+/// indexes and the deny mask `Generation::new` derives, so a node restarting into a live
+/// suppression set has it before its first request.
+#[allow(clippy::too_many_arguments)]
+fn first_generation(
+    readers: &PrefixReaders,
+    suggest_dir: &Path,
+    bundle: &Arc<Bundle>,
+    state: &crate::write::WritePathState,
+    vocabularies: Vocabularies,
+    overlay: tessera_lifecycle::Overlay,
+    buffer: tessera_lifecycle::IngestBuffer,
+    fragments: Arc<FragmentCache>,
+    pool: &rayon::ThreadPool,
+) -> Result<Arc<GenerationHandle>> {
+    let prefix_dir = &readers.prefix_dir;
+    // Opened with the bundle and carried forward by every generation successor: a restart
+    // composes what the flushes before it published, not the build's coverage alone.
+    let filter_columns = {
+        let unfolded_attributes = state.attributes.entity_names();
+        let partition = bundle.partitions.keys().next().cloned().unwrap_or_default();
+        Arc::new(
+            open_filter_columns(prefix_dir, bundle, &unfolded_attributes).map_err(|e| {
+                EngineError::Store(tessera_store::StoreError::Io {
+                    path: prefix_dir.join("partitions").join(&partition),
+                    source: e,
+                })
+            })?,
+        )
+    };
+
+    // Built synchronously at open, not lazily, so a first keystroke never pays the sort as a
+    // cold start; only for the vocabularies a declared category column draws on.
+    // Stale by construction; leaving a previous run's indexes would accumulate a directory
+    // per restart.
+    let _ = std::fs::remove_dir_all(suggest_dir);
+    let suggest_names: std::collections::BTreeSet<String> = bundle
+        .manifest
+        .declared_scalars
+        .iter()
+        .filter_map(|scalar| scalar.vocabulary.clone())
+        .chain(
+            bundle
+                .manifest
+                .scoped_scalars()
+                .into_iter()
+                .filter_map(|family| family.vocabulary),
+        )
+        .collect();
+    let suggest = Arc::new(crate::suggest::SuggestIndexes::build(
+        suggest_dir,
+        &vocabularies,
+        suggest_names,
+        pool,
+    ));
+
+    Ok(Arc::new(ArcSwap::new(Arc::new(Generation::new(
+        crate::GenerationParts {
+            prefix: readers.prefix.clone(),
+            suggest,
+            segments_version: readers.segments_version,
+            watermark: readers.watermark,
+            bundle: Arc::clone(bundle),
+            dict: Arc::clone(&readers.dict),
+            postings: Arc::clone(&readers.postings),
+            fragments,
+            external_index: Arc::clone(&readers.external_index),
+            delta_postings: readers.delta_postings.clone(),
+            overlay_version: 0,
+            overlay: Arc::new(overlay),
+            buffer: Arc::new(buffer),
+            vocabularies: Arc::new(vocabularies),
+            filter_columns,
+        },
+    )))))
+}
+
+/// The structures a fold left under the prefix, adopted where their coordinate still holds: the
+/// artifact projections and every spatial level's shapes, both warmed before this engine serves a
+/// request.
+fn adopt_derived_structures(
+    cache_dir: &Path,
+    readers: &PrefixReaders,
+    bundle: &Arc<Bundle>,
+    state: &crate::write::WritePathState,
+) -> (
+    Arc<crate::artifacts::ArtifactProjections>,
+    Arc<crate::shapes::ShapeStore>,
+) {
+    let prefix_dir = &readers.prefix_dir;
+    let manifest_derived_extents: Vec<tessera_store::manifest::DerivedExtent> =
+        across_partitions(bundle, |m| m.derived_extents.iter().cloned());
+
+    // The fold's containment partitions, adopted where their coordinate still holds; a
+    // mismatched partition is dropped and the level recomposes on first use.
+    // The row columns' scratch, swept at open: meaningless outside the run that wrote it.
+    let row_column_scratch = cache_dir.join(crate::artifacts::ROW_COLUMN_SCRATCH_DIR);
+    let _ = std::fs::create_dir_all(&row_column_scratch);
+    tessera_store::derived::sweep_row_column_scratch(&row_column_scratch);
+    let artifact_projections = Arc::new(crate::artifacts::ArtifactProjections::new(
+        row_column_scratch,
+    ));
+    artifact_projections.adopt_derived(
+        prefix_dir,
+        &readers.prefix,
+        &manifest_derived_extents,
+        &state.artifacts,
+    );
+    // What the open actually took. An open reporting zero adoptions against a manifest that
+    // names extents means every coordinate was rejected: correct but expensive, since the next
+    // request then derives what this open would have mapped.
+    tracing::info!(
+        named = manifest_derived_extents.len(),
+        containment_adopted = artifact_projections.adopted(),
+        prefix = %readers.prefix,
+        "the engine adopted the prefix's derived artifact structures"
+    );
+
+    // Every spatial level's shapes decoded and decomposed, and every segment's piece claimed
+    // or resolved and staged, before this engine serves a request.
+    let shapes = Arc::new(crate::shapes::ShapeStore::new());
+    let (layers, _) = state.registry.snapshot();
+    let warmed = shapes.warm(
+        bundle,
+        &layers,
+        &state.artifacts,
+        &crate::shapes::PersistedPieces {
+            prefix_dir: Some(prefix_dir),
+            extents: &manifest_derived_extents,
+        },
+    );
+    if warmed.levels > 0 {
+        tracing::info!(
+            levels = warmed.levels,
+            artifacts = warmed.artifacts,
+            pieces_claimed = warmed.pieces_claimed,
+            pieces_resolved = warmed.pieces_resolved,
+            held_claimed = warmed.held_claimed,
+            held_decomposed = warmed.held_decomposed,
+            rows_tested = warmed.rows_tested,
+            build_ms = warmed.build_ms,
+            claim_ms = warmed.claim_ms,
+            resolve_ms = warmed.resolve_ms,
+            held_bytes = warmed.held_bytes,
+            elapsed_ms = warmed.elapsed_ms,
+            "the engine built every spatial level's shapes and claimed or resolved every \
+             segment's piece"
+        );
+    }
+    (artifact_projections, shapes)
+}
+
+impl Engine {
+    /// This engine's resolved configuration, exposed so `/v1/meta` can publish the selection
+    /// constants directly from here.
+    pub fn config(&self) -> &EngineConfig {
+        &self.config
+    }
+
+    /// Open the bundle at `bundle_root`, replay the WAL at `wal_path`, seed the entity-id
+    /// allocator, and build the first [`Generation`]. `cache_dir` is the engine-local (never
+    /// in-bundle) fragment cache directory.
+    pub fn open(
+        bundle_root: &Path,
+        cache_dir: &Path,
+        wal_path: &Path,
+        plugin: impl Plugin + 'static,
+        config: EngineConfig,
+    ) -> Result<Engine> {
+        config.check()?;
+        let mut bundle = open_bundle(bundle_root).map_err(EngineError::Store)?;
+        let side = merge_side_declarations(&mut bundle);
+        check_serving_plugin(&bundle.manifest, &plugin)?;
+
+        let readers = PrefixReaders::open(bundle_root, &bundle)?;
+        let ReconstructedWrites {
+            overlay,
+            buffer,
+            state,
+            vocabularies,
+        } = reconstruct_writes(wal_path, &bundle, &readers, side)?;
+
         let plugin: Arc<dyn Plugin> = Arc::new(plugin);
         let auth_plugin_hash = hex_decode_32(&plugin.auth_plugin_hash()).ok_or_else(|| {
             EngineError::Malformed("plugin auth_plugin_hash is not 64 hex characters".to_string())
         })?;
-
         let fragment_cache = Arc::new(FragmentCache::new(
             cache_dir,
-            bundle_identity,
+            readers.bundle_identity,
             auth_plugin_hash,
         ));
-
         // Built now, not lazily on first request: a pool that cannot be built is a fact about this
         // engine's open-time health, not one to discover on whichever request happens to be first.
         let pool = Arc::new(
@@ -579,160 +853,23 @@ impl Engine {
                 .map_err(|e| EngineError::ThreadPoolBuild(e.to_string()))?,
         );
 
-        // The roster: the views a build declared, plus every view created while the service ran,
-        // minus every key dropped. Applied before the first generation is built, since a created
-        // view absent from the manifest comes back from a restart as a 404.
-        let (runtime_groups, runtime_plain_views) = write_state.view_declarations.snapshot();
-        let (created_views, dead_incarnations) = write_state.roster.snapshot();
-        // And the group-scoped columns a flush wrote: `with_scoped_columns` drops a column of a
-        // dead incarnation rather than publishing its values as the new view's.
-        let scoped_columns: Vec<(String, String, tessera_types::view::ViewIncarnation)> =
-            across_partitions(&bundle, |m| {
-                m.scoped_columns
-                    .iter()
-                    .map(|c| (c.column.clone(), c.view.clone(), c.incarnation))
-            });
-        let bundle = if created_views.is_empty()
-            && dead_incarnations.is_empty()
-            && scoped_columns.is_empty()
-            && runtime_attributes.is_empty()
-            && runtime_scoped_attributes.is_empty()
-            && runtime_groups.is_empty()
-            && runtime_plain_views.is_empty()
-        {
-            Arc::new(bundle)
-        } else {
-            // Groups and plain views first, so a creation lands on a group the manifest carries;
-            // then the runtime columns.
-            let manifest = bundle
-                .manifest
-                .with_groups(&runtime_groups)
-                .with_plain_views(&runtime_plain_views)
-                .with_attributes(&runtime_attributes, &runtime_scoped_attributes)
-                .with_roster(&created_views, &dead_incarnations)
-                .with_scoped_columns(&scoped_columns);
-            Arc::new(bundle).with_views(manifest)
-        };
-
-        // Opened with the bundle and carried forward by every generation successor: a restart
-        // composes what the flushes before it published, not the build's coverage alone.
-        let filter_columns = {
-            let partition = bundle.partitions.keys().next().cloned().unwrap_or_default();
-            Arc::new(
-                open_filter_columns(&prefix_dir, &bundle, &unfolded_attributes).map_err(|e| {
-                    EngineError::Store(tessera_store::StoreError::Io {
-                        path: prefix_dir.join("partitions").join(&partition),
-                        source: e,
-                    })
-                })?,
-            )
-        };
-
-        // Built synchronously at open, not lazily, so a first keystroke never pays the sort as a
-        // cold start; into the engine's own cache directory, since it is derived and rebuilt every
-        // open; only for the vocabularies a declared category column draws on.
+        let bundle = served_bundle(bundle, &state, &vocabularies);
+        // The suggestion indexes go in the engine's own cache directory, never in the bundle:
+        // they are derived, and rebuilt every open.
         let suggest_dir = cache_dir.join(crate::suggest::SUGGEST_DIR);
-        // Stale by construction; leaving a previous run's indexes would accumulate a directory
-        // per restart.
-        let _ = std::fs::remove_dir_all(&suggest_dir);
-        let suggest_names: std::collections::BTreeSet<String> = bundle
-            .manifest
-            .declared_scalars
-            .iter()
-            .filter_map(|scalar| scalar.vocabulary.clone())
-            .chain(
-                bundle
-                    .manifest
-                    .scoped_scalars()
-                    .into_iter()
-                    .filter_map(|family| family.vocabulary),
-            )
-            .collect();
-        let suggest = Arc::new(crate::suggest::SuggestIndexes::build(
+        let generation = first_generation(
+            &readers,
             &suggest_dir,
-            &vocabularies,
-            suggest_names,
+            &bundle,
+            &state,
+            vocabularies,
+            overlay,
+            buffer,
+            fragment_cache,
             &pool,
-        ));
-
-        // `Generation::new` derives the deny mask, so a node restarting into a live suppression
-        // set has it before its first request.
-        let generation = Arc::new(ArcSwap::new(Arc::new(Generation::new(crate::GenerationParts {
-            prefix,
-            suggest,
-            segments_version,
-            watermark,
-            bundle: Arc::clone(&bundle),
-            dict: Arc::clone(&dict),
-            postings: Arc::clone(&postings),
-            fragments: fragment_cache,
-            external_index,
-            delta_postings,
-            overlay_version: 0,
-            overlay: Arc::new(overlay),
-            buffer: Arc::new(buffer),
-            vocabularies: Arc::new(vocabularies),
-            filter_columns,
-        }))));
-
-        // The fold's containment partitions, adopted where their coordinate still holds; a
-        // mismatched partition is dropped and the level recomposes on first use.
-        // The row columns' scratch, swept at open: meaningless outside the run that wrote it.
-        let row_column_scratch = cache_dir.join(crate::artifacts::ROW_COLUMN_SCRATCH_DIR);
-        let _ = std::fs::create_dir_all(&row_column_scratch);
-        tessera_store::derived::sweep_row_column_scratch(&row_column_scratch);
-        let artifact_projections = Arc::new(crate::artifacts::ArtifactProjections::new(
-            row_column_scratch,
-        ));
-        artifact_projections.adopt_derived(
-            &prefix_dir,
-            generation.load().prefix.as_str(),
-            &manifest_derived_extents,
-            &write_state.artifacts,
-        );
-        // What the open actually took. An open reporting zero adoptions against a manifest that
-        // names extents means every coordinate was rejected: correct but expensive, since the next
-        // request then derives what this open would have mapped.
-        tracing::info!(
-            named = manifest_derived_extents.len(),
-            containment_adopted = artifact_projections.adopted(),
-            prefix = %generation.load().prefix,
-            "the engine adopted the prefix's derived artifact structures"
-        );
-
-        // Every spatial level's shapes decoded and decomposed, and every segment's piece claimed
-        // or resolved and staged, before this engine serves a request.
-        let shapes = Arc::new(crate::shapes::ShapeStore::new());
-        {
-            let (layers, _) = write_state.registry.snapshot();
-            let warmed = shapes.warm(
-                &generation.load().bundle,
-                &layers,
-                &write_state.artifacts,
-                &crate::shapes::PersistedPieces {
-                    prefix_dir: Some(&prefix_dir),
-                    extents: &manifest_derived_extents,
-                },
-            );
-            if warmed.levels > 0 {
-                tracing::info!(
-                    levels = warmed.levels,
-                    artifacts = warmed.artifacts,
-                    pieces_claimed = warmed.pieces_claimed,
-                    pieces_resolved = warmed.pieces_resolved,
-                    held_claimed = warmed.held_claimed,
-                    held_decomposed = warmed.held_decomposed,
-                    rows_tested = warmed.rows_tested,
-                    build_ms = warmed.build_ms,
-                    claim_ms = warmed.claim_ms,
-                    resolve_ms = warmed.resolve_ms,
-                    held_bytes = warmed.held_bytes,
-                    elapsed_ms = warmed.elapsed_ms,
-                    "the engine built every spatial level's shapes and claimed or resolved every \
-                     segment's piece"
-                );
-            }
-        }
+        )?;
+        let (artifact_projections, shapes) =
+            adopt_derived_structures(cache_dir, &readers, &bundle, &state);
 
         let row_projection_cache = Arc::new(RowProjectionCache::new(u64::MAX));
         let region_cache = Arc::new(crate::single_flight::SingleFlightCache::new(u64::MAX));
@@ -772,8 +909,8 @@ impl Engine {
             suggest_dir,
             config,
             next_token_id: AtomicU64::new(0),
-            write: WritePath::new(write_state),
-            identity_key,
+            write: WritePath::new(state),
+            identity_key: readers.identity_key,
             boot_nonce: OsRng.next_u64(),
             switches,
             counters,
@@ -962,9 +1099,11 @@ pub(crate) fn open_rotation(
     // published carries the rest.
     let (side_attributes, side_scoped_attributes) = side_manifest_attributes(&bundle);
     let unfolded_attributes: Vec<String> = side_attributes.iter().map(|d| d.name.clone()).collect();
-    bundle.manifest = bundle
-        .manifest
-        .with_attributes(&side_attributes, &side_scoped_attributes);
+    bundle.manifest = bundle.manifest.with_declarations(&Declarations {
+        attributes: &side_attributes,
+        scoped_attributes: &side_scoped_attributes,
+        ..Declarations::default()
+    });
     let bundle = Arc::new(bundle);
     let (phash, partition) = bundle
         .partitions
@@ -977,17 +1116,8 @@ pub(crate) fn open_rotation(
             )
         })?;
 
-    let postings = Arc::new(
-        PostingsReader::open(
-            &prefix_dir
-                .join("partitions")
-                .join(&phash)
-                .join("terms")
-                .join("postings.arrow"),
-            true,
-        )
-        .map_err(|e| PublishGeometryError::PrefixNotOpenable(e.to_string()))?,
-    );
+    let postings = open_postings(&prefix_dir, &phash)
+        .map_err(|e| PublishGeometryError::PrefixNotOpenable(e.to_string()))?;
     let external_index = Arc::new(
         ExternalIdIndex::open(&bundle.manifest, &partition.manifest, &prefix_dir)
             .map_err(|e| PublishGeometryError::PrefixNotOpenable(e.to_string()))?,
