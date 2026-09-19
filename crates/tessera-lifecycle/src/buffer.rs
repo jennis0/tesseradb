@@ -506,16 +506,27 @@ impl IngestBuffer {
         self.fills.len() + self.scoped_fills.len()
     }
 
-    /// Remove one item — **what a flush's publication does with exactly the entities it
-    /// consumed** (§1.2).
-    ///
-    /// By entity id and never by range: the flush ran while the executor went on accepting ingest,
-    /// so a range spanning the consumed ids would also take the rows that arrived meanwhile, which
-    /// have no geometry and would be lost from both the buffer and every segment.
+    /// Whether anything buffered belongs to one of these entities: a row, a fill or a scoped fill.
+    pub fn holds_any(&self, entities: &[EntityId]) -> bool {
+        entities
+            .iter()
+            .any(|e| self.items.contains_key(e) || self.fills.contains_key(e))
+            || (!self.scoped_fills.is_empty()
+                && self
+                    .scoped_fills
+                    .keys()
+                    .any(|(entity, _)| entities.contains(entity)))
+    }
+
+    /// Drops everything buffered for a deleted entity: its rows and its fills. No flush consumes
+    /// a deleted entity's rows or fills, and each holds the log at its position, so one left here
+    /// would stop the log rotating.
     pub fn remove(&mut self, entity: EntityId) {
         if let Some(rows) = self.items.remove(&entity) {
             self.rows -= rows.len();
         }
+        self.fills.remove(&entity);
+        self.scoped_fills.retain(|(held, _), _| *held != entity);
     }
 
     /// Remove one **(entity, view)** row — what a flush's publication does with exactly the rows

@@ -516,6 +516,10 @@ impl WritePath {
             let families = scoped_families_of_view(&served, view);
             let owner_view = scoped_owner_view_of(&served, view);
             for row in rows {
+                // A deleted entity's fill is never flushed, and would hold the log where it sits.
+                if overlay.is_deleted(row.entity_id) {
+                    continue;
+                }
                 let mut scalars: Vec<WalScalar> =
                     vec![WalScalar::Null; served.declared_scalars.len()];
                 let mut scoped: Vec<WalScalar> = vec![WalScalar::Null; families.len()];

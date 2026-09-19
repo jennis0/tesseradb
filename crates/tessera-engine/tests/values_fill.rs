@@ -807,6 +807,41 @@ fn a_values_only_tick_publishes_the_cells_with_no_new_segment() {
     );
 }
 
+/// A fill whose entity is deleted before the next tick does not stay in the buffer: a fill holds
+/// the log at its position, so one that no flush will ever consume would stop rotation for good.
+#[test]
+fn a_fill_on_an_entity_deleted_before_the_tick_does_not_hold_the_log() {
+    let fx = fixture();
+    let engine = engine_over(&fx);
+    declare_families(&engine);
+    let entity = flushed_entity(&engine);
+
+    engine
+        .fill_values(values_request(
+            "values-1",
+            &["tag"],
+            vec![(entity, vec![WalScalar::Utf8("alpha".to_string())])],
+        ))
+        .expect("the fill is accepted");
+    engine
+        .accept_change(entity, tessera_lifecycle::ChangeOp::Delete)
+        .expect("the delete is accepted");
+    settle(&engine);
+
+    assert_eq!(
+        engine.generation().buffer.oldest_wal_pos(),
+        None,
+        "nothing buffered holds the log"
+    );
+
+    let engine = restart(&fx, engine);
+    assert_eq!(
+        engine.generation().buffer.oldest_wal_pos(),
+        None,
+        "and a restart does not buffer the fill again"
+    );
+}
+
 /// **The fold folds the filling layer into the base** (`ingest.md` §1.4). The record blob's
 /// layers become one row again and the entity-space extents one column, so every filled cell is
 /// still read afterwards — through one claimant rather than two.

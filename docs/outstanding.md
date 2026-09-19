@@ -10,6 +10,8 @@ Things found during the cleanup that are not yet done. One line each; delete a l
 
 - View metadata: a build widens an integer where a float is declared; a running service refuses it.
 
+- A values fill whose view is dropped before the next tick is never consumed by a flush, so it holds the log at its position and its value is never written. Needs a decision: an entity-scoped value is not the view's, so dropping the fill with the view loses an acknowledged write, and keeping it needs a flush that does not name a view.
+
 ## Structure
 
 - `tessera-build` keeps a second whole implementation of the build (`build_in_memory`) as a test oracle for the streaming one. Every change to the build is made twice.

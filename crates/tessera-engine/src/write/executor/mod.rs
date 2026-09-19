@@ -3597,15 +3597,11 @@ impl Executor {
         // deny lane, so paying it per window would put a flush-sized stall in front of every
         // revocation. Deleting an entity that already has geometry, which is the ordinary case,
         // costs one hash lookup per entry and no clone at all.
-        let buffered_deletions: Vec<EntityId> = deleted
-            .into_iter()
-            .filter(|entity| generation.buffer.contains(*entity))
-            .collect();
-        let buffer = if buffered_deletions.is_empty() {
+        let buffer = if !generation.buffer.holds_any(&deleted) {
             Arc::clone(&generation.buffer)
         } else {
             let mut buffer = (*generation.buffer).clone();
-            for entity in buffered_deletions {
+            for entity in deleted {
                 buffer.remove(entity);
             }
             self.health
