@@ -7,7 +7,7 @@
 
 use sha2::{Digest, Sha256};
 use tessera_analyse::{
-    analyser, analyser_with_identity, Analyser, ANALYSER_NAMES, ANALYSER_VECTOR_DIGESTS,
+    analyser, analyser_with_identity, identity_of, Analyser, ANALYSER_NAMES, ANALYSER_VECTOR_DIGESTS,
 };
 
 fn vector_sets() -> Vec<serde_json::Value> {
@@ -40,6 +40,11 @@ fn a_name_this_binary_does_not_carry_is_refused() {
         assert!(analyser(name).is_none(), "{name:?} resolved to an analyser");
     }
     assert!(analyser("unicode").is_some());
+    for name in ANALYSER_NAMES {
+        let built = analyser(name).expect("a carried name resolves");
+        assert_eq!(identity_of(name), Some(built.identity()), "{name}");
+    }
+    assert_eq!(identity_of("standard"), None);
 }
 
 #[test]

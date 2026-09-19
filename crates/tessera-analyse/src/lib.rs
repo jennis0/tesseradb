@@ -78,10 +78,20 @@ pub fn analyser(name: &str) -> Option<Analyser> {
     }
 }
 
+/// The identity, `<name>/<version>`, that a column declaring `name` is recorded under. It
+/// constructs no analyser, so a declaration is checked without loading the segmenter.
+pub fn identity_of(name: &str) -> Option<String> {
+    match name {
+        UNICODE => Some(format!("{UNICODE}/{UNICODE_VERSION}")),
+        _ => None,
+    }
+}
+
 /// The analyser whose recorded identity is `identity`. `None` where this binary does not carry
 /// that name, or carries it at another version: its terms could not be reproduced.
 pub fn analyser_with_identity(identity: &str) -> Option<Analyser> {
-    analyser(declared_name(identity)).filter(|a| a.identity() == identity)
+    let name = declared_name(identity);
+    (identity_of(name)? == identity).then(|| analyser(name)).flatten()
 }
 
 /// The declared name inside an identity, which is `<name>/<version>`.
@@ -160,7 +170,7 @@ impl Analyser {
 
     /// `<name>/<version>`, recorded in the manifest against every column this analyser indexed.
     pub fn identity(&self) -> String {
-        format!("{UNICODE}/{UNICODE_VERSION}")
+        identity_of(UNICODE).expect("`unicode` is carried")
     }
 
     /// The tokens of `text`, in order, with duplicates kept. `match` needs neither, but a phrase

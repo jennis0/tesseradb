@@ -1241,16 +1241,17 @@ impl WalkState<'_> {
     }
 }
 
-/// **`match.len`, derived at response time rather than stored** (§4).
+/// `match.len`: how many characters of `served`, from character `start`, fold to cover `q`.
 ///
-/// The index records where an entry starts as a character offset into the *served* string; this
-/// re-folds that string forward from there until `q`'s folded bytes are consumed, and the
-/// characters consumed are the length. That is O(|q|) per emitted value — `q` is bounded at 256
-/// bytes by the contract — and it needs no second copy of the folded text beside the entry, which
-/// is what lets `match` be reported in characters of the string the client is about to draw rather
-/// than of a folded form the client never sees.
+/// The index stores where an entry starts in the served string and no folded copy of it, so the
+/// length is found here, per emitted value, and is reported in characters of the string the client
+/// draws. An empty query highlights nothing.
 ///
-/// An empty query consumes nothing and highlights nothing, which is the picker's initial list.
+/// The fold of a prefix is not a prefix of the fold, so each probe folds its prefix whole. The
+/// probes double and then bisect, which is a logarithm of the span in folds; a walk that folded
+/// every prefix cost 0.6 ms per value at a 250-character query (measured). Bisecting takes every
+/// prefix longer than a covering one to cover `q` too, which holds where the tail's fold starts
+/// with `q`.
 fn match_len(fold: &SuggestionFold, served: &str, start: u32, folded_q: &str) -> u32 {
     if folded_q.is_empty() {
         return 0;
@@ -1259,28 +1260,81 @@ fn match_len(fold: &SuggestionFold, served: &str, start: u32, folded_q: &str) ->
         return 0;
     };
     let tail = &served[at..];
-    let mut characters = 0u32;
-    for (end, c) in tail.char_indices() {
-        characters += 1;
-        let folded = fold.entry(&tail[..end + c.len_utf8()]);
-        if folded.len() >= folded_q.len() && folded.starts_with(folded_q) {
-            return characters;
+    // `ends[k - 1]` is the byte at which the tail's first `k` characters end.
+    let ends: Vec<usize> = tail
+        .char_indices()
+        .map(|(at, c)| at + c.len_utf8())
+        .collect();
+    let n = ends.len();
+    let covers = |k: usize| fold.entry(&tail[..ends[k - 1]]).starts_with(folded_q);
+
+    let (mut short, mut long) = (0, 1);
+    while long < n && !covers(long) {
+        short = long;
+        long = (long * 2).min(n);
+    }
+    // The whole tail does not cover `q` where `start` does not name the word the entry came from:
+    // `SuggestionFold::entries_of` pairs folded and served word starts by position, and two
+    // boundary changes that cancel leave the pairing wrong. The entry string is the fold's own
+    // output, so the value still matches and is still gated correctly; only the span is wrong, and
+    // the tail's length keeps it inside the string.
+    if long == n && !covers(n) {
+        return n as u32;
+    }
+    while long - short > 1 {
+        let middle = short + (long - short) / 2;
+        if covers(middle) {
+            long = middle;
+        } else {
+            short = middle;
         }
     }
-    // **The whole tail, where the loop consumed it without matching.** Reachable only from an
-    // offset that does not name the word the entry came from — `SuggestionFold::served_word_starts`
-    // pairs the folded and served boundary lists by position, and two cancelling boundary changes
-    // can leave the counts equal over different boundaries (see that function). The entry string is
-    // the fold's own output either way, so such a value still *matches* correctly and is still
-    // gated correctly; what is wrong is only the span. Returning the tail's length rather than
-    // panicking or refusing keeps it that way: an over-long highlight on a string the client was
-    // going to draw anyway.
-    characters
+    long as u32
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The span is the shortest run of served characters whose fold covers the query, which is
+    /// what folding one more character at a time finds.
+    #[test]
+    fn match_len_is_the_shortest_prefix_whose_fold_covers_the_query() {
+        let fold = SuggestionFold::new();
+        let walked = |served: &str, start: usize, q: &str| {
+            let tail: String = served.chars().skip(start).collect();
+            let mut prefix = String::new();
+            for (taken, c) in tail.chars().enumerate() {
+                prefix.push(c);
+                if fold.entry(&prefix).starts_with(q) {
+                    return taken as u32 + 1;
+                }
+            }
+            tail.chars().count() as u32
+        };
+        for (served, start) in [
+            ("Machine Learning", 0),
+            ("Machine Learning", 8),
+            ("  Café   Noir", 2),
+            ("ﬁle STRASSE ＦＵＬＬ　width", 0),
+            ("a¼b and İstanbul", 0),
+            ("x", 0),
+        ] {
+            let folded = fold.entry(&served.chars().skip(start).collect::<String>());
+            for cut in folded.char_indices().map(|(at, c)| at + c.len_utf8()) {
+                let q = &folded[..cut];
+                assert_eq!(
+                    match_len(&fold, served, start as u32, q),
+                    walked(served, start, q),
+                    "{served:?} from {start}, q = {q:?}"
+                );
+            }
+        }
+        // A query the tail does not fold to takes the whole tail, and an empty one nothing.
+        assert_eq!(match_len(&fold, "Machine Learning", 8, "zebra"), 8);
+        assert_eq!(match_len(&fold, "Machine Learning", 0, ""), 0);
+        assert_eq!(match_len(&fold, "Machine", 9, "m"), 0);
+    }
 
     fn pool() -> rayon::ThreadPool {
         rayon::ThreadPoolBuilder::new()
