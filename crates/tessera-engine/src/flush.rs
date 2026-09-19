@@ -536,8 +536,13 @@ pub(crate) fn plan_flush(
     let mut consumed_fills: Vec<EntityId> = Vec::new();
     let mut consumed_scoped_fills: Vec<(EntityId, String)> = Vec::new();
     let mut fills: Vec<(EntityId, BufferedItem)> = Vec::new();
+    // An entity-scoped fill whose named view has been dropped is written by the first live
+    // view's pass: exactly one pass of a tick takes it, and the cells it writes name no view.
+    let live_views = || generation.bundle.partitions.values().flat_map(|p| p.views.keys());
+    let takes_orphans = live_views().min().is_some_and(|first| first == view);
     for (entity, fill) in generation.buffer.fills() {
-        if fill.view != view || is_deleted(&generation.overlay, *entity) {
+        let orphaned = takes_orphans && !live_views().any(|live| *live == fill.view);
+        if (fill.view != view && !orphaned) || is_deleted(&generation.overlay, *entity) {
             continue;
         }
         consumed_fills.push(*entity);

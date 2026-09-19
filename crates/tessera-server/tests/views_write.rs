@@ -3276,3 +3276,83 @@ async fn a_plain_view_created_in_a_commit_serves_its_rows_at_the_number_it_was_p
     assert_eq!(resp.status(), 201, "a plain view is created");
     a_view_created_and_fed_publishes_in_one_cycle(&mut served, "extra", "world").await;
 }
+
+/// One `POST /control/values` row through `view`, accepted.
+async fn fill_depth(served: &Served, batch_id: &str, view: &str, id: &[u8], depth: i32) {
+    use base64::Engine as _;
+    let resp = served
+        .server
+        .client
+        .post(served.server.control_url("/control/values"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .header("x-tessera-batch-id", batch_id)
+        .header("x-tessera-view", view)
+        .json(&json!([{
+            "external_id": base64::engine::general_purpose::STANDARD.encode(id),
+            "depth": depth,
+        }]))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "the fill is accepted");
+}
+
+/// An entity-scoped value belongs to no view, so one accepted through a view that is dropped
+/// before the next tick is still written, and does not hold the log.
+#[tokio::test]
+async fn an_entity_value_filled_through_a_view_dropped_before_the_tick_is_still_written() {
+    const DEPTH: i32 = 4242;
+    let mut served = serve_families().await;
+    assert_eq!(
+        create(&served, "quarter", "2026-Q5", json!({ "metadata": {} }))
+            .await
+            .status(),
+        201
+    );
+    reauthorise(&mut served).await;
+
+    let id = b"filled-through-a-dropped-view".to_vec();
+    let sparse = Attrs {
+        score: None,
+        depth: None,
+        tag: None,
+        note: None,
+        archive: None,
+    };
+    assert_eq!(
+        families_ingest(&served, "sparse", "world", &id, 20.0, 20.0, sparse)
+            .await
+            .status(),
+        200
+    );
+    flush(&served).await;
+
+    fill_depth(&served, "fill", "quarter:2026-Q5", &id, DEPTH).await;
+    drop_view(&served, "quarter", "2026-Q5", false).await;
+    reauthorise(&mut served).await;
+    flush(&served).await;
+
+    let holds_depth = json!({ "depth": { "eq": DEPTH } });
+    assert_eq!(
+        filtered_points(&served, "world", holds_depth.clone()).await.len(),
+        1,
+        "the value is read under a surviving view"
+    );
+    assert_eq!(
+        served.server.state.engine.generation().buffer.oldest_wal_pos(),
+        None,
+        "nothing buffered holds the log"
+    );
+
+    let served = restart(served).await;
+    assert_eq!(
+        filtered_points(&served, "world", holds_depth).await.len(),
+        1,
+        "and after a restart"
+    );
+    assert_eq!(
+        served.server.state.engine.generation().buffer.oldest_wal_pos(),
+        None,
+        "and the replayed fill does not hold the log either"
+    );
+}
