@@ -300,6 +300,19 @@ struct FoldApplies<'a> {
     carried_entities: u64,
 }
 
+/// What every derived writer of one fold shares: where the files go, the row spaces and segments
+/// the fold has just written, the levels its retirement is about to move, and the file counter.
+struct DerivedPass<'a> {
+    prefix_dir: &'a std::path::Path,
+    partition: &'a str,
+    n: u64,
+    incarnations: FxHashMap<String, tessera_types::view::ViewIncarnation>,
+    spaces: Vec<(String, tessera_store::RowSpace)>,
+    segments: Vec<(String, tessera_store::read::SegmentData)>,
+    pending: &'a PendingRetirement,
+    index: tessera_store::derived::DerivedIndex,
+}
+
 /// What a fold carries forward: everything the live manifest still lists that the fold did not
 /// consume — what published during its flight.
 ///
@@ -874,6 +887,60 @@ impl Executor {
         any
     }
 
+    /// Writes every derived artifact file into the prefix the fold is publishing. All of them are
+    /// derived, so a file that will not compose is left out and built on first use.
+    fn write_fold_derived(
+        &mut self,
+        to_prefix_dir: &std::path::Path,
+        completed: &crate::compact::CompletedFold,
+        manifest_n: u64,
+        data_plugin_hash: &str,
+        pending: &PendingRetirement,
+    ) -> Vec<tessera_store::manifest::DerivedExtent> {
+        let plan = &completed.plan;
+        let views: Vec<(String, u32)> = completed
+            .segments
+            .iter()
+            .map(|segment| (segment.view.clone(), segment.row_count))
+            .collect();
+        let mut pass = DerivedPass {
+            prefix_dir: to_prefix_dir,
+            partition: &plan.partition,
+            n: manifest_n,
+            // Stamped from the plan, which is what the row spaces came from: a view created since
+            // has no space here to describe.
+            incarnations: plan
+                .views
+                .iter()
+                .map(|view| (view.view.clone(), view.incarnation))
+                .collect(),
+            spaces: self.fold_row_spaces(to_prefix_dir, &plan.partition, &views),
+            segments: fold_segments(to_prefix_dir, &plan.partition, &completed.segments),
+            pending,
+            index: Default::default(),
+        };
+        let mut derived = self.write_containment_partitions(&mut pass, data_plugin_hash);
+        // The layouts are chosen before the files and the registry snapshot, or the fold would
+        // publish a level in its old layout under a record claiming the new one. A level whose
+        // layout flipped has its held forms dropped: nothing would ever claim them again.
+        let layouts = self.choose_layouts(&pass.spaces, pending, &pass.segments);
+        for (layer, level, chosen) in &layouts {
+            if self.live.record_layout(layer, *level, *chosen) {
+                self.artifact_projections.forget_level(layer, *level);
+            }
+        }
+        // The fold rewrites every level, so the deltas held for the tick describe forms that are
+        // going.
+        self.pending_forms.clear();
+        derived.extend(self.write_tile_indexes(&mut pass, &layouts));
+        derived.extend(self.write_row_columns(&mut pass, &layouts));
+        // The row forms of the spatial levels the columns do not cover.
+        let shape_rows = self.write_shape_rows(&mut pass, &derived);
+        derived.extend(shape_rows);
+        derived.extend(self.write_shape_held(&mut pass));
+        derived
+    }
+
     /// Whether a completed fold still applies to the live bundle, asked before anything is
     /// written: what it carries forward from the live manifest and the deletions it retires, or
     /// why it is discarded.
@@ -1174,103 +1241,13 @@ impl Executor {
         // counter, on the fold thread, from the number a build uses: the two counters cover
         // disjoint kinds, and `compact::TERM_IMAGE_MANIFEST_N` carries why that pass cannot use
         // this one.
-        let mut derived_index = tessera_store::derived::DerivedIndex::default();
-        let mut derived = self.write_containment_partitions(
+        let derived = self.write_fold_derived(
             &to_prefix_dir,
-            &plan.partition,
+            &completed,
             manifest_n,
             &live.bundle.manifest.data_plugin_hash,
             &pending,
-            &mut derived_index,
         );
-        // **The row spaces every derived structure below is computed over**, opened once: base
-        // only, against the permutations this fold just wrote.
-        let index_views: Vec<(String, u32)> = completed
-            .segments
-            .iter()
-            .map(|segment| (segment.view.clone(), segment.row_count))
-            .collect();
-        let spaces = self.fold_row_spaces(&to_prefix_dir, &plan.partition, &index_views);
-        // **The layout re-evaluation, here and not later** (selection memo §5). The fold writes the
-        // membership files first and snapshots the registry after, so a choice taken after the
-        // snapshot would reach neither the files nor the manifest — and the fold would publish a
-        // level in the old layout with a record claiming the new one. Taken before either.
-        //
-        // **A flip drops the level's held forms explicitly.** The cached row form is
-        // replace-on-mismatch and this fold moves the prefix, so it would go anyway; the *held*
-        // tile index and column would not, because a level that flipped is never asked for its old
-        // form again and nothing would ever claim the entry.
-        let fold_segments = fold_segments(&to_prefix_dir, &plan.partition, &completed.segments);
-        // **Which incarnation each planned view is** (decision 0115), so every derived structure
-        // this pass writes is stamped with the one whose row space it was written over. Taken
-        // from the plan rather than from the live manifest: the plan is what the row spaces above
-        // came from, and a view created since it was taken has no space here to describe.
-        let fold_incarnations: FxHashMap<String, tessera_types::view::ViewIncarnation> = plan
-            .views
-            .iter()
-            .map(|view| (view.view.clone(), view.incarnation))
-            .collect();
-        let layouts = self.choose_layouts(&spaces, &pending, &fold_segments);
-        for (layer, level, chosen) in &layouts {
-            if self.live.record_layout(layer, *level, *chosen) {
-                self.artifact_projections.forget_level(layer, *level);
-            }
-        }
-        // **The fold rewrites every level, so every delta held for the tick describes a form that
-        // is going.** The forms themselves go on the prefix move; the store holds what the deltas
-        // said, and the new prefix's forms are built from it.
-        self.pending_forms.clear();
-        // **The tile indexes, in the same pass and omitting the same levels** — and omitting the
-        // levels now recorded row-major, which have nothing to index. Their extents are rows, so
-        // they are per view and are projected against the base permutation this fold just wrote.
-        derived.extend(self.write_tile_indexes(
-            &to_prefix_dir,
-            &plan.partition,
-            manifest_n,
-            &fold_incarnations,
-            &spaces,
-            &layouts,
-            &pending,
-            &mut derived_index,
-        ));
-        // **And the columns for the levels that do**, in the same pass and under the same
-        // omissions. A level whose column will not compose gets no entry, and is served
-        // artifact-major.
-        let row_columns = self.write_row_columns(
-            &to_prefix_dir,
-            &plan.partition,
-            manifest_n,
-            &fold_incarnations,
-            &spaces,
-            &layouts,
-            &pending,
-            &fold_segments,
-            &mut derived_index,
-        );
-        derived.extend(row_columns);
-        // **And the row forms of the spatial levels the columns do not cover**, so the next open
-        // claims what this fold just resolved instead of resolving it again
-        // (`polygon-membership.md` §6.3; owner ruling 2026-08-29).
-        let shape_rows = self.write_shape_rows(
-            &to_prefix_dir,
-            &plan.partition,
-            manifest_n,
-            &fold_incarnations,
-            &derived,
-            &pending,
-            &fold_segments,
-            &mut derived_index,
-        );
-        derived.extend(shape_rows);
-        derived.extend(self.write_shape_held(
-            &to_prefix_dir,
-            &plan.partition,
-            manifest_n,
-            &fold_incarnations,
-            &pending,
-            &fold_segments,
-            &mut derived_index,
-        ));
         stairs.record("8 derived");
 
         // ---- step 3b: the report, before anything retires ---------------------------------------
@@ -2053,16 +2030,15 @@ impl Executor {
     /// **Every failure is an empty list, not a discarded fold.** A partition is derived — the level
     /// recomposes it on first use — so refusing to publish over one would be a refusal outside the
     /// disclosure surface, and the thing being refused has a correct fallback.
-    #[allow(clippy::too_many_arguments)]
-    pub(super) fn write_containment_partitions(
+    fn write_containment_partitions(
         &self,
-        prefix_dir: &std::path::Path,
-        partition: &str,
-        n: u64,
+        pass: &mut DerivedPass<'_>,
         data_plugin_hash: &str,
-        pending: &PendingRetirement,
-        index: &mut tessera_store::derived::DerivedIndex,
     ) -> Vec<tessera_store::manifest::DerivedExtent> {
+        let prefix_dir = pass.prefix_dir;
+        let partition = pass.partition;
+        let n = pass.n;
+        let pending = pass.pending;
         // The gate: under any plugin but the builtin the partition is not sound at all, so nothing
         // is composed and nothing is written (`crate::containment`).
         if !crate::containment::signature_shaped(data_plugin_hash) {
@@ -2123,7 +2099,7 @@ impl Executor {
             prefix_dir,
             partition,
             n,
-            index,
+            &mut pass.index,
             composed
                 .into_iter()
                 .map(
@@ -2413,19 +2389,18 @@ impl Executor {
     ///
     /// **Every failure is an empty entry, not a discarded fold** — a column is derived, and the
     /// artifact-major route answers every question it would have.
-    #[allow(clippy::too_many_arguments)]
-    pub(super) fn write_row_columns(
+    fn write_row_columns(
         &self,
-        prefix_dir: &std::path::Path,
-        partition: &str,
-        n: u64,
-        incarnations: &FxHashMap<String, tessera_types::view::ViewIncarnation>,
-        spaces: &[(String, tessera_store::RowSpace)],
+        pass: &mut DerivedPass<'_>,
         layouts: &[(String, u32, tessera_types::layer::ServingLayout)],
-        pending: &PendingRetirement,
-        fold_segments: &[(String, tessera_store::read::SegmentData)],
-        index: &mut tessera_store::derived::DerivedIndex,
     ) -> Vec<tessera_store::manifest::DerivedExtent> {
+        let prefix_dir = pass.prefix_dir;
+        let partition = pass.partition;
+        let n = pass.n;
+        let incarnations = &pass.incarnations;
+        let spaces = &pass.spaces;
+        let pending = pass.pending;
+        let fold_segments = &pass.segments;
         let wanted: Vec<(String, u32, tessera_types::layer::ServingLayout)> = layouts
             .iter()
             .filter(|(layer, level, layout)| {
@@ -2556,7 +2531,7 @@ impl Executor {
             prefix_dir,
             partition,
             n,
-            index,
+            &mut pass.index,
             written
                 .into_iter()
                 .filter_map(|(view, layer, level, level_version, layout, path)| {
@@ -2586,18 +2561,17 @@ impl Executor {
     ///
     /// **Every failure is a dropped entry, not a discarded fold** — the form is derived, and an
     /// open that finds no entry resolves the segment again, loudly.
-    #[allow(clippy::too_many_arguments)]
-    pub(super) fn write_shape_rows(
+    fn write_shape_rows(
         &self,
-        prefix_dir: &std::path::Path,
-        partition: &str,
-        n: u64,
-        incarnations: &FxHashMap<String, tessera_types::view::ViewIncarnation>,
+        pass: &mut DerivedPass<'_>,
         columns: &[tessera_store::manifest::DerivedExtent],
-        pending: &PendingRetirement,
-        fold_segments: &[(String, tessera_store::read::SegmentData)],
-        index: &mut tessera_store::derived::DerivedIndex,
     ) -> Vec<tessera_store::manifest::DerivedExtent> {
+        let prefix_dir = pass.prefix_dir;
+        let partition = pass.partition;
+        let n = pass.n;
+        let incarnations = &pass.incarnations;
+        let pending = pass.pending;
+        let fold_segments = &pass.segments;
         let levels: Vec<(String, u32)> = self.live.with_artifacts(|store| {
             levels_of(store)
                 .filter(|(layer, level)| !pending.is_pending(layer, *level))
@@ -2661,22 +2635,21 @@ impl Executor {
                 });
             }
         }
-        tessera_store::derived::file_derived(prefix_dir, partition, n, index, filed)
+        tessera_store::derived::file_derived(prefix_dir, partition, n, &mut pass.index, filed)
     }
 
     /// Write this prefix's persisted decompositions: every spatial level's held shapes for each
     /// fold view, as the level holds them at its current version.
-    #[allow(clippy::too_many_arguments)]
-    pub(super) fn write_shape_held(
+    fn write_shape_held(
         &self,
-        prefix_dir: &std::path::Path,
-        partition: &str,
-        n: u64,
-        incarnations: &FxHashMap<String, tessera_types::view::ViewIncarnation>,
-        pending: &PendingRetirement,
-        fold_segments: &[(String, tessera_store::read::SegmentData)],
-        index: &mut tessera_store::derived::DerivedIndex,
+        pass: &mut DerivedPass<'_>,
     ) -> Vec<tessera_store::manifest::DerivedExtent> {
+        let prefix_dir = pass.prefix_dir;
+        let partition = pass.partition;
+        let n = pass.n;
+        let incarnations = &pass.incarnations;
+        let pending = pass.pending;
+        let fold_segments = &pass.segments;
         let filed: Vec<tessera_store::derived::Filed> = self.live.with_artifacts(|store| {
             let mut out = Vec::new();
             let levels: Vec<(String, u32)> = levels_of(store)
@@ -2721,21 +2694,20 @@ impl Executor {
             }
             out
         });
-        tessera_store::derived::file_derived(prefix_dir, partition, n, index, filed)
+        tessera_store::derived::file_derived(prefix_dir, partition, n, &mut pass.index, filed)
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub(super) fn write_tile_indexes(
+    fn write_tile_indexes(
         &self,
-        prefix_dir: &std::path::Path,
-        partition: &str,
-        n: u64,
-        incarnations: &FxHashMap<String, tessera_types::view::ViewIncarnation>,
-        spaces: &[(String, tessera_store::RowSpace)],
+        pass: &mut DerivedPass<'_>,
         layouts: &[(String, u32, tessera_types::layer::ServingLayout)],
-        pending: &PendingRetirement,
-        index: &mut tessera_store::derived::DerivedIndex,
     ) -> Vec<tessera_store::manifest::DerivedExtent> {
+        let prefix_dir = pass.prefix_dir;
+        let partition = pass.partition;
+        let n = pass.n;
+        let incarnations = &pass.incarnations;
+        let spaces = &pass.spaces;
+        let pending = pass.pending;
         if spaces.is_empty() {
             return Vec::new();
         }
@@ -2802,7 +2774,7 @@ impl Executor {
             prefix_dir,
             partition,
             n,
-            index,
+            &mut pass.index,
             projected
                 .into_iter()
                 .filter_map(|(view, layer, level, level_version, bytes)| {
