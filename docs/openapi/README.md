@@ -26,10 +26,9 @@ the description says exactly that; the `/v1/viewport` body is not JSON and is de
 `arrow_type` value is engine-derived, so the description names its type and says the set is not
 enumerated there.
 
-Two request semantics in the file are the owner's rulings of 2026-08-25 and are marked as landing
+One request semantic in the file is the owner's ruling of 2026-08-25 and is marked as landing
 on the s3 track: `layers` omitted or `[]` means *no* layers, the string `"all"` means every
-reachable layer, and an array is intersected with the reachable set; and a dependent artifact's
-`masked_count` is its target's. Until that track merges, the server reads an omitted `layers` as
+reachable layer, and an array is intersected with the reachable set. Until that track merges, the server reads an omitted `layers` as
 `"all"` — send `[]` for none and an explicit array otherwise, which both servers read identically.
 The test that asserts the ruled behaviour is `#[ignore]`d with that reason.
 

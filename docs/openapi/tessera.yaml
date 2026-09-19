@@ -419,6 +419,11 @@ paths:
         fifteenth on the artifacts frame (`bool?`, after `matched`). The served set is identical
         with and without one — see `highlight`.
 
+        The artifacts frame's sixteenth column is `target` (`uint64?`): the `tessera_id` of the
+        artifact this row is attached to, which for a clustering's label is its cluster. The
+        target is a row of the same frame, and the column is null for a row attached to nothing.
+        A label's `masked_count` is its own. The `"identity"` projection omits `target`.
+
         `layers` decides whether an artifacts frame can appear — see its schema; the semantics
         there are the owner's ruling of 2026-08-25 and the server change is landing on the s3
         track, so until that merges an *omitted* `layers` is read as `"all"` and the string form is

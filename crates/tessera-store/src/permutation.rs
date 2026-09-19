@@ -1750,8 +1750,7 @@ impl RowSpace {
 
     /// Project into the **base** rows alone, ignoring every extent above them.
     ///
-    /// **What the fold writes, and what a *generating set* is projected through**
-    /// (`annotation-write-cycle.md` §4.1). A durable derived structure — a row-major column, a tile
+    /// **What the fold writes.** A durable derived structure — a row-major column, a tile
     /// index's extents — is written over the rows the fold folded and describes nothing above them,
     /// so this is the projection that produces one and the projection a reader must compare it
     /// against.
@@ -1760,9 +1759,8 @@ impl RowSpace {
     /// is extended by each flush in place (`tessera_engine::artifacts`); what base-only bought was
     /// that a form survived a flush and a merge untouched, and what it cost was that a member
     /// ingested since the last fold contributed nothing to its artifact's masked count — fail-closed
-    /// and hours wide under the nightly compaction gate. A generating set stays here, because the
-    /// containment partition composed beside it is a function of the level's records and knows
-    /// nothing of the geometry.
+    /// and hours wide under the nightly compaction gate. A generating set is projected through the whole
+    /// row space too.
     pub fn project_base(&self, mask: &croaring::Bitmap) -> croaring::Bitmap {
         self.base.project(mask)
     }

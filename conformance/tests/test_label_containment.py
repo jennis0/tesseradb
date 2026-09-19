@@ -228,3 +228,132 @@ def test_no_cache_above_the_containment_check_outlives_an_overlay_change(
         assert after == narrower
     finally:
         stop_server(proc)
+
+
+# ---------------------------------------------------------------------------------------------
+# A generating set whose members arrived after the build
+# ---------------------------------------------------------------------------------------------
+
+
+def _ingest_batch(rows: list[tuple[int, list[str]]]) -> bytes:
+    """A `/control/ingest` body for this fixture's bundle: `(external_id, x, y, access)`.
+
+    The external id is the source id's eight little-endian bytes, as `--mint-external-ids` writes
+    them, so an ingested member is addressed the same way a built one is.
+    """
+    import io  # noqa: PLC0415
+
+    import pyarrow as pa  # noqa: PLC0415
+    import pyarrow.ipc as ipc  # noqa: PLC0415
+
+    schema = pa.schema(
+        [
+            pa.field("external_id", pa.binary()),
+            pa.field("x", pa.float32()),
+            pa.field("y", pa.float32()),
+            pa.field("access", pa.list_(pa.utf8())),
+        ]
+    )
+    batch = pa.record_batch(
+        [
+            pa.array([source_id.to_bytes(8, "little") for source_id, _ in rows], pa.binary()),
+            pa.array([100.0 + i for i in range(len(rows))], pa.float32()),
+            pa.array([200.0 + i for i in range(len(rows))], pa.float32()),
+            pa.array([terms for _, terms in rows], pa.list_(pa.utf8())),
+        ],
+        schema=schema,
+    )
+    sink = io.BytesIO()
+    with ipc.new_stream(sink, schema) as writer:
+        writer.write_batch(batch)
+    return sink.getvalue()
+
+
+def _member(source_id: int) -> str:
+    return base64.b64encode(source_id.to_bytes(8, "little")).decode()
+
+
+#: Source ids for the two items this case ingests. Above the fixture's own range, so neither can
+#: be confused with a built entity.
+INGESTED_SHARED = 900
+INGESTED_EDGE = 901
+
+
+def test_a_generating_set_holding_an_ingested_member_is_served_on_the_same_rule(
+    tmp_path, tmp_path_factory, label_bundle
+):
+    """**Where a member's row came from does not decide who is served.**
+
+    A label published over a generating set that holds entities which arrived through
+    `/control/ingest` is served to a principal who holds every member of it and withheld from one
+    who lacks a single member — the same answer the built sets above get. A member is projected
+    into the row space it occupies, and a flushed entity occupies an extent row.
+
+    The publication names entities that are still in the commit buffer when it is accepted, so the
+    set has no rows for them until the flush; the label is served from that publication onwards.
+
+    **The control is in the same response.** The narrower principal is served the built labels it
+    contains, so the one absence is containment rather than a layer gate or an empty viewport.
+    """
+    private = tmp_path / "bundle"
+    shutil.copytree(label_bundle, private)
+    server, proc = spawn_server(private, tmp_path_factory.mktemp("label-ingested"))
+    try:
+        assert (
+            server.ingest(
+                _ingest_batch(
+                    [
+                        (INGESTED_SHARED, [str(lf.CORE_TERM), str(lf.EDGE_TERM)]),
+                        (INGESTED_EDGE, [str(lf.EDGE_TERM)]),
+                    ]
+                ),
+                "label-containment-ingest",
+            ).status_code
+            == 200
+        )
+
+        # Published while its members are still buffered: the set names two entities with no rows.
+        resp = server.publish_artifacts(
+            lf.LAYER.replace("/", "%2F"),
+            addressing="external",
+            artifacts=[
+                {
+                    "key": "l-ingested",
+                    "members": [_member(e) for e in lf.NARROW_SET],
+                    "content": [
+                        {
+                            "values": ["drawn from what arrived since the build"],
+                            "generated_from": [_member(e) for e in lf.NARROW_SET]
+                            + [_member(INGESTED_SHARED), _member(INGESTED_EDGE)],
+                        }
+                    ],
+                }
+            ],
+        )
+        assert resp.status_code == 201, resp.text
+
+        whole_token = server.authorise(lf.WHOLE_TERMS)["token"]
+        core_token = server.authorise(lf.CORE_TERMS)["token"]
+        # The flush that gives the ingested entities rows and publishes the artifact.
+        server.flush()
+        whole = served(server, whole_token)
+        assert whole["l-ingested"][1] == ("drawn from what arrived since the build",), (
+            "a principal holding every member of the set is served the content"
+        )
+        core = served(server, core_token)
+        assert "l-ingested" not in core, (
+            "one ingested member carries the edge term alone, so this principal is one member "
+            "short and the artifact is absent whole"
+        )
+        # The control in the same response: this principal is served the built labels it contains,
+        # so the absence above is containment rather than a gate or an empty viewport.
+        assert set(core) == {"l-ranked", "l-core"}
+
+        # A suppression of the ingested member withholds it from the wider principal too, and an
+        # unsuppress restores it: a deny reaches an extent row as it reaches a base row.
+        assert server.change(_member(INGESTED_SHARED), "suppress").status_code == 200
+        assert "l-ingested" not in served(server, whole_token)
+        assert server.change(_member(INGESTED_SHARED), "unsuppress").status_code == 200
+        assert "l-ingested" in served(server, whole_token)
+    finally:
+        stop_server(proc)

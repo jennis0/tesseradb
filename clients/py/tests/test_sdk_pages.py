@@ -193,14 +193,6 @@ def test_new_papers_with_a_cluster_and_a_label_are_served(served, corpus):
     assert set(report.artifact_ids["topics/kmeans"]) == {"k-new-label"}
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="issue #150: a content gated `all` whose generating set holds entities that arrived by "
-    "ingest fails containment for every principal, so the label is served to nobody. The "
-    "publication is accepted and the artifact exists; the same label over entities the build read "
-    "is served, which `test_a_label_set_declared_after_the_first_commit_is_declared_and_served` "
-    "shows",
-)
 def test_the_new_label_is_served_over_the_rows_the_same_commit_ingested(served, corpus):
     """§10.3's last step: the label's own text, as the viewport's artifacts frame carries it."""
     db = notebook(served, corpus)
