@@ -1620,6 +1620,13 @@ impl LiveState {
         lock_recover(&self.registry).get(name).cloned()
     }
 
+    /// Whether a registered layer resolves its memberships from shapes — [`spatial_membership`],
+    /// for a layer held by name.
+    pub(crate) fn spatial_layer(&self, name: &str) -> bool {
+        self.registered_layer(name)
+            .is_some_and(|registered| spatial_membership(&registered.declaration))
+    }
+
     /// Every `membership = { attribute = f }` layer, with the declared-scalar index of `f` and the
     /// vocabulary that column's values are named by — `(layer, index, vocabulary)`.
     ///
@@ -5442,11 +5449,400 @@ fn view_row_space<'a>(
         .map(|v| &v.row_space)
 }
 
+/// Write one membership extent per packed level into the prefix and fsync it, returning the
+/// manifest entries — the file half of [`Executor::write_membership_extents`] and of
+/// [`Executor::rewrite_membership_extents`], which differ only in where `ready` comes from.
+///
+/// **The layer name never reaches the filename.** It is path-shaped — `clusters/a` — so a
+/// name-derived path would escape the directory or collide after escaping. The manifest entry
+/// carries the name; the file is addressed by the publication that introduced it and its index
+/// within that publication. The directory entry has to be durable too, or a crash leaves a
+/// manifest naming a file whose name was never written.
+fn pack_membership_extents(
+    prefix_dir: &std::path::Path,
+    partition: &str,
+    n: u64,
+    ready: Vec<tessera_lifecycle::membership::PendingExtent>,
+) -> tessera_store::Result<Vec<tessera_store::manifest::MembershipExtent>> {
+    if ready.is_empty() {
+        return Ok(Vec::new());
+    }
+    let dir = prefix_dir
+        .join("partitions")
+        .join(partition)
+        .join("members");
+    std::fs::create_dir_all(&dir).map_err(|source| tessera_store::StoreError::Io {
+        path: dir.clone(),
+        source,
+    })?;
+    let mut entries = Vec::with_capacity(ready.len());
+    for (index, (layer, level, ordinal_lo, blobs)) in ready.into_iter().enumerate() {
+        let name = format!("members-{n:06}-{index:03}.tsmb");
+        let count = blobs.len() as u32;
+        let bytes = tessera_store::membership::pack(ordinal_lo, &blobs);
+        tessera_store::write_and_fsync(&dir.join(&name), &bytes)?;
+        entries.push(tessera_store::manifest::MembershipExtent {
+            path: format!("partitions/{partition}/members/{name}"),
+            layer,
+            level,
+            ordinal_lo,
+            count,
+        });
+    }
+    tessera_store::fsync_dir(&dir)?;
+    Ok(entries)
+}
+
+/// Whether every artefact a completed fold consumed is still listed in the live manifest.
+fn fold_rebases(
+    plan: &crate::compact::FoldPlan,
+    live_manifest: &SegmentsManifest,
+    consumed_segments: &FxHashSet<(&str, &str)>,
+) -> bool {
+    let listed_segments: FxHashSet<(&str, &str)> = live_manifest
+        .segments
+        .iter()
+        .map(|d| (d.view.as_str(), d.seg_id.as_str()))
+        .collect();
+    consumed_segments.is_subset(&listed_segments)
+        && plan.tiers.iter().all(|t| live_manifest.deltas.contains(t))
+        && plan
+            .runs
+            .iter()
+            .all(|r| live_manifest.external_id_runs.contains(r))
+        && plan.locator_extents.iter().all(|path| {
+            live_manifest
+                .locator_extents
+                .iter()
+                .any(|extent| &extent.path == path)
+        })
+        && plan.attr_extents.iter().all(|consumed| {
+            live_manifest
+                .attr_extents
+                .iter()
+                .any(|extent| extent.values == consumed.values)
+        })
+        && plan.record_extents.iter().all(|consumed| {
+            live_manifest
+                .record_extents
+                .iter()
+                .any(|extent| extent.blocks == consumed.blocks)
+        })
+        && plan.text_extents.iter().all(|consumed| {
+            live_manifest
+                .text_extents
+                .iter()
+                .any(|extent| extent.dict == consumed.dict)
+        })
+        && plan.entity_terms_extents.iter().all(|consumed| {
+            live_manifest
+                .entity_terms_extents
+                .iter()
+                .any(|extent| extent.terms == consumed.terms)
+        })
+}
+
+/// What a fold carries forward: everything the live manifest still lists that the fold did not
+/// consume — what published during its flight.
+///
+/// **Listed order is preserved in every one of these**: for segments it is entity order, which
+/// `RowSpace::with_extent` requires; for runs it is recency, which newest-first resolution reads;
+/// elsewhere it is what keeps a manifest's bytes from depending on a set's iteration order.
+///
+/// **Nothing of a dead incarnation is carried** (decision 0115). The drop retains the view out of
+/// the bundle, so the plan has no base for it and never consumed its segments, and carrying them
+/// would name an incarnation the new manifest does not declare — this omission is the whole of
+/// "reclamation by omission", the descriptors being left behind with the superseded prefix's files.
+/// It is `(view, incarnation)` and not the view alone because a dropped key may be created again,
+/// and a segment stamped with the dead incarnation would serve the new view the predecessor's
+/// points. Without the filter every fold after such a drop is discarded by the base check, so
+/// compaction stops for the life of the bundle and nothing ever retires.
+struct Flight<'a> {
+    segments: Vec<&'a tessera_store::manifest::SegmentDescriptor>,
+    tiers: Vec<String>,
+    runs: Vec<String>,
+    locators: Vec<tessera_store::manifest::LocatorExtent>,
+    attrs: Vec<tessera_store::manifest::AttrExtent>,
+    records: Vec<tessera_store::manifest::RecordExtent>,
+    texts: Vec<tessera_store::manifest::TextExtent>,
+    entity_terms: Vec<tessera_store::manifest::EntityTermsExtent>,
+    /// The dropped views whose segments were left behind, and how many segments that was.
+    omitted_views: Vec<String>,
+    omitted_segments: usize,
+}
+
+/// The entries of `live` the fold did not consume, in listed order.
+///
+/// The five extent lists are identified by the file the fold consumed them by — the values, blocks,
+/// dictionary or terms path, each `seg_id`-derived and never reused. Dropping a flight entry is
+/// never a refusal to open: it answers a drill-down "no record", a `match` with silence, or a
+/// label set with *unknown*, all with no symptom.
+fn not_consumed<T: Clone>(
+    live: &[T],
+    consumed: &FxHashSet<&str>,
+    key: impl Fn(&T) -> &str,
+) -> Vec<T> {
+    live.iter()
+        .filter(|entry| !consumed.contains(key(entry)))
+        .cloned()
+        .collect()
+}
+
+fn carried_forward<'a>(
+    plan: &crate::compact::FoldPlan,
+    live_manifest: &'a SegmentsManifest,
+    live_incarnations: &FxHashMap<&str, tessera_types::view::ViewIncarnation>,
+    consumed_segments: &FxHashSet<(&str, &str)>,
+) -> Flight<'a> {
+    // Owned, because the log that reports them outlives the generation this borrows from.
+    let mut omitted_views: Vec<String> = Vec::new();
+    let mut omitted_segments = 0usize;
+    let segments: Vec<&tessera_store::manifest::SegmentDescriptor> = live_manifest
+        .segments
+        .iter()
+        .filter(|d| !consumed_segments.contains(&(d.view.as_str(), d.seg_id.as_str())))
+        .filter(|d| {
+            let live = live_incarnations.get(d.view.as_str()) == Some(&d.incarnation);
+            if !live {
+                omitted_segments += 1;
+                if !omitted_views.iter().any(|v| v == &d.view) {
+                    omitted_views.push(d.view.clone());
+                }
+            }
+            live
+        })
+        .collect();
+    let mut attrs = not_consumed(
+        &live_manifest.attr_extents,
+        &plan
+            .attr_extents
+            .iter()
+            .map(|extent| extent.values.as_str())
+            .collect(),
+        |extent| extent.values.as_str(),
+    );
+    // **And nothing of a dead incarnation here either**: a group-scoped column's extents outlive
+    // the drop that orphaned them, and a key created again writes its own column under the same
+    // family name.
+    attrs.retain(|extent| {
+        carries_live_view(
+            live_incarnations,
+            extent.view.as_deref(),
+            extent.incarnation,
+        )
+    });
+    let mut texts = not_consumed(
+        &live_manifest.text_extents,
+        &plan
+            .text_extents
+            .iter()
+            .map(|extent| extent.dict.as_str())
+            .collect(),
+        |extent| extent.dict.as_str(),
+    );
+    texts.retain(|extent| {
+        carries_live_view(
+            live_incarnations,
+            extent.view.as_deref(),
+            extent.incarnation,
+        )
+    });
+    Flight {
+        segments,
+        tiers: live_manifest
+            .deltas
+            .iter()
+            .filter(|t| !plan.tiers.contains(t))
+            .cloned()
+            .collect(),
+        runs: live_manifest
+            .external_id_runs
+            .iter()
+            .filter(|r| !plan.runs.contains(r))
+            .cloned()
+            .collect(),
+        locators: live_manifest
+            .locator_extents
+            .iter()
+            .filter(|extent| !plan.locator_extents.contains(&extent.path))
+            .cloned()
+            .collect(),
+        attrs,
+        records: not_consumed(
+            &live_manifest.record_extents,
+            &plan
+                .record_extents
+                .iter()
+                .map(|extent| extent.blocks.as_str())
+                .collect(),
+            |extent| extent.blocks.as_str(),
+        ),
+        texts,
+        entity_terms: not_consumed(
+            &live_manifest.entity_terms_extents,
+            &plan
+                .entity_terms_extents
+                .iter()
+                .map(|extent| extent.terms.as_str())
+                .collect(),
+            |extent| extent.terms.as_str(),
+        ),
+        omitted_views,
+        omitted_segments,
+    }
+}
+
+/// Exactly the files the new manifest names that the fold did not write, deduplicated: a carried
+/// segment's run and locator are already in the run and locator lists, and linking one path twice
+/// is what `hard_link_forward` refuses.
+///
+/// **Every file an entry names, never a subset.** A segment carries its morton, cut index and
+/// columns and a `presence/<column>.roaring` per rendered column that has an absence — one missing
+/// reads as every-row-present. An attribute extent carries its values and presence always, and its
+/// dictionary, postings and offsets wherever the entry names them; a record extent all three files;
+/// a text extent all three; a transpose extent all four. An entry naming a file the link set omits
+/// is a prefix that refuses to open, whatever the file is for.
+///
+/// Taken from the manifest and not from a directory scan: a scan finds what is there, and the
+/// manifest says what must be.
+fn carried_files(
+    partition: &str,
+    live_manifest: &SegmentsManifest,
+    flight: &Flight,
+) -> std::collections::BTreeSet<String> {
+    let mut rels: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for descriptor in &flight.segments {
+        let segment_prefix = format!(
+            "partitions/{}/{}/segments/{}",
+            partition,
+            tessera_store::view_rel(&descriptor.view),
+            descriptor.seg_id
+        );
+        for name in [
+            "morton.u32",
+            tessera_store::read::CutIndex::FILE,
+            "columns.arrow",
+        ] {
+            rels.insert(format!("{segment_prefix}/{name}"));
+        }
+        let presence_prefix = format!("{segment_prefix}/{}/", RENDER_PRESENCE_DIR);
+        rels.extend(
+            live_manifest
+                .files
+                .keys()
+                .filter(|rel| rel.starts_with(&presence_prefix))
+                .cloned(),
+        );
+    }
+    rels.extend(flight.runs.iter().cloned());
+    rels.extend(flight.locators.iter().map(|e| e.path.clone()));
+    rels.extend(flight.tiers.iter().cloned());
+    for extent in &flight.attrs {
+        rels.insert(extent.values.clone());
+        rels.insert(extent.presence.clone());
+        rels.extend(extent.dict.iter().cloned());
+        rels.extend(extent.postings.iter().cloned());
+        rels.extend(extent.offsets.iter().cloned());
+    }
+    for extent in &flight.records {
+        rels.insert(extent.blocks.clone());
+        rels.insert(extent.hasrow.clone());
+        rels.insert(extent.directory.clone());
+    }
+    for extent in &flight.texts {
+        rels.insert(extent.dict.clone());
+        rels.insert(extent.postings.clone());
+        rels.insert(extent.presence.clone());
+    }
+    for extent in &flight.entity_terms {
+        rels.insert(extent.hasrow.clone());
+        rels.insert(extent.offsets.clone());
+        rels.insert(extent.terms.clone());
+        rels.insert(extent.bases.clone());
+    }
+    rels.extend(live_manifest.dict_extents.iter().map(|e| e.path.clone()));
+    rels
+}
+
+/// A record extent's files, resolved against the prefix directory that holds them. All three, and
+/// any one missing is a refusal to open rather than "those entities have no record".
+fn record_extent_paths(
+    prefix_dir: &std::path::Path,
+    extent: &tessera_store::manifest::RecordExtent,
+) -> tessera_filter::RecordExtentPaths {
+    tessera_filter::RecordExtentPaths {
+        blocks: prefix_dir.join(&extent.blocks),
+        hasrow: prefix_dir.join(&extent.hasrow),
+        directory: prefix_dir.join(&extent.directory),
+    }
+}
+
+/// An entity→term extent's four files, resolved against the prefix directory that holds them.
+fn entity_terms_extent_paths(
+    prefix_dir: &std::path::Path,
+    extent: &tessera_store::manifest::EntityTermsExtent,
+) -> tessera_store::EntityTermsExtentPaths {
+    tessera_store::EntityTermsExtentPaths {
+        hasrow: prefix_dir.join(&extent.hasrow),
+        offsets: prefix_dir.join(&extent.offsets),
+        terms: prefix_dir.join(&extent.terms),
+        bases: prefix_dir.join(&extent.bases),
+    }
+}
+
+/// A text extent's three files, resolved against the prefix directory that holds them, under the
+/// column name a leaf resolves to.
+fn text_extent_paths(
+    prefix_dir: &std::path::Path,
+    extent: &tessera_store::manifest::TextExtent,
+) -> crate::filter::TextExtentPaths {
+    crate::filter::TextExtentPaths {
+        column: crate::filter::extent_column_name(&extent.column, extent.view.as_deref()),
+        dict_rel: extent.dict.clone(),
+        dict: prefix_dir.join(&extent.dict),
+        postings: prefix_dir.join(&extent.postings),
+        presence: prefix_dir.join(&extent.presence),
+    }
+}
+
+/// The reader this process holds open for the tier `rel` names, or `None` if it holds none.
+///
+/// The two lists are positional against each other: `tiers` was opened from `rels`, which is the
+/// `deltas` list of the manifest they came from.
+fn held_tier(tiers: &[Arc<DeltaTier>], rels: &[String], rel: &str) -> Option<Arc<DeltaTier>> {
+    tiers
+        .iter()
+        .zip(rels)
+        .find(|(_, live_rel)| live_rel.as_str() == rel)
+        .map(|(tier, _)| Arc::clone(tier))
+}
+
+/// A background job is outstanding while it runs, and until its completed unit has been drained
+/// from its channel and published — see [`Executor::fold_outstanding`].
+fn outstanding(in_flight: &AtomicBool, completed_pending: &AtomicBool) -> bool {
+    in_flight.load(Ordering::SeqCst) || completed_pending.load(Ordering::SeqCst)
+}
+
 fn stored_membership(declaration: &tessera_types::layer::LayerDeclaration) -> bool {
     matches!(
         declaration.membership,
         tessera_types::layer::MembershipSource::Enumerated
     ) && declaration.shape.is_none()
+}
+
+/// A layer whose memberships are resolved from shapes: spatial, with a shape declared.
+fn spatial_membership(declaration: &tessera_types::layer::LayerDeclaration) -> bool {
+    matches!(
+        declaration.membership,
+        tessera_types::layer::MembershipSource::Spatial
+    ) && declaration.shape.is_some()
+}
+
+/// Every `(layer, level)` the artifact store holds.
+fn levels_of(store: &ArtifactStore) -> impl Iterator<Item = (String, u32)> + '_ {
+    store
+        .levels_and_extents()
+        .map(|(layer, level, _)| (layer.to_string(), level))
 }
 
 /// The `(layer, level)` a record changes the artifacts of, and `None` for every other record —
@@ -6140,82 +6536,34 @@ impl Executor {
 
     /// Whether a fold is **outstanding**: running, or completed and not yet published.
     ///
-    /// # Publication is the boundary the mutual exclusion has to use, and running was not
+    /// A fold plans against a snapshot of what the live manifest lists, and a merge or a coalesce
+    /// changes exactly that, so the three exclude one another — on this boundary rather than on
+    /// "the other is executing". A job that has completed and is still sitting undrained in its
+    /// channel is about to change the manifest, and a pass dispatched beside it is discarded whole
+    /// at its rebase check, having done all of its IO.
     ///
-    /// A fold plans against a snapshot of which artefacts the live manifest lists; a merge and a
-    /// coalesce change exactly that. So the three exclude one another — and the state each must
-    /// exclude is not "the other is executing" but "the other's effect is not visible yet". A
-    /// background job passes through three phases: running, completed and sitting undrained in its
-    /// channel, and published. The `*_in_flight` flag covers only the first, and the executor's own
-    /// loop straddles the second: `publish_completed_merges` runs at the top of an iteration and
-    /// drains nothing because the merge is still working, and `tick_if_due` later in the *same*
-    /// iteration reads a by-then-cleared `merge_in_flight` and dispatches a fold against a
-    /// generation that is about to change. The next iteration publishes the merge, and the fold is
-    /// left naming artefacts the live manifest no longer lists — discarded whole at its rebase
-    /// check.
-    ///
-    /// **Every outcome of that was fail-closed, and it was still worth closing**: the cost is a
-    /// discarded corpus rewrite — minutes to hours at scale — plus an orphan prefix tree nothing
-    /// sweeps, compaction §7's startup sweep covering only what is present when an executor
-    /// starts. It was also not rare. Measured on the merge-lands-during-fold direction: **3 of 93
-    /// runs of the whole `--test fold` binary and 12 of 480 runs of the single test, ~3%**, under
-    /// 3–4 concurrent lanes, with the mechanism confirmed each time (one dispatch, one orphan
-    /// prefix holding only `partitions/`, the discard line, then a second dispatch). "Microseconds
-    /// wide" describes the instruction window and is not the rate, because the loop and the job's
-    /// completion are both driven by the tick cadence rather than being independent.
-    ///
-    /// The `*_completed_pending` flags this reads are the ones the completion handshake already
-    /// maintains — set before the send, cleared by the drain
-    /// ([`ExecutorHealth::flush_completed_pending`] states the ordering) — so the boundary needed
-    /// no new state, only the right flag.
-    ///
-    /// # Suspended, not refused
-    ///
-    /// A pass that does not start here has had nothing rejected and has lost no intent, which is
-    /// why every site says *suspended*. `dispatch_merge` calls `plan_merge` fresh on every tick, so
-    /// a merge that does not start is simply re-decided at the next one against whatever the corpus
-    /// is then; the plan does not survive the tick, and it is not meant to. That is the same
-    /// principle this boundary rests on — a merge plan names specific segments, so one made before
-    /// a fold and held until after would be a plan against a generation the fold is about to
-    /// replace. Re-planning is what keeps a plan and the generation it executes on together.
-    ///
-    /// # Why this cannot wedge
-    ///
-    /// A suspension here lasts at most one pass. The pending flags are set only by a completing job
-    /// and cleared only by `publish_completed_*`, which [`Executor::run`] calls at the top of every
-    /// iteration, unconditionally and *before* `tick_if_due` — no dispatcher's suspension can
-    /// suppress the drain that clears the flag it suspended on, because no dispatcher runs before
-    /// it. Nothing on this path sets a pending flag, so a dispatcher cannot starve itself, and the
-    /// mutual case resolves for the same reason: whichever flags are set, the next iteration's drain
-    /// clears them all before any dispatch is attempted. The executor also cannot sleep through it —
-    /// [`Executor::wait_for_work`] treats every pending flag as a reason for the fast completion
-    /// poll rather than the full tick. The one state in which a pending flag never clears is a
-    /// test's publication pause, which is `false` in a shipped build and wakes the executor when it
-    /// is lifted.
-    ///
-    /// A suspended *requested* fold is not consumed either: the request flag stays armed and the
-    /// next tick tries again, which is the treatment `dispatch_fold` already gives a fold suspended
-    /// for a running merge.
+    /// Nothing is refused by a suspension and nothing wedges: [`Executor::run`] drains every
+    /// completed job before any dispatcher runs, so a suspension lasts at most one pass; a plan
+    /// does not survive the tick and is re-decided at the next one, and a suspended request flag
+    /// stays armed. [`Executor::wait_for_work`] treats a pending flag as a reason for the fast
+    /// completion poll, so the executor cannot sleep through it either.
     fn fold_outstanding(&self) -> bool {
-        self.fold_in_flight.load(Ordering::SeqCst)
-            || self.health.fold_completed_pending.load(Ordering::SeqCst)
+        outstanding(&self.fold_in_flight, &self.health.fold_completed_pending)
     }
 
-    /// Whether a merge is running, or completed and not yet published — the boundary
-    /// [`Executor::fold_outstanding`] states, applied to the row-space merge.
+    /// Whether a merge is outstanding — [`Executor::fold_outstanding`]'s boundary, applied to the
+    /// row-space merge.
     fn merge_outstanding(&self) -> bool {
-        self.merge_in_flight.load(Ordering::SeqCst)
-            || self.health.merge_completed_pending.load(Ordering::SeqCst)
+        outstanding(&self.merge_in_flight, &self.health.merge_completed_pending)
     }
 
-    /// Whether a coalesce is running, or completed and not yet published — the boundary
-    /// [`Executor::fold_outstanding`] states, applied to the entity-space coalesce.
+    /// Whether a coalesce is outstanding — [`Executor::fold_outstanding`]'s boundary, applied to
+    /// the entity-space coalesce.
     fn coalesce_outstanding(&self) -> bool {
-        self.coalesce_in_flight.load(Ordering::SeqCst)
-            || self
-                .health
-                .coalesce_completed_pending
-                .load(Ordering::SeqCst)
+        outstanding(
+            &self.coalesce_in_flight,
+            &self.health.coalesce_completed_pending,
+        )
     }
 
     /// Select and dispatch an entity-space coalesce, if one qualifies and none is outstanding.
@@ -6588,6 +6936,18 @@ impl Executor {
         if !self.may_publish() {
             return;
         }
+        // Every counted discard below is the same posture, so it is one closure rather than the
+        // shape repeated. It owns what it reports, so it borrows nothing the sequence below needs.
+        let discard = {
+            let health = Arc::clone(&self.health);
+            move |reason: &str| {
+                health.merge_failures.fetch_add(1, Ordering::Relaxed);
+                tracing::error!(
+                    "ALARM: discarding a completed merge: {reason}. Its files are orphans, every \
+                     consumed segment still stands, and the next tick re-plans"
+                );
+            }
+        };
         let live = self.generation.load_full();
         if live.prefix != completed.prefix {
             tracing::warn!("discarding a completed merge planned against a superseded prefix");
@@ -6614,13 +6974,9 @@ impl Executor {
         let manifest_n = match self.allocate_manifest_n() {
             Ok(n) => n,
             Err(e) => {
-                self.health.merge_failures.fetch_add(1, Ordering::Relaxed);
-                tracing::error!(
-                    error = %e,
-                    "ALARM: a completed merge's side-manifest number could not be allocated; its \
-                     files are orphans, every consumed segment still stands, and the next tick \
-                     re-plans"
-                );
+                discard(&format!(
+                    "its side-manifest number could not be allocated ({e})"
+                ));
                 return;
             }
         };
@@ -6635,12 +6991,7 @@ impl Executor {
             &mut manifest,
             None,
         ) {
-            self.health.merge_failures.fetch_add(1, Ordering::Relaxed);
-            tracing::error!(
-                error = %e,
-                "ALARM: a completed merge's side-manifest could not be committed; its files are \
-                 orphans, every consumed segment still stands, and the next tick re-plans"
-            );
+            discard(&format!("its side-manifest could not be committed ({e})"));
             return;
         }
 
@@ -7118,8 +7469,6 @@ impl Executor {
     /// still holds mapped. That is compaction §7's "crash between `CURRENT` and the swap", reached
     /// without a crash.
     fn publish_fold(&mut self, completed: crate::compact::CompletedFold) {
-        use std::collections::BTreeSet;
-
         let started = std::time::Instant::now();
         // The fold thread's staircase, continued here for the publication's phases so the gauges
         // on `/control/status` cover the whole fold (`compact::Staircase`). A discard below drops
@@ -7183,20 +7532,10 @@ impl Executor {
 
         // ---- step 1: rebase or discard --------------------------------------------------------
         //
-        // ABA-safe because ids are never reused (contracts §2.1), so an artefact still listed is
-        // the same artefact the fold consumed. A merge or a coalesce that published under the fold
-        // fails this.
-        //
-        // **Unreachable by construction while the suspension holds, and kept anyway.** No merge or
-        // coalesce can publish under a fold at all: `dispatch_merge` and `dispatch_coalesce` are
-        // the only routes to either, both run from the tick, and both consult
-        // `Executor::fold_outstanding`, which covers the fold from dispatch through publication.
-        // What would make this reachable again is a dispatcher that stopped consulting those
-        // predicates, or a second route to a merge — a control-plane trigger, a second writer. The
-        // check costs one set comparison against a manifest already in hand, on a path that has
-        // just spent hours of IO, and its failure mode is fail-closed where forcing would drop
-        // every row the merge wrote; so it stays as defence in depth rather than as a path with a
-        // known rate.
+        // ABA-safe because ids are never reused, so an artefact still listed is the same artefact
+        // the fold consumed. [`Executor::fold_outstanding`] makes a merge or a coalesce publishing
+        // under a fold unreachable; this stays as defence in depth, being one set comparison
+        // against a manifest already in hand on a path that has just spent hours of IO.
         let consumed_segments: FxHashSet<(&str, &str)> = plan
             .views
             .iter()
@@ -7206,79 +7545,17 @@ impl Executor {
                     .map(move |segment| (view.view.as_str(), segment.seg_id.as_str()))
             })
             .collect();
-        let listed_segments: FxHashSet<(&str, &str)> = live_manifest
-            .segments
-            .iter()
-            .map(|d| (d.view.as_str(), d.seg_id.as_str()))
-            .collect();
-        if !consumed_segments.is_subset(&listed_segments)
-            || !plan.tiers.iter().all(|t| live_manifest.deltas.contains(t))
-            || !plan
-                .runs
-                .iter()
-                .all(|r| live_manifest.external_id_runs.contains(r))
-            || !plan.locator_extents.iter().all(|path| {
-                live_manifest
-                    .locator_extents
-                    .iter()
-                    .any(|extent| &extent.path == path)
-            })
-            || !plan.attr_extents.iter().all(|consumed| {
-                live_manifest
-                    .attr_extents
-                    .iter()
-                    .any(|extent| extent.values == consumed.values)
-            })
-            || !plan.record_extents.iter().all(|consumed| {
-                live_manifest
-                    .record_extents
-                    .iter()
-                    .any(|extent| extent.blocks == consumed.blocks)
-            })
-            || !plan.text_extents.iter().all(|consumed| {
-                live_manifest
-                    .text_extents
-                    .iter()
-                    .any(|extent| extent.dict == consumed.dict)
-            })
-            || !plan.entity_terms_extents.iter().all(|consumed| {
-                live_manifest
-                    .entity_terms_extents
-                    .iter()
-                    .any(|extent| extent.terms == consumed.terms)
-            })
-        {
+        if !fold_rebases(plan, live_manifest, &consumed_segments) {
             discard("an artefact it consumed is no longer listed in the live manifest");
             return;
         }
 
         // ---- the carry-forward set ------------------------------------------------------------
         //
-        // Listed order is preserved in every one of these: for segments it is entity order, which
-        // `RowSpace::with_extent` requires; for runs it is recency, which decision 0047's
-        // newest-first resolution reads.
-        //
-        // **A dead incarnation's segments are carried by nothing** (`views.md` §3.4, decision
-        // 0115): the drop retains the view out of the bundle, so the plan has no base for it and
-        // never consumed its segments — and carrying them would name an incarnation the new
-        // manifest does not declare. This filter is the whole of "reclamation by omission": the
-        // descriptors are left behind with the superseded prefix's files, which the reclaim then
-        // deletes. Without it every fold after a drop of a view that held rows is *discarded* by
-        // the base check below, so compaction stops for the life of the bundle and nothing ever
-        // retires.
-        //
-        // **`(view, incarnation)`, not the view alone.** A dropped key may be created again
-        // (decision 0115), and the recreated view is declared under the same id — so "is this
-        // view still declared" stopped being the question the moment the burn was withdrawn. A
-        // segment stamped with the dead incarnation would otherwise be carried into the fold's
-        // output and the new view would serve the predecessor's points.
-        //
-        // **The `MANIFEST.json` roster decides, not the partition's view map.** Both answer the
-        // same question — the map is retained against the same roster at `Bundle::with_views` —
-        // but only one of them is that question: the map is a cache of open row spaces, and a
-        // later change to how it is built would move this predicate without anyone reading this
-        // line. The roster read here is the same snapshot the new manifest is written from, so
-        // what is carried and what is declared cannot disagree.
+        // **The `MANIFEST.json` roster decides which incarnations are live, not the partition's
+        // view map.** The map is a cache of open row spaces; the roster read here is the same
+        // snapshot the new manifest is written from, so what is carried and what is declared cannot
+        // disagree.
         let live_incarnations: FxHashMap<&str, tessera_types::view::ViewIncarnation> = live
             .bundle
             .manifest
@@ -7286,125 +7563,7 @@ impl Executor {
             .iter()
             .map(|v| (v.id.as_str(), v.incarnation))
             .collect();
-        // **Owned, because the log that reports them outlives this borrow**: the generation is
-        // moved into `pending_reclaim` at step 8, a few lines before the publication is logged.
-        let mut omitted_views: Vec<String> = Vec::new();
-        let mut omitted_segments = 0usize;
-        let carried_segments: Vec<&tessera_store::manifest::SegmentDescriptor> = live_manifest
-            .segments
-            .iter()
-            .filter(|d| !consumed_segments.contains(&(d.view.as_str(), d.seg_id.as_str())))
-            .filter(|d| {
-                let live = live_incarnations.get(d.view.as_str()) == Some(&d.incarnation);
-                if !live {
-                    omitted_segments += 1;
-                    if !omitted_views.iter().any(|v| v == &d.view) {
-                        omitted_views.push(d.view.clone());
-                    }
-                }
-                live
-            })
-            .collect();
-        let carried_tiers: Vec<String> = live_manifest
-            .deltas
-            .iter()
-            .filter(|t| !plan.tiers.contains(t))
-            .cloned()
-            .collect();
-        let carried_runs: Vec<String> = live_manifest
-            .external_id_runs
-            .iter()
-            .filter(|r| !plan.runs.contains(r))
-            .cloned()
-            .collect();
-        let carried_locators: Vec<tessera_store::manifest::LocatorExtent> = live_manifest
-            .locator_extents
-            .iter()
-            .filter(|extent| !plan.locator_extents.contains(&extent.path))
-            .cloned()
-            .collect();
-        // **The flight's attribute extents, and the pass consumed every other one** (filter-index
-        // §6.2). Selected by the values path because that is what the plan consumed and what the
-        // fold read; the column name is not an identity here, since a column has many extents.
-        //
-        // Listed order is preserved for the reason it is everywhere else in this set: composition
-        // unions the layers, so their order is immaterial to the answer — but a manifest whose
-        // bytes depend on a set iteration order is a bundle identity that depends on one.
-        let consumed_attrs: FxHashSet<&str> = plan
-            .attr_extents
-            .iter()
-            .map(|extent| extent.values.as_str())
-            .collect();
-        let carried_attrs: Vec<tessera_store::manifest::AttrExtent> = live_manifest
-            .attr_extents
-            .iter()
-            .filter(|extent| !consumed_attrs.contains(extent.values.as_str()))
-            // **And nothing of a dead incarnation** (decision 0115), on the segment filter's
-            // argument: a group-scoped column's extents outlive the drop that orphaned them, and
-            // a key created again writes its own column under the same family name.
-            .filter(|extent| {
-                carries_live_view(
-                    &live_incarnations,
-                    extent.view.as_deref(),
-                    extent.incarnation,
-                )
-            })
-            .cloned()
-            .collect();
-        // The record-blob extents take the attribute extents' shape exactly: the fold consumed
-        // every one its snapshot named and folded the rows into the new base blob; what is carried
-        // is the flight's — a flush publishing during the fold appended entities the new base does
-        // not hold, and dropping its entry would answer their drill-downs "no record" with no
-        // symptom. Identified by the blocks path, `seg_id`-derived and never reused.
-        let consumed_records: FxHashSet<&str> = plan
-            .record_extents
-            .iter()
-            .map(|extent| extent.blocks.as_str())
-            .collect();
-        let carried_records: Vec<tessera_store::manifest::RecordExtent> = live_manifest
-            .record_extents
-            .iter()
-            .filter(|extent| !consumed_records.contains(extent.blocks.as_str()))
-            .cloned()
-            .collect();
-        // The text extents, same shape again: the fold merged every one its snapshot named into
-        // the new base index, and what is carried is the flight's. Identified by the dictionary
-        // path, which is `seg_id`-derived and never reused — and which is also the half a reader
-        // cannot substitute, an extent's postings being positions in *its own* dictionary.
-        let consumed_texts: FxHashSet<&str> = plan
-            .text_extents
-            .iter()
-            .map(|extent| extent.dict.as_str())
-            .collect();
-        // The transpose's extents, the same shape a third time: pass 4c folded every one its
-        // snapshot named into the new base, and what is carried is the flight's. Identified by the
-        // terms path, `seg_id`-derived and never reused. Dropping a flight entry would leave the
-        // entities that flush minted with *unknown* labels — a drill-down without them and, on the
-        // write path, a join rule with nothing to compare against.
-        let consumed_entity_terms: FxHashSet<&str> = plan
-            .entity_terms_extents
-            .iter()
-            .map(|extent| extent.terms.as_str())
-            .collect();
-        let carried_entity_terms: Vec<tessera_store::manifest::EntityTermsExtent> = live_manifest
-            .entity_terms_extents
-            .iter()
-            .filter(|extent| !consumed_entity_terms.contains(extent.terms.as_str()))
-            .cloned()
-            .collect();
-        let carried_texts: Vec<tessera_store::manifest::TextExtent> = live_manifest
-            .text_extents
-            .iter()
-            .filter(|extent| !consumed_texts.contains(extent.dict.as_str()))
-            .filter(|extent| {
-                carries_live_view(
-                    &live_incarnations,
-                    extent.view.as_deref(),
-                    extent.incarnation,
-                )
-            })
-            .cloned()
-            .collect();
+        let flight = carried_forward(plan, live_manifest, &live_incarnations, &consumed_segments);
 
         // **Every carried-forward extent must begin at or above the fold's own base**, per view.
         // `RowSpace::with_extent` refuses an extent below the base permutation's bound and
@@ -7414,7 +7573,7 @@ impl Executor {
         // state's-clothes). Both would be discovered *after* `CURRENT` had flipped, so they are
         // checked before anything is written. The relation holds for every publication that
         // cleared the live row space's own floor; this refuses to be the place it is assumed.
-        for descriptor in &carried_segments {
+        for descriptor in &flight.segments {
             let Some(view) = plan.views.iter().find(|s| s.view == descriptor.view) else {
                 // **A view that arrived during the flight**, and the only way to reach this now:
                 // a view created and flushed since the plan was taken has a segment and no base
@@ -7444,7 +7603,8 @@ impl Executor {
         // those per-view bounds and is therefore at or below that high-water. A view whose own
         // bound is lower cannot produce an extent beneath the maximum, because it does not get to
         // choose its ids.
-        if carried_locators
+        if flight
+            .locators
             .iter()
             .any(|extent| extent.entity_lo < plan.entity_bound)
         {
@@ -7457,17 +7617,17 @@ impl Executor {
         // the *base locator's* path from that entry's directory, so it would take a flush's
         // entity-range extent for the full-length base locator. Discarded rather than published;
         // the next fold's snapshot holds the run and emits a proper base for it.
-        if completed.external_id_run.is_none() && !carried_runs.is_empty() {
+        if completed.external_id_run.is_none() && !flight.runs.is_empty() {
             discard("the deployment gained its first external-id run during the fold's flight");
             return;
         }
 
         // ---- retirement: compaction §5, evaluated here and nowhere earlier ---------------------
         let mut carried = crate::compact::CarriedForward::new();
-        for descriptor in &carried_segments {
+        for descriptor in &flight.segments {
             carried.add_segment(descriptor);
         }
-        for extent in &carried_locators {
+        for extent in &flight.locators {
             carried.add_locator_extent(extent);
         }
         let executed = crate::compact::executed(&plan.tombstones, &carried);
@@ -7694,19 +7854,20 @@ impl Executor {
         // Each view's fold base first and its carried extents after it, because the reader takes
         // the first segment listed for a view as the one `permutation.bin` addresses and every
         // later one as an extent above it.
-        let mut segments = Vec::with_capacity(completed.segments.len() + carried_segments.len());
+        let mut segments = Vec::with_capacity(completed.segments.len() + flight.segments.len());
         for base in &completed.segments {
             segments.push(base.clone());
             segments.extend(
-                carried_segments
+                flight
+                    .segments
                     .iter()
                     .filter(|d| d.view == base.view)
                     .map(|d| (*d).clone()),
             );
         }
-        let mut external_id_runs = Vec::with_capacity(1 + carried_runs.len());
+        let mut external_id_runs = Vec::with_capacity(1 + flight.runs.len());
         external_id_runs.extend(completed.external_id_run.clone());
-        external_id_runs.extend(carried_runs.iter().cloned());
+        external_id_runs.extend(flight.runs.iter().cloned());
 
         // **The executed entries leave `tombstones` here as well as the overlay**, and the two must
         // be one decision: the manifest is the overlay's other durable home (write-path §4.5), so a
@@ -7746,7 +7907,7 @@ impl Executor {
             // index. A flush publishing during the fold indexed entities the new base does not
             // hold, and dropping its entry would answer every `match` over that batch's prose with
             // silence — the words are simply not in the base the fold wrote.
-            text_extents: carried_texts.clone(),
+            text_extents: flight.texts.clone(),
             // **Live, and untouched.** Deriving either from the fold's inputs moves the watermark
             // backwards past every post-snapshot entity, and composition treats an entity at or
             // above it as buffered rather than rowed — so the gap goes invisible to every principal
@@ -7800,7 +7961,7 @@ impl Executor {
                 .collect(),
             artifact_record_extents: self.artifact_record_extents.clone(),
             segments,
-            deltas: carried_tiers.clone(),
+            deltas: flight.tiers.clone(),
             // **Verbatim, and the live list rather than the plan's**: a flush that promoted during
             // the fold's flight appended an extent whose ordinals the live dictionary already
             // holds, and dropping it would shift every ordinal after it.
@@ -7812,179 +7973,19 @@ impl Executor {
             // cleanly and silently answers filters without every post-snapshot entity's value — a
             // wrong answer with no symptom, and strictly worse than a refusal to open. The two
             // halves are written here, in one manifest write.
-            attr_extents: carried_attrs.clone(),
-            record_extents: carried_records.clone(),
-            entity_terms_extents: carried_entity_terms.clone(),
+            attr_extents: flight.attrs.clone(),
+            record_extents: flight.records.clone(),
+            entity_terms_extents: flight.entity_terms.clone(),
             external_id_runs,
-            locator_extents: carried_locators.clone(),
+            locator_extents: flight.locators.clone(),
             ..SegmentsManifest::empty()
         };
         write_deny_state(&mut segments_manifest, &published_overlay);
 
         // ---- the new `MANIFEST.json` ----------------------------------------------------------
-        //
-        // **`entity_id_high_water` here is the *snapshot's* entity space, not the live one**, and
-        // the two fields of that name mean different things. `SEGMENTS-<n>.json`'s seeds the I9
-        // allocator and is the live value, above. `MANIFEST.json`'s is what
-        // `ExternalIdSidecar::deferred_from_manifest` takes as the base locator's declared length —
-        // the reader that makes this field's value load-bearing here — and
-        // pass 3 sized that locator to the snapshot so post-snapshot locator extents stay reachable
-        // past it (compaction §3, pass 3). A live value here would make the base locator claim
-        // every post-snapshot entity and answer "this item has no external id" for items that have
-        // one.
-        //
-        // **It is not the only reader, and the second one is I9's allocator.** `Engine::open` seeds
-        // the allocator's floor from `bundle.manifest.entity_id_high_water.max(side_manifest)`
-        // (`session.rs`), so writing a *lower* value here is safe only because the side-manifest
-        // carries the live one and the `max` picks it up. That is the whole of why lowering this
-        // field does not re-issue entity ids after a restart — and it is a property of the other
-        // reader, not of this one, so a change on either side has to re-check it.
-        let mut bundle_manifest = live.bundle.manifest.clone();
-        // **The schema as it stood at the plan.** A column declared while the fold ran has no
-        // base in the new prefix, so it stays off this manifest and on the side manifest's runtime
-        // list, from which the reopen appends it again at the same tail position
-        // (`ingest.md` §6.3; `compact::FoldContext::runtime_attributes`).
-        {
-            let (runtime_attributes, runtime_scoped_attributes) =
-                self.live.attributes_for_publication();
-            let since_plan: Vec<&str> = runtime_attributes
-                .iter()
-                .map(|d| d.name.as_str())
-                .filter(|name| !completed.runtime_attributes.iter().any(|n| n == name))
-                .collect();
-            bundle_manifest
-                .declared_scalars
-                .retain(|d| !since_plan.contains(&d.name.as_str()));
-            let scoped_since_plan: Vec<&str> = runtime_scoped_attributes
-                .iter()
-                .map(|f| f.name.as_str())
-                .filter(|name| {
-                    !completed
-                        .runtime_scoped_attributes
-                        .iter()
-                        .any(|n| n == name)
-                })
-                .collect();
-            for group in &mut bundle_manifest.groups {
-                group
-                    .scoped_scalars
-                    .retain(|f| !scoped_since_plan.contains(&f.name.as_str()));
-            }
-        }
-        // **Every live binding, with its title, into the table this fold writes**
-        // (`ingest.md` §1.3). A vocabulary declared at a running service carries its declaration
-        // in the served manifest and its values in its minter, and the extensions folded in below
-        // are a second path to the same bindings; taking them from the minters here makes the
-        // written table complete whichever path fed it, and the merge is a union so neither can
-        // drop one.
-        crate::vocabularies::merge_live_values(&mut bundle_manifest, &live.vocabularies);
-        bundle_manifest.entity_id_high_water = plan.entity_bound;
-        bundle_manifest.files = completed.files.clone();
-        // **The extensions fold in verbatim, and verbatim is the whole rule** (§3.3). Every binding
-        // the served side-manifests carried becomes a value of the new prefix's
-        // `MANIFEST.vocabularies`, keys and codes byte-identical, and the new prefix's first
-        // `SEGMENTS-<n>.json` restates an empty extension set — which is what the `Vec::new()`
-        // above is.
-        //
-        // A fold that re-derived, re-sorted or re-numbered here would recolour the whole corpus
-        // with no error and no digest mismatch, because `columns.arrow` stores the code and nothing
-        // else records what it meant. Appending the carried values is therefore the entire
-        // operation: no compilation, no normalisation, no pass through the schema compiler.
-        //
-        // Decision 0050 touches none of this. Codes are not ordinals, index nothing positional, and
-        // no cached artefact is keyed by them, so the fold's postings rewrite and fragment
-        // invalidation pass over the vocabulary table without reading it.
-        let carried_bindings: Vec<_> = live
-            .bundle
-            .partitions
-            .values()
-            .flat_map(|partition| partition.manifest.vocabulary_extensions.iter().cloned())
-            .collect();
-        tessera_store::vocabulary::fold_extensions_into(
-            &mut bundle_manifest.vocabularies,
-            &carried_bindings,
-        );
+        let mut bundle_manifest = self.fold_bundle_manifest(&live, &completed, plan);
 
-        // Exactly the files the new manifest names, deduplicated: a carried segment's run and
-        // locator are already in the run and locator lists, and linking one path twice is what
-        // `hard_link_forward` refuses.
-        let mut carried_rels: BTreeSet<String> = BTreeSet::new();
-        for descriptor in &carried_segments {
-            let segment_prefix = format!(
-                "partitions/{}/{}/segments/{}",
-                plan.partition,
-                tessera_store::view_rel(&descriptor.view),
-                descriptor.seg_id
-            );
-            for name in [
-                "morton.u32",
-                tessera_store::read::CutIndex::FILE,
-                "columns.arrow",
-            ] {
-                carried_rels.insert(format!("{segment_prefix}/{name}"));
-            }
-            // **And every render column's presence bitmap the live manifest names for it**
-            // (decision 0064). A fixed list of two files was right while a segment held exactly
-            // two; a segment now holds a `presence/<column>.roaring` per rendered column that has
-            // an absence, and a carried segment that arrived without one would read as
-            // every-row-present — an item with no number matching a range containing zero, which
-            // is the 2026-08-11 defect reached by the fold's carry-forward rather than by the
-            // scan. Taken from the manifest, not from a directory scan, for the reason
-            // `AttrExtent` gives: a scan finds what is there, and the manifest says what must be.
-            let presence_prefix = format!("{segment_prefix}/{}/", RENDER_PRESENCE_DIR);
-            carried_rels.extend(
-                live_manifest
-                    .files
-                    .keys()
-                    .filter(|rel| rel.starts_with(&presence_prefix))
-                    .cloned(),
-            );
-        }
-        carried_rels.extend(carried_runs.iter().cloned());
-        carried_rels.extend(carried_locators.iter().map(|e| e.path.clone()));
-        carried_rels.extend(carried_tiers.iter().cloned());
-        // **Every file a carried attribute extent's entry names**, not the two a numeric one has.
-        // The values and the presence bitmap always; the sorted dictionary whenever the entry names
-        // one, which is exactly when the column is a keyword — its values are ordinals into *that
-        // layer's* dictionary and nothing else numbers them, so a carried extent without it is an
-        // entry pointing at a file that is not there. The whole prefix then refuses to open, which
-        // is how this was found. `postings` and `offsets` ride along for the same reason: an entry
-        // naming a file the link set omits is a bundle that will not open, whatever the file is
-        // for (`filter-index.md` §2.5; records §4.3, §7).
-        for extent in &carried_attrs {
-            carried_rels.insert(extent.values.clone());
-            carried_rels.insert(extent.presence.clone());
-            carried_rels.extend(extent.dict.iter().cloned());
-            carried_rels.extend(extent.postings.iter().cloned());
-            carried_rels.extend(extent.offsets.iter().cloned());
-        }
-        // All three files of every carried record extent: the blocks and both addressing files,
-        // any of whose absence is a refusal to open rather than "those entities have no record"
-        // (records §7).
-        for extent in &carried_records {
-            carried_rels.insert(extent.blocks.clone());
-            carried_rels.insert(extent.hasrow.clone());
-            carried_rels.insert(extent.directory.clone());
-        }
-        // All three files of every carried text extent, under the same rule: the dictionary and
-        // the postings are one record — an ordinal names a position in *this* dictionary — and the
-        // presence half is what stops an entity whose prose analysed to no terms reading as absent.
-        for extent in &carried_texts {
-            carried_rels.insert(extent.dict.clone());
-            carried_rels.insert(extent.postings.clone());
-            carried_rels.insert(extent.presence.clone());
-        }
-        // All four files of every carried transpose extent, under the same rule: the offsets and
-        // their block bases address the terms and the has-row bitmap ranks them, so any one
-        // missing is a refusal at open rather than a shorter label set
-        // (`tessera_store::entity_terms`).
-        for extent in &carried_entity_terms {
-            carried_rels.insert(extent.hasrow.clone());
-            carried_rels.insert(extent.offsets.clone());
-            carried_rels.insert(extent.terms.clone());
-            carried_rels.insert(extent.bases.clone());
-        }
-        carried_rels.extend(live_manifest.dict_extents.iter().map(|e| e.path.clone()));
+        let carried_rels = carried_files(&plan.partition, live_manifest, &flight);
         for rel in &carried_rels {
             // A hard link changes nothing about a file's content, so the digest it earned under the
             // old prefix's path is still correct under the new one — nothing is re-hashed. A file
@@ -8200,27 +8201,20 @@ impl Executor {
         // readers themselves are the live `Arc`s — their mappings are of the same inodes the
         // carry-forward just gave a second name, so they survive the old prefix's deletion exactly
         // as `reclaim_prefix` argues.
-        let mut delta_postings: Vec<Arc<DeltaTier>> = Vec::with_capacity(carried_tiers.len());
+        let mut delta_postings: Vec<Arc<DeltaTier>> = Vec::with_capacity(flight.tiers.len());
         for rel in &segments_manifest.deltas {
-            match live
-                .delta_postings
-                .iter()
-                .zip(&live_manifest.deltas)
-                .find(|(_, live_rel)| *live_rel == rel)
-            {
-                Some((tier, _)) => delta_postings.push(Arc::clone(tier)),
-                None => {
-                    self.diverge_from_current(&completed.prefix);
-                    tracing::error!(
-                        tier = %rel,
-                        "ALARM: the folded manifest names a delta tier this process does not hold \
-                         open; abandoning the swap rather than serving a fragment built from fewer \
-                         tiers than the manifest declares. CURRENT names the new prefix and a \
-                         restart serves it"
-                    );
-                    return;
-                }
-            }
+            let Some(tier) = held_tier(&live.delta_postings, &live_manifest.deltas, rel) else {
+                self.diverge_from_current(&completed.prefix);
+                tracing::error!(
+                    tier = %rel,
+                    "ALARM: the folded manifest names a delta tier this process does not hold \
+                     open; abandoning the swap rather than serving a fragment built from fewer \
+                     tiers than the manifest declares. CURRENT names the new prefix and a restart \
+                     serves it"
+                );
+                return;
+            };
+            delta_postings.push(tier);
         }
 
         let segments_version = live.segments_version + 1;
@@ -8328,6 +8322,14 @@ impl Executor {
         });
 
         // ---- step 8: reclaim the superseded prefix (compaction §8) ------------------------------
+        //
+        // Owned first: the rest of the carry-forward set borrows the generation being moved here,
+        // and the log below still has to say what was left behind.
+        let Flight {
+            omitted_views,
+            omitted_segments,
+            ..
+        } = flight;
         self.pending_reclaim.push(PendingReclaim {
             generation: live,
             prefix_dir: from_prefix_dir,
@@ -8427,6 +8429,75 @@ impl Executor {
              base postings tier, one external-id run and one locator, plus whatever landed during \
              its flight"
         );
+    }
+
+    /// The `MANIFEST.json` a fold's new prefix carries: the live one, with the schema wound back to
+    /// what it was at the plan, every live vocabulary binding folded in, and the fold's own files.
+    ///
+    /// **`entity_id_high_water` here is the snapshot's entity space, not the live one**, and the
+    /// two fields of that name mean different things. `SEGMENTS-<n>.json`'s seeds the I9 allocator
+    /// and is the live value; this one is what `ExternalIdSidecar::deferred_from_manifest` takes as
+    /// the base locator's declared length, and pass 3 sized that locator to the snapshot so
+    /// post-snapshot locator extents stay reachable past it. A live value here would make the base
+    /// locator claim every post-snapshot entity and answer "this item has no external id" for items
+    /// that have one. Writing the lower value is safe for the allocator only because `Engine::open`
+    /// seeds its floor from the max of this and the side-manifest's, which carries the live one.
+    ///
+    /// **The schema as it stood at the plan.** A column declared while the fold ran has no base in
+    /// the new prefix, so it stays off this manifest and on the side manifest's runtime list, from
+    /// which the reopen appends it again at the same tail position.
+    ///
+    /// **The vocabulary bindings fold in verbatim, and verbatim is the whole rule.** Keys and codes
+    /// are byte-identical, from the live minters and from the served side-manifests' extensions
+    /// alike — the merge is a union, so neither path can drop one. Re-deriving, re-sorting or
+    /// re-numbering here would recolour the whole corpus with no error and no digest mismatch,
+    /// because `columns.arrow` stores the code and nothing else records what it meant.
+    fn fold_bundle_manifest(
+        &self,
+        live: &Generation,
+        completed: &crate::compact::CompletedFold,
+        plan: &crate::compact::FoldPlan,
+    ) -> tessera_store::manifest::Manifest {
+        let mut bundle_manifest = live.bundle.manifest.clone();
+        let (runtime_attributes, runtime_scoped_attributes) =
+            self.live.attributes_for_publication();
+        let since_plan: Vec<&str> = runtime_attributes
+            .iter()
+            .map(|d| d.name.as_str())
+            .filter(|name| !completed.runtime_attributes.iter().any(|n| n == name))
+            .collect();
+        bundle_manifest
+            .declared_scalars
+            .retain(|d| !since_plan.contains(&d.name.as_str()));
+        let scoped_since_plan: Vec<&str> = runtime_scoped_attributes
+            .iter()
+            .map(|f| f.name.as_str())
+            .filter(|name| {
+                !completed
+                    .runtime_scoped_attributes
+                    .iter()
+                    .any(|n| n == name)
+            })
+            .collect();
+        for group in &mut bundle_manifest.groups {
+            group
+                .scoped_scalars
+                .retain(|f| !scoped_since_plan.contains(&f.name.as_str()));
+        }
+        crate::vocabularies::merge_live_values(&mut bundle_manifest, &live.vocabularies);
+        bundle_manifest.entity_id_high_water = plan.entity_bound;
+        bundle_manifest.files = completed.files.clone();
+        let carried_bindings: Vec<_> = live
+            .bundle
+            .partitions
+            .values()
+            .flat_map(|partition| partition.manifest.vocabulary_extensions.iter().cloned())
+            .collect();
+        tessera_store::vocabulary::fold_extensions_into(
+            &mut bundle_manifest.vocabularies,
+            &carried_bindings,
+        );
+        bundle_manifest
     }
 
     /// Latch [`ExecutorHealth::prefix_diverged`]: `CURRENT` names a prefix this process could not
@@ -8584,6 +8655,18 @@ impl Executor {
         if !self.may_publish() {
             return;
         }
+        // Every counted discard below is the same posture, so it is one closure rather than the
+        // shape repeated. It owns what it reports, so it borrows nothing the sequence below needs.
+        let discard = {
+            let health = Arc::clone(&self.health);
+            move |reason: &str| {
+                health.coalesce_failures.fetch_add(1, Ordering::Relaxed);
+                tracing::error!(
+                    "ALARM: discarding a completed coalesce: {reason}. Its files are orphans, \
+                     every consumed entry still stands, and the next tick re-plans"
+                );
+            }
+        };
         let live = self.generation.load_full();
         if live.prefix != completed.prefix {
             tracing::warn!(
@@ -8636,16 +8719,7 @@ impl Executor {
             .zip(&completed.plan.texts)
             .map(|(extent, window)| crate::filter::CoalescedTextWindow {
                 consumed: window.extents.iter().map(|e| e.dict.clone()).collect(),
-                paths: crate::filter::TextExtentPaths {
-                    column: crate::filter::extent_column_name(
-                        &extent.column,
-                        extent.view.as_deref(),
-                    ),
-                    dict_rel: extent.dict.clone(),
-                    dict: prefix_dir.join(&extent.dict),
-                    postings: prefix_dir.join(&extent.postings),
-                    presence: prefix_dir.join(&extent.presence),
-                },
+                paths: text_extent_paths(&prefix_dir, extent),
             })
             .collect();
         // **The transpose's stack is re-derived from the rebased manifest**, not patched — the
@@ -8663,12 +8737,7 @@ impl Executor {
             let extents: Vec<tessera_store::EntityTermsExtentPaths> = manifest
                 .entity_terms_extents
                 .iter()
-                .map(|e| tessera_store::EntityTermsExtentPaths {
-                    hasrow: prefix_dir.join(&e.hasrow),
-                    offsets: prefix_dir.join(&e.offsets),
-                    terms: prefix_dir.join(&e.terms),
-                    bases: prefix_dir.join(&e.bases),
-                })
+                .map(|e| entity_terms_extent_paths(&prefix_dir, e))
                 .collect();
             match tessera_store::EntityTermsStack::open(
                 Some(&partition_dir.join(tessera_store::ENTITY_TERMS_DIR)),
@@ -8676,16 +8745,10 @@ impl Executor {
             ) {
                 Ok(stack) => Some(Arc::new(stack)),
                 Err(e) => {
-                    self.health
-                        .coalesce_failures
-                        .fetch_add(1, Ordering::Relaxed);
-                    tracing::error!(
-                        error = %e,
-                        "ALARM: a completed coalesce's entity→term extent would not compose into \
-                         a stack; discarding it rather than publishing a manifest naming a layer \
-                         this process cannot serve. Its files are orphans and every consumed \
-                         entry still stands"
-                    );
+                    discard(&format!(
+                        "its entity→term extent would not compose into a stack ({e}), and a \
+                         manifest must not name a layer this process cannot serve"
+                    ));
                     return;
                 }
             }
@@ -8718,11 +8781,7 @@ impl Executor {
                     .record_extents
                     .iter()
                     .chain(manifest.artifact_record_extents.iter())
-                    .map(|e| tessera_filter::RecordExtentPaths {
-                        blocks: prefix_dir.join(&e.blocks),
-                        hasrow: prefix_dir.join(&e.hasrow),
-                        directory: prefix_dir.join(&e.directory),
-                    })
+                    .map(|e| record_extent_paths(&prefix_dir, e))
                     .collect();
                 match tessera_filter::RecordStack::open(
                     blob_resident.then_some(record_dir.as_path()),
@@ -8731,41 +8790,28 @@ impl Executor {
                 ) {
                     Ok(stack) => Some(Arc::new(stack)),
                     Err(e) => {
-                        self.health
-                            .coalesce_failures
-                            .fetch_add(1, Ordering::Relaxed);
-                        tracing::error!(
-                            error = %e,
-                            "ALARM: a completed coalesce's record extent would not compose into a \
-                             stack; discarding it rather than publishing a manifest naming a \
-                             layer this process cannot serve. Its files are orphans and every \
-                             consumed entry still stands"
-                        );
+                        discard(&format!(
+                            "its record extent would not compose into a stack ({e}), and a \
+                             manifest must not name a layer this process cannot serve"
+                        ));
                         return;
                     }
                 }
             };
-        let filter_columns = match live.filter_columns.with_coalesced(
-            &windows,
-            &text_windows,
-            entity_terms,
-            records,
-        ) {
-            Ok(columns) => Arc::new(columns),
-            Err(e) => {
-                self.health
-                    .coalesce_failures
-                    .fetch_add(1, Ordering::Relaxed);
-                tracing::error!(
-                    error = %e,
-                    "ALARM: a completed coalesce's attribute extents would not replace the layers \
-                     they consumed; discarding it rather than publishing a manifest naming a \
-                     column this process cannot serve. Its files are orphans and every consumed \
-                     entry still stands"
-                );
-                return;
-            }
-        };
+        let filter_columns =
+            match live
+                .filter_columns
+                .with_coalesced(&windows, &text_windows, entity_terms, records)
+            {
+                Ok(columns) => Arc::new(columns),
+                Err(e) => {
+                    discard(&format!(
+                        "its attribute extents would not replace the layers they consumed ({e}), \
+                         and a manifest must not name a column this process cannot serve"
+                    ));
+                    return;
+                }
+            };
         // Complete current state, serialised fresh from the overlay this publication carries —
         // the same rule every other manifest write follows (contracts §2.3).
         write_deny_state(&mut manifest, &live.overlay);
@@ -8778,15 +8824,9 @@ impl Executor {
         let manifest_n = match self.allocate_manifest_n() {
             Ok(n) => n,
             Err(e) => {
-                self.health
-                    .coalesce_failures
-                    .fetch_add(1, Ordering::Relaxed);
-                tracing::error!(
-                    error = %e,
-                    "ALARM: a completed coalesce's side-manifest number could not be allocated; \
-                     its files are orphans, every consumed entry still stands, and the next tick \
-                     re-plans"
-                );
+                discard(&format!(
+                    "its side-manifest number could not be allocated ({e})"
+                ));
                 return;
             }
         };
@@ -8801,14 +8841,7 @@ impl Executor {
             &mut manifest,
             None,
         ) {
-            self.health
-                .coalesce_failures
-                .fetch_add(1, Ordering::Relaxed);
-            tracing::error!(
-                error = %e,
-                "ALARM: a completed coalesce's side-manifest could not be committed; its files \
-                 are orphans, every consumed entry still stands, and the next tick re-plans"
-            );
+            discard(&format!("its side-manifest could not be committed ({e})"));
             return;
         }
 
@@ -8822,14 +8855,15 @@ impl Executor {
         ) {
             Ok(index) => index,
             Err(e) => {
+                // Not the discard above: this manifest is already committed. The process keeps
+                // serving the pre-coalesce sidecar, which answers identically.
                 self.health
                     .coalesce_failures
                     .fetch_add(1, Ordering::Relaxed);
                 tracing::error!(
                     error = %e,
                     "ALARM: a coalesce's manifest committed but its external-id sidecar would not \
-                     open; the process keeps serving the pre-coalesce sidecar, which answers \
-                     identically, and a restart opens the committed manifest"
+                     open; a restart opens the committed manifest and no operator action is owed"
                 );
                 return;
             }
@@ -8862,26 +8896,20 @@ impl Executor {
             .manifest
             .deltas
         {
-            match coalesced.filter(|(path, _)| path == rel) {
-                Some((_, tier)) => delta_postings.push(Arc::clone(tier)),
-                None => match live
-                    .delta_postings
-                    .iter()
-                    .zip(&partition_data.manifest.deltas)
-                    .find(|(_, live_rel)| *live_rel == rel)
-                {
-                    Some((tier, _)) => delta_postings.push(Arc::clone(tier)),
-                    None => {
-                        tracing::error!(
-                            tier = %rel,
-                            "ALARM: a coalesce's manifest names a delta tier this process does \
-                             not hold open; abandoning the swap rather than serving a fragment \
-                             built from fewer tiers than the manifest declares"
-                        );
-                        return;
-                    }
-                },
-            }
+            let held = match coalesced.filter(|(path, _)| path == rel) {
+                Some((_, tier)) => Some(Arc::clone(tier)),
+                None => held_tier(&live.delta_postings, &partition_data.manifest.deltas, rel),
+            };
+            let Some(tier) = held else {
+                tracing::error!(
+                    tier = %rel,
+                    "ALARM: a coalesce's manifest names a delta tier this process does not hold \
+                     open; abandoning the swap rather than serving a fragment built from fewer \
+                     tiers than the manifest declares"
+                );
+                return;
+            };
+            delta_postings.push(tier);
         }
 
         let next = Generation {
@@ -9017,8 +9045,7 @@ impl Executor {
             return false;
         };
 
-        let mut contexts = Vec::with_capacity(1);
-        {
+        let context = {
             let Some(view_data) = partition_data.views.get(&view) else {
                 return false;
             };
@@ -9182,64 +9209,58 @@ impl Executor {
                 .iter()
                 .map(|lane| families.iter().position(|f| f.name == lane.name))
                 .collect();
-            contexts.push((
-                plan,
-                crate::flush::FlushContext {
-                    prefix_dir: self.prefix_dir(generation),
-                    partition: partition.clone(),
-                    view: view.clone(),
-                    scoped_view,
-                    scoped_incarnation,
-                    incarnation,
+            crate::flush::FlushContext {
+                prefix_dir: self.prefix_dir(generation),
+                partition: partition.clone(),
+                view: view.clone(),
+                scoped_view,
+                scoped_incarnation,
+                incarnation,
 
-                    // **`seg_id`s are never reused** (contracts §2.1), which is what makes the
-                    // merge rebase ABA-safe — and the attempt counter is not decoration. `next_n`
-                    // alone repeats whenever a flush is planned twice before it publishes, and the
-                    // second attempt would then `File::create` over files the first has memory
-                    // mapped: a truncated mapping, and SIGBUS on the next read of it. The counter
-                    // makes every attempt's path distinct, so a re-plan writes beside the earlier
-                    // one rather than through it, and the loser's files are orphans nothing
-                    // references.
-                    seg_id: format!("flush-{planned_at_n}-{}", self.next_flush_attempt()),
-                    row_base,
-                    identity_key: self.identity_key,
-                    shard_id: manifest.identity.shard_id,
-                    quantisation,
-                    // **This view's schema, entity-scoped tail then scoped render lanes** — the
-                    // same list a merge and a fold of this view take (`view_scalar_schema_of`),
-                    // so a segment written by any of the three carries the same columns.
-                    //
-                    // **The two derivations agree only because a `members` group can never own a
-                    // family** (`Manifest::validate_groups` refuses one, `views.md` §3.3): under a
-                    // view whose key is in a scope — the owner's own, or a sharing group's of the
-                    // same key — `scoped_render` is the owning group's rendered families in
-                    // manifest order, which is exactly what `scoped_render_families` yields there
-                    // once publication has put the owner view id on each family's list; under any
-                    // other view the branch above *is* that function. Change either site — or that
-                    // refusal — and the third has to move with it, or a flush writes a tail its own
-                    // view's rewriters cannot read.
-                    scalar_schema: {
-                        let mut schema = scalar_schema.clone();
-                        schema.extend(scoped_render.iter().map(|f| (f.name.clone(), f.arrow_type)));
-                        schema
-                    },
-                    render_indices: render_indices.clone(),
-                    scoped_schema,
-                    scoped_render: scoped_render_indices,
-                    filter_schema: filter_schema.clone(),
-                    record_schema: record_schema.clone(),
-                    text_schema: text_schema.clone(),
-                    dict: Arc::clone(&generation.dict),
-                    novel_descriptors,
-                    max_distinct_terms: self.max_distinct_terms,
-                    prefix: generation.prefix.clone(),
-                    shapes: self.shapes.levels_of_view(&view),
+                // **`seg_id`s are never reused** (contracts §2.1), which is what makes the
+                // merge rebase ABA-safe — and the attempt counter is not decoration. `next_n`
+                // alone repeats whenever a flush is planned twice before it publishes, and the
+                // second attempt would then `File::create` over files the first has memory
+                // mapped: a truncated mapping, and SIGBUS on the next read of it. The counter
+                // makes every attempt's path distinct, so a re-plan writes beside the earlier
+                // one rather than through it, and the loser's files are orphans nothing
+                // references.
+                seg_id: format!("flush-{planned_at_n}-{}", self.next_flush_attempt()),
+                row_base,
+                identity_key: self.identity_key,
+                shard_id: manifest.identity.shard_id,
+                quantisation,
+                // **This view's schema, entity-scoped tail then scoped render lanes** — the
+                // same list a merge and a fold of this view take (`view_scalar_schema_of`),
+                // so a segment written by any of the three carries the same columns.
+                //
+                // **The two derivations agree only because a `members` group can never own a
+                // family** (`Manifest::validate_groups` refuses one, `views.md` §3.3): under a
+                // view whose key is in a scope — the owner's own, or a sharing group's of the
+                // same key — `scoped_render` is the owning group's rendered families in
+                // manifest order, which is exactly what `scoped_render_families` yields there
+                // once publication has put the owner view id on each family's list; under any
+                // other view the branch above *is* that function. Change either site — or that
+                // refusal — and the third has to move with it, or a flush writes a tail its own
+                // view's rewriters cannot read.
+                scalar_schema: {
+                    let mut schema = scalar_schema.clone();
+                    schema.extend(scoped_render.iter().map(|f| (f.name.clone(), f.arrow_type)));
+                    schema
                 },
-            ));
-        }
-        if contexts.is_empty() {
-            return false;
-        }
+                render_indices: render_indices.clone(),
+                scoped_schema,
+                scoped_render: scoped_render_indices,
+                filter_schema: filter_schema.clone(),
+                record_schema: record_schema.clone(),
+                text_schema: text_schema.clone(),
+                dict: Arc::clone(&generation.dict),
+                novel_descriptors,
+                max_distinct_terms: self.max_distinct_terms,
+                prefix: generation.prefix.clone(),
+                shapes: self.shapes.levels_of_view(&view),
+            }
+        };
         self.health
             .flush_lap(crate::flush::FlushStage::Dispatch, mark);
 
@@ -9261,36 +9282,31 @@ impl Executor {
         self.health.mark_flush_started(std::time::Instant::now());
         let health = Arc::clone(&self.health);
         self.pool.spawn(move || {
-            for (plan, ctx) in contexts {
-                let mut laps = crate::flush::FlushLaps::default();
-                match crate::flush::execute_flush(plan, ctx, &mut laps) {
-                    Ok(completed) => {
-                        health.record_flush_execution(&laps, Some(completed.consumed.len()));
-                        // **Pending is set before the send** — the completion handshake's whole
-                        // ordering; see `ExecutorHealth::flush_completed_pending`.
-                        health.flush_completed_pending.store(true, Ordering::SeqCst);
-                        // A send failure means the executor is gone, which is a shutdown and not a
-                        // fault: the files are orphans nothing references, and replay re-flushes.
-                        let _ = submit.send(completed);
-                    }
-                    Err(e) => {
-                        health.record_flush_execution(&laps, None);
-                        // **Nothing happened, retry next tick** (§10). The side-manifest is the
-                        // only commit point, so a failure before it leaves orphan files nothing
-                        // references and the buffer intact.
-                        health.flush_failures.fetch_add(1, Ordering::Relaxed);
-                        // Nothing was published, so the cycle stays open and its request is
-                        // re-armed: a caller waiting on the number waits for the retry that
-                        // succeeds (`ExecutorHealth::fail_publication_cycle`).
-                        health.fail_publication_cycle();
-                        tracing::error!(
-                            error = %e,
-                            "ALARM: a flush failed; the buffer is retained and it will be retried \
-                             at the next tick. Sustained failure grows the buffer until \
-                             ingest_buffer_max_items sheds ingest, which is the intended \
-                             backpressure"
-                        );
-                    }
+            let mut laps = crate::flush::FlushLaps::default();
+            match crate::flush::execute_flush(plan, context, &mut laps) {
+                Ok(completed) => {
+                    health.record_flush_execution(&laps, Some(completed.consumed.len()));
+                    // **Pending is set before the send** — the completion handshake's whole
+                    // ordering; see `ExecutorHealth::flush_completed_pending`.
+                    health.flush_completed_pending.store(true, Ordering::SeqCst);
+                    // A send failure means the executor is gone, which is a shutdown and not a
+                    // fault: the files are orphans nothing references, and replay re-flushes.
+                    let _ = submit.send(completed);
+                }
+                Err(e) => {
+                    health.record_flush_execution(&laps, None);
+                    // **Nothing happened, retry next tick.** The side-manifest is the only commit
+                    // point, so a failure before it leaves orphan files nothing references and the
+                    // buffer intact. The cycle stays open and its request is re-armed: a caller
+                    // waiting on the number waits for the retry that succeeds.
+                    health.flush_failures.fetch_add(1, Ordering::Relaxed);
+                    health.fail_publication_cycle();
+                    tracing::error!(
+                        error = %e,
+                        "ALARM: a flush failed; the buffer is retained and it will be retried at \
+                         the next tick. Sustained failure grows the buffer until \
+                         ingest_buffer_max_items sheds ingest, which is the intended backpressure"
+                    );
                 }
             }
             health.flush_in_flight.store(false, Ordering::SeqCst);
@@ -9392,15 +9408,12 @@ impl Executor {
             // yet. Waiting out the floor costs one wake instead of fifty a second.
             until_tick.min(backoff)
         } else if self.health.flush_requested.load(Ordering::SeqCst)
-            || self.health.flush_in_flight.load(Ordering::SeqCst)
-            || self.health.flush_completed_pending.load(Ordering::SeqCst)
-            || self.coalesce_in_flight.load(Ordering::SeqCst)
-            || self
-                .health
-                .coalesce_completed_pending
-                .load(Ordering::SeqCst)
-            || self.merge_in_flight.load(Ordering::SeqCst)
-            || self.health.merge_completed_pending.load(Ordering::SeqCst)
+            || outstanding(
+                &self.health.flush_in_flight,
+                &self.health.flush_completed_pending,
+            )
+            || self.coalesce_outstanding()
+            || self.merge_outstanding()
             || self.health.fold_completed_pending.load(Ordering::SeqCst)
         {
             // A flush or a coalesce is executing on the pool, or its completed unit is waiting in
@@ -12256,9 +12269,7 @@ impl Executor {
             return;
         };
         let stored = stored_membership(&registered.declaration);
-        let spatial = registered.declaration.membership
-            == tessera_types::layer::MembershipSource::Spatial
-            && registered.declaration.shape.is_some();
+        let spatial = spatial_membership(&registered.declaration);
         if !stored && !spatial {
             return;
         }
@@ -14001,6 +14012,32 @@ impl Executor {
     /// **Failure alarms and retains.** Nothing is un-acked and nothing is unwound — the state is
     /// WAL-durable either way. Only the disaster-path bound degrades while the alarm stands, and
     /// any later write carries complete state, so a single success repairs it.
+    /// Restate the live row-less state into a side-manifest about to be committed: the registry
+    /// and its low-water mark, the roster, the runtime attribute columns, the runtime vocabularies
+    /// with their values, and the view groups and plain views.
+    ///
+    /// **Restated from live state, never carried forward from the clone.** The manifest a
+    /// publication starts from may be several publications behind, so a registration, a create or
+    /// a declaration that landed since would be dropped by carrying it forward — and a rotation
+    /// then makes that permanent. `min`, not `max`, for the mark: the row-less region grows
+    /// downward.
+    fn write_live_state(&self, manifest: &mut SegmentsManifest, vocabularies: &Vocabularies) {
+        let (layers, layer_tombstones, low_water) = self.live.registry_for_publication();
+        manifest.entity_id_low_water = manifest.entity_id_low_water.min(low_water);
+        manifest.layers = layers;
+        manifest.layer_tombstones = layer_tombstones;
+        let (created_views, dead_view_incarnations) = self.live.roster_for_publication();
+        manifest.views = created_views;
+        manifest.dead_view_incarnations = dead_view_incarnations;
+        let (attributes, scoped_attributes) = self.live.attributes_for_publication();
+        manifest.attributes = attributes;
+        manifest.scoped_attributes = scoped_attributes;
+        manifest.vocabularies = self.live.vocabularies_for_publication(vocabularies);
+        let (groups, plain_views) = self.live.view_declarations_for_publication();
+        manifest.groups = groups;
+        manifest.plain_views = plain_views;
+    }
+
     fn publish_overlay_state(&mut self) {
         if !self.deny_dirty {
             return;
@@ -14036,41 +14073,12 @@ impl Executor {
         for (partition, partition_data) in &live.bundle.partitions {
             let mut manifest = partition_data.manifest.clone();
             write_deny_state(&mut manifest, &live.overlay);
-            // **The registry travels with this publication too, and not only with a flush.** Until
-            // artifacts existed, a registration could wait for the next flush to reach a manifest —
-            // the WAL held it meanwhile and `publish_flush` says so. An extent breaks that: a
+            // **The registry travels with this publication too, and not only with a flush.** A
             // manifest naming memberships for a layer it does not declare is internally
             // inconsistent, and at open the layer's reserved runs are what turn an ordinal into an
-            // entity, so the extents would be skipped whole and every artifact would come back
+            // entity — so the extents would be skipped whole and every artifact would come back
             // absent. The two are written together or the manifest is wrong.
-            //
-            // `min`, not `max`, for the mark — the row-less region grows downward.
-            let (layers, layer_tombstones, low_water) = self.live.registry_for_publication();
-            manifest.entity_id_low_water = manifest.entity_id_low_water.min(low_water);
-            manifest.layers = layers;
-            manifest.layer_tombstones = layer_tombstones;
-            // **The roster's durable home, restated from the live roster and never from the
-            // clone** (`views.md` §3.2): the manifest this was cloned from may be several
-            // publications behind, and a create that landed since would be dropped by carrying it
-            // forward — which a rotation then makes permanent.
-            let (created_views, dead_view_incarnations) = self.live.roster_for_publication();
-            manifest.views = created_views;
-            manifest.dead_view_incarnations = dead_view_incarnations;
-            // The runtime attribute columns beside the roster, on its rule (`ingest.md` §6.3).
-            let (attributes, scoped_attributes) = self.live.attributes_for_publication();
-            manifest.attributes = attributes;
-            manifest.scoped_attributes = scoped_attributes;
-            // And the runtime vocabularies, each with its values as the live minters hold them
-            // (`ingest.md` §1.3). Restated from the live state rather than carried forward, on
-            // the roster's rule: a declaration or a page that landed since the manifest was
-            // cloned would otherwise be dropped, and a rotation makes that permanent.
-            manifest.vocabularies = self.live.vocabularies_for_publication(&live.vocabularies);
-            // And the view groups and plain views declared at a running service, on the roster's
-            // rule (`ingest.md` §1.3). A group's roster is `manifest.views` above, restated from
-            // the live roster; what these carry is the group's own half and the plain views.
-            let (groups, plain_views) = self.live.view_declarations_for_publication();
-            manifest.groups = groups;
-            manifest.plain_views = plain_views;
+            self.write_live_state(&mut manifest, &live.vocabularies);
             // **Membership extents are written before the manifest that names them**, which is the
             // whole of their durability contract: a manifest naming a missing extent refuses at
             // open, so the file has to be durable first. A failure here abandons the publication
@@ -14372,36 +14380,7 @@ impl Executor {
         retired: &croaring::Bitmap,
     ) -> tessera_store::Result<Vec<tessera_store::manifest::MembershipExtent>> {
         let ready = self.live.with_artifacts(|store| store.repack_all(retired));
-        if ready.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        let dir = prefix_dir
-            .join("partitions")
-            .join(partition)
-            .join("members");
-        std::fs::create_dir_all(&dir).map_err(|source| tessera_store::StoreError::Io {
-            path: dir.clone(),
-            source,
-        })?;
-        let mut entries = Vec::with_capacity(ready.len());
-        for (index, (layer, level, ordinal_lo, blobs)) in ready.into_iter().enumerate() {
-            // The same naming rule the online route follows: the layer name is path-shaped and
-            // never reaches a filename; the publication that introduced the file does.
-            let name = format!("members-{n:06}-{index:03}.tsmb");
-            let count = blobs.len() as u32;
-            let bytes = tessera_store::membership::pack(ordinal_lo, &blobs);
-            tessera_store::write_and_fsync(&dir.join(&name), &bytes)?;
-            entries.push(tessera_store::manifest::MembershipExtent {
-                path: format!("partitions/{partition}/members/{name}"),
-                layer,
-                level,
-                ordinal_lo,
-                count,
-            });
-        }
-        tessera_store::fsync_dir(&dir)?;
-        Ok(entries)
+        pack_membership_extents(prefix_dir, partition, n, ready)
     }
 
     /// Compose and write this prefix's containment partitions, one file per `(layer, level)`.
@@ -14454,10 +14433,7 @@ impl Executor {
         // Composed under one borrow with the versions they are composed at, and written outside it:
         // composing is the dear part and needs the store, writing a file does not.
         let composed: Vec<(String, u32, u64, Vec<u8>)> = self.live.with_artifacts(|store| {
-            let levels: Vec<(String, u32)> = store
-                .levels_and_extents()
-                .map(|(layer, level, _)| (layer.to_string(), level))
-                .collect();
+            let levels: Vec<(String, u32)> = levels_of(store).collect();
             levels
                 .into_iter()
                 .filter(|(layer, level)| !pending.is_pending(layer, *level))
@@ -14635,9 +14611,7 @@ impl Executor {
             return Vec::new();
         };
         let levels: Vec<(String, u32)> = self.live.with_artifacts(|store| {
-            store
-                .levels_and_extents()
-                .map(|(layer, level, _)| (layer.to_string(), level))
+            levels_of(store)
                 .filter(|(layer, level)| self.composes_row_structures(pending, layer, *level))
                 .collect()
         });
@@ -14661,9 +14635,7 @@ impl Executor {
             // under the new segment ids for the derived files this pass writes and for the row
             // forms the flip's warm builds. That is the fold's re-resolution — everything, because
             // the fold renumbered every row.
-            let spatial = registered.declaration.membership
-                == tessera_types::layer::MembershipSource::Spatial
-                && registered.declaration.shape.is_some();
+            let spatial = spatial_membership(&registered.declaration);
             let shape = self.live.with_artifacts(|store| {
                 if spatial {
                     let mut observed = None;
@@ -14972,17 +14944,9 @@ impl Executor {
         index: &mut tessera_store::derived::DerivedIndex,
     ) -> Vec<tessera_store::manifest::DerivedExtent> {
         let levels: Vec<(String, u32)> = self.live.with_artifacts(|store| {
-            store
-                .levels_and_extents()
-                .map(|(layer, level, _)| (layer.to_string(), level))
+            levels_of(store)
                 .filter(|(layer, level)| !pending.is_pending(layer, *level))
-                .filter(|(layer, _)| {
-                    self.live.registered_layer(layer).is_some_and(|registered| {
-                        registered.declaration.membership
-                            == tessera_types::layer::MembershipSource::Spatial
-                            && registered.declaration.shape.is_some()
-                    })
-                })
+                .filter(|(layer, _)| self.live.spatial_layer(layer))
                 .collect()
         });
         let mut filed: Vec<tessera_store::derived::Filed> = Vec::new();
@@ -15060,17 +15024,9 @@ impl Executor {
     ) -> Vec<tessera_store::manifest::DerivedExtent> {
         let filed: Vec<tessera_store::derived::Filed> = self.live.with_artifacts(|store| {
             let mut out = Vec::new();
-            let levels: Vec<(String, u32)> = store
-                .levels_and_extents()
-                .map(|(layer, level, _)| (layer.to_string(), level))
+            let levels: Vec<(String, u32)> = levels_of(store)
                 .filter(|(layer, level)| !pending.is_pending(layer, *level))
-                .filter(|(layer, _)| {
-                    self.live.registered_layer(layer).is_some_and(|registered| {
-                        registered.declaration.membership
-                            == tessera_types::layer::MembershipSource::Spatial
-                            && registered.declaration.shape.is_some()
-                    })
-                })
+                .filter(|(layer, _)| self.live.spatial_layer(layer))
                 .collect();
             for (layer, level) in &levels {
                 let version = store.level_version(layer, *level);
@@ -15233,12 +15189,8 @@ impl Executor {
     /// level with neither projects its memberships (`ArtifactProjections::get_or_build`).
     fn warm_artifact_caches(&self) {
         let generation = self.generation.load_full();
-        let levels: Vec<(String, u32)> = self.live.with_artifacts(|store| {
-            store
-                .levels_and_extents()
-                .map(|(layer, level, _)| (layer.to_string(), level))
-                .collect()
-        });
+        let levels: Vec<(String, u32)> =
+            self.live.with_artifacts(|store| levels_of(store).collect());
         if levels.is_empty() {
             return;
         }
@@ -15273,12 +15225,9 @@ impl Executor {
                     let membership = registered
                         .as_ref()
                         .map(|r| r.declaration.membership.clone());
-                    let spatial = matches!(
-                        membership,
-                        Some(tessera_types::layer::MembershipSource::Spatial)
-                    ) && registered
+                    let spatial = registered
                         .as_ref()
-                        .is_some_and(|r| r.declaration.shape.is_some());
+                        .is_some_and(|r| spatial_membership(&r.declaration));
                     if matches!(
                         membership,
                         Some(tessera_types::layer::MembershipSource::Attribute(_))
@@ -15384,41 +15333,7 @@ impl Executor {
                  not published; they stay WAL-durable and the log stays pinned"
             );
         }
-        if ready.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        let dir = prefix_dir
-            .join("partitions")
-            .join(partition)
-            .join("members");
-        std::fs::create_dir_all(&dir).map_err(|source| tessera_store::StoreError::Io {
-            path: dir.clone(),
-            source,
-        })?;
-
-        let mut entries = Vec::with_capacity(ready.len());
-        for (index, (layer, level, ordinal_lo, blobs)) in ready.into_iter().enumerate() {
-            // **The layer name never reaches the filename.** It is path-shaped — `clusters/a` — so
-            // a name-derived path would escape the directory or collide after escaping. The
-            // manifest entry carries the name; the file is addressed by the publication that
-            // introduced it and its index within that publication.
-            let name = format!("members-{n:06}-{index:03}.tsmb");
-            let count = blobs.len() as u32;
-            let bytes = tessera_store::membership::pack(ordinal_lo, &blobs);
-            tessera_store::write_and_fsync(&dir.join(&name), &bytes)?;
-            entries.push(tessera_store::manifest::MembershipExtent {
-                path: format!("partitions/{partition}/members/{name}"),
-                layer,
-                level,
-                ordinal_lo,
-                count,
-            });
-        }
-        // The directory entry itself has to be durable, or a crash leaves a manifest naming a file
-        // whose name was never written — the same rule every other publication here follows.
-        tessera_store::fsync_dir(&dir)?;
-        Ok(entries)
+        pack_membership_extents(prefix_dir, partition, n, ready)
     }
 
     /// **Publication by rebase** (§1.2): apply a completed flush to the **then-current**
@@ -15465,6 +15380,18 @@ impl Executor {
         if !self.may_publish() {
             return false;
         }
+        // Every counted discard below is the same posture, so it is one closure rather than the
+        // shape repeated. It owns what it reports, so it borrows nothing the sequence below needs.
+        let discard = {
+            let health = Arc::clone(&self.health);
+            move |reason: &str| {
+                health.flush_failures.fetch_add(1, Ordering::Relaxed);
+                tracing::error!(
+                    "ALARM: discarding a completed flush: {reason}. Its files are orphans, the \
+                     buffer is retained, and the next tick re-plans"
+                );
+            }
+        };
         let live = self.generation.load_full();
         if live.prefix != completed.prefix {
             // A compaction moved the prefix under this flush. Nothing to apply it to.
@@ -15539,28 +15466,16 @@ impl Executor {
         let record_paths: Vec<tessera_filter::RecordExtentPaths> = completed
             .record_extent
             .iter()
-            .map(|e| tessera_filter::RecordExtentPaths {
-                blocks: record_dir.join(&e.blocks),
-                hasrow: record_dir.join(&e.hasrow),
-                directory: record_dir.join(&e.directory),
-            })
+            .map(|e| record_extent_paths(&record_dir, e))
             .collect();
-        let entity_terms_paths = vec![tessera_store::EntityTermsExtentPaths {
-            hasrow: record_dir.join(&completed.entity_terms_extent.hasrow),
-            offsets: record_dir.join(&completed.entity_terms_extent.offsets),
-            terms: record_dir.join(&completed.entity_terms_extent.terms),
-            bases: record_dir.join(&completed.entity_terms_extent.bases),
-        }];
+        let entity_terms_paths = vec![entity_terms_extent_paths(
+            &record_dir,
+            &completed.entity_terms_extent,
+        )];
         let text_paths: Vec<crate::filter::TextExtentPaths> = completed
             .text_extents
             .iter()
-            .map(|e| crate::filter::TextExtentPaths {
-                column: crate::filter::extent_column_name(&e.column, e.view.as_deref()),
-                dict_rel: e.dict.clone(),
-                dict: record_dir.join(&e.dict),
-                postings: record_dir.join(&e.postings),
-                presence: record_dir.join(&e.presence),
-            })
+            .map(|e| text_extent_paths(&record_dir, e))
             .collect();
         // **The new columns first, then the extents that land on them** (`views.md` §5). A flush
         // of a view a family had no column for wrote its base in the same unit as its extent, and
@@ -15587,13 +15502,10 @@ impl Executor {
             ) {
                 Ok(columns) => Arc::new(columns),
                 Err(e) => {
-                    self.health.flush_failures.fetch_add(1, Ordering::Relaxed);
-                    tracing::error!(
-                        error = %e,
-                        "ALARM: a completed flush wrote a group-scoped column this process cannot \
-                         open; discarding it rather than publishing a manifest naming a column no \
-                         request could read. Its files are orphans and the buffer is retained"
-                    );
+                    discard(&format!(
+                        "it wrote a group-scoped column this process cannot open ({e}), and a \
+                         manifest must not name a column no request could read"
+                    ));
                     return false;
                 }
             }
@@ -15606,13 +15518,10 @@ impl Executor {
         ) {
             Ok(columns) => Arc::new(columns),
             Err(e) => {
-                self.health.flush_failures.fetch_add(1, Ordering::Relaxed);
-                tracing::error!(
-                    error = %e,
-                    "ALARM: a completed flush's filter extents would not compose onto the live \
-                     columns; discarding it rather than publishing a bundle whose filter answers \
-                     would be wrong. Its files are orphans and the buffer is retained"
-                );
+                discard(&format!(
+                    "its filter extents would not compose onto the live columns ({e}), and a \
+                     bundle published over that would answer filters wrongly"
+                ));
                 return false;
             }
         };
@@ -15624,12 +15533,9 @@ impl Executor {
         let manifest_n = match self.allocate_manifest_n() {
             Ok(n) => n,
             Err(e) => {
-                self.health.flush_failures.fetch_add(1, Ordering::Relaxed);
-                tracing::error!(
-                    error = %e,
-                    "ALARM: a completed flush's side-manifest number could not be allocated; its \
-                     files are orphans, the buffer is retained, and the next tick re-plans"
-                );
+                discard(&format!(
+                    "its side-manifest number could not be allocated ({e})"
+                ));
                 return false;
             }
         };
@@ -15670,29 +15576,10 @@ impl Executor {
                 .unwrap_or(0),
         );
         // **The row-less half of the same obligation.** A flush is the routine publication, so it
-        // is where a registration made since the last one stops depending on the WAL surviving:
-        // rotation reclaims `LayerCreate`, and without this the mark and the registry go with it.
-        // `min`, not `max` — this region grows downward — and taken from the live allocator rather
-        // than from the flush, which knows only about points.
-        let (layers, layer_tombstones, low_water) = self.live.registry_for_publication();
-        manifest.entity_id_low_water = manifest.entity_id_low_water.min(low_water);
-        manifest.layers = layers;
-        manifest.layer_tombstones = layer_tombstones;
-        // The roster beside them, on the same rule and for the same reason (`views.md` §3.2).
-        let (created_views, dead_view_incarnations) = self.live.roster_for_publication();
-        manifest.views = created_views;
-        manifest.dead_view_incarnations = dead_view_incarnations;
-        // The runtime attribute columns beside the roster, on its rule (`ingest.md` §6.3).
-        let (attributes, scoped_attributes) = self.live.attributes_for_publication();
-        manifest.attributes = attributes;
-        manifest.scoped_attributes = scoped_attributes;
-        // And the runtime vocabularies with their values, on the same rule (`ingest.md` §1.3).
-        manifest.vocabularies = self.live.vocabularies_for_publication(&live.vocabularies);
-        // And the view groups and plain views, on the same rule (`ingest.md` §1.3). A group's
-        // roster is `manifest.views` above; what these carry is the group's own half.
-        let (groups, plain_views) = self.live.view_declarations_for_publication();
-        manifest.groups = groups;
-        manifest.plain_views = plain_views;
+        // is where a registration, a create or a declaration made since the last one stops
+        // depending on the WAL surviving: rotation reclaims their records, and without this the
+        // mark and everything it covers go with them.
+        self.write_live_state(&mut manifest, &live.vocabularies);
         // **And the group-scoped columns this flush gave a view its first of** (`views.md` §5).
         // Carried forward and appended to, never restated: the list is what a *restart* recovers
         // `scoped_scalars[..].views` from, and a render-only family writes no extent for the
@@ -15799,12 +15686,7 @@ impl Executor {
             &mut manifest,
             None,
         ) {
-            self.health.flush_failures.fetch_add(1, Ordering::Relaxed);
-            tracing::error!(
-                error = %e,
-                "ALARM: a completed flush's side-manifest could not be committed; its files are \
-                 orphans, the buffer is retained, and the next tick will re-plan"
-            );
+            discard(&format!("its side-manifest could not be committed ({e})"));
             return false;
         }
         *mark = self
