@@ -2003,11 +2003,9 @@ impl FilterColumns {
                     vocabularies,
                     mmap,
                 )?;
-                // This view's column of a text family holds its flushes' layers here, where every
-                // other family's arrive through `compose` below: a text extent composes onto no
-                // value column, so nothing else would reach it. A key created again shares
-                // `(column, view)` with its predecessor, whose extents stay listed until a fold,
-                // so the incarnation decides which of the two an extent belongs to.
+                // A text family's flushed layers are added here; every other family's arrive
+                // through `compose` below. A key created again shares `(column, view)` with its
+                // predecessor, whose extents stay listed until a fold.
                 if layers.family == Family::Text {
                     layers.text.extend(text_extent_layers(
                         prefix_dir,
