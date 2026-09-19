@@ -1160,39 +1160,17 @@ pub(crate) fn rebase_into(manifest: &mut SegmentsManifest, completed: &Completed
         Some(at) => at,
         None => return false,
     };
-    // **Within the window's own `(column, view, incarnation)` subsequence**, the key the planner
-    // grouped by. Every other axis is a contiguous window of one list; this one is a contiguous
-    // window of a *filtered* list, because `attr_extents` interleaves the columns a flush publishes
-    // for — and, for a group-scoped family, the views sharing one column name. The rebase therefore
-    // checks the window is still contiguous in that subsequence — not in the whole list, which a
-    // flush publishing another column's or another view's extent mid-window would break for no
-    // reason.
+    // Keyed by the values path — the never-reused identity a listed attribute extent is found by.
     if plan.attrs.len() != completed.attrs.len() {
         return false;
     }
-    let mut attr_positions: Vec<Vec<usize>> = Vec::with_capacity(completed.attrs.len());
-    for window in &plan.attrs {
-        let subsequence: Vec<usize> = manifest
-            .attr_extents
-            .iter()
-            .enumerate()
-            .filter(|(_, e)| {
-                e.column == window.column
-                    && e.view == window.view
-                    && e.incarnation == window.incarnation
-            })
-            .map(|(i, _)| i)
-            .collect();
-        let listed: Vec<&str> = subsequence
-            .iter()
-            .map(|i| manifest.attr_extents[*i].values.as_str())
-            .collect();
-        let consumed: Vec<&str> = window.extents.iter().map(|e| e.values.as_str()).collect();
-        let Some(at) = window_of(&listed, &consumed, |s| s) else {
-            return false;
-        };
-        attr_positions.push(subsequence[at].to_vec());
-    }
+    let Some(attr_positions) =
+        column_positions(&manifest.attr_extents, &plan.attrs, |e: &AttrExtent| {
+            e.values.as_str()
+        })
+    else {
+        return false;
+    };
 
     // The record window: one contiguous run of `record_extents`, keyed by the blocks path — the
     // same never-reused identity the attribute windows key on.
@@ -1210,35 +1188,18 @@ pub(crate) fn rebase_into(manifest: &mut SegmentsManifest, completed: &Completed
         None => return false,
     };
 
-    // The text axis, on the attribute axis's rule: a contiguous window of one
-    // `(column, view, incarnation)`'s own subsequence, keyed by the dictionary path — the never-reused identity a text layer is named
-    // by, and the one the composition finds a layer with.
+    // The text axis, keyed by the dictionary path — the never-reused identity a text layer is
+    // named by, and the one the composition finds a layer with.
     if plan.texts.len() != completed.texts.len() {
         return false;
     }
-    let mut text_positions: Vec<Vec<usize>> = Vec::with_capacity(completed.texts.len());
-    for window in &plan.texts {
-        let subsequence: Vec<usize> = manifest
-            .text_extents
-            .iter()
-            .enumerate()
-            .filter(|(_, e)| {
-                e.column == window.column
-                    && e.view == window.view
-                    && e.incarnation == window.incarnation
-            })
-            .map(|(i, _)| i)
-            .collect();
-        let listed: Vec<&str> = subsequence
-            .iter()
-            .map(|i| manifest.text_extents[*i].dict.as_str())
-            .collect();
-        let consumed: Vec<&str> = window.extents.iter().map(|e| e.dict.as_str()).collect();
-        let Some(at) = window_of(&listed, &consumed, |s| s) else {
-            return false;
-        };
-        text_positions.push(subsequence[at].to_vec());
-    }
+    let Some(text_positions) =
+        column_positions(&manifest.text_extents, &plan.texts, |e: &TextExtent| {
+            e.dict.as_str()
+        })
+    else {
+        return false;
+    };
 
     // Every file a consumed extent names, its dictionary included: a consumed dictionary left in
     // `files` would be digested for a layer no list names, and the fold's orphan sweep is what
@@ -1325,48 +1286,12 @@ pub(crate) fn rebase_into(manifest: &mut SegmentsManifest, completed: &Completed
         // (filter-index §6.2): the files above and this list. A bundle whose `attr_extents` lost a
         // window whose bytes were written opens cleanly and answers filters missing every entity
         // that window held — a wrong answer with no symptom.
-        //
-        // Each coalesced entry lands where its window began. Nothing reads `attr_extents` by
-        // position — the layers are unioned — but a manifest whose bytes depend on when a pass ran
-        // is a bundle identity that does.
-        let removed: BTreeSet<usize> = attr_positions.iter().flatten().copied().collect();
-        let inserts: BTreeMap<usize, &AttrExtent> = attr_positions
-            .iter()
-            .zip(&completed.attrs)
-            .map(|(positions, attr)| (positions[0], &attr.extent))
-            .collect();
-        let mut next = Vec::with_capacity(manifest.attr_extents.len());
-        for (i, extent) in manifest.attr_extents.iter().enumerate() {
-            if let Some(coalesced) = inserts.get(&i) {
-                next.push((*coalesced).clone());
-            }
-            if !removed.contains(&i) {
-                next.push(extent.clone());
-            }
-        }
-        manifest.attr_extents = next;
+        let coalesced: Vec<&AttrExtent> = completed.attrs.iter().map(|a| &a.extent).collect();
+        splice_columns(&mut manifest.attr_extents, &attr_positions, &coalesced);
     }
     if !completed.texts.is_empty() {
-        // The attribute axis's splice, over `text_extents`. Each coalesced entry lands where its
-        // window began, for that axis's reason: nothing reads the list by position — the layers are
-        // disjoint (I9) and `match` unions them — but a manifest whose bytes depend on when a pass
-        // ran is a bundle identity that does.
-        let removed: BTreeSet<usize> = text_positions.iter().flatten().copied().collect();
-        let inserts: BTreeMap<usize, &TextExtent> = text_positions
-            .iter()
-            .zip(&completed.texts)
-            .map(|(positions, extent)| (positions[0], extent))
-            .collect();
-        let mut next = Vec::with_capacity(manifest.text_extents.len());
-        for (i, extent) in manifest.text_extents.iter().enumerate() {
-            if let Some(coalesced) = inserts.get(&i) {
-                next.push((*coalesced).clone());
-            }
-            if !removed.contains(&i) {
-                next.push(extent.clone());
-            }
-        }
-        manifest.text_extents = next;
+        let coalesced: Vec<&TextExtent> = completed.texts.iter().collect();
+        splice_columns(&mut manifest.text_extents, &text_positions, &coalesced);
     }
     true
 }
@@ -1392,6 +1317,66 @@ fn window_of<'a, T, K: PartialEq + 'a>(
                 .eq(needle.iter())
         })
         .map(|start| start..start + needle.len())
+}
+
+/// Where each window's consumed extents sit in `entries`, as positions in the whole list, or
+/// `None` if one of them no longer does.
+///
+/// **Within the window's own `(column, view, incarnation)` subsequence**, the key the planner
+/// grouped by. Every other axis is a contiguous window of one list; these two are contiguous
+/// windows of a *filtered* list, because the list interleaves the columns a flush publishes for —
+/// and, for a group-scoped family, the views sharing one column name. Contiguity in the whole list
+/// would be broken by a flush publishing another column's or another view's extent mid-window, for
+/// no reason. `identity` names the file a listed extent is recognised by.
+fn column_positions<E: ColumnExtent>(
+    entries: &[E],
+    windows: &[ColumnWindow<E>],
+    identity: impl Fn(&E) -> &str,
+) -> Option<Vec<Vec<usize>>> {
+    let mut positions = Vec::with_capacity(windows.len());
+    for window in windows {
+        let key = (
+            window.column.as_str(),
+            window.view.as_deref(),
+            window.incarnation,
+        );
+        let subsequence: Vec<usize> = entries
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| e.key() == key)
+            .map(|(i, _)| i)
+            .collect();
+        let listed: Vec<&str> = subsequence.iter().map(|i| identity(&entries[*i])).collect();
+        let consumed: Vec<&str> = window.extents.iter().map(&identity).collect();
+        let at = window_of(&listed, &consumed, |s| s)?;
+        positions.push(subsequence[at].to_vec());
+    }
+    Some(positions)
+}
+
+/// Drop the consumed positions from `entries` and put each window's coalesced extent where its
+/// window began.
+///
+/// Nothing reads either list by position — the attribute layers are unioned, the text layers
+/// disjoint (I9) and unioned by `match` — but a manifest whose bytes depend on when a pass ran is
+/// a bundle identity that does.
+fn splice_columns<E: Clone>(entries: &mut Vec<E>, positions: &[Vec<usize>], coalesced: &[&E]) {
+    let removed: BTreeSet<usize> = positions.iter().flatten().copied().collect();
+    let inserts: BTreeMap<usize, &E> = positions
+        .iter()
+        .zip(coalesced)
+        .map(|(at, extent)| (at[0], *extent))
+        .collect();
+    let mut next = Vec::with_capacity(entries.len());
+    for (i, extent) in entries.iter().enumerate() {
+        if let Some(coalesced) = inserts.get(&i) {
+            next.push((*coalesced).clone());
+        }
+        if !removed.contains(&i) {
+            next.push(extent.clone());
+        }
+    }
+    *entries = next;
 }
 
 /// `tessera_store::digest_of` with this pass's error type — see `crate::flush::digest_of` for why
