@@ -1303,6 +1303,13 @@ pub struct DictExtent {
     pub records: u64,
 }
 
+impl DictExtent {
+    /// Every file this extent owns.
+    pub fn files(&self) -> impl Iterator<Item = &str> {
+        std::iter::once(self.path.as_str())
+    }
+}
+
 /// One entry of `attr_extents`: one flush's values for one filterable column
 /// (`filter-index.md` §2.1, §2.5).
 ///
@@ -1376,6 +1383,20 @@ pub struct AttrExtent {
     pub offsets: Option<String>,
 }
 
+impl AttrExtent {
+    /// Every file this extent owns, the optional ones when the extent names them.
+    pub fn files(&self) -> impl Iterator<Item = &str> {
+        [self.values.as_str(), self.presence.as_str()]
+            .into_iter()
+            .chain(
+                [&self.dict, &self.postings, &self.offsets]
+                    .into_iter()
+                    .flatten()
+                    .map(String::as_str),
+            )
+    }
+}
+
 /// One entry of `text_extents`: one flush's text layer — **dictionary, postings and presence, and
 /// no value column** (`records-and-search.md` §4.4).
 ///
@@ -1426,6 +1447,18 @@ pub struct TextExtent {
     pub presence: String,
 }
 
+impl TextExtent {
+    /// Every file this extent owns.
+    pub fn files(&self) -> impl Iterator<Item = &str> {
+        [
+            self.dict.as_str(),
+            self.postings.as_str(),
+            self.presence.as_str(),
+        ]
+        .into_iter()
+    }
+}
+
 /// One entry of `record_extents`: one flush's record-blob layer (`records-and-search.md` §3, §7).
 ///
 /// The record blob is not a column, so its extents cannot live in [`AttrExtent`]'s list — that
@@ -1454,6 +1487,18 @@ pub struct RecordExtent {
     pub directory: String,
 }
 
+impl RecordExtent {
+    /// Every file this extent owns.
+    pub fn files(&self) -> impl Iterator<Item = &str> {
+        [
+            self.blocks.as_str(),
+            self.hasrow.as_str(),
+            self.directory.as_str(),
+        ]
+        .into_iter()
+    }
+}
+
 /// One entry of `entity_terms_extents`: one flush's slice of the entity→term transpose
 /// (`entities/terms/`, contracts §2.4; `crate::entity_terms` for the format).
 ///
@@ -1477,6 +1522,19 @@ pub struct EntityTermsExtent {
     /// Prefix-relative path of the extent's `u64` block bases, one per 65,536 ranks of
     /// `offsets`, which is what keeps a layer's pair count off a `u32` ceiling.
     pub bases: String,
+}
+
+impl EntityTermsExtent {
+    /// Every file this extent owns.
+    pub fn files(&self) -> impl Iterator<Item = &str> {
+        [
+            self.hasrow.as_str(),
+            self.offsets.as_str(),
+            self.terms.as_str(),
+            self.bases.as_str(),
+        ]
+        .into_iter()
+    }
 }
 
 /// One entry of `membership_extents`: one publication's packed artifact memberships for one level
@@ -1649,6 +1707,14 @@ pub struct LocatorExtent {
     pub entity_hi: u64,
     /// Prefix-relative path of the `external_id_runs` entry these ordinals index.
     pub external_id_run: String,
+}
+
+impl LocatorExtent {
+    /// Every file this extent names, the run it indexes included — which is also named by
+    /// `external_id_runs`, so a caller walking both lists sees it twice.
+    pub fn files(&self) -> impl Iterator<Item = &str> {
+        [self.path.as_str(), self.external_id_run.as_str()].into_iter()
+    }
 }
 
 /// `SEGMENTS-<n>.json` (contracts §2.3): complete current state for one partition, written by
