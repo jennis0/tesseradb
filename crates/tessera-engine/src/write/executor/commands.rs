@@ -1,34 +1,33 @@
 use super::*;
 
-/// The refusal a roster error is answered with — the three the wire tells apart
-/// (`views.md` §3.2, and this module's `ExecError` doc for why the caller's remedy decides).
+/// The refusal a roster error is answered with: the three the wire tells apart, and this module's
+/// `ExecError` doc for why the caller's remedy decides.
 pub(super) fn roster_error(e: tessera_lifecycle::RosterError) -> ExecError {
     use tessera_lifecycle::RosterError;
     let detail = e.to_string();
     match e {
-        // **A conflict is a *live* key and nothing else now** (decision 0115): a dropped key is
-        // created again at a fresh incarnation, so the tombstone arm this match once had has no
-        // refusal left to carry.
+        // A conflict is a live key and nothing else now: a dropped key is created again at a
+        // fresh incarnation, so the tombstone arm this match once had has no refusal left to
+        // carry.
         RosterError::Exists { .. } => ExecError::ViewConflict { detail },
         RosterError::Unknown { .. } => ExecError::ViewUnknown { detail },
         RosterError::Refused(_) => ExecError::ViewRefused { detail },
     }
 }
 
-/// The entities of `views` that hold a row in **no other view** — the commit-window buffer
-/// included (`views.md` §3.4's `delete_dangling`).
+/// The entities of `views` that hold a row in no other view, the commit-window buffer included.
 ///
-/// **`views` is every id the dropped key resolves to** (`Manifest::view_ids_for_key`), not the one
-/// the request happened to name: a key is a view of the group that owns it *and* one of every
-/// group sharing its views (`views.md` §3.3), so a probe over a single spelling reads the wrong
-/// row space when the drop was addressed to the other, and counts an entity dangling that holds a
-/// row under the key's own second name.
+/// `views` is every id the dropped key resolves to (`Manifest::view_ids_for_key`), not the one
+/// the request happened to name: a key is a view of the group that owns it and one of every group
+/// sharing its views, so a probe over a single spelling reads the wrong row space when the drop
+/// was addressed to the other, and counts an entity dangling that holds a row under the key's own
+/// second name.
 ///
-/// **The buffer counts as a view's rows.** A row accepted but not yet flushed is in no
-/// permutation, so a probe that read the permutations alone would call an entity dangling that a
-/// caller was told had landed elsewhere — and then delete it.
+/// The buffer counts as a view's rows: a row accepted but not yet flushed is in no permutation, so
+/// a probe that read the permutations alone would call an entity dangling that a caller was told
+/// had landed elsewhere, and then delete it.
 ///
-/// **Row space is walked, entity space only where it cannot be.** A view's rows invert to their
+/// Row space is walked, entity space only where it cannot be. A view's rows invert to their
 /// entities directly wherever the row space can be inverted, which is every view a flush created
 /// and every built view that published a `row-entity.u32`; where it cannot, the fallback asks
 /// each entity below the high-water whether this view holds it, which is `O(entity space)` and is
@@ -67,7 +66,7 @@ pub(super) fn dangling_entities(generation: &Generation, views: &[String]) -> Ve
             }
         }
     }
-    // **Every buffered row, joins included** (`rows()`, not `iter()`): the question here is which
+    // Every buffered row, joins included (`rows()`, not `iter()`): the question here is which
     // entities have a row *in one of these views*, which is geometry, and a join is a row.
     for (entity, item) in generation.buffer.rows() {
         if views.iter().any(|view| view == &item.view) {
@@ -96,23 +95,22 @@ pub(super) fn dangling_entities(generation: &Generation, views: &[String]) -> Ve
     candidates
 }
 
-/// Every entity holding a row in one of these views, or buffered for one, **minus the deleted**
-/// — the set an exclusion is complemented against (`ingest.md` §2.3).
+/// Every entity holding a row in one of these views, or buffered for one, minus the deleted: the
+/// set an exclusion is complemented against.
 ///
 /// [`dangling_entities`]'s walk without its second question: that one asks which entities would
 /// be left with no row if these views went away, and this asks which have a row in them now. A
 /// view that publishes no row→entity table is walked over entity space, and the warning there is
 /// that walk's, not repeated here.
 ///
-/// **A deleted entity is excluded and a suppressed one is not.** A deletion is irreversible and
-/// its entity can contribute to no count again — publishing a membership that named one would be
-/// refused a statement later — where a suppression is a live member temporarily outside every
-/// mask, which the inclusion spelling would have named and this one keeps.
-/// **The cost is a walk of the view's rows**, on the executor loop, once per publication that
-/// carries an exclusion: a row→entity inversion per row, or a `row_of` per entity where the view
-/// publishes no inversion table. It is accepted — the bound on the *list* is what makes the
-/// operation admissible at all, and the complement cannot be taken before the whole list is in
-/// (`ingest.md` §2.3) — and it is stated here so it is not rediscovered as a surprise.
+/// A deleted entity is excluded and a suppressed one is not. A deletion is irreversible and its
+/// entity can contribute to no count again, where a suppression is a live member temporarily
+/// outside every mask, which the inclusion spelling would have named and this one keeps.
+///
+/// The cost is a walk of the view's rows, on the executor loop, once per publication that carries
+/// an exclusion: a row→entity inversion per row, or a `row_of` per entity where the view publishes
+/// no inversion table. The bound on the list is what makes the operation admissible at all, and
+/// the complement cannot be taken before the whole list is in.
 pub(super) fn view_entities(generation: &Generation, views: &[String]) -> croaring::Bitmap {
     let mut entities = croaring::Bitmap::new();
     for view in views {
@@ -147,9 +145,9 @@ pub(super) fn view_entities(generation: &Generation, views: &[String]) -> croari
             }
         }
     }
-    // **Buffered rows are in the view** (`rows()`, joins included): a point acknowledged and not
+    // Buffered rows are in the view (`rows()`, joins included): a point acknowledged and not
     // yet flushed is an entity of this view, and an exclusion taken without it would leave every
-    // such point out of the membership for ever — the one asymmetry between the two spellings
+    // such point out of the membership for ever: the one asymmetry between the two spellings
     // that would not be stale but wrong.
     for (entity, item) in generation.buffer.rows() {
         if views.iter().any(|view| view == &item.view) {
@@ -167,17 +165,17 @@ pub(super) fn view_entities(generation: &Generation, views: &[String]) -> croari
     entities
 }
 
-/// What one accepted `POST /control/values` batch did (`ingest.md` §1.4). Every count is bounded
-/// by the caller's own request and names no entity and no value.
+/// What one accepted `POST /control/values` batch did. Every count is bounded by the caller's own
+/// request and names no entity and no value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ValuesReceipt {
     pub filled: u64,
     pub held: u64,
     pub joined: u64,
-    /// How many artifacts this batch's layer columns **created** — a key no artifact held, on a
-    /// layer whose value set is open (`ingest.md` §1.4). Reported for `/control/ingest`'s reason:
-    /// under `open` a typo creates a permanent object rather than being refused, and the
-    /// mitigation is that the caller who made it is told the number in its own `200`.
+    /// How many artifacts this batch's layer columns created: a key no artifact held, on a layer
+    /// whose value set is open. Under `open` a typo creates a permanent object rather than being
+    /// refused, and the mitigation is that the caller who made it is told the number in its own
+    /// `200`.
     pub minted: u64,
 }
 
@@ -186,7 +184,7 @@ pub struct ValuesReceipt {
 ///
 /// Every key here has resolved in `prepare_grow` under the same lock, so the second lookup cannot
 /// fail; a failure is a bug in that ordering and is treated as one. The difference is taken
-/// against the membership as it stands **before** the record is applied, which is the only time
+/// against the membership as it stands before the record is applied, which is the only time
 /// it exists.
 pub(super) fn growth_receipt(
     registry: &LayerRegistry,
@@ -207,15 +205,15 @@ pub(super) fn growth_receipt(
             let record = store
                 .get(layer, level, ordinal)
                 .expect("a resolved ordinal names a record");
-            // **The set this row moves**, which is the membership on a row with no rank and the
+            // The set this row moves, which is the membership on a row with no rank and the
             // content's generating set on a row with one. A rank naming no content refused the
             // batch in `prepare_grow` above, so the `None` arm here is unreachable and answers
             // nothing rather than panicking on a thread that owes an acknowledgement.
             //
-            // **`left` is counted against the set the joins have already entered**, which is the
-            // order the page is applied in (`ingest.md` §1.1): an entity this page both joins and
-            // leaves is one this page took out. The copy that takes is skipped where nothing
-            // leaves, which is every membership row.
+            // `left` is counted against the set the joins have already entered, which is the
+            // order the page is applied in: an entity this page both joins and leaves is one this
+            // page took out. The copy that takes is skipped where nothing leaves, which is every
+            // membership row.
             let counted = |set: &croaring::Bitmap| {
                 let joined = join.joining.andnot_cardinality(set);
                 let left = if join.leaving.is_empty() {
@@ -255,8 +253,7 @@ pub(super) fn growth_receipt(
 pub(super) fn refusal_of(e: tessera_lifecycle::RegistryError) -> ExecError {
     match e {
         // A second `excluding` on a held key is the same `409` a differing fixed part is: the
-        // complement it asks for is a different set from the one the artifact holds
-        // (`ingest.md` §1.3).
+        // complement it asks for is a different set from the one the artifact holds.
         tessera_lifecycle::RegistryError::PartConflict { .. }
         | tessera_lifecycle::RegistryError::ExclusionOnHeldKey { .. } => ExecError::PartConflict {
             detail: e.to_string(),
@@ -268,13 +265,13 @@ pub(super) fn refusal_of(e: tessera_lifecycle::RegistryError) -> ExecError {
 }
 
 /// What `WritePath::publish_artifacts` answers: the entities in the caller's order and the
-/// batch's counts (`ingest.md` §1.5).
+/// batch's counts.
 ///
 /// A key the level held is accepted under the fill rule and is not created, so `created` is how
 /// many artifacts the batch minted, `without_content` how many of those carry no content on a
-/// layer declaring some (R5), `filled` how many fixed parts were filled on held artifacts, and
-/// `joined` how many members joined held artifacts. Each is bounded by the caller's own request
-/// and names no artifact.
+/// layer declaring some, `filled` how many fixed parts were filled on held artifacts, and `joined`
+/// how many members joined held artifacts. Each is bounded by the caller's own request and names
+/// no artifact.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PublishedBatch {
     pub(crate) entities: Vec<EntityId>,
@@ -288,12 +285,10 @@ impl Executor {
     pub(super) fn execute(&mut self, command: Command) {
         match command {
             // Unreachable on the deny lane while the lane follows the command; handled so the
-            // executor stays total over `Command`. A window of one entry is exactly the
-            // per-command semantics, which is why there is no second ingest implementation — and
-            // why this goes through `admit_ingest` rather than around it: if this arm ever becomes
-            // reachable it must not be the one ingest path with no idempotency. The window it is
-            // given is empty, so `BatchState::Held` is unconstructible here and the answers are
-            // exactly `admit`'s.
+            // executor stays total over `Command`. This goes through `admit_ingest` rather than
+            // around it, so if this arm ever becomes reachable it still has idempotency rather
+            // than becoming a second, unchecked ingest path. The window it is given is empty, so
+            // `BatchState::Held` is unconstructible here and the answers are exactly `admit`'s.
             Command::Ingest {
                 rows,
                 batch_id,
@@ -308,8 +303,8 @@ impl Executor {
                     self.close_window(window);
                 }
             }
-            // A window of one entry is exactly the per-command semantics this path used to have,
-            // which is why there is no second deny implementation to keep in step with the first.
+            // A window of one entry is exactly the per-command semantics, which is why there is
+            // no second deny implementation to keep in step with the first.
             Command::Change { entity, op, reply } => {
                 let mut entries = vec![DenyEntry {
                     record: WalRecord::ChangeByEntity {
@@ -320,7 +315,7 @@ impl Executor {
                     op,
                     reply: Some(reply),
                 }];
-                // The cascade rides this path too — a window of one is still a window, and a
+                // The cascade rides this path too: a window of one is still a window, and a
                 // deletion admitted here that skipped it would strand every artifact depending on
                 // the one deleted.
                 self.cascade_dependents(&mut entries);
@@ -383,13 +378,13 @@ impl Executor {
         }
     }
 
-    /// Validate, allocate, append, sync, apply — `commit_registry`'s sequence, for the same reason
-    /// and with one addition: the record lands in **two** structures, the registry (for a level
+    /// Validate, allocate, append, sync, apply: `commit_registry`'s sequence, for the same reason
+    /// and with one addition: the record lands in two structures, the registry (for a level
     /// that grew) and the store (for the memberships themselves), and both are applied under the
     /// one lock the preparation was made under.
     ///
-    /// **Nothing is applied before the record is durable.** A membership applied and then lost is
-    /// an artifact whose `tessera_id` a caller already holds and whose members come back empty —
+    /// Nothing is applied before the record is durable. A membership applied and then lost is an
+    /// artifact whose `tessera_id` a caller already holds and whose members come back empty,
     /// served as absent, indistinguishable from one that failed its criterion. So the append comes
     /// first, and a failure means the batch does not exist.
     pub(super) fn commit_artifacts(
@@ -400,22 +395,22 @@ impl Executor {
         reply: Reply<PublishedBatch>,
     ) {
         // Read before the record is applied, because it is what says a held row form is the form
-        // this publication follows — see [`Self::bring_artifacts_forward`].
-        // **Partitioned before any ordinal is claimed** (`ingest.md` §1.5, R3): a key the level
-        // holds is compared under the fill rule and resolves to its existing ordinal, and only the
-        // keys it does not hold are published. The answer is up to three kinds of record, in the
-        // order they are appended and applied.
-        // **The complement, taken here and nowhere else** (`ingest.md` §2.3): a membership spelled
-        // by exclusion is materialised on the executor, against the view's entity set as it stands
-        // at this step, *before* the record is written — so the log, the store and every read path
-        // carry the inclusion the other spelling would have produced, and no serving path can
-        // evaluate a complement against a viewer's mask, which would disclose the existence of
-        // items outside it (`annotation-write-cycle.md` §6.1).
+        // this publication follows: see [`Self::bring_artifacts_forward`].
+        // Partitioned before any ordinal is claimed: a key the level holds is compared under the
+        // fill rule and resolves to its existing ordinal, and only the keys it does not hold are
+        // published. The answer is up to three kinds of record, in the order they are appended
+        // and applied.
         //
-        // **The held-key refusal is taken first**: an exclusion on a key the level holds is a
-        // `409` ([`RegistryError::ExclusionOnHeldKey`], which `prepare_put` makes below over the
-        // same store), and the walk of the view's entities is the most expensive thing this route
-        // does — so the refusal spends nothing, as every other refusal on this path does not.
+        // The complement is taken here and nowhere else: a membership spelled by exclusion is
+        // materialised on the executor, against the view's entity set as it stands at this step,
+        // before the record is written, so the log, the store and every read path carry the
+        // inclusion the other spelling would have produced. No serving path evaluates a complement
+        // against a viewer's mask, which would disclose the existence of items outside it.
+        //
+        // The held-key refusal is taken first: an exclusion on a key the level holds is a `409`
+        // ([`RegistryError::ExclusionOnHeldKey`], which `prepare_put` makes below over the same
+        // store), and the walk of the view's entities is the most expensive thing this route does,
+        // so the refusal spends nothing, as every other refusal on this path does not.
         if let Err(e) = self.materialise_exclusions(&layer, level, &mut incoming) {
             reply.fail(e);
             return;
@@ -467,22 +462,21 @@ impl Executor {
     }
 
     /// Materialise every membership this batch spelled by exclusion, and answer the refusal where
-    /// the layer cannot be read (`ingest.md` §2.3).
+    /// the layer cannot be read.
     ///
-    /// **The view's entity set is every entity holding a row in it or buffered for it, deleted
-    /// entities excluded**, and the membership is one `andnot` of the caller's list over it. On a
+    /// The view's entity set is every entity holding a row in it or buffered for it, deleted
+    /// entities excluded, and the membership is one `andnot` of the caller's list over it. On a
     /// group-scoped layer the view is the artifact's own; on an entity-scoped one it is the union
     /// of the views the layer is drawn on, which is the layer's whole corpus and the set the
     /// build complements against (`layers.rs::resolve_artifact`, `0..high_water`).
     ///
-    /// **Two divergences from the build's byte-identity are structural and stated rather than
-    /// closed** (`ingest.md` §2.3): an entity ingested after this step is in the inclusion
-    /// spelling's membership and not in the exclusion's, and a suppressed entity is in both,
-    /// suppression not being deletion.
+    /// Two divergences from the build's byte-identity are structural and stated rather than
+    /// closed: an entity ingested after this step is in the inclusion spelling's membership and
+    /// not in the exclusion's, and a suppressed entity is in both, suppression not being deletion.
     ///
     /// The size is logged rather than answered: how large a membership a caller's exclusion came
     /// to is operator-facing, and a count of the corpus is not something a publication's
-    /// acknowledgement carries (C8).
+    /// acknowledgement carries.
     pub(super) fn materialise_exclusions(
         &self,
         layer: &str,
@@ -529,10 +523,10 @@ impl Executor {
             };
             let view = artifact.view.clone();
             let entities = sets.entry(view.clone()).or_insert_with(|| {
-                // **The artifact names a view's *key* and the generation holds view *ids***
-                // (`quarter:q1`; `views.md` §3.1), so the key is resolved against the layer's own
-                // declared views rather than used as an id — which matched nothing and made every
-                // group-scoped complement empty.
+                // The artifact names a view's key and the generation holds view ids (`quarter:q1`),
+                // so the key is resolved against the layer's own declared views rather than used
+                // as an id directly, which would match nothing and make every group-scoped
+                // complement empty.
                 let views: Vec<String> = match &view {
                     Some(key) => registered
                         .declaration
@@ -562,34 +556,33 @@ impl Executor {
         Ok(())
     }
 
-    /// Grow the memberships of artifacts that already exist — `commit_artifacts`'s sequence
+    /// Grow the memberships of artifacts that already exist: `commit_artifacts`'s sequence
     /// (validate, append, sync, apply) with nothing allocated, because a join takes no ordinal and
     /// no entity.
     ///
-    /// **This is the second way state enters the artifact store, and the first that is not a whole
-    /// record.** It is a *growth* path, which is why it is admissible at all: write-path §5.4's two
-    /// removal rules govern how a bit **leaves** a membership, and this adds bits that are then
-    /// retired by exactly the routes every other member is retired by — `ArtifactStore::grow`
-    /// carries the argument in full, and there is one such method rather than one per caller.
+    /// This is the second way state enters the artifact store, and the first that is not a whole
+    /// record. It is a growth path, which is why it is admissible at all: a membership's removal
+    /// rules govern how a bit leaves it, and this adds bits that are then retired by exactly the
+    /// routes every other member is retired by; `ArtifactStore::grow` carries the argument in
+    /// full, and there is one such method rather than one per caller.
     ///
-    /// **Nothing is applied before the record is durable**, on `commit_artifacts`'s reason, one
-    /// step sharper: a join applied and then lost is an artifact that comes back from a restart
-    /// *without* the point, which nothing distinguishes from an artifact that failed its existence
+    /// Nothing is applied before the record is durable, on `commit_artifacts`'s reason, one step
+    /// sharper: a join applied and then lost is an artifact that comes back from a restart without
+    /// the point, which nothing distinguishes from an artifact that failed its existence
     /// criterion. The same failure is what the pin `ArtifactStore::mark_growth_packed` releases
     /// exists against, on the packing side.
     ///
-    /// **This is the control plane's route into growth, and it is no longer the only one.** An
-    /// ingest batch carrying a column named for a layer grows the same memberships through
-    /// `Executor::close_window` instead (`artifacts-from-points.md` §6.2) — resolved at admission,
-    /// appended inside the window's own fsync, and applied through the same `ArtifactStore::grow`
-    /// this command reaches. The two share the record and the store method rather than the command,
-    /// because a batch's entities do not exist until its window allocates and a command cannot wait
-    /// inside one.
+    /// This is the control plane's route into growth, and it is not the only one. An ingest batch
+    /// carrying a column named for a layer grows the same memberships through
+    /// `Executor::close_window` instead: resolved at admission, appended inside the window's own
+    /// fsync, and applied through the same `ArtifactStore::grow` this command reaches. The two
+    /// share the record and the store method rather than the command, because a batch's entities
+    /// do not exist until its window allocates and a command cannot wait inside one.
     ///
-    /// **Minting is that close's and not this command's** (§6.3). An unknown key here is refused
-    /// whatever the layer's value set says: this route names an artifact to add members to, where a
-    /// membership column names the artifact a *point* belongs to and may therefore create it. Where
-    /// the two do agree is the thread — a mint claims ordinals serially on this executor, exactly as
+    /// Minting is that close's and not this command's. An unknown key here is refused whatever the
+    /// layer's value set says: this route names an artifact to add members to, where a membership
+    /// column names the artifact a point belongs to and may therefore create it. Where the two do
+    /// agree is the thread: a mint claims ordinals serially on this executor, exactly as
     /// `commit_artifacts` does, which is why neither claim is made in a handler.
     pub(super) fn commit_growth(
         &mut self,
@@ -600,7 +593,7 @@ impl Executor {
     ) {
         // `commit_artifacts`' reason: the version a held row form must be at for this delta to be
         // the one it is missing.
-        // The receipt is read beside the preparation, under the same lock and **before** the
+        // The receipt is read beside the preparation, under the same lock and before the
         // record is applied: afterwards every joining member is a member, and how many were new
         // is gone.
         let prepared = self.live.with_publication_state(|registry, store, _| {
@@ -641,16 +634,16 @@ impl Executor {
         reply.ack(grown);
     }
 
-    /// Validate, allocate, append, sync, apply — in that order, which is the whole of the
+    /// Validate, allocate, append, sync, apply: in that order, which is the whole of the
     /// registry's durability contract.
     ///
-    /// **Nothing is applied before the record is durable, and this is the opposite posture from a
-    /// deny.** A suppression is applied to the live overlay even when its append fails, because
+    /// Nothing is applied before the record is durable, and this is the opposite posture from a
+    /// deny. A suppression is applied to the live overlay even when its append fails, because
     /// leaving an accepted deny unapplied is a fail-open and "in force but not durable" is the
     /// safer of two bad states. A registration has no such asymmetry: a layer that exists in memory
     /// and not in the log comes back from a restart as a name that is free again, having already
     /// handed a caller a `tessera_id` for its entity. So the append comes first and a failure means
-    /// the layer does not exist — which is what the caller is told.
+    /// the layer does not exist: which is what the caller is told.
     pub(super) fn commit_registry<T>(
         &mut self,
         prepare: impl FnOnce(
@@ -679,17 +672,14 @@ impl Executor {
 
         let ack = ack_of(&record);
         self.live.apply_registry_record(&record);
-        // **A dropped layer's derived structures go with it.** Neither cache had a removal path,
-        // so each was bounded by the triples a process had ever seen rather than the ones it
-        // holds — gigabytes a level at the campaign's target, pinned for the life of the process.
-        // Retention only, never correctness: a tombstoned name never resolves through the registry
-        // again, so nothing held here was reachable to be served.
+        // A dropped layer's derived structures go with it. Retention only, never correctness: a
+        // tombstoned name never resolves through the registry again, so nothing held here is
+        // reachable to be served.
         //
-        // ⊘ **The store's own copy of a dropped layer's memberships is not released**, because
-        // `ArtifactStore::remove_layer` is reached from nowhere — a drop touches the registry and
-        // stops there. That is the larger half of the same retention, and it is a write-path
-        // question rather than a caching one: releasing it changes what the next fold repacks and
-        // how far back the rotation pin holds the log.
+        // The store's own copy of a dropped layer's memberships is not released here, because
+        // `ArtifactStore::remove_layer` is reached from nowhere: a drop touches the registry and
+        // stops there. Releasing it changes what the next fold repacks and how far back the
+        // rotation pin holds the log.
         if let WalRecord::LayerDrop { name } = &record {
             // The deltas held for the tick describe forms that are going with the layer.
             self.pending_forms.retain(|(layer, _), _| layer != name);
@@ -704,15 +694,14 @@ impl Executor {
         reply.ack(ack);
     }
 
-    /// `PUT /control/views/{group}/{key}` — create a view of a group while the service runs
-    /// (`views.md` §3.2, decision 0108).
+    /// `PUT /control/views/{group}/{key}`: create a view of a group while the service runs.
     ///
-    /// **The shape is `commit_registry`'s**, because the obligation is: prepare against state only
+    /// The shape is `commit_registry`'s, because the obligation is: prepare against state only
     /// this thread may write, append, fsync, apply, publish, ack. What differs is that a view has
-    /// a *row space* — an empty one — so the apply reaches the bundle rather than stopping at a
+    /// a row space, an empty one, so the apply reaches the bundle rather than stopping at a
     /// live-state map, and the ack therefore rides a generation swap rather than a registry token.
     ///
-    /// **The ordinal is spent whatever happens next.** A create whose append fails is refused with
+    /// The ordinal is spent whatever happens next. A create whose append fails is refused with
     /// its ordinal unreturned, exactly as a failed registration keeps its ids: an ordinal reissued
     /// after a torn append that replay might still apply is two views under one alias, which is
     /// worse than a gap in a sequence nothing counts.
@@ -738,8 +727,8 @@ impl Executor {
             // existence oracle over the roster.
             reply.fail(ExecError::ViewUnknown {
                 detail: format!(
-                    "unknown view group '{group}'. A group is declared at a build and its views \
-                     grow at a running service (views §3.1); there is no create that mints a group"
+                    "unknown view group '{group}': a group is declared at a build and its views \
+                     grow at a running service; there is no create that mints a group"
                 ),
             });
             return;
@@ -765,51 +754,29 @@ impl Executor {
         }
         self.live.with_roster(|roster| roster.apply(&record));
         self.publish_roster(&generation, started, &[]);
-        // Durable in the log and not yet in a manifest, and a rotation reclaims the log — so the
-        // roster reaches `SEGMENTS-<n>.json` on the mechanism a deny already uses (`views.md`
-        // §3.2: the durable home is the segments manifest).
+        // Durable in the log and not yet in a manifest, and a rotation reclaims the log: so the
+        // roster reaches `SEGMENTS-<n>.json` on the mechanism a deny already uses.
         self.deny_dirty = true;
         reply.ack(());
     }
 
-    /// `PUT /control/attributes` — declare an attribute column while the service runs
-    /// (`ingest.md` §1.3, §6.3; decision 0136).
+    /// `POST /control/values`: fill attribute values on entities that already exist.
     ///
-    /// **The shape is [`Self::commit_view_create`]'s**: resolve against state only this thread
-    /// may write, append, fsync, apply, publish, ack. The apply reaches the bundle, because the
-    /// served schema is the manifest's `declared_scalars` and every reader takes it from there:
-    /// the successor generation carries the column at the tail of that list, the filter columns
-    /// hold an empty stack for it so the next flush's extent composes onto something, and a
-    /// vocabulary no column named before is narrowed to the width this column stores.
+    /// It creates no point and no row. Every entity a row names was resolved at the boundary, so
+    /// this pass adds cells to entities that have them and members to artifacts; a subject that
+    /// does not exist refused the batch before it was submitted. What it does create is an
+    /// artifact a layer column named and no artifact held, on an `open` layer, through the same
+    /// [`Executor::prepare_mints`] the ingest door's window close uses.
     ///
-    /// **Ingestable at the ack.** A batch decoded against the successor's schema carries the
-    /// column; one decoded against the predecessor's is shorter by one and is padded with the
-    /// column's absence at its window's close (`crate::attributes::pad_to_schema`). The column is
-    /// listed on `/v1/meta` from the swap and absent for every entity until a row fills it.
+    /// The fill rule is evaluated here and nowhere else, beside the join arm and for its reason:
+    /// the sources are the commit-window buffer, the unflushed fills and the flushed homes, and
+    /// only this thread moves any of them. An absent cell takes the value, a cell holding the
+    /// identical value is a no-op, and a cell holding a different value refuses the whole batch
+    /// with a `409` naming the column and the key and never the held value.
     ///
-    /// An identical redeclaration answers the existing identity with nothing appended; a
-    /// differing one is a conflict (`ingest.md` §1.1). A failed append means the column does not
-    /// exist, on the layer registration's rule.
-    /// `POST /control/values` — fill attribute values on entities that already exist
-    /// (`ingest.md` §1.4).
-    ///
-    /// **It creates no point and no row.** Every entity a row names was resolved at the boundary,
-    /// so this pass adds cells to entities that have them and members to artifacts; a subject that
-    /// does not exist refused the batch before it was submitted (`ingest.md` §1.6). What it does
-    /// create is an **artifact** a layer column named and no artifact held, on an `open` layer —
-    /// python-sdk §11.2 F — through the same [`Executor::prepare_mints`]
-    /// the ingest door's window close uses.
-    ///
-    /// **The fill rule is evaluated here and nowhere else** (`ingest.md` §1.1), beside the join
-    /// arm and for its reason (decision 0116): the sources are the commit-window buffer, the
-    /// unflushed fills and the flushed homes, and only this thread moves any of them. An absent
-    /// cell takes the value, a cell holding the identical value is a no-op, and a cell holding a
-    /// different value refuses the whole batch with a `409` naming the column and the key and
-    /// never the held value.
-    ///
-    /// **One append, one fsync, one apply.** The values record and the growth records its layer
+    /// One append, one fsync, one apply. The values record and the growth records its layer
     /// columns produced are made durable together, so there is no state in which a cell is filled
-    /// and its membership is not (write-path §7.3).
+    /// and its membership is not.
     pub(super) fn commit_values(
         &mut self,
         request: tessera_lifecycle::ValuesRequest,
@@ -818,7 +785,7 @@ impl Executor {
         let started = std::time::Instant::now();
         let generation = self.generation.load_full();
 
-        // **The batch-id replay check, on the executor** ([`BatchState`]'s rule). A values batch
+        // The batch-id replay check, on the executor ([`BatchState`]'s rule). A values batch
         // allocates nothing, so a replay has no ids to hand back; a byte-identical retry runs the
         // pass below and finds every cell held identically, which is the fill rule's own no-op.
         if let Some((held_hash, _)) = self.live.accepted_batch(&request.batch_id) {
@@ -838,10 +805,10 @@ impl Executor {
                 return;
             }
         };
-        // **A layer column on a values row is a membership join, and mints what it names**
-        // (`ingest.md` §1.4; python-sdk §11.2 F). A held key joins the entity to
-        // the artifact; a key no artifact holds mints it here, on an `open` layer, with the
-        // batch's rows as its first members and its lineage from a list column's own adjacency.
+        // A layer column on a values row is a membership join, and mints what it names. A held
+        // key joins the entity to the artifact; a key no artifact holds mints it here, on an
+        // `open` layer, with the batch's rows as its first members and its lineage from a list
+        // column's own adjacency.
         // The refusals are `resolve_or_mint`'s and are made below with the batch still without
         // effect: a `closed` value set, and a layer declaring supplied content or a dependency.
         let (mut memberships, mint_edges) = match self.resolve_memberships(&request.artifacts) {
@@ -851,8 +818,8 @@ impl Executor {
                 return;
             }
         };
-        // **Through the one implementation the ingest door's window close uses** (decision 0139),
-        // so a key arriving here creates the artifact the same key would have created there.
+        // Through the one implementation the ingest door's window close uses, so a key arriving
+        // here creates the artifact the same key would have created there.
         let wanted = match values_mint_plan(&memberships, &request.rows) {
             Ok(wanted) => wanted,
             Err(detail) => {
@@ -885,9 +852,9 @@ impl Executor {
                 return;
             }
         };
-        // Read beside the preparation and **before** the apply, on `growth_receipt`'s rule:
+        // Read beside the preparation and before the apply, on `growth_receipt`'s rule:
         // afterwards every joining member is a member and how many were new is gone.
-        // **`joined` counts members of artifacts that already existed**, at this door as at
+        // `joined` counts members of artifacts that already existed, at this door as at
         // `PUT /control/layers/{name}/artifacts`: an artifact this batch created is reported under
         // `minted`, and its first members are what creating it means rather than a second number.
         let joined = self.live.with_artifacts(|store| {
@@ -911,12 +878,12 @@ impl Executor {
                 })
                 .collect(),
         };
-        // **The publications that minted come first, then the growths** — the window close's own
+        // The publications that minted come first, then the growths: the window close's own
         // order, and for its reason: a growth of this batch may name an ordinal one of them
         // claimed, and replay applies the sequence in order, so an artifact must exist before
         // anything addresses it.
         let artifact_records: Vec<&WalRecord> = mints.iter().chain(growth.iter()).collect();
-        // The level version each record is the delta against, read before the apply moves it —
+        // The level version each record is the delta against, read before the apply moves it, on
         // `commit_growth`'s rule, carried forward across the sequence because a mint and a growth
         // of this batch may name one level and each moves it exactly once.
         let mut durable: Vec<&WalRecord> = vec![&values_record];
@@ -931,9 +898,9 @@ impl Executor {
         let values_position = positions[0];
         self.apply_artifact_records(&artifact_records, &positions[1..]);
 
-        // **The cells reach the buffer's fill map**, which is what the next flush writes into the
-        // family's entity-space extent and the record blob (`ingest.md` §6.3). The map is cloned
-        // with the buffer, on the immutable-snapshot rule every generation is built by.
+        // The cells reach the buffer's fill map, which is what the next flush writes into the
+        // family's entity-space extent and the record blob. The map is cloned with the buffer, on
+        // the immutable-snapshot rule every generation is built by.
         let mut buffer = (*generation.buffer).clone();
         for (entity, fill) in planned.fills {
             buffer.fill(entity, fill, |value| matches!(value, WalScalar::Null));
@@ -954,8 +921,8 @@ impl Executor {
         self.publish(next, started);
         // A values batch allocates no entity, so the index records none: the batch id and the
         // body hash are the whole of what a retry is answered off. Indexed at the values record's
-        // own position, so the rotation that reclaims that record forgets the id with it — the
-        // horizon a restart rebuilds (§2.4).
+        // own position, so the rotation that reclaims that record forgets the id with it, the
+        // horizon a restart rebuilds.
         let identity = tessera_lifecycle::batch_identity(&values_record);
         debug_assert_eq!(
             identity,
@@ -972,7 +939,7 @@ impl Executor {
             Vec::new(),
             values_position,
         );
-        // **What a batch minted is reported to the batch that minted it**, and to the operator —
+        // What a batch minted is reported to the batch that minted it, and to the operator :
         // the window close's own line, for its own reason: under `value_set = "open"` a typo
         // creates a permanent object rather than being refused, and the mitigation is that it is
         // visible.
@@ -1003,6 +970,23 @@ impl Executor {
         });
     }
 
+    /// `PUT /control/attributes`: declare an attribute column while the service runs.
+    ///
+    /// The shape is [`Self::commit_view_create`]'s: resolve against state only this thread may
+    /// write, append, fsync, apply, publish, ack. The apply reaches the bundle, because the served
+    /// schema is the manifest's `declared_scalars` and every reader takes it from there: the
+    /// successor generation carries the column at the tail of that list, the filter columns hold
+    /// an empty stack for it so the next flush's extent composes onto something, and a vocabulary
+    /// no column named before is narrowed to the width this column stores.
+    ///
+    /// Ingestable at the ack. A batch decoded against the successor's schema carries the column;
+    /// one decoded against the predecessor's is shorter by one and is padded with the column's
+    /// absence at its window's close (`crate::attributes::pad_to_schema`). The column is listed on
+    /// `/v1/meta` from the swap and absent for every entity until a row fills it.
+    ///
+    /// An identical redeclaration answers the existing identity with nothing appended; a
+    /// differing one is a conflict. A failed append means the column does not exist, on the layer
+    /// registration's rule.
     pub(super) fn commit_attribute_declare(
         &mut self,
         request: tessera_lifecycle::AttributeRequest,
@@ -1100,17 +1084,16 @@ impl Executor {
         reply.ack(false);
     }
 
-    /// `PUT /control/view_groups/{name}` — declare a view group while the service runs
-    /// (`ingest.md` §1.3; decision 0136).
+    /// `PUT /control/view_groups/{name}`: declare a view group while the service runs.
     ///
-    /// **The shape is [`Self::commit_attribute_declare`]'s**: resolve against state only this
+    /// The shape is [`Self::commit_attribute_declare`]'s: resolve against state only this
     /// thread may write, append, fsync, apply, publish, ack. The apply reaches the bundle,
     /// because the served roster is the manifest's `groups` and every reader takes it from there:
     /// the successor generation carries the group with an empty roster, and a view of it may be
     /// created in the next request.
     ///
-    /// An identical redeclaration answers the group that exists; a differing one is a conflict
-    /// (`ingest.md` §1.1). A failed append means the group does not exist.
+    /// An identical redeclaration answers the group that exists; a differing one is a conflict. A
+    /// failed append means the group does not exist.
     pub(super) fn commit_view_group_create(
         &mut self,
         declaration: tessera_lifecycle::wal::ViewGroupDeclaration,
@@ -1152,11 +1135,10 @@ impl Executor {
         reply.ack(false);
     }
 
-    /// `PUT /control/views/{name}` — create a plain view while the service runs (`ingest.md`
-    /// §1.3 and §10, R9; decision 0136).
+    /// `PUT /control/views/{name}`: create a plain view while the service runs.
     ///
-    /// **The shape is [`Self::commit_view_group_create`]'s**, and what differs is that a plain
-    /// view has a *row space* — an empty one, until its first flush — so the apply goes through
+    /// The shape is [`Self::commit_view_group_create`]'s, and what differs is that a plain view
+    /// has a row space, an empty one until its first flush, so the apply goes through
     /// `Bundle::with_views`, which is what gives a view created at a running service its place in
     /// the per-view map. A view absent from that map is read as an unknown view by the viewport
     /// and as a disagreement between the mask and the bundle by the deny mask.
@@ -1199,13 +1181,13 @@ impl Executor {
         reply.ack(false);
     }
 
-    /// Publish a generation carrying `manifest` and nothing else moved — the swap a group
+    /// Publish a generation carrying `manifest` and nothing else moved: the swap a group
     /// declaration and a plain view creation both make.
     ///
-    /// **`Bundle::with_views`, which brings the per-view map into step with the manifest**: a
-    /// view the manifest declares and the map does not is an unknown view to the viewport, and a
-    /// created view gains the empty row space `views.md` §3.2 gives it. `segments_version` and
-    /// the watermark are unmoved, on `publish_roster`'s argument: no row moved.
+    /// `Bundle::with_views`, which brings the per-view map into step with the manifest: a view
+    /// the manifest declares and the map does not is an unknown view to the viewport, and a
+    /// created view gains an empty row space. `segments_version` and the watermark are unmoved,
+    /// on `publish_roster`'s argument: no row moved.
     pub(super) fn publish_view_manifest(
         &mut self,
         generation: &Arc<Generation>,
@@ -1219,22 +1201,21 @@ impl Executor {
         self.publish(next, started)
     }
 
-    /// `PUT /control/vocabularies/{name}` — declare a vocabulary while the service runs
-    /// (`ingest.md` §1.3; decision 0136).
+    /// `PUT /control/vocabularies/{name}`: declare a vocabulary while the service runs.
     ///
-    /// **The shape is [`Self::commit_attribute_declare`]'s**: resolve against state only this
+    /// The shape is [`Self::commit_attribute_declare`]'s: resolve against state only this
     /// thread may write, draw the codes, append, fsync, apply, publish, ack. The apply reaches
     /// the bundle, because the served vocabulary table is the manifest's `vocabularies` and every
     /// reader takes it from there: the successor generation carries the vocabulary, and its
     /// minter holds the values the declaration named.
     ///
-    /// **Usable at the ack.** A `declared` category column may name the vocabulary in the next
-    /// request, and a row may carry a value it holds; a key it does not hold is the declare-then-
-    /// use refusal, unchanged (per-point-attributes §5).
+    /// Usable at the ack. A `declared` category column may name the vocabulary in the next
+    /// request, and a row may carry a value it holds; a key it does not hold is refused under the
+    /// declare-then-use rule, unchanged.
     ///
     /// An identical redeclaration answers the vocabulary that exists and applies the request's
-    /// values as a page; a differing one is a conflict (`ingest.md` §1.1). A failed append means
-    /// the vocabulary does not exist and no code was spent.
+    /// values as a page; a differing one is a conflict. A failed append means the vocabulary does
+    /// not exist and no code was spent.
     pub(super) fn commit_vocabulary_declare(
         &mut self,
         request: tessera_lifecycle::VocabularyRequest,
@@ -1324,8 +1305,8 @@ impl Executor {
         });
     }
 
-    /// `PATCH /control/vocabularies/{name}/values` — a page of values for a vocabulary that
-    /// exists (`ingest.md` §1.3).
+    /// `PATCH /control/vocabularies/{name}/values`: a page of values for a vocabulary that
+    /// exists.
     pub(super) fn commit_vocabulary_values(
         &mut self,
         vocabulary: String,
@@ -1338,9 +1319,9 @@ impl Executor {
     /// One page of values, whether it arrived on the values route or as the inline values of a
     /// redeclaration.
     ///
-    /// **Every value of the page is checked before any code is drawn**, so a refused page binds
+    /// Every value of the page is checked before any code is drawn, so a refused page binds
     /// nothing and a caller's corrected retry means what they think it means. The page is one
-    /// append and one fsync — a `VocabularyDeclare` record carrying the page's values with the
+    /// append and one fsync: a `VocabularyDeclare` record carrying the page's values with the
     /// codes drawn for them, because a value's title is part of what the page acknowledges and a
     /// `VocabularyMint` record carries none.
     ///
@@ -1348,9 +1329,9 @@ impl Executor {
     /// values page's is that unchanged, and a redeclaration's is a [`VocabularyDeclared`] carrying
     /// the same two counts.
     ///
-    /// **A title supplied for a held key replaces the held title** and is counted into the
-    /// acknowledgement (decision 0136's amendment). The key-to-code binding does not move, so a
-    /// row already carrying the code means what it meant; what changes is the name a client draws.
+    /// A title supplied for a held key replaces the held title and is counted into the
+    /// acknowledgement. The key-to-code binding does not move, so a row already carrying the code
+    /// means what it meant; what changes is the name a client draws.
     pub(super) fn commit_vocabulary_page<T>(
         &mut self,
         vocabulary: String,
@@ -1365,10 +1346,9 @@ impl Executor {
             // declared and one this deployment does not carry are one answer.
             reply.fail(ExecError::ViewUnknown {
                 detail: format!(
-                    "unknown vocabulary '{vocabulary}'. A vocabulary is declared at a build or by \
-                     `PUT /control/vocabularies/{{name}}` (ingest §1.3); a page of values does \
-                     not create one, because the value set's width and visibility are the \
-                     declaration's to state"
+                    "unknown vocabulary '{vocabulary}': a vocabulary is declared at a build or by \
+                     `PUT /control/vocabularies/{{name}}`; a page of values does not create one, \
+                     because the value set's width and visibility are the declaration's to state"
                 ),
             });
             return;
@@ -1405,11 +1385,10 @@ impl Executor {
                 minter.set_title(&value.key, title.clone());
             }
         }
-        // **Nothing to append where the page bound nothing and changed no title.** A repeat of a
-        // page already applied is the no-op `ingest.md` §1.1 asks for, and an fsync for it would
-        // be a durable record of a decision nothing made. `titles` counts the held keys whose
-        // title this page changes, so a page restating the titles a deployment holds appends
-        // nothing.
+        // Nothing to append where the page bound nothing and changed no title. A repeat of a page
+        // already applied is a no-op, and an fsync for it would be a durable record of a decision
+        // nothing made. `titles` counts the held keys whose title this page changes, so a page
+        // restating the titles a deployment holds appends nothing.
         if added == 0 && titles == 0 {
             reply.ack(answer(VocabularyValues {
                 added,
@@ -1460,18 +1439,18 @@ impl Executor {
         }));
     }
 
-    /// `DELETE /control/views/{group}/{key}` — drop a view, freeing its key and killing its
-    /// incarnation (`views.md` §3.4, decision 0115).
+    /// `DELETE /control/views/{group}/{key}`: drop a view, freeing its key and killing its
+    /// incarnation.
     ///
-    /// **Dropping a view deletes no entity.** An entity whose only view was dropped still exists,
-    /// with its label, its attributes and its artifact memberships, in no view — and a later batch
+    /// Dropping a view deletes no entity. An entity whose only view was dropped still exists,
+    /// with its label, its attributes and its artifact memberships, in no view, and a later batch
     /// into a new view picks it up by `external_id` under the join rule. `delete_dangling` is the
-    /// caller who *did* mean "and the items that were only here", and it is **sugar and nothing
-    /// else**: the entities are submitted as ordinary deletions, which enter the overlay and
-    /// retire at the fold that executes them (Rule F, write-path §5.4). It is not a second
-    /// retirement route, and the two removal rules are untouched by anything here.
+    /// caller who did mean "and the items that were only here", and it is sugar and nothing else:
+    /// the entities are submitted as ordinary deletions, which enter the overlay and retire at the
+    /// fold that executes them. It is not a second retirement route, and the two removal rules are
+    /// untouched by anything here.
     ///
-    /// **The probe and the submission are one step on this thread**, which is what the
+    /// The probe and the submission are one step on this thread, which is what the
     /// serialisation is for: a batch acked between them could re-add an entity the probe had
     /// already found dangling, and the deletion would then destroy a row the caller was told had
     /// landed.
@@ -1485,15 +1464,14 @@ impl Executor {
         let started = std::time::Instant::now();
         let generation = self.generation.load_full();
         // The owner's key, whatever group the request named: a key belongs to the group that owns
-        // the views, and dropping the key takes the view out of every group sharing them
-        // (`views.md` §3.3).
+        // the views, and dropping the key takes the view out of every group sharing them.
         let owner = generation.bundle.manifest.owner_of_group(&group);
-        // **Every id the key resolves to**, which is what a drop takes away — the owner's view and
-        // every sharing group's. Built from the *owner* rather than from the group the request
+        // Every id the key resolves to, which is what a drop takes away: the owner's view and
+        // every sharing group's. Built from the owner rather than from the group the request
         // named, and used by all three things below that act on "the views of this key": the log
         // line, the `delete_dangling` probe and the buffer prune. A prune over the requested
-        // spelling alone leaves the other's buffered rows to be flushed into whatever takes the
-        // key next ([decision 0115](../../../docs/decisions/0115-a-dropped-view-key-is-reusable.md)).
+        // spelling alone would leave the other's buffered rows to be flushed into whatever takes
+        // the key next.
         let ids = generation.bundle.manifest.view_ids_for_key(&owner, &key);
         let prepared = self
             .live
@@ -1505,8 +1483,8 @@ impl Executor {
                 return;
             }
         };
-        // **Computed before the drop applies**, because the probe reads the row space the drop is
-        // about to take away — and on this thread, with no yield between it and the submission.
+        // Computed before the drop applies, because the probe reads the row space the drop is
+        // about to take away, on this thread, with no yield between it and the submission.
         let dangling = if delete_dangling {
             dangling_entities(&generation, &ids)
         } else {
@@ -1519,11 +1497,11 @@ impl Executor {
         self.live.with_roster(|roster| roster.apply(&record));
         self.publish_roster(&generation, started, &ids);
         self.deny_dirty = true;
-        // **Ordinary deletions, through the ordinary lane.** They are appended, fsynced and
-        // applied by the same path a `/control/changes` delete takes, so they retire at the fold
-        // under Rule F and nowhere else. A failure here is reported the way that lane reports one
-        // — in force, and possibly not durable — and does not un-drop the view, which is already
-        // acknowledged as far as the log is concerned.
+        // Ordinary deletions, through the ordinary lane. They are appended, fsynced and applied by
+        // the same path a `/control/changes` delete takes, so they retire at the fold and nowhere
+        // else. A failure here is reported the way that lane reports one, in force and possibly
+        // not durable, and does not un-drop the view, which is already acknowledged as far as the
+        // log is concerned.
         let deleted = dangling.len() as u64;
         if !dangling.is_empty() {
             let mut entries: Vec<DenyEntry> = dangling
@@ -1548,11 +1526,11 @@ impl Executor {
     /// it, the deny mask re-derived over the views it now has, and every buffered row of a view
     /// that has gone.
     ///
-    /// **The buffered rows of a dropped view are discarded, and that is not a deletion.** They
-    /// name a coordinate system that no longer exists, so nothing will ever give them geometry —
-    /// and a row left in the buffer for a view no flush will plan pins `oldest_wal_pos`, and with
-    /// it every WAL member after it, for the life of the process. Their entities are untouched:
-    /// an entity left in no view is exactly what `views.md` §3.4 says a drop produces.
+    /// The buffered rows of a dropped view are discarded, and that is not a deletion. They name a
+    /// coordinate system that no longer exists, so nothing will ever give them geometry, and a row
+    /// left in the buffer for a view no flush will plan pins `oldest_wal_pos`, and with it every
+    /// WAL member after it, for the life of the process. Their entities are untouched: an entity
+    /// left in no view is exactly what a drop produces.
     pub(super) fn publish_roster(
         &self,
         generation: &Arc<Generation>,
