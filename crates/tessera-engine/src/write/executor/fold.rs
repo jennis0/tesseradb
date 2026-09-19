@@ -619,7 +619,7 @@ impl Executor {
         self.health.fold_requested.store(false, Ordering::SeqCst);
         let unit = self.fold.start();
         let health = Arc::clone(&self.health);
-        let paused = Arc::clone(&self.fold_paused);
+        let switches = Arc::clone(&self.switches);
         let spawned = std::thread::Builder::new()
             .name("tessera-fold".to_string())
             .spawn(move || {
@@ -627,7 +627,7 @@ impl Executor {
                     Ok(mut completed) => {
                         // Test hook; always false otherwise. See `Engine::set_fold_paused_for_test`.
                         health.fold_holding.store(true, Ordering::SeqCst);
-                        while paused.load(Ordering::SeqCst) {
+                        while switches.fold_paused.load(Ordering::SeqCst) {
                             std::thread::sleep(std::time::Duration::from_millis(5));
                         }
                         health.fold_holding.store(false, Ordering::SeqCst);
@@ -663,8 +663,8 @@ impl Executor {
 
     /// Apply every completed fold waiting from its thread, and report whether any did.
     pub(super) fn publish_completed_folds(&mut self) -> bool {
-        // Test hook; always false in a shipped build. See `MaintenanceDeps::fold_publication_paused`.
-        if self.fold_publication_paused.load(Ordering::SeqCst) {
+        // Test hook; always false in a shipped build. See `MaintenanceDeps::switches`.
+        if self.switches.fold_publication_paused.load(Ordering::SeqCst) {
             return false;
         }
         let mut any = false;

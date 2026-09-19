@@ -28,7 +28,7 @@ impl Engine {
     #[cfg(feature = "fault-injection")]
     #[doc(hidden)]
     pub fn set_background_refresh_for_test(&self, enabled: bool) {
-        self.refresh_enabled.store(enabled, Ordering::SeqCst);
+        self.switches.refresh_enabled.store(enabled, Ordering::SeqCst);
     }
 
     /// Turn the background occupancy fill off, so a request computes every rung itself, letting a
@@ -37,7 +37,7 @@ impl Engine {
     #[cfg(feature = "fault-injection")]
     #[doc(hidden)]
     pub fn set_occupancy_stage_for_test(&self, enabled: bool) {
-        self.stage.enabled.store(enabled, Ordering::SeqCst);
+        self.switches.occupancy_stage_enabled.store(enabled, Ordering::SeqCst);
     }
 
     /// How many background occupancy fills are still running, for a test to poll rather than
@@ -78,7 +78,7 @@ impl Engine {
     /// unassisted. The flush publishes into the old prefix exactly as in production; this only
     /// stretches the window before the fold's own publication follows.
     pub fn set_fold_paused_for_test(&self, paused: bool) {
-        self.fold_paused.store(paused, Ordering::SeqCst);
+        self.switches.fold_paused.store(paused, Ordering::SeqCst);
     }
 
     /// Hold a completed fold in its channel, undrained, so a merge or coalesce can publish under
@@ -86,7 +86,7 @@ impl Engine {
     #[cfg(feature = "fault-injection")]
     #[doc(hidden)]
     pub fn set_fold_publication_paused_for_test(&self, paused: bool) {
-        self.fold_publication_paused.store(paused, Ordering::SeqCst);
+        self.switches.fold_publication_paused.store(paused, Ordering::SeqCst);
         if !paused {
             self.write.wake();
         }
@@ -105,7 +105,8 @@ impl Engine {
     #[cfg(feature = "fault-injection")]
     #[doc(hidden)]
     pub fn set_merge_publication_paused_for_test(&self, paused: bool) {
-        self.merge_publication_paused
+        self.switches
+            .merge_publication_paused
             .store(paused, Ordering::SeqCst);
         if !paused {
             self.write.wake();
@@ -140,14 +141,14 @@ impl Engine {
     #[cfg(feature = "fault-injection")]
     #[doc(hidden)]
     pub fn set_refresh_paused_for_test(&self, paused: bool) {
-        self.refresh_paused.store(paused, Ordering::SeqCst);
+        self.switches.refresh_paused.store(paused, Ordering::SeqCst);
     }
 
     /// Turn the row-space merge off.
     #[cfg(feature = "fault-injection")]
     #[doc(hidden)]
     pub fn set_merge_for_test(&self, enabled: bool) {
-        self.merge_enabled.store(enabled, Ordering::SeqCst);
+        self.switches.merge_enabled.store(enabled, Ordering::SeqCst);
     }
 
     /// Turn the entity-space coalesce off, so a soak can show the axes it bounds keep growing
@@ -155,7 +156,7 @@ impl Engine {
     #[cfg(feature = "fault-injection")]
     #[doc(hidden)]
     pub fn set_coalesce_for_test(&self, enabled: bool) {
-        self.coalesce_enabled.store(enabled, Ordering::SeqCst);
+        self.switches.coalesce_enabled.store(enabled, Ordering::SeqCst);
     }
 
     /// Override the serial/parallel fan-out threshold (`viewport::SERIAL_FALLBACK_MAX_ROWS`),
@@ -172,7 +173,8 @@ impl Engine {
     #[cfg(feature = "bench-timing")]
     #[doc(hidden)]
     pub fn set_serial_fallback_max_rows_for_test(&self, value: u64) {
-        self.serial_fallback_max_rows
+        self.switches
+            .serial_fallback_max_rows
             .store(value, Ordering::Relaxed);
     }
 

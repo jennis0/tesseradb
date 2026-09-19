@@ -210,8 +210,8 @@ impl SessionRegistry {
         session: Session,
         now_secs: u64,
     ) -> (std::sync::Arc<SessionEntry>, Vec<u64>) {
-        let token = session.token.clone();
-        let token_id = session.token_id;
+        let token = session.token().to_string();
+        let token_id = session.token_id();
         let entry = std::sync::Arc::new(SessionEntry { session });
         self.by_token
             .insert(token.clone(), std::sync::Arc::clone(&entry));
@@ -243,7 +243,7 @@ impl SessionRegistry {
     fn sweep_expired(&mut self, now_secs: u64) -> Vec<u64> {
         let before = self.by_token.len();
         self.by_token
-            .retain(|_, entry| entry.session.expires_at > now_secs);
+            .retain(|_, entry| entry.session.expires_at() > now_secs);
         // The secondary index is pruned against the primary map rather than swept on its own
         // deadline, so the two cannot disagree about which sessions exist — `revoke` reaches
         // `by_token` only through this index, and an index entry outliving its session would make
@@ -738,7 +738,7 @@ impl AppState {
             .lock()
             .get(token)
             .ok_or(ApiError::BadCredential)?;
-        if now_secs() >= entry.session.expires_at {
+        if now_secs() >= entry.session.expires_at() {
             return Err(ApiError::ExpiredToken);
         }
         Ok(entry)

@@ -172,7 +172,7 @@ fn c_zero_term_session_sees_nothing() {
     // else, so it names no item. That is the shape of the reservation: a universal *label*, not a
     // universal grant.
     assert_eq!(
-        session.satisfied,
+        *session.satisfied_for_test(),
         [tessera_authz::PUBLIC_TERM].into_iter().collect(),
         "zero-term credential grants nothing but the reserved label"
     );
@@ -1980,7 +1980,7 @@ fn the_background_fill_takes_the_ladder_to_twelve_in_one_walk_off_the_request() 
 
     // Revoking takes any fill still running with it: `prune_token` cancels first and drops the
     // entry, so nothing is left working on behalf of a session that no longer exists.
-    filled.prune_token(session.token_id);
+    filled.prune_token(session.token_id());
     assert_eq!(filled.occupancy_stages_in_flight(), 0);
 }
 

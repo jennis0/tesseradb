@@ -243,7 +243,7 @@ impl crate::Engine {
         // principal was not already told by `/v1/meta`.
         let refuse_layer = || EngineError::BrowseRefused(BrowseRefused::UnknownLayer(req.layer.to_string()));
         let reachable = self.write.live().resolve_layers(
-            |term| session.satisfied.contains(&term),
+            |term| session.satisfied().contains(&term),
             |label| generation.dict.lookup(label.as_bytes()),
         );
         if !reachable.contains(req.layer) {
@@ -306,7 +306,7 @@ impl crate::Engine {
                 view: view.to_string(),
             })?;
         let mask = compose(
-            &session.satisfied,
+            session.satisfied(),
             &generation.overlay,
             &generation.buffer,
             Arc::clone(&geometry.projection),
@@ -396,11 +396,11 @@ impl crate::Engine {
                 // A browse page carries a name and a count, never a derived geometry.
                 None,
             );
-            let containment = rows.partition().map(|p| p.answers(&session.satisfied));
+            let containment = rows.partition().map(|p| p.answers(session.satisfied()));
             let view_of = crate::artifacts::ArtifactView {
                 declaration: &layer.declaration,
                 overlay: &generation.overlay,
-                satisfied: &session.satisfied,
+                satisfied: session.satisfied(),
                 layer_reachable: true,
                 rows: &rows,
                 mask: &mask,
@@ -692,7 +692,7 @@ impl crate::Engine {
         let fragment = self.fragment_for(session, generation)?;
         let candidate = crate::filter::candidate(
             &fragment,
-            &session.satisfied,
+            session.satisfied(),
             &generation.overlay,
             &generation.buffer,
         );

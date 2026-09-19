@@ -748,7 +748,7 @@ fn a_prune_drops_the_tokens_masked_counts_occupancy_and_shapes() {
         );
     }
 
-    engine.prune_token(doomed.token_id);
+    engine.prune_token(doomed.token_id());
 
     let after = per_session_entries(&engine);
     for (cache, ((&after, &both), &doomed)) in after
@@ -789,7 +789,7 @@ fn a_batch_prune_drops_the_same_caches_as_a_single_one() {
     warm(&engine, &survivor);
     let both = per_session_entries(&engine);
 
-    engine.prune_tokens(&FxHashSet::from_iter([doomed.token_id]));
+    engine.prune_tokens(&FxHashSet::from_iter([doomed.token_id()]));
 
     let after = per_session_entries(&engine);
     for (cache, ((&after, &both), &doomed)) in after
