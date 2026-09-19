@@ -1057,6 +1057,22 @@ struct ColumnJob {
     postings: bool,
 }
 
+/// The incarnation an extent must carry to belong to this job: the view's live one for a column
+/// of a scoped family, and `None` for an entity-scoped column, whose extents are stamped with
+/// neither a view nor an incarnation (decision 0115).
+///
+/// **A key dropped and created again leaves its predecessor's extents under the same view id**,
+/// and the job writes into the live incarnation's directory — so an extent filter on the view
+/// alone would fold the dead incarnation's values into the new view's column.
+fn job_incarnation(
+    ctx: &FoldContext,
+    job: &ColumnJob,
+) -> Option<tessera_types::view::ViewIncarnation> {
+    job.view
+        .as_ref()
+        .and_then(|view| ctx.view_incarnations.get(view).copied())
+}
+
 /// Every column the attribute pass folds, entity-scoped then group-scoped, in manifest order.
 ///
 /// **The predicate is the opener's**, `filter::owes_value_column` and
@@ -1615,6 +1631,10 @@ pub(crate) fn execute(plan: FoldPlan, ctx: FoldContext) -> Result<CompletedFold,
 
     for job in value_column_jobs(&plan, &ctx) {
         let scalar = &job;
+        let incarnation = job_incarnation(&ctx, &job);
+        let belongs = |e: &&AttrExtent| {
+            e.column == scalar.name && e.view == job.view && e.incarnation == incarnation
+        };
         let column_rel = job.rel.clone();
         let from_dir = ctx.from_prefix_dir.join(&column_rel);
         let to_dir = ctx.to_prefix_dir.join(&column_rel);
@@ -1643,11 +1663,7 @@ pub(crate) fn execute(plan: FoldPlan, ctx: FoldContext) -> Result<CompletedFold,
             Some(base)
         };
         let mut extents = Vec::new();
-        for extent in plan
-            .attr_extents
-            .iter()
-            .filter(|e| e.column == scalar.name && e.view == job.view)
-        {
+        for extent in plan.attr_extents.iter().filter(belongs) {
             extents.push(
                 tessera_filter::open_extent(
                     &ctx.from_prefix_dir.join(&extent.values),
@@ -1674,11 +1690,7 @@ pub(crate) fn execute(plan: FoldPlan, ctx: FoldContext) -> Result<CompletedFold,
                     .map_err(|e| failed("pass 4a (attributes: the base dictionary)", &e))?,
                 );
             }
-            for extent in plan
-                .attr_extents
-                .iter()
-                .filter(|e| e.column == scalar.name && e.view == job.view)
-            {
+            for extent in plan.attr_extents.iter().filter(belongs) {
                 let Some(dict_rel) = extent.dict.as_ref() else {
                     return Err(FoldFailed(format!(
                         "pass 4a (attributes): keyword column '{}' has an extent with no \
@@ -2158,6 +2170,7 @@ fn fold_text_columns(
     }
     for job in &jobs {
         let scalar = job;
+        let incarnation = job_incarnation(ctx, job);
         let column_rel = job.rel.clone();
         let from_dir = ctx.from_prefix_dir.join(&column_rel);
         let to_dir = ctx.to_prefix_dir.join(&column_rel);
@@ -2195,11 +2208,9 @@ fn fold_text_columns(
             *attr_read += file_len(&from_dir.join(tessera_filter::DICT_FILE))
                 + file_len(&from_dir.join("postings.arrow"));
         }
-        for extent in plan
-            .text_extents
-            .iter()
-            .filter(|e| e.column == scalar.name && e.view == job.view)
-        {
+        for extent in plan.text_extents.iter().filter(|e| {
+            e.column == scalar.name && e.view == job.view && e.incarnation == incarnation
+        }) {
             dicts.push(
                 tessera_filter::SortedDict::open(
                     &ctx.from_prefix_dir.join(&extent.dict),
