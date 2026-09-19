@@ -230,7 +230,7 @@ fi
 #    which compiles, because both are public and `viewport.rs` is in the same crate -- running,
 #    and reverting.
 if grep -n 'run_ratio\|postings_per_container\|fragmentation' \
-     crates/tessera-engine/src/viewport.rs \
+     crates/tessera-engine/src/viewport/*.rs \
      crates/tessera-engine/src/select.rs \
      crates/tessera-engine/src/compose.rs \
      crates/tessera-server/src/viewer.rs \
