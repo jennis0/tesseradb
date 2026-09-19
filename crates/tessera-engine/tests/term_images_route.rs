@@ -5,7 +5,7 @@
 //! its grant covers the entity domain, by the split route, which unions the bundle's images of the
 //! terms it holds and then walks the residual and the extents, or by the complement route, a walk
 //! over the entities the grant does not hold subtracted from the base's row range
-//! (`tessera_engine::compose::RowProjection::new`). The chooser picks one from the principal's own
+//! (`tessera_engine::projection::RowProjection::new`). The chooser picks one from the principal's own
 //! grant before any of them runs. What that buys is first-viewport time; what it must never cost
 //! is a row.
 //!

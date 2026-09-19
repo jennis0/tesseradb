@@ -34,7 +34,7 @@ use tessera_lifecycle::{IngestBuffer, Overlay};
 use tessera_store::{Bundle, RowSpace};
 use tessera_types::{EntityId, TermId};
 
-pub use crate::projection::RowProjection;
+use crate::projection::RowProjection;
 use crate::DenyMask;
 
 /// An attribute filter's rows, **with the part of row space they are an answer about**.

@@ -26,7 +26,8 @@ use tempfile::TempDir;
 
 use tessera_authz::{write_postings, FragmentCache, PostingsReader};
 use tessera_engine::artifacts::{ArtifactProjections, ArtifactRows, Containment};
-use tessera_engine::compose::{compose, EffectiveMask, RowProjection};
+use tessera_engine::compose::{compose, EffectiveMask};
+use tessera_engine::projection::RowProjection;
 use tessera_engine::containment::{signature_shaped, ContainmentPartition, PartitionSource};
 use tessera_engine::denied_rows_of;
 use tessera_lifecycle::membership::{ArtifactRecord, ArtifactStore, ContentSet};

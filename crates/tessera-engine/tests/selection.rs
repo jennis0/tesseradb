@@ -18,7 +18,8 @@ use rustc_hash::FxHashSet;
 use tempfile::TempDir;
 
 use tessera_authz::{write_postings, FragmentCache, PostingsReader};
-use tessera_engine::compose::{compose, EffectiveMask, RowProjection};
+use tessera_engine::compose::{compose, EffectiveMask};
+use tessera_engine::projection::RowProjection;
 use tessera_engine::occupancy::{
     occupied_tiles, occupied_tiles_ladder_with_precision, TileSketch, SKETCH_PRECISION,
 };

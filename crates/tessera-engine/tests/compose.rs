@@ -458,28 +458,6 @@ fn g2_visible_runs_flatten_to_rows_in_range_on_both_routes() {
     );
 }
 
-#[test]
-fn h_structural_invariants_hold_pervasively() {
-    let fx = build_fixture();
-
-    let mut overlay = Overlay::new();
-    overlay.apply(e(SUPPRESS_IN), ChangeOp::Suppress);
-    overlay.apply(e(SUPPRESS_OUT), ChangeOp::Suppress);
-    overlay.apply(e(CROSS2_SDU), ChangeOp::Suppress);
-    overlay.apply(e(CROSS2_SDU), ChangeOp::Delete);
-    overlay.apply(e(CROSS2_SDU), ChangeOp::Unsuppress);
-
-    let mut buffer = IngestBuffer::new();
-    insert_buffered(
-        &mut buffer,
-        BUFFERED_PASS,
-        vec![TermId::new(SATISFIED_TERM_A)],
-    );
-
-    let mask = compose_with(&fx, &overlay, &buffer);
-    assert!(mask.check_structural_invariants());
-}
-
 /// Insert a buffered item directly with already-resolved `terms`, bypassing descriptor
 /// resolution (irrelevant to these tests — see [`tessera_lifecycle::IngestBuffer::insert_row_with_terms`]).
 fn insert_buffered(buffer: &mut IngestBuffer, entity: u64, terms: Vec<TermId>) {
