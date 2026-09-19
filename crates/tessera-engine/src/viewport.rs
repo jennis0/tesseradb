@@ -5402,7 +5402,7 @@ impl Engine {
                 recorded,
                 predicate.as_ref(),
                 generation.segments_version,
-                self.serves_column_only(&name),
+                crate::artifacts::serves_column_only(&layer.declaration),
             )
         });
         // ⊘ **A cold drill-down on a row-major level pays the level's whole histogram**, because
@@ -6172,7 +6172,7 @@ impl Engine {
                 recorded,
                 predicate.as_ref(),
                 ctx.generation.segments_version,
-                self.serves_column_only(&attachment.layer),
+                crate::artifacts::serves_column_only(&layer.declaration),
             )
         });
         // The target's own count, from whichever structure its layout puts it in — the same
@@ -6450,7 +6450,7 @@ impl Engine {
                             recorded,
                             predicate.as_ref(),
                             generation.segments_version,
-                            self.serves_column_only(&name),
+                            crate::artifacts::serves_column_only(&layer.declaration),
                         ),
                         store.lineage_version(&name, level),
                     )
