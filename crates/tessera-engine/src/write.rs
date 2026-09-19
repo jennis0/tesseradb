@@ -6088,6 +6088,12 @@ fn view_row_space<'a>(
         .map(|v| &v.row_space)
 }
 
+/// A background job is outstanding while it runs, and until its completed unit has been drained
+/// from its channel and published — see [`Executor::fold_outstanding`].
+fn outstanding(in_flight: &AtomicBool, completed_pending: &AtomicBool) -> bool {
+    in_flight.load(Ordering::SeqCst) || completed_pending.load(Ordering::SeqCst)
+}
+
 fn stored_membership(declaration: &tessera_types::layer::LayerDeclaration) -> bool {
     matches!(
         declaration.membership,
@@ -6890,82 +6896,34 @@ impl Executor {
 
     /// Whether a fold is **outstanding**: running, or completed and not yet published.
     ///
-    /// # Publication is the boundary the mutual exclusion has to use, and running was not
+    /// A fold plans against a snapshot of what the live manifest lists, and a merge or a coalesce
+    /// changes exactly that, so the three exclude one another — on this boundary rather than on
+    /// "the other is executing". A job that has completed and is still sitting undrained in its
+    /// channel is about to change the manifest, and a pass dispatched beside it is discarded whole
+    /// at its rebase check, having done all of its IO.
     ///
-    /// A fold plans against a snapshot of which artefacts the live manifest lists; a merge and a
-    /// coalesce change exactly that. So the three exclude one another — and the state each must
-    /// exclude is not "the other is executing" but "the other's effect is not visible yet". A
-    /// background job passes through three phases: running, completed and sitting undrained in its
-    /// channel, and published. The `*_in_flight` flag covers only the first, and the executor's own
-    /// loop straddles the second: `publish_completed_merges` runs at the top of an iteration and
-    /// drains nothing because the merge is still working, and `tick_if_due` later in the *same*
-    /// iteration reads a by-then-cleared `merge_in_flight` and dispatches a fold against a
-    /// generation that is about to change. The next iteration publishes the merge, and the fold is
-    /// left naming artefacts the live manifest no longer lists — discarded whole at its rebase
-    /// check.
-    ///
-    /// **Every outcome of that was fail-closed, and it was still worth closing**: the cost is a
-    /// discarded corpus rewrite — minutes to hours at scale — plus an orphan prefix tree nothing
-    /// sweeps, compaction §7's startup sweep covering only what is present when an executor
-    /// starts. It was also not rare. Measured on the merge-lands-during-fold direction: **3 of 93
-    /// runs of the whole `--test fold` binary and 12 of 480 runs of the single test, ~3%**, under
-    /// 3–4 concurrent lanes, with the mechanism confirmed each time (one dispatch, one orphan
-    /// prefix holding only `partitions/`, the discard line, then a second dispatch). "Microseconds
-    /// wide" describes the instruction window and is not the rate, because the loop and the job's
-    /// completion are both driven by the tick cadence rather than being independent.
-    ///
-    /// The `*_completed_pending` flags this reads are the ones the completion handshake already
-    /// maintains — set before the send, cleared by the drain
-    /// ([`ExecutorHealth::flush_completed_pending`] states the ordering) — so the boundary needed
-    /// no new state, only the right flag.
-    ///
-    /// # Suspended, not refused
-    ///
-    /// A pass that does not start here has had nothing rejected and has lost no intent, which is
-    /// why every site says *suspended*. `dispatch_merge` calls `plan_merge` fresh on every tick, so
-    /// a merge that does not start is simply re-decided at the next one against whatever the corpus
-    /// is then; the plan does not survive the tick, and it is not meant to. That is the same
-    /// principle this boundary rests on — a merge plan names specific segments, so one made before
-    /// a fold and held until after would be a plan against a generation the fold is about to
-    /// replace. Re-planning is what keeps a plan and the generation it executes on together.
-    ///
-    /// # Why this cannot wedge
-    ///
-    /// A suspension here lasts at most one pass. The pending flags are set only by a completing job
-    /// and cleared only by `publish_completed_*`, which [`Executor::run`] calls at the top of every
-    /// iteration, unconditionally and *before* `tick_if_due` — no dispatcher's suspension can
-    /// suppress the drain that clears the flag it suspended on, because no dispatcher runs before
-    /// it. Nothing on this path sets a pending flag, so a dispatcher cannot starve itself, and the
-    /// mutual case resolves for the same reason: whichever flags are set, the next iteration's drain
-    /// clears them all before any dispatch is attempted. The executor also cannot sleep through it —
-    /// [`Executor::wait_for_work`] treats every pending flag as a reason for the fast completion
-    /// poll rather than the full tick. The one state in which a pending flag never clears is a
-    /// test's publication pause, which is `false` in a shipped build and wakes the executor when it
-    /// is lifted.
-    ///
-    /// A suspended *requested* fold is not consumed either: the request flag stays armed and the
-    /// next tick tries again, which is the treatment `dispatch_fold` already gives a fold suspended
-    /// for a running merge.
+    /// Nothing is refused by a suspension and nothing wedges: [`Executor::run`] drains every
+    /// completed job before any dispatcher runs, so a suspension lasts at most one pass; a plan
+    /// does not survive the tick and is re-decided at the next one, and a suspended request flag
+    /// stays armed. [`Executor::wait_for_work`] treats a pending flag as a reason for the fast
+    /// completion poll, so the executor cannot sleep through it either.
     fn fold_outstanding(&self) -> bool {
-        self.fold_in_flight.load(Ordering::SeqCst)
-            || self.health.fold_completed_pending.load(Ordering::SeqCst)
+        outstanding(&self.fold_in_flight, &self.health.fold_completed_pending)
     }
 
-    /// Whether a merge is running, or completed and not yet published — the boundary
-    /// [`Executor::fold_outstanding`] states, applied to the row-space merge.
+    /// Whether a merge is outstanding — [`Executor::fold_outstanding`]'s boundary, applied to the
+    /// row-space merge.
     fn merge_outstanding(&self) -> bool {
-        self.merge_in_flight.load(Ordering::SeqCst)
-            || self.health.merge_completed_pending.load(Ordering::SeqCst)
+        outstanding(&self.merge_in_flight, &self.health.merge_completed_pending)
     }
 
-    /// Whether a coalesce is running, or completed and not yet published — the boundary
-    /// [`Executor::fold_outstanding`] states, applied to the entity-space coalesce.
+    /// Whether a coalesce is outstanding — [`Executor::fold_outstanding`]'s boundary, applied to
+    /// the entity-space coalesce.
     fn coalesce_outstanding(&self) -> bool {
-        self.coalesce_in_flight.load(Ordering::SeqCst)
-            || self
-                .health
-                .coalesce_completed_pending
-                .load(Ordering::SeqCst)
+        outstanding(
+            &self.coalesce_in_flight,
+            &self.health.coalesce_completed_pending,
+        )
     }
 
     /// Select and dispatch an entity-space coalesce, if one qualifies and none is outstanding.
@@ -10126,15 +10084,12 @@ impl Executor {
             // yet. Waiting out the floor costs one wake instead of fifty a second.
             until_tick.min(backoff)
         } else if self.health.flush_requested.load(Ordering::SeqCst)
-            || self.health.flush_in_flight.load(Ordering::SeqCst)
-            || self.health.flush_completed_pending.load(Ordering::SeqCst)
-            || self.coalesce_in_flight.load(Ordering::SeqCst)
-            || self
-                .health
-                .coalesce_completed_pending
-                .load(Ordering::SeqCst)
-            || self.merge_in_flight.load(Ordering::SeqCst)
-            || self.health.merge_completed_pending.load(Ordering::SeqCst)
+            || outstanding(
+                &self.health.flush_in_flight,
+                &self.health.flush_completed_pending,
+            )
+            || self.coalesce_outstanding()
+            || self.merge_outstanding()
             || self.health.fold_completed_pending.load(Ordering::SeqCst)
         {
             // A flush or a coalesce is executing on the pool, or its completed unit is waiting in
@@ -14814,6 +14769,32 @@ impl Executor {
     /// **Failure alarms and retains.** Nothing is un-acked and nothing is unwound — the state is
     /// WAL-durable either way. Only the disaster-path bound degrades while the alarm stands, and
     /// any later write carries complete state, so a single success repairs it.
+    /// Restate the live row-less state into a side-manifest about to be committed: the registry
+    /// and its low-water mark, the roster, the runtime attribute columns, the runtime vocabularies
+    /// with their values, and the view groups and plain views.
+    ///
+    /// **Restated from live state, never carried forward from the clone.** The manifest a
+    /// publication starts from may be several publications behind, so a registration, a create or
+    /// a declaration that landed since would be dropped by carrying it forward — and a rotation
+    /// then makes that permanent. `min`, not `max`, for the mark: the row-less region grows
+    /// downward.
+    fn write_live_state(&self, manifest: &mut SegmentsManifest, vocabularies: &Vocabularies) {
+        let (layers, layer_tombstones, low_water) = self.live.registry_for_publication();
+        manifest.entity_id_low_water = manifest.entity_id_low_water.min(low_water);
+        manifest.layers = layers;
+        manifest.layer_tombstones = layer_tombstones;
+        let (created_views, dead_view_incarnations) = self.live.roster_for_publication();
+        manifest.views = created_views;
+        manifest.dead_view_incarnations = dead_view_incarnations;
+        let (attributes, scoped_attributes) = self.live.attributes_for_publication();
+        manifest.attributes = attributes;
+        manifest.scoped_attributes = scoped_attributes;
+        manifest.vocabularies = self.live.vocabularies_for_publication(vocabularies);
+        let (groups, plain_views) = self.live.view_declarations_for_publication();
+        manifest.groups = groups;
+        manifest.plain_views = plain_views;
+    }
+
     fn publish_overlay_state(&mut self) {
         if !self.deny_dirty {
             return;
@@ -14849,41 +14830,12 @@ impl Executor {
         for (partition, partition_data) in &live.bundle.partitions {
             let mut manifest = partition_data.manifest.clone();
             write_deny_state(&mut manifest, &live.overlay);
-            // **The registry travels with this publication too, and not only with a flush.** Until
-            // artifacts existed, a registration could wait for the next flush to reach a manifest —
-            // the WAL held it meanwhile and `publish_flush` says so. An extent breaks that: a
+            // **The registry travels with this publication too, and not only with a flush.** A
             // manifest naming memberships for a layer it does not declare is internally
             // inconsistent, and at open the layer's reserved runs are what turn an ordinal into an
-            // entity, so the extents would be skipped whole and every artifact would come back
+            // entity — so the extents would be skipped whole and every artifact would come back
             // absent. The two are written together or the manifest is wrong.
-            //
-            // `min`, not `max`, for the mark — the row-less region grows downward.
-            let (layers, layer_tombstones, low_water) = self.live.registry_for_publication();
-            manifest.entity_id_low_water = manifest.entity_id_low_water.min(low_water);
-            manifest.layers = layers;
-            manifest.layer_tombstones = layer_tombstones;
-            // **The roster's durable home, restated from the live roster and never from the
-            // clone** (`views.md` §3.2): the manifest this was cloned from may be several
-            // publications behind, and a create that landed since would be dropped by carrying it
-            // forward — which a rotation then makes permanent.
-            let (created_views, dead_view_incarnations) = self.live.roster_for_publication();
-            manifest.views = created_views;
-            manifest.dead_view_incarnations = dead_view_incarnations;
-            // The runtime attribute columns beside the roster, on its rule (`ingest.md` §6.3).
-            let (attributes, scoped_attributes) = self.live.attributes_for_publication();
-            manifest.attributes = attributes;
-            manifest.scoped_attributes = scoped_attributes;
-            // And the runtime vocabularies, each with its values as the live minters hold them
-            // (`ingest.md` §1.3). Restated from the live state rather than carried forward, on
-            // the roster's rule: a declaration or a page that landed since the manifest was
-            // cloned would otherwise be dropped, and a rotation makes that permanent.
-            manifest.vocabularies = self.live.vocabularies_for_publication(&live.vocabularies);
-            // And the view groups and plain views declared at a running service, on the roster's
-            // rule (`ingest.md` §1.3). A group's roster is `manifest.views` above, restated from
-            // the live roster; what these carry is the group's own half and the plain views.
-            let (groups, plain_views) = self.live.view_declarations_for_publication();
-            manifest.groups = groups;
-            manifest.plain_views = plain_views;
+            self.write_live_state(&mut manifest, &live.vocabularies);
             // **Membership extents are written before the manifest that names them**, which is the
             // whole of their durability contract: a manifest naming a missing extent refuses at
             // open, so the file has to be durable first. A failure here abandons the publication
@@ -16486,29 +16438,10 @@ impl Executor {
                 .unwrap_or(0),
         );
         // **The row-less half of the same obligation.** A flush is the routine publication, so it
-        // is where a registration made since the last one stops depending on the WAL surviving:
-        // rotation reclaims `LayerCreate`, and without this the mark and the registry go with it.
-        // `min`, not `max` — this region grows downward — and taken from the live allocator rather
-        // than from the flush, which knows only about points.
-        let (layers, layer_tombstones, low_water) = self.live.registry_for_publication();
-        manifest.entity_id_low_water = manifest.entity_id_low_water.min(low_water);
-        manifest.layers = layers;
-        manifest.layer_tombstones = layer_tombstones;
-        // The roster beside them, on the same rule and for the same reason (`views.md` §3.2).
-        let (created_views, dead_view_incarnations) = self.live.roster_for_publication();
-        manifest.views = created_views;
-        manifest.dead_view_incarnations = dead_view_incarnations;
-        // The runtime attribute columns beside the roster, on its rule (`ingest.md` §6.3).
-        let (attributes, scoped_attributes) = self.live.attributes_for_publication();
-        manifest.attributes = attributes;
-        manifest.scoped_attributes = scoped_attributes;
-        // And the runtime vocabularies with their values, on the same rule (`ingest.md` §1.3).
-        manifest.vocabularies = self.live.vocabularies_for_publication(&live.vocabularies);
-        // And the view groups and plain views, on the same rule (`ingest.md` §1.3). A group's
-        // roster is `manifest.views` above; what these carry is the group's own half.
-        let (groups, plain_views) = self.live.view_declarations_for_publication();
-        manifest.groups = groups;
-        manifest.plain_views = plain_views;
+        // is where a registration, a create or a declaration made since the last one stops
+        // depending on the WAL surviving: rotation reclaims their records, and without this the
+        // mark and everything it covers go with them.
+        self.write_live_state(&mut manifest, &live.vocabularies);
         // **And the group-scoped columns this flush gave a view its first of** (`views.md` §5).
         // Carried forward and appended to, never restated: the list is what a *restart* recovers
         // `scoped_scalars[..].views` from, and a render-only family writes no extent for the
