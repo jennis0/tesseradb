@@ -9752,8 +9752,7 @@ impl Executor {
             return false;
         };
 
-        let mut contexts = Vec::with_capacity(1);
-        {
+        let context = {
             let Some(view_data) = partition_data.views.get(&view) else {
                 return false;
             };
@@ -9917,64 +9916,58 @@ impl Executor {
                 .iter()
                 .map(|lane| families.iter().position(|f| f.name == lane.name))
                 .collect();
-            contexts.push((
-                plan,
-                crate::flush::FlushContext {
-                    prefix_dir: self.prefix_dir(generation),
-                    partition: partition.clone(),
-                    view: view.clone(),
-                    scoped_view,
-                    scoped_incarnation,
-                    incarnation,
+            crate::flush::FlushContext {
+                prefix_dir: self.prefix_dir(generation),
+                partition: partition.clone(),
+                view: view.clone(),
+                scoped_view,
+                scoped_incarnation,
+                incarnation,
 
-                    // **`seg_id`s are never reused** (contracts §2.1), which is what makes the
-                    // merge rebase ABA-safe — and the attempt counter is not decoration. `next_n`
-                    // alone repeats whenever a flush is planned twice before it publishes, and the
-                    // second attempt would then `File::create` over files the first has memory
-                    // mapped: a truncated mapping, and SIGBUS on the next read of it. The counter
-                    // makes every attempt's path distinct, so a re-plan writes beside the earlier
-                    // one rather than through it, and the loser's files are orphans nothing
-                    // references.
-                    seg_id: format!("flush-{planned_at_n}-{}", self.next_flush_attempt()),
-                    row_base,
-                    identity_key: self.identity_key,
-                    shard_id: manifest.identity.shard_id,
-                    quantisation,
-                    // **This view's schema, entity-scoped tail then scoped render lanes** — the
-                    // same list a merge and a fold of this view take (`view_scalar_schema_of`),
-                    // so a segment written by any of the three carries the same columns.
-                    //
-                    // **The two derivations agree only because a `members` group can never own a
-                    // family** (`Manifest::validate_groups` refuses one, `views.md` §3.3): under a
-                    // view whose key is in a scope — the owner's own, or a sharing group's of the
-                    // same key — `scoped_render` is the owning group's rendered families in
-                    // manifest order, which is exactly what `scoped_render_families` yields there
-                    // once publication has put the owner view id on each family's list; under any
-                    // other view the branch above *is* that function. Change either site — or that
-                    // refusal — and the third has to move with it, or a flush writes a tail its own
-                    // view's rewriters cannot read.
-                    scalar_schema: {
-                        let mut schema = scalar_schema.clone();
-                        schema.extend(scoped_render.iter().map(|f| (f.name.clone(), f.arrow_type)));
-                        schema
-                    },
-                    render_indices: render_indices.clone(),
-                    scoped_schema,
-                    scoped_render: scoped_render_indices,
-                    filter_schema: filter_schema.clone(),
-                    record_schema: record_schema.clone(),
-                    text_schema: text_schema.clone(),
-                    dict: Arc::clone(&generation.dict),
-                    novel_descriptors,
-                    max_distinct_terms: self.max_distinct_terms,
-                    prefix: generation.prefix.clone(),
-                    shapes: self.shapes.levels_of_view(&view),
+                // **`seg_id`s are never reused** (contracts §2.1), which is what makes the
+                // merge rebase ABA-safe — and the attempt counter is not decoration. `next_n`
+                // alone repeats whenever a flush is planned twice before it publishes, and the
+                // second attempt would then `File::create` over files the first has memory
+                // mapped: a truncated mapping, and SIGBUS on the next read of it. The counter
+                // makes every attempt's path distinct, so a re-plan writes beside the earlier
+                // one rather than through it, and the loser's files are orphans nothing
+                // references.
+                seg_id: format!("flush-{planned_at_n}-{}", self.next_flush_attempt()),
+                row_base,
+                identity_key: self.identity_key,
+                shard_id: manifest.identity.shard_id,
+                quantisation,
+                // **This view's schema, entity-scoped tail then scoped render lanes** — the
+                // same list a merge and a fold of this view take (`view_scalar_schema_of`),
+                // so a segment written by any of the three carries the same columns.
+                //
+                // **The two derivations agree only because a `members` group can never own a
+                // family** (`Manifest::validate_groups` refuses one, `views.md` §3.3): under a
+                // view whose key is in a scope — the owner's own, or a sharing group's of the
+                // same key — `scoped_render` is the owning group's rendered families in
+                // manifest order, which is exactly what `scoped_render_families` yields there
+                // once publication has put the owner view id on each family's list; under any
+                // other view the branch above *is* that function. Change either site — or that
+                // refusal — and the third has to move with it, or a flush writes a tail its own
+                // view's rewriters cannot read.
+                scalar_schema: {
+                    let mut schema = scalar_schema.clone();
+                    schema.extend(scoped_render.iter().map(|f| (f.name.clone(), f.arrow_type)));
+                    schema
                 },
-            ));
-        }
-        if contexts.is_empty() {
-            return false;
-        }
+                render_indices: render_indices.clone(),
+                scoped_schema,
+                scoped_render: scoped_render_indices,
+                filter_schema: filter_schema.clone(),
+                record_schema: record_schema.clone(),
+                text_schema: text_schema.clone(),
+                dict: Arc::clone(&generation.dict),
+                novel_descriptors,
+                max_distinct_terms: self.max_distinct_terms,
+                prefix: generation.prefix.clone(),
+                shapes: self.shapes.levels_of_view(&view),
+            }
+        };
         self.health
             .flush_lap(crate::flush::FlushStage::Dispatch, mark);
 
@@ -9996,36 +9989,31 @@ impl Executor {
         self.health.mark_flush_started(std::time::Instant::now());
         let health = Arc::clone(&self.health);
         self.pool.spawn(move || {
-            for (plan, ctx) in contexts {
-                let mut laps = crate::flush::FlushLaps::default();
-                match crate::flush::execute_flush(plan, ctx, &mut laps) {
-                    Ok(completed) => {
-                        health.record_flush_execution(&laps, Some(completed.consumed.len()));
-                        // **Pending is set before the send** — the completion handshake's whole
-                        // ordering; see `ExecutorHealth::flush_completed_pending`.
-                        health.flush_completed_pending.store(true, Ordering::SeqCst);
-                        // A send failure means the executor is gone, which is a shutdown and not a
-                        // fault: the files are orphans nothing references, and replay re-flushes.
-                        let _ = submit.send(completed);
-                    }
-                    Err(e) => {
-                        health.record_flush_execution(&laps, None);
-                        // **Nothing happened, retry next tick** (§10). The side-manifest is the
-                        // only commit point, so a failure before it leaves orphan files nothing
-                        // references and the buffer intact.
-                        health.flush_failures.fetch_add(1, Ordering::Relaxed);
-                        // Nothing was published, so the cycle stays open and its request is
-                        // re-armed: a caller waiting on the number waits for the retry that
-                        // succeeds (`ExecutorHealth::fail_publication_cycle`).
-                        health.fail_publication_cycle();
-                        tracing::error!(
-                            error = %e,
-                            "ALARM: a flush failed; the buffer is retained and it will be retried \
-                             at the next tick. Sustained failure grows the buffer until \
-                             ingest_buffer_max_items sheds ingest, which is the intended \
-                             backpressure"
-                        );
-                    }
+            let mut laps = crate::flush::FlushLaps::default();
+            match crate::flush::execute_flush(plan, context, &mut laps) {
+                Ok(completed) => {
+                    health.record_flush_execution(&laps, Some(completed.consumed.len()));
+                    // **Pending is set before the send** — the completion handshake's whole
+                    // ordering; see `ExecutorHealth::flush_completed_pending`.
+                    health.flush_completed_pending.store(true, Ordering::SeqCst);
+                    // A send failure means the executor is gone, which is a shutdown and not a
+                    // fault: the files are orphans nothing references, and replay re-flushes.
+                    let _ = submit.send(completed);
+                }
+                Err(e) => {
+                    health.record_flush_execution(&laps, None);
+                    // **Nothing happened, retry next tick.** The side-manifest is the only commit
+                    // point, so a failure before it leaves orphan files nothing references and the
+                    // buffer intact. The cycle stays open and its request is re-armed: a caller
+                    // waiting on the number waits for the retry that succeeds.
+                    health.flush_failures.fetch_add(1, Ordering::Relaxed);
+                    health.fail_publication_cycle();
+                    tracing::error!(
+                        error = %e,
+                        "ALARM: a flush failed; the buffer is retained and it will be retried at \
+                         the next tick. Sustained failure grows the buffer until \
+                         ingest_buffer_max_items sheds ingest, which is the intended backpressure"
+                    );
                 }
             }
             health.flush_in_flight.store(false, Ordering::SeqCst);
