@@ -281,15 +281,13 @@ pub(crate) struct RefreshDeps {
     /// through duration instead of through omission.
     pub(crate) in_flight: Arc<std::sync::atomic::AtomicU64>,
     pub(crate) refreshes: Arc<std::sync::atomic::AtomicU64>,
-    /// Whether the pass runs at all. Always `true` in a shipped build; a test disables it to model
-    /// a refresh that **produces nothing and finishes** — the degraded case, where the in-flight
-    /// flag clears and the ladder's rung 3 becomes a build rather than a 429.
-    pub(crate) enabled: Arc<std::sync::atomic::AtomicBool>,
-    /// Whether the pass **holds**. Always `false` in a shipped build; a test sets it to model a
-    /// refresh that is merely *slow* — the in-flight flag stays set for as long as it is held,
-    /// which is the window rung 3 sheds a racer in. The two hooks are different states and a test
-    /// that used one for the other would assert the wrong thing.
-    pub(crate) paused: Arc<std::sync::atomic::AtomicBool>,
+    /// `refresh_enabled`, whether the pass runs at all, and `refresh_paused`, whether it **holds**.
+    /// A test disables it to model a refresh that **produces nothing and finishes** — the degraded
+    /// case, where the in-flight flag clears and the ladder's rung 3 becomes a build rather than a
+    /// 429 — and pauses it to model one that is merely *slow*, the in-flight flag staying set for
+    /// as long as it is held, which is the window rung 3 sheds a racer in. The two hooks are
+    /// different states and a test that used one for the other would assert the wrong thing.
+    pub(crate) switches: Arc<crate::switches::TestSwitches>,
     /// The engine's projection-route counters and forced route, shared so that rung 3's builds
     /// are counted where the request path's are and a forced route reaches both.
     pub(crate) projection_routes: Arc<crate::compose::ProjectionRoutes>,
@@ -309,17 +307,17 @@ impl RefreshDeps {
         // The generation this pass is for. Taken before the early return so both exit paths
         // release only their own claim — see [`clear_if_current`].
         let mine = generation.segments_version;
-        if !self.enabled.load(Ordering::SeqCst) {
+        if !self.switches.refresh_enabled.load(Ordering::SeqCst) {
             // Nothing will produce the live key, so the flag must not stay set: rung 3 of the
             // ladder would 429 for ever instead of building.
             clear_if_current(&in_flight, mine);
             return;
         }
         let spawn_on = Arc::clone(&self.pool);
-        let paused = Arc::clone(&self.paused);
+        let switches = Arc::clone(&self.switches);
         let projection_routes = Arc::clone(&self.projection_routes);
         spawn_on.spawn(move || {
-            while paused.load(Ordering::SeqCst) {
+            while switches.refresh_paused.load(Ordering::SeqCst) {
                 std::thread::sleep(std::time::Duration::from_millis(2));
             }
             let produced = refresh_resident(&cache, &pool, &generation, &projection_routes);

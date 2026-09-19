@@ -436,8 +436,7 @@ impl WritePath {
                     coalesce: executor::Background::new(),
                     refresh: flush.refresh,
                     merge_policy: flush.merge,
-                    coalesce_enabled: flush.coalesce_enabled,
-                    merge_enabled: flush.merge_enabled,
+                    switches: flush.switches,
                     merge: executor::Background::sharing(
                         Default::default(),
                         Arc::clone(&health.merge_completed_pending),
@@ -453,9 +452,6 @@ impl WritePath {
                         Default::default(),
                     ),
                     configured_merge_bytes: flush.configured_merge_bytes,
-                    fold_paused: flush.fold_paused,
-                    fold_publication_paused: flush.fold_publication_paused,
-                    merge_publication_paused: flush.merge_publication_paused,
                     compaction: flush.compaction,
                     last_fold_start_unix: None,
                     superseded_sidecars: Vec::new(),
@@ -1163,9 +1159,6 @@ pub(crate) struct MaintenanceDeps {
     /// The supplied-content tables, shared for the one thing this thread does with them: dropping
     /// a layer's when the layer is dropped, beside the two caches above.
     pub(crate) level_contents: Arc<crate::artifact_content::LevelContents>,
-    /// Whether the coalesce and the merge run at all: see `Engine::merge_enabled`.
-    pub(crate) coalesce_enabled: Arc<AtomicBool>,
-    pub(crate) merge_enabled: Arc<AtomicBool>,
     /// The bundle root, from which the live prefix directory is derived per use: see
     /// [`Executor::prefix_dir`] and `Engine::bundle_root`.
     pub(crate) bundle_root: PathBuf,
@@ -1189,30 +1182,24 @@ pub(crate) struct MaintenanceDeps {
     /// (an unset one is derived from the base and cannot violate the relation), so the fold must
     /// tell the two apart, which the policy alone cannot.
     pub(crate) configured_merge_bytes: Option<u64>,
-    /// Whether a fold holds between its last pass and its submission :
-    /// `Engine::set_fold_paused_for_test`, which lets a test land a flush inside a fold's flight.
-    /// Always `false` in a shipped build.
-    pub(crate) fold_paused: Arc<AtomicBool>,
-    /// Whether a completed fold is left undrained in its channel :
-    /// `Engine::set_fold_publication_paused_for_test`. Always `false` in a shipped build.
+    /// Whether the coalesce and the merge run at all (`coalesce_enabled`, `merge_enabled`);
+    /// whether a fold holds between its last pass and its submission (`fold_paused`), which lets a
+    /// test land a flush inside a fold's flight; and whether a completed fold or merge is left
+    /// undrained in its channel (`fold_publication_paused`, `merge_publication_paused`).
     ///
-    /// [`Self::fold_paused`] holds the fold thread before it clears `fold_in_flight`, so merge and
-    /// coalesce stay suspended and nothing can publish under it. This flag instead lets the thread
-    /// finish and the suspension lift, but stops the executor draining the result, which is the
-    /// state in which a merge or coalesce can dispatch, publish, and leave the fold planned against
-    /// artefacts the live manifest no longer lists. The dispatchers now suspend on publication
-    /// rather than on completion ([`Executor::fold_outstanding`]), so that state is no longer
-    /// reachable through the executor; this hook is what holds a fold in it for testing the
+    /// `fold_paused` holds the fold thread before it clears `fold_in_flight`, so merge and
+    /// coalesce stay suspended and nothing can publish under it. `fold_publication_paused` instead
+    /// lets the thread finish and the suspension lift, but stops the executor draining the result,
+    /// which is the state in which a merge or coalesce can dispatch, publish, and leave the fold
+    /// planned against artefacts the live manifest no longer lists. The dispatchers now suspend on
+    /// publication rather than on completion ([`Executor::fold_outstanding`]), so that state is no
+    /// longer reachable through the executor; this hook is what holds a fold in it for testing the
     /// suspension: a merge offered ten ticks under a held fold takes none of them.
-    pub(crate) fold_publication_paused: Arc<AtomicBool>,
-    /// Whether a completed merge is left undrained in its channel :
-    /// `Engine::set_merge_publication_paused_for_test`. Always `false` in a shipped build.
-    ///
-    /// [`Self::fold_publication_paused`]'s shape, opening the merge's own window: a flush
-    /// publishing between a merge's plan and its publication, the interleaving under which the
-    /// merge's rebase must keep the live manifest's watermark rather than its plan-time snapshot
+    /// `merge_publication_paused` opens the merge's own window: a flush publishing between a
+    /// merge's plan and its publication, the interleaving under which the merge's rebase must keep
+    /// the live manifest's watermark rather than its plan-time snapshot
     /// (`crate::merge::rebase_into`).
-    pub(crate) merge_publication_paused: Arc<AtomicBool>,
+    pub(crate) switches: Arc<crate::switches::TestSwitches>,
     /// When a fold is dispatched with nobody asking for one: see
     /// [`crate::compact::CompactionSchedule`].
     pub(crate) compaction: crate::compact::CompactionSchedule,

@@ -3522,7 +3522,8 @@ impl Engine {
         // directly, at the cost of one `Relaxed` atomic load, negligible against the request's
         // own atomic operations elsewhere. Deliberately not `#[cfg]`-gated to a second code path
         // here too: that would cost more to audit than the load itself costs to run.
-        let serial_fallback_max_rows = self.serial_fallback_max_rows.load(Ordering::Relaxed);
+        let serial_fallback_max_rows =
+            self.switches.serial_fallback_max_rows.load(Ordering::Relaxed);
         let tile_outcomes: Vec<Result<Option<TileSweepOut>>> =
             if should_fold_serially(total_rows_in_ranges, serial_fallback_max_rows, tiles.len()) {
                 tiles

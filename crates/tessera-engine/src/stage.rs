@@ -121,10 +121,8 @@ pub(crate) struct StageDeps {
     pub(crate) occupancy:
         Arc<crate::single_flight::SingleFlightCache<OccupancyKey, OccupiedTiles>>,
     pub(crate) pool: Arc<rayon::ThreadPool>,
-    /// Whether the fill runs at all. Always `true` in a shipped build; a test turns it off so an
-    /// assertion about what a *request* computed is not answered by work a background task did
-    /// first.
-    pub(crate) enabled: Arc<std::sync::atomic::AtomicBool>,
+    /// `occupancy_stage_enabled`, whether the fill runs at all.
+    pub(crate) switches: Arc<crate::switches::TestSwitches>,
     /// One cancellation token per session with a fill in flight, flipped and dropped by
     /// [`crate::Engine::prune_token`]. Bounded by the number of fills running at once, not by the
     /// number of sessions: a fill removes its own entry when it ends.
@@ -143,7 +141,11 @@ impl StageDeps {
     /// in flight — the common case for every request after the first — pays a lock and a hash
     /// lookup and does not clone a term set or a view name.
     pub(crate) fn spawn(&self, token_id: u64, make: impl FnOnce() -> LadderTask) {
-        if !self.enabled.load(std::sync::atomic::Ordering::SeqCst) {
+        if !self
+            .switches
+            .occupancy_stage_enabled
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
             return;
         }
         let cancel = CancelToken::new();
