@@ -3342,7 +3342,7 @@ fn check_view_name(object: &str, name: &str) -> Result<()> {
 /// (`tessera_build::build`); a deployment serving the bundle under a different plugin is a
 /// mismatch the gate fails closed on rather than one this check could anticipate.
 fn compile_view_gate(object: &str, declared: Option<&[String]>) -> Result<Option<Vec<String>>> {
-    tessera_plugin::check_gate(&tessera_plugin::Passthrough::new(), declared)
+    tessera_plugin::check_visibility(&tessera_plugin::Passthrough::new(), declared)
         .map_err(|detail| declaration_error(format!("{object}: {detail}")))
 }
 

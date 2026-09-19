@@ -166,11 +166,11 @@ fn passthrough_hash() -> String {
     format!("{:x}", Sha256::digest(PASSTHROUGH_IDENTITY.as_bytes()))
 }
 
-/// The label every principal holds. A gate of `public` alone admits everyone and is stored as no
-/// gate.
+/// The label every principal holds. A `visibility` of `public` alone admits everyone and is stored
+/// as `None`.
 pub const PUBLIC: &str = "public";
 /// The word a layer writes as its artifacts' default visibility to give them the layer's own
-/// gate. It is not a label, and it is refused wherever a label is expected.
+/// `visibility`. It is not a label, and it is refused wherever a label is expected.
 pub const INHERITED: &str = "inherited";
 
 /// Check a word written where one access label is expected. `public` is accepted as a label. An
@@ -191,7 +191,7 @@ pub fn check_label(key: &str, label: &str) -> Result<(), String> {
 }
 
 /// Check `point_visibility.default`, the label given to a point that carries none of its own.
-/// `inherited` is refused because a point has no container to take a gate from. A label the
+/// `inherited` is refused because a point has no layer to take a `visibility` from. A label the
 /// plugin maps to no term is refused because no viewer would see the points given it.
 pub fn check_point_default(plugin: &dyn Plugin, default: &str) -> Result<(), String> {
     const KEY: &str = "point_visibility.default";
@@ -211,10 +211,10 @@ pub fn check_point_default(plugin: &dyn Plugin, default: &str) -> Result<(), Str
     Ok(())
 }
 
-/// Check the labels a view or view group declares as its gate, and return the gate as it is
-/// stored: `None` for `public` or for no declared gate. A principal passes a gate by holding any
-/// one of its terms, so a gate whose labels map to no term admits nobody and is refused.
-pub fn check_gate(
+/// Check the labels a view or view group declares as its `visibility`, and return them as they
+/// are stored: `None` for `public` or where none is declared. A principal reaches the view by
+/// holding any one of the terms, so labels that map to no term admit nobody and are refused.
+pub fn check_visibility(
     plugin: &dyn Plugin,
     declared: Option<&[String]>,
 ) -> Result<Option<Vec<String>>, String> {
@@ -247,8 +247,8 @@ pub fn check_gate(
         .map_err(|e| format!("the plugin refused `visibility = {labels:?}`: {e}"))?;
     if terms.is_empty() {
         return Err(format!(
-            "the plugin maps `visibility = {labels:?}` to no term, so no viewer could pass the \
-             gate; list a label the plugin maps to a term"
+            "the plugin maps `visibility = {labels:?}` to no term, so no viewer could reach \
+             the view; list a label the plugin maps to a term"
         ));
     }
     Ok(Some(labels.to_vec()))
@@ -316,12 +316,12 @@ mod tests {
     }
 
     #[test]
-    fn a_gate_is_stored_as_its_labels_and_public_as_none() {
+    fn visibility_is_stored_as_its_labels_and_public_as_none() {
         let p = Passthrough::new();
-        assert_eq!(check_gate(&p, None), Ok(None));
-        assert_eq!(check_gate(&p, Some(&labels(&["public"]))), Ok(None));
+        assert_eq!(check_visibility(&p, None), Ok(None));
+        assert_eq!(check_visibility(&p, Some(&labels(&["public"]))), Ok(None));
         assert_eq!(
-            check_gate(&p, Some(&labels(&["finance", "legal"]))),
+            check_visibility(&p, Some(&labels(&["finance", "legal"]))),
             Ok(Some(labels(&["finance", "legal"])))
         );
         for refused in [
@@ -331,12 +331,12 @@ mod tests {
             labels(&["finance", "public"]),
             labels(&["inherited"]),
         ] {
-            assert!(check_gate(&p, Some(&refused)).is_err(), "{refused:?}");
+            assert!(check_visibility(&p, Some(&refused)).is_err(), "{refused:?}");
         }
     }
 
-    /// With a plugin that maps every label to no term, a gate admits nobody and a default label
-    /// hides every point given it. Both are refused.
+    /// With a plugin that maps every label to no term, a view's labels admit nobody and a default
+    /// label hides every point given it. Both are refused.
     #[test]
     fn labels_that_name_no_terms_are_refused() {
         struct NoTerms;
@@ -360,7 +360,7 @@ mod tests {
                 Passthrough.auth_plugin_hash()
             }
         }
-        assert!(check_gate(&NoTerms, Some(&labels(&["finance"]))).is_err());
+        assert!(check_visibility(&NoTerms, Some(&labels(&["finance"]))).is_err());
         assert!(check_point_default(&NoTerms, "finance").is_err());
         // `public` is accepted without asking the plugin.
         assert!(check_point_default(&NoTerms, "public").is_ok());

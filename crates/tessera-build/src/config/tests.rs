@@ -823,7 +823,7 @@ fn a_views_own_visibility_is_a_label_the_plugin_can_read() {
             &format!("name             = \"s0\"\nvisibility       = {declared}"),
         ))
     };
-    // The rules are tested in `tessera_plugin::check_gate`; here, that the build applies them.
+    // The rules are tested in `tessera_plugin::check_visibility`; here, that the build applies them.
     refusal("[]");
     refusal("[\"public\", \"finance\"]");
 }

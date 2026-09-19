@@ -396,7 +396,7 @@ impl Engine {
         &self,
         declaration: tessera_lifecycle::wal::ViewGroupDeclaration,
     ) -> std::result::Result<bool, crate::write::AcceptError> {
-        self.check_gate_labels(declaration.visibility.as_deref())?;
+        self.check_visibility(declaration.visibility.as_deref())?;
         self.check_point_default(declaration.point_default.as_deref())?;
         self.write.create_view_group(declaration)
     }
@@ -407,7 +407,7 @@ impl Engine {
         &self,
         declaration: tessera_lifecycle::wal::PlainViewDeclaration,
     ) -> std::result::Result<bool, crate::write::AcceptError> {
-        self.check_gate_labels(declaration.visibility.as_deref())?;
+        self.check_visibility(declaration.visibility.as_deref())?;
         self.check_point_default(declaration.point_default.as_deref())?;
         self.write.create_plain_view(declaration)
     }
@@ -424,14 +424,12 @@ impl Engine {
         })
     }
 
-    /// The half of a gate's validation that needs the plugin: labels go through the same
-    /// `Plugin::terms_of_labels` call an item's `access` list takes. A list the plugin cannot
-    /// read is refused rather than stored as a gate nobody could ever satisfy.
-    fn check_gate_labels(
+    /// [`tessera_plugin::check_visibility`] with this engine's plugin, as a view refusal.
+    fn check_visibility(
         &self,
         visibility: Option<&[String]>,
     ) -> std::result::Result<(), crate::write::AcceptError> {
-        tessera_plugin::check_gate(self.plugin.as_ref(), visibility)
+        tessera_plugin::check_visibility(self.plugin.as_ref(), visibility)
             .map(|_| ())
             .map_err(|detail| {
                 crate::write::AcceptError::Exec(tessera_lifecycle::ExecError::ViewRefused { detail })
@@ -439,7 +437,7 @@ impl Engine {
     }
 
     /// Create a view of a view group. Almost nothing is validated here; the gate's labels are the
-    /// exception, checked at [`Engine::check_gate_labels`].
+    /// exception, checked at [`Engine::check_visibility`].
     pub fn create_view(
         &self,
         group: String,
@@ -447,7 +445,7 @@ impl Engine {
         visibility: Option<Vec<String>>,
         metadata: std::collections::BTreeMap<String, tessera_types::view::ViewMetadataValue>,
     ) -> std::result::Result<(), crate::write::AcceptError> {
-        self.check_gate_labels(visibility.as_deref())?;
+        self.check_visibility(visibility.as_deref())?;
         self.write.create_view(group, key, visibility, metadata)
     }
 

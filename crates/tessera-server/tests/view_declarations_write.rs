@@ -644,7 +644,7 @@ async fn a_point_default_is_measured_against_the_plugin_on_both_routes() {
     // The plugin arm is exercised by no case here: this fixture's plugin reads every non-empty
     // label as a term, so a label it *cannot* read has no spelling. What the two cases below
     // cover is the pair the build refuses too, and the plugin call itself is the one
-    // `check_gate_labels` makes, on the same descriptors.
+    // `check_visibility` makes, on the same descriptors.
     for default in ["", "inherited"] {
         let mut view = embedding();
         view["point_visibility"] = json!({ "default": default });
