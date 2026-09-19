@@ -1552,6 +1552,10 @@ impl Executor {
         Some(crate::artifacts::SegmentRows::Resolved(Arc::new(rows)))
     }
 
+    /// Writes a side-manifest carrying what live state holds and no manifest does yet: deny
+    /// state, layers, views, runtime declarations, and the artifact memberships and content
+    /// published since the last one. Does nothing unless something is unpublished. A poisoned or
+    /// diverged node writes nothing, and the state stays unpublished until it recovers.
     pub(super) fn publish_overlay_state(&mut self) {
         if !self.deny_dirty {
             return;
