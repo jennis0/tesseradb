@@ -1,14 +1,14 @@
-//! The lifecycle command vocabulary: what a handler submits to the write executor, and what it
-//! gets back.
+//! What a write command carries, and why an accepted one can still fail.
 //!
-//! ## Where the executor lives, and why the vocabulary lives here
+//! ## Where the commands themselves live
 //!
-//! The executor thread itself is **not** in this crate — it is in `tessera-engine`'s `write.rs`.
-//! Its loop is append → fsync → **apply → swap** → ack, and apply/swap clone the
-//! `IngestBuffer`/`Overlay` out of a `Generation`, which holds a `tessera_store::Bundle`;
-//! `tessera-engine` depends on this crate, so a thread here importing `Generation` is a cycle
-//! cargo refuses, and this crate deliberately has no `tessera-store` dependency. Everything in
-//! this module is entity-space and store-free, which is exactly the half that *can* live here.
+//! The executor thread is **not** in this crate — it is in `tessera-engine`'s `write` module, and
+//! so is the command enum it consumes. Its loop is append → fsync → **apply → swap** → ack, and
+//! apply/swap clone the `IngestBuffer`/`Overlay` out of a `Generation`, which holds a
+//! `tessera_store::Bundle`; `tessera-engine` depends on this crate, so a thread here importing
+//! `Generation` is a cycle cargo refuses, and this crate deliberately has no `tessera-store`
+//! dependency. What is here is the half that is entity-space and store-free: the rows and requests
+//! a command carries, and the two errors `tessera-server` maps to HTTP statuses.
 //!
 //! ## Why the commands carry unallocated rows
 //!
@@ -23,7 +23,7 @@
 use tessera_types::{EntityId, TermId};
 
 use crate::alloc::{AllocError, PendingItem};
-use crate::wal::{ChangeOp, WalError, WalRow, WalScalar};
+use crate::wal::{WalError, WalRow, WalScalar};
 
 /// One ingest row awaiting entity-ID assignment on the executor.
 ///
@@ -58,7 +58,7 @@ pub struct UnallocatedRow {
     /// already exists and is in no such view (`views.md` §4). `None` is the ordinary case: an
     /// unknown external id, or none at all, and the close allocates.
     ///
-    /// **Carried rather than re-resolved on the executor**, on [`Command::Change`]'s rule: the
+    /// **Carried rather than re-resolved on the executor**, on the change command's rule: the
     /// resolution happens once, at admission, and what travels is the entity. The executor's own
     /// backstop re-reads the live map beside the same generation it will clone from, so a batch
     /// that raced a delete cannot be admitted against a stale answer.
@@ -145,7 +145,7 @@ impl UnallocatedRow {
 /// of this batch* named the key; the executor turns those positions into entities after the
 /// assignment and before the append, which is what puts the join in the same commit as the rows.
 ///
-/// **The key travels as a key**, on [`Command::PublishArtifacts`]'s rule: `ordinal_of_key` reads
+/// **The key travels as a key**, on the publication command's rule: `ordinal_of_key` reads
 /// state only the executor may write. It is resolved once, at admission, and the ordinal is carried
 /// from there — recorded rather than re-derived, so what the log holds is what was decided.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -191,172 +191,6 @@ impl BatchArtifacts {
     }
 }
 
-/// One unit of work for the write executor.
-///
-/// Ingest and change are the whole vocabulary. A flush and a compaction fold are specified as
-/// further commands and would arrive **additively** — new variants, not a changed shape for these
-/// two.
-/// **⊘ Specified, not implemented.** Neither exists, so nothing today submits anything but these.
-#[derive(Debug, Clone, PartialEq)]
-pub enum Command {
-    /// An accepted `/control/ingest` batch, rows not yet allocated (see [`UnallocatedRow`]).
-    ///
-    /// `batch_id`/`body_hash` are the idempotency key material and travel with the command
-    /// because the batch-state lookup is evaluated **on the executor, not in the handler**:
-    /// between a handler check and the enqueue an open window can close, and a retry that saw
-    /// `Unknown` and then enqueued into a fresh window has double-allocated.
-    Ingest {
-        rows: Vec<UnallocatedRow>,
-        batch_id: String,
-        body_hash: [u8; 32],
-        /// The artifacts this batch's rows named in a column named for a layer — empty for a batch
-        /// that named none (§6.2). Resolved and grown when the window closes, in the same commit as
-        /// the rows, so there is no state in which a point is ingested and its membership is not.
-        artifacts: BatchArtifacts,
-    },
-    /// One accepted `/control/changes` entry.
-    ///
-    /// **Addressed by entity, whatever the caller supplied.** The handler resolves an
-    /// `external_id` through the live map and the bundle sidecar, or inverts a `tessera_id`, and
-    /// carries the result — so the executor re-resolves nothing inside its critical section, and
-    /// the record it appends names the entity rather than an identifier whose meaning depends on
-    /// a key (`WalRecord::ChangeByEntity`). An item ingested without an external id is addressable
-    /// only this way, which is the hole addressing by entity closes.
-    Change { entity: EntityId, op: ChangeOp },
-    /// Register an annotation layer.
-    ///
-    /// **The declaration travels unvalidated and unallocated**, in the same shape and for the same
-    /// reason as [`Command::Ingest`]'s rows: the checks that decide a name is free, and the
-    /// allocations that follow them, both read state only the executor may write. A handler that
-    /// validated first could be overtaken by a registration of the same name between its check and
-    /// the enqueue, and would then have acked two layers onto one name.
-    /// **Boxed** so one large variant does not set the size of every command in the queue: a
-    /// declaration is the biggest thing that travels here by a wide margin, and `Ingest` and
-    /// `Change` are the two the executor moves at rate.
-    RegisterLayer {
-        declaration: Box<tessera_types::layer::LayerDeclaration>,
-    },
-    /// Drop an annotation layer, tombstoning its name for ever.
-    DropLayer { name: String },
-    /// Create a view of a view group (`views.md` §3.2).
-    ///
-    /// **The record travels unvalidated**, in the same shape and for the same reason as
-    /// [`Command::RegisterLayer`]'s declaration: the checks that decide a key is free — and the
-    /// ordinal that follows them — read state only the executor may write, so a handler that
-    /// validated first could be overtaken by a create of the same key between its check and the
-    /// enqueue, and would then have acked two views onto one key.
-    CreateView {
-        group: String,
-        key: String,
-        /// The gate's labels, each one term (decision 0132); `None` is `public`.
-        visibility: Option<Vec<String>>,
-        metadata: std::collections::BTreeMap<String, tessera_types::view::ViewMetadataValue>,
-    },
-    /// Drop a view of a view group, tombstoning its key for ever (`views.md` §3.4).
-    ///
-    /// `delete_dangling` is **sugar and nothing else**: at the drop the executor computes the
-    /// entities of this view that hold a row in no other view — the commit-window buffer included
-    /// — and submits them as *ordinary* deletions, which enter the overlay and retire at the fold
-    /// like any deletion (Rule F, write-path §5.4). It is not a second retirement route and must
-    /// not become one; a drop that removed an entity any other way would be the fail-open the two
-    /// removal rules exist to prevent.
-    DropView {
-        group: String,
-        key: String,
-        delete_dangling: bool,
-    },
-    /// Declare an attribute column while the service runs (`PUT /control/attributes`,
-    /// `ingest.md` §1.3, §6.3).
-    ///
-    /// **The request travels unvalidated**, on [`Command::RegisterLayer`]'s rule: whether the name
-    /// is free, whether a column of that name already carries this identity, and which width a
-    /// vocabulary no column named before takes, all read the served schema and the live bindings,
-    /// which only the executor may move between a check and an apply. Boxed for the reason the
-    /// layer declaration is.
-    DeclareAttribute { request: Box<AttributeRequest> },
-    /// Declare a vocabulary while the service runs (`PUT /control/vocabularies/{name}`,
-    /// `ingest.md` §1.3). On the executor for [`Command::DeclareAttribute`]'s reason: whether the
-    /// name is free and whether a held vocabulary carries this identity read state only the
-    /// executor may move between a check and an apply. Boxed as the attribute request is.
-    DeclareVocabulary { request: Box<VocabularyRequest> },
-    /// Declare a view group while the service runs (`PUT /control/view_groups/{name}`,
-    /// `ingest.md` §1.3). On the executor for [`Command::DeclareAttribute`]'s reason: whether the
-    /// name is free, and what a held group's identity is, read state only the executor may move
-    /// between a check and an apply.
-    CreateViewGroup {
-        declaration: Box<crate::wal::ViewGroupDeclaration>,
-    },
-    /// Create a plain view while the service runs (`PUT /control/views/{name}`, `ingest.md` §1.3
-    /// and §10, R9), on [`Command::CreateViewGroup`]'s rule.
-    CreatePlainView {
-        declaration: Box<crate::wal::PlainViewDeclaration>,
-    },
-    /// A page of values for a vocabulary that already exists
-    /// (`PATCH /control/vocabularies/{name}/values`, `ingest.md` §1.3).
-    ///
-    /// **The codes are not here**, and cannot be: a code is drawn on the executor at the moment
-    /// the binding becomes durable, and a caller who supplied one would be the minting authority
-    /// for a space the server owns (per-point-attributes §3.1).
-    MintVocabularyValues {
-        vocabulary: String,
-        values: Vec<DeclaredValue>,
-    },
-    /// Publish a batch of artifacts into one level of one layer.
-    ///
-    /// **Members are entities already.** The handler inverts the caller's `tessera_id`s once, at
-    /// the boundary, on the same rule [`Command::Change`] follows: a blinded identifier's meaning
-    /// depends on a key, so carrying one into the executor — and from there into the log — would
-    /// let a rotation silently redirect a membership.
-    ///
-    /// Ordinals are **not** carried: they are claimed on the executor from the level's cursor, for
-    /// the reason [`Command::RegisterLayer`] leaves its name check there. Two batches admitted
-    /// concurrently would otherwise be handed the same ordinals and the second would overwrite the
-    /// first's artifacts in place.
-    PublishArtifacts {
-        layer: String,
-        level: u32,
-        artifacts: Vec<crate::membership::IncomingArtifact>,
-    },
-    /// Add entities to the memberships of artifacts that **already exist**, each named by the key
-    /// it was published under.
-    ///
-    /// **Members are entities already**, on [`Command::PublishArtifacts`]'s rule, and the keys are
-    /// **not** resolved here: `ordinal_of_key` reads state only the executor may write, so a
-    /// handler that resolved first could be overtaken by a fold retiring the artifact between its
-    /// lookup and the enqueue, and would have grown an ordinal a later publication now holds.
-    ///
-    /// The whole batch or none of it: a key that names no artifact refuses the command rather than
-    /// growing the rest, so a caller is never left unable to say which of their joins happened.
-    ///
-    /// **It rides the bounded, sheddable lane**, like the publication it grows — a join refused for
-    /// load is backpressure and the caller retries, where a deny refused for load is an item left
-    /// visible. See [`Command::is_never_shed`].
-    GrowMemberships {
-        layer: String,
-        level: u32,
-        joins: Vec<crate::membership::IncomingGrowth>,
-    },
-    /// An accepted `POST /control/values` batch: attribute values for entities that already
-    /// exist, filled per cell under the fill rule (`ingest.md` §1.1, §1.4).
-    ///
-    /// **The comparison travels unmade**, on [`Command::Ingest`]'s rule and the join arm's
-    /// (decision 0116): whether a cell is absent, holds the identical value or holds a different
-    /// one is read from the buffer and the flushed homes, which only the executor may move
-    /// between a check and an apply. A handler that compared first could be overtaken by the
-    /// window that writes the cell and would then fill it twice.
-    ///
-    /// **Entities, not identifiers.** The handler resolves each row's `external_id` or inverts
-    /// its `tessera_id` at the boundary, on [`Command::Change`]'s rule, so no blinded identifier
-    /// reaches the executor or the log (**I10**).
-    ///
-    /// It rides the bounded, sheddable lane ([`Command::is_never_shed`]): a values batch refused
-    /// for load is backpressure and the caller retries, nothing having been filled.
-    ///
-    /// **Boxed** so one large variant does not set the size of every command in the queue, on
-    /// [`Command::RegisterLayer`]'s rule.
-    Values { request: Box<ValuesRequest> },
-}
-
 /// One accepted `POST /control/values` batch as it reaches the executor (`ingest.md` §1.4).
 ///
 /// **Columns are named, and a row's values are positional against that list.** A values batch
@@ -391,32 +225,6 @@ pub struct IncomingValues {
     pub values: Vec<crate::wal::WalScalar>,
 }
 
-impl Command {
-    /// Whether this command rides the **never-refused** lane (lifecycle §1.3's deny priority
-    /// lane): the unbounded queue the executor drains to empty before it touches work.
-    ///
-    /// The lane is chosen by **endpoint, not by op**. Every `/control/changes` entry takes it,
-    /// including [`ChangeOp::Unsuppress`], because the property being
-    /// preserved is contracts §3.1's: `/control/changes` cannot answer 429. Batching a security
-    /// operation for latency is acceptable; refusing one for load is not — and an `Unsuppress`
-    /// shed for load leaves an item hidden that a caller was told to expect back, which is a
-    /// different failure but not a better one.
-    ///
-    /// Two consequences, chosen rather than discovered: a sustained deny flood starves ingest
-    /// completely, and this queue is unbounded in memory.
-    ///
-    /// **A NEW VARIANT DEFAULTS TO THE BOUNDED, SHEDDABLE LANE.** This is a `matches!` over one
-    /// variant, so a `Flush` or a `Compact` is sheddable the moment it is
-    /// added and nothing warns about it. That default is right for those two — a flush that cannot
-    /// be admitted is backpressure working — but it is the wrong default for anything a caller is
-    /// owed an unrefusable answer to, and adding a variant without visiting this line is how such a
-    /// thing ships. There is no `submit_deny` to reach for instead: the lane follows the command,
-    /// and this function is the whole of the rule.
-    pub fn is_never_shed(&self) -> bool {
-        matches!(self, Command::Change { .. })
-    }
-}
-
 /// Why a command did not come back with a receipt. Distinct from [`ExecError`], which is why an
 /// accepted command failed *while executing*.
 ///
@@ -447,7 +255,7 @@ pub enum SubmitError {
     /// §3.1's 429 row). Nothing was enqueued: `try_send` returned the job.
     ///
     /// **Reachable only from the ingest lane.** A command for which
-    /// [`Command::is_never_shed`] holds is submitted to the unbounded queue and can never
+    /// `Command::is_never_shed` holds is submitted to the unbounded queue and can never
     /// produce this variant; `changes_never_429s` is the test that asserts it.
     QueueFull { retry_after_s: u64 },
     /// The executor could not be **handed** the command — it was never started, or the queue it
@@ -538,123 +346,7 @@ impl std::fmt::Display for SubmitError {
 
 impl std::error::Error for SubmitError {}
 
-/// What the executor did, once it did it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Ack {
-    /// One `EntityId` per submitted row, **in the caller's submitted row order** — not in the
-    /// signature-sorted order the IDs were assigned in. The handler turns each into a
-    /// `tessera_id` for the response (contracts §3.4 r6), which is the only reason an entity ID
-    /// is materialised outside the engine at all (I10).
-    Ingested {
-        entity_ids: Vec<EntityId>,
-        /// How many artifacts this batch's membership column **created** — a key no artifact held,
-        /// on a layer whose `value_set` is open (`artifacts-from-points.md` §3). Zero for every
-        /// batch that named none, which is every batch that carries no membership column and every
-        /// one whose keys all existed.
-        ///
-        /// **Reported because minting is not undoable.** A typo creates a permanent object rather
-        /// than being refused, which is the trade an open layer makes knowingly; the mitigation is
-        /// that the caller who made it is told, in the same 200 that accepted the rows.
-        ///
-        /// **A replayed batch reports zero**, and that is the honest reading: the count is what
-        /// *this submission* created, and a duplicate batch id creates nothing.
-        minted: u64,
-    },
-    /// A disposition change applied. Nothing to return: the caller named the item.
-    Changed,
-    /// A layer was registered. The entity is returned so the handler can hand back its
-    /// `tessera_id` — the only address by which a caller can later suppress the layer, since an
-    /// entity id never crosses the boundary (**I10**).
-    LayerRegistered { entity: EntityId },
-    /// A layer was dropped and its name tombstoned. Nothing to return: the caller named it.
-    LayerDropped,
-    /// A view was created. Nothing to return: the caller named the group and the key, and the
-    /// key is the view's only address (decision 0113).
-    ViewCreated,
-    /// An attribute column was declared, or an identical declaration met the column that already
-    /// carries it (`existing`). Nothing else to return: the name is the column's only address, on
-    /// every surface that names one.
-    AttributeDeclared { existing: bool },
-    /// A vocabulary was declared, or an identical declaration met the one that already carries
-    /// that name (`existing`). `added` is how many of the record's inline values were novel, the
-    /// rest having been bound already, and `titles` how many held values the request gave a title
-    /// differing from the one they carried.
-    VocabularyDeclared {
-        existing: bool,
-        added: u64,
-        titles: u64,
-    },
-    /// A page of values was applied: `added` were novel and drew a code, `existing` were already
-    /// bound, and `titles` of those held values had their title replaced by the one the page
-    /// supplied. All three are bounded by the caller's own page.
-    ///
-    /// **`titles` is reported because a title upsert overwrites** (decision 0136's amendment). The
-    /// count is what tells a caller how much of their page changed a name a client draws, where
-    /// `added` and `existing` say only which keys were bound.
-    VocabularyValuesMinted {
-        added: u64,
-        existing: u64,
-        titles: u64,
-    },
-    /// A view group was declared, or an identical declaration met the group that already carries
-    /// that name (`existing`). Nothing else to return: the name is the group's only address.
-    ViewGroupCreated { existing: bool },
-    /// A plain view was created, or an identical declaration met the view that already carries
-    /// that name (`existing`), on [`Ack::ViewGroupCreated`]'s rule.
-    PlainViewCreated { existing: bool },
-    /// A view was dropped. `deleted` is how many entities `delete_dangling` submitted for
-    /// deletion — **reported because the operation is not undoable**, on the same rule
-    /// [`Ack::Ingested`]'s `minted` is reported by, and `0` for a drop that did not ask for it.
-    ViewDropped { deleted: u64 },
-    /// Artifacts were published, in the caller's submitted order.
-    ///
-    /// **Entities, which the handler turns into `tessera_id`s — never the ordinals.** An ordinal is
-    /// a position in a dense level, so a caller holding two of them learns how many artifacts sit
-    /// between; across two principals it is a corpus-wide count over objects one of them may not
-    /// see, which is C8's row. The `tessera_id` is the only artifact address that crosses the wire.
-    ///
-    /// The counts are the batch's own (`ingest.md` §1.5): a key the level held is accepted under
-    /// the fill rule and is not created, so `created` is how many artifacts the batch minted,
-    /// `without_content` how many of those carry no content on a layer declaring some (R5),
-    /// `filled` how many fixed parts were filled on held artifacts, and `joined` how many members
-    /// joined held artifacts. Each is bounded by the caller's own request and names no artifact.
-    ArtifactsPublished {
-        entities: Vec<EntityId>,
-        created: u64,
-        without_content: u64,
-        filled: u64,
-        joined: u64,
-    },
-    /// Memberships grew: one receipt per join the caller submitted, in the caller's order.
-    ///
-    /// **The artifact's entity, which the handler turns into a `tessera_id`, and how many of the
-    /// joining members it did not already hold.** No identity was minted, and the ordinals the
-    /// growth resolved to are exactly what never crosses the wire (C8). A membership size is not
-    /// here either: `joined` is bounded by the caller's own list, so it says nothing about the
-    /// members they did not send.
-    MembershipsGrown { grown: Vec<MembershipGrown> },
-    /// A values batch was applied (`ingest.md` §1.4). The counts are the batch's own, bounded by
-    /// the caller's own request, and name no entity and no value.
-    ValuesFilled {
-        /// Cells that were absent and now hold the supplied value.
-        filled: u64,
-        /// Cells that already held the identical value, which the fill rule accepts with no
-        /// effect. Reported so a pipeline resending a page sees that it changed nothing.
-        held: u64,
-        /// Members this batch's layer columns added to **artifacts that already existed** and did
-        /// not already hold them, on [`MembershipGrown::joined`]'s terms. An artifact this batch
-        /// created is counted under `minted` and its first members are not counted here, so the
-        /// word means at this door what it means on the publication route.
-        joined: u64,
-        /// Artifacts this batch's layer columns **created**: a key no artifact held, on a layer
-        /// whose value set is open (python-sdk §11.2 F). [`Ack::Ingested`]'s
-        /// `minted` for the values door, and reported for its reason — under `open` a typo
-        /// creates a permanent object rather than being refused, so the caller is told the count.
-        minted: u64,
-    },
-}
-
-/// One join's receipt inside [`Ack::MembershipsGrown`].
+/// One join's receipt: what a membership growth did to the artifact one join named.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MembershipGrown {
     /// The artifact's own entity: the address its `tessera_id` blinds, and the one a later
@@ -921,39 +613,6 @@ impl From<AllocError> for ExecError {
     }
 }
 
-/// The executor's answer to one submitted [`Command`].
-///
-/// **A receipt is a promise that the effect is in force**, not that the command was queued: the
-/// executor resolves it strictly *after* the generation carrying the effect has been swapped in
-/// (`append → fsync → apply → swap → ack`). The fail-open this ordering exists to prevent is an
-/// ack that precedes the swap, letting a client observe a 200 for a suppression that is not yet
-/// in force.
-///
-/// A struct rather than a bare `Result` because it is expected to acquire company — a window
-/// sequence number, group-commit counters — and widening a struct is additive where changing a type
-/// alias is not.
-#[derive(Debug)]
-pub struct Receipt {
-    /// The ack payload, or why there is none. See [`ExecError::Wal`] before assuming an error
-    /// here means the command had no effect.
-    pub outcome: Result<Ack, ExecError>,
-}
-
-impl Receipt {
-    /// A receipt for a command that completed.
-    pub fn ok(ack: Ack) -> Self {
-        Receipt { outcome: Ok(ack) }
-    }
-
-    /// A receipt for a command that failed. The caller maps the variant to a status code; see
-    /// [`ExecError`] for the mapping and for which variants still applied something.
-    pub fn failed(error: impl Into<ExecError>) -> Self {
-        Receipt {
-            outcome: Err(error.into()),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1015,24 +674,4 @@ mod tests {
         );
     }
 
-    /// The lane asymmetry, asserted on the vocabulary itself: every `/control/changes` command
-    /// takes the never-shed lane regardless of op — including `Unsuppress`, the one a reader is
-    /// most likely to assume is ordinary work — and ingest never does.
-    #[test]
-    fn every_change_rides_the_never_shed_lane_and_no_ingest_does() {
-        for op in [ChangeOp::Delete, ChangeOp::Suppress, ChangeOp::Unsuppress] {
-            let cmd = Command::Change {
-                entity: EntityId::new(1),
-                op,
-            };
-            assert!(cmd.is_never_shed(), "{op:?} must not be sheddable for load");
-        }
-        let ingest = Command::Ingest {
-            rows: vec![row()],
-            batch_id: "b".into(),
-            body_hash: [0u8; 32],
-            artifacts: Default::default(),
-        };
-        assert!(!ingest.is_never_shed());
-    }
 }

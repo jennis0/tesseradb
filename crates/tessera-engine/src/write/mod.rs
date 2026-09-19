@@ -18,12 +18,14 @@
 //! lane is chosen by the command ([`LifecycleHandle::enqueue`]), so a suppression can never be
 //! put on the bounded queue.
 
+mod command;
 mod executor;
 mod health;
 mod live;
 mod reconstruct;
 mod schema;
 
+pub(crate) use command::*;
 pub use executor::*;
 pub use health::*;
 pub(crate) use live::*;
@@ -40,7 +42,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use tessera_authz::{DeltaTier, Dict, FragmentCache};
 use tessera_lifecycle::alloc::{high_water_from, low_water_from, AllocError, Allocator};
 use tessera_lifecycle::buffer::DescriptorResolver;
-use tessera_lifecycle::command::{Ack, Command, ExecError, Receipt, SubmitError, UnallocatedRow};
+use tessera_lifecycle::command::{ExecError, SubmitError, UnallocatedRow};
 use tessera_lifecycle::faults::WalMeter;
 use tessera_lifecycle::membership::{ArtifactStore, IncomingArtifact};
 use tessera_lifecycle::overlay::replay;
@@ -64,29 +66,6 @@ use tessera_types::{EntityId, IdentityKey, TermId};
 
 use crate::session::EngineError;
 use crate::{Generation, GenerationHandle};
-
-// =================================================================================================
-// The ack channel
-// =================================================================================================
-
-/// The receipt half of a submitted command. A handler acks only after the effect is in force:
-/// durable, applied and swapped in. `ack_follows_fsync_then_swap` holds that.
-pub(crate) struct Responder(SyncSender<Receipt>);
-
-impl Responder {
-    fn new(tx: SyncSender<Receipt>) -> Self {
-        Responder(tx)
-    }
-
-    /// A caller that has gone away is not an error: the effect stands either way.
-    fn ack(&self, ack: Ack) {
-        let _ = self.0.send(Receipt::ok(ack));
-    }
-
-    fn fail(&self, error: ExecError) {
-        let _ = self.0.send(Receipt::failed(error));
-    }
-}
 
 /// Take a lock, recovering rather than panicking if a previous holder panicked.
 ///
@@ -567,9 +546,9 @@ impl WritePath {
                 //
                 // **It does not order the posture against the IN-FLIGHT submitter**, which is the
                 // reading to resist.
-                // `Job { command, respond }` is destructured into `Executor::execute`'s frame, so
-                // the in-flight `Responder` drops *earlier* in the unwind than this guard: that
-                // caller's `rx.recv()` can return before the posture moves. The consequence that
+                // The in-flight command is destructured into `Executor::execute`'s frame, so its
+                // `Reply` drops *earlier* in the unwind than this guard: that caller's
+                // `rx.recv()` can return before the posture moves. The consequence that
                 // matters is that the caller's error must be `SubmitError::ReceiptLost` — mapped to
                 // a fail-closed 500 rather than 503 — which is correct *regardless* of the posture,
                 // because the command may be fully applied. `tests/write.rs`'s
@@ -701,16 +680,12 @@ impl WritePath {
 
     // --- submission -----------------------------------------------------------------------------
 
-    /// Submits a command, waits for its receipt, and takes the ack that command answers with.
-    fn run<T>(
-        &self,
-        command: Command,
-        take: impl FnOnce(Ack) -> Option<T>,
-    ) -> Result<T, AcceptError> {
-        match self.handle()?.submit(command)?.outcome {
-            Ok(ack) => Ok(take(ack).expect("a command answers with its own ack")),
-            Err(e) => Err(AcceptError::Exec(e)),
-        }
+    /// Open a reply channel, enqueue the command built around it, and wait for the answer that
+    /// command's reply is typed to carry.
+    fn submit<T>(&self, command: impl FnOnce(Reply<T>) -> Command) -> Result<T, AcceptError> {
+        let (reply, pending) = Reply::channel();
+        self.handle()?.enqueue(command(reply))?;
+        pending.accept()
     }
 
     /// Submit an ingest batch and wait for its receipt.
@@ -723,7 +698,7 @@ impl WritePath {
     /// commit window this submission lands in.
     ///
     /// Returns the assigned ids and **how many artifacts this batch's membership column created**
-    /// (`Ack::Ingested::minted`).
+    /// ([`Ingested::minted`]).
     pub(crate) fn accept_ingest(
         &self,
         rows: Vec<UnallocatedRow>,
@@ -732,20 +707,15 @@ impl WritePath {
         artifacts: tessera_lifecycle::BatchArtifacts,
     ) -> Result<(Vec<EntityId>, u64), AcceptError> {
         let mark = StageMark::now();
-        let answered = self.run(
-            Command::Ingest {
-                rows,
-                batch_id,
-                body_hash,
-                artifacts,
-            },
-            |ack| match ack {
-                Ack::Ingested { entity_ids, minted } => Some((entity_ids, minted)),
-                _ => None,
-            },
-        );
+        let answered = self.submit(|reply| Command::Ingest {
+            rows,
+            batch_id,
+            body_hash,
+            artifacts,
+            reply,
+        });
         self.health().lap(WriteStage::SubmitToReceipt, mark);
-        answered
+        answered.map(|ingested| (ingested.entity_ids, ingested.minted))
     }
 
     /// Submit one `/control/changes` entry and wait for its receipt.
@@ -770,26 +740,15 @@ impl WritePath {
         &self,
         declaration: tessera_types::layer::LayerDeclaration,
     ) -> Result<EntityId, AcceptError> {
-        self.run(
-            Command::RegisterLayer {
-                declaration: Box::new(declaration),
-            },
-            |ack| match ack {
-                Ack::LayerRegistered { entity } => Some(entity),
-                _ => None,
-            },
-        )
+        self.submit(|reply| Command::RegisterLayer {
+            declaration: Box::new(declaration),
+            reply,
+        })
     }
 
     /// Drop a layer, tombstoning its name for ever.
     pub(crate) fn drop_layer(&self, name: String) -> Result<(), AcceptError> {
-        self.run(
-            Command::DropLayer { name },
-            |ack| match ack {
-                Ack::LayerDropped => Some(()),
-                _ => None,
-            },
-        )
+        self.submit(|reply| Command::DropLayer { name, reply })
     }
 
     /// Create a view of a view group while the service runs (`views.md` §3.2).
@@ -800,18 +759,13 @@ impl WritePath {
         visibility: Option<Vec<String>>,
         metadata: std::collections::BTreeMap<String, tessera_types::view::ViewMetadataValue>,
     ) -> Result<(), AcceptError> {
-        self.run(
-            Command::CreateView {
-                group,
-                key,
-                visibility,
-                metadata,
-            },
-            |ack| match ack {
-                Ack::ViewCreated => Some(()),
-                _ => None,
-            },
-        )
+        self.submit(|reply| Command::CreateView {
+            group,
+            key,
+            visibility,
+            metadata,
+            reply,
+        })
     }
 
     /// Declare an attribute column while the service runs (`ingest.md` §1.3, §6.3). Answers
@@ -820,15 +774,10 @@ impl WritePath {
         &self,
         request: tessera_lifecycle::AttributeRequest,
     ) -> Result<bool, AcceptError> {
-        self.run(
-            Command::DeclareAttribute {
-                request: Box::new(request),
-            },
-            |ack| match ack {
-                Ack::AttributeDeclared { existing } => Some(existing),
-                _ => None,
-            },
-        )
+        self.submit(|reply| Command::DeclareAttribute {
+            request: Box::new(request),
+            reply,
+        })
     }
 
     /// Fill attribute values on entities that already exist (`POST /control/values`,
@@ -837,25 +786,10 @@ impl WritePath {
         &self,
         request: tessera_lifecycle::ValuesRequest,
     ) -> Result<ValuesReceipt, AcceptError> {
-        self.run(
-            Command::Values {
-                request: Box::new(request),
-            },
-            |ack| match ack {
-                Ack::ValuesFilled {
-                    filled,
-                    held,
-                    joined,
-                    minted,
-                } => Some(ValuesReceipt {
-                    filled,
-                    held,
-                    joined,
-                    minted,
-                }),
-                _ => None,
-            },
-        )
+        self.submit(|reply| Command::Values {
+            request: Box::new(request),
+            reply,
+        })
     }
 
     /// Declare a vocabulary. Answers `(existing, added, titles)`: whether a vocabulary of that
@@ -865,19 +799,11 @@ impl WritePath {
         &self,
         request: tessera_lifecycle::VocabularyRequest,
     ) -> Result<(bool, u64, u64), AcceptError> {
-        self.run(
-            Command::DeclareVocabulary {
-                request: Box::new(request),
-            },
-            |ack| match ack {
-                Ack::VocabularyDeclared {
-                    existing,
-                    added,
-                    titles,
-                } => Some((existing, added, titles)),
-                _ => None,
-            },
-        )
+        let declared = self.submit(|reply| Command::DeclareVocabulary {
+            request: Box::new(request),
+            reply,
+        })?;
+        Ok((declared.existing, declared.added, declared.titles))
     }
 
     /// A page of values for a vocabulary that exists. Answers `(added, existing, titles)`.
@@ -886,17 +812,12 @@ impl WritePath {
         vocabulary: String,
         values: Vec<tessera_lifecycle::DeclaredValue>,
     ) -> Result<(u64, u64, u64), AcceptError> {
-        self.run(
-            Command::MintVocabularyValues { vocabulary, values },
-            |ack| match ack {
-                Ack::VocabularyValuesMinted {
-                    added,
-                    existing,
-                    titles,
-                } => Some((added, existing, titles)),
-                _ => None,
-            },
-        )
+        let minted = self.submit(|reply| Command::MintVocabularyValues {
+            vocabulary,
+            values,
+            reply,
+        })?;
+        Ok((minted.added, minted.existing, minted.titles))
     }
 
     /// Declare a view group. Answers whether a group of that name already carried this identity.
@@ -904,15 +825,10 @@ impl WritePath {
         &self,
         declaration: tessera_lifecycle::wal::ViewGroupDeclaration,
     ) -> Result<bool, AcceptError> {
-        self.run(
-            Command::CreateViewGroup {
-                declaration: Box::new(declaration),
-            },
-            |ack| match ack {
-                Ack::ViewGroupCreated { existing } => Some(existing),
-                _ => None,
-            },
-        )
+        self.submit(|reply| Command::CreateViewGroup {
+            declaration: Box::new(declaration),
+            reply,
+        })
     }
 
     /// Create a plain view. Answers whether a view of that name already carried this identity.
@@ -920,15 +836,10 @@ impl WritePath {
         &self,
         declaration: tessera_lifecycle::wal::PlainViewDeclaration,
     ) -> Result<bool, AcceptError> {
-        self.run(
-            Command::CreatePlainView {
-                declaration: Box::new(declaration),
-            },
-            |ack| match ack {
-                Ack::PlainViewCreated { existing } => Some(existing),
-                _ => None,
-            },
-        )
+        self.submit(|reply| Command::CreatePlainView {
+            declaration: Box::new(declaration),
+            reply,
+        })
     }
 
     /// Drop a view — freeing its key and killing its incarnation (decision 0115) — and answer how
@@ -939,17 +850,12 @@ impl WritePath {
         key: String,
         delete_dangling: bool,
     ) -> Result<u64, AcceptError> {
-        self.run(
-            Command::DropView {
-                group,
-                key,
-                delete_dangling,
-            },
-            |ack| match ack {
-                Ack::ViewDropped { deleted } => Some(deleted),
-                _ => None,
-            },
-        )
+        self.submit(|reply| Command::DropView {
+            group,
+            key,
+            delete_dangling,
+            reply,
+        })
     }
 
     /// Which layers a principal may know exist, resolved once per session.
@@ -974,36 +880,19 @@ impl WritePath {
     }
 
     /// Publish a batch of artifacts, returning their entities in the caller's submitted order and
-    /// the batch's counts (`Ack::ArtifactsPublished`).
+    /// the batch's counts ([`PublishedBatch`]).
     pub(crate) fn publish_artifacts(
         &self,
         layer: String,
         level: u32,
         artifacts: Vec<IncomingArtifact>,
     ) -> Result<PublishedBatch, AcceptError> {
-        self.run(
-            Command::PublishArtifacts {
-                layer,
-                level,
-                artifacts,
-            },
-            |ack| match ack {
-                Ack::ArtifactsPublished {
-                    entities,
-                    created,
-                    without_content,
-                    filled,
-                    joined,
-                } => Some(PublishedBatch {
-                    entities,
-                    created,
-                    without_content,
-                    filled,
-                    joined,
-                }),
-                _ => None,
-            },
-        )
+        self.submit(|reply| Command::PublishArtifacts {
+            layer,
+            level,
+            artifacts,
+            reply,
+        })
     }
 
     /// Grow the memberships of artifacts that already exist, answering one receipt per join in
@@ -1014,17 +903,12 @@ impl WritePath {
         level: u32,
         joins: Vec<tessera_lifecycle::IncomingGrowth>,
     ) -> Result<Vec<tessera_lifecycle::MembershipGrown>, AcceptError> {
-        self.run(
-            Command::GrowMemberships {
-                layer,
-                level,
-                joins,
-            },
-            |ack| match ack {
-                Ack::MembershipsGrown { grown } => Some(grown),
-                _ => None,
-            },
-        )
+        self.submit(|reply| Command::GrowMemberships {
+            layer,
+            level,
+            joins,
+            reply,
+        })
     }
 
     pub(crate) fn with_artifacts<R>(&self, f: impl FnOnce(&ArtifactStore) -> R) -> R {
@@ -1055,29 +939,26 @@ impl WritePath {
         entity: EntityId,
         op: ChangeOp,
     ) -> Result<PendingChange, AcceptError> {
-        let pending = self.handle()?.enqueue(Command::Change { entity, op })?;
+        let (reply, pending) = Reply::channel();
+        self.handle()?.enqueue(Command::Change { entity, op, reply })?;
         Ok(PendingChange(pending))
     }
 
 }
-/// An enqueued `/control/changes` entry, awaiting its receipt.
+/// An enqueued `/control/changes` entry, awaiting its answer.
 ///
-/// Deliberately **not** a re-export of [`Pending`]: a change's receipt carries no ids, so the only
-/// thing a caller can do with it is learn whether the change took hold, and this type says exactly
-/// that in its `wait` signature. `Ack::Ingested` reaching a change's caller would be a bug the
-/// wider type would not catch.
-pub struct PendingChange(Pending);
+/// The public face of `Pending<()>`: a change's answer carries no ids, so the only thing a caller
+/// can do with it is learn whether the change took hold, and this type says exactly that in its
+/// `wait` signature.
+pub struct PendingChange(Pending<()>);
 
 impl PendingChange {
     /// Block until the executor answers this change.
     ///
     /// `Err` does **not** mean "nothing happened" — for `Delete`/`Suppress` see [`ExecError::Wal`],
-    /// and for [`SubmitError::ReceiptLost`] see [`Pending::wait`].
+    /// and for [`SubmitError::ReceiptLost`] see `Pending::wait`.
     pub fn wait(self) -> Result<(), AcceptError> {
-        match self.0.wait()?.outcome {
-            Ok(_) => Ok(()),
-            Err(e) => Err(AcceptError::Exec(e)),
-        }
+        self.0.accept()
     }
 }
 
@@ -1127,17 +1008,6 @@ impl Drop for DeathGuard {
 // The queues
 // =================================================================================================
 
-/// One queued unit of work: what to do, and where to say it was done.
-///
-/// The responder travels **with** the command rather than being looked up afterwards, because a
-/// window entry that has been joined by a retry holds several of them. It is an
-/// [`ack::Responder`], not a raw
-/// sender — see that module for why the difference is the whole of the ack-ordering guarantee.
-pub(crate) struct Job {
-    command: Command,
-    respond: Responder,
-}
-
 /// What the executor's **work** lane carries: a lifecycle command, or a geometry publication.
 ///
 /// **The split is deliberate, and the store-shaped half cannot live in `tessera-lifecycle`.**
@@ -1149,10 +1019,10 @@ pub(crate) struct Job {
 /// swapped the pointer itself from whatever thread called it — a second publisher whose
 /// compare-and-swap could not stop the executor's own `store` from clobbering it.
 ///
-/// A publication carries its own response channel rather than a [`Responder`]: its answer is a
-/// `Vec<Reclaimed>`, which is engine-local and has no place in [`Ack`].
+/// A publication carries a bare sender rather than a [`Reply`]: its answer is engine-local, it is
+/// not a client request, and there is no [`ExecError`] it can fail with.
 pub(crate) enum ExecutorWork {
-    Lifecycle(Job),
+    Lifecycle(Command),
     PublishGeometry {
         publication: GeometryPublication,
         respond: SyncSender<std::result::Result<(), GeometryRefused>>,
@@ -1242,7 +1112,7 @@ pub(crate) struct LifecycleHandle {
     /// shed (lifecycle §1.3: completed units arrive on the work lane, never the deny lane).
     work: SyncSender<ExecutorWork>,
     /// Unbounded: a deny is never refused for load.
-    deny: Sender<Job>,
+    deny: Sender<Command>,
     /// Capacity-one wake signal. `std::sync::mpsc` has no select over two receivers, and the two
     /// alternatives were both worse: `crossbeam-channel` is a workspace dependency for one
     /// `select!`, and `recv_timeout` polling would put a latency floor on the one wait the
@@ -1252,29 +1122,6 @@ pub(crate) struct LifecycleHandle {
 }
 
 impl LifecycleHandle {
-    /// Submit any [`Command`] and block until its receipt arrives.
-    ///
-    /// **One method, because the lane is chosen by the command and not by the call site.**
-    /// `Command::Change` rides the unbounded never-shed queue and can therefore never answer
-    /// [`SubmitError::QueueFull`] — contracts §3.1 forbids `/control/changes` answering 429 —
-    /// while `Command::Ingest` rides the bounded one and can. **There is deliberately no
-    /// `submit_deny` beside this.** Its body would be byte-identical, so a "never 429" doc on it
-    /// would describe a by-call-site rule that does not exist and be false of itself in both
-    /// directions — and a second name for one behaviour is how a later author comes to believe the
-    /// lane follows the call.
-    ///
-    /// Both lanes can still report [`SubmitError::ExecutorDead`]. A deny is never refused for
-    /// *load*, which is not the same as never refused; there is no honest 200 to give when there is
-    /// nothing left to apply the write to.
-    ///
-    /// [`Command::is_never_shed`] is the rule, and this is the only place it is consulted.
-    ///
-    /// **Enqueue and wait are separable, and for denies they must be** — see [`Self::enqueue`].
-    /// This is the one-command convenience over the two.
-    pub(crate) fn submit(&self, command: Command) -> std::result::Result<Receipt, SubmitError> {
-        self.enqueue(command)?.wait()
-    }
-
     /// Hand `command` to the executor and return **without waiting for its receipt**.
     ///
     /// This is what makes group commit reachable for a caller with several commands. A caller that
@@ -1298,7 +1145,7 @@ impl LifecycleHandle {
     /// "which half returned this" as the discriminator. [`SubmitError::may_have_taken_effect`] is
     /// the discriminator, and it is the same one `tessera-server`'s batch fold uses.
     ///
-    /// The doorbell stays **here** rather than moving into [`Pending::wait`], which would remove
+    /// The doorbell stays **here** rather than moving into `Pending::wait`, which would remove
     /// the head-of-request race in which the executor commits a small first window while the caller
     /// is still enqueueing. It would also mean a `Pending` dropped without being waited on leaves
     /// its job queued with nothing to wake it — on an idle node, indefinitely. A deny that is
@@ -1383,21 +1230,17 @@ impl LifecycleHandle {
         let _ = self.bell.try_send(());
     }
 
-    pub(crate) fn enqueue(&self, command: Command) -> std::result::Result<Pending, SubmitError> {
-        let (tx, rx) = std::sync::mpsc::sync_channel(1);
-        let job = Job {
-            command,
-            respond: Responder::new(tx),
-        };
-
-        if job.command.is_never_shed() {
-            self.deny.send(job).map_err(|_| SubmitError::ExecutorDead)?;
+    pub(crate) fn enqueue(&self, command: Command) -> std::result::Result<(), SubmitError> {
+        if command.is_never_shed() {
+            self.deny
+                .send(command)
+                .map_err(|_| SubmitError::ExecutorDead)?;
             // Bumped **after** the enqueue and **before** the blocking wait, so a test can observe
             // "the deny is queued" as a condition rather than betting on a sleep.
             self.health.deny_submitted.fetch_add(1, Ordering::SeqCst);
         } else {
             self.work
-                .try_send(ExecutorWork::Lifecycle(job))
+                .try_send(ExecutorWork::Lifecycle(command))
                 .map_err(|e| match e {
                     // Derived, not a placeholder — see [`estimate_retry_after_s`], which also
                     // states what makes it an estimator rather than a bound. Both operands are plain
@@ -1430,30 +1273,7 @@ impl LifecycleHandle {
             return Err(SubmitError::ReceiptLost);
         }
 
-        Ok(Pending(rx))
-    }
-}
-
-/// An enqueued command whose receipt has not been collected yet.
-///
-/// Holding one of these is what lets a caller with N commands have all N in the executor's queue at
-/// once, which is the only condition under which the deny lane's group commit has anything to
-/// gather ([`LifecycleHandle::enqueue`]).
-pub(crate) struct Pending(Receiver<Receipt>);
-
-impl Pending {
-    /// Block until the executor answers.
-    ///
-    /// A dropped responder means the executor died **holding this job** — never `Ok`. Answering
-    /// anything else here is the false-202 [`SubmitError`]'s own doc calls the worst available
-    /// outcome.
-    ///
-    /// [`SubmitError::ReceiptLost`] because the ack is the **last** step:
-    /// `append → fsync → apply → swap → ack` ([`Executor::commit_denies`]), so a death after the
-    /// swap leaves a durable, in-force suppression with no receipt. Reporting that as "nothing was
-    /// submitted" is how an operator comes to believe an item is still visible when it is not.
-    pub(crate) fn wait(self) -> std::result::Result<Receipt, SubmitError> {
-        self.0.recv().map_err(|_| SubmitError::ReceiptLost)
+        Ok(())
     }
 }
 
@@ -1469,7 +1289,7 @@ impl Pending {
 /// [`Executor::run_work_pass`].
 pub(crate) struct LifecycleQueues {
     work: Receiver<ExecutorWork>,
-    deny: Receiver<Job>,
+    deny: Receiver<Command>,
     /// The wake signal. Capacity one — see [`LifecycleHandle::bell`] and [`Executor::run`].
     bell: Receiver<()>,
 }

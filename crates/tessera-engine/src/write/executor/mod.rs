@@ -786,7 +786,7 @@ pub(super) struct DenyEntry {
     /// the artifacts depending on it, and those deletions have no caller to answer. They are
     /// entries in every other respect — their own WAL record, applied in the same window, retired
     /// at the same fold — so the ack is the only thing that distinguishes them.
-    respond: Option<Responder>,
+    reply: Option<Reply<()>>,
 }
 
 /// The single writer. One per partition, on its own thread, owning the WAL by value.
@@ -1503,11 +1503,10 @@ impl Executor {
         let mut entries: Vec<DenyEntry> = Vec::new();
 
         while entries.len() < DENY_WINDOW_MAX_ENTRIES {
-            let Ok(job) = self.queues.deny.try_recv() else {
+            let Ok(command) = self.queues.deny.try_recv() else {
                 break;
             };
-            let Job { command, respond } = job;
-            let Command::Change { entity, op } = command else {
+            let Command::Change { entity, op, reply } = command else {
                 // Unreachable while the lane follows the command (`Command::is_never_shed`): only a
                 // `Change` rides the deny queue. Executed rather than dropped, so a future variant
                 // that lands here is answered instead of silently losing its waiter — and the
@@ -1517,7 +1516,7 @@ impl Executor {
                 if !entries.is_empty() {
                     self.commit_denies(std::mem::take(&mut entries));
                 }
-                self.execute(Job { command, respond });
+                self.execute(command);
                 return true;
             };
             entries.push(DenyEntry {
@@ -1527,7 +1526,7 @@ impl Executor {
                 },
                 entity,
                 op,
-                respond: Some(respond),
+                reply: Some(reply),
             });
         }
 
@@ -1578,7 +1577,7 @@ impl Executor {
                 },
                 entity,
                 op: ChangeOp::Delete,
-                respond: None,
+                reply: None,
             });
         }
     }
@@ -1695,8 +1694,8 @@ impl Executor {
                 } else {
                     WalError::Poisoned
                 };
-                if let Some(respond) = &entry.respond {
-                    self.ack_failed(respond, ExecError::Wal(e));
+                if let Some(reply) = &entry.reply {
+                    self.ack_failed(reply, ExecError::Wal(e));
                 }
             }
             return;
@@ -1727,8 +1726,8 @@ impl Executor {
         // some not; every un-acked one gets `SubmitError::ReceiptLost` → 500, never `ExecutorDead`
         // → 503, because its change is durably in force.
         for entry in entries {
-            if let Some(respond) = &entry.respond {
-                self.ack(respond, Ack::Changed);
+            if let Some(reply) = &entry.reply {
+                self.ack(reply, ());
             }
         }
     }
@@ -1830,7 +1829,7 @@ impl Executor {
     /// terminates only on an empty queue. What still bounds it is the structural fact — one entry,
     /// or one joined waiter, per concurrently-blocked submitting thread, since every submitter
     /// blocks on its receipt. That is a bound on *waiters*, not on rows or bytes, and it costs one
-    /// `Responder` each; resident rows are unaffected, because a
+    /// `Reply` each; resident rows are unaffected, because a
     /// join carries no rows into the window. Deny latency is *better* on this path than the
     /// alternative of closing per retry: one close for N retries rather than N.
     ///
@@ -1880,7 +1879,7 @@ impl Executor {
     /// premises — an age bound, and denies joining the ingest window — are both false of it.
     pub(super) fn run_work_pass(&mut self) -> bool {
         let max_rows = self.health.commit_window_max_rows();
-        let mut window: CommitWindow<Responder> = CommitWindow::new(self.next_window_seq());
+        let mut window: CommitWindow<Reply<Ingested>> = CommitWindow::new(self.next_window_seq());
         let mut did_work = false;
 
         loop {
@@ -1901,8 +1900,8 @@ impl Executor {
             let Ok(work) = self.queues.work.try_recv() else {
                 break;
             };
-            let job = match work {
-                ExecutorWork::Lifecycle(job) => job,
+            let command = match work {
+                ExecutorWork::Lifecycle(command) => command,
                 ExecutorWork::PublishGeometry {
                     publication,
                     respond,
@@ -1958,12 +1957,12 @@ impl Executor {
                     continue;
                 }
             };
-            let Job { command, respond } = job;
             let Command::Ingest {
                 rows,
                 batch_id,
                 body_hash,
                 artifacts,
+                reply,
             } = command
             else {
                 // **Every command but `Ingest` and `Change` arrives here**, which is the layer
@@ -1984,7 +1983,7 @@ impl Executor {
                 // ordinals from a level's cursor while a window is open**, which is why an ingest
                 // batch's minted key claims its own at the *close* and not at admission
                 // (`Executor::mint_records`).
-                self.execute(Job { command, respond });
+                self.execute(command);
                 // This job was counted at submission on the work lane and `execute` counts nothing,
                 // so it is counted here or `work_depth` drifts up one per occurrence forever — the
                 // drift `note_work_refused` exists to prevent.
@@ -1996,7 +1995,7 @@ impl Executor {
             let admitted;
             let m = StageMark::now();
             (window, admitted) =
-                self.admit_ingest(window, rows, batch_id, body_hash, artifacts, respond);
+                self.admit_ingest(window, rows, batch_id, body_hash, artifacts, reply);
             self.health.lap(WriteStage::AdmitWindow, m);
             did_work = true;
             if admitted == Admission::YieldedAfterClose {
@@ -2046,7 +2045,7 @@ impl Executor {
     /// **So there is no test here**, and that is recorded rather than left as a gap someone assumes
     /// is covered: the join makes a replacement window hold *fewer* entries, not more, so there is
     /// no construction that observes the mis-stamp.
-    pub(super) fn close_and_reopen(&mut self, window: CommitWindow<Responder>) -> CommitWindow<Responder> {
+    pub(super) fn close_and_reopen(&mut self, window: CommitWindow<Reply<Ingested>>) -> CommitWindow<Reply<Ingested>> {
         self.close_window(window);
         CommitWindow::new(self.next_window_seq())
     }
@@ -2182,17 +2181,17 @@ impl Executor {
     /// | [`BatchState::Unknown`] | the ordinary path: external-id conflict check against the window, then `established_collisions`, then a new entry |
     /// | [`BatchState::Accepted`], same bytes | the recorded ids are replayed — re-deriving them is *impossible* for a row that supplied no external id |
     /// | [`BatchState::Accepted`], different bytes | `409`, no effect |
-    /// | [`BatchState::Held`], same bytes | **join**: the caller's responder is appended to the held entry, and both receive the same ids off one allocation |
+    /// | [`BatchState::Held`], same bytes | **join**: the caller's reply is appended to the held entry, and both receive the same ids off one allocation |
     /// | [`BatchState::Held`], different bytes | `409` **to the retry only** — see the arm |
     pub(super) fn admit_ingest(
         &mut self,
-        mut window: CommitWindow<Responder>,
+        mut window: CommitWindow<Reply<Ingested>>,
         rows: Vec<UnallocatedRow>,
         batch_id: String,
         body_hash: [u8; 32],
         artifacts: tessera_lifecycle::BatchArtifacts,
-        respond: Responder,
-    ) -> (CommitWindow<Responder>, Admission) {
+        reply: Reply<Ingested>,
+    ) -> (CommitWindow<Reply<Ingested>>, Admission) {
         match BatchState::of(&self.live, &window, &batch_id) {
             BatchState::Accepted {
                 body_hash: prev_hash,
@@ -2203,13 +2202,14 @@ impl Executor {
                     // keys created were created when it was first accepted, and this submission
                     // created none.
                     self.ack(
-                        &respond,
-                        Ack::Ingested {
+                        &reply,
+                        Ingested {
                             entity_ids,
                             minted: 0,
-                        });
+                        },
+                    );
                 } else {
-                    self.ack_failed(&respond, ExecError::BatchConflict { batch_id });
+                    self.ack_failed(&reply, ExecError::BatchConflict { batch_id });
                 }
                 self.health.note_work_refused();
                 (window, Admission::Answered)
@@ -2224,7 +2224,7 @@ impl Executor {
                     "the entry must be joined to the window it was found in"
                 );
                 if prev_hash == body_hash {
-                    let joined = window.join(&batch_id, respond);
+                    let joined = window.join(&batch_id, reply);
                     debug_assert!(joined, "`held` just answered for this batch id");
                 } else {
                     // **The 409 reaches the retry and NOT the held original, and this is the one
@@ -2246,7 +2246,7 @@ impl Executor {
                     // skipped by `CommitWindow::allocate` and by `held`) and fail its waiters. Not
                     // an entry *removal* — `by_batch` stores indices into `entries` and the
                     // external-id set has no refcounts, so removing one entry means repairing both.
-                    self.ack_failed(&respond, ExecError::BatchConflict { batch_id });
+                    self.ack_failed(&reply, ExecError::BatchConflict { batch_id });
                 }
                 // Either way this job occupied a work-queue slot and was counted at submission,
                 // while `record_window_service` counts one completion per *entry* and a join adds
@@ -2279,7 +2279,7 @@ impl Executor {
                     // joins rather than closing.
                     admission = Admission::YieldedAfterClose;
                 }
-                if let Some(entry) = self.admit(rows, batch_id, body_hash, artifacts, respond) {
+                if let Some(entry) = self.admit(rows, batch_id, body_hash, artifacts, reply) {
                     if window.is_empty() {
                         // The in-flight gauge is armed at the **first entry**, never at window
                         // construction: an empty window is never closed, so a gauge armed there
@@ -2327,8 +2327,8 @@ impl Executor {
         batch_id: String,
         body_hash: [u8; 32],
         artifacts: tessera_lifecycle::BatchArtifacts,
-        respond: Responder,
-    ) -> Option<WindowEntry<Responder>> {
+        reply: Reply<Ingested>,
+    ) -> Option<WindowEntry<Reply<Ingested>>> {
         // The fail-closed backstop for the widened check-to-apply race — see
         // `LiveState::established_collisions`. The overlay read here is the same generation the
         // apply below will clone from, on the same thread, so the deleted-holder exemption cannot
@@ -2361,7 +2361,7 @@ impl Executor {
         if collisions == 0 {
             if let Err(detail) = settle_joins(&generation, &mut rows) {
                 drop(generation);
-                self.ack_failed(&respond, ExecError::JoinRefused { detail });
+                self.ack_failed(&reply, ExecError::JoinRefused { detail });
                 self.health.note_work_refused();
                 return None;
             }
@@ -2369,7 +2369,7 @@ impl Executor {
         drop(generation);
         if collisions > 0 {
             self.ack_failed(
-                &respond,
+                &reply,
                 ExecError::DuplicateExternalId { count: collisions },
             );
             self.health.note_work_refused();
@@ -2379,7 +2379,7 @@ impl Executor {
         let (memberships, edges) = match self.resolve_memberships(&artifacts) {
             Ok(resolved) => resolved,
             Err(detail) => {
-                self.ack_failed(&respond, ExecError::LayerRefused { detail });
+                self.ack_failed(&reply, ExecError::LayerRefused { detail });
                 self.health.note_work_refused();
                 return None;
             }
@@ -2391,7 +2391,7 @@ impl Executor {
             body_hash,
             memberships,
             edges,
-            waiters: vec![respond],
+            waiters: vec![reply],
         })
     }
 
@@ -2536,7 +2536,7 @@ impl Executor {
     /// `LayerRegistry::prepare_derive`'s own contract.
     pub(super) fn derive_records(
         &mut self,
-        closed: &[tessera_lifecycle::ClosedEntry<Responder>],
+        closed: &[tessera_lifecycle::ClosedEntry<Reply<Ingested>>],
         vocabularies: &Vocabularies,
     ) -> Result<Vec<WalRecord>, String> {
         use tessera_types::layer::attribute_value_key;
@@ -2625,7 +2625,7 @@ impl Executor {
     /// own was refused at its admission.
     pub(super) fn mint_records(
         &mut self,
-        closed: &mut [tessera_lifecycle::ClosedEntry<Responder>],
+        closed: &mut [tessera_lifecycle::ClosedEntry<Reply<Ingested>>],
     ) -> Result<(Vec<WalRecord>, Vec<u64>), String> {
         let mut minted_per_entry = vec![0u64; closed.len()];
         let Some((wanted, edges)) = mint_plan(closed) else {
@@ -2796,7 +2796,7 @@ impl Executor {
     /// holding two. `an_ingest_whose_durability_failed_stays_absent_across_a_reopen` holds this, and
     /// `crash_between_fsync_and_swap_replays_rather_than_reallocates` holds the other half — a real
     /// killed process whose window *did* fsync, which replays rather than reallocating.
-    pub(super) fn close_window(&mut self, window: CommitWindow<Responder>) {
+    pub(super) fn close_window(&mut self, window: CommitWindow<Reply<Ingested>>) {
         let entries = window.len() as u64;
         let started = window.opened_at();
         let mut mark = StageMark::now();
@@ -3173,9 +3173,9 @@ impl Executor {
                 .expect("an entry always has at least one waiter");
             for waiter in waiters {
                 let entity_ids = entity_ids.clone();
-                self.ack(&waiter, Ack::Ingested { entity_ids, minted });
+                self.ack(&waiter, Ingested { entity_ids, minted });
             }
-            self.ack(&last, Ack::Ingested { entity_ids, minted });
+            self.ack(&last, Ingested { entity_ids, minted });
         }
 
         self.health
@@ -3187,7 +3187,7 @@ impl Executor {
     pub(super) fn fail_window_alloc(
         &self,
         error: AllocError,
-        waiters: Vec<Vec<Responder>>,
+        waiters: Vec<Vec<Reply<Ingested>>>,
         entries: u64,
         started: std::time::Instant,
     ) {
@@ -3203,7 +3203,7 @@ impl Executor {
     /// The window's append or fsync failed: **apply nothing**, and answer every waiter.
     pub(super) fn fail_window_wal(
         &self,
-        closed: Vec<ClosedEntry<Responder>>,
+        closed: Vec<ClosedEntry<Reply<Ingested>>>,
         index: usize,
         error: WalError,
         entries: u64,
@@ -3231,7 +3231,7 @@ impl Executor {
     /// Answers every waiter of a window that was refused after allocation with the same error.
     pub(super) fn fail_window(
         &self,
-        closed: Vec<ClosedEntry<Responder>>,
+        closed: Vec<ClosedEntry<Reply<Ingested>>>,
         error: impl Fn() -> ExecError,
         entries: u64,
         started: std::time::Instant,
@@ -3447,7 +3447,7 @@ impl Executor {
     /// discard every code this window just drew.
     pub(super) fn apply_window(
         &self,
-        closed: &mut [ClosedEntry<Responder>],
+        closed: &mut [ClosedEntry<Reply<Ingested>>],
         positions: &[u64],
         vocabularies: Vocabularies,
         mints: &[(String, String, u32)],
@@ -4055,24 +4055,24 @@ impl Executor {
     /// than at either call site. That is what makes it a statement about the ack rather than about
     /// a line number: an ack that any later rewrite moves above the swap takes this pause point
     /// with it, and a test parked here then observes the effect *not* in force.
-    pub(super) fn ack(&self, respond: &Responder, ack: Ack) {
+    pub(super) fn ack<T>(&self, reply: &Reply<T>, value: T) {
         self.pause_point(PauseSiteArg::BeforeAck);
         #[cfg(feature = "fault-injection")]
         if let Some(faults) = &self.faults {
             faults.record(tessera_lifecycle::faults::Step::Ack);
         }
-        respond.ack(ack);
+        reply.ack(value);
     }
 
     /// Send a failure receipt. **Not** armed with the pause point above: parking there would stall
     /// the WAL-failure tests inside a path that has nothing to say about ack ordering, and there is
     /// no effect for a parked test to look for.
-    pub(super) fn ack_failed(&self, respond: &Responder, error: ExecError) {
+    pub(super) fn ack_failed<T>(&self, reply: &Reply<T>, error: ExecError) {
         #[cfg(feature = "fault-injection")]
         if let Some(faults) = &self.faults {
             faults.record(tessera_lifecycle::faults::Step::Ack);
         }
-        respond.fail(error);
+        reply.fail(error);
     }
 
     /// Reach an armed pause site, if any. Fault-injection builds only; a no-op otherwise.

@@ -4386,7 +4386,7 @@ pub struct PublishedArtifacts {
 /// Where an artifact sits, as [`Engine::locate_artifact`] answers it.
 ///
 /// The ordinal is here because the engine's own routes address by it. **It does not cross the
-/// wire** — see `Ack::ArtifactsPublished` for why two ordinals are a count of what lies between.
+/// wire** — see `Command::PublishArtifacts` for why two ordinals are a count of what lies between.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PublishedArtifactAddress {
     pub layer: String,
