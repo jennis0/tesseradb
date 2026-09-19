@@ -683,7 +683,10 @@ impl WritePath {
     /// Open a reply channel, enqueue the command built around it, and wait for the answer that
     /// command's reply is typed to carry.
     fn submit<T>(&self, command: impl FnOnce(Reply<T>) -> Command) -> Result<T, AcceptError> {
-        let (reply, pending) = Reply::channel();
+        let (reply, pending) = Reply::channel(
+            #[cfg(feature = "fault-injection")]
+            self.faults.clone(),
+        );
         self.handle()?.enqueue(command(reply))?;
         pending.accept()
     }
@@ -939,7 +942,10 @@ impl WritePath {
         entity: EntityId,
         op: ChangeOp,
     ) -> Result<PendingChange, AcceptError> {
-        let (reply, pending) = Reply::channel();
+        let (reply, pending) = Reply::channel(
+            #[cfg(feature = "fault-injection")]
+            self.faults.clone(),
+        );
         self.handle()?.enqueue(Command::Change { entity, op, reply })?;
         Ok(PendingChange(pending))
     }

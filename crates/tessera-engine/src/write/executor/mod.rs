@@ -1695,7 +1695,7 @@ impl Executor {
                     WalError::Poisoned
                 };
                 if let Some(reply) = &entry.reply {
-                    self.ack_failed(reply, ExecError::Wal(e));
+                    reply.fail(ExecError::Wal(e));
                 }
             }
             return;
@@ -1727,7 +1727,7 @@ impl Executor {
         // → 503, because its change is durably in force.
         for entry in entries {
             if let Some(reply) = &entry.reply {
-                self.ack(reply, ());
+                reply.ack(());
             }
         }
     }
@@ -2201,15 +2201,13 @@ impl Executor {
                     // **A replay mints nothing, and the zero says so**: the artifacts this batch's
                     // keys created were created when it was first accepted, and this submission
                     // created none.
-                    self.ack(
-                        &reply,
-                        Ingested {
+                    reply.ack(Ingested {
                             entity_ids,
                             minted: 0,
                         },
                     );
                 } else {
-                    self.ack_failed(&reply, ExecError::BatchConflict { batch_id });
+                    reply.fail(ExecError::BatchConflict { batch_id });
                 }
                 self.health.note_work_refused();
                 (window, Admission::Answered)
@@ -2246,7 +2244,7 @@ impl Executor {
                     // skipped by `CommitWindow::allocate` and by `held`) and fail its waiters. Not
                     // an entry *removal* — `by_batch` stores indices into `entries` and the
                     // external-id set has no refcounts, so removing one entry means repairing both.
-                    self.ack_failed(&reply, ExecError::BatchConflict { batch_id });
+                    reply.fail(ExecError::BatchConflict { batch_id });
                 }
                 // Either way this job occupied a work-queue slot and was counted at submission,
                 // while `record_window_service` counts one completion per *entry* and a join adds
@@ -2361,16 +2359,14 @@ impl Executor {
         if collisions == 0 {
             if let Err(detail) = settle_joins(&generation, &mut rows) {
                 drop(generation);
-                self.ack_failed(&reply, ExecError::JoinRefused { detail });
+                reply.fail(ExecError::JoinRefused { detail });
                 self.health.note_work_refused();
                 return None;
             }
         }
         drop(generation);
         if collisions > 0 {
-            self.ack_failed(
-                &reply,
-                ExecError::DuplicateExternalId { count: collisions },
+            reply.fail(ExecError::DuplicateExternalId { count: collisions },
             );
             self.health.note_work_refused();
             return None;
@@ -2379,7 +2375,7 @@ impl Executor {
         let (memberships, edges) = match self.resolve_memberships(&artifacts) {
             Ok(resolved) => resolved,
             Err(detail) => {
-                self.ack_failed(&reply, ExecError::LayerRefused { detail });
+                reply.fail(ExecError::LayerRefused { detail });
                 self.health.note_work_refused();
                 return None;
             }
@@ -3173,9 +3169,9 @@ impl Executor {
                 .expect("an entry always has at least one waiter");
             for waiter in waiters {
                 let entity_ids = entity_ids.clone();
-                self.ack(&waiter, Ingested { entity_ids, minted });
+                waiter.ack(Ingested { entity_ids, minted });
             }
-            self.ack(&last, Ingested { entity_ids, minted });
+            last.ack(Ingested { entity_ids, minted });
         }
 
         self.health
@@ -3193,7 +3189,7 @@ impl Executor {
     ) {
         for entry in waiters {
             for waiter in entry {
-                self.ack_failed(&waiter, ExecError::Alloc(error));
+                waiter.fail(ExecError::Alloc(error));
             }
         }
         self.health
@@ -3221,7 +3217,7 @@ impl Executor {
                 } else {
                     WalError::Poisoned
                 };
-                self.ack_failed(&waiter, ExecError::Wal(e));
+                waiter.fail(ExecError::Wal(e));
             }
         }
         self.health
@@ -3238,7 +3234,7 @@ impl Executor {
     ) {
         for entry in closed {
             for waiter in entry.waiters {
-                self.ack_failed(&waiter, error());
+                waiter.fail(error());
             }
         }
         self.health
@@ -4047,32 +4043,6 @@ impl Executor {
     /// here refuses to lower the flag.
     pub(super) fn observe_wal(&self) {
         self.health.mirror_wal(self.wal.is_poisoned());
-    }
-
-    /// Send a successful receipt.
-    ///
-    /// The [`PauseSite::BeforeAck`] point is armed **here**, one statement above the send, rather
-    /// than at either call site. That is what makes it a statement about the ack rather than about
-    /// a line number: an ack that any later rewrite moves above the swap takes this pause point
-    /// with it, and a test parked here then observes the effect *not* in force.
-    pub(super) fn ack<T>(&self, reply: &Reply<T>, value: T) {
-        self.pause_point(PauseSiteArg::BeforeAck);
-        #[cfg(feature = "fault-injection")]
-        if let Some(faults) = &self.faults {
-            faults.record(tessera_lifecycle::faults::Step::Ack);
-        }
-        reply.ack(value);
-    }
-
-    /// Send a failure receipt. **Not** armed with the pause point above: parking there would stall
-    /// the WAL-failure tests inside a path that has nothing to say about ack ordering, and there is
-    /// no effect for a parked test to look for.
-    pub(super) fn ack_failed<T>(&self, reply: &Reply<T>, error: ExecError) {
-        #[cfg(feature = "fault-injection")]
-        if let Some(faults) = &self.faults {
-            faults.record(tessera_lifecycle::faults::Step::Ack);
-        }
-        reply.fail(error);
     }
 
     /// Reach an armed pause site, if any. Fault-injection builds only; a no-op otherwise.

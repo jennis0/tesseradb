@@ -823,9 +823,7 @@ impl Executor {
         // pass below and finds every cell held identically, which is the fill rule's own no-op.
         if let Some((held_hash, _)) = self.live.accepted_batch(&request.batch_id) {
             if held_hash != request.body_hash {
-                self.ack_failed(
-                    &reply,
-                    ExecError::BatchConflict {
+                reply.fail(ExecError::BatchConflict {
                         batch_id: request.batch_id.clone(),
                     },
                 );
@@ -836,7 +834,7 @@ impl Executor {
         let planned = match plan_fills(&generation, &request) {
             Ok(planned) => planned,
             Err(e) => {
-                self.ack_failed(&reply, e);
+                reply.fail(e);
                 return;
             }
         };
@@ -849,7 +847,7 @@ impl Executor {
         let (mut memberships, mint_edges) = match self.resolve_memberships(&request.artifacts) {
             Ok(resolved) => resolved,
             Err(detail) => {
-                self.ack_failed(&reply, ExecError::LayerRefused { detail });
+                reply.fail(ExecError::LayerRefused { detail });
                 return;
             }
         };
@@ -858,7 +856,7 @@ impl Executor {
         let wanted = match values_mint_plan(&memberships, &request.rows) {
             Ok(wanted) => wanted,
             Err(detail) => {
-                self.ack_failed(&reply, ExecError::ValuesRefused { detail });
+                reply.fail(ExecError::ValuesRefused { detail });
                 return;
             }
         };
@@ -872,7 +870,7 @@ impl Executor {
                     mints = records;
                 }
                 Err(detail) => {
-                    self.ack_failed(&reply, ExecError::LayerRefused { detail });
+                    reply.fail(ExecError::LayerRefused { detail });
                     return;
                 }
             }
@@ -883,7 +881,7 @@ impl Executor {
         {
             Ok(records) => records,
             Err(detail) => {
-                self.ack_failed(&reply, ExecError::ValuesRefused { detail });
+                reply.fail(ExecError::ValuesRefused { detail });
                 return;
             }
         };

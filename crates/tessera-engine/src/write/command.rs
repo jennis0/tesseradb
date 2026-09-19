@@ -22,32 +22,51 @@ use tessera_types::EntityId;
 
 use super::{AcceptError, PublishedBatch, ValuesReceipt};
 
-/// The executor's end of one command's reply channel.
-///
-/// **A reply is a promise that the effect is in force**, not that the command was queued: the
-/// executor sends it strictly *after* the generation carrying the effect has been swapped in
-/// (`append → fsync → apply → swap → ack`). The fail-open this ordering exists to prevent is an
-/// ack that precedes the swap, letting a client observe a 200 for a suppression that is not yet in
-/// force.
-pub(crate) struct Reply<T>(SyncSender<Result<T, ExecError>>);
+/// Where a command is answered. Every answer goes out through [`Reply::ack`] or [`Reply::fail`],
+/// so under fault injection every command's answer passes the `BeforeAck` pause and is recorded
+/// as a step, whichever handler sends it.
+pub(crate) struct Reply<T> {
+    tx: SyncSender<Result<T, ExecError>>,
+    #[cfg(feature = "fault-injection")]
+    faults: Faults,
+}
+
+/// The fault switchboard a reply reports to, where one is installed.
+#[cfg(feature = "fault-injection")]
+pub(crate) type Faults = Option<std::sync::Arc<tessera_lifecycle::faults::FaultSwitchboard>>;
 
 impl<T> Reply<T> {
-    /// The two halves of one command's reply: the one that travels with the command, and the one
-    /// the submitter waits on.
-    pub(crate) fn channel() -> (Reply<T>, Pending<T>) {
+    pub(crate) fn channel(
+        #[cfg(feature = "fault-injection")] faults: Faults,
+    ) -> (Reply<T>, Pending<T>) {
         let (tx, rx) = std::sync::mpsc::sync_channel(1);
-        (Reply(tx), Pending(rx))
+        let reply = Reply {
+            tx,
+            #[cfg(feature = "fault-injection")]
+            faults,
+        };
+        (reply, Pending(rx))
     }
 
-    /// A caller that has gone away is not an error: the effect stands either way.
+    /// Answers the command. A caller that has gone away is not an error: the effect stands.
     pub(super) fn ack(&self, value: T) {
-        let _ = self.0.send(Ok(value));
+        #[cfg(feature = "fault-injection")]
+        if let Some(faults) = &self.faults {
+            use tessera_lifecycle::faults::{PauseAction, PauseSite, Step};
+            if let Some(PauseAction::Panic) = faults.pause_point(PauseSite::BeforeAck) {
+                panic!("fault-injection: executor panicked at the BeforeAck pause point");
+            }
+            faults.record(Step::Ack);
+        }
+        let _ = self.tx.send(Ok(value));
     }
 
-    /// The caller maps the variant to a status code; see [`ExecError`] for the mapping and for
-    /// which variants still applied something.
     pub(super) fn fail(&self, error: ExecError) {
-        let _ = self.0.send(Err(error));
+        #[cfg(feature = "fault-injection")]
+        if let Some(faults) = &self.faults {
+            faults.record(tessera_lifecycle::faults::Step::Ack);
+        }
+        let _ = self.tx.send(Err(error));
     }
 }
 
@@ -380,7 +399,10 @@ mod tests {
     #[test]
     fn every_change_rides_the_never_shed_lane_and_no_ingest_does() {
         for op in [ChangeOp::Delete, ChangeOp::Suppress, ChangeOp::Unsuppress] {
-            let (reply, _pending) = Reply::channel();
+            let (reply, _pending) = Reply::channel(
+                #[cfg(feature = "fault-injection")]
+                None,
+            );
             let cmd = Command::Change {
                 entity: EntityId::new(1),
                 op,
@@ -388,7 +410,10 @@ mod tests {
             };
             assert!(cmd.is_never_shed(), "{op:?} must not be sheddable for load");
         }
-        let (reply, _pending) = Reply::channel();
+        let (reply, _pending) = Reply::channel(
+                #[cfg(feature = "fault-injection")]
+                None,
+            );
         let ingest = Command::Ingest {
             rows: Vec::new(),
             batch_id: "b".into(),
