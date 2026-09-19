@@ -628,6 +628,98 @@ pub trait ViewportSink {
     fn points(&mut self, chunk: PointColumns) -> SinkResult;
 }
 
+/// The columns every points chunk of one response carries: the render columns the head published,
+/// and the membership resolver where the artifacts frame carried anything to resolve against.
+///
+/// One value, because the two are decided together — `point_rows = "highlight"` empties both — and
+/// because a chunk seeded from one list and gathered against another would caption a column's
+/// values with another column's name.
+pub(super) struct PointSchema<'a> {
+    pub(super) render_scalars: &'a [DeclaredScalar],
+    pub(super) membership: Option<crate::membership_column::Resolved>,
+}
+
+/// The emit pass: gather and hand off, serial, in response order (this module's doc says
+/// why serial). A chunk is delivered once its estimated wire size reaches `flush_bytes`, always at
+/// a whole-tile boundary.
+pub(super) fn emit_points(
+    swept: &[TileSweepOut<'_>],
+    schema: &PointSchema<'_>,
+    mask: &EffectiveMask,
+    flush_bytes: usize,
+    cancel: &Option<CancelToken>,
+    probe: &mut Probe,
+    sink: &mut dyn ViewportSink,
+) -> Result<()> {
+    // The buffer is seeded from the declaration rather than from whichever tile arrives first — a
+    // request whose first tile is narrower than a later one must not fix the column set from it —
+    // and re-seeded identically at each flush.
+    let seed = || PointColumns {
+        tessera_ids: Vec::new(),
+        codes: Vec::new(),
+        scalars: schema
+            .render_scalars
+            .iter()
+            .map(|d| ColumnBuf::empty(d.arrow_type))
+            .collect(),
+        membership: schema
+            .membership
+            .as_ref()
+            .map(|m| m.empty_columns())
+            .unwrap_or_default(),
+        highlighted: mask.has_highlight().then(Vec::new),
+    };
+    let mut buf = seed();
+    let mut buf_bytes = 0usize;
+    for ts in swept {
+        // D-C: the emit pass's per-tile checkpoint — one atomic read, so an abandoned
+        // stream stops gathering within one tile even when the sink is not refusing yet.
+        check_cancelled(cancel)?;
+        let mut stats = TileProbe::new();
+        let parts = SelectionParts::new(&ts.parts);
+        let mut tile_points = gather_tile_columns(&parts, &ts.rows, schema.render_scalars)?;
+        if let Some(membership) = &schema.membership {
+            tile_points.membership = membership.columns_for(&ts.rows);
+        }
+        // One `contains` per served point against the crossed highlight set — at most
+        // `k_max_marks` lookups for the whole response (`highlight-and-hierarchy.md` §2.1).
+        if mask.has_highlight() {
+            tile_points.highlighted =
+                Some(ts.rows.iter().map(|&row| mask.is_highlighted(row)).collect());
+        }
+        stats.count(|t| &mut t.points_gathered, tile_points.len() as u64);
+        buf_bytes += tile_points.wire_bytes_estimate();
+        if let Err((want, got)) = buf.append(tile_points) {
+            return Err(EngineError::Malformed(format!(
+                "two tiles of one response hold the same declared column at different \
+                 types ({want} and {got}); the bundle's segments disagree about it"
+            )));
+        }
+        // Brackets gather-and-append only — the flush below (a channel send, under
+        // streaming) must not inflate a figure documented as CPU cost.
+        stats.lap(|t| &mut t.gather_ns);
+        stats.t.fold_into(&mut probe.t);
+        // Two guards on the threshold (both from the implementation review):
+        // `!buf.is_empty()`, because a zero-row buffer can still carry estimate bytes — a
+        // Utf8 column's offset table is 4 bytes at zero rows — so `k = 0` (a legal
+        // counts-only request) over enough tiles would otherwise emit empty points frames
+        // against the sink contract; and `MAX_POINTS_FRAME_BYTES`, so a deliberately huge
+        // `flush_bytes` ("one flush per response") cannot accumulate a frame past the
+        // wire's u32 length field, which is a panic there and a bounded split here.
+        if buf_bytes >= flush_bytes.min(MAX_POINTS_FRAME_BYTES) && !buf.is_empty() {
+            let chunk = std::mem::replace(&mut buf, seed());
+            buf_bytes = 0;
+            sink.points(chunk)
+                .map_err(|SinkClosed| EngineError::Cancelled)?;
+        }
+    }
+    if !buf.is_empty() {
+        sink.points(buf)
+            .map_err(|SinkClosed| EngineError::Cancelled)?;
+    }
+    Ok(())
+}
+
 /// [`Engine::viewport`]'s sink: collect everything, so the batch caller sees exactly what a
 /// streaming consumer would have seen, concatenated.
 #[derive(Default)]

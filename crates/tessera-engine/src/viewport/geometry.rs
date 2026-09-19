@@ -2,7 +2,237 @@
 
 use super::*;
 
+/// What a request resolves before it counts anything: the view it is served from, this session's
+/// geometry over it, the composed mask and the columns the response renders.
+pub(super) struct OpenView<'a> {
+    pub(super) served: ServedView<'a>,
+    /// The composed mask, before any filter narrows it.
+    pub(super) mask: EffectiveMask,
+    /// Kept beside the mask for the background ladder fill, which takes the whole entry.
+    pub(super) geometry: Arc<SessionGeometry>,
+    pub(super) coordinates: ViewCoordinates,
+    /// The bundle-wide render columns and then this view's scoped ones, in that order.
+    pub(super) render_scalars: Vec<DeclaredScalar>,
+}
+
+/// θ's inputs for one request: the composed visible cardinality the threshold is anchored on, and
+/// the threshold itself. `v_total` outlives the threshold because the filter's route rule reads it
+/// (§8.2).
+pub(super) struct Theta {
+    pub(super) v_total: u64,
+    pub(super) threshold: Threshold,
+}
+
 impl Engine {
+    /// Resolve the view this request is served from, and everything fixed by that resolution.
+    pub(super) fn open_view<'a>(
+        &self,
+        session: &'a Session,
+        generation: &'a Generation,
+        view: &'a str,
+        cancel: &Option<CancelToken>,
+        probe: &mut Probe,
+    ) -> Result<OpenView<'a>> {
+        // Fail closed on a view spanning partitions, for the same reason the segment guard below
+        // exists: this resolves to ONE partition, and theta's anchor and every rank are then taken
+        // over that partition alone — which §12.3 forbids (the anchor must be session-global, or
+        // "below the cut" means different things in different partitions). The build emits one
+        // partition, so this is unreachable; it is here so a §12 bundle cannot be served
+        // half-masked with no error, which is the failure the multi-segment guard already refuses.
+        let carriers = generation
+            .bundle
+            .partitions
+            .values()
+            .filter(|partition| partition.views.contains_key(view))
+            .count();
+        if carriers > 1 {
+            return Err(EngineError::MultiPartitionView(view.to_string()));
+        }
+        let view_data = generation
+            .bundle
+            .partitions
+            .values()
+            .find_map(|partition| partition.views.get(view))
+            .ok_or_else(|| EngineError::UnknownView(view.to_string()))?;
+
+        // Every segment of the view, each with where its rows begin in the view's row space — see
+        // [`segments_with_row_bases`] for why the pairing is keyed on `seg_id` and never positional.
+        let segments = segments_with_row_bases(view, view_data)?;
+        probe.lap(|t| &mut t.view_lookup_ns);
+
+        // **Zero update-induced work on this thread, in the steady state** (decision 0044's D1).
+        // Every flush advances `segments_version`, so every flush rotates this key for every live
+        // session; the *measured* costs of doing anything about that here are 1.28 s for a rebuild
+        // and 40.9 ms for the patch's bitmap clone alone (`probes/2026-08-04-refresh-ladder/`),
+        // against a budget of 0.2 ms. Neither fits. What runs instead is a background refresh at
+        // each publication (`crate::refresh`), and this is its request-side face: a three-rung
+        // ladder that builds nothing a refresh is about to produce.
+        //
+        // **Guardrail (D-D/D-F): nothing reachable from a rayon worker below may touch this
+        // cache.** The value is resolved once, here, on the calling thread, strictly before the
+        // parallel tile sweep begins, and is then only *borrowed* (via `compose`'s
+        // `EffectiveMask`) by every `tile_sweep` call — never re-fetched or re-built per tile.
+        let geometry = self.session_geometry(session, generation, view, view_data, cancel, probe)?;
+        // Minted here, from the geometry that actually resolved — see `view_coordinates`.
+        let coordinates = self.view_coordinates(generation, &geometry, view);
+        // The same rule one structure along: the masked-count cache's key names the fragment this
+        // request composes against, which under stale-serve is the entry's and not the newest one.
+        let mask_identity = self.mask_identity(session, generation, &geometry);
+        let base = Arc::clone(&geometry.projection);
+        probe.lap(|t| &mut t.row_projection_ns);
+
+        // **Render columns only, narrowed once — for the head and the gather alike.**
+        // `declared_scalars` is the compiled schema and includes `filter`-only and blob-resident
+        // columns, which are entity-space and absent from `columns.arrow` by design; taking the
+        // full list would publish a column of nulls under a name a client can see, and — because
+        // the head's names are zipped positionally with the gathered buffers — caption a render
+        // column's values with a non-render column's name wherever the two lists diverge. One
+        // construction site is what keeps the names and the buffers the same list.
+        let mut render_scalars: Vec<_> = generation
+            .bundle
+            .manifest
+            .render_scalars()
+            .cloned()
+            .collect();
+        // **Then this view's scoped render columns, and only this view's** (`views.md` §5). A
+        // group-scoped attribute declaring `render` occupies a slot in the row tail of every view
+        // of its group — and of any group sharing those views — and in no other, so the list is
+        // per view where the bundle-wide half above is not. Appended rather than interleaved,
+        // which is the order the build and every flush write the lanes in.
+        render_scalars.extend(scoped_render_scalars(
+            &generation.bundle.manifest,
+            view,
+            session.visible_views(),
+        ));
+
+        // D-C checkpoint: before compose, one of the two long serial-prefix stages this task
+        // guards. Placed after the (non-cancellable, D-G) row-projection build so a cancellation
+        // observed here never interrupts that build — only work this request would otherwise go
+        // on to do itself.
+        check_cancelled(cancel)?;
+
+        // **Fail-closed on a missing entry.** Every view the bundle carries has one, empty when
+        // nothing is denied (`compose::derive_denied`), so an absent key means the mask and the
+        // bundle disagree about what this generation holds. Serving that as "nothing is denied
+        // here" would publish suppressed and deleted rows on the map with no error anywhere —
+        // the same shape as `SegmentWithoutRowBase`, and refused the same way.
+        let denied = generation
+            .denied()
+            .get(view)
+            .ok_or_else(|| EngineError::DenyMaskMissing {
+                view: view.to_string(),
+            })?;
+
+        // Everything this request's view fixes, named once — see [`ServedView`]. The composed mask
+        // is not part of it: the filter below holds the pre-filter mask and the narrowed one at the
+        // same time.
+        let served = ServedView {
+            session,
+            generation,
+            name: view,
+            data: view_data,
+            segments,
+            denied,
+            mask_identity,
+        };
+
+        let mask = compose(
+            session.satisfied(),
+            &generation.overlay,
+            &generation.buffer,
+            base,
+            &view_data.row_space,
+            denied,
+        );
+        probe.lap(|t| &mut t.compose_ns);
+
+        Ok(OpenView {
+            served,
+            mask,
+            geometry,
+            coordinates,
+            render_scalars,
+        })
+    }
+
+    /// θ's two anchors, both over the session's **composed** mask and this view's whole row
+    /// space: `V_total`, the visible cardinality, and `N_occ(zoom)`, the number of depth-`zoom`
+    /// tiles holding at least one visible row. Both must be the composed figures and not
+    /// `base`'s — see `Threshold::at_depth`'s doc for the I2 argument and the concrete channel
+    /// the pre-overlay figures open.
+    ///
+    /// Both are viewport-*invariant*: they depend on the session's mask, the view and the
+    /// generation, never on `bbox`, so θ does not move when the viewer pans — which is the churn
+    /// §7.2 forbids. `N_occ` is a function of the depth, so θ moves on a *zoom*, which is what
+    /// makes the mean occupied tile draw `m_target` marks at every depth; nesting survives it
+    /// because `N_occ` is non-decreasing in depth, so θ is monotone (§7.2). Both move on an
+    /// overlay swap, which is accepted: swaps are rare against pans, and because the served set
+    /// is a `tessera_id` prefix, a small θ move perturbs only the marks nearest the cut.
+    ///
+    /// **The mask is the pre-filter one**, which is what the caller holds at this point: a filtered
+    /// request saturates the threshold rather than re-anchoring it (**I12**).
+    pub(super) fn theta(
+        &self,
+        served: &ServedView<'_>,
+        generation: &Arc<Generation>,
+        geometry: &Arc<SessionGeometry>,
+        mask: &EffectiveMask,
+        req: &ViewportRequest<'_>,
+        probe: &mut Probe,
+    ) -> Theta {
+        let v_total = mask.visible_total();
+        probe.lap(|t| &mut t.theta_anchor_ns);
+        let threshold = match req.filter {
+            // §8.5's match-layer count rule: a filtered request serves every match, up to the cap.
+            // The θ threshold clause does not thin a filtered selection, and saturating is how the
+            // definition says "in full": `C_θ = |vis(T)|`, so `served = min(matched, cap)` per
+            // tile, with the cap-many smallest `tessera_id`s when a tile is over — the same prefix
+            // rule as ever, so nesting across zooms is untouched. Neither anchor is walked, both
+            // being inputs to a threshold this request does not consult.
+            //
+            // This is NOT a re-anchor. θ's anchors stay the unfiltered composed mask's, and §5.2 of
+            // `filter-surface.md` forbids anchoring on `M_sel` (a threshold that moved as the
+            // viewer typed). The rule here is the other half of the same section: the anchor never
+            // narrows, and the match layer never samples. Before this, a filtered tile was pushed
+            // through the unfiltered θ odds — a tile narrowed from 4,000 visible to 40 matched drew
+            // ~1% of 40, i.e. the k_min floor — so the map thinned in proportion to the filter's
+            // selectivity instead of showing the matches.
+            Some(_) => Threshold::Saturated,
+            None => Threshold::at_depth(
+                v_total,
+                self.config.theta_target_marks,
+                self.occupied_tiles(
+                    &served.mask_identity,
+                    served.name,
+                    &served.segments,
+                    mask,
+                    req.zoom,
+                ),
+            ),
+        };
+        probe.lap(|t| &mut t.theta_occupancy_ns);
+        // **The rest of the ladder, on the pool, after this request has its own rung** — see
+        // `crate::stage`. This request walked at `zoom` and kept every rung below it; the fill
+        // takes the ladder the rest of the way to `stage::BACKGROUND_DEPTH`, so a session's zoom
+        // to depth 12 and its zoom back out cost nothing. Spawned here rather than at authorise
+        // because `N_occ` is counted over the composed mask, which needs the row projection this
+        // request has just resolved and which no session has before its first request.
+        //
+        // **Only where the anchor was taken.** A filtered request saturates θ and consults neither
+        // anchor (above), so it has no reason to warm one; the next unfiltered request spawns the
+        // fill for itself.
+        if req.filter.is_none() && req.zoom < crate::stage::BACKGROUND_DEPTH {
+            self.spawn_ladder_fill(
+                &served.mask_identity,
+                served.name,
+                served.session,
+                generation,
+                geometry,
+            );
+        }
+        Theta { v_total, threshold }
+    }
+
     pub(crate) fn session_geometry(
         &self,
         session: &Session,

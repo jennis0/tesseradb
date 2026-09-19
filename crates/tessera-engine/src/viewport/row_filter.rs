@@ -1123,6 +1123,138 @@ pub(crate) fn predicate_source<'a>(
 }
 
 impl Engine {
+    /// **The request's filter and highlight, evaluated and crossed into the mask** — after the tile
+    /// ranges, before the sweep. This placement is load-bearing three ways, and the signature is
+    /// what holds it: the route rule needs both its operands in hand: 0068 routes a both-routes
+    /// column row-space while `rows_in_ranges ≤ |M_auth|` — the request's own span against the
+    /// principal's own composed total, both quantities the caller could compute, never a statistic
+    /// about another principal's data (§8.2). The row-space leaves need the request's merged tile
+    /// ranges, which is what they are evaluated over. And everything before this is deliberately
+    /// blind to the filter — `visible_total()` is θ's anchor and stays unfiltered under **I12**,
+    /// and `rows_in_ranges` is C4's leak-register numerator and stays mask-free (§14.2). Both
+    /// arrive here already computed.
+    ///
+    /// **`filters` and `highlight` are two expressions of one request, evaluated here together**
+    /// (`highlight-and-hierarchy.md` §2.1). Both run against the same candidate and through the
+    /// same resolvers, closed over the same **pre-filter** mask — a highlight is a conjunction
+    /// with the filter's candidate by construction, and evaluating its region or `member_of`
+    /// leaves against an already-filtered mask would make the two positions of one clause mean
+    /// different things. The mask takes both results afterwards, in separate fields: only
+    /// `with_filter`'s narrows what is drawn.
+    ///
+    /// Returns the mask the sweep reads and the response's region verdict, which is settled by the
+    /// decomposition here and never by a row.
+    pub(super) fn narrow_to_filters(
+        &self,
+        served: &ServedView<'_>,
+        mask: EffectiveMask,
+        tiling: &Tiling,
+        v_total: u64,
+        req: &ViewportRequest<'_>,
+        probe: &mut Probe,
+    ) -> Result<(EffectiveMask, Option<crate::region::RegionVerdict>)> {
+        if req.filter.is_none() && req.highlight.is_none() {
+            return Ok((mask, None));
+        }
+        check_cancelled(&req.cancel)?;
+        let rows_in_ranges = tiling.rows_in_ranges;
+        let row_bases: Vec<u32> = served.segments.iter().map(|&(_, base)| base).collect();
+        let domain = crossing_domain(&tiling.ranges, &row_bases);
+        let mut region_verdict: Option<crate::region::RegionVerdict> = None;
+        let (filter_rows, highlight_rows) =
+            self.route_filters(served, &mask, &req.cancel, |route| {
+                // One transcription of the route-and-cross sequence, called for each
+                // expression, so the two positions of a clause cannot drift apart.
+                // `per_tile_only` is the highlight's route and `count_matched` its exclusion
+                // from the `filter_matched` probe — a highlight's own cardinality is not the
+                // filter's, and adding it there would make one gauge report two quantities.
+                let mut evaluate = |expr: &crate::filter::FilterExpr,
+                                    per_tile_only: bool,
+                                    count_matched: bool|
+                 -> Result<(FilterRows, Option<crate::region::RegionVerdict>)> {
+                    let routed = route(expr, rows_in_ranges <= v_total)?;
+                    probe.lap(|t| &mut t.filter_eval_ns);
+                    // One crossing per expression, whichever shape came back (0062's tree;
+                    // 0068). The row of `filter_matched` reports what the route produced:
+                    // matched entities on the entity route, matched rows-in-domain on the row
+                    // route.
+                    let out = match routed {
+                        crate::filter::RoutedFilter::Entity(entities) => {
+                            if count_matched {
+                                probe.count(|t| &mut t.filter_matched, entities.cardinality());
+                            }
+                            (
+                                self.cross_filter_into_row_space(
+                                    served,
+                                    &entities,
+                                    &tiling.ranges,
+                                    rows_in_ranges,
+                                    per_tile_only,
+                                ),
+                                None,
+                            )
+                        }
+                        crate::filter::RoutedFilter::Row(tree) => {
+                            let verdict = tree.region_verdict();
+                            let rows = self.evaluate_row_route(
+                                &tree,
+                                served,
+                                &domain,
+                                rows_in_ranges,
+                                per_tile_only,
+                            )?;
+                            self.counters.filter_row_routed.fetch_add(1, Ordering::Relaxed);
+                            // **Not counted when a region is in the tree.** Its interior rows
+                            // have not met the mask yet, so the cardinality would be a pre-mask
+                            // quantity about the region — the number selection-operand §7 says
+                            // may not be computed, for a metric or for anything else.
+                            if count_matched && !tree.has_region() {
+                                probe.count(|t| &mut t.filter_matched, rows.rows().cardinality());
+                            }
+                            (rows, verdict)
+                        }
+                    };
+                    probe.lap(|t| &mut t.filter_cross_ns);
+                    Ok(out)
+                };
+                let filter_rows = match &req.filter {
+                    None => None,
+                    Some(expr) => {
+                        let (rows, verdict) = evaluate(expr, false, true)?;
+                        region_verdict = verdict;
+                        Some(rows)
+                    }
+                };
+                // **The highlight always takes the per-tile walk**, whatever it matched
+                // corpus-wide: its three answers are all inside the request's tiles, so the
+                // whole-view projection would be paid for nothing (§2.1).
+                let highlight_rows = match &req.highlight {
+                    None => None,
+                    Some(expr) => {
+                        let (rows, verdict) = evaluate(expr, true, false)?;
+                        // The coarsest of the two, exactly as two region leaves of one
+                        // expression combine: a cover anywhere makes the response's verdict a
+                        // cover.
+                        region_verdict = match (region_verdict, verdict) {
+                            (Some(a), Some(b)) => Some(a.coarser(b)),
+                            (a, b) => a.or(b),
+                        };
+                        Some(rows)
+                    }
+                };
+                Ok((filter_rows, highlight_rows))
+            })?;
+        let mask = match filter_rows {
+            Some(rows) => mask.with_filter(rows),
+            None => mask,
+        };
+        let mask = match highlight_rows {
+            Some(rows) => mask.with_highlight(rows),
+            None => mask,
+        };
+        Ok((mask, region_verdict))
+    }
+
     /// **Route this request's filter expressions against its pre-filter mask**: bring the fragment
     /// forward, build the entity-space candidate, close the region and `member_of` resolvers over
     /// `mask`, and hand `body` a `route` that puts one expression through them. One transcription
