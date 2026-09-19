@@ -167,14 +167,14 @@ pub(crate) struct CoalescePlan {
     /// a function of the schema — deliberately, and filter-index §5.2 says why: that property
     /// belongs to the flush, where an operator predicts what ingest produces, not to a maintenance
     /// pass that fires where the policy says there is work.
-    pub(crate) attrs: Vec<AttrWindow>,
+    pub(crate) attrs: Vec<ColumnWindow<AttrExtent>>,
     /// Consumed `record_extents` entries — one contiguous window, the record blob being a single
     /// pseudo-column (`record`) on the attribute axis's policy (records §7). Empty if the axis
     /// did not qualify.
     pub(crate) records: Vec<RecordExtent>,
     /// Consumed `text_extents` entries, one window per text column — the sixth axis, on the
     /// attribute axis's per-column policy over its own manifest list.
-    pub(crate) texts: Vec<TextWindow>,
+    pub(crate) texts: Vec<ColumnWindow<TextExtent>>,
     /// Consumed `entity_terms_extents` entries — one contiguous window, the transpose being a
     /// single family on the record blob's policy (`tessera_store::entity_terms`). Empty if the
     /// axis did not qualify.
@@ -204,9 +204,26 @@ type WindowKey<'a> = (
     Option<tessera_types::view::ViewIncarnation>,
 );
 
-/// One column's contiguous window of its own `attr_extents` subsequence.
+/// An extent listed under one column, on an axis whose list interleaves the columns.
+trait ColumnExtent {
+    fn key(&self) -> WindowKey<'_>;
+}
+
+impl ColumnExtent for AttrExtent {
+    fn key(&self) -> WindowKey<'_> {
+        (self.column.as_str(), self.view.as_deref(), self.incarnation)
+    }
+}
+
+impl ColumnExtent for TextExtent {
+    fn key(&self) -> WindowKey<'_> {
+        (self.column.as_str(), self.view.as_deref(), self.incarnation)
+    }
+}
+
+/// One column's contiguous window of its own subsequence of an axis's list.
 #[derive(Debug, Clone)]
-pub(crate) struct AttrWindow {
+pub(crate) struct ColumnWindow<E> {
     pub(crate) column: String,
     /// The view whose column of a **group-scoped family** this window belongs to — `None` for an
     /// ordinary entity-scoped column ([`AttrExtent::view`], `views.md` §5). The unit is
@@ -216,18 +233,7 @@ pub(crate) struct AttrWindow {
     /// The incarnation of `view` these extents belong to — the window's third key component
     /// (decision 0115), `None` exactly when `view` is.
     pub(crate) incarnation: Option<tessera_types::view::ViewIncarnation>,
-    pub(crate) extents: Vec<AttrExtent>,
-}
-
-/// One text column's contiguous window of its own `text_extents` subsequence.
-#[derive(Debug, Clone)]
-pub(crate) struct TextWindow {
-    pub(crate) column: String,
-    /// [`AttrWindow::view`]'s field, for its reason.
-    pub(crate) view: Option<String>,
-    /// [`AttrWindow::incarnation`]'s field, for its reason.
-    pub(crate) incarnation: Option<tessera_types::view::ViewIncarnation>,
-    pub(crate) extents: Vec<TextExtent>,
+    pub(crate) extents: Vec<E>,
 }
 
 impl CoalescePlan {
@@ -265,24 +271,6 @@ pub(crate) fn plan_coalesce(
             .map_or(0, |d| d.size)
     };
     let is_build = |rel: &str| build_files.contains_key(rel);
-    // **A dead incarnation's extents are not coalesced** (decision 0115). They belong to a view
-    // that was dropped and whose key may since have been created again; the fold reclaims them by
-    // omission, and merging them is not merely wasted IO — `coalesced_column_rel` derives the
-    // output path from `(column, view)` alone, so a dead window and the live one would write the
-    // same files and truncate each other's, leaving the live view serving its predecessor's values
-    // under a digest that no longer describes them.
-    //
-    // **Fail-closed on a half-stamped entry**: a `view` with no incarnation, or the reverse,
-    // matches nothing and is skipped, which costs a coalesce and never merges across a drop.
-    let live_window =
-        |view: Option<&str>, incarnation: Option<tessera_types::view::ViewIncarnation>| {
-            match (view, incarnation) {
-                // Entity-scoped: one column bundle-wide, belonging to no view.
-                (None, None) => true,
-                (Some(view), Some(incarnation)) => is_live(view, incarnation),
-                _ => false,
-            }
-        };
 
     let mut plan = CoalescePlan {
         partition: partition.to_string(),
@@ -375,81 +363,31 @@ pub(crate) fn plan_coalesce(
     // coalesce Q3's layers with Q4's into one file that then claims both views' entities. The
     // incarnation is the third component for the same reason a key apart: a dropped key may be
     // created again, and its predecessor's extents sit in this list until a fold reclaims them.
-    let mut by_column: BTreeMap<WindowKey<'_>, Vec<&AttrExtent>> = BTreeMap::new();
-    for extent in &manifest.attr_extents {
-        by_column
-            .entry((
-                extent.column.as_str(),
-                extent.view.as_deref(),
-                extent.incarnation,
-            ))
-            .or_default()
-            .push(extent);
-    }
-    for ((column, view, incarnation), extents) in by_column {
-        if !live_window(view, incarnation) {
-            continue;
-        }
-        // **A layer's dictionary counts toward the cap**, because the merge holds it: a keyword
-        // window's transient is its remap and its decode cursors, both sized by the keys those
-        // files hold, and a cap that ignored them would bound the ordinals while the dictionary —
-        // which for a near-unique column is the larger half — grew unwatched (records §7). A
-        // keyword column is otherwise selected exactly as every other column: per column, by
-        // `width`, over the size floor. Whether a window's extents carry dictionaries decides
-        // which merge `execute_coalesce` runs, never whether the window is taken.
-        let size = |extent: &&AttrExtent| {
-            Some(
-                size_of(&extent.values)
-                    + size_of(&extent.presence)
-                    + extent.dict.as_deref().map_or(0, &size_of),
-            )
-        };
-        // **The width narrows to fit the input cap, and for no other reason.** The cap bounds the
-        // pass transient — the window's values and presence held during the merge — and it applies
-        // per column, so a text column whose values outgrow it stalls *itself* and never its
-        // neighbours. Below the policy's width nothing is selected at all, exactly as on every
-        // other axis: the narrowing answers "this column's extents are too big", never "this
-        // column has too few", which would coalesce pairs at every tick for ever.
-        let uncapped = CoalescePolicy {
-            max_input_bytes: u64::MAX,
-            ..policy
-        };
-        let selected = select_window(&extents, policy.width, uncapped, size).and_then(|_| {
-            (2..=policy.width)
-                .rev()
-                .find_map(|width| select_window(&extents, width, policy, size))
-        });
-        if let Some(window) = selected {
-            plan.attrs.push(AttrWindow {
-                column: column.to_string(),
-                view: view.map(str::to_string),
-                incarnation,
-                extents: extents[window].iter().map(|e| (*e).clone()).collect(),
-            });
-        }
-    }
+    //
+    // **A layer's dictionary counts toward the cap**, because the merge holds it: a keyword
+    // window's transient is its remap and its decode cursors, both sized by the keys those files
+    // hold, and a cap that ignored them would bound the ordinals while the dictionary — which for
+    // a near-unique column is the larger half — grew unwatched (records §7). A keyword column is
+    // otherwise selected exactly as every other column. Whether a window's extents carry
+    // dictionaries decides which merge `execute_coalesce` runs, never whether the window is taken.
+    plan.attrs = column_windows(&manifest.attr_extents, policy, is_live, |extent| {
+        Some(
+            size_of(&extent.values)
+                + size_of(&extent.presence)
+                + extent.dict.as_deref().map_or(0, &size_of),
+        )
+    });
 
     // ---- record-blob extents: the fifth axis, one pseudo-column on the attribute policy -------
     //
     // records §7: the same per-column selection, `record_extents` already being a single column's
     // own subsequence. No build guard, for the attribute axis's reason — a built bundle's list is
-    // empty, the base blob living in `MANIFEST.files` — and the same cap-narrowing, so a blob
-    // window that outgrows the input cap stalls itself and nothing else.
+    // empty, the base blob living in `MANIFEST.files`.
     {
         let size = |extent: &RecordExtent| {
             Some(size_of(&extent.blocks) + size_of(&extent.hasrow) + size_of(&extent.directory))
         };
-        let uncapped = CoalescePolicy {
-            max_input_bytes: u64::MAX,
-            ..policy
-        };
-        let selected = select_window(&manifest.record_extents, policy.width, uncapped, size)
-            .and_then(|_| {
-                (2..=policy.width)
-                    .rev()
-                    .find_map(|width| select_window(&manifest.record_extents, width, policy, size))
-            });
-        if let Some(window) = selected {
+        if let Some(window) = widest_window(&manifest.record_extents, policy, size) {
             plan.records = manifest.record_extents[window].to_vec();
         }
     }
@@ -464,57 +402,21 @@ pub(crate) fn plan_coalesce(
     // prose-carrying flush until the next fold, and every `match` pays a resolve and a posting read
     // per token *per layer* — a read cost that grows linearly in the flush count with nothing
     // reducing it between folds.
-    {
-        let mut by_column: BTreeMap<WindowKey<'_>, Vec<&TextExtent>> = BTreeMap::new();
-        for extent in &manifest.text_extents {
-            by_column
-                .entry((
-                    extent.column.as_str(),
-                    extent.view.as_deref(),
-                    extent.incarnation,
-                ))
-                .or_default()
-                .push(extent);
-        }
-        for ((column, view, incarnation), extents) in by_column {
-            if !live_window(view, incarnation) {
-                continue;
-            }
-            // All three files, for the attribute axis's reason: the merge holds a term's postings
-            // from every input at once and streams both dictionaries, so a cap that watched one
-            // half would bound the postings while the vocabulary — which for prose is the larger
-            // half at a long singleton tail — grew unwatched.
-            let size = |extent: &&TextExtent| {
-                Some(size_of(&extent.dict) + size_of(&extent.postings) + size_of(&extent.presence))
-            };
-            let uncapped = CoalescePolicy {
-                max_input_bytes: u64::MAX,
-                ..policy
-            };
-            let selected = select_window(&extents, policy.width, uncapped, size).and_then(|_| {
-                (2..=policy.width)
-                    .rev()
-                    .find_map(|width| select_window(&extents, width, policy, size))
-            });
-            if let Some(window) = selected {
-                plan.texts.push(TextWindow {
-                    column: column.to_string(),
-                    view: view.map(str::to_string),
-                    incarnation,
-                    extents: extents[window].iter().map(|e| (*e).clone()).collect(),
-                });
-            }
-        }
-    }
+    //
+    // All three files count toward the cap, for the attribute axis's reason: the merge holds a
+    // term's postings from every input at once and streams both dictionaries, so a cap that watched
+    // one half would bound the postings while the vocabulary — which for prose is the larger half
+    // at a long singleton tail — grew unwatched.
+    plan.texts = column_windows(&manifest.text_extents, policy, is_live, |extent| {
+        Some(size_of(&extent.dict) + size_of(&extent.postings) + size_of(&extent.presence))
+    });
 
     // ---- entity→term extents: the seventh axis, the record blob's policy over its own list ----
     //
     // `entity_terms_extents` is already one family's own subsequence, exactly as `record_extents`
     // is, so the selection is the record axis's verbatim. No build guard, for the attribute axis's
     // reason: a built bundle's list is empty, the base layer living under `entities/terms/` and
-    // named in `MANIFEST.files`. The same cap-narrowing too, so a window that outgrows the input
-    // cap stalls itself and nothing else — though at four small files per flush that is the
-    // unusual case rather than the expected one.
+    // named in `MANIFEST.files`.
     {
         let size = |extent: &EntityTermsExtent| {
             Some(
@@ -524,17 +426,7 @@ pub(crate) fn plan_coalesce(
                     + size_of(&extent.bases),
             )
         };
-        let uncapped = CoalescePolicy {
-            max_input_bytes: u64::MAX,
-            ..policy
-        };
-        let selected = select_window(&manifest.entity_terms_extents, policy.width, uncapped, size)
-            .and_then(|_| {
-                (2..=policy.width).rev().find_map(|width| {
-                    select_window(&manifest.entity_terms_extents, width, policy, size)
-                })
-            });
-        if let Some(window) = selected {
+        if let Some(window) = widest_window(&manifest.entity_terms_extents, policy, size) {
             plan.terms = manifest.entity_terms_extents[window].to_vec();
         }
     }
@@ -581,6 +473,74 @@ fn select_window<T>(
         return Some(start..start + width);
     }
     None
+}
+
+/// The widest window that fits the input cap.
+///
+/// A run of `policy.width` entries sharing one size tier must exist first, ignoring the cap; of the
+/// widths that run admits, the widest whose bytes fit the cap is taken. So the narrowing answers
+/// "these extents are too big", never "there are too few of them", which would coalesce pairs at
+/// every tick for ever — and the cap applies to the one list passed, so a column whose values
+/// outgrow it stalls itself and never its neighbours.
+fn widest_window<T>(
+    entries: &[T],
+    policy: CoalescePolicy,
+    size_of: impl Fn(&T) -> Option<u64>,
+) -> Option<std::ops::Range<usize>> {
+    let uncapped = CoalescePolicy {
+        max_input_bytes: u64::MAX,
+        ..policy
+    };
+    select_window(entries, policy.width, uncapped, &size_of).and_then(|_| {
+        (2..=policy.width)
+            .rev()
+            .find_map(|width| select_window(entries, width, policy, &size_of))
+    })
+}
+
+/// One window per live `(column, view, incarnation)` of `entries`, over that key's own
+/// subsequence of the list.
+///
+/// **A dead incarnation's extents are not coalesced** (decision 0115). They belong to a view that
+/// was dropped and whose key may since have been created again; the fold reclaims them by
+/// omission, and merging them is not merely wasted IO — `coalesced_column_rel` derives the output
+/// path from `(column, view)` alone, so a dead window and the live one would write the same files
+/// and truncate each other's, leaving the live view serving its predecessor's values under a
+/// digest that no longer describes them.
+///
+/// **Fail-closed on a half-stamped entry**: a `view` with no incarnation, or the reverse, matches
+/// nothing and is skipped, which costs a coalesce and never merges across a drop.
+fn column_windows<E: ColumnExtent + Clone>(
+    entries: &[E],
+    policy: CoalescePolicy,
+    is_live: &dyn Fn(&str, tessera_types::view::ViewIncarnation) -> bool,
+    size_of: impl Fn(&E) -> Option<u64>,
+) -> Vec<ColumnWindow<E>> {
+    let mut by_column: BTreeMap<WindowKey<'_>, Vec<&E>> = BTreeMap::new();
+    for extent in entries {
+        by_column.entry(extent.key()).or_default().push(extent);
+    }
+    let mut windows = Vec::new();
+    for ((column, view, incarnation), extents) in by_column {
+        let live = match (view, incarnation) {
+            // Entity-scoped: one column bundle-wide, belonging to no view.
+            (None, None) => true,
+            (Some(view), Some(incarnation)) => is_live(view, incarnation),
+            _ => false,
+        };
+        if !live {
+            continue;
+        }
+        if let Some(window) = widest_window(&extents, policy, |extent: &&E| size_of(extent)) {
+            windows.push(ColumnWindow {
+                column: column.to_string(),
+                view: view.map(str::to_string),
+                incarnation,
+                extents: extents[window].iter().map(|e| (*e).clone()).collect(),
+            });
+        }
+    }
+    windows
 }
 
 /// Everything [`execute_coalesce`] needs beyond its plan — taken from the generation on the
@@ -1200,39 +1160,17 @@ pub(crate) fn rebase_into(manifest: &mut SegmentsManifest, completed: &Completed
         Some(at) => at,
         None => return false,
     };
-    // **Within the window's own `(column, view, incarnation)` subsequence**, the key the planner
-    // grouped by. Every other axis is a contiguous window of one list; this one is a contiguous
-    // window of a *filtered* list, because `attr_extents` interleaves the columns a flush publishes
-    // for — and, for a group-scoped family, the views sharing one column name. The rebase therefore
-    // checks the window is still contiguous in that subsequence — not in the whole list, which a
-    // flush publishing another column's or another view's extent mid-window would break for no
-    // reason.
+    // Keyed by the values path — the never-reused identity a listed attribute extent is found by.
     if plan.attrs.len() != completed.attrs.len() {
         return false;
     }
-    let mut attr_positions: Vec<Vec<usize>> = Vec::with_capacity(completed.attrs.len());
-    for window in &plan.attrs {
-        let subsequence: Vec<usize> = manifest
-            .attr_extents
-            .iter()
-            .enumerate()
-            .filter(|(_, e)| {
-                e.column == window.column
-                    && e.view == window.view
-                    && e.incarnation == window.incarnation
-            })
-            .map(|(i, _)| i)
-            .collect();
-        let listed: Vec<&str> = subsequence
-            .iter()
-            .map(|i| manifest.attr_extents[*i].values.as_str())
-            .collect();
-        let consumed: Vec<&str> = window.extents.iter().map(|e| e.values.as_str()).collect();
-        let Some(at) = window_of(&listed, &consumed, |s| s) else {
-            return false;
-        };
-        attr_positions.push(subsequence[at].to_vec());
-    }
+    let Some(attr_positions) =
+        column_positions(&manifest.attr_extents, &plan.attrs, |e: &AttrExtent| {
+            e.values.as_str()
+        })
+    else {
+        return false;
+    };
 
     // The record window: one contiguous run of `record_extents`, keyed by the blocks path — the
     // same never-reused identity the attribute windows key on.
@@ -1250,35 +1188,18 @@ pub(crate) fn rebase_into(manifest: &mut SegmentsManifest, completed: &Completed
         None => return false,
     };
 
-    // The text axis, on the attribute axis's rule: a contiguous window of one
-    // `(column, view, incarnation)`'s own subsequence, keyed by the dictionary path — the never-reused identity a text layer is named
-    // by, and the one the composition finds a layer with.
+    // The text axis, keyed by the dictionary path — the never-reused identity a text layer is
+    // named by, and the one the composition finds a layer with.
     if plan.texts.len() != completed.texts.len() {
         return false;
     }
-    let mut text_positions: Vec<Vec<usize>> = Vec::with_capacity(completed.texts.len());
-    for window in &plan.texts {
-        let subsequence: Vec<usize> = manifest
-            .text_extents
-            .iter()
-            .enumerate()
-            .filter(|(_, e)| {
-                e.column == window.column
-                    && e.view == window.view
-                    && e.incarnation == window.incarnation
-            })
-            .map(|(i, _)| i)
-            .collect();
-        let listed: Vec<&str> = subsequence
-            .iter()
-            .map(|i| manifest.text_extents[*i].dict.as_str())
-            .collect();
-        let consumed: Vec<&str> = window.extents.iter().map(|e| e.dict.as_str()).collect();
-        let Some(at) = window_of(&listed, &consumed, |s| s) else {
-            return false;
-        };
-        text_positions.push(subsequence[at].to_vec());
-    }
+    let Some(text_positions) =
+        column_positions(&manifest.text_extents, &plan.texts, |e: &TextExtent| {
+            e.dict.as_str()
+        })
+    else {
+        return false;
+    };
 
     // Every file a consumed extent names, its dictionary included: a consumed dictionary left in
     // `files` would be digested for a layer no list names, and the fold's orphan sweep is what
@@ -1365,48 +1286,12 @@ pub(crate) fn rebase_into(manifest: &mut SegmentsManifest, completed: &Completed
         // (filter-index §6.2): the files above and this list. A bundle whose `attr_extents` lost a
         // window whose bytes were written opens cleanly and answers filters missing every entity
         // that window held — a wrong answer with no symptom.
-        //
-        // Each coalesced entry lands where its window began. Nothing reads `attr_extents` by
-        // position — the layers are unioned — but a manifest whose bytes depend on when a pass ran
-        // is a bundle identity that does.
-        let removed: BTreeSet<usize> = attr_positions.iter().flatten().copied().collect();
-        let inserts: BTreeMap<usize, &AttrExtent> = attr_positions
-            .iter()
-            .zip(&completed.attrs)
-            .map(|(positions, attr)| (positions[0], &attr.extent))
-            .collect();
-        let mut next = Vec::with_capacity(manifest.attr_extents.len());
-        for (i, extent) in manifest.attr_extents.iter().enumerate() {
-            if let Some(coalesced) = inserts.get(&i) {
-                next.push((*coalesced).clone());
-            }
-            if !removed.contains(&i) {
-                next.push(extent.clone());
-            }
-        }
-        manifest.attr_extents = next;
+        let coalesced: Vec<&AttrExtent> = completed.attrs.iter().map(|a| &a.extent).collect();
+        splice_columns(&mut manifest.attr_extents, &attr_positions, &coalesced);
     }
     if !completed.texts.is_empty() {
-        // The attribute axis's splice, over `text_extents`. Each coalesced entry lands where its
-        // window began, for that axis's reason: nothing reads the list by position — the layers are
-        // disjoint (I9) and `match` unions them — but a manifest whose bytes depend on when a pass
-        // ran is a bundle identity that does.
-        let removed: BTreeSet<usize> = text_positions.iter().flatten().copied().collect();
-        let inserts: BTreeMap<usize, &TextExtent> = text_positions
-            .iter()
-            .zip(&completed.texts)
-            .map(|(positions, extent)| (positions[0], extent))
-            .collect();
-        let mut next = Vec::with_capacity(manifest.text_extents.len());
-        for (i, extent) in manifest.text_extents.iter().enumerate() {
-            if let Some(coalesced) = inserts.get(&i) {
-                next.push((*coalesced).clone());
-            }
-            if !removed.contains(&i) {
-                next.push(extent.clone());
-            }
-        }
-        manifest.text_extents = next;
+        let coalesced: Vec<&TextExtent> = completed.texts.iter().collect();
+        splice_columns(&mut manifest.text_extents, &text_positions, &coalesced);
     }
     true
 }
@@ -1432,6 +1317,66 @@ fn window_of<'a, T, K: PartialEq + 'a>(
                 .eq(needle.iter())
         })
         .map(|start| start..start + needle.len())
+}
+
+/// Where each window's consumed extents sit in `entries`, as positions in the whole list, or
+/// `None` if one of them no longer does.
+///
+/// **Within the window's own `(column, view, incarnation)` subsequence**, the key the planner
+/// grouped by. Every other axis is a contiguous window of one list; these two are contiguous
+/// windows of a *filtered* list, because the list interleaves the columns a flush publishes for —
+/// and, for a group-scoped family, the views sharing one column name. Contiguity in the whole list
+/// would be broken by a flush publishing another column's or another view's extent mid-window, for
+/// no reason. `identity` names the file a listed extent is recognised by.
+fn column_positions<E: ColumnExtent>(
+    entries: &[E],
+    windows: &[ColumnWindow<E>],
+    identity: impl Fn(&E) -> &str,
+) -> Option<Vec<Vec<usize>>> {
+    let mut positions = Vec::with_capacity(windows.len());
+    for window in windows {
+        let key = (
+            window.column.as_str(),
+            window.view.as_deref(),
+            window.incarnation,
+        );
+        let subsequence: Vec<usize> = entries
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| e.key() == key)
+            .map(|(i, _)| i)
+            .collect();
+        let listed: Vec<&str> = subsequence.iter().map(|i| identity(&entries[*i])).collect();
+        let consumed: Vec<&str> = window.extents.iter().map(&identity).collect();
+        let at = window_of(&listed, &consumed, |s| s)?;
+        positions.push(subsequence[at].to_vec());
+    }
+    Some(positions)
+}
+
+/// Drop the consumed positions from `entries` and put each window's coalesced extent where its
+/// window began.
+///
+/// Nothing reads either list by position — the attribute layers are unioned, the text layers
+/// disjoint (I9) and unioned by `match` — but a manifest whose bytes depend on when a pass ran is
+/// a bundle identity that does.
+fn splice_columns<E: Clone>(entries: &mut Vec<E>, positions: &[Vec<usize>], coalesced: &[&E]) {
+    let removed: BTreeSet<usize> = positions.iter().flatten().copied().collect();
+    let inserts: BTreeMap<usize, &E> = positions
+        .iter()
+        .zip(coalesced)
+        .map(|(at, extent)| (at[0], *extent))
+        .collect();
+    let mut next = Vec::with_capacity(entries.len());
+    for (i, extent) in entries.iter().enumerate() {
+        if let Some(coalesced) = inserts.get(&i) {
+            next.push((*coalesced).clone());
+        }
+        if !removed.contains(&i) {
+            next.push(extent.clone());
+        }
+    }
+    *entries = next;
 }
 
 /// `tessera_store::digest_of` with this pass's error type — see `crate::flush::digest_of` for why
