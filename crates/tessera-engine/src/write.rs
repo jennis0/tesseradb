@@ -8733,88 +8733,7 @@ impl Executor {
         write_deny_state(&mut segments_manifest, &published_overlay);
 
         // ---- the new `MANIFEST.json` ----------------------------------------------------------
-        //
-        // **`entity_id_high_water` here is the *snapshot's* entity space, not the live one**, and
-        // the two fields of that name mean different things. `SEGMENTS-<n>.json`'s seeds the I9
-        // allocator and is the live value, above. `MANIFEST.json`'s is what
-        // `ExternalIdSidecar::deferred_from_manifest` takes as the base locator's declared length —
-        // the reader that makes this field's value load-bearing here — and
-        // pass 3 sized that locator to the snapshot so post-snapshot locator extents stay reachable
-        // past it (compaction §3, pass 3). A live value here would make the base locator claim
-        // every post-snapshot entity and answer "this item has no external id" for items that have
-        // one.
-        //
-        // **It is not the only reader, and the second one is I9's allocator.** `Engine::open` seeds
-        // the allocator's floor from `bundle.manifest.entity_id_high_water.max(side_manifest)`
-        // (`session.rs`), so writing a *lower* value here is safe only because the side-manifest
-        // carries the live one and the `max` picks it up. That is the whole of why lowering this
-        // field does not re-issue entity ids after a restart — and it is a property of the other
-        // reader, not of this one, so a change on either side has to re-check it.
-        let mut bundle_manifest = live.bundle.manifest.clone();
-        // **The schema as it stood at the plan.** A column declared while the fold ran has no
-        // base in the new prefix, so it stays off this manifest and on the side manifest's runtime
-        // list, from which the reopen appends it again at the same tail position
-        // (`ingest.md` §6.3; `compact::FoldContext::runtime_attributes`).
-        {
-            let (runtime_attributes, runtime_scoped_attributes) =
-                self.live.attributes_for_publication();
-            let since_plan: Vec<&str> = runtime_attributes
-                .iter()
-                .map(|d| d.name.as_str())
-                .filter(|name| !completed.runtime_attributes.iter().any(|n| n == name))
-                .collect();
-            bundle_manifest
-                .declared_scalars
-                .retain(|d| !since_plan.contains(&d.name.as_str()));
-            let scoped_since_plan: Vec<&str> = runtime_scoped_attributes
-                .iter()
-                .map(|f| f.name.as_str())
-                .filter(|name| {
-                    !completed
-                        .runtime_scoped_attributes
-                        .iter()
-                        .any(|n| n == name)
-                })
-                .collect();
-            for group in &mut bundle_manifest.groups {
-                group
-                    .scoped_scalars
-                    .retain(|f| !scoped_since_plan.contains(&f.name.as_str()));
-            }
-        }
-        // **Every live binding, with its title, into the table this fold writes**
-        // (`ingest.md` §1.3). A vocabulary declared at a running service carries its declaration
-        // in the served manifest and its values in its minter, and the extensions folded in below
-        // are a second path to the same bindings; taking them from the minters here makes the
-        // written table complete whichever path fed it, and the merge is a union so neither can
-        // drop one.
-        crate::vocabularies::merge_live_values(&mut bundle_manifest, &live.vocabularies);
-        bundle_manifest.entity_id_high_water = plan.entity_bound;
-        bundle_manifest.files = completed.files.clone();
-        // **The extensions fold in verbatim, and verbatim is the whole rule** (§3.3). Every binding
-        // the served side-manifests carried becomes a value of the new prefix's
-        // `MANIFEST.vocabularies`, keys and codes byte-identical, and the new prefix's first
-        // `SEGMENTS-<n>.json` restates an empty extension set — which is what the `Vec::new()`
-        // above is.
-        //
-        // A fold that re-derived, re-sorted or re-numbered here would recolour the whole corpus
-        // with no error and no digest mismatch, because `columns.arrow` stores the code and nothing
-        // else records what it meant. Appending the carried values is therefore the entire
-        // operation: no compilation, no normalisation, no pass through the schema compiler.
-        //
-        // Decision 0050 touches none of this. Codes are not ordinals, index nothing positional, and
-        // no cached artefact is keyed by them, so the fold's postings rewrite and fragment
-        // invalidation pass over the vocabulary table without reading it.
-        let carried_bindings: Vec<_> = live
-            .bundle
-            .partitions
-            .values()
-            .flat_map(|partition| partition.manifest.vocabulary_extensions.iter().cloned())
-            .collect();
-        tessera_store::vocabulary::fold_extensions_into(
-            &mut bundle_manifest.vocabularies,
-            &carried_bindings,
-        );
+        let mut bundle_manifest = self.fold_bundle_manifest(&live, &completed, plan);
 
         let carried_rels = carried_files(&plan.partition, live_manifest, &flight);
         for rel in &carried_rels {
@@ -9260,6 +9179,75 @@ impl Executor {
              base postings tier, one external-id run and one locator, plus whatever landed during \
              its flight"
         );
+    }
+
+    /// The `MANIFEST.json` a fold's new prefix carries: the live one, with the schema wound back to
+    /// what it was at the plan, every live vocabulary binding folded in, and the fold's own files.
+    ///
+    /// **`entity_id_high_water` here is the snapshot's entity space, not the live one**, and the
+    /// two fields of that name mean different things. `SEGMENTS-<n>.json`'s seeds the I9 allocator
+    /// and is the live value; this one is what `ExternalIdSidecar::deferred_from_manifest` takes as
+    /// the base locator's declared length, and pass 3 sized that locator to the snapshot so
+    /// post-snapshot locator extents stay reachable past it. A live value here would make the base
+    /// locator claim every post-snapshot entity and answer "this item has no external id" for items
+    /// that have one. Writing the lower value is safe for the allocator only because `Engine::open`
+    /// seeds its floor from the max of this and the side-manifest's, which carries the live one.
+    ///
+    /// **The schema as it stood at the plan.** A column declared while the fold ran has no base in
+    /// the new prefix, so it stays off this manifest and on the side manifest's runtime list, from
+    /// which the reopen appends it again at the same tail position.
+    ///
+    /// **The vocabulary bindings fold in verbatim, and verbatim is the whole rule.** Keys and codes
+    /// are byte-identical, from the live minters and from the served side-manifests' extensions
+    /// alike — the merge is a union, so neither path can drop one. Re-deriving, re-sorting or
+    /// re-numbering here would recolour the whole corpus with no error and no digest mismatch,
+    /// because `columns.arrow` stores the code and nothing else records what it meant.
+    fn fold_bundle_manifest(
+        &self,
+        live: &Generation,
+        completed: &crate::compact::CompletedFold,
+        plan: &crate::compact::FoldPlan,
+    ) -> tessera_store::manifest::Manifest {
+        let mut bundle_manifest = live.bundle.manifest.clone();
+        let (runtime_attributes, runtime_scoped_attributes) =
+            self.live.attributes_for_publication();
+        let since_plan: Vec<&str> = runtime_attributes
+            .iter()
+            .map(|d| d.name.as_str())
+            .filter(|name| !completed.runtime_attributes.iter().any(|n| n == name))
+            .collect();
+        bundle_manifest
+            .declared_scalars
+            .retain(|d| !since_plan.contains(&d.name.as_str()));
+        let scoped_since_plan: Vec<&str> = runtime_scoped_attributes
+            .iter()
+            .map(|f| f.name.as_str())
+            .filter(|name| {
+                !completed
+                    .runtime_scoped_attributes
+                    .iter()
+                    .any(|n| n == name)
+            })
+            .collect();
+        for group in &mut bundle_manifest.groups {
+            group
+                .scoped_scalars
+                .retain(|f| !scoped_since_plan.contains(&f.name.as_str()));
+        }
+        crate::vocabularies::merge_live_values(&mut bundle_manifest, &live.vocabularies);
+        bundle_manifest.entity_id_high_water = plan.entity_bound;
+        bundle_manifest.files = completed.files.clone();
+        let carried_bindings: Vec<_> = live
+            .bundle
+            .partitions
+            .values()
+            .flat_map(|partition| partition.manifest.vocabulary_extensions.iter().cloned())
+            .collect();
+        tessera_store::vocabulary::fold_extensions_into(
+            &mut bundle_manifest.vocabularies,
+            &carried_bindings,
+        );
+        bundle_manifest
     }
 
     /// Latch [`ExecutorHealth::prefix_diverged`]: `CURRENT` names a prefix this process could not
