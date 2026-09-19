@@ -219,7 +219,7 @@ impl Engine {
                 let fragment = self.fragment_for(session, &generation)?;
                 Some(crate::filter::candidate(
                     &fragment,
-                    &session.satisfied,
+                    session.satisfied(),
                     &generation.overlay,
                     &generation.buffer,
                 ))
@@ -508,7 +508,7 @@ impl Engine {
             let fragment = self.fragment_for(session, &generation)?;
             Some(crate::filter::candidate(
                 &fragment,
-                &session.satisfied,
+                session.satisfied(),
                 &generation.overlay,
                 &generation.buffer,
             ))
@@ -546,7 +546,7 @@ impl Engine {
         // on a pair keeps it too — the sweep is dispatched here and nothing waits for it.
         let set = if derived {
             let key = crate::suggest_set::SuggestSetKey {
-                token_id: session.token_id,
+                token_id: session.token_id(),
                 column: column.to_string(),
                 segments_version: generation.segments_version,
                 overlay_version: generation.overlay_version,

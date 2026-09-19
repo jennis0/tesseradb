@@ -182,7 +182,7 @@ fn a_rotation_moves_the_prefix_the_postings_the_identity_and_the_sidecar_togethe
     let engine = engine_over_fixture(&tmp, &root, "cache", "wal.log");
 
     let session = engine.authorise(&full_coverage_credential()).unwrap();
-    let satisfied: Vec<_> = session.satisfied.iter().copied().collect();
+    let satisfied: Vec<_> = session.satisfied_for_test().iter().copied().collect();
     let before = engine.generation();
     let key_before = engine.fragment_canonical_key(&satisfied);
     let baseline = visible(&engine, &session);
@@ -310,7 +310,7 @@ fn a_pre_rotation_fragment_is_unreachable_by_key_on_disc_and_across_a_restart() 
     let engine = engine_over_fixture(&tmp, &root, "cache", "wal.log");
 
     let session = engine.authorise(&full_coverage_credential()).unwrap();
-    let satisfied: Vec<_> = session.satisfied.iter().copied().collect();
+    let satisfied: Vec<_> = session.satisfied_for_test().iter().copied().collect();
     let key_before = engine.fragment_canonical_key(&satisfied);
     let frag_before = cache_dir.join(format!("{}.frag", hex(&key_before)));
     assert!(
@@ -366,7 +366,8 @@ fn a_pre_rotation_fragment_is_unreachable_by_key_on_disc_and_across_a_restart() 
     )
     .expect("the new prefix opens on its own");
     let restarted_session = restarted.authorise(&full_coverage_credential()).unwrap();
-    let restarted_satisfied: Vec<_> = restarted_session.satisfied.iter().copied().collect();
+    let restarted_satisfied: Vec<_> =
+        restarted_session.satisfied_for_test().iter().copied().collect();
     assert_eq!(
         restarted.fragment_canonical_key(&restarted_satisfied),
         key_after,

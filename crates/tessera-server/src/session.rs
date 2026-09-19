@@ -94,9 +94,9 @@ async fn authorise(
     .map_err(map_engine_error)?;
 
     let resp = AuthoriseResp {
-        token: session.token.clone(),
-        token_id: session.token_id,
-        expires_at: session.expires_at,
+        token: session.token().to_string(),
+        token_id: session.token_id(),
+        expires_at: session.expires_at(),
     };
     // Inserting is also what drives the registry's expiry sweep: authorisation is the only path
     // that grows the registry, so it is where the growth is bounded. The clock is read here, once

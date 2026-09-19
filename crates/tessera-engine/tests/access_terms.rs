@@ -154,7 +154,7 @@ fn visible(dir: &Path, terms: &[&str]) -> u64 {
     let session = engine
         .authorise(credential.as_bytes())
         .expect("a credential of known descriptors authorises");
-    let cardinality = session.fragment.view().cardinality();
+    let cardinality = session.fragment_at_authorise_for_test().view().cardinality();
     cardinality
 }
 

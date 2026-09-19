@@ -210,7 +210,7 @@ fn a_novel_descriptor_becomes_a_durable_ordinal_and_the_item_becomes_visible() {
     let credential = br#"{"terms": ["dept:secret"]}"#.to_vec();
     let before = engine.authorise(&credential).expect("authorises");
     assert_eq!(
-        before.satisfied,
+        *before.satisfied_for_test(),
         [tessera_authz::PUBLIC_TERM].into_iter().collect(),
         "the descriptor does not exist yet, so this session satisfies nothing but the reserved \
          `public` term every session holds"
@@ -243,7 +243,7 @@ fn a_novel_descriptor_becomes_a_durable_ordinal_and_the_item_becomes_visible() {
     // And it means something: the item is visible through the promoted term.
     let after = reopened.authorise(&credential).expect("authorises");
     // Two: the promoted descriptor, and the reserved `public` term every session holds.
-    assert_eq!(after.satisfied.len(), 2, "the descriptor now resolves");
+    assert_eq!(after.satisfied_for_test().len(), 2, "the descriptor now resolves");
     let tessera_id = reopened.tessera_id_of(id).expect("identity is computable");
     assert!(
         reopened.item(&after, tessera_id, None).unwrap().is_some(),
@@ -252,7 +252,7 @@ fn a_novel_descriptor_becomes_a_durable_ordinal_and_the_item_becomes_visible() {
 
     // §3.2's first consequence, preserved: the older session never gains it.
     assert_eq!(
-        before.satisfied,
+        *before.satisfied_for_test(),
         [tessera_authz::PUBLIC_TERM].into_iter().collect(),
         "`satisfied` is fixed at authorise; a promotion never reaches back into a live session"
     );
@@ -319,7 +319,7 @@ fn an_ingest_and_a_tick_flip_the_staleness_hint() {
         .expect("authorises");
     // Two: the credential's own `0`, and the reserved `public` term the engine adds. `dept:secret`
     // is the one that did not resolve.
-    assert_eq!(session.satisfied.len(), 2, "one resolved, one did not");
+    assert_eq!(session.satisfied_for_test().len(), 2, "one resolved, one did not");
     assert!(!session.is_stale(&engine.generation()));
 
     ingest_with(&engine, "ext-1", &[NOVEL]);

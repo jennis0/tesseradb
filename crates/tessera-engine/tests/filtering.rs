@@ -393,8 +393,8 @@ fn candidate_for(fx: &Fixture, credential: &[u8]) -> (tessera_engine::Engine, Bi
         .expect("the credential resolves");
     let generation = engine.generation();
     let cand = candidate(
-        &session.fragment,
-        &session.satisfied,
+        session.fragment_at_authorise_for_test(),
+        session.satisfied_for_test(),
         &generation.overlay,
         &generation.buffer,
     );
@@ -677,8 +677,8 @@ fn live_candidate(engine: &tessera_engine::Engine) -> (Arc<tessera_engine::Gener
         .expect("credential resolves");
     let generation = engine.generation();
     let cand = candidate(
-        &session.fragment,
-        &session.satisfied,
+        session.fragment_at_authorise_for_test(),
+        session.satisfied_for_test(),
         &generation.overlay,
         &generation.buffer,
     );
@@ -3248,7 +3248,7 @@ fn a_session_from_before_a_fold_is_never_offered_the_retired_entitys_only_value(
     // this session authorised with still names the retired entity, and the overlay no longer
     // does, so an answer derived from that fragment alone would carry the value.
     assert!(
-        session.fragment.view().contains(doomed as u32),
+        session.fragment_at_authorise_for_test().view().contains(doomed as u32),
         "the frozen fragment must still name the retired entity"
     );
 

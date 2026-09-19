@@ -1825,11 +1825,11 @@ impl Engine {
     /// `entity` exists and is visible, exists and is not, or does not exist at all (Critical
     /// C-5, closed rather than narrowed).
     ///
-    /// **Takes the fragment as an argument rather than reading `session.fragment`.** A session's
-    /// own fragment goes stale at every flush — see [`Engine::fragment_for`] — and a drill-down
-    /// that answered from the stale one would report a flushed item as invisible while the viewport
-    /// beside it drew the mark. The caller has already resolved the generation once (lifecycle
-    /// §1.1) and brings the fragment forward against that same snapshot.
+    /// **Takes the fragment as an argument.** A session's own fragment goes stale at every flush —
+    /// see [`Engine::fragment_for`] — and a drill-down that answered from the stale one would
+    /// report a flushed item as invisible while the viewport beside it drew the mark. The caller
+    /// has already resolved the generation once (lifecycle §1.1) and brings the fragment forward
+    /// against that same snapshot.
     pub fn visible_to(
         &self,
         fragment: &FrozenFragment,
@@ -1839,7 +1839,7 @@ impl Engine {
     ) -> bool {
         visible_to(
             fragment,
-            &session.satisfied,
+            session.satisfied(),
             &generation.overlay,
             &generation.buffer,
             entity,
@@ -1887,7 +1887,7 @@ impl Engine {
             .into_iter()
             .filter_map(|term| {
                 session
-                    .satisfied_descriptors
+                    .satisfied_descriptors()
                     .get(&TermId::new(term))
                     .cloned()
             })
@@ -1989,7 +1989,7 @@ impl Engine {
         // `RowProjectionCache::freshest_fragment`.
         let fragment = match self
             .row_projection_cache
-            .freshest_fragment(session.token_id, &generation.prefix)
+            .freshest_fragment(session.token_id(), &generation.prefix)
         {
             Some(fragment) => fragment,
             None => self.fragment_for(session, &generation)?,
@@ -2071,7 +2071,7 @@ impl Engine {
         // quantity per view rather than one position repeated.
         let views: Vec<ItemView> = rows
             .iter()
-            .filter(|(view, _, _)| session.visible_views.contains_view(view))
+            .filter(|(view, _, _)| session.visible_views().contains_view(view))
             .map(|&(view, segment, local)| {
                 let (x, y) = tessera_spatial::unsplit32(
                     tessera_types::MortonCode::new(segment.morton.u32()[local]),
@@ -2099,7 +2099,7 @@ impl Engine {
         // (`ItemOut::views`), and its record is what it always was.
         let Some(&(_view, segment, local)) = rows
             .iter()
-            .find(|(view, _, _)| session.visible_views.contains_view(view))
+            .find(|(view, _, _)| session.visible_views().contains_view(view))
             .or_else(|| rows.first())
         else {
             // Visible in entity space but with no row anywhere: a buffered item awaiting flush.
@@ -2109,7 +2109,7 @@ impl Engine {
 
         // **The scoped values, gate-filtered by the same set and keyed by the group's key** — the
         // key being a view's only address (decision 0113). See [`scoped_values_of`].
-        let scoped = scoped_values_of(&generation, &session.visible_views, entity_raw);
+        let scoped = scoped_values_of(&generation, session.visible_views(), entity_raw);
 
         // One value slot per declared column, filled home by home; a column no home
         // holds a value in stays `None` and is omitted — absence is absence.
@@ -2656,7 +2656,7 @@ impl Engine {
         probe: &mut Probe,
     ) -> Result<Arc<SessionGeometry>> {
         let key = RowProjectionKey {
-            token_id: session.token_id,
+            token_id: session.token_id(),
             view: view.to_string(),
             segments_version: generation.segments_version,
             prefix: generation.prefix.clone(),
@@ -2755,7 +2755,7 @@ impl Engine {
                 // nothing is cached across sessions.
                 let inputs = crate::compose::ProjectionInputs {
                     fragment: &fragment,
-                    satisfied: &session.satisfied_sorted,
+                    satisfied: session.satisfied_sorted(),
                     postings: &generation.postings,
                     deltas: &generation.delta_postings,
                     images: view_data.term_images.as_deref(),
@@ -2767,9 +2767,9 @@ impl Engine {
                 SessionGeometry {
                     fragment: Arc::clone(&fragment),
                     projection: Arc::new(projection),
-                    satisfied_sorted: Arc::clone(&session.satisfied_sorted),
-                    auth_data_hash: session.auth_data_hash,
-                    satisfied_at: session.segments_version_at_authorise,
+                    satisfied_sorted: Arc::clone(session.satisfied_sorted()),
+                    auth_data_hash: session.auth_data_hash(),
+                    satisfied_at: session.segments_version_at_authorise(),
                 }
             })
             .map_err(|ended| match ended {
@@ -2975,7 +2975,7 @@ impl Engine {
         render_scalars.extend(scoped_render_scalars(
             &generation.bundle.manifest,
             view,
-            &session.visible_views,
+            session.visible_views(),
         ));
 
         // The head is delivered below, after the filter is evaluated and before the sweep: its
@@ -3002,7 +3002,7 @@ impl Engine {
             })?;
 
         let mask = compose(
-            &session.satisfied,
+            session.satisfied(),
             &generation.overlay,
             &generation.buffer,
             base,
@@ -3291,7 +3291,7 @@ impl Engine {
             let fragment = self.fragment_for(session, &generation)?;
             let candidate = crate::filter::candidate(
                 &fragment,
-                &session.satisfied,
+                session.satisfied(),
                 &generation.overlay,
                 &generation.buffer,
             );
@@ -5051,7 +5051,7 @@ impl Engine {
         geometry: &crate::cache::SessionGeometry,
     ) -> crate::histogram::MaskIdentity {
         crate::histogram::MaskIdentity {
-            token_id: session.token_id,
+            token_id: session.token_id(),
             segments_version: generation.segments_version,
             overlay_version: generation.overlay_version,
             fragment_identity: geometry.fragment.identity,
@@ -5089,10 +5089,10 @@ impl Engine {
         ) {
             return;
         }
-        self.stage.spawn(session.token_id, || crate::stage::LadderTask {
-            token_id: session.token_id,
+        self.stage.spawn(session.token_id(), || crate::stage::LadderTask {
+            token_id: session.token_id(),
             view: view.to_string(),
-            satisfied: session.satisfied.clone(),
+            satisfied: session.satisfied().clone(),
             generation: Arc::clone(generation),
             geometry: Arc::clone(geometry),
         });
@@ -5195,7 +5195,7 @@ impl Engine {
                 view: view.to_string(),
             })?;
         let mask = compose(
-            &session.satisfied,
+            session.satisfied(),
             &generation.overlay,
             &generation.buffer,
             Arc::clone(&geometry.projection),
@@ -5241,7 +5241,7 @@ impl Engine {
                         view: view.to_string(),
                     })?;
             compose(
-                &session.satisfied,
+                session.satisfied(),
                 &generation.overlay,
                 &generation.buffer,
                 Arc::clone(&geometry.projection),
@@ -5357,7 +5357,7 @@ impl Engine {
         // Reachability, then the live suppression of the layer itself — the same two steps in the
         // same order `Engine::visible_layers` and `serve_artifacts` take.
         let reachable = self.write.live().resolve_layers(
-            |term| session.satisfied.contains(&term),
+            |term| session.satisfied().contains(&term),
             |label| generation.dict.lookup(label.as_bytes()),
         );
         if !reachable.contains(&name)
@@ -5428,10 +5428,10 @@ impl Engine {
         // wrote. Lazily, because this route resolves one identifier — see `answer_for_one`.
         let containment = rows
             .partition()
-            .map(|p| p.answer_for_one(&session.satisfied));
+            .map(|p| p.answer_for_one(session.satisfied()));
         let ctx = DependencyContext {
             generation,
-            satisfied: &session.satisfied,
+            satisfied: session.satisfied(),
             view,
             view_data,
             mask,
@@ -5443,7 +5443,7 @@ impl Engine {
         let artifact_view = crate::artifacts::ArtifactView {
             declaration: &layer.declaration,
             overlay: &generation.overlay,
-            satisfied: &session.satisfied,
+            satisfied: session.satisfied(),
             layer_reachable: true,
             rows: &rows,
             mask,
@@ -5606,7 +5606,7 @@ impl Engine {
     ) -> std::result::Result<croaring::Bitmap, crate::filter::FilterError> {
         use crate::filter::FilterError;
         let reachable = self.write.live().resolve_layers(
-            |term| session.satisfied.contains(&term),
+            |term| session.satisfied().contains(&term),
             |label| generation.dict.lookup(label.as_bytes()),
         );
         if !reachable.contains(&leaf.layer) {
@@ -5710,7 +5710,7 @@ impl Engine {
                 view: view.to_string(),
             })?;
         let mask = compose(
-            &session.satisfied,
+            session.satisfied(),
             &generation.overlay,
             &generation.buffer,
             Arc::clone(&geometry.projection),
@@ -6259,7 +6259,7 @@ impl Engine {
         // Which layers this principal may know exist — one set probe for a gate-failed name and a
         // never-registered one alike (`LayerRegistry::resolve_for`).
         let reachable = self.write.live().resolve_layers(
-            |term| session.satisfied.contains(&term),
+            |term| session.satisfied().contains(&term),
             |label| generation.dict.lookup(label.as_bytes()),
         );
         // **Intersected with the request, never unioned.** A name the principal does not reach is
@@ -6291,7 +6291,7 @@ impl Engine {
             })?;
         let ctx = DependencyContext {
             generation,
-            satisfied: &session.satisfied,
+            satisfied: session.satisfied(),
             view,
             view_data,
             mask,
@@ -6476,7 +6476,7 @@ impl Engine {
                 // Kept beside the view below, which takes the `Arc` — the derived geometry reads
                 // the accumulation this same entry carries.
                 let accumulated = counts.clone();
-                let containment = rows.partition().map(|p| p.answers(&session.satisfied));
+                let containment = rows.partition().map(|p| p.answers(session.satisfied()));
                 // Captured before the shadow below: `view` becomes the artifact predicate's value,
                 // and the derived-geometry key needs the view's *name*.
                 let view_name = view;
@@ -6489,7 +6489,7 @@ impl Engine {
                 let view = crate::artifacts::ArtifactView {
                     declaration: &layer.declaration,
                     overlay: &generation.overlay,
-                    satisfied: &session.satisfied,
+                    satisfied: session.satisfied(),
                     layer_reachable: true,
                     rows: &rows,
                     mask,
