@@ -2687,13 +2687,15 @@ impl WritePath {
                 };
                 match tessera_lifecycle::membership::decode_record(entity, blob) {
                     Some((mut record, shape)) => {
-                        // The membership is read through the pack's mapping and the decoded bitmap is dropped: a
-                        // heap bitmap per artifact was 31 GB at open on the GBIF corpus.
+                        // The membership is read through the pack's mapping and the decoded
+                        // bitmap is dropped: a heap bitmap per artifact was 31 GB at open on the
+                        // GBIF corpus.
                         //
-                        // SAFETY: `blob` is a slice of `pack`'s read-only mapping and the `Members` holds `owner`
-                        // for as long as it holds the view. No extent file is written twice (names come from the
-                        // publication counter, which only rises, and one executor owns a bundle root), so a mapped
-                        // file is never truncated under a reader.
+                        // SAFETY: `blob` is a slice of `pack`'s read-only mapping and the
+                        // `Members` holds `owner` for as long as it holds the view. No extent file
+                        // is written twice (names come from the publication counter, which only
+                        // rises, and one executor owns a bundle root), so a mapped file is never
+                        // truncated under a reader.
                         let mapped = unsafe {
                             tessera_lifecycle::membership::mapped_members(blob, owner.clone())
                         };
