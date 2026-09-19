@@ -10461,7 +10461,6 @@ fn key_of_owner_view(owner_view: &str) -> &str {
 /// and holds the column's absence falls through to the next, so a cell one source left absent is
 /// not read as unheld while another holds a value for it.
 ///
-/// `pending` is `None` for a caller that does not read unflushed fills.
 fn held_entity_value(
     generation: &Generation,
     entity: EntityId,
@@ -10907,6 +10906,8 @@ fn settle_joins(generation: &Generation, rows: &mut [UnallocatedRow]) -> Result<
             continue;
         };
         let buffered = generation.buffer.get(entity);
+        let pending = generation.buffer.fill_of(entity);
+        let pending_scoped = generation.buffer.scoped_fill_of(entity, &owner_view);
         // Read at most once for this row, and only if a blob-resident column asks.
         let mut blob = crate::session::BlobRow::default();
         // **The label arm reads the buffer first and the transpose after it, and both are exact.**
@@ -10939,8 +10940,6 @@ fn settle_joins(generation: &Generation, rows: &mut [UnallocatedRow]) -> Result<
         // row must carry the stored value or leave it absent. The sources are compared by the same
         // equality, on values normalised to the shape a batch carries (`stored_as_wal`), so the
         // buffered and the flushed arm cannot come to disagree about what "the same value" means.
-        //
-        // The pending fills are not a source here; only the values door reads them.
         for (position, d) in declared.iter().enumerate() {
             let Some(supplied) = row.scalars.get(position) else {
                 continue;
@@ -10951,7 +10950,7 @@ fn settle_joins(generation: &Generation, rows: &mut [UnallocatedRow]) -> Result<
             if crate::session::scalar_is_absent(supplied, d) {
                 continue;
             }
-            let held = held_entity_value(generation, entity, position, d, buffered, None, &mut blob);
+            let held = held_entity_value(generation, entity, position, d, buffered, pending, &mut blob);
             let Some(held) = held else {
                 continue;
             };
@@ -10979,8 +10978,6 @@ fn settle_joins(generation: &Generation, rows: &mut [UnallocatedRow]) -> Result<
         // layer stamped with the same view, which `match` unions across, so two sets of words
         // would answer under one column with no symptom anywhere. Occupancy is asked instead, and
         // an occupied cell refuses a supplied string, equal or not.
-        //
-        // The pending scoped fills are not a source here; only the values door reads them.
         for (position, family) in scoped_families.iter().enumerate() {
             let Some(supplied) = row.scoped.get(position) else {
                 continue;
@@ -10990,7 +10987,15 @@ fn settle_joins(generation: &Generation, rows: &mut [UnallocatedRow]) -> Result<
                 continue;
             }
             let held =
-                held_scoped_value(generation, entity, position, family, &d, &owner_view, None);
+                held_scoped_value(
+                generation,
+                entity,
+                position,
+                family,
+                &d,
+                &owner_view,
+                pending_scoped,
+            );
             if held.is_none()
                 && family.arrow_type == ScalarType::Text
                 && crate::session::flushed_scoped_text_present(
@@ -11066,7 +11071,7 @@ fn settle_joins(generation: &Generation, rows: &mut [UnallocatedRow]) -> Result<
             // A column the entity genuinely holds nothing for is `None` here and its absence stays
             // an absence in every view.
             let Some(held) =
-                held_entity_value(generation, entity, position, d, buffered, None, &mut blob)
+                held_entity_value(generation, entity, position, d, buffered, pending, &mut blob)
             else {
                 continue;
             };
