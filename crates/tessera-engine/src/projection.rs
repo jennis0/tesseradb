@@ -424,19 +424,22 @@ impl RowProjection {
 
     fn over(rows: Bitmap, space: &RowSpace) -> Self {
         let extents = space.extents();
-        let mut projection = Self::from_rows(rows);
-        projection.extents_covered = extents.len();
-        projection.boundary_seg_id = extents.last().map(|e| e.seg_id.clone());
-        projection.base_rows = space.base_rows();
-        projection
+        Self::covering(
+            rows,
+            extents.len(),
+            extents.last().map(|e| e.seg_id.clone()),
+            space.base_rows(),
+        )
     }
 
-    /// Build directly from an already-projected row-space bitmap (e.g. in tests, or when a
-    /// caller has its own reason to hold the projection independently of a `FrozenFragment`).
-    ///
-    /// The result covers no extents, so [`Self::extends_to`] holds only over a row space with none.
-    /// A projection meant to be extended must come from [`Self::new`].
-    pub fn from_rows(mut rows: Bitmap) -> Self {
+    /// Build over `rows` with the coverage it claims — the one construction site, so a projection
+    /// is never half-initialised.
+    fn covering(
+        mut rows: Bitmap,
+        extents_covered: usize,
+        boundary_seg_id: Option<String>,
+        base_rows: u32,
+    ) -> Self {
         // **Run containers, because a projection is held for a session and read for its life.**
         // The rows a grant projects to are a contiguous range wherever the grant covers a run of
         // row space, and a bitmap container spends 8 KiB stating what a run container states in
@@ -462,15 +465,24 @@ impl RowProjection {
         let cardinality = rows.cardinality();
         RowProjection {
             rows,
-            // Covering no extents, which is what an unattached bitmap can honestly claim. A caller
-            // that wants a derivable projection goes through `RowProjection::new`.
-            extents_covered: 0,
-            boundary_seg_id: None,
-            // Likewise: an unattached bitmap addresses no base, so `can_rebase_extents` holds only
-            // over a row space with none.
-            base_rows: 0,
+            extents_covered,
+            boundary_seg_id,
+            base_rows,
             cardinality,
         }
+    }
+
+    /// Build directly from an already-projected row-space bitmap (e.g. in tests, or when a
+    /// caller has its own reason to hold the projection independently of a `FrozenFragment`).
+    ///
+    /// The result covers no extents, so [`Self::extends_to`] holds only over a row space with none.
+    /// A projection meant to be extended must come from [`Self::new`].
+    pub fn from_rows(rows: Bitmap) -> Self {
+        // Covering no extents, which is what an unattached bitmap can honestly claim. A caller
+        // that wants a derivable projection goes through `RowProjection::new`. Likewise: an
+        // unattached bitmap addresses no base, so `can_rebase_extents` holds only over a row space
+        // with none.
+        Self::covering(rows, 0, None, 0)
     }
 
     /// The number of rows in this projection — O(1), memoised at construction.

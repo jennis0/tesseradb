@@ -576,8 +576,7 @@ impl EffectiveMask {
         result
     }
 
-    /// See [`MaskedSet::count_intersection`], which this implements and documents.
-    ///
+    /// Whether one row is visible — the composed mask and the request's filter, for a single row.
     pub fn contains_row(&self, row: u32) -> bool {
         self.debug_assert_in_domain(&(row..row + 1));
         if self
