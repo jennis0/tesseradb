@@ -2939,7 +2939,6 @@ name = "tessera-wire"
 version = "0.1.0"
 dependencies = [
  "arrow",
- "tessera-types",
 ]
 
 [[package]]

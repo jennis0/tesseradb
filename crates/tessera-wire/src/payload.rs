@@ -40,7 +40,6 @@ pub const FRAME_POINTS: u8 = 3;
 pub const FRAME_TRAILER: u8 = 4;
 pub const FRAME_ARTIFACTS: u8 = 5;
 
-/// The kind byte and the `u32` length before every payload.
 pub const FRAME_HEADER_BYTES: usize = 5;
 
 /// One declared scalar column of a points frame, as long as the frame's `tessera_ids`.
@@ -62,7 +61,6 @@ pub enum ScalarColumn<'a> {
 }
 
 impl ScalarColumn<'_> {
-    /// The Arrow array, which also carries the column's wire type and length.
     fn array(&self) -> ArrayRef {
         macro_rules! copied {
             ($array:ident, $values:expr) => {
@@ -107,8 +105,7 @@ fn nullable(name: &str, column: &ArrayRef) -> Field {
 ///
 /// # Panics
 ///
-/// Panics if the payload is longer than `u32::MAX` bytes. The engine caps a points frame well
-/// below that and no other kind grows with the corpus.
+/// Panics if the payload is longer than `u32::MAX` bytes.
 fn frame(kind: u8, payload_hint: usize, write: impl FnOnce(&mut Vec<u8>)) -> Vec<u8> {
     let mut out = Vec::with_capacity(FRAME_HEADER_BYTES + payload_hint);
     out.push(kind);
@@ -119,8 +116,7 @@ fn frame(kind: u8, payload_hint: usize, write: impl FnOnce(&mut Vec<u8>)) -> Vec
     out
 }
 
-/// One frame holding `columns` as a single-batch Arrow stream, written straight into the frame
-/// buffer.
+/// One frame holding `columns` as a single-batch Arrow stream.
 ///
 /// # Panics
 ///
@@ -343,7 +339,6 @@ pub fn artifacts_frame(rows: &[ArtifactRow<'_>]) -> Vec<u8> {
     arrow_frame(FRAME_ARTIFACTS, columns)
 }
 
-/// One axis of every row's shape.
 fn shape_column(name: &str, rows: &[ArtifactRow<'_>], axis: usize) -> (Field, ArrayRef) {
     let item = |data_type| Arc::new(Field::new("item", data_type, false));
     let vertex = item(DataType::UInt32);
@@ -408,7 +403,6 @@ pub fn points_highlight_frame(tessera_ids: &[u64], highlighted: &[bool]) -> Vec<
     )
 }
 
-/// The points-frame column that carries a layer's membership.
 fn membership_column_name(layer: &str) -> String {
     format!("membership:{layer}")
 }
@@ -453,10 +447,9 @@ pub fn trailer_frame(json: &[u8]) -> Vec<u8> {
     frame(FRAME_TRAILER, json.len(), |out| out.extend_from_slice(json))
 }
 
-/// Split a response body into `(kind, payload)` frames.
-///
-/// A short header, a payload running past the end of the body, or an unknown kind is an error,
-/// so a truncated body never reads as a shorter response.
+/// Split a body into `(kind, payload)` frames. A short header, a payload running past the end
+/// of the body, or an unknown kind is an error, so a truncated body never reads as a shorter
+/// response.
 pub fn split_frames(body: &[u8]) -> Result<Vec<(u8, &[u8])>, FrameError> {
     let mut frames = Vec::new();
     let mut at = 0usize;
