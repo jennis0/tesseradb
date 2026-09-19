@@ -157,7 +157,7 @@ impl Engine {
         let mut satisfied: FxHashSet<TermId> = FxHashSet::default();
         let mut satisfied_descriptors: FxHashMap<TermId, Vec<u8>> = FxHashMap::default();
         let mut unresolved_count = 0usize;
-        for descriptor in &auth_terms.terms {
+        for descriptor in &auth_terms {
             match generation.dict.lookup(descriptor) {
                 Some(term) => {
                     satisfied.insert(term);

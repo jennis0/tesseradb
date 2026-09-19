@@ -827,7 +827,7 @@ components:
         expires_at:
           type: integer
           minimum: 0
-          description: Seconds since the Unix epoch: the time of the request plus the server's `token_max_lifetime_secs`.
+          description: Seconds since the Unix epoch. It is the time of the request plus the server's `token_max_lifetime_secs`.
 
     RevokeRequest:
       type: object

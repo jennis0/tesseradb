@@ -25,7 +25,7 @@ use std::time::Duration;
 use common::*;
 use tessera_engine::{Engine, EngineConfig};
 use tessera_lifecycle::UnallocatedRow;
-use tessera_plugin::{AuthTerms, DeclaredBounds, Descriptor, Passthrough, Plugin, PluginError};
+use tessera_plugin::{DeclaredBounds, Descriptor, Passthrough, Plugin, PluginError};
 use tessera_types::EntityId;
 
 const WAIT: Duration = Duration::from_secs(20);
@@ -42,7 +42,7 @@ impl Plugin for CappedTerms {
     fn terms_of_labels(&self, labels: &[Descriptor]) -> Result<Vec<Descriptor>, PluginError> {
         Passthrough::new().terms_of_labels(labels)
     }
-    fn terms_of_auth(&self, auth_data: &[u8]) -> Result<AuthTerms, PluginError> {
+    fn terms_of_auth(&self, auth_data: &[u8]) -> Result<Vec<Descriptor>, PluginError> {
         Passthrough::new().terms_of_auth(auth_data)
     }
     fn present_terms(&self, descriptors: &[Vec<u8>]) -> Result<Vec<String>, PluginError> {

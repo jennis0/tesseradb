@@ -23,12 +23,6 @@ pub type Descriptor = Vec<u8>;
 /// labelling that produced it.
 const PASSTHROUGH_IDENTITY: &str = "builtin:passthrough:2";
 
-/// What `terms_of_auth` returns: the credential's descriptors.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AuthTerms {
-    pub terms: Vec<Descriptor>,
-}
-
 /// The sizes a plugin declares. Exceeding one is counted and reported. It does not exclude an
 /// item or drop a term, because a dropped term widens what the item's viewers see.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -65,7 +59,7 @@ pub trait Plugin: Send + Sync {
     fn terms_of_labels(&self, labels: &[Descriptor]) -> Result<Vec<Descriptor>, PluginError>;
 
     /// The descriptors a credential's `auth_data` authorises (the auth side).
-    fn terms_of_auth(&self, auth_data: &[u8]) -> Result<AuthTerms, PluginError>;
+    fn terms_of_auth(&self, auth_data: &[u8]) -> Result<Vec<Descriptor>, PluginError>;
 
     /// The strings a viewer is shown for `descriptors`, one per descriptor in the order given.
     ///
@@ -134,13 +128,11 @@ impl Plugin for Passthrough {
             .collect()
     }
 
-    fn terms_of_auth(&self, auth_data: &[u8]) -> Result<AuthTerms, PluginError> {
+    fn terms_of_auth(&self, auth_data: &[u8]) -> Result<Vec<Descriptor>, PluginError> {
         let parsed: PassthroughAuthData = serde_json::from_slice(auth_data).map_err(|e| {
             PluginError::Malformed(format!("auth_data is not the expected JSON: {e}"))
         })?;
-        Ok(AuthTerms {
-            terms: parsed.terms.into_iter().map(String::into_bytes).collect(),
-        })
+        Ok(parsed.terms.into_iter().map(String::into_bytes).collect())
     }
 
     fn declared_bounds(&self) -> DeclaredBounds {
@@ -168,6 +160,43 @@ pub const PUBLIC: &str = "public";
 /// Means "take the container's gate" where a layer declares visibility; it is not a label.
 pub const INHERITED: &str = "inherited";
 
+/// Check one word written where an access label goes. `public` is a label; [`INHERITED`] is not.
+pub fn check_label(key: &str, label: &str) -> Result<(), String> {
+    if label.trim().is_empty() {
+        return Err(format!(
+            "`{key}` is empty; write an access label, or `public` for the one every principal holds"
+        ));
+    }
+    if label == INHERITED {
+        return Err(format!(
+            "`{key}` is `inherited`, which means the container's gate and is not a label; write \
+             an access label or `public`"
+        ));
+    }
+    Ok(())
+}
+
+/// Check `point_visibility.default`, the label given to a point that carries none. A point has no
+/// container whose gate it could inherit, and a default the plugin turns into no term would leave
+/// every point given it visible to nobody.
+pub fn check_point_default(plugin: &dyn Plugin, default: &str) -> Result<(), String> {
+    const KEY: &str = "point_visibility.default";
+    check_label(KEY, default)?;
+    if default == PUBLIC {
+        return Ok(());
+    }
+    let terms = plugin
+        .terms_of_labels(&[default.as_bytes().to_vec()])
+        .map_err(|e| format!("`{KEY} = {default:?}`: the plugin cannot read the label ({e})"))?;
+    if terms.is_empty() {
+        return Err(format!(
+            "`{KEY} = {default:?}` names no terms, so a point given it is visible to nobody; \
+             write `public` or a label that names a term"
+        ));
+    }
+    Ok(())
+}
+
 /// Check the labels a view or group declares as its gate, and answer the gate as stored: `None`
 /// for a public view. A principal passes a gate by holding any one of its terms, so a gate that
 /// names no terms would shut everyone out and is refused.
@@ -185,22 +214,19 @@ pub fn check_gate(
         return Err("`visibility = []` names no labels; write `public` or list them".to_string());
     }
     for label in labels {
-        if label.trim().is_empty() {
-            return Err("`visibility` has an empty label".to_string());
-        }
+        check_label("visibility", label)?;
         if label == PUBLIC {
-            return Err("`visibility` lists `public` beside other labels; write `public` alone \
+            return Err(
+                "`visibility` lists `public` beside other labels; write `public` alone \
                         or leave it out"
-                .to_string());
-        }
-        if label == INHERITED {
-            return Err("`inherited` is not a label a view's `visibility` can take".to_string());
+                    .to_string(),
+            );
         }
     }
     let descriptors: Vec<Descriptor> = labels.iter().map(|l| l.as_bytes().to_vec()).collect();
-    let terms = plugin
-        .terms_of_labels(&descriptors)
-        .map_err(|e| format!("`visibility = {labels:?}`: the plugin cannot read the labels ({e})"))?;
+    let terms = plugin.terms_of_labels(&descriptors).map_err(|e| {
+        format!("`visibility = {labels:?}`: the plugin cannot read the labels ({e})")
+    })?;
     if terms.is_empty() {
         return Err(format!("`visibility = {labels:?}` names no terms"));
     }
@@ -247,12 +273,10 @@ mod tests {
         let p = Passthrough::new();
         assert_eq!(
             p.terms_of_auth(br#"{"terms": ["1207", "9"]}"#).unwrap(),
-            AuthTerms {
-                terms: vec![b"1207".to_vec(), b"9".to_vec()],
-            }
+            vec![b"1207".to_vec(), b"9".to_vec()]
         );
         // A credential of no terms is valid and sees nothing; it is not the refusal below.
-        assert!(p.terms_of_auth(br#"{"terms": []}"#).unwrap().terms.is_empty());
+        assert!(p.terms_of_auth(br#"{"terms": []}"#).unwrap().is_empty());
         assert!(p.terms_of_auth(b"not json").is_err());
         assert!(p.terms_of_auth(br#"{"nope": 1}"#).is_err());
     }
@@ -289,15 +313,16 @@ mod tests {
         }
     }
 
-    /// A plugin that maps every label away leaves a gate nobody can pass.
+    /// A plugin that maps every label away leaves a gate nobody can pass, and a default label
+    /// that puts its points in front of nobody.
     #[test]
-    fn a_gate_whose_labels_name_no_terms_is_refused() {
+    fn labels_that_name_no_terms_are_refused() {
         struct NoTerms;
         impl Plugin for NoTerms {
             fn terms_of_labels(&self, _: &[Descriptor]) -> Result<Vec<Descriptor>, PluginError> {
                 Ok(Vec::new())
             }
-            fn terms_of_auth(&self, auth_data: &[u8]) -> Result<AuthTerms, PluginError> {
+            fn terms_of_auth(&self, auth_data: &[u8]) -> Result<Vec<Descriptor>, PluginError> {
                 Passthrough.terms_of_auth(auth_data)
             }
             fn present_terms(&self, d: &[Descriptor]) -> Result<Vec<String>, PluginError> {
@@ -314,5 +339,19 @@ mod tests {
             }
         }
         assert!(check_gate(&NoTerms, Some(&labels(&["finance"]))).is_err());
+        assert!(check_point_default(&NoTerms, "finance").is_err());
+        // `public` is every principal's label whatever the plugin says.
+        assert!(check_point_default(&NoTerms, "public").is_ok());
+    }
+
+    #[test]
+    fn a_point_default_is_a_label_and_not_inherited() {
+        let p = Passthrough::new();
+        for accepted in ["public", "finance"] {
+            assert!(check_point_default(&p, accepted).is_ok(), "{accepted:?}");
+        }
+        for refused in ["", "  ", "inherited"] {
+            assert!(check_point_default(&p, refused).is_err(), "{refused:?}");
+        }
     }
 }

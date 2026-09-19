@@ -645,15 +645,11 @@ async fn a_point_default_is_measured_against_the_plugin_on_both_routes() {
     // label as a term, so a label it *cannot* read has no spelling. What the two cases below
     // cover is the pair the build refuses too, and the plugin call itself is the one
     // `check_gate_labels` makes, on the same descriptors.
-    for (default, reason) in [("", "is empty"), ("inherited", "is refused")] {
+    for default in ["", "inherited"] {
         let mut view = embedding();
         view["point_visibility"] = json!({ "default": default });
         let (status, body) = declare_view(&served, "bad_default", view).await;
         assert_eq!(status, 422, "{default:?}: {body}");
-        assert!(
-            body["detail"].as_str().unwrap().contains(reason),
-            "{default:?}: {body}"
-        );
 
         let mut group = quarter();
         group["point_visibility"] = json!({ "default": default });

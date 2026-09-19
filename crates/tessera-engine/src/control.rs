@@ -412,9 +412,6 @@ impl Engine {
         self.write.create_plain_view(declaration)
     }
 
-    /// `point_visibility.default`: what a point with no label of its own is given. A default the
-    /// plugin cannot turn into a term leaves every point that took it in nobody's mask.
-    /// `inherited` and the empty string are refused: a gate can only narrow.
     fn check_point_default(
         &self,
         default: Option<&str>,
@@ -422,48 +419,9 @@ impl Engine {
         let Some(default) = default else {
             return Ok(());
         };
-        let refused = |detail: String| {
+        tessera_plugin::check_point_default(self.plugin.as_ref(), default).map_err(|detail| {
             crate::write::AcceptError::Exec(tessera_lifecycle::ExecError::ViewRefused { detail })
-        };
-        if default.trim().is_empty() {
-            return Err(refused(
-                "point_visibility.default is empty. An access label is a term a principal either \
-                 holds or does not; write `public` for the one every principal holds"
-                    .to_string(),
-            ));
-        }
-        if default == "inherited" {
-            return Err(refused(
-                "point_visibility.default = \"inherited\" is refused. A container's gate narrows \
-                 rather than widens, and a point carrying no terms is already in no principal's \
-                 mask — so inheriting would have to *add* a term to the point, which can only \
-                 widen it (configuration.md §4). Name the label such a point should carry, or \
-                 `public`"
-                    .to_string(),
-            ));
-        }
-        let public = std::str::from_utf8(tessera_authz::PUBLIC_LABEL).expect("the label is ASCII");
-        if default == public {
-            return Ok(());
-        }
-        let descriptors = self
-            .plugin
-            .terms_of_labels(&[default.as_bytes().to_vec()])
-            .map_err(|e| {
-                refused(format!(
-                    "point_visibility.default = {default:?} is not a label the plugin can read \
-                     ({e}). It is given to every point that carries none of its own \
-                     (decision 0133), so a label the plugin cannot turn into a term would put \
-                     those points in no principal's mask"
-                ))
-            })?;
-        if descriptors.is_empty() {
-            return Err(refused(format!(
-                "point_visibility.default = {default:?} names no terms, so every point given it \
-                 would be in no principal's mask. Write `public`, or a label naming a term"
-            )));
-        }
-        Ok(())
+        })
     }
 
     /// The half of a gate's validation that needs the plugin: labels go through the same

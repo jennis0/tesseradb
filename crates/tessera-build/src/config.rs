@@ -184,11 +184,7 @@ pub fn declaration_error(detail: impl Into<String>) -> BuildError {
 /// first value.
 pub const ABSENT_CODE: u32 = 0;
 
-/// The word that reaches every principal, wherever an access label may be written.
-const PUBLIC: &str = "public";
-/// The word that means *the container's gate is the whole of it*. It occupies a slot that otherwise
-/// takes a caller's label, so a label spelled this way is refused (§4).
-const INHERITED: &str = "inherited";
+use tessera_plugin::{INHERITED, PUBLIC};
 /// **The canonical identity field** (`configuration.md` §8), which
 /// `[defaults].entity_id_field` moves for this declaration and each reader of one may move again.
 /// It is entity-space and shared: a point has one identity across every view it appears in, and it
@@ -3294,28 +3290,11 @@ fn compile_projected_fields(
     })
 }
 
-/// A word written where an access label goes. `public` is a label and is fine; `inherited` is the
-/// one reserved word occupying such a slot (§4), so it is refused rather than interned.
-///
-/// `object` is the declaration quoted as its own block names it — `view 's0'`, `layer
-/// 'clusters/a'`, `view group 'quarter'` — because the same key is written on four kinds of block
-/// and *which one* is half of the refusal.
+/// [`tessera_plugin::check_label`], with the refusal naming the declaring block: the same key is
+/// written on four kinds of block.
 fn check_label(object: &str, key: &str, label: &str) -> Result<()> {
-    if label.trim().is_empty() {
-        return Err(declaration_error(format!(
-            "{object}: `{key}` is empty. An access label is a term a principal either holds or \
-             does not; write `public` for the one every principal holds"
-        )));
-    }
-    if label == INHERITED {
-        return Err(declaration_error(format!(
-            "{object}: an access label may not be spelled `inherited` — it is reserved for *the \
-             container's gate is the whole of it*, and it is the one reserved word occupying a \
-             slot that otherwise takes a label (configuration.md §4). `public` is not reserved in \
-             this sense: it *is* a label, held by every principal"
-        )));
-    }
-    Ok(())
+    tessera_plugin::check_label(key, label)
+        .map_err(|detail| declaration_error(format!("{object}: {detail}")))
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -3701,16 +3680,8 @@ fn compile_point_visibility(
             default: None,
         });
     };
-    if default == INHERITED {
-        return Err(declaration_error(format!(
-            "{object}: `point_visibility.default = \"inherited\"` is refused. A container's gate \
-             narrows rather than widens, and a point carrying no terms is already in no \
-             principal's mask — so inheriting would have to *add* a term to the point, which can \
-             only widen it (configuration.md §4). Name the label such a point should carry, or \
-             `public`"
-        )));
-    }
-    check_label(object, "point_visibility.default", default)?;
+    tessera_plugin::check_point_default(&tessera_plugin::Passthrough::new(), default)
+        .map_err(|detail| declaration_error(format!("{object}: {detail}")))?;
     Ok(PointVisibility {
         field: point.field.clone(),
         source: labels,
