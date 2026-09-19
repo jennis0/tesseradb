@@ -12,7 +12,7 @@
 
 mod common;
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::Duration;
 
 use common::*;
@@ -47,16 +47,6 @@ fn engine_at(tmp: &Path, root: &Path, tick_secs: u64) -> Engine {
         .start_write_executor(64)
         .expect("the executor starts once");
     engine
-}
-
-fn fixture(tmp: &Path) -> PathBuf {
-    let root = tmp.join("bundle");
-    build_fixture(
-        &root,
-        &tmp.join("points.parquet"),
-        &tmp.join("pairs.parquet"),
-    );
-    root
 }
 
 /// The newest side-manifest on disc, read the way the reader reads it — highest `n` first.
@@ -103,7 +93,7 @@ fn ingest(engine: &Engine, external_id: &str) -> EntityId {
 #[test]
 fn a_flush_manifest_carries_the_deny_state_at_publication() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let root = fixture(tmp.path());
+    let root = fixture_in(tmp.path());
     let engine = engine_at(tmp.path(), &root, 1);
 
     let suppressed = entity_of_source(&root, 7);
@@ -139,7 +129,7 @@ fn a_flush_manifest_carries_the_deny_state_at_publication() {
 #[test]
 fn an_unsuppress_is_absent_from_the_next_manifest() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let root = fixture(tmp.path());
+    let root = fixture_in(tmp.path());
     let engine = engine_at(tmp.path(), &root, 1);
     let entity = entity_of_source(&root, 7);
 
@@ -171,7 +161,7 @@ fn an_unsuppress_is_absent_from_the_next_manifest() {
 #[test]
 fn a_delete_reaches_tombstones_and_a_suppress_reaches_deny() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let root = fixture(tmp.path());
+    let root = fixture_in(tmp.path());
     let engine = engine_at(tmp.path(), &root, 1);
 
     let deleted = entity_of_source(&root, 11);
@@ -205,7 +195,7 @@ fn a_delete_reaches_tombstones_and_a_suppress_reaches_deny() {
 #[test]
 fn a_node_restored_from_the_bundle_alone_honours_the_published_deny() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let root = fixture(tmp.path());
+    let root = fixture_in(tmp.path());
     let suppressed = entity_of_source(&root, 7);
 
     let visible_before = {
@@ -268,7 +258,7 @@ fn visible_count(engine: &Engine, session: &tessera_engine::Session) -> u64 {
 #[test]
 fn an_accepted_deny_publishes_without_moving_the_geometry_version() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let root = fixture(tmp.path());
+    let root = fixture_in(tmp.path());
     let engine = engine_at(tmp.path(), &root, 3600);
 
     let (n_before, _) = newest_manifest(&root);

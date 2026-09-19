@@ -67,16 +67,6 @@ fn reader_at(tmp: &std::path::Path, root: &std::path::Path) -> Engine {
     .expect("engine opens")
 }
 
-fn fixture(tmp: &std::path::Path) -> std::path::PathBuf {
-    let root = tmp.join("bundle");
-    build_fixture(
-        &root,
-        &tmp.join("points.parquet"),
-        &tmp.join("pairs.parquet"),
-    );
-    root
-}
-
 fn ingest(engine: &Engine, external_id: &str) -> EntityId {
     let row = UnallocatedRow {
         external_id: Some(external_id.as_bytes().to_vec()),
@@ -99,7 +89,7 @@ fn ingest(engine: &Engine, external_id: &str) -> EntityId {
 #[test]
 fn the_tick_plans_what_it_would_flush() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let engine = engine_at(tmp.path(), &fixture(tmp.path()), 1);
+    let engine = engine_at(tmp.path(), &fixture_in(tmp.path()), 1);
 
     ingest(&engine, "ext-1");
     ingest(&engine, "ext-2");
@@ -114,7 +104,7 @@ fn the_tick_plans_what_it_would_flush() {
 #[test]
 fn an_idle_tick_plans_nothing() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let engine = engine_at(tmp.path(), &fixture(tmp.path()), 1);
+    let engine = engine_at(tmp.path(), &fixture_in(tmp.path()), 1);
 
     wait_until("several ticks", WAIT, || {
         engine.write_executor_stats().ticks >= 3
@@ -133,7 +123,7 @@ fn an_idle_tick_plans_nothing() {
 #[test]
 fn a_published_flush_is_a_bundle_a_restart_opens() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let root = fixture(tmp.path());
+    let root = fixture_in(tmp.path());
     let engine = engine_at(tmp.path(), &root, 1);
 
     let id = ingest(&engine, "ext-1");
@@ -206,7 +196,7 @@ fn a_published_flush_is_a_bundle_a_restart_opens() {
 #[test]
 fn a_reopened_engine_does_not_re_buffer_rows_that_already_have_geometry() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let root = fixture(tmp.path());
+    let root = fixture_in(tmp.path());
 
     let id = {
         let engine = engine_at(tmp.path(), &root, 1);
@@ -251,7 +241,7 @@ fn a_reopened_engine_does_not_re_buffer_rows_that_already_have_geometry() {
 #[test]
 fn the_allocator_floor_comes_from_the_side_manifest() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let root = fixture(tmp.path());
+    let root = fixture_in(tmp.path());
 
     let flushed = {
         let engine = engine_at(tmp.path(), &root, 1);
@@ -303,7 +293,7 @@ fn the_allocator_floor_comes_from_the_side_manifest() {
 #[test]
 fn a_flushed_item_is_visible_in_a_viewport() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let root = fixture(tmp.path());
+    let root = fixture_in(tmp.path());
     let engine = engine_at(tmp.path(), &root, 1);
 
     // The ingested item sits at (5, 5) — see `ingest`.

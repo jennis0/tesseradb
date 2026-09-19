@@ -22,7 +22,7 @@ pub use wait::*;
 
 use std::collections::BTreeMap;
 use std::fs::File;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use arrow::array::{Array, BinaryArray, Float64Array, UInt32Array, UInt64Array};
@@ -216,6 +216,44 @@ pub fn build_fixture_n(out: &Path, points_path: &Path, pairs_path: &Path, n: u64
 /// Build the fixture bundle at `out` through `tessera_build::build`.
 pub fn build_fixture(out: &Path, points_path: &Path, pairs_path: &Path) {
     build_fixture_n(out, points_path, pairs_path, N_ITEMS)
+}
+
+/// A built fixture bundle and the paths an engine opens it with, holding the temporary directory
+/// that owns all three.
+pub struct Fixture {
+    pub _tmp: tempfile::TempDir,
+    pub root: PathBuf,
+    pub cache: PathBuf,
+    pub wal: PathBuf,
+}
+
+/// The `N_ITEMS` fixture, built into a temporary directory of its own.
+pub fn fixture() -> Fixture {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().join("bundle");
+    build_fixture(
+        &root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+    Fixture {
+        root,
+        cache: tmp.path().join("cache"),
+        wal: tmp.path().join("wal.log"),
+        _tmp: tmp,
+    }
+}
+
+/// The same bundle, built into a caller's directory — for a case that opens the bundle more than
+/// once, or beside paths of its own.
+pub fn fixture_in(tmp: &Path) -> PathBuf {
+    let root = tmp.join("bundle");
+    build_fixture(
+        &root,
+        &tmp.join("points.parquet"),
+        &tmp.join("pairs.parquet"),
+    );
+    root
 }
 
 /// Build a bundle over inputs the **corpus generator** wrote, with the generator's own schema.

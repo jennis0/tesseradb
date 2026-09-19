@@ -173,13 +173,6 @@ fn topic_members() -> Vec<(&'static str, Option<u32>, u64)> {
     rows
 }
 
-struct Fixture {
-    _tmp: tempfile::TempDir,
-    root: std::path::PathBuf,
-    cache: std::path::PathBuf,
-    wal: std::path::PathBuf,
-}
-
 /// A bundle built **with** its layers and artifacts — no control-plane call anywhere.
 fn fixture() -> Fixture {
     try_fixture(write_topics).expect("a build carrying layers")

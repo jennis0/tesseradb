@@ -156,13 +156,6 @@ fn clumped_members() -> (Vec<String>, Vec<(String, u64)>) {
     (keys, rows)
 }
 
-struct Fixture {
-    _tmp: tempfile::TempDir,
-    root: std::path::PathBuf,
-    cache: std::path::PathBuf,
-    wal: std::path::PathBuf,
-}
-
 fn fixture() -> Fixture {
     let tmp = tempfile::TempDir::new().unwrap();
     let root = tmp.path().join("bundle");

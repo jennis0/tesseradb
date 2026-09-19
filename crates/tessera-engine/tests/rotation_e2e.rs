@@ -17,16 +17,6 @@ use tessera_types::EntityId;
 
 const WAIT: Duration = Duration::from_secs(20);
 
-fn fixture(tmp: &std::path::Path) -> std::path::PathBuf {
-    let root = tmp.join("bundle");
-    build_fixture(
-        &root,
-        &tmp.join("points.parquet"),
-        &tmp.join("pairs.parquet"),
-    );
-    root
-}
-
 fn engine_at(tmp: &std::path::Path, root: &std::path::Path, tick_secs: u64) -> Engine {
     let mut engine = Engine::open(
         root,
@@ -84,7 +74,7 @@ fn members(tmp: &std::path::Path) -> Vec<String> {
 #[test]
 fn a_published_flush_rotates_the_log() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let root = fixture(tmp.path());
+    let root = fixture_in(tmp.path());
     let engine = engine_at(tmp.path(), &root, 1);
 
     assert_eq!(members(tmp.path()), vec!["wal-000001.log"]);
@@ -117,7 +107,7 @@ fn a_published_flush_rotates_the_log() {
 #[test]
 fn a_row_acked_during_a_flush_survives_rotation_and_a_restart() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let root = fixture(tmp.path());
+    let root = fixture_in(tmp.path());
 
     let second = {
         // A slow tick, so the two ingests land in different flushes rather than the same one.
@@ -156,7 +146,7 @@ fn a_row_acked_during_a_flush_survives_rotation_and_a_restart() {
 #[test]
 fn a_suppression_accepted_before_a_rotation_is_still_in_force_after_a_restart() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let root = fixture(tmp.path());
+    let root = fixture_in(tmp.path());
 
     let suppressed = {
         let engine = engine_at(tmp.path(), &root, 1);
@@ -195,7 +185,7 @@ fn a_suppression_accepted_before_a_rotation_is_still_in_force_after_a_restart() 
 #[test]
 fn a_row_deleted_before_its_first_flush_stops_pinning_the_log() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let root = fixture(tmp.path());
+    let root = fixture_in(tmp.path());
 
     let deleted = {
         let engine = engine_at(tmp.path(), &root, 1);

@@ -20,16 +20,6 @@ use tessera_types::EntityId;
 
 const WAIT: Duration = Duration::from_secs(20);
 
-fn fixture(tmp: &std::path::Path) -> std::path::PathBuf {
-    let root = tmp.join("bundle");
-    build_fixture(
-        &root,
-        &tmp.join("points.parquet"),
-        &tmp.join("pairs.parquet"),
-    );
-    root
-}
-
 fn engine_at(tmp: &std::path::Path, root: &std::path::Path, tick_secs: u64) -> Engine {
     let mut engine = Engine::open(
         root,
@@ -96,7 +86,7 @@ fn flushed_then_rotated(tmp: &std::path::Path, root: &std::path::Path, key: &str
 #[test]
 fn a_flushed_item_answers_items_after_rotation_and_a_restart() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let root = fixture(tmp.path());
+    let root = fixture_in(tmp.path());
     let id = flushed_then_rotated(tmp.path(), &root, "ext-1");
 
     let reopened = engine_at(tmp.path(), &root, 3600);
@@ -116,7 +106,7 @@ fn a_flushed_item_answers_items_after_rotation_and_a_restart() {
 #[test]
 fn an_item_with_no_external_id_answers_none_after_rotation_rather_than_erroring() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let root = fixture(tmp.path());
+    let root = fixture_in(tmp.path());
 
     let anonymous = {
         let engine = engine_at(tmp.path(), &root, 1);
@@ -166,7 +156,7 @@ fn an_item_with_no_external_id_answers_none_after_rotation_rather_than_erroring(
 #[test]
 fn a_duplicate_external_id_is_caught_against_a_flushed_run() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let root = fixture(tmp.path());
+    let root = fixture_in(tmp.path());
     flushed_then_rotated(tmp.path(), &root, "ext-1");
 
     let reopened = engine_at(tmp.path(), &root, 3600);
@@ -191,7 +181,7 @@ fn a_duplicate_external_id_is_caught_against_a_flushed_run() {
 #[test]
 fn a_batch_older_than_the_retained_wal_is_no_longer_recognised_as_a_duplicate() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let root = fixture(tmp.path());
+    let root = fixture_in(tmp.path());
     flushed_then_rotated(tmp.path(), &root, "ext-1");
 
     let reopened = engine_at(tmp.path(), &root, 3600);
@@ -212,7 +202,7 @@ fn a_batch_older_than_the_retained_wal_is_no_longer_recognised_as_a_duplicate() 
 #[test]
 fn an_accepted_batch_leaves_the_live_index_when_its_wal_member_is_rotated_away() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let root = fixture(tmp.path());
+    let root = fixture_in(tmp.path());
     let engine = engine_at(tmp.path(), &root, 1);
     ingest(&engine, "ext-1");
     assert!(

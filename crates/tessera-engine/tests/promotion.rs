@@ -19,7 +19,7 @@
 
 mod common;
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::Duration;
 
 use common::*;
@@ -115,16 +115,6 @@ fn reader_at(tmp: &Path, root: &Path) -> Engine {
     .expect("engine opens")
 }
 
-fn fixture(tmp: &Path) -> PathBuf {
-    let root = tmp.join("bundle");
-    build_fixture(
-        &root,
-        &tmp.join("points.parquet"),
-        &tmp.join("pairs.parquet"),
-    );
-    root
-}
-
 /// Ingest one item at (5, 5) carrying exactly `descriptors`.
 fn ingest_with(engine: &Engine, external_id: &str, descriptors: &[&[u8]]) -> EntityId {
     let descriptors: Vec<Vec<u8>> = descriptors.iter().map(|d| d.to_vec()).collect();
@@ -198,7 +188,7 @@ fn extent_records(root: &Path, prefix: &str) -> Vec<Vec<Vec<u8>>> {
 #[test]
 fn a_novel_descriptor_becomes_a_durable_ordinal_and_the_item_becomes_visible() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let root = fixture(tmp.path());
+    let root = fixture_in(tmp.path());
     let engine = engine_at(tmp.path(), &root, 1);
 
     let credential = br#"{"terms": ["dept:secret"]}"#.to_vec();
@@ -268,7 +258,7 @@ fn a_novel_descriptor_becomes_a_durable_ordinal_and_the_item_becomes_visible() {
 #[test]
 fn a_second_flush_reuses_the_first_flushs_ordinal_and_writes_no_duplicate_record() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let root = fixture(tmp.path());
+    let root = fixture_in(tmp.path());
     let engine = engine_at(tmp.path(), &root, 1);
 
     ingest_with(&engine, "ext-1", &[NOVEL]);
@@ -310,7 +300,7 @@ fn a_second_flush_reuses_the_first_flushs_ordinal_and_writes_no_duplicate_record
 #[test]
 fn an_ingest_and_a_tick_flip_the_staleness_hint() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let engine = engine_at(tmp.path(), &fixture(tmp.path()), 1);
+    let engine = engine_at(tmp.path(), &fixture_in(tmp.path()), 1);
 
     let session = engine
         .authorise(br#"{"terms": ["0", "dept:secret"]}"#)
@@ -345,7 +335,7 @@ fn an_ingest_and_a_tick_flip_the_staleness_hint() {
 #[test]
 fn promotion_past_the_declared_term_ceiling_refuses_the_flush() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let root = fixture(tmp.path());
+    let root = fixture_in(tmp.path());
     let mut engine = Engine::open(
         &root,
         &tmp.path().join("cache"),
