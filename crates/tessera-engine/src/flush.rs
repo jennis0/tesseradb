@@ -1340,12 +1340,7 @@ fn promote(plan: &FlushPlan, ctx: &FlushContext) -> Result<Promotion, Maintenanc
     // empty, which is a value and not an absence (`tessera_store::entity_terms`).
     let mut per_entity: Vec<(u32, Vec<u32>)> = Vec::with_capacity(plan.items.len());
     for (entity, item) in plan.entity_space_items() {
-        let Ok(entity) = u32::try_from(entity.raw()) else {
-            return Err(MaintenanceFailed(format!(
-                "entity {} does not fit the u32 posting space (I9's ceiling)",
-                entity.raw()
-            )));
-        };
+        let entity = narrow_entity(*entity)?;
         let mut mine: Vec<u32> = Vec::with_capacity(item.terms.len());
         for term in &item.terms {
             // Below the dictionary's length: already a durable ordinal, nothing to do.
@@ -1766,12 +1761,7 @@ fn entity_scoped_rows<'a>(
 ) -> Result<Vec<(u32, &'a WalScalar)>, MaintenanceFailed> {
     let mut out = Vec::with_capacity(plan.items.len() + plan.fills.len());
     for (entity, item) in plan.value_rows() {
-        let entity = u32::try_from(entity.raw()).map_err(|_| {
-            MaintenanceFailed(format!(
-                "entity {} does not fit the u32 entity space (I9's ceiling)",
-                entity.raw()
-            ))
-        })?;
+        let entity = narrow_entity(*entity)?;
         let value = item.scalars.get(spec.index).ok_or_else(|| {
             MaintenanceFailed(format!(
                 "a buffered row carries {} scalars, but column '{}' is declared at position {}",
@@ -1799,12 +1789,7 @@ fn scoped_rows<'a>(
 ) -> Result<Vec<(u32, &'a WalScalar)>, MaintenanceFailed> {
     let mut out = Vec::with_capacity(plan.items.len() + plan.fills.len());
     for (entity, item) in plan.scoped_value_rows() {
-        let entity = u32::try_from(entity.raw()).map_err(|_| {
-            MaintenanceFailed(format!(
-                "entity {} does not fit the u32 entity space (I9's ceiling)",
-                entity.raw()
-            ))
-        })?;
+        let entity = narrow_entity(*entity)?;
         // A row buffered before the family was declared, or one whose view named a group with a
         // shorter list, has nothing here — absence, and the ordinary reading of it.
         let value = item.scoped.get(spec.index).unwrap_or(&WalScalar::Null);
@@ -1956,14 +1941,8 @@ fn write_text_extents(
     for spec in &ctx.text_schema {
         let mut rows = Vec::with_capacity(plan.items.len() + plan.fills.len());
         for (entity, row) in plan.value_rows() {
-            let entity = u32::try_from(entity.raw()).map_err(|_| {
-                MaintenanceFailed(format!(
-                    "entity {} does not fit the u32 entity space (I9's ceiling)",
-                    entity.raw()
-                ))
-            })?;
             rows.push((
-                entity,
+                narrow_entity(*entity)?,
                 row.scalars.get(spec.index).unwrap_or(&WalScalar::Null),
             ));
         }
@@ -2444,12 +2423,7 @@ fn write_record_extent(
     let mut fields: Vec<tessera_filter::RecordField> = Vec::with_capacity(ctx.record_schema.len());
     let mut open: Option<u32> = None;
     for (entity, item) in plan.value_rows() {
-        let entity = u32::try_from(entity.raw()).map_err(|_| {
-            MaintenanceFailed(format!(
-                "entity {} does not fit the u32 entity space (I9's ceiling)",
-                entity.raw()
-            ))
-        })?;
+        let entity = narrow_entity(*entity)?;
         if open != Some(entity) {
             push_record_row(&mut writer, open, &fields)?;
             fields.clear();
@@ -2542,6 +2516,18 @@ fn record_value_of(
             _ => return Err(wrong()),
         },
     }))
+}
+
+/// One entity id as the postings, the extents and the blob address it. Every artefact this module
+/// writes is keyed by a `u32`, so an id past that ceiling fails the flush rather than wrapping into
+/// another entity's slot.
+fn narrow_entity(entity: EntityId) -> Result<u32, MaintenanceFailed> {
+    u32::try_from(entity.raw()).map_err(|_| {
+        MaintenanceFailed(format!(
+            "entity {} does not fit the u32 entity space",
+            entity.raw()
+        ))
+    })
 }
 
 /// This flush's segment directory. Both the segment writer and promotion address it; naming it
