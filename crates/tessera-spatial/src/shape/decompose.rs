@@ -187,7 +187,7 @@ pub fn decompose<R: Region>(shape: &R, max_boundary_cells: Option<usize>) -> Dec
     };
     // The crossing tiles at the current depth, with their contexts.
     let mut pending: Vec<(Tile, R::Ctx)> = Vec::new();
-    match classify_into(shape, root, shape.root(), &mut out) {
+    match classify_into(shape, root, shape.root(), &mut out.interior) {
         Some(p) => pending.push(p),
         None => return out,
     }
@@ -205,12 +205,7 @@ pub fn decompose<R: Region>(shape: &R, max_boundary_cells: Option<usize>) -> Dec
         // Classify the children into a staging area first: under a budget the whole level is
         // accepted or rejected together, and a rejected level's interior tiles must not leak into
         // the output beside a cover of their parents.
-        let mut staged = Decomposition {
-            interior: Vec::new(),
-            boundary: Vec::new(),
-            cover: Vec::new(),
-            cover_depth: None,
-        };
+        let mut staged: Vec<Tile> = Vec::new();
         let mut next: Vec<(Tile, R::Ctx)> = Vec::new();
         'level: for (tile, ctx) in &pending {
             let from = Rect::of_tile(tile);
@@ -234,7 +229,7 @@ pub fn decompose<R: Region>(shape: &R, max_boundary_cells: Option<usize>) -> Dec
             out.cover = pending.into_iter().map(|(t, _)| t).collect();
             return out;
         }
-        out.interior.extend(staged.interior);
+        out.interior.extend(staged);
         pending = next;
     }
     out
@@ -304,12 +299,12 @@ fn classify_into<R: Region>(
     shape: &R,
     tile: Tile,
     ctx: R::Ctx,
-    out: &mut Decomposition<R::Ctx>,
+    interior: &mut Vec<Tile>,
 ) -> Option<(Tile, R::Ctx)> {
     match shape.classify(Rect::of_tile(&tile), &ctx) {
         Class::Disjoint => None,
         Class::Inside => {
-            out.interior.push(tile);
+            interior.push(tile);
             None
         }
         Class::Crossed => Some((tile, ctx)),

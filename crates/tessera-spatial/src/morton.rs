@@ -15,16 +15,19 @@ pub struct Bounds {
 }
 
 impl Bounds {
+    pub fn is_finite(&self) -> bool {
+        self.x_min.is_finite()
+            && self.x_max.is_finite()
+            && self.y_min.is_finite()
+            && self.y_max.is_finite()
+    }
+
     /// Reject degenerate/non-finite extents. `cell`/`morton_of`/`tiles_for_bbox` are defined
     /// only over a valid extent (all four bounds finite, both axes non-empty) — a `min == max`
     /// or infinite bound would make `cell`'s division produce NaN/±inf silently, diverging from
     /// the Python oracle, which raises instead.
     pub fn validate(&self) -> Result<(), String> {
-        if !(self.x_min.is_finite()
-            && self.x_max.is_finite()
-            && self.y_min.is_finite()
-            && self.y_max.is_finite())
-        {
+        if !self.is_finite() {
             return Err("Bounds bounds must be finite".to_string());
         }
         if self.x_max <= self.x_min {
@@ -37,6 +40,9 @@ impl Bounds {
     }
 }
 
+/// Positions per axis on the 32-bit grid: 2^32.
+pub(crate) const FIXED_SPAN: f64 = 4_294_967_296.0;
+
 /// Quantise a coordinate value into a 16-bit cell index.
 ///
 /// `cell(v) = clamp( floor( (v - min) / (max - min) * 65536 ), 0, 65535 )`, computed in f64.
@@ -47,20 +53,7 @@ impl Bounds {
 /// [`Bounds::validate`]. This function only asserts in debug builds; it does not itself reject
 /// degenerate input, since it takes bare `min`/`max` rather than an `Bounds`.
 pub fn cell(v: f64, min: f64, max: f64) -> u16 {
-    debug_assert!(v.is_finite(), "cell(): v must be finite, got {v}");
-    debug_assert!(
-        min.is_finite() && max.is_finite() && max > min,
-        "cell(): invalid extent [{min}, {max})"
-    );
-    let scaled = (v - min) / (max - min) * 65536.0;
-    let floored = scaled.floor();
-    if floored <= 0.0 {
-        0
-    } else if floored >= 65535.0 {
-        65535
-    } else {
-        floored as u16
-    }
+    (fixed32(v, min, max) >> 16) as u16
 }
 
 /// Quantise a coordinate value into a 32-bit fixed-point position: [`cell`] widened by 16 bits.
@@ -88,8 +81,7 @@ pub fn fixed32(v: f64, min: f64, max: f64) -> u32 {
         min.is_finite() && max.is_finite() && max > min,
         "fixed32(): invalid extent [{min}, {max})"
     );
-    const SCALE: f64 = 4_294_967_296.0; // 2^32
-    let scaled = (v - min) / (max - min) * SCALE;
+    let scaled = (v - min) / (max - min) * FIXED_SPAN;
     let floored = scaled.floor();
     if floored <= 0.0 {
         0
@@ -181,14 +173,9 @@ pub fn interleave_bits(tx: u32, ty: u32, d: u8) -> u64 {
         tx >> d == 0 && ty >> d == 0,
         "interleave_bits(): tx/ty must fit in {d} bits, got tx={tx}, ty={ty}"
     );
-    let mut prefix: u64 = 0;
-    for i in 0..d as u64 {
-        let xb = ((tx as u64) >> i) & 1;
-        let yb = ((ty as u64) >> i) & 1;
-        prefix |= xb << (2 * i);
-        prefix |= yb << (2 * i + 1);
-    }
-    prefix
+    // Bit i of a coordinate lands at bit 2i whatever the depth, so the full-width spread of a
+    // d-bit coordinate is already the 2d-bit prefix.
+    u64::from(spread(tx as u16) | (spread(ty as u16) << 1))
 }
 
 /// A tile in the Morton quadtree: a `depth`-deep prefix over the 32-bit code space.
@@ -291,28 +278,6 @@ mod tests {
     #[test]
     fn worked_example_from_contracts_2_5() {
         assert_eq!(interleave(6, 3).raw(), 30); // contracts §2.5
-    }
-
-    /// The property the cell-plus-residual representation rests on: the 32-bit quantiser is a
-    /// *widening* of the 16-bit one, so both agree on which cell a coordinate belongs to. A
-    /// different scale factor or rounding mode passes every other test in this file and fails
-    /// this one — which is the whole reason it exists.
-    #[test]
-    fn fixed32_high_half_is_cell() {
-        let (min, max) = (-12.0, 25.5);
-        // Both clamps, both boundaries, and a spread of interior values including ones that
-        // land exactly on a cell edge.
-        let mut vs = vec![min, max, min - 1.0, max + 1.0, 0.0, 0.5, -11.999_999];
-        for i in 0..2000 {
-            vs.push(min + (max - min) * (i as f64) / 2000.0);
-        }
-        for v in vs {
-            assert_eq!(
-                (fixed32(v, min, max) >> 16) as u16,
-                cell(v, min, max),
-                "fixed32(v) >> 16 must equal cell(v) at v = {v}"
-            );
-        }
     }
 
     /// Concatenating the two stored words yields the 64-bit interleave of the two 32-bit axes.

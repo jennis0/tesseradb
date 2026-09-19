@@ -96,11 +96,7 @@ proptest! {
 }
 
 #[test]
-fn interleave_bits_matches_interleave_at_full_depth() {
-    let x: u16 = 0xBEEF;
-    let y: u16 = 0x1234;
-    assert_eq!(
-        tessera_spatial::interleave_bits(x as u32, y as u32, 16),
-        tessera_spatial::interleave(x, y).raw() as u64
-    );
+fn a_tile_prefix_interleaves_only_its_depth_bits() {
+    // Column 0b101, row 0b011 at depth 3: y bits at the odd positions, x bits at the even.
+    assert_eq!(tessera_spatial::interleave_bits(0b101, 0b011, 3), 0b01_10_11);
 }

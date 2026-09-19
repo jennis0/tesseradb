@@ -297,10 +297,7 @@ pub fn sort_batch(items: &mut Vec<TilerItem>, entity_ids: &mut Vec<EntityId>) ->
         "sort_batch: items and entity_ids must be the same length"
     );
 
-    // Pair each item with its Morton code up front so the sort comparator and the
-    // returned code vector both derive from one computation (avoids recomputing per
-    // comparison, and avoids the code and the sorted item order ever disagreeing).
-    let mut codes: Vec<u32> = items
+    let codes: Vec<u32> = items
         .iter()
         .map(|item| split32(item.qx, item.qy).0.raw())
         .collect();
@@ -312,20 +309,11 @@ pub fn sort_batch(items: &mut Vec<TilerItem>, entity_ids: &mut Vec<EntityId>) ->
             .then_with(|| items[a].tessera_id.cmp(&items[b].tessera_id))
     });
 
-    // Apply the permutation to `items`, `entity_ids` and `codes` in lockstep so all three
-    // stay aligned with the new row order.
-    let mut sorted_items = Vec::with_capacity(items.len());
-    let mut sorted_entity_ids = Vec::with_capacity(entity_ids.len());
-    let mut sorted_codes: Vec<u32> = Vec::with_capacity(items.len());
-    for &i in &order {
-        sorted_items.push(items[i].clone());
-        sorted_entity_ids.push(entity_ids[i]);
-        sorted_codes.push(codes[i]);
-    }
-    *items = sorted_items;
-    *entity_ids = sorted_entity_ids;
-    codes = sorted_codes;
-    codes
+    // Each index appears once in `order`, so every item moves and none is cloned.
+    let mut unsorted: Vec<Option<TilerItem>> = items.drain(..).map(Some).collect();
+    items.extend(order.iter().map(|&i| unsorted[i].take().expect("an index sorts once")));
+    *entity_ids = order.iter().map(|&i| entity_ids[i]).collect();
+    order.iter().map(|&i| codes[i]).collect()
 }
 
 #[cfg(test)]

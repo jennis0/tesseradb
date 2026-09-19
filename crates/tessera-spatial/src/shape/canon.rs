@@ -10,7 +10,7 @@
 //! caller's data the caller can see, not disclosures (`CLAUDE.md`, *what the strictness is for*).
 //! What does refuse is a coordinate that is not one.
 
-use crate::morton::{fixed32, Bounds};
+use crate::morton::{fixed32, Bounds, FIXED_SPAN};
 
 use super::conic::Conic;
 use super::project::{place, Space};
@@ -262,8 +262,8 @@ impl ShapeF64 {
         if report.outside {
             return Ok(Shape::Polygon(Polygon::default()));
         }
-        let sx = 4_294_967_296.0 / (extent.x_max - extent.x_min);
-        let sy = 4_294_967_296.0 / (extent.y_max - extent.y_min);
+        let sx = FIXED_SPAN / (extent.x_max - extent.x_min);
+        let sy = FIXED_SPAN / (extent.y_max - extent.y_min);
         let centre = (
             fixed32(cx, extent.x_min, extent.x_max),
             fixed32(cy, extent.y_min, extent.y_max),
@@ -289,56 +289,29 @@ fn clip_ring(ring: &[(f64, f64)], e: &Bounds) -> (Vec<(f64, f64)>, bool) {
         return (pts, false);
     }
     // Each side as: inside predicate and intersection with the side's line.
-    type Side = (
-        Box<dyn Fn((f64, f64)) -> bool>,
-        Box<dyn Fn((f64, f64), (f64, f64)) -> (f64, f64)>,
-    );
-    let sides: [Side; 4] = [
-        (
-            Box::new({
-                let m = e.x_min;
-                move |p: (f64, f64)| p.0 >= m
-            }),
-            Box::new({
-                let m = e.x_min;
-                move |a: (f64, f64), b: (f64, f64)| (m, a.1 + (b.1 - a.1) * (m - a.0) / (b.0 - a.0))
-            }),
-        ),
-        (
-            Box::new({
-                let m = e.x_max;
-                move |p: (f64, f64)| p.0 <= m
-            }),
-            Box::new({
-                let m = e.x_max;
-                move |a: (f64, f64), b: (f64, f64)| (m, a.1 + (b.1 - a.1) * (m - a.0) / (b.0 - a.0))
-            }),
-        ),
-        (
-            Box::new({
-                let m = e.y_min;
-                move |p: (f64, f64)| p.1 >= m
-            }),
-            Box::new({
-                let m = e.y_min;
-                move |a: (f64, f64), b: (f64, f64)| (a.0 + (b.0 - a.0) * (m - a.1) / (b.1 - a.1), m)
-            }),
-        ),
-        (
-            Box::new({
-                let m = e.y_max;
-                move |p: (f64, f64)| p.1 <= m
-            }),
-            Box::new({
-                let m = e.y_max;
-                move |a: (f64, f64), b: (f64, f64)| (a.0 + (b.0 - a.0) * (m - a.1) / (b.1 - a.1), m)
-            }),
-        ),
-    ];
-    for (inside, cut) in &sides {
+    // Sutherland–Hodgman, one side at a time: the axis, the bound, and whether inside is above it.
+    for (axis, bound, above) in [
+        (0, e.x_min, true),
+        (0, e.x_max, false),
+        (1, e.y_min, true),
+        (1, e.y_max, false),
+    ] {
         if pts.is_empty() {
             break;
         }
+        let along = |p: (f64, f64)| if axis == 0 { (p.0, p.1) } else { (p.1, p.0) };
+        let inside = |p: (f64, f64)| {
+            let (v, _) = along(p);
+            if above {
+                v >= bound
+            } else {
+                v <= bound
+            }
+        };
+        let cut = |a: (f64, f64), b: (f64, f64)| {
+            let ((av, aw), (bv, bw)) = (along(a), along(b));
+            along((bound, aw + (bw - aw) * (bound - av) / (bv - av)))
+        };
         let mut out = Vec::with_capacity(pts.len() + 4);
         let n = pts.len();
         for i in 0..n {

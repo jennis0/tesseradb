@@ -58,8 +58,14 @@ impl Conic {
     }
 
     fn q(&self, (x, y): GridPoint) -> f64 {
-        let dx = f64::from(x) - f64::from(self.cx);
-        let dy = f64::from(y) - f64::from(self.cy);
+        self.q_at(
+            f64::from(x) - f64::from(self.cx),
+            f64::from(y) - f64::from(self.cy),
+        )
+    }
+
+    /// `q` at an offset from the centre.
+    fn q_at(&self, dx: f64, dy: f64) -> f64 {
         self.m11 * dx * dx + 2.0 * self.m12 * dx * dy + self.m22 * dy * dy
     }
 
@@ -120,17 +126,15 @@ impl Conic {
             f64::from(r.y0) - f64::from(self.cy),
             f64::from(r.y1) - f64::from(self.cy),
         );
-        let q =
-            |dx: f64, dy: f64| self.m11 * dx * dx + 2.0 * self.m12 * dx * dy + self.m22 * dy * dy;
         let mut best = f64::INFINITY;
         for dx in [x0, x1] {
             // Minimise over dy ∈ [y0, y1]: derivative zero at dy = −m12·dx / m22.
             let dy = (-self.m12 * dx / self.m22).clamp(y0, y1);
-            best = best.min(q(dx, dy));
+            best = best.min(self.q_at(dx, dy));
         }
         for dy in [y0, y1] {
             let dx = (-self.m12 * dy / self.m11).clamp(x0, x1);
-            best = best.min(q(dx, dy));
+            best = best.min(self.q_at(dx, dy));
         }
         best
     }

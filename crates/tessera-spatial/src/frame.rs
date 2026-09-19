@@ -75,8 +75,7 @@ impl AlignedSquare {
     /// else), so the interesting inputs here are the frames a `none` view may declare — an
     /// arbitrary box — and a manifest written by hand.
     pub fn of_bounds(b: &Bounds) -> Option<AlignedSquare> {
-        if !(b.x_min.is_finite() && b.x_max.is_finite() && b.y_min.is_finite() && b.y_max.is_finite())
-        {
+        if !b.is_finite() {
             return None;
         }
         // The side length fixes the offset, so at most one square can match; the walk is over
@@ -190,7 +189,7 @@ fn fits(b: &Bounds, z: u32) -> bool {
 /// `z = 0` always does.
 pub fn snap_outward(b: &Bounds) -> Snap {
     debug_assert!(
-        b.x_min.is_finite() && b.x_max.is_finite() && b.y_min.is_finite() && b.y_max.is_finite(),
+        b.is_finite(),
         "snap_outward(): the box must be finite, got {b:?}"
     );
     debug_assert!(
