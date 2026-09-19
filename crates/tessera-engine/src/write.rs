@@ -7338,6 +7338,18 @@ impl Executor {
         if !self.may_publish() {
             return;
         }
+        // Every counted discard below is the same posture, so it is one closure rather than the
+        // shape repeated. It owns what it reports, so it borrows nothing the sequence below needs.
+        let discard = {
+            let health = Arc::clone(&self.health);
+            move |reason: &str| {
+                health.merge_failures.fetch_add(1, Ordering::Relaxed);
+                tracing::error!(
+                    "ALARM: discarding a completed merge: {reason}. Its files are orphans, every \
+                     consumed segment still stands, and the next tick re-plans"
+                );
+            }
+        };
         let live = self.generation.load_full();
         if live.prefix != completed.prefix {
             tracing::warn!("discarding a completed merge planned against a superseded prefix");
@@ -7364,13 +7376,9 @@ impl Executor {
         let manifest_n = match self.allocate_manifest_n() {
             Ok(n) => n,
             Err(e) => {
-                self.health.merge_failures.fetch_add(1, Ordering::Relaxed);
-                tracing::error!(
-                    error = %e,
-                    "ALARM: a completed merge's side-manifest number could not be allocated; its \
-                     files are orphans, every consumed segment still stands, and the next tick \
-                     re-plans"
-                );
+                discard(&format!(
+                    "its side-manifest number could not be allocated ({e})"
+                ));
                 return;
             }
         };
@@ -7385,12 +7393,7 @@ impl Executor {
             &mut manifest,
             None,
         ) {
-            self.health.merge_failures.fetch_add(1, Ordering::Relaxed);
-            tracing::error!(
-                error = %e,
-                "ALARM: a completed merge's side-manifest could not be committed; its files are \
-                 orphans, every consumed segment still stands, and the next tick re-plans"
-            );
+            discard(&format!("its side-manifest could not be committed ({e})"));
             return;
         }
 
@@ -9334,6 +9337,18 @@ impl Executor {
         if !self.may_publish() {
             return;
         }
+        // Every counted discard below is the same posture, so it is one closure rather than the
+        // shape repeated. It owns what it reports, so it borrows nothing the sequence below needs.
+        let discard = {
+            let health = Arc::clone(&self.health);
+            move |reason: &str| {
+                health.coalesce_failures.fetch_add(1, Ordering::Relaxed);
+                tracing::error!(
+                    "ALARM: discarding a completed coalesce: {reason}. Its files are orphans, \
+                     every consumed entry still stands, and the next tick re-plans"
+                );
+            }
+        };
         let live = self.generation.load_full();
         if live.prefix != completed.prefix {
             tracing::warn!(
@@ -9426,16 +9441,10 @@ impl Executor {
             ) {
                 Ok(stack) => Some(Arc::new(stack)),
                 Err(e) => {
-                    self.health
-                        .coalesce_failures
-                        .fetch_add(1, Ordering::Relaxed);
-                    tracing::error!(
-                        error = %e,
-                        "ALARM: a completed coalesce's entity→term extent would not compose into \
-                         a stack; discarding it rather than publishing a manifest naming a layer \
-                         this process cannot serve. Its files are orphans and every consumed \
-                         entry still stands"
-                    );
+                    discard(&format!(
+                        "its entity→term extent would not compose into a stack ({e}), and a \
+                         manifest must not name a layer this process cannot serve"
+                    ));
                     return;
                 }
             }
@@ -9481,41 +9490,28 @@ impl Executor {
                 ) {
                     Ok(stack) => Some(Arc::new(stack)),
                     Err(e) => {
-                        self.health
-                            .coalesce_failures
-                            .fetch_add(1, Ordering::Relaxed);
-                        tracing::error!(
-                            error = %e,
-                            "ALARM: a completed coalesce's record extent would not compose into a \
-                             stack; discarding it rather than publishing a manifest naming a \
-                             layer this process cannot serve. Its files are orphans and every \
-                             consumed entry still stands"
-                        );
+                        discard(&format!(
+                            "its record extent would not compose into a stack ({e}), and a \
+                             manifest must not name a layer this process cannot serve"
+                        ));
                         return;
                     }
                 }
             };
-        let filter_columns = match live.filter_columns.with_coalesced(
-            &windows,
-            &text_windows,
-            entity_terms,
-            records,
-        ) {
-            Ok(columns) => Arc::new(columns),
-            Err(e) => {
-                self.health
-                    .coalesce_failures
-                    .fetch_add(1, Ordering::Relaxed);
-                tracing::error!(
-                    error = %e,
-                    "ALARM: a completed coalesce's attribute extents would not replace the layers \
-                     they consumed; discarding it rather than publishing a manifest naming a \
-                     column this process cannot serve. Its files are orphans and every consumed \
-                     entry still stands"
-                );
-                return;
-            }
-        };
+        let filter_columns =
+            match live
+                .filter_columns
+                .with_coalesced(&windows, &text_windows, entity_terms, records)
+            {
+                Ok(columns) => Arc::new(columns),
+                Err(e) => {
+                    discard(&format!(
+                        "its attribute extents would not replace the layers they consumed ({e}), \
+                         and a manifest must not name a column this process cannot serve"
+                    ));
+                    return;
+                }
+            };
         // Complete current state, serialised fresh from the overlay this publication carries —
         // the same rule every other manifest write follows (contracts §2.3).
         write_deny_state(&mut manifest, &live.overlay);
@@ -9528,15 +9524,9 @@ impl Executor {
         let manifest_n = match self.allocate_manifest_n() {
             Ok(n) => n,
             Err(e) => {
-                self.health
-                    .coalesce_failures
-                    .fetch_add(1, Ordering::Relaxed);
-                tracing::error!(
-                    error = %e,
-                    "ALARM: a completed coalesce's side-manifest number could not be allocated; \
-                     its files are orphans, every consumed entry still stands, and the next tick \
-                     re-plans"
-                );
+                discard(&format!(
+                    "its side-manifest number could not be allocated ({e})"
+                ));
                 return;
             }
         };
@@ -9551,14 +9541,7 @@ impl Executor {
             &mut manifest,
             None,
         ) {
-            self.health
-                .coalesce_failures
-                .fetch_add(1, Ordering::Relaxed);
-            tracing::error!(
-                error = %e,
-                "ALARM: a completed coalesce's side-manifest could not be committed; its files \
-                 are orphans, every consumed entry still stands, and the next tick re-plans"
-            );
+            discard(&format!("its side-manifest could not be committed ({e})"));
             return;
         }
 
@@ -9572,14 +9555,15 @@ impl Executor {
         ) {
             Ok(index) => index,
             Err(e) => {
+                // Not the discard above: this manifest is already committed. The process keeps
+                // serving the pre-coalesce sidecar, which answers identically.
                 self.health
                     .coalesce_failures
                     .fetch_add(1, Ordering::Relaxed);
                 tracing::error!(
                     error = %e,
                     "ALARM: a coalesce's manifest committed but its external-id sidecar would not \
-                     open; the process keeps serving the pre-coalesce sidecar, which answers \
-                     identically, and a restart opens the committed manifest"
+                     open; a restart opens the committed manifest and no operator action is owed"
                 );
                 return;
             }
@@ -16294,6 +16278,18 @@ impl Executor {
         if !self.may_publish() {
             return false;
         }
+        // Every counted discard below is the same posture, so it is one closure rather than the
+        // shape repeated. It owns what it reports, so it borrows nothing the sequence below needs.
+        let discard = {
+            let health = Arc::clone(&self.health);
+            move |reason: &str| {
+                health.flush_failures.fetch_add(1, Ordering::Relaxed);
+                tracing::error!(
+                    "ALARM: discarding a completed flush: {reason}. Its files are orphans, the \
+                     buffer is retained, and the next tick re-plans"
+                );
+            }
+        };
         let live = self.generation.load_full();
         if live.prefix != completed.prefix {
             // A compaction moved the prefix under this flush. Nothing to apply it to.
@@ -16416,13 +16412,10 @@ impl Executor {
             ) {
                 Ok(columns) => Arc::new(columns),
                 Err(e) => {
-                    self.health.flush_failures.fetch_add(1, Ordering::Relaxed);
-                    tracing::error!(
-                        error = %e,
-                        "ALARM: a completed flush wrote a group-scoped column this process cannot \
-                         open; discarding it rather than publishing a manifest naming a column no \
-                         request could read. Its files are orphans and the buffer is retained"
-                    );
+                    discard(&format!(
+                        "it wrote a group-scoped column this process cannot open ({e}), and a \
+                         manifest must not name a column no request could read"
+                    ));
                     return false;
                 }
             }
@@ -16435,13 +16428,10 @@ impl Executor {
         ) {
             Ok(columns) => Arc::new(columns),
             Err(e) => {
-                self.health.flush_failures.fetch_add(1, Ordering::Relaxed);
-                tracing::error!(
-                    error = %e,
-                    "ALARM: a completed flush's filter extents would not compose onto the live \
-                     columns; discarding it rather than publishing a bundle whose filter answers \
-                     would be wrong. Its files are orphans and the buffer is retained"
-                );
+                discard(&format!(
+                    "its filter extents would not compose onto the live columns ({e}), and a \
+                     bundle published over that would answer filters wrongly"
+                ));
                 return false;
             }
         };
@@ -16453,12 +16443,9 @@ impl Executor {
         let manifest_n = match self.allocate_manifest_n() {
             Ok(n) => n,
             Err(e) => {
-                self.health.flush_failures.fetch_add(1, Ordering::Relaxed);
-                tracing::error!(
-                    error = %e,
-                    "ALARM: a completed flush's side-manifest number could not be allocated; its \
-                     files are orphans, the buffer is retained, and the next tick re-plans"
-                );
+                discard(&format!(
+                    "its side-manifest number could not be allocated ({e})"
+                ));
                 return false;
             }
         };
@@ -16628,12 +16615,7 @@ impl Executor {
             &mut manifest,
             None,
         ) {
-            self.health.flush_failures.fetch_add(1, Ordering::Relaxed);
-            tracing::error!(
-                error = %e,
-                "ALARM: a completed flush's side-manifest could not be committed; its files are \
-                 orphans, the buffer is retained, and the next tick will re-plan"
-            );
+            discard(&format!("its side-manifest could not be committed ({e})"));
             return false;
         }
         *mark = self
