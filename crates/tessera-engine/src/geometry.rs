@@ -47,7 +47,7 @@ use croaring::Bitmap;
 use tessera_authz::{DeltaTier, Dict, FragmentCache, PostingsReader};
 use tessera_store::Bundle;
 
-use crate::session::ExternalIdIndex;
+use crate::engine::ExternalIdIndex;
 use crate::Generation;
 
 /// One geometry publication, whole — **the single seam a generation swap may go through**, and the
@@ -149,7 +149,7 @@ impl GeometryPublication {
     }
 
     /// Carry a [`PrefixRotation`] — what a fold's publication makes, and nothing else. Assembled
-    /// by [`crate::session::Engine::publish_rotated_prefix_for_test`], which is the only producer.
+    /// by [`crate::engine::Engine::publish_rotated_prefix_for_test`], which is the only producer.
     pub(crate) fn rotating(mut self, rotation: PrefixRotation) -> Self {
         self.rotation = Some(rotation);
         self
@@ -230,7 +230,7 @@ impl std::fmt::Display for GeometryRefused {
 impl std::error::Error for GeometryRefused {}
 
 /// Whether `(prefix, segments_version)` may be published over `live` — the identity guard
-/// [`crate::session::Engine::publish_geometry`] runs inside its compare-and-swap loop.
+/// [`crate::engine::Engine::publish_geometry`] runs inside its compare-and-swap loop.
 ///
 /// **`segments_version` must strictly increase, and this refuses rather than warns**, for the
 /// reason this module's doc gives. The mirror case is equally refused: republishing an *older*

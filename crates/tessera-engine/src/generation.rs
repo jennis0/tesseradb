@@ -64,7 +64,7 @@ pub struct GenerationParts {
     /// entities' keys (compaction §3, pass 3) and rewrites the locator into a new prefix, so a
     /// request pairing the new geometry with the pre-fold sidecar would resolve through files the
     /// old prefix holds and reclamation is about to delete. One pointer, one answer.
-    pub(crate) external_index: Arc<crate::session::ExternalIdIndex>,
+    pub(crate) external_index: Arc<crate::engine::ExternalIdIndex>,
     /// One sparse delta postings tier per flush segment, in publication order.
     ///
     /// A fragment build unions the base with every live tier over the session's satisfied terms
@@ -274,7 +274,7 @@ impl Generation {
         let dir = tempfile::TempDir::new().expect("a temp dir");
         let postings_path = dir.path().join("postings.arrow");
         tessera_authz::write_postings(&postings_path, &[], 32).expect("an empty postings file");
-        let external_index = crate::session::ExternalIdIndex::open(
+        let external_index = crate::engine::ExternalIdIndex::open(
             &manifest,
             &tessera_store::manifest::SegmentsManifest::empty(),
             std::path::Path::new("fixture-prefix-never-read"),

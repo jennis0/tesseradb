@@ -874,7 +874,7 @@ impl Executor {
         // The sidecar reads the *new* manifest, so it must be built after the edit and before the
         // swap. It is built here, on the executor, because a failure must abandon the publication
         // rather than leave the generation naming runs no sidecar can resolve.
-        let next_index = match crate::session::ExternalIdIndex::open(
+        let next_index = match crate::engine::ExternalIdIndex::open(
             &live.bundle.manifest,
             &manifest,
             &self.prefix_dir(&live),

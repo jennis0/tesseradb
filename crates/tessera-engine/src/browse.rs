@@ -49,7 +49,7 @@ use tessera_types::{EntityId, TesseraId};
 use crate::compose::{compose, MaskedSet, WholeMask};
 use crate::filter::{FilterExpr, RoutedFilter};
 use crate::viewport::{response_rungs, segments_with_row_bases};
-use crate::session::Result;
+use crate::error::Result;
 use crate::EngineError;
 
 /// Which of §4's three forms a request takes. One verb, three forms (§9 (a), owner ruling).

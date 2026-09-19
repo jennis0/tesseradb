@@ -1154,7 +1154,7 @@ pub const DEFAULT_COMMIT_WINDOW_MAX_ROWS: usize = 10_000;
 ///
 /// Both live here, away from the rest of [`Engine`]'s methods, because both read the write
 /// executor's state and the argument for their exactness is this module's.
-impl crate::session::Engine {
+impl crate::engine::Engine {
     /// Publication cycles completed since this engine's executor started. `GET /control/status`
     /// publishes it as `publication`, and a client compares it against the number its flush
     /// request was answered with.
