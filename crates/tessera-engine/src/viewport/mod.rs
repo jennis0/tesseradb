@@ -375,18 +375,7 @@ impl Engine {
 
         // The artifacts frame, after the counts and before any point. It is an aggregate channel,
         // not a point one — a cluster's masked count belongs beside a tile's, not beside a mark.
-        let (artifacts, served_layers) = self.serve_artifacts(
-            &served,
-            &tiling.ranges,
-            &mask,
-            req.layers,
-            req.artifact_budget,
-            req.levels,
-            req.computed,
-            req.zoom,
-            req.artifact_rows,
-            &req.cancel,
-        )?;
+        let (artifacts, served_layers) = self.serve_artifacts(&served, &mask, &tiling, &req)?;
         if !artifacts.is_empty() {
             sink.artifacts(&artifacts)
                 .map_err(|SinkClosed| EngineError::Cancelled)?;
