@@ -268,7 +268,13 @@ pub(super) fn refusal_of(e: tessera_lifecycle::RegistryError) -> ExecError {
 }
 
 /// What `WritePath::publish_artifacts` answers: the entities in the caller's order and the
-/// batch's counts, as `Ack::ArtifactsPublished` carries them.
+/// batch's counts (`ingest.md` §1.5).
+///
+/// A key the level held is accepted under the fill rule and is not created, so `created` is how
+/// many artifacts the batch minted, `without_content` how many of those carry no content on a
+/// layer declaring some (R5), `filled` how many fixed parts were filled on held artifacts, and
+/// `joined` how many members joined held artifacts. Each is bounded by the caller's own request
+/// and names no artifact.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PublishedBatch {
     pub(crate) entities: Vec<EntityId>,
@@ -279,8 +285,7 @@ pub(crate) struct PublishedBatch {
 }
 
 impl Executor {
-    pub(super) fn execute(&mut self, job: Job) {
-        let Job { command, respond } = job;
+    pub(super) fn execute(&mut self, command: Command) {
         match command {
             // Unreachable on the deny lane while the lane follows the command; handled so the
             // executor stays total over `Command`. A window of one entry is exactly the
@@ -294,17 +299,18 @@ impl Executor {
                 batch_id,
                 body_hash,
                 artifacts,
+                reply,
             } => {
                 let window = CommitWindow::new(self.next_window_seq());
                 let (window, _) =
-                    self.admit_ingest(window, rows, batch_id, body_hash, artifacts, respond);
+                    self.admit_ingest(window, rows, batch_id, body_hash, artifacts, reply);
                 if !window.is_empty() {
                     self.close_window(window);
                 }
             }
             // A window of one entry is exactly the per-command semantics this path used to have,
             // which is why there is no second deny implementation to keep in step with the first.
-            Command::Change { entity, op } => {
+            Command::Change { entity, op, reply } => {
                 let mut entries = vec![DenyEntry {
                     record: WalRecord::ChangeByEntity {
                         entity_id: entity,
@@ -312,7 +318,7 @@ impl Executor {
                     },
                     entity,
                     op,
-                    respond: Some(respond),
+                    respond: Some(reply),
                 }];
                 // The cascade rides this path too — a window of one is still a window, and a
                 // deletion admitted here that skipped it would strand every artifact depending on
@@ -320,58 +326,60 @@ impl Executor {
                 self.cascade_dependents(&mut entries);
                 self.commit_denies(entries)
             }
-            Command::RegisterLayer { declaration } => self.commit_registry(
+            Command::RegisterLayer { declaration, reply } => self.commit_registry(
                 |registry, alloc| registry.prepare_create(*declaration, alloc),
                 |record| match record {
-                    WalRecord::LayerCreate { layer_entity, .. } => Ack::LayerRegistered {
-                        entity: *layer_entity,
-                    },
+                    WalRecord::LayerCreate { layer_entity, .. } => *layer_entity,
                     _ => unreachable!("prepare_create returns a LayerCreate"),
                 },
-                respond,
+                reply,
             ),
-            Command::DropLayer { name } => self.commit_registry(
-                |registry, _| registry.prepare_drop(&name),
-                |_| Ack::LayerDropped,
-                respond,
-            ),
+            Command::DropLayer { name, reply } => {
+                self.commit_registry(|registry, _| registry.prepare_drop(&name), |_| (), reply)
+            }
             Command::CreateView {
                 group,
                 key,
                 visibility,
                 metadata,
-            } => self.commit_view_create(group, key, visibility, metadata, respond),
+                reply,
+            } => self.commit_view_create(group, key, visibility, metadata, reply),
             Command::DropView {
                 group,
                 key,
                 delete_dangling,
-            } => self.commit_view_drop(group, key, delete_dangling, respond),
-            Command::DeclareAttribute { request } => {
-                self.commit_attribute_declare(*request, respond)
+                reply,
+            } => self.commit_view_drop(group, key, delete_dangling, reply),
+            Command::DeclareAttribute { request, reply } => {
+                self.commit_attribute_declare(*request, reply)
             }
-            Command::Values { request } => self.commit_values(*request, respond),
-            Command::DeclareVocabulary { request } => {
-                self.commit_vocabulary_declare(*request, respond)
+            Command::Values { request, reply } => self.commit_values(*request, reply),
+            Command::DeclareVocabulary { request, reply } => {
+                self.commit_vocabulary_declare(*request, reply)
             }
-            Command::MintVocabularyValues { vocabulary, values } => {
-                self.commit_vocabulary_values(vocabulary, values, respond)
+            Command::MintVocabularyValues {
+                vocabulary,
+                values,
+                reply,
+            } => self.commit_vocabulary_values(vocabulary, values, reply),
+            Command::CreateViewGroup { declaration, reply } => {
+                self.commit_view_group_create(*declaration, reply)
             }
-            Command::CreateViewGroup { declaration } => {
-                self.commit_view_group_create(*declaration, respond)
-            }
-            Command::CreatePlainView { declaration } => {
-                self.commit_plain_view_create(*declaration, respond)
+            Command::CreatePlainView { declaration, reply } => {
+                self.commit_plain_view_create(*declaration, reply)
             }
             Command::PublishArtifacts {
                 layer,
                 level,
                 artifacts,
-            } => self.commit_artifacts(layer, level, artifacts, respond),
+                reply,
+            } => self.commit_artifacts(layer, level, artifacts, reply),
             Command::GrowMemberships {
                 layer,
                 level,
                 joins,
-            } => self.commit_growth(layer, level, joins, respond),
+                reply,
+            } => self.commit_growth(layer, level, joins, reply),
         }
     }
 
@@ -389,7 +397,7 @@ impl Executor {
         layer: String,
         level: u32,
         mut incoming: Vec<IncomingArtifact>,
-        respond: Responder,
+        reply: Reply<PublishedBatch>,
     ) {
         // Read before the record is applied, because it is what says a held row form is the form
         // this publication follows — see [`Self::bring_artifacts_forward`].
@@ -409,7 +417,7 @@ impl Executor {
         // same store), and the walk of the view's entities is the most expensive thing this route
         // does — so the refusal spends nothing, as every other refusal on this path does not.
         if let Err(e) = self.materialise_exclusions(&layer, level, &mut incoming) {
-            respond.fail(e);
+            reply.fail(e);
             return;
         }
         let prepared = self.live.with_publication_state(|registry, store, alloc| {
@@ -418,7 +426,7 @@ impl Executor {
         let prepared = match prepared {
             Ok(prepared) => prepared,
             Err(e) => {
-                respond.fail(refusal_of(e));
+                reply.fail(refusal_of(e));
                 return;
             }
         };
@@ -431,34 +439,31 @@ impl Executor {
         if records.is_empty() {
             // Every key was held and every part identical: nothing to append, on
             // `commit_growth`'s no-op rule, and the acknowledgement is the held artifacts' own.
-            let ack = Ack::ArtifactsPublished {
+            reply.ack(PublishedBatch {
                 entities: prepared.entities,
                 created: 0,
                 without_content: 0,
                 filled: 0,
                 joined: 0,
-            };
-            respond.ack(ack);
+            });
             return;
         }
 
         let positions = match self.make_durable(&records, "an artifact publication") {
             Ok(positions) => positions,
             Err(e) => {
-                respond.fail(e);
+                reply.fail(e);
                 return;
             }
         };
         self.apply_artifact_records(&records, &positions);
-        respond.ack(
-            Ack::ArtifactsPublished {
-                entities: prepared.entities,
-                created: prepared.created,
-                without_content: prepared.without_content,
-                filled: prepared.fills.len() as u64,
-                joined: prepared.joined,
-            },
-        );
+        reply.ack(PublishedBatch {
+            entities: prepared.entities,
+            created: prepared.created,
+            without_content: prepared.without_content,
+            filled: prepared.fills.len() as u64,
+            joined: prepared.joined,
+        });
     }
 
     /// Materialise every membership this batch spelled by exclusion, and answer the refusal where
@@ -591,7 +596,7 @@ impl Executor {
         layer: String,
         level: u32,
         joins: Vec<tessera_lifecycle::IncomingGrowth>,
-        respond: Responder,
+        reply: Reply<Vec<tessera_lifecycle::MembershipGrown>>,
     ) {
         // `commit_artifacts`' reason: the version a held row form must be at for this delta to be
         // the one it is missing.
@@ -606,7 +611,7 @@ impl Executor {
         let (prepared, grown) = match prepared {
             Ok(prepared) => prepared,
             Err(e) => {
-                respond.fail(refusal_of(e));
+                reply.fail(refusal_of(e));
                 return;
             }
         };
@@ -621,20 +626,19 @@ impl Executor {
             // Every key resolved, nothing was joining and every part was held identically. No
             // record is owed for a no-op, and appending an empty one would pin the log at a
             // growth that changed nothing.
-            respond.ack(
-                Ack::MembershipsGrown { grown });
+            reply.ack(grown);
             return;
         }
 
         let positions = match self.make_durable(&records, "a membership growth") {
             Ok(positions) => positions,
             Err(e) => {
-                respond.fail(e);
+                reply.fail(e);
                 return;
             }
         };
         self.apply_artifact_records(&records, &positions);
-        respond.ack(Ack::MembershipsGrown { grown });
+        reply.ack(grown);
     }
 
     /// Validate, allocate, append, sync, apply — in that order, which is the whole of the
@@ -647,21 +651,21 @@ impl Executor {
     /// and not in the log comes back from a restart as a name that is free again, having already
     /// handed a caller a `tessera_id` for its entity. So the append comes first and a failure means
     /// the layer does not exist — which is what the caller is told.
-    pub(super) fn commit_registry(
+    pub(super) fn commit_registry<T>(
         &mut self,
         prepare: impl FnOnce(
             &mut LayerRegistry,
             &mut Allocator,
         )
             -> std::result::Result<WalRecord, tessera_lifecycle::RegistryError>,
-        ack_of: impl FnOnce(&WalRecord) -> Ack,
-        respond: Responder,
+        ack_of: impl FnOnce(&WalRecord) -> T,
+        reply: Reply<T>,
     ) {
         let prepared = self.live.with_registry_and_allocator(prepare);
         let record = match prepared {
             Ok(record) => record,
             Err(e) => {
-                respond.fail(ExecError::LayerRefused {
+                reply.fail(ExecError::LayerRefused {
                     detail: e.to_string(),
                 });
                 return;
@@ -669,7 +673,7 @@ impl Executor {
         };
 
         if let Err(e) = self.make_durable(&[&record], "a layer registration") {
-            respond.fail(e);
+            reply.fail(e);
             return;
         }
 
@@ -697,7 +701,7 @@ impl Executor {
         // log. Marking the manifest dirty is what gets it published at the next flush, on the same
         // mechanism a deny uses to reach `SEGMENTS-<n>.json`.
         self.deny_dirty = true;
-        respond.ack(ack);
+        reply.ack(ack);
     }
 
     /// `PUT /control/views/{group}/{key}` — create a view of a group while the service runs
@@ -718,7 +722,7 @@ impl Executor {
         key: String,
         visibility: Option<Vec<String>>,
         metadata: std::collections::BTreeMap<String, tessera_types::view::ViewMetadataValue>,
-        respond: Responder,
+        reply: Reply<()>,
     ) {
         let started = std::time::Instant::now();
         let generation = self.generation.load_full();
@@ -732,7 +736,7 @@ impl Executor {
             // The same 404 an unknown view id is, and for the same reason: a group nobody declared
             // and a key no view holds must be one answer, or the difference between them is an
             // existence oracle over the roster.
-            respond.fail(ExecError::ViewUnknown {
+            reply.fail(ExecError::ViewUnknown {
                 detail: format!(
                     "unknown view group '{group}'. A group is declared at a build and its views \
                      grow at a running service (views §3.1); there is no create that mints a group"
@@ -751,12 +755,12 @@ impl Executor {
         let record = match prepared {
             Ok(record) => record,
             Err(e) => {
-                respond.fail(roster_error(e));
+                reply.fail(roster_error(e));
                 return;
             }
         };
         if let Err(e) = self.make_durable(&[&record], "a view creation") {
-            respond.fail(e);
+            reply.fail(e);
             return;
         }
         self.live.with_roster(|roster| roster.apply(&record));
@@ -765,7 +769,7 @@ impl Executor {
         // roster reaches `SEGMENTS-<n>.json` on the mechanism a deny already uses (`views.md`
         // §3.2: the durable home is the segments manifest).
         self.deny_dirty = true;
-        respond.ack(Ack::ViewCreated);
+        reply.ack(());
     }
 
     /// `PUT /control/attributes` — declare an attribute column while the service runs
@@ -806,7 +810,11 @@ impl Executor {
     /// **One append, one fsync, one apply.** The values record and the growth records its layer
     /// columns produced are made durable together, so there is no state in which a cell is filled
     /// and its membership is not (write-path §7.3).
-    pub(super) fn commit_values(&mut self, request: tessera_lifecycle::ValuesRequest, respond: Responder) {
+    pub(super) fn commit_values(
+        &mut self,
+        request: tessera_lifecycle::ValuesRequest,
+        reply: Reply<ValuesReceipt>,
+    ) {
         let started = std::time::Instant::now();
         let generation = self.generation.load_full();
 
@@ -816,7 +824,7 @@ impl Executor {
         if let Some((held_hash, _)) = self.live.accepted_batch(&request.batch_id) {
             if held_hash != request.body_hash {
                 self.ack_failed(
-                    &respond,
+                    &reply,
                     ExecError::BatchConflict {
                         batch_id: request.batch_id.clone(),
                     },
@@ -828,7 +836,7 @@ impl Executor {
         let planned = match plan_fills(&generation, &request) {
             Ok(planned) => planned,
             Err(e) => {
-                self.ack_failed(&respond, e);
+                self.ack_failed(&reply, e);
                 return;
             }
         };
@@ -841,7 +849,7 @@ impl Executor {
         let (mut memberships, mint_edges) = match self.resolve_memberships(&request.artifacts) {
             Ok(resolved) => resolved,
             Err(detail) => {
-                self.ack_failed(&respond, ExecError::LayerRefused { detail });
+                self.ack_failed(&reply, ExecError::LayerRefused { detail });
                 return;
             }
         };
@@ -850,7 +858,7 @@ impl Executor {
         let wanted = match values_mint_plan(&memberships, &request.rows) {
             Ok(wanted) => wanted,
             Err(detail) => {
-                self.ack_failed(&respond, ExecError::ValuesRefused { detail });
+                self.ack_failed(&reply, ExecError::ValuesRefused { detail });
                 return;
             }
         };
@@ -864,7 +872,7 @@ impl Executor {
                     mints = records;
                 }
                 Err(detail) => {
-                    self.ack_failed(&respond, ExecError::LayerRefused { detail });
+                    self.ack_failed(&reply, ExecError::LayerRefused { detail });
                     return;
                 }
             }
@@ -875,7 +883,7 @@ impl Executor {
         {
             Ok(records) => records,
             Err(detail) => {
-                self.ack_failed(&respond, ExecError::ValuesRefused { detail });
+                self.ack_failed(&reply, ExecError::ValuesRefused { detail });
                 return;
             }
         };
@@ -918,7 +926,7 @@ impl Executor {
         let positions = match self.make_durable(&durable, "a values batch") {
             Ok(positions) => positions,
             Err(e) => {
-                respond.fail(e);
+                reply.fail(e);
                 return;
             }
         };
@@ -989,20 +997,18 @@ impl Executor {
                  open, so the artifacts were created"
             );
         }
-        respond.ack(
-            Ack::ValuesFilled {
-                filled: planned.filled,
-                held: planned.held,
-                joined,
-                minted: minted_count,
-            },
-        );
+        reply.ack(ValuesReceipt {
+            filled: planned.filled,
+            held: planned.held,
+            joined,
+            minted: minted_count,
+        });
     }
 
     pub(super) fn commit_attribute_declare(
         &mut self,
         request: tessera_lifecycle::AttributeRequest,
-        respond: Responder,
+        reply: Reply<bool>,
     ) {
         let started = std::time::Instant::now();
         let generation = self.generation.load_full();
@@ -1013,13 +1019,12 @@ impl Executor {
         );
         let compiled = match resolved {
             Ok(crate::attributes::Resolution::Existing) => {
-                respond.ack(
-                    Ack::AttributeDeclared { existing: true });
+                reply.ack(true);
                 return;
             }
             Ok(crate::attributes::Resolution::New(compiled)) => compiled,
             Err(e) => {
-                respond.fail(e);
+                reply.fail(e);
                 return;
             }
         };
@@ -1042,7 +1047,7 @@ impl Executor {
                 ) {
                     Ok(columns) => Arc::new(columns),
                     Err(e) => {
-                        respond.fail(ExecError::AttributeRefused {
+                        reply.fail(ExecError::AttributeRefused {
                             detail: format!("attribute '{}': {e}", request.name),
                         });
                         return;
@@ -1057,7 +1062,7 @@ impl Executor {
             declaration: Box::new(compiled.declaration(request.title.clone())),
         };
         if let Err(e) = self.make_durable(&[&record], "an attribute declaration") {
-            respond.fail(e);
+            reply.fail(e);
             return;
         }
 
@@ -1094,7 +1099,7 @@ impl Executor {
         // Durable in the log and not yet in a manifest, and a rotation reclaims the log: the
         // declaration reaches `SEGMENTS-<n>.json` on the mechanism a deny already uses.
         self.deny_dirty = true;
-        respond.ack(Ack::AttributeDeclared { existing: false });
+        reply.ack(false);
     }
 
     /// `PUT /control/view_groups/{name}` — declare a view group while the service runs
@@ -1111,7 +1116,7 @@ impl Executor {
     pub(super) fn commit_view_group_create(
         &mut self,
         declaration: tessera_lifecycle::wal::ViewGroupDeclaration,
-        respond: Responder,
+        reply: Reply<bool>,
     ) {
         let started = std::time::Instant::now();
         let generation = self.generation.load_full();
@@ -1120,13 +1125,12 @@ impl Executor {
             &generation.bundle.manifest,
         ) {
             Ok(crate::view_declarations::Resolution::Existing) => {
-                respond.ack(
-                    Ack::ViewGroupCreated { existing: true });
+                reply.ack(true);
                 return;
             }
             Ok(crate::view_declarations::Resolution::New(compiled)) => *compiled,
             Err(e) => {
-                respond.fail(e);
+                reply.fail(e);
                 return;
             }
         };
@@ -1134,7 +1138,7 @@ impl Executor {
             declaration: Box::new(declaration),
         };
         if let Err(e) = self.make_durable(&[&record], "a view group declaration") {
-            respond.fail(e);
+            reply.fail(e);
             return;
         }
         self.live
@@ -1147,7 +1151,7 @@ impl Executor {
         // Durable in the log and not yet in a manifest, and a rotation reclaims the log: the
         // declaration reaches `SEGMENTS-<n>.json` on the mechanism a deny already uses.
         self.deny_dirty = true;
-        respond.ack(Ack::ViewGroupCreated { existing: false });
+        reply.ack(false);
     }
 
     /// `PUT /control/views/{name}` — create a plain view while the service runs (`ingest.md`
@@ -1161,7 +1165,7 @@ impl Executor {
     pub(super) fn commit_plain_view_create(
         &mut self,
         declaration: tessera_lifecycle::wal::PlainViewDeclaration,
-        respond: Responder,
+        reply: Reply<bool>,
     ) {
         let started = std::time::Instant::now();
         let generation = self.generation.load_full();
@@ -1170,13 +1174,12 @@ impl Executor {
             &generation.bundle.manifest,
         ) {
             Ok(crate::view_declarations::Resolution::Existing) => {
-                respond.ack(
-                    Ack::PlainViewCreated { existing: true });
+                reply.ack(true);
                 return;
             }
             Ok(crate::view_declarations::Resolution::New(compiled)) => *compiled,
             Err(e) => {
-                respond.fail(e);
+                reply.fail(e);
                 return;
             }
         };
@@ -1184,7 +1187,7 @@ impl Executor {
             declaration: Box::new(declaration),
         };
         if let Err(e) = self.make_durable(&[&record], "a plain view creation") {
-            respond.fail(e);
+            reply.fail(e);
             return;
         }
         self.live
@@ -1195,7 +1198,7 @@ impl Executor {
             .with_plain_views(std::slice::from_ref(&compiled));
         self.publish_view_manifest(&generation, manifest, started);
         self.deny_dirty = true;
-        respond.ack(Ack::PlainViewCreated { existing: false });
+        reply.ack(false);
     }
 
     /// Publish a generation carrying `manifest` and nothing else moved — the swap a group
@@ -1237,19 +1240,25 @@ impl Executor {
     pub(super) fn commit_vocabulary_declare(
         &mut self,
         request: tessera_lifecycle::VocabularyRequest,
-        respond: Responder,
+        reply: Reply<VocabularyDeclared>,
     ) {
         let started = std::time::Instant::now();
         let generation = self.generation.load_full();
         let compiled = match crate::vocabularies::resolve(&request, &generation.bundle.manifest) {
             Ok(crate::vocabularies::Resolution::Existing) => {
                 // A redeclaration is the same vocabulary, and its values are a page against it.
-                self.commit_vocabulary_page(request.name, request.values, true, respond);
+                self.commit_vocabulary_page(request.name, request.values, reply, |page| {
+                    VocabularyDeclared {
+                        existing: true,
+                        added: page.added,
+                        titles: page.titles,
+                    }
+                });
                 return;
             }
             Ok(crate::vocabularies::Resolution::New(compiled)) => *compiled,
             Err(e) => {
-                respond.fail(e);
+                reply.fail(e);
                 return;
             }
         };
@@ -1269,7 +1278,7 @@ impl Executor {
             match minter.mint(&value.key) {
                 Ok(minted) => codes.push((value.key.clone(), minted.code())),
                 Err(e) => {
-                    respond.fail(ExecError::VocabularyRefused {
+                    reply.fail(ExecError::VocabularyRefused {
                         detail: e.to_string(),
                     });
                     return;
@@ -1285,7 +1294,7 @@ impl Executor {
             )),
         };
         if let Err(e) = self.make_durable(&[&record], "a vocabulary declaration") {
-            respond.fail(e);
+            reply.fail(e);
             return;
         }
 
@@ -1308,15 +1317,13 @@ impl Executor {
         // Durable in the log and not yet in a manifest, and a rotation reclaims the log: the
         // declaration reaches `SEGMENTS-<n>.json` on the mechanism a deny already uses.
         self.deny_dirty = true;
-        respond.ack(
-            Ack::VocabularyDeclared {
-                existing: false,
-                added,
-                // A new vocabulary holds no value whose title could be replaced: every title it
-                // carries arrived with the value that drew its code.
-                titles: 0,
-            },
-        );
+        reply.ack(VocabularyDeclared {
+            existing: false,
+            added,
+            // A new vocabulary holds no value whose title could be replaced: every title it
+            // carries arrived with the value that drew its code.
+            titles: 0,
+        });
     }
 
     /// `PATCH /control/vocabularies/{name}/values` — a page of values for a vocabulary that
@@ -1325,9 +1332,9 @@ impl Executor {
         &mut self,
         vocabulary: String,
         values: Vec<tessera_lifecycle::DeclaredValue>,
-        respond: Responder,
+        reply: Reply<VocabularyValues>,
     ) {
-        self.commit_vocabulary_page(vocabulary, values, false, respond);
+        self.commit_vocabulary_page(vocabulary, values, reply, std::convert::identity);
     }
 
     /// One page of values, whether it arrived on the values route or as the inline values of a
@@ -1339,22 +1346,26 @@ impl Executor {
     /// codes drawn for them, because a value's title is part of what the page acknowledges and a
     /// `VocabularyMint` record carries none.
     ///
+    /// `answer` turns what the page did into the answer the command it arrived on is owed: a
+    /// values page's is that unchanged, and a redeclaration's is a [`VocabularyDeclared`] carrying
+    /// the same two counts.
+    ///
     /// **A title supplied for a held key replaces the held title** and is counted into the
     /// acknowledgement (decision 0136's amendment). The key-to-code binding does not move, so a
     /// row already carrying the code means what it meant; what changes is the name a client draws.
-    pub(super) fn commit_vocabulary_page(
+    pub(super) fn commit_vocabulary_page<T>(
         &mut self,
         vocabulary: String,
         values: Vec<tessera_lifecycle::DeclaredValue>,
-        redeclaration: bool,
-        respond: Responder,
+        reply: Reply<T>,
+        answer: impl Fn(VocabularyValues) -> T,
     ) {
         let started = std::time::Instant::now();
         let generation = self.generation.load_full();
         let Some(held) = generation.vocabularies.get(&vocabulary) else {
             // The same 404 an unknown view is, and for the same reason: a vocabulary nobody
             // declared and one this deployment does not carry are one answer.
-            respond.fail(ExecError::ViewUnknown {
+            reply.fail(ExecError::ViewUnknown {
                 detail: format!(
                     "unknown vocabulary '{vocabulary}'. A vocabulary is declared at a build or by \
                      `PUT /control/vocabularies/{{name}}` (ingest §1.3); a page of values does \
@@ -1367,7 +1378,7 @@ impl Executor {
         let titles = match crate::vocabularies::check_page(held, &vocabulary, &values) {
             Ok(titles) => titles,
             Err(e) => {
-                respond.fail(e);
+                reply.fail(e);
                 return;
             }
         };
@@ -1386,7 +1397,7 @@ impl Executor {
                     codes.push((value.key.clone(), code));
                 }
                 Err(e) => {
-                    respond.fail(ExecError::VocabularyRefused {
+                    reply.fail(ExecError::VocabularyRefused {
                         detail: e.to_string(),
                     });
                     return;
@@ -1402,20 +1413,11 @@ impl Executor {
         // title this page changes, so a page restating the titles a deployment holds appends
         // nothing.
         if added == 0 && titles == 0 {
-            respond.ack(
-                if redeclaration {
-                    Ack::VocabularyDeclared {
-                        existing: true,
-                        added: 0,
-                        titles: 0,
-                    }
-                } else {
-                    Ack::VocabularyValuesMinted {
-                        added,
-                        existing,
-                        titles: 0,
-                    }
-                });
+            reply.ack(answer(VocabularyValues {
+                added,
+                existing,
+                titles: 0,
+            }));
             return;
         }
         let declaration = tessera_lifecycle::wal::VocabularyDeclaration {
@@ -1440,7 +1442,7 @@ impl Executor {
             declaration: Box::new(declaration),
         };
         if let Err(e) = self.make_durable(&[&record], "a page of vocabulary values") {
-            respond.fail(e);
+            reply.fail(e);
             return;
         }
         let mut vocabularies: Vocabularies = (*generation.vocabularies).clone();
@@ -1453,21 +1455,11 @@ impl Executor {
         // entry and one of a runtime-declared vocabulary as a value of its own runtime entry;
         // both are written at the next side-manifest publication, which this marks due.
         self.deny_dirty = true;
-        respond.ack(
-            if redeclaration {
-                Ack::VocabularyDeclared {
-                    existing: true,
-                    added,
-                    titles,
-                }
-            } else {
-                Ack::VocabularyValuesMinted {
-                    added,
-                    existing,
-                    titles,
-                }
-            },
-        );
+        reply.ack(answer(VocabularyValues {
+            added,
+            existing,
+            titles,
+        }));
     }
 
     /// `DELETE /control/views/{group}/{key}` — drop a view, freeing its key and killing its
@@ -1490,7 +1482,7 @@ impl Executor {
         group: String,
         key: String,
         delete_dangling: bool,
-        respond: Responder,
+        reply: Reply<u64>,
     ) {
         let started = std::time::Instant::now();
         let generation = self.generation.load_full();
@@ -1511,7 +1503,7 @@ impl Executor {
         let record = match prepared {
             Ok(record) => record,
             Err(e) => {
-                respond.fail(roster_error(e));
+                reply.fail(roster_error(e));
                 return;
             }
         };
@@ -1523,7 +1515,7 @@ impl Executor {
             Vec::new()
         };
         if let Err(e) = self.make_durable(&[&record], "a view drop") {
-            respond.fail(e);
+            reply.fail(e);
             return;
         }
         self.live.with_roster(|roster| roster.apply(&record));
@@ -1551,7 +1543,7 @@ impl Executor {
             self.cascade_dependents(&mut entries);
             self.commit_denies(entries);
         }
-        respond.ack(Ack::ViewDropped { deleted });
+        reply.ack(deleted);
     }
 
     /// Publish the generation a create or a drop makes: the bundle as the live roster describes

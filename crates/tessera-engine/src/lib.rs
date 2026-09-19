@@ -131,11 +131,11 @@ pub use tessera_spatial::Projection;
 pub use tessera_store::manifest::Quantisation;
 // The write path's **outcome** vocabulary, and nothing else.
 //
-// `LifecycleHandle`, `LifecycleQueues`, `Job` and `Responder` are deliberately **not** here, and
+// `LifecycleHandle`, `LifecycleQueues`, `Command` and `Reply` are deliberately **not** here, and
 // the tempting design where a handler holds the handle and submits through it is refused:
 // `LifecycleHandle` is not `Clone` and `WritePath` is its sole owner, precisely so `WritePath::drop`
 // can disconnect the queues and join the thread. No handler can hold one, and none of those four
-// types appears anywhere outside `write.rs`.
+// types appears anywhere outside the `write` module.
 //
 // What a handler does hold is `Engine`, and it submits through `Engine::accept_ingest` /
 // `Engine::accept_change` — blocking calls, hence inside `spawn_blocking`. What it needs from here

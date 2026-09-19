@@ -7,9 +7,9 @@
 //! [`buffer`] are the replayed WAL's live authorisation-relevant state: the overlay's two
 //! independent deny facts and the ingest buffer.
 //!
-//! [`command`] is the write-executor vocabulary and [`window`] the commit window it is gathered
-//! into. The executor thread that consumes both lives in `tessera-engine`, not here: only that
-//! crate can see both a `Wal` and a `Generation`.
+//! [`command`] is what a write command carries and [`window`] the commit window ingest is gathered
+//! into. The commands themselves, and the executor thread that consumes them, live in
+//! `tessera-engine`: only that crate can see both a `Wal` and a `Generation`.
 //!
 //! [`roster`] is the view roster — which views of which groups exist, and which keys are burnt.
 //! It sits beside the layer registry because the two problems are one: a named object created
@@ -38,9 +38,9 @@ pub use alloc::{
 };
 pub use buffer::{BufferedItem, DescriptorResolver, Fill, IngestBuffer, ScopedFill};
 pub use command::{
-    Ack, AttributeRequest, BatchArtifacts, BatchEdge, BatchMembership, Command, DeclaredValue,
-    ExecError, IncomingValues, MembershipGrown, Receipt, SubmitError, UnallocatedRow,
-    ValuesRequest, VocabularyRequest,
+    AttributeRequest, BatchArtifacts, BatchEdge, BatchMembership, DeclaredValue, ExecError,
+    IncomingValues, MembershipGrown, SubmitError, UnallocatedRow, ValuesRequest,
+    VocabularyRequest,
 };
 pub use faults::WalMeter;
 pub use membership::{
