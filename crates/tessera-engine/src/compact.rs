@@ -87,6 +87,7 @@ use tessera_store::{
 };
 use tessera_types::IdentityKey;
 
+use crate::flush::MaintenanceFailed;
 use crate::Generation;
 
 /// Every entity a carried-forward artefact names — the operand [`executed`] subtracts from `D₀`.
@@ -1247,21 +1248,13 @@ pub(crate) struct CompletedFold {
     pub(crate) runtime_scoped_attributes: Vec<String>,
 }
 
-/// Why a fold produced nothing. **Every failure discards the fold** (compaction §3, pass 5): its
-/// files are orphans under a prefix `CURRENT` does not name, and the next trigger re-plans from
-/// scratch. There is no resume, deliberately — a resumable fold needs its own durable progress
-/// record, and re-doing a maintenance pass is cheaper than a second thing to get wrong.
-#[derive(Debug)]
-pub(crate) struct FoldFailed(pub(crate) String);
-
-impl std::fmt::Display for FoldFailed {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
 /// Run the fold's five passes into `ctx.to_prefix_dir`. **On one dedicated thread** — see the
 /// module doc.
+///
+/// **A failure discards the fold**: its files are orphans under a prefix `CURRENT` does not name,
+/// and the next trigger re-plans from scratch. There is no resume, deliberately — a resumable fold
+/// needs its own durable progress record, and re-doing a maintenance pass is cheaper than a second
+/// thing to get wrong.
 ///
 /// # Why the digests are re-read rather than computed as the bytes are written
 ///
@@ -1274,8 +1267,11 @@ impl std::fmt::Display for FoldFailed {
 /// each written file back — which is exactly what `tessera-build` does at every scale it has been
 /// measured at, and what its own §8 calls a stage. Stated here rather than left as a silent
 /// divergence from the design, and corrected in that document.
-pub(crate) fn execute(plan: FoldPlan, ctx: FoldContext) -> Result<CompletedFold, FoldFailed> {
-    let failed = |what: &str, e: &dyn std::fmt::Display| FoldFailed(format!("{what}: {e}"));
+pub(crate) fn execute(
+    plan: FoldPlan,
+    ctx: FoldContext,
+) -> Result<CompletedFold, MaintenanceFailed> {
+    let failed = |what: &str, e: &dyn std::fmt::Display| MaintenanceFailed(format!("{what}: {e}"));
 
     let partition_dir = ctx.to_prefix_dir.join("partitions").join(&plan.partition);
     let terms_dir = partition_dir.join("terms");
@@ -1307,7 +1303,7 @@ pub(crate) fn execute(plan: FoldPlan, ctx: FoldContext) -> Result<CompletedFold,
         // empty schema writes a segment with no scalar tail at all, which every reader takes for a
         // corpus that declares none — the silent shape this whole change exists to remove.
         let Some(view_schema) = ctx.scalar_schema.get(&view.view) else {
-            return Err(FoldFailed(format!(
+            return Err(MaintenanceFailed(format!(
                 "pass 1 (row space): this fold holds no writer schema for view '{}', though \\
                  its plan names it; the two disagree about what is being folded",
                 view.view
@@ -1688,7 +1684,7 @@ pub(crate) fn execute(plan: FoldPlan, ctx: FoldContext) -> Result<CompletedFold,
             }
             for extent in plan.attr_extents.iter().filter(belongs) {
                 let Some(dict_rel) = extent.dict.as_ref() else {
-                    return Err(FoldFailed(format!(
+                    return Err(MaintenanceFailed(format!(
                         "pass 4a (attributes): keyword column '{}' has an extent with no \
                          dictionary; its ordinals name nothing",
                         scalar.name
@@ -1714,7 +1710,7 @@ pub(crate) fn execute(plan: FoldPlan, ctx: FoldContext) -> Result<CompletedFold,
         // this bound writes no presence bitmap at all — the reader's "the entity id is the array
         // index" — and one deletion below it is what takes that away.
         let bound = u32::try_from(plan.entity_bound).map_err(|_| {
-            FoldFailed("pass 4a (attributes): the entity bound exceeds u32".to_string())
+            MaintenanceFailed("pass 4a (attributes): the entity bound exceeds u32".to_string())
         })?;
         // **A keyword folds through its own pass, because its values are ordinals.** The generic
         // fold carries values through byte-preserved, which is exactly wrong for a column whose
@@ -1828,7 +1824,7 @@ pub(crate) fn execute(plan: FoldPlan, ctx: FoldContext) -> Result<CompletedFold,
             && crate::filter::blob_resident(d, &ctx.vocabularies)
     });
     if !blob_resident && !plan.record_extents.is_empty() {
-        return Err(FoldFailed(
+        return Err(MaintenanceFailed(
             "pass 4a (record blob): the manifest names record extents but the schema declares no \
              blob-resident column; folding would drop their bytes silently, so it is refused"
                 .to_string(),
@@ -2035,7 +2031,7 @@ pub(crate) fn execute(plan: FoldPlan, ctx: FoldContext) -> Result<CompletedFold,
     for (rel, path) in &written {
         files.insert(
             rel.clone(),
-            crate::flush::digest_of(path).map_err(FoldFailed)?,
+            crate::flush::digest_of(path)?,
         );
     }
     let paths: Vec<PathBuf> = written.iter().map(|(_, path)| path.clone()).collect();
@@ -2122,9 +2118,9 @@ fn fold_text_columns(
     written: &mut Vec<(String, PathBuf)>,
     attr_read: &mut u64,
     attr_written: &mut u64,
-) -> Result<(), FoldFailed> {
+) -> Result<(), MaintenanceFailed> {
     let file_len = |path: &Path| std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
-    let failed = |what: &str, e: &dyn std::fmt::Display| FoldFailed(format!("{what}: {e}"));
+    let failed = |what: &str, e: &dyn std::fmt::Display| MaintenanceFailed(format!("{what}: {e}"));
 
     // The entity-scoped indexed text columns, then one job per view of each indexed **scoped**
     // text family (`views.md` §5): a family's per-view index is the same three artefacts in a

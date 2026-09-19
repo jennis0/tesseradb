@@ -40,6 +40,7 @@ use tessera_store::read::SegmentData;
 use tessera_store::render_presence::RENDER_PRESENCE_DIR;
 use tessera_types::IdentityKey;
 
+use crate::flush::MaintenanceFailed;
 use crate::Generation;
 
 /// One merge's immutable plan: the segments it consumes, in listed (entity) order.
@@ -184,15 +185,6 @@ pub(crate) struct CompletedMerge {
     pub(crate) segment: SegmentData,
 }
 
-#[derive(Debug)]
-pub(crate) struct MergeFailed(pub(crate) String);
-
-impl std::fmt::Display for MergeFailed {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
 /// Turn a plan into durable files. **Runs on the background pool, over immutable inputs.**
 ///
 /// # Memory: the row-space half streams, the entity-space half does not
@@ -217,7 +209,10 @@ impl std::fmt::Display for MergeFailed {
 /// **What remains unmeasured on any version**: tier coalescence (postings rather than rows — the
 /// probe's shape does not transfer) and the **sum** when a flush, a merge and a coalesce overlap on
 /// this pool, which nothing bounds.
-pub(crate) fn execute(plan: MergePlan, ctx: MergeContext) -> Result<CompletedMerge, MergeFailed> {
+pub(crate) fn execute(
+    plan: MergePlan,
+    ctx: MergeContext,
+) -> Result<CompletedMerge, MaintenanceFailed> {
     let output = execute_merge(
         &ctx.prefix_dir,
         &plan.partition,
@@ -235,7 +230,7 @@ pub(crate) fn execute(plan: MergePlan, ctx: MergeContext) -> Result<CompletedMer
             entity_id_high_water: ctx.entity_id_high_water,
         },
     )
-    .map_err(|e| MergeFailed(format!("merge: {e}")))?;
+    .map_err(|e| MaintenanceFailed(format!("merge: {e}")))?;
 
     let seg_dir = tessera_store::view_path(
         &ctx.prefix_dir.join("partitions").join(&plan.partition),
@@ -244,7 +239,7 @@ pub(crate) fn execute(plan: MergePlan, ctx: MergeContext) -> Result<CompletedMer
     .join("segments")
     .join(&ctx.seg_id);
     let segment = SegmentData::load(&seg_dir, &ctx.seg_id, output.segment.row_count)
-        .map_err(|e| MergeFailed(e.to_string()))?;
+        .map_err(|e| MaintenanceFailed(e.to_string()))?;
 
     Ok(CompletedMerge {
         plan,

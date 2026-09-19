@@ -109,7 +109,7 @@ use tessera_store::manifest::{
 };
 use tessera_store::merge::size_tier;
 
-use crate::flush::SMALL_TERM_THRESHOLD;
+use crate::flush::{digest_of, MaintenanceFailed, SMALL_TERM_THRESHOLD};
 
 /// What a coalesce is allowed to take, per axis.
 #[derive(Debug, Clone, Copy)]
@@ -596,25 +596,13 @@ pub(crate) struct CoalescedAttr {
     pub(crate) dict: Option<Arc<tessera_filter::SortedDict>>,
 }
 
-/// Why a coalesce produced nothing. **Every failure is "nothing happened, retry next tick"**: the
-/// manifest is the only commit point, so a failure before it leaves orphan files nothing
-/// references and the consumed entries stand.
-#[derive(Debug)]
-pub(crate) struct CoalesceFailed(pub(crate) String);
-
-impl std::fmt::Display for CoalesceFailed {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
 /// Turn a plan into durable files. **Runs on the background pool, over immutable inputs.**
 pub(crate) fn execute_coalesce(
     plan: CoalescePlan,
     ctx: CoalesceContext,
-) -> Result<CompletedCoalesce, CoalesceFailed> {
+) -> Result<CompletedCoalesce, MaintenanceFailed> {
     let out_dir = ctx.prefix_dir.join(&ctx.out_rel);
-    std::fs::create_dir_all(&out_dir).map_err(|e| CoalesceFailed(format!("coalesce dir: {e}")))?;
+    std::fs::create_dir_all(&out_dir).map_err(|e| MaintenanceFailed(format!("coalesce dir: {e}")))?;
     let rel = |name: &str| format!("{}/{name}", ctx.out_rel);
     let mut files: BTreeMap<String, FileDigest> = BTreeMap::new();
 
@@ -624,10 +612,10 @@ pub(crate) fn execute_coalesce(
         let inputs: Vec<PathBuf> = plan.tiers.iter().map(|p| ctx.prefix_dir.join(p)).collect();
         let path = out_dir.join("delta.arrow");
         coalesce_delta_tiers(&inputs, &path, SMALL_TERM_THRESHOLD)
-            .map_err(|e| CoalesceFailed(format!("delta tiers: {e}")))?;
+            .map_err(|e| MaintenanceFailed(format!("delta tiers: {e}")))?;
         files.insert(rel("delta.arrow"), digest_of(&path)?);
         let reader =
-            DeltaTier::open(&path).map_err(|e| CoalesceFailed(format!("coalesced tier: {e}")))?;
+            DeltaTier::open(&path).map_err(|e| MaintenanceFailed(format!("coalesced tier: {e}")))?;
         Some((rel("delta.arrow"), Arc::new(reader)))
     };
 
@@ -640,7 +628,7 @@ pub(crate) fn execute_coalesce(
         let entity_lo = plan.locators[0].entity_lo;
         let entity_hi = plan.locators[plan.locators.len() - 1].entity_hi;
         coalesce_external_id_runs(&inputs, entity_lo, entity_hi, &out_dir)
-            .map_err(|e| CoalesceFailed(format!("external-id runs: {e}")))?;
+            .map_err(|e| MaintenanceFailed(format!("external-id runs: {e}")))?;
         files.insert(
             rel("external-ids.arrow"),
             digest_of(&out_dir.join("external-ids.arrow"))?,
@@ -670,7 +658,7 @@ pub(crate) fn execute_coalesce(
             .collect();
         let path = out_dir.join("terms-0.dict");
         let records = coalesce_dict_extents(&inputs, &path)
-            .map_err(|e| CoalesceFailed(format!("dictionary extents: {e}")))?;
+            .map_err(|e| MaintenanceFailed(format!("dictionary extents: {e}")))?;
         // **The record count is checked, not trusted.** `Dict::load` counts *distinct*
         // descriptors while a `records` field counts records, and the two differ only in a case
         // the writer is forbidden to produce (decision 0042). A disagreement here means an input
@@ -678,7 +666,7 @@ pub(crate) fn execute_coalesce(
         // exists to prevent — so it fails the pass rather than republishing it under one name.
         let declared: u64 = plan.dicts.iter().map(|e| e.records).sum();
         if records != declared {
-            return Err(CoalesceFailed(format!(
+            return Err(MaintenanceFailed(format!(
                 "the coalesced dictionary extent holds {records} records where its inputs declare \
                  {declared}; an input repeated a descriptor (decision 0042) and coalescing it \
                  would renumber every ordinal after the repeat"
@@ -714,7 +702,7 @@ pub(crate) fn execute_coalesce(
             0 => false,
             n if n == window.extents.len() => true,
             _ => {
-                return Err(CoalesceFailed(format!(
+                return Err(MaintenanceFailed(format!(
                     "column '{}' has {with_dict} layers with their own dictionaries and {} \
                      without; a keyword layer's values are ordinals and another family's are \
                      values, so the window has no single reading and neither merge takes it",
@@ -729,7 +717,7 @@ pub(crate) fn execute_coalesce(
         let column_rel = coalesced_column_rel(&ctx.out_rel, &window.column, window.view.as_deref());
         let column_dir = ctx.prefix_dir.join(&column_rel);
         std::fs::create_dir_all(&column_dir)
-            .map_err(|e| CoalesceFailed(format!("coalesce dir for '{}': {e}", window.column)))?;
+            .map_err(|e| MaintenanceFailed(format!("coalesce dir for '{}': {e}", window.column)))?;
         // Mapped, as the flush and the fold map theirs: the merge streams each input's values once
         // and never holds a column, so what resides is what it touches.
         let inputs: Vec<tessera_filter::ValueColumn> = window
@@ -743,7 +731,7 @@ pub(crate) fn execute_coalesce(
                 )
             })
             .collect::<std::io::Result<_>>()
-            .map_err(|e| CoalesceFailed(format!("attr extent for '{}': {e}", window.column)))?;
+            .map_err(|e| MaintenanceFailed(format!("attr extent for '{}': {e}", window.column)))?;
 
         let values_rel = format!("{column_rel}/{}", tessera_filter::VALUES_FILE);
         let presence_rel = format!("{column_rel}/{}", tessera_filter::PRESENCE_FILE);
@@ -770,7 +758,7 @@ pub(crate) fn execute_coalesce(
                 })
                 .collect::<Result<_, _>>()
                 .map_err(|e: tessera_filter::DictError| {
-                    CoalesceFailed(format!("keyword dictionary for '{}': {e}", window.column))
+                    MaintenanceFailed(format!("keyword dictionary for '{}': {e}", window.column))
                 })?;
             let layers: Vec<tessera_filter_write::KeywordLayer<'_>> = inputs
                 .iter()
@@ -790,7 +778,7 @@ pub(crate) fn execute_coalesce(
                 &dict_path,
             )
             .map_err(|e| {
-                CoalesceFailed(format!("keyword coalesce for '{}': {e}", window.column))
+                MaintenanceFailed(format!("keyword coalesce for '{}': {e}", window.column))
             })?;
             files.insert(rel.clone(), digest_of(&dict_path)?);
             dict_rel = Some(rel);
@@ -798,7 +786,7 @@ pub(crate) fn execute_coalesce(
             let refs: Vec<&tessera_filter::ValueColumn> = inputs.iter().collect();
             tessera_filter_write::coalesce_attr_extents(&refs, &values_path, &presence_path)
                 .map_err(|e| {
-                    CoalesceFailed(format!("attr coalesce for '{}': {e}", window.column))
+                    MaintenanceFailed(format!("attr coalesce for '{}': {e}", window.column))
                 })?;
         }
         files.insert(values_rel.clone(), digest_of(&values_path)?);
@@ -813,7 +801,7 @@ pub(crate) fn execute_coalesce(
             &presence_path,
             tessera_filter::Access::Mapped,
         )
-        .map_err(|e| CoalesceFailed(format!("coalesced attr extent: {e}")))?;
+        .map_err(|e| MaintenanceFailed(format!("coalesced attr extent: {e}")))?;
         let dict = dict_rel
             .as_ref()
             .map(|rel| {
@@ -825,7 +813,7 @@ pub(crate) fn execute_coalesce(
             })
             .transpose()
             .map_err(|e| {
-                CoalesceFailed(format!("the coalesced dictionary does not reopen: {e}"))
+                MaintenanceFailed(format!("the coalesced dictionary does not reopen: {e}"))
             })?;
         attrs.push(CoalescedAttr {
             extent: AttrExtent {
@@ -856,7 +844,7 @@ pub(crate) fn execute_coalesce(
         let record_rel = format!("{}/attrs/record", ctx.out_rel);
         let record_dir = ctx.prefix_dir.join(&record_rel);
         std::fs::create_dir_all(&record_dir)
-            .map_err(|e| CoalesceFailed(format!("coalesce dir for the record blob: {e}")))?;
+            .map_err(|e| MaintenanceFailed(format!("coalesce dir for the record blob: {e}")))?;
         let inputs: Vec<tessera_filter::RecordBlob> = plan
             .records
             .iter()
@@ -869,7 +857,7 @@ pub(crate) fn execute_coalesce(
                 )
             })
             .collect::<Result<_, _>>()
-            .map_err(|e| CoalesceFailed(format!("record extent: {e}")))?;
+            .map_err(|e| MaintenanceFailed(format!("record extent: {e}")))?;
         let refs: Vec<&tessera_filter::RecordBlob> = inputs.iter().collect();
 
         let extent = RecordExtent {
@@ -887,7 +875,7 @@ pub(crate) fn execute_coalesce(
             &directory_path,
             tessera_filter::RECORD_BLOCK_TARGET,
         )
-        .map_err(|e| CoalesceFailed(format!("record coalesce: {e}")))?;
+        .map_err(|e| MaintenanceFailed(format!("record coalesce: {e}")))?;
         for rel in extent.files() {
             files.insert(rel.to_string(), digest_of(&ctx.prefix_dir.join(rel))?);
         }
@@ -900,7 +888,9 @@ pub(crate) fn execute_coalesce(
             &directory_path,
             tessera_filter::Access::Mapped,
         )
-        .map_err(|e| CoalesceFailed(format!("the coalesced record extent does not reopen: {e}")))?;
+        .map_err(|e| {
+            MaintenanceFailed(format!("the coalesced record extent does not reopen: {e}"))
+        })?;
         Some(extent)
     };
 
@@ -915,7 +905,7 @@ pub(crate) fn execute_coalesce(
         let column_rel = coalesced_column_rel(&ctx.out_rel, &window.column, window.view.as_deref());
         let column_dir = ctx.prefix_dir.join(&column_rel);
         std::fs::create_dir_all(&column_dir)
-            .map_err(|e| CoalesceFailed(format!("coalesce dir for '{}': {e}", window.column)))?;
+            .map_err(|e| MaintenanceFailed(format!("coalesce dir for '{}': {e}", window.column)))?;
 
         // Sequential, and it is the merge's own access rather than a request's (decision 0052):
         // each dictionary is streamed exactly once, in order. The postings are not advised — the
@@ -932,7 +922,7 @@ pub(crate) fn execute_coalesce(
             })
             .collect::<Result<_, _>>()
             .map_err(|e: tessera_filter::DictError| {
-                CoalesceFailed(format!("text extent for '{}': {e}", window.column))
+                MaintenanceFailed(format!("text extent for '{}': {e}", window.column))
             })?;
         let postings: Vec<tessera_filter::ColumnPostings> = window
             .extents
@@ -941,7 +931,7 @@ pub(crate) fn execute_coalesce(
                 tessera_filter::ColumnPostings::open(&ctx.prefix_dir.join(&extent.postings), true)
             })
             .collect::<std::io::Result<_>>()
-            .map_err(|e| CoalesceFailed(format!("text extent for '{}': {e}", window.column)))?;
+            .map_err(|e| MaintenanceFailed(format!("text extent for '{}': {e}", window.column)))?;
         let presences: Vec<croaring::Bitmap> = window
             .extents
             .iter()
@@ -950,7 +940,7 @@ pub(crate) fn execute_coalesce(
                     .map(|bytes| croaring::Bitmap::deserialize::<croaring::Portable>(&bytes))
             })
             .collect::<std::io::Result<_>>()
-            .map_err(|e| CoalesceFailed(format!("text presence for '{}': {e}", window.column)))?;
+            .map_err(|e| MaintenanceFailed(format!("text presence for '{}': {e}", window.column)))?;
         let inputs: Vec<tessera_filter_write::TextLayerRef<'_>> = dicts
             .iter()
             .zip(postings.iter())
@@ -987,7 +977,7 @@ pub(crate) fn execute_coalesce(
         );
         let _ = std::fs::remove_file(&spool_path);
         outcome
-            .map_err(|e| CoalesceFailed(format!("text coalesce for '{}': {e}", window.column)))?;
+            .map_err(|e| MaintenanceFailed(format!("text coalesce for '{}': {e}", window.column)))?;
         drop(inputs);
         drop(postings);
         drop(dicts);
@@ -1000,14 +990,14 @@ pub(crate) fn execute_coalesce(
         // publishing a layer whose ordinals name the wrong words on every later `match`.
         let reopened_dict =
             tessera_filter::SortedDict::open(&dict_path, tessera_filter::Access::Read).map_err(
-                |e| CoalesceFailed(format!("the coalesced text extent does not reopen: {e}")),
+                |e| MaintenanceFailed(format!("the coalesced text extent does not reopen: {e}")),
             )?;
         let reopened_postings = tessera_filter::ColumnPostings::open(&postings_path, false)
             .map_err(|e| {
-                CoalesceFailed(format!("the coalesced text extent does not reopen: {e}"))
+                MaintenanceFailed(format!("the coalesced text extent does not reopen: {e}"))
             })?;
         if reopened_dict.len() != reopened_postings.record_count() {
-            return Err(CoalesceFailed(format!(
+            return Err(MaintenanceFailed(format!(
                 "the coalesced text extent for '{}' holds {} terms and {} postings records",
                 window.column,
                 reopened_dict.len(),
@@ -1031,7 +1021,7 @@ pub(crate) fn execute_coalesce(
         let terms_rel = format!("{}/entities/terms", ctx.out_rel);
         let terms_dir = ctx.prefix_dir.join(&terms_rel);
         std::fs::create_dir_all(&terms_dir)
-            .map_err(|e| CoalesceFailed(format!("coalesce dir for the transpose: {e}")))?;
+            .map_err(|e| MaintenanceFailed(format!("coalesce dir for the transpose: {e}")))?;
         let inputs: Vec<tessera_store::EntityTerms> = plan
             .terms
             .iter()
@@ -1044,7 +1034,7 @@ pub(crate) fn execute_coalesce(
                 )
             })
             .collect::<Result<_, _>>()
-            .map_err(|e| CoalesceFailed(format!("entity-terms extent: {e}")))?;
+            .map_err(|e| MaintenanceFailed(format!("entity-terms extent: {e}")))?;
         let expected: u64 = inputs.iter().map(tessera_store::EntityTerms::len).sum();
         let refs: Vec<&tessera_store::EntityTerms> = inputs.iter().collect();
 
@@ -1061,14 +1051,14 @@ pub(crate) fn execute_coalesce(
             &ctx.prefix_dir.join(&extent.terms),
             &ctx.prefix_dir.join(&extent.bases),
         )
-        .map_err(|e| CoalesceFailed(format!("entity-terms coalesce: {e}")))?;
+        .map_err(|e| MaintenanceFailed(format!("entity-terms coalesce: {e}")))?;
         // **The entity count is checked, not trusted** — the dictionary axis's posture, and the
         // same shape of fault: the merge refuses a repeated entity, so a count short of the sum
         // could only mean an input's has-row bitmap named an entity its offsets did not, and
         // publishing that would lose a flush's worth of label sets with no symptom until a `409`
         // failed to fire.
         if written != expected {
-            return Err(CoalesceFailed(format!(
+            return Err(MaintenanceFailed(format!(
                 "the coalesced entity-terms extent holds {written} entities where its inputs hold \
                  {expected}"
             )));
@@ -1088,7 +1078,7 @@ pub(crate) fn execute_coalesce(
             &ctx.prefix_dir.join(&extent.bases),
         )
         .map_err(|e| {
-            CoalesceFailed(format!(
+            MaintenanceFailed(format!(
                 "the coalesced entity-terms extent does not reopen: {e}"
             ))
         })?;
@@ -1348,13 +1338,6 @@ fn splice_columns<E: Clone>(entries: &mut Vec<E>, positions: &[Vec<usize>], coal
         }
     }
     *entries = next;
-}
-
-/// `tessera_store::digest_of` with this pass's error type — see `crate::flush::digest_of` for why
-/// there is one definition rather than the three there were.
-fn digest_of(path: &std::path::Path) -> Result<FileDigest, CoalesceFailed> {
-    tessera_store::digest_of(path)
-        .map_err(|e| CoalesceFailed(format!("digest {}: {e}", path.display())))
 }
 
 #[cfg(test)]
