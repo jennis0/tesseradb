@@ -153,14 +153,14 @@ pub(crate) fn filter_schema_of(
 /// query would otherwise answer from whichever layer holds the entity, with no error.
 pub(crate) fn text_schema_of(
     manifest: &tessera_store::manifest::Manifest,
-) -> Result<Vec<crate::flush::TextColumnSpec>, crate::flush::FlushFailed> {
+) -> Result<Vec<crate::flush::TextColumnSpec>, crate::flush::MaintenanceFailed> {
     let mut out = Vec::new();
     for (index, d) in manifest.declared_scalars.iter().enumerate() {
         if d.arrow_type != tessera_spatial::tiler::ScalarType::Text || !d.index {
             continue;
         }
         let identity = d.analyser.as_deref().ok_or_else(|| {
-            crate::flush::FlushFailed(format!(
+            crate::flush::MaintenanceFailed(format!(
                 "column '{}' is text but the manifest records no analyser identity",
                 d.name
             ))
@@ -168,7 +168,7 @@ pub(crate) fn text_schema_of(
         let analyser = tessera_analyse::analyser(identity.split('/').next().unwrap_or_default())
             .filter(|a| a.identity() == identity)
             .ok_or_else(|| {
-                crate::flush::FlushFailed(format!(
+                crate::flush::MaintenanceFailed(format!(
                     "column '{}' was indexed by analyser '{identity}', which this binary does not \
                      carry. A flush cannot extend an index whose terms it cannot reproduce.",
                     d.name
@@ -187,9 +187,9 @@ pub(crate) fn text_schema_of(
 /// ([`text_schema_of`]'s resolution, over a family's declaration).
 pub(in crate::write) fn analyser_of(
     family: &tessera_store::manifest::ScopedScalar,
-) -> Result<tessera_analyse::Analyser, crate::flush::FlushFailed> {
+) -> Result<tessera_analyse::Analyser, crate::flush::MaintenanceFailed> {
     let identity = family.analyser.as_deref().ok_or_else(|| {
-        crate::flush::FlushFailed(format!(
+        crate::flush::MaintenanceFailed(format!(
             "the scoped column family '{}' is text but the manifest records no analyser identity",
             family.name
         ))
@@ -197,7 +197,7 @@ pub(in crate::write) fn analyser_of(
     tessera_analyse::analyser(identity.split('/').next().unwrap_or_default())
         .filter(|a| a.identity() == identity)
         .ok_or_else(|| {
-            crate::flush::FlushFailed(format!(
+            crate::flush::MaintenanceFailed(format!(
                 "the scoped column family '{}' was indexed by analyser '{identity}', which this \
                  binary does not carry. A flush cannot extend an index whose terms it cannot \
                  reproduce.",
