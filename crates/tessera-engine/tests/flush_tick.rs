@@ -8,20 +8,11 @@
 
 mod common;
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use common::*;
 use tessera_lifecycle::ChangeOp;
 use tessera_types::EntityId;
-
-/// Poll until `cond` holds, rather than sleeping on a guess about how long a tick takes.
-fn wait_until(what: &str, mut cond: impl FnMut() -> bool) {
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while !cond() {
-        assert!(Instant::now() < deadline, "timed out waiting: {what}");
-        std::thread::sleep(Duration::from_millis(5));
-    }
-}
 
 /// [`engine_with_tick`] with the row trigger set too — `flush_max_items`, §4.1's second trigger.
 fn engine_with_triggers(
@@ -72,6 +63,8 @@ fn engine_with_tick(
 
 use tessera_engine::{Engine, EngineConfig};
 
+const WAIT: Duration = Duration::from_secs(10);
+
 /// The tick fires on its own, with no traffic at all. A cadence that only advanced when something
 /// else woke the executor would make visibility latency a function of load rather than of
 /// `flush_max_age_secs`.
@@ -85,7 +78,7 @@ fn the_tick_fires_on_an_idle_node() {
         &tmp.path().join("pairs.parquet"),
     );
     let engine = engine_with_tick(&tmp, &root, 1);
-    wait_until("two ticks on an idle node", || {
+    wait_until("two ticks on an idle node", WAIT, || {
         engine.write_executor_stats().ticks >= 2
     });
 }
@@ -110,12 +103,14 @@ fn a_requested_flush_executes_promptly_through_the_tick_path() {
 
     // Empty buffer: the triggered tick fires, plans nothing, and consumes the request.
     engine.request_flush();
-    wait_until("the requested tick fires on an empty buffer", || {
+    wait_until("the requested tick fires on an empty buffer", WAIT, || {
         engine.write_executor_stats().ticks > ticks_at_start
     });
-    wait_until("the request is consumed by the tick it triggered", || {
-        !engine.write_executor_stats().flush_requested
-    });
+    wait_until(
+        "the request is consumed by the tick it triggered",
+        WAIT,
+        || !engine.write_executor_stats().flush_requested,
+    );
     assert_eq!(
         engine.generation().segments_version,
         0,
@@ -140,6 +135,7 @@ fn a_requested_flush_executes_promptly_through_the_tick_path() {
     engine.request_flush();
     wait_until(
         "the buffered row is published by the requested flush",
+        WAIT,
         || engine.generation().segments_version > 0,
     );
 }
@@ -219,6 +215,7 @@ fn a_deny_only_node_rotates_at_the_tick_and_the_suppression_survives_restart() {
     // prefix below the snapshot is reclaimable.
     wait_until(
         "the original WAL member is reclaimed by a tick rotation",
+        WAIT,
         || {
             let now = wal_members();
             now != before && !now.is_empty()
@@ -288,6 +285,7 @@ fn the_row_trigger_publishes_ahead_of_the_period() {
 
     wait_until(
         "the buffered rows are published by the row trigger, with no request and no elapsed tick",
+        WAIT,
         || engine.generation().segments_version > 0,
     );
 }

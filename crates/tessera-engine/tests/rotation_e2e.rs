@@ -8,20 +8,14 @@
 
 mod common;
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use common::*;
 use tessera_engine::{Engine, EngineConfig};
 use tessera_lifecycle::{ChangeOp, UnallocatedRow};
 use tessera_types::EntityId;
 
-fn wait_until(what: &str, mut cond: impl FnMut() -> bool) {
-    let deadline = Instant::now() + Duration::from_secs(20);
-    while !cond() {
-        assert!(Instant::now() < deadline, "timed out waiting: {what}");
-        std::thread::sleep(Duration::from_millis(5));
-    }
-}
+const WAIT: Duration = Duration::from_secs(20);
 
 fn fixture(tmp: &std::path::Path) -> std::path::PathBuf {
     let root = tmp.join("bundle");
@@ -96,16 +90,16 @@ fn a_published_flush_rotates_the_log() {
     assert_eq!(members(tmp.path()), vec!["wal-000001.log"]);
 
     ingest(&engine, "ext-1");
-    wait_until("the flush to publish", || {
+    wait_until("the flush to publish", WAIT, || {
         engine.write_executor_stats().flushes >= 1
     });
-    wait_until("the rotation to follow it", || {
+    wait_until("the rotation to follow it", WAIT, || {
         members(tmp.path()).len() >= 2
     });
 
     // The buffer is empty — everything ingested has geometry — so the whole durable prefix was
     // reclaimable and member 1 goes. What survives is the member the snapshot was just written to.
-    wait_until("member 1 to be reclaimed", || {
+    wait_until("member 1 to be reclaimed", WAIT, || {
         !members(tmp.path()).contains(&"wal-000001.log".to_string())
     });
 }
@@ -129,14 +123,14 @@ fn a_row_acked_during_a_flush_survives_rotation_and_a_restart() {
         // A slow tick, so the two ingests land in different flushes rather than the same one.
         let engine = engine_at(tmp.path(), &root, 1);
         ingest(&engine, "ext-1");
-        wait_until("the first flush", || {
+        wait_until("the first flush", WAIT, || {
             engine.write_executor_stats().flushes >= 1
         });
 
         // Acked after that flush consumed the first row, so it is buffered when the rotation runs.
         let second = ingest(&engine, "ext-2");
         assert!(engine.generation().buffer.contains(second));
-        wait_until("a rotation", || members(tmp.path()).len() >= 2);
+        wait_until("a rotation", WAIT, || members(tmp.path()).len() >= 2);
         second
     };
 
@@ -171,8 +165,10 @@ fn a_suppression_accepted_before_a_rotation_is_still_in_force_after_a_restart() 
             .accept_change(id, ChangeOp::Suppress)
             .expect("the suppression is accepted");
 
-        wait_until("the flush", || engine.write_executor_stats().flushes >= 1);
-        wait_until("member 1 to be reclaimed", || {
+        wait_until("the flush", WAIT, || {
+            engine.write_executor_stats().flushes >= 1
+        });
+        wait_until("member 1 to be reclaimed", WAIT, || {
             !members(tmp.path()).contains(&"wal-000001.log".to_string())
         });
         id
@@ -215,7 +211,7 @@ fn a_row_deleted_before_its_first_flush_stops_pinning_the_log() {
 
         // No flush publishes — the one buffered row was deleted — so what rotates is the tick's
         // own growth-gated rotation, and it may only reclaim because the buffer is now empty.
-        wait_until("member 1 to be reclaimed", || {
+        wait_until("member 1 to be reclaimed", WAIT, || {
             !members(tmp.path()).contains(&"wal-000001.log".to_string())
         });
         id

@@ -40,7 +40,7 @@ mod common;
 
 use std::path::Path;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use common::*;
 use tessera_engine::{Engine, EngineConfig};
@@ -49,17 +49,10 @@ use tessera_lifecycle::{ChangeOp, UnallocatedRow};
 use tessera_types::EntityId;
 
 const WAIT: Duration = Duration::from_secs(30);
+
 /// Long enough that a `Stall` which failed to block would almost always have published by the
 /// time the post-settle assertion runs, short enough to cost nothing against the binary's runtime.
 const SETTLE: Duration = Duration::from_millis(50);
-
-fn wait_until(what: &str, mut cond: impl FnMut() -> bool) {
-    let deadline = Instant::now() + Duration::from_secs(30);
-    while !cond() {
-        assert!(Instant::now() < deadline, "timed out waiting: {what}");
-        std::thread::sleep(Duration::from_millis(5));
-    }
-}
 
 /// A fixture engine whose executor runs against a switchboard the test holds the other end of.
 /// The tick is held long so the test owns the clock, exactly as the driver will
@@ -160,7 +153,7 @@ fn the_current_flip_site_parks_the_fold_with_the_old_prefix_still_committed() {
 
     // Proceeds: release, and the rename lands.
     faults.release();
-    wait_until("the released fold publishes", || {
+    wait_until("the released fold publishes", WAIT, || {
         engine.write_executor_stats().folds >= 1
     });
     assert_eq!(engine.write_executor_stats().fold_failures, 0);
@@ -192,7 +185,7 @@ fn the_fold_status_covers_the_publication() {
     let held = Duration::from_millis(1_200);
     std::thread::sleep(held);
     faults.release();
-    wait_until("the released fold publishes", || {
+    wait_until("the released fold publishes", WAIT, || {
         engine.write_executor_stats().folds >= 1
     });
 
@@ -295,7 +288,7 @@ fn the_manifest_publish_site_parks_a_flush_with_its_segment_unreferenced() {
 
     // Proceeds.
     faults.release();
-    wait_until("the released flush publishes", || {
+    wait_until("the released flush publishes", WAIT, || {
         engine.write_executor_stats().flushes >= 1
     });
     assert_eq!(

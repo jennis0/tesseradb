@@ -19,16 +19,10 @@ use tessera_engine::{Engine, EngineConfig};
 use tessera_lifecycle::UnallocatedRow;
 use tessera_types::EntityId;
 
+const WAIT: Duration = Duration::from_secs(30);
+
 /// The coalesce policy's width. Every axis needs this many entries before anything is selected.
 const WIDTH: usize = 8;
-
-fn wait_until(what: &str, mut cond: impl FnMut() -> bool) {
-    let deadline = Instant::now() + Duration::from_secs(30);
-    while !cond() {
-        assert!(Instant::now() < deadline, "timed out waiting: {what}");
-        std::thread::sleep(Duration::from_millis(5));
-    }
-}
 
 fn engine_at(tmp: &std::path::Path, root: &std::path::Path) -> Engine {
     let mut engine = Engine::open(
@@ -115,7 +109,7 @@ fn a_coalesce_bounds_the_three_entity_space_axes_without_moving_geometry() {
         ingested.push((entity, format!("ext-{i}").into_bytes()));
         let flushes = engine.write_executor_stats().flushes;
         engine.request_flush();
-        wait_until("the flush to publish", || {
+        wait_until("the flush to publish", WAIT, || {
             engine.write_executor_stats().flushes > flushes
         });
     }
@@ -131,7 +125,7 @@ fn a_coalesce_bounds_the_three_entity_space_axes_without_moving_geometry() {
 
     // The coalesce is selected on the tick, and the tick is what a requested flush drives.
     engine.request_flush();
-    wait_until("the coalesce to publish", || {
+    wait_until("the coalesce to publish", WAIT, || {
         engine.write_executor_stats().coalesces >= 1
     });
 
@@ -210,12 +204,12 @@ fn a_coalesced_manifest_reopens_with_every_item_and_binding_intact() {
             ingested.push((entity, format!("ext-{i}").into_bytes()));
             let flushes = engine.write_executor_stats().flushes;
             engine.request_flush();
-            wait_until("the flush to publish", || {
+            wait_until("the flush to publish", WAIT, || {
                 engine.write_executor_stats().flushes > flushes
             });
         }
         engine.request_flush();
-        wait_until("the coalesce to publish", || {
+        wait_until("the coalesce to publish", WAIT, || {
             engine.write_executor_stats().coalesces >= 1
         });
         ingested
@@ -289,14 +283,14 @@ fn a_configured_coalesce_width_reaches_selection_and_changes_when_the_pass_fires
         ingested.push((entity, format!("ext-{i}").into_bytes()));
         let flushes = engine.write_executor_stats().flushes;
         engine.request_flush();
-        wait_until("the flush to publish", || {
+        wait_until("the flush to publish", WAIT, || {
             engine.write_executor_stats().flushes > flushes
         });
     }
     assert_eq!(manifest_of(&root).deltas.len(), 2, "one tier per flush");
 
     engine.request_flush();
-    wait_until("the width-2 coalesce to publish", || {
+    wait_until("the width-2 coalesce to publish", WAIT, || {
         engine.write_executor_stats().coalesces >= 1
     });
 
@@ -343,7 +337,7 @@ fn a_coalesce_merges_the_entity_term_extents_and_every_entity_answers_the_same()
         ingested.push(ingest_novel(&engine, i));
         let flushes = engine.write_executor_stats().flushes;
         engine.request_flush();
-        wait_until("the flush to publish", || {
+        wait_until("the flush to publish", WAIT, || {
             engine.write_executor_stats().flushes > flushes
         });
     }
@@ -401,7 +395,7 @@ fn a_coalesce_merges_the_entity_term_extents_and_every_entity_answers_the_same()
     );
 
     engine.request_flush();
-    wait_until("the coalesce to publish", || {
+    wait_until("the coalesce to publish", WAIT, || {
         engine.write_executor_stats().coalesces >= 1
     });
 
@@ -466,7 +460,7 @@ fn a_pending_deletion_keeps_its_terms_across_a_coalesce() {
         ingested.push(ingest_novel(&engine, i));
         let flushes = engine.write_executor_stats().flushes;
         engine.request_flush();
-        wait_until("the flush to publish", || {
+        wait_until("the flush to publish", WAIT, || {
             engine.write_executor_stats().flushes > flushes
         });
     }
@@ -479,7 +473,7 @@ fn a_pending_deletion_keeps_its_terms_across_a_coalesce() {
         .expect("the delete is accepted");
 
     engine.request_flush();
-    wait_until("the coalesce to publish", || {
+    wait_until("the coalesce to publish", WAIT, || {
         engine.write_executor_stats().coalesces >= 1
     });
     assert_eq!(manifest_of(&root).entity_terms_extents.len(), 1);

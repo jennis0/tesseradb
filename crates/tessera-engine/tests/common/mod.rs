@@ -12,6 +12,11 @@
 // carrying their own copy — which is the drift this module exists to prevent.
 #![allow(dead_code)]
 
+mod wait;
+
+#[allow(unused_imports)]
+pub use wait::*;
+
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::path::Path;
@@ -479,25 +484,6 @@ pub fn open_engine_uncapped(bundle_root: &Path, cache_dir: &Path, wal_path: &Pat
         config_uncapped(),
     )
     .expect("engine should open against a freshly built bundle")
-}
-
-/// **Force a tick and wait for it** — the moment a level's row forms are published from the
-/// deltas accumulated since the last one (`ingest.md` §1.3, §10 ruling 6).
-///
-/// A write is durable at its acknowledgement and visible at the next publication, so a test that
-/// writes and then reads what a viewer sees puts this between the two. The tick is requested
-/// rather than waited for so that a test does not sit out `flush_max_age_secs`.
-pub fn tick(engine: &Engine) {
-    let before = engine.write_executor_stats().ticks;
-    engine.request_flush();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-    while engine.write_executor_stats().ticks == before {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the tick that publishes the row forms never ran"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(5));
-    }
 }
 
 pub fn full_coverage_credential() -> Vec<u8> {

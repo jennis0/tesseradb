@@ -202,24 +202,20 @@ fn park<'scope, 'env>(
 /// reached the queue" — the observation that orders one submission after another instead of
 /// betting on two threads.
 fn wait_for_queue(engine: &Engine, depth: u64) {
-    wait_until(&format!("the work lane reaches depth {depth}"), || {
-        engine.write_executor_stats().work_depth >= depth
-    });
+    wait_until(
+        &format!("the work lane reaches depth {depth}"),
+        WAIT,
+        || engine.write_executor_stats().work_depth >= depth,
+    );
 }
 
 /// Block until the deny lane has taken `n` submissions.
 fn wait_for_denies(engine: &Engine, n: u64) {
-    wait_until(&format!("the deny lane takes {n} submission(s)"), || {
-        engine.write_executor_stats().deny_submitted >= n
-    });
-}
-
-fn wait_until(what: &str, mut cond: impl FnMut() -> bool) {
-    let deadline = Instant::now() + WAIT;
-    while !cond() {
-        assert!(Instant::now() < deadline, "timed out waiting: {what}");
-        std::thread::sleep(Duration::from_millis(2));
-    }
+    wait_until(
+        &format!("the deny lane takes {n} submission(s)"),
+        WAIT,
+        || engine.write_executor_stats().deny_submitted >= n,
+    );
 }
 
 // -------------------------------------------------------------------------------------------
@@ -302,7 +298,7 @@ fn artifact_entity(engine: &Engine, id: tessera_types::TesseraId) -> EntityId {
 fn flush(engine: &Engine) {
     let before = engine.write_executor_stats().flushes;
     engine.request_flush();
-    wait_until("the flush publishes", || {
+    wait_until("the flush publishes", WAIT, || {
         engine.write_executor_stats().flushes > before
     });
 }
@@ -311,7 +307,7 @@ fn flush(engine: &Engine) {
 fn fold(engine: &Engine) {
     let before = engine.write_executor_stats();
     engine.request_fold();
-    wait_until("the fold publishes", || {
+    wait_until("the fold publishes", WAIT, || {
         let now = engine.write_executor_stats();
         assert_eq!(
             now.fold_failures, before.fold_failures,
@@ -338,7 +334,7 @@ fn settle(engine: &Engine) {
 fn rotate(engine: &Engine) {
     let before = engine.write_executor_stats().ticks;
     engine.request_flush();
-    wait_until("the tick that rotates the log runs", || {
+    wait_until("the tick that rotates the log runs", WAIT, || {
         engine.write_executor_stats().ticks > before
     });
 }
@@ -411,7 +407,7 @@ fn publish_and_pack(fx: &Fixture, engine: &Engine, key: &str, members: Vec<Entit
             vec![IncomingArtifact::from_entities(Some(key.into()), members)],
         )
         .expect("a publication into a registered layer");
-    wait_until("the publication reaches an extent", || {
+    wait_until("the publication reaches an extent", WAIT, || {
         membership_files(fx, engine) > before
     });
 }
@@ -675,7 +671,7 @@ fn a_growth_that_lands_after_the_folds_pack_pins_the_log_again() {
                     .expect("a growth behind a parked fold is an ordinary write")
             });
             faults.release();
-            wait_until("the released fold publishes", || {
+            wait_until("the released fold publishes", WAIT, || {
                 engine.write_executor_stats().folds > before_fold
             });
             grown.join().unwrap();
@@ -800,7 +796,7 @@ fn a_suppression_racing_a_join_hides_the_artifact_and_keeps_the_join() {
             )],
         )
         .unwrap()[0];
-    wait_until("the publication lands", || {
+    wait_until("the publication lands", WAIT, || {
         engine.published_artifacts() == 1
     });
     let entity = artifact_entity(&engine, id);

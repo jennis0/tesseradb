@@ -13,20 +13,14 @@
 
 mod common;
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use common::*;
 use tessera_engine::{AcceptError, Engine, EngineConfig};
 use tessera_lifecycle::wal::{Wal, WalRecord, WalRow};
 use tessera_lifecycle::UnallocatedRow;
 
-fn wait_until(what: &str, mut cond: impl FnMut() -> bool) {
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while !cond() {
-        assert!(Instant::now() < deadline, "timed out waiting: {what}");
-        std::thread::sleep(Duration::from_millis(5));
-    }
-}
+const WAIT: Duration = Duration::from_secs(10);
 
 /// Write a `SEGMENTS-1.json` cloned from the build's `SEGMENTS-0.json`, carrying a delta-tier
 /// declaration and a file that does not verify — honourable, unverifiable, steppable.
@@ -130,7 +124,7 @@ fn a_stepped_down_node_refuses_ingest_flushes_nothing_and_rotates_nothing() {
 
     // The buffered pre-existing row is not flushed: ticks pass, nothing publishes. And the
     // suppression lane stays open — a deny is accepted, because denies threaten no segment.
-    wait_until("two ticks fire on the stepped-down node", || {
+    wait_until("two ticks fire on the stepped-down node", WAIT, || {
         engine.write_executor_stats().ticks >= 2
     });
     assert_eq!(

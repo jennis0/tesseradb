@@ -15,20 +15,14 @@
 
 mod common;
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use common::*;
 use tessera_engine::{Engine, EngineConfig, ViewportRequest};
 use tessera_lifecycle::UnallocatedRow;
 use tessera_types::EntityId;
 
-fn wait_until(what: &str, mut cond: impl FnMut() -> bool) {
-    let deadline = Instant::now() + Duration::from_secs(20);
-    while !cond() {
-        assert!(Instant::now() < deadline, "timed out waiting: {what}");
-        std::thread::sleep(Duration::from_millis(5));
-    }
-}
+const WAIT: Duration = Duration::from_secs(20);
 
 fn engine_at(tmp: &std::path::Path, root: &std::path::Path, tick_secs: u64) -> Engine {
     let mut engine = Engine::open(
@@ -110,7 +104,7 @@ fn the_tick_plans_what_it_would_flush() {
     ingest(&engine, "ext-1");
     ingest(&engine, "ext-2");
 
-    wait_until("the tick to plan", || {
+    wait_until("the tick to plan", WAIT, || {
         engine.write_executor_stats().flushable_items == 2
     });
 }
@@ -122,7 +116,9 @@ fn an_idle_tick_plans_nothing() {
     let tmp = tempfile::TempDir::new().unwrap();
     let engine = engine_at(tmp.path(), &fixture(tmp.path()), 1);
 
-    wait_until("several ticks", || engine.write_executor_stats().ticks >= 3);
+    wait_until("several ticks", WAIT, || {
+        engine.write_executor_stats().ticks >= 3
+    });
     assert_eq!(engine.write_executor_stats().flushable_items, 0);
     assert_eq!(engine.generation().segments_version, 0);
 }
@@ -141,7 +137,7 @@ fn a_published_flush_is_a_bundle_a_restart_opens() {
     let engine = engine_at(tmp.path(), &root, 1);
 
     let id = ingest(&engine, "ext-1");
-    wait_until("the flush to publish", || {
+    wait_until("the flush to publish", WAIT, || {
         engine.write_executor_stats().flushes >= 1
     });
 
@@ -215,7 +211,7 @@ fn a_reopened_engine_does_not_re_buffer_rows_that_already_have_geometry() {
     let id = {
         let engine = engine_at(tmp.path(), &root, 1);
         let id = ingest(&engine, "ext-1");
-        wait_until("the flush to publish", || {
+        wait_until("the flush to publish", WAIT, || {
             engine.write_executor_stats().flushes >= 1
         });
         assert!(!engine.generation().buffer.contains(id));
@@ -260,7 +256,7 @@ fn the_allocator_floor_comes_from_the_side_manifest() {
     let flushed = {
         let engine = engine_at(tmp.path(), &root, 1);
         let id = ingest(&engine, "ext-1");
-        wait_until("the flush to publish", || {
+        wait_until("the flush to publish", WAIT, || {
             engine.write_executor_stats().flushes >= 1
         });
         id
@@ -322,7 +318,7 @@ fn a_flushed_item_is_visible_in_a_viewport() {
     let visible_before = before.tiles.iter().map(|t| t.visible).sum::<u64>();
 
     let id = ingest(&engine, "ext-1");
-    wait_until("the flush to publish", || {
+    wait_until("the flush to publish", WAIT, || {
         engine.write_executor_stats().flushes >= 1
     });
 

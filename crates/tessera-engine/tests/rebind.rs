@@ -6,19 +6,13 @@
 
 mod common;
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use common::*;
 use tessera_engine::{Engine, EngineConfig};
 use tessera_lifecycle::{ChangeOp, UnallocatedRow};
 
-fn wait_until(what: &str, mut cond: impl FnMut() -> bool) {
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while !cond() {
-        assert!(Instant::now() < deadline, "timed out waiting: {what}");
-        std::thread::sleep(Duration::from_millis(5));
-    }
-}
+const WAIT: Duration = Duration::from_secs(10);
 
 fn row(engine: &Engine, external_id: &[u8]) -> UnallocatedRow {
     UnallocatedRow {
@@ -77,7 +71,7 @@ fn delete_then_reingest_rebinds_the_external_id_across_flush_rotation_and_restar
         )
         .expect("first ingest accepted")[0];
     engine.request_flush();
-    wait_until("first flush publishes", || {
+    wait_until("first flush publishes", WAIT, || {
         engine.generation().segments_version >= 1
     });
 
@@ -101,7 +95,7 @@ fn delete_then_reingest_rebinds_the_external_id_across_flush_rotation_and_restar
     );
 
     engine.request_flush();
-    wait_until("second flush publishes", || {
+    wait_until("second flush publishes", WAIT, || {
         engine.generation().segments_version >= 2
     });
 

@@ -11,20 +11,14 @@
 
 mod common;
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use common::*;
 use tessera_engine::{Engine, EngineConfig};
 use tessera_lifecycle::UnallocatedRow;
 use tessera_types::EntityId;
 
-fn wait_until(what: &str, mut cond: impl FnMut() -> bool) {
-    let deadline = Instant::now() + Duration::from_secs(20);
-    while !cond() {
-        assert!(Instant::now() < deadline, "timed out waiting: {what}");
-        std::thread::sleep(Duration::from_millis(5));
-    }
-}
+const WAIT: Duration = Duration::from_secs(20);
 
 fn fixture(tmp: &std::path::Path) -> std::path::PathBuf {
     let root = tmp.join("bundle");
@@ -93,8 +87,10 @@ fn wal_members(tmp: &std::path::Path) -> Vec<String> {
 fn flushed_then_rotated(tmp: &std::path::Path, root: &std::path::Path, key: &str) -> EntityId {
     let engine = engine_at(tmp, root, 1);
     let id = ingest(&engine, key);
-    wait_until("the flush", || engine.write_executor_stats().flushes >= 1);
-    wait_until("member 1 to be reclaimed", || {
+    wait_until("the flush", WAIT, || {
+        engine.write_executor_stats().flushes >= 1
+    });
+    wait_until("member 1 to be reclaimed", WAIT, || {
         !wal_members(tmp).contains(&"wal-000001.log".to_string())
     });
     id
@@ -149,8 +145,10 @@ fn an_item_with_no_external_id_answers_none_after_rotation_rather_than_erroring(
         let id = engine
             .accept_ingest(vec![row], "anon".to_string(), [0u8; 32])
             .expect("an item with no external id is accepted")[0];
-        wait_until("the flush", || engine.write_executor_stats().flushes >= 1);
-        wait_until("member 1 to be reclaimed", || {
+        wait_until("the flush", WAIT, || {
+            engine.write_executor_stats().flushes >= 1
+        });
+        wait_until("member 1 to be reclaimed", WAIT, || {
             !wal_members(tmp.path()).contains(&"wal-000001.log".to_string())
         });
         id
@@ -232,11 +230,13 @@ fn an_accepted_batch_leaves_the_live_index_when_its_wal_member_is_rotated_away()
         engine.accepted_batch("ext-1").is_some(),
         "the batch was just accepted, so its id is held"
     );
-    wait_until("the flush", || engine.write_executor_stats().flushes >= 1);
-    wait_until("member 1 to be reclaimed", || {
+    wait_until("the flush", WAIT, || {
+        engine.write_executor_stats().flushes >= 1
+    });
+    wait_until("member 1 to be reclaimed", WAIT, || {
         !wal_members(tmp.path()).contains(&"wal-000001.log".to_string())
     });
-    wait_until("the index to follow the log", || {
+    wait_until("the index to follow the log", WAIT, || {
         engine.accepted_batch("ext-1").is_none()
     });
 }

@@ -51,6 +51,8 @@ use tessera_engine::{Engine, EngineConfig, ProjectionRoute, ViewportRequest};
 use tessera_lifecycle::{ChangeOp, UnallocatedRow};
 use tessera_types::EntityId;
 
+const WAIT: Duration = Duration::from_secs(60);
+
 /// The one view the fixture builds. A second, created while the engine runs, appears in
 /// [`a_view_created_while_running_has_no_images_and_is_served_by_the_walk`].
 const VIEW: &str = "s0";
@@ -390,14 +392,6 @@ fn drop_term_image_extents(root: &Path) {
     assert!(found > 0, "no segments manifest was found under {root:?}");
 }
 
-fn wait_until(what: &str, mut ready: impl FnMut() -> bool) {
-    let deadline = Instant::now() + Duration::from_secs(60);
-    while !ready() {
-        assert!(Instant::now() < deadline, "timed out waiting for {what}");
-        std::thread::sleep(Duration::from_millis(5));
-    }
-}
-
 fn whole_extent() -> ViewportRequest<'static> {
     ViewportRequest::new(VIEW, 2, [0.0, 0.0, 1000.0, 1000.0], 500)
 }
@@ -636,7 +630,7 @@ fn every_route_agrees_after_a_flush_under_a_kept_and_an_unkept_term() {
     }
     let flushes = engine.write_executor_stats().flushes;
     engine.request_flush();
-    wait_until("the flush to publish", || {
+    wait_until("the flush to publish", WAIT, || {
         engine.write_executor_stats().flushes > flushes
     });
 
@@ -662,13 +656,13 @@ fn every_route_agrees_after_a_merge() {
         }
         let flushes = engine.write_executor_stats().flushes;
         engine.request_flush();
-        wait_until("a flush to publish", || {
+        wait_until("a flush to publish", WAIT, || {
             engine.write_executor_stats().flushes > flushes
         });
     }
     engine.set_merge_for_test(true);
     engine.request_flush();
-    wait_until("the merge to publish", || {
+    wait_until("the merge to publish", WAIT, || {
         engine.write_executor_stats().merges >= 1
     });
 
@@ -753,12 +747,14 @@ fn the_background_refresh_builds_by_a_chosen_route_and_equals_the_walk() {
     ingest(&engine, "refreshed", &[MOST], 250.0);
     let flushes = engine.write_executor_stats().flushes;
     engine.request_flush();
-    wait_until("the flush to publish", || {
+    wait_until("the flush to publish", WAIT, || {
         engine.write_executor_stats().flushes > flushes
     });
-    wait_until("the background refresh to produce every entry", || {
-        engine.refreshes() >= before_refreshes + sessions.len() as u64
-    });
+    wait_until(
+        "the background refresh to produce every entry",
+        WAIT,
+        || engine.refreshes() >= before_refreshes + sessions.len() as u64,
+    );
 
     // A flush leaves rung 1 available, so the pass patches rather than builds and no route is
     // chosen. What must hold is that whatever it produced is still the walk's set.
@@ -797,7 +793,7 @@ fn the_background_refresh_builds_by_a_chosen_route_and_equals_the_walk() {
         assert!(Instant::now() < deadline, "the fold never published");
         std::thread::sleep(Duration::from_millis(10));
     }
-    wait_until("the post-fold refresh to produce every entry", || {
+    wait_until("the post-fold refresh to produce every entry", WAIT, || {
         engine.refreshes() >= before_refreshes + sessions.len() as u64
     });
     let after_routes = engine.projection_builds_by_route();
@@ -982,7 +978,7 @@ fn a_view_created_while_running_has_no_images_and_is_served_by_the_walk() {
     }
     let flushes = engine.write_executor_stats().flushes;
     engine.request_flush();
-    wait_until("the flush to publish", || {
+    wait_until("the flush to publish", WAIT, || {
         engine.write_executor_stats().flushes > flushes
     });
 
@@ -1122,7 +1118,7 @@ fn a_view_created_while_running_gains_images_at_its_first_fold() {
     }
     let flushes = engine.write_executor_stats().flushes;
     engine.request_flush();
-    wait_until("the flush to publish", || {
+    wait_until("the flush to publish", WAIT, || {
         engine.write_executor_stats().flushes > flushes
     });
 

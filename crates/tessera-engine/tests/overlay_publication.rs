@@ -13,7 +13,7 @@
 mod common;
 
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use common::*;
 use tessera_engine::{Engine, EngineConfig};
@@ -22,13 +22,7 @@ use tessera_lifecycle::UnallocatedRow;
 use tessera_store::manifest::SegmentsManifest;
 use tessera_types::EntityId;
 
-fn wait_until(what: &str, mut cond: impl FnMut() -> bool) {
-    let deadline = Instant::now() + Duration::from_secs(20);
-    while !cond() {
-        assert!(Instant::now() < deadline, "timed out waiting: {what}");
-        std::thread::sleep(Duration::from_millis(5));
-    }
-}
+const WAIT: Duration = Duration::from_secs(20);
 
 fn engine_at(tmp: &Path, root: &Path, tick_secs: u64) -> Engine {
     std::fs::create_dir_all(tmp).unwrap();
@@ -118,7 +112,7 @@ fn a_flush_manifest_carries_the_deny_state_at_publication() {
         .expect("the suppression is accepted");
 
     ingest(&engine, "ext-1");
-    wait_until("the flush to publish", || {
+    wait_until("the flush to publish", WAIT, || {
         engine.write_executor_stats().flushes >= 1
     });
 
@@ -153,7 +147,7 @@ fn an_unsuppress_is_absent_from_the_next_manifest() {
         .accept_change(entity, ChangeOp::Suppress)
         .expect("accepted");
     ingest(&engine, "ext-1");
-    wait_until("the first flush", || {
+    wait_until("the first flush", WAIT, || {
         engine.write_executor_stats().flushes >= 1
     });
     assert_eq!(suppressed_in(&newest_manifest(&root).1), vec![entity.raw()]);
@@ -162,7 +156,7 @@ fn an_unsuppress_is_absent_from_the_next_manifest() {
         .accept_change(entity, ChangeOp::Unsuppress)
         .expect("accepted");
     ingest(&engine, "ext-2");
-    wait_until("the second flush", || {
+    wait_until("the second flush", WAIT, || {
         engine.write_executor_stats().flushes >= 2
     });
 
@@ -190,7 +184,9 @@ fn a_delete_reaches_tombstones_and_a_suppress_reaches_deny() {
         .expect("accepted");
 
     ingest(&engine, "ext-1");
-    wait_until("the flush", || engine.write_executor_stats().flushes >= 1);
+    wait_until("the flush", WAIT, || {
+        engine.write_executor_stats().flushes >= 1
+    });
 
     let (_, manifest) = newest_manifest(&root);
     assert_eq!(suppressed_in(&manifest), vec![suppressed.raw()]);
@@ -221,7 +217,7 @@ fn a_node_restored_from_the_bundle_alone_honours_the_published_deny() {
             .accept_change(suppressed, ChangeOp::Suppress)
             .expect("accepted");
         ingest(&engine, "ext-1");
-        wait_until("the flush to publish", || {
+        wait_until("the flush to publish", WAIT, || {
             engine.write_executor_stats().flushes >= 1
         });
         before
@@ -282,7 +278,7 @@ fn an_accepted_deny_publishes_without_moving_the_geometry_version() {
     engine
         .accept_change(entity, ChangeOp::Suppress)
         .expect("accepted");
-    wait_until("the overlay publication", || {
+    wait_until("the overlay publication", WAIT, || {
         engine.write_executor_stats().overlay_publications >= 1
     });
 
