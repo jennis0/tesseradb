@@ -6132,6 +6132,47 @@ fn pack_membership_extents(
     Ok(entries)
 }
 
+/// A record extent's files, resolved against the prefix directory that holds them. All three, and
+/// any one missing is a refusal to open rather than "those entities have no record".
+fn record_extent_paths(
+    prefix_dir: &std::path::Path,
+    extent: &tessera_store::manifest::RecordExtent,
+) -> tessera_filter::RecordExtentPaths {
+    tessera_filter::RecordExtentPaths {
+        blocks: prefix_dir.join(&extent.blocks),
+        hasrow: prefix_dir.join(&extent.hasrow),
+        directory: prefix_dir.join(&extent.directory),
+    }
+}
+
+/// An entity→term extent's four files, resolved against the prefix directory that holds them.
+fn entity_terms_extent_paths(
+    prefix_dir: &std::path::Path,
+    extent: &tessera_store::manifest::EntityTermsExtent,
+) -> tessera_store::EntityTermsExtentPaths {
+    tessera_store::EntityTermsExtentPaths {
+        hasrow: prefix_dir.join(&extent.hasrow),
+        offsets: prefix_dir.join(&extent.offsets),
+        terms: prefix_dir.join(&extent.terms),
+        bases: prefix_dir.join(&extent.bases),
+    }
+}
+
+/// A text extent's three files, resolved against the prefix directory that holds them, under the
+/// column name a leaf resolves to.
+fn text_extent_paths(
+    prefix_dir: &std::path::Path,
+    extent: &tessera_store::manifest::TextExtent,
+) -> crate::filter::TextExtentPaths {
+    crate::filter::TextExtentPaths {
+        column: crate::filter::extent_column_name(&extent.column, extent.view.as_deref()),
+        dict_rel: extent.dict.clone(),
+        dict: prefix_dir.join(&extent.dict),
+        postings: prefix_dir.join(&extent.postings),
+        presence: prefix_dir.join(&extent.presence),
+    }
+}
+
 /// The reader this process holds open for the tier `rel` names, or `None` if it holds none.
 ///
 /// The two lists are positional against each other: `tiers` was opened from `rels`, which is the
@@ -9408,16 +9449,7 @@ impl Executor {
             .zip(&completed.plan.texts)
             .map(|(extent, window)| crate::filter::CoalescedTextWindow {
                 consumed: window.extents.iter().map(|e| e.dict.clone()).collect(),
-                paths: crate::filter::TextExtentPaths {
-                    column: crate::filter::extent_column_name(
-                        &extent.column,
-                        extent.view.as_deref(),
-                    ),
-                    dict_rel: extent.dict.clone(),
-                    dict: prefix_dir.join(&extent.dict),
-                    postings: prefix_dir.join(&extent.postings),
-                    presence: prefix_dir.join(&extent.presence),
-                },
+                paths: text_extent_paths(&prefix_dir, extent),
             })
             .collect();
         // **The transpose's stack is re-derived from the rebased manifest**, not patched — the
@@ -9435,12 +9467,7 @@ impl Executor {
             let extents: Vec<tessera_store::EntityTermsExtentPaths> = manifest
                 .entity_terms_extents
                 .iter()
-                .map(|e| tessera_store::EntityTermsExtentPaths {
-                    hasrow: prefix_dir.join(&e.hasrow),
-                    offsets: prefix_dir.join(&e.offsets),
-                    terms: prefix_dir.join(&e.terms),
-                    bases: prefix_dir.join(&e.bases),
-                })
+                .map(|e| entity_terms_extent_paths(&prefix_dir, e))
                 .collect();
             match tessera_store::EntityTermsStack::open(
                 Some(&partition_dir.join(tessera_store::ENTITY_TERMS_DIR)),
@@ -9484,11 +9511,7 @@ impl Executor {
                     .record_extents
                     .iter()
                     .chain(manifest.artifact_record_extents.iter())
-                    .map(|e| tessera_filter::RecordExtentPaths {
-                        blocks: prefix_dir.join(&e.blocks),
-                        hasrow: prefix_dir.join(&e.hasrow),
-                        directory: prefix_dir.join(&e.directory),
-                    })
+                    .map(|e| record_extent_paths(&prefix_dir, e))
                     .collect();
                 match tessera_filter::RecordStack::open(
                     blob_resident.then_some(record_dir.as_path()),
@@ -16284,28 +16307,16 @@ impl Executor {
         let record_paths: Vec<tessera_filter::RecordExtentPaths> = completed
             .record_extent
             .iter()
-            .map(|e| tessera_filter::RecordExtentPaths {
-                blocks: record_dir.join(&e.blocks),
-                hasrow: record_dir.join(&e.hasrow),
-                directory: record_dir.join(&e.directory),
-            })
+            .map(|e| record_extent_paths(&record_dir, e))
             .collect();
-        let entity_terms_paths = vec![tessera_store::EntityTermsExtentPaths {
-            hasrow: record_dir.join(&completed.entity_terms_extent.hasrow),
-            offsets: record_dir.join(&completed.entity_terms_extent.offsets),
-            terms: record_dir.join(&completed.entity_terms_extent.terms),
-            bases: record_dir.join(&completed.entity_terms_extent.bases),
-        }];
+        let entity_terms_paths = vec![entity_terms_extent_paths(
+            &record_dir,
+            &completed.entity_terms_extent,
+        )];
         let text_paths: Vec<crate::filter::TextExtentPaths> = completed
             .text_extents
             .iter()
-            .map(|e| crate::filter::TextExtentPaths {
-                column: crate::filter::extent_column_name(&e.column, e.view.as_deref()),
-                dict_rel: e.dict.clone(),
-                dict: record_dir.join(&e.dict),
-                postings: record_dir.join(&e.postings),
-                presence: record_dir.join(&e.presence),
-            })
+            .map(|e| text_extent_paths(&record_dir, e))
             .collect();
         // **The new columns first, then the extents that land on them** (`views.md` §5). A flush
         // of a view a family had no column for wrote its base in the same unit as its extent, and
