@@ -2646,14 +2646,13 @@ async fn a_row_promoted_to_a_join_after_its_handler_pass_still_meets_the_arms() 
     }
 }
 
-/// **The refusal body is the same whichever source answered it, to the byte** (decision 0116).
+/// **The attribute arm's refusal is a `conflict` naming the row and the column, and nothing else.**
 ///
 /// `the_buffered_and_flushed_attribute_arms_refuse_identically` asserts the two *sources* agree;
-/// this pins the whole body against a literal, so the text a caller reads cannot drift while the
-/// arms are moved between sites. It is the assertion decision 0116's "the bodies did not move with
-/// the site" claim rests on, and a `contains()` would not be one.
+/// this asserts what a caller is given — the status, the error kind, the row index and the column
+/// name — and that neither the stored value nor the supplied one is in the body (**I10**).
 #[tokio::test]
-async fn the_join_rules_refusal_body_is_pinned_whole() {
+async fn the_join_rules_refusal_names_the_row_and_the_column() {
     let served = serve().await;
     assert_eq!(
         create(&served, "quarter", "2026-Q5", q_record("Q5", 1))
@@ -2681,12 +2680,16 @@ async fn the_join_rules_refusal_body_is_pinned_whole() {
     )
     .await;
     assert_eq!(resp.status(), 409);
-    assert_eq!(
-        resp.text().await.unwrap(),
-        "{\"error\":\"conflict\",\"detail\":\"row 0 joins an entity this deployment already holds, \
-         with a different value for column 'score'. An entity-scoped attribute is one value per \
-         entity, so a joining row byte-matches the stored value or omits it (views §4, §5)\"}",
-        "the writer's body, whole — the text the handler answered with before the arms moved"
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["error"], "conflict", "{body}");
+    let detail = body["detail"].as_str().unwrap();
+    assert!(
+        detail.contains("row 0") && detail.contains("column 'score'"),
+        "the refusal names the row and the column: {detail}"
+    );
+    assert!(
+        !detail.contains('7') && !detail.contains('9'),
+        "neither value is in the body: {detail}"
     );
 }
 

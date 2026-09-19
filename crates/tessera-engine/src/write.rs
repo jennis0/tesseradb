@@ -11169,6 +11169,77 @@ enum ValuesColumn {
     Scoped(usize),
 }
 
+/// The key half of an owner view id — the half a caller spelled, never the owning group, which a
+/// sharing group's caller has no business learning from a refusal.
+fn key_of_owner_view(owner_view: &str) -> &str {
+    owner_view
+        .split_once(tessera_store::GROUP_SEPARATOR)
+        .map_or(owner_view, |(_, key)| key)
+}
+
+/// What this deployment already holds for one entity and one entity-scoped column: the entity's
+/// own buffered row, then `pending` — the cells an earlier values batch filled and no flush has
+/// written — then the flushed homes.
+///
+/// **Each source is asked for a *held* value, not for a slot.** A source that carries the position
+/// and holds the column's absence falls through to the next, so a cell one source left absent is
+/// not read as unheld while another holds a value for it.
+///
+/// `pending` is `None` for a caller that does not read unflushed fills.
+fn held_entity_value(
+    generation: &Generation,
+    entity: EntityId,
+    at: usize,
+    declared: &tessera_store::manifest::DeclaredScalar,
+    buffered: Option<&tessera_lifecycle::BufferedItem>,
+    pending: Option<&tessera_lifecycle::Fill>,
+    blob: &mut crate::session::BlobRow,
+) -> Option<WalScalar> {
+    let held =
+        |value: WalScalar| (!crate::session::scalar_is_absent(&value, declared)).then_some(value);
+    buffered
+        .and_then(|item| item.scalars.get(at).cloned())
+        .and_then(held)
+        .or_else(|| {
+            pending
+                .and_then(|fill| fill.scalars.get(at).cloned())
+                .and_then(held)
+        })
+        .or_else(|| crate::session::flushed_scalar_of(generation, entity, at, blob).and_then(held))
+}
+
+/// What this deployment already holds for one `(entity, attribute, key)` cell, on
+/// [`held_entity_value`]'s rule for absence.
+///
+/// The buffered source is every row of the entity whose view addresses this same key — the cell's
+/// own rows, not the entity's own row, which is a different question.
+fn held_scoped_value(
+    generation: &Generation,
+    entity: EntityId,
+    at: usize,
+    family: &tessera_store::manifest::ScopedScalar,
+    declared: &tessera_store::manifest::DeclaredScalar,
+    owner_view: &str,
+    pending: Option<&tessera_lifecycle::ScopedFill>,
+) -> Option<WalScalar> {
+    let manifest = &generation.bundle.manifest;
+    let held =
+        |value: WalScalar| (!crate::session::scalar_is_absent(&value, declared)).then_some(value);
+    generation
+        .buffer
+        .rows_of(entity)
+        .filter(|item| scoped_owner_view_of(manifest, &item.view) == owner_view)
+        .find_map(|item| item.scoped.get(at).cloned().and_then(held))
+        .or_else(|| {
+            pending
+                .and_then(|fill| fill.scoped.get(at).cloned())
+                .and_then(held)
+        })
+        .or_else(|| {
+            crate::session::flushed_scoped_of(generation, entity, family, owner_view).and_then(held)
+        })
+}
+
 /// Apply the fill rule to one values batch (`ingest.md` §1.1, §1.4), producing the cells nothing
 /// holds and refusing on the first cell that is held differently.
 ///
@@ -11188,54 +11259,24 @@ fn plan_fills(
     let declared = &manifest.declared_scalars;
     let families = scoped_families_of_view(manifest, &request.view);
     let owner_view = scoped_owner_view_of(manifest, &request.view);
-    // The cell's key, for a refusal — the half of the owner view id a caller spelled, never the
-    // owning group, which a sharing group's caller has no business learning from a refusal
-    // (`settle_joins`' rule).
-    let key = owner_view
-        .split_once(tessera_store::GROUP_SEPARATOR)
-        .map(|(_, key)| key)
-        .unwrap_or(owner_view.as_str())
-        .to_string();
+    let key = key_of_owner_view(&owner_view);
 
     // One resolution per batch, not per row. A name in neither space is refused here as well as
     // at the door: the door reads the served schema of a generation this pass may have moved past.
-    // **A `render` column cannot be filled** (`ingest.md` §6.3). A fill acquires no row, so it
-    // never reaches the hot column, and the hot column is the only home a tile and the drill-down
-    // read a rendered value from. Two shapes, refused for two reasons:
     //
-    // - **`render` alone** — not `index`, and not a `derived` category — has *no home at all*
-    //   for a fill: `owes_value_column` is false, so there is no entity-space column, and
-    //   `blob_resident` is false because the column renders, so there is no blob row either. The
-    //   value would be acknowledged and stored nowhere.
-    // - **`render` with `index`**, and a rendered `derived` category, *do* have an entity-space
-    //   column, so a fill would be stored and would answer a filter that took the entity route.
-    //   It would still draw absent on every tile and at the drill-down, and answer nothing to a
-    //   filter whose request made the row route cheaper — which is a per-request cost choice
-    //   (decision 0068, `FilterColumns::leaf_space`'s `prefer_row`), not a property of the
-    //   column. One column answering two ways depending on the shape of the request is the
-    //   reason this is refused rather than half-served.
-    //
-    // **The guard stands although `PUT /control/attributes` now refuses `render`** (decision
-    // 0136's amendment, 2026-09-08). That door closes the runtime half: no column declared at a
-    // running service carries the flag. A column the *build* declared `render` still reaches
-    // here, which is every rendered column a deployment has, so this is the arm that fires.
-    //
-    // R10, which read a back-filled `render` value as filterable where `index` was declared, is
-    // withdrawn. It was true of the entity route and said nothing about the value being drawn
-    // nowhere, which is what this refusal keeps the two surfaces from disagreeing over.
-    let row_tail_only = |d: &tessera_store::manifest::DeclaredScalar| d.render;
+    // **A `render` column cannot be filled.** A fill acquires no row, so the value never reaches
+    // the hot column, which is the only home a tile and the drill-down read a rendered value
+    // from. Where the column is not also `index` there is no other home either, so the value
+    // would be acknowledged and stored nowhere.
     let mut columns = Vec::with_capacity(request.columns.len());
     for name in &request.columns {
         if let Some(position) = declared.iter().position(|d| &d.name == name) {
-            if row_tail_only(&declared[position]) {
+            if declared[position].render {
                 return Err(ExecError::ValuesRefused {
                     detail: format!(
-                        "column '{name}' is declared `render`, and a rendered value is drawn \
-                         from the hot column of the row that carries it. A values row acquires no \
-                         row, so the value would be drawn on no tile and at no drill-down — and \
-                         where the column is not also `index` it would be stored nowhere at all. \
-                         Re-ingest the point, or declare the column without `render` \
-                         (`ingest.md` §6.3)"
+                        "column '{name}' is declared `render` and a values row acquires no row \
+                         for the value to be drawn from; re-ingest the point, or declare the \
+                         column without `render`"
                     ),
                 });
             }
@@ -11243,12 +11284,12 @@ fn plan_fills(
             continue;
         }
         if let Some(position) = families.iter().position(|f| &f.name == name) {
-            if row_tail_only(&crate::session::declared_of_scoped(&families[position])) {
+            if families[position].render {
                 return Err(ExecError::ValuesRefused {
                     detail: format!(
-                        "group-scoped column '{name}' is declared `render`, and a rendered value \
-                         is drawn from the hot column of the row that carries it, which a values \
-                         row does not acquire (`ingest.md` §6.3)"
+                        "group-scoped column '{name}' is declared `render` and a values row \
+                         acquires no row for the value to be drawn from; re-ingest the point, or \
+                         declare the column without `render`"
                     ),
                 });
             }
@@ -11257,9 +11298,9 @@ fn plan_fills(
         }
         return Err(ExecError::ValuesRefused {
             detail: format!(
-                "column '{name}' is neither in MANIFEST.declared_scalars nor a group-scoped \
-                 family whose key set holds view '{}' (`views.md` §5). Declare the column, or \
-                 name the view whose key addresses the cell",
+                "column '{name}' is neither a declared scalar nor a group-scoped family whose key \
+                 set holds view '{}'; declare the column, or name the view whose key addresses \
+                 the cell",
                 request.view
             ),
         });
@@ -11274,25 +11315,23 @@ fn plan_fills(
         if generation.overlay.is_deleted(entity) {
             return Err(ExecError::ValuesRefused {
                 detail: format!(
-                    "row {index} names an entity this deployment has deleted. A deletion is not \
-                     undone by a fill (decision 0047): the item is re-ingested, which allocates a \
-                     fresh entity"
+                    "row {index} names an entity this deployment has deleted; re-ingest the item, \
+                     which allocates a fresh entity"
                 ),
             });
         }
         let buffered = generation.buffer.get(entity);
-        // The cells an earlier batch filled and no flush has written. Read as a claimant beside
-        // the other two: a cell filled at the last tick is held, not absent. **A lookup, not a
-        // scan** — this is asked once per row and a batch runs to `max_batch_rows`.
+        // The cells an earlier batch filled and no flush has written. **A lookup, not a scan** —
+        // these are asked once per row and a batch runs to `max_batch_rows`.
         let pending = generation.buffer.fill_of(entity);
         let pending_scoped = generation.buffer.scoped_fill_of(entity, &owner_view);
         // Read at most once for this row, and only if a blob-resident column asks.
         let mut blob = crate::session::BlobRow::default();
         // **Absence in a fill's tails is `WalScalar::Null` for every family, a category
-        // included.** A category's own spelling of absence is the reserved code (decision 0064),
-        // which the flush's gather maps `Null` onto — and using it here would make a merge of two
-        // fills unable to tell an unfilled category cell from a filled one, the reserved code
-        // being an ordinary `u8` to any predicate over the value alone.
+        // included.** A category's own spelling of absence is the reserved code, which the flush's
+        // gather maps `Null` onto — using it here would make a merge of two fills unable to tell
+        // an unfilled category cell from a filled one, the reserved code being an ordinary `u8` to
+        // any predicate over the value alone.
         let mut scalars: Vec<WalScalar> = vec![WalScalar::Null; declared.len()];
         let mut scoped: Vec<WalScalar> = vec![WalScalar::Null; families.len()];
         let mut any_entity = false;
@@ -11308,28 +11347,15 @@ fn plan_fills(
                     if crate::session::scalar_is_absent(supplied, d) {
                         continue;
                     }
-                    // **Each source is asked for a *held* value, not for a slot** — the shape
-                    // `settle_joins` reads its arms in. A buffered row that carries the position
-                    // and holds the column's absence answers `Some(absence)`, so a chain that
-                    // short-circuited on `Some` would stop there and never reach the pending fill
-                    // or the flushed home: a cell already filled would read as absent, be filled
-                    // a second time, and the second value would be dropped at the merge after
-                    // being acknowledged.
-                    let held = |value: WalScalar| {
-                        (!crate::session::scalar_is_absent(&value, d)).then_some(value)
-                    };
-                    let stored = buffered
-                        .and_then(|item| item.scalars.get(*at).cloned())
-                        .and_then(held)
-                        .or_else(|| {
-                            pending
-                                .and_then(|fill| fill.scalars.get(*at).cloned())
-                                .and_then(held)
-                        })
-                        .or_else(|| {
-                            crate::session::flushed_scalar_of(generation, entity, *at, &mut blob)
-                                .and_then(held)
-                        });
+                    let stored = held_entity_value(
+                        generation,
+                        entity,
+                        *at,
+                        d,
+                        buffered,
+                        pending,
+                        &mut blob,
+                    );
                     match stored {
                         None => {
                             scalars[*at] = supplied.clone();
@@ -11340,12 +11366,10 @@ fn plan_fills(
                         Some(_) => {
                             return Err(ExecError::ValueConflict {
                                 detail: format!(
-                                    "row {index} supplies a value for column '{}' that this \
-                                     deployment already holds a different one for. An \
-                                     entity-scoped attribute is one value per entity, so a values \
-                                     row fills a cell that is absent, restates the value held, or \
-                                     is refused; changing it is a delete plus a re-ingest \
-                                     (decision 0047, `ingest.md` §1.1)",
+                                    "row {index} supplies a different value for column '{}' than \
+                                     this deployment already holds; an entity-scoped attribute is \
+                                     one value per entity, so supply the value held or omit the \
+                                     column",
                                     d.name
                                 ),
                             })
@@ -11358,39 +11382,20 @@ fn plan_fills(
                     if crate::session::scalar_is_absent(supplied, &d) {
                         continue;
                     }
-                    // Every buffered row of the entity whose view addresses this same key — the
-                    // cell's own rows, not the entity's own row, which is a different question
-                    // (`settle_joins`' scoped arm). Each source answers a *held* value on the
-                    // entity-scoped arm's rule: `find_map` over the slot alone would stop at the
-                    // first row that carries the position, absence included, and an entity with
-                    // two buffered rows under one key would then hide a value the second holds.
-                    let held = |value: WalScalar| {
-                        (!crate::session::scalar_is_absent(&value, &d)).then_some(value)
-                    };
-                    let stored = generation
-                        .buffer
-                        .rows_of(entity)
-                        .filter(|item| scoped_owner_view_of(manifest, &item.view) == owner_view)
-                        .find_map(|item| item.scoped.get(*at).cloned().and_then(held))
-                        .or_else(|| {
-                            pending_scoped
-                                .and_then(|fill| fill.scoped.get(*at).cloned())
-                                .and_then(held)
-                        })
-                        .or_else(|| {
-                            crate::session::flushed_scoped_of(
-                                generation,
-                                entity,
-                                family,
-                                &owner_view,
-                            )
-                            .and_then(held)
-                        });
-                    // **A `text` family past a flush is refused rather than compared**
-                    // (`views.md` §5): the column stores a dictionary, postings and a presence
-                    // bitmap and no value per entity, so there is nothing to compare a supplied
-                    // string against, and admitting it would write a second text layer stamped
-                    // with the same view that `match` unions across. Occupancy is asked instead.
+                    let stored = held_scoped_value(
+                        generation,
+                        entity,
+                        *at,
+                        family,
+                        &d,
+                        &owner_view,
+                        pending_scoped,
+                    );
+                    // **A `text` family past a flush is refused rather than compared**: the column
+                    // stores a dictionary, postings and a presence bitmap and no value per entity,
+                    // so there is nothing to compare a supplied string against, and admitting it
+                    // would write a second text layer stamped with the same view that `match`
+                    // unions across. Occupancy is asked instead.
                     if stored.is_none()
                         && family.arrow_type == ScalarType::Text
                         && crate::session::flushed_scoped_text_present(
@@ -11402,11 +11407,9 @@ fn plan_fills(
                     {
                         return Err(ExecError::ValueConflict {
                             detail: format!(
-                                "row {index} supplies a value for group-scoped column '{}', and \
-                                 this deployment already holds prose for key '{key}'. A `text` \
-                                 family's stored value cannot be compared once it has flushed, so \
-                                 a cell that holds prose takes no second one, equal or not \
-                                 (views §5)",
+                                "row {index} supplies a value for group-scoped column '{}' and \
+                                 this deployment already holds prose for key '{key}' that a flush \
+                                 has made uncomparable; omit the column",
                                 family.name
                             ),
                         });
@@ -11421,12 +11424,10 @@ fn plan_fills(
                         Some(_) => {
                             return Err(ExecError::ValueConflict {
                                 detail: format!(
-                                    "row {index} supplies a value for group-scoped column '{}' \
-                                     that this deployment already holds a different one for under \
-                                     key '{key}'. A scoped value is addressed by (attribute, key) \
-                                     and is one value per cell, so a values row fills a cell that \
-                                     is absent, restates the value held, or is refused \
-                                     (views §5, `ingest.md` §1.1)",
+                                    "row {index} supplies a different value for group-scoped \
+                                     column '{}' than this deployment already holds for key \
+                                     '{key}'; a scoped value is one value per cell, so supply the \
+                                     value held or omit the column",
                                     family.name
                                 ),
                             })
@@ -11598,32 +11599,20 @@ fn new_members_of(record: &WalRecord, store: &tessera_lifecycle::ArtifactStore) 
         .sum()
 }
 
-/// Settle every joining row of one batch, whose join-ness `established_collisions` has just decided
-/// (`views.md` §4, §5; decision 0116) — the **join rule**'s three arms, and then the completion an
-/// accepted join owes.
+/// Settle every joining row of one batch, whose join-ness `established_collisions` has just
+/// decided — the **join rule**'s three arms (label, entity-scoped attribute, scoped cell), and
+/// then the completion an accepted join owes: its descriptors dropped and its omitted `render`
+/// values backfilled.
 ///
 /// `Err` is the refusal the caller is answered with — a `409`, whole batch without effect, taken
-/// before the WAL append so a refused batch leaves no record. The text is what
-/// `/control/ingest`'s handler answered with until 2026-09-01, byte for byte: the site moved and
-/// the body did not, so a caller cannot tell one from the other and the byte-identity tests hold.
-///
-/// **Why all three are here and none in the handler.** A joining row carries geometry, and — for a
-/// scoped family — the cell its key addresses. Everything else it might name is already decided:
-/// the entity's label, and its entity-scoped attributes. What each arm checks is that the caller is
-/// not trying to change one of those through a second view's row. The handler could ask the same
-/// questions, and did, but it asked them of an answer a queue drain old: a row promoted to a join
-/// between the handler's pass and this one passed no arm at all, which is the race this collapse
-/// closes.
+/// before the WAL append so a refused batch leaves no record.
 ///
 /// **A row index and a column name reach the caller; nothing else does.** No entity id, no external
-/// id and no value on either side (**I10**, and `error.rs`'s standing rule about caller data in
-/// bodies).
+/// id and no value on either side (**I10**).
 ///
 /// **One pass, because the arms and the completion read the same sources.** A joining row's
-/// buffered row is fetched once, its record-blob row is decompressed at most once
-/// ([`crate::session::BlobRow`]) however many blob-resident columns ask for it, and the descriptor
-/// drop and the render backfill happen in the same visit. Splitting them cost a second lookup per
-/// row and a decompression per blob column per site (review finding F4).
+/// buffered row is fetched once and its record-blob row is decompressed at most once
+/// ([`crate::session::BlobRow`]) however many blob-resident columns ask for it.
 fn settle_joins(generation: &Generation, rows: &mut [UnallocatedRow]) -> Result<(), String> {
     if rows.iter().all(|row| row.join.is_none()) {
         return Ok(());
@@ -11635,13 +11624,7 @@ fn settle_joins(generation: &Generation, rows: &mut [UnallocatedRow]) -> Result<
     let view = rows.first().map(|row| row.view.as_str()).unwrap_or("");
     let scoped_families = scoped_families_of_view(manifest, view);
     let owner_view = scoped_owner_view_of(manifest, view);
-    // The cell's key, for the refusal — the half of the owner view id a caller spelled, and never
-    // the owning group, which a sharing group's caller has no business learning from a refusal.
-    let key = owner_view
-        .split_once(tessera_store::GROUP_SEPARATOR)
-        .map(|(_, key)| key)
-        .unwrap_or(owner_view.as_str())
-        .to_string();
+    let key = key_of_owner_view(&owner_view);
 
     for (index, row) in rows.iter_mut().enumerate() {
         let Some(entity) = row.join else {
@@ -11671,83 +11654,57 @@ fn settle_joins(generation: &Generation, rows: &mut [UnallocatedRow]) -> Result<
             if supplied_terms != held_terms {
                 return Err(format!(
                     "row {index} joins an entity this deployment already holds, under a different \
-                     access label. A re-label is a delete plus a re-ingest (decision 0047), never \
-                     a field carried in on a second view's row: the alternative is a widening with \
-                     no overlay entry, or a narrowing that bypasses the deny lanes (views §4)"
+                     access label; carry the label the entity holds, or delete the item and \
+                     re-ingest it"
                 ));
             }
         }
-        // **The attribute arm reads the buffer first and the stored value after it, and both are
-        // exact** (2026-08-31, closing `views.md` §4's last ⊘). An entity-scoped attribute is one
-        // value per entity, so a joining row must carry the stored value or leave it absent. A
-        // differing one is refused naming the column — silently keeping either value would make
-        // the answer depend on which view a filter was asked under, which is exactly what a
-        // *scoped* attribute is for and this is not one.
+        // **The attribute arm.** An entity-scoped attribute is one value per entity, so a joining
+        // row must carry the stored value or leave it absent. The sources are compared by the same
+        // equality, on values normalised to the shape a batch carries (`stored_as_wal`), so the
+        // buffered and the flushed arm cannot come to disagree about what "the same value" means.
         //
-        // The two sources are compared by the *same* equality, on values normalised to the shape a
-        // batch carries (`stored_as_wal`), so the buffered and the flushed arm produce
-        // byte-identical refusals and cannot come to disagree about what "the same value" means.
+        // The pending fills are not a source here; only the values door reads them.
         for (position, d) in declared.iter().enumerate() {
             let Some(supplied) = row.scalars.get(position) else {
                 continue;
             };
-            let held = match &buffered {
-                Some(buffered) => buffered.scalars.get(position).cloned(),
-                // `None` here is *no value held* and *could not find out* alike; see
-                // `session::flushed_scalar_of` for why one answer serves both.
-                None => crate::session::flushed_scalar_of(generation, entity, position, &mut blob),
-            };
-            let Some(held) = held else {
-                continue;
-            };
-            if crate::session::scalar_is_absent(&held, d) {
-                continue;
-            }
             // **An omitted value is not a disagreement**, and is not written through as an absence
             // either: the backfill below fills a `render` column's omitted slot from the entity's
             // stored value, once join-ness is settled.
-            if crate::session::scalar_is_absent(supplied, d) || held == *supplied {
+            if crate::session::scalar_is_absent(supplied, d) {
+                continue;
+            }
+            let held = held_entity_value(generation, entity, position, d, buffered, None, &mut blob);
+            let Some(held) = held else {
+                continue;
+            };
+            if held == *supplied {
                 continue;
             }
             return Err(format!(
                 "row {index} joins an entity this deployment already holds, with a different \
-                 value for column '{}'. An entity-scoped attribute is one value per entity, so a \
-                 joining row byte-matches the stored value or omits it (views §4, §5)",
+                 value for column '{}'; an entity-scoped attribute is one value per entity, so a \
+                 joining row carries the stored value or omits the column",
                 d.name
             ));
         }
-        // **The scoped cell arm: one value per `(entity, attribute, key)`, whichever door wrote it**
-        // (`views.md` §5, decision 0116). A scoped value is not the entity's, so the two arms above
-        // do not reach it; it is the *cell's*, and the cell a joining row addresses may already hold
-        // a value — put there through the owning group's view, or through any group sharing those
-        // views, in this window or a previous one.
+        // **The scoped cell arm: one value per `(entity, attribute, key)`, whichever door wrote
+        // it.** A scoped value is not the entity's, so the two arms above do not reach it; it is
+        // the *cell's*, and the cell a joining row addresses may already hold a value — put there
+        // through the owning group's view, or through any group sharing those views, in this
+        // window or a previous one. An empty cell takes the row's value, a cell holding the same
+        // value drops the row's copy so that one claimant is left, and a cell holding a different
+        // one refuses.
         //
-        // Three answers, and the middle one is what makes the two doors safe:
+        // **A `text` family past a flush is refused rather than compared.** A text column stores a
+        // dictionary, postings and a presence bitmap, and no per-entity value for
+        // `flushed_scoped_of` to read back; the row's value would be written as a second text
+        // layer stamped with the same view, which `match` unions across, so two sets of words
+        // would answer under one column with no symptom anywhere. Occupancy is asked instead, and
+        // an occupied cell refuses a supplied string, equal or not.
         //
-        // - the cell is empty, or this row names no value for it → the row writes it;
-        // - the cell holds the **same** value → the row's copy is dropped. One claimant per cell, so
-        //   the extents stay disjoint in entity space and the composition has nothing to refuse;
-        //   this is what replaces the old two-extents jam argument for the one-door rule;
-        // - the cell holds a **different** value → `409` naming the column and the key.
-        //
-        // **The same-window case needs no separate check.** Two batches writing one cell means two
-        // rows for one entity, so the second names an external id the open window already holds and
-        // `admit_ingest` closes the window before reaching here — after which the first batch's row
-        // is in the buffer and the buffered source below is the one that answers.
-        //
-        // **A `text` family past a flush is refused rather than compared, and that is the whole
-        // rule for it** (2026-09-01, review finding F1). Nothing here can compare prose across a
-        // flush boundary: a text column stores a dictionary, postings and a presence bitmap, and no
-        // per-entity value for `flushed_scoped_of` to read back. The blob-resident analogy the
-        // entity-scoped arm makes does not carry — *there* a lost comparison costs only the report,
-        // because a joining row writes no record field, but here the row's value **is** written, as
-        // a second text layer stamped with the same view. Text layers have no coverage check (their
-        // disjointness rests on I9, which no longer holds for a scoped column, two views of one key
-        // now reaching one cell) and `match` unions across them, so an admitted disagreement is two
-        // sets of words answering under one column with no symptom anywhere. So occupancy is asked
-        // instead of equality, and an occupied cell refuses a supplied string — equal or not, the
-        // equality being exactly what cannot be established. Omitting the column still passes, and
-        // the buffered source above still compares text exactly.
+        // The pending scoped fills are not a source here; only the values door reads them.
         for (position, family) in scoped_families.iter().enumerate() {
             let Some(supplied) = row.scoped.get(position) else {
                 continue;
@@ -11756,19 +11713,8 @@ fn settle_joins(generation: &Generation, rows: &mut [UnallocatedRow]) -> Result<
             if crate::session::scalar_is_absent(supplied, &d) {
                 continue;
             }
-            // Every buffered row of the entity whose view addresses this same key — the cell's own
-            // rows, not the entity's own row, which is a different question and `buffer.get`'s.
-            let held = generation
-                .buffer
-                .rows_of(entity)
-                .filter(|item| scoped_owner_view_of(manifest, &item.view) == owner_view)
-                .find_map(|item| {
-                    let value = item.scoped.get(position)?;
-                    (!crate::session::scalar_is_absent(value, &d)).then(|| value.clone())
-                })
-                .or_else(|| {
-                    crate::session::flushed_scoped_of(generation, entity, family, &owner_view)
-                });
+            let held =
+                held_scoped_value(generation, entity, position, family, &d, &owner_view, None);
             if held.is_none()
                 && family.arrow_type == ScalarType::Text
                 && crate::session::flushed_scoped_text_present(
@@ -11779,21 +11725,15 @@ fn settle_joins(generation: &Generation, rows: &mut [UnallocatedRow]) -> Result<
                 )
             {
                 return Err(format!(
-                    "row {index} names a value for group-scoped column '{}', and this deployment \
-                     already holds prose for key '{}'. A `text` family's stored value cannot be \
-                     compared once it has flushed — the column stores a dictionary and postings \
-                     and no value per entity — so a cell that holds prose takes no second one, \
-                     equal or not: changing it is a delete plus a re-ingest (decision 0047), and \
-                     omitting the column leaves the cell as it stands (views §5)",
-                    family.name, key
+                    "row {index} names a value for group-scoped column '{}' and this deployment \
+                     already holds prose for key '{key}' that a flush has made uncomparable; omit \
+                     the column",
+                    family.name
                 ));
             }
             let Some(held) = held else {
                 continue;
             };
-            if crate::session::scalar_is_absent(&held, &d) {
-                continue;
-            }
             if held == row.scoped[position] {
                 // The dedupe. Absence in this row's tail, and the cell keeps the one claimant it
                 // already had.
@@ -11802,11 +11742,9 @@ fn settle_joins(generation: &Generation, rows: &mut [UnallocatedRow]) -> Result<
             }
             return Err(format!(
                 "row {index} names a different value for group-scoped column '{}' than this \
-                 deployment already holds for key '{}'. A scoped value is addressed by \
-                 (attribute, key) and is one value per cell, so a row naming that cell — through \
-                 the owning group's view or through any group sharing it — byte-matches the stored \
-                 value or omits it (views §5)",
-                family.name, key
+                 deployment already holds for key '{key}'; a scoped value is one value per cell, \
+                 so a joining row carries the stored value or omits the column",
+                family.name
             ));
         }
 
@@ -11849,19 +11787,13 @@ fn settle_joins(generation: &Generation, rows: &mut [UnallocatedRow]) -> Result<
             if !crate::session::scalar_is_absent(supplied, d) {
                 continue;
             }
-            // The entity's own row where it is still buffered, the stored homes after it. A column
-            // the entity genuinely holds nothing for is `None` here and its absence stays an
-            // absence in every view.
-            let held = match &buffered {
-                Some(item) => item.scalars.get(position).cloned(),
-                None => crate::session::flushed_scalar_of(generation, entity, position, &mut blob),
-            };
-            let Some(held) = held else {
+            // A column the entity genuinely holds nothing for is `None` here and its absence stays
+            // an absence in every view.
+            let Some(held) =
+                held_entity_value(generation, entity, position, d, buffered, None, &mut blob)
+            else {
                 continue;
             };
-            if crate::session::scalar_is_absent(&held, d) {
-                continue;
-            }
             row.scalars[position] = held;
         }
     }
