@@ -460,7 +460,7 @@ pub(crate) fn execute_coalesce(
         if records != declared {
             return Err(MaintenanceFailed(format!(
                 "the coalesced dictionary extent holds {records} records where its inputs declare \
-                 {declared}; an input repeated a descriptor (decision 0042) and coalescing it \
+                 {declared}; an input repeated a descriptor, and coalescing it \
                  would renumber every ordinal after the repeat"
             )));
         }
