@@ -11169,6 +11169,32 @@ enum ValuesColumn {
     Scoped(usize),
 }
 
+/// The parent each child in these edges is named under, refusing a child named under two.
+///
+/// A list column declares the edges, so two rows naming different parents for one artifact are two
+/// hierarchies and which of them was published would be the order the rows arrived in. The child is
+/// keyed by its own level, which a levelled taxonomy needs: one key legitimately sits at two levels
+/// and carries a different parent at each.
+fn parent_of_each_child(
+    edges: &[tessera_lifecycle::BatchEdge],
+) -> Result<std::collections::BTreeMap<(&str, u32, &str), &str>, String> {
+    let mut claimed: std::collections::BTreeMap<(&str, u32, &str), &str> = Default::default();
+    for edge in edges {
+        let at = (edge.layer.as_str(), edge.level, edge.child.as_str());
+        if let Some(first) = claimed.insert(at, edge.parent.as_str()) {
+            if first != edge.parent {
+                return Err(format!(
+                    "{} in level {} of {} is named as a child of both {first} and {}; a list \
+                     column declares the edges, so name one parent for the child or publish the \
+                     two hierarchies as separate layers",
+                    edge.child, edge.level, edge.layer, edge.parent
+                ));
+            }
+        }
+    }
+    Ok(claimed)
+}
+
 /// The key half of an owner view id — the half a caller spelled, never the owning group, which a
 /// sharing group's caller has no business learning from a refusal.
 fn key_of_owner_view(owner_view: &str) -> &str {
@@ -11962,32 +11988,12 @@ impl Executor {
                 .map(|(layer, _, key)| (*layer, *key))
                 .collect();
 
-            // **A child named under two parents refuses the batch**, which is the build's own
-            // refusal at the other entry point (`artifacts-from-points.md` §4): two rows naming
-            // different parents for one artifact are two hierarchies, and which of them was
-            // published would be the batch's row order rather than anything the caller wrote. It is
-            // made here, over the batch's own column, because that is where the two rows are — and
-            // it is the whole check for a minted child, whose parent nothing else has an opinion
-            // about yet. It holds at every kind: only a `nested` or `tiered` list column declares
-            // edges, and a `dag` layer's several parents arrive on its artifact rows' `parent`
-            // list by the publish route, never here (`ListMeaning`, decision 0125).
-            let mut claimed: std::collections::BTreeMap<(&str, u32, &str), &str> =
-                Default::default();
-            for edge in &artifacts.edges {
-                let at = (edge.layer.as_str(), edge.level, edge.child.as_str());
-                if let Some(first) = claimed.insert(at, edge.parent.as_str()) {
-                    if first != edge.parent {
-                        return Err(format!(
-                            "{} in level {} of {} is named as a child of both {first} and {}. A \
-                             list column declares the edges, so two rows naming different parents \
-                             for one artifact are two hierarchies — and which of them was \
-                             published would be the batch's row order rather than anything the \
-                             caller wrote",
-                            edge.child, edge.level, edge.layer, edge.parent
-                        ));
-                    }
-                }
-            }
+            // **A child named under two parents refuses the batch**, over the batch's own column,
+            // because that is where the two rows are — and it is the whole check for a minted
+            // child, whose parent nothing else has an opinion about yet. Only a `nested` or
+            // `tiered` list column declares edges; a `dag` layer's several parents arrive on its
+            // artifact rows' `parent` list by the publish route, never here.
+            parent_of_each_child(&artifacts.edges)?;
 
             let mut mints = Vec::new();
             for edge in &artifacts.edges {
@@ -12191,33 +12197,11 @@ impl Executor {
         use std::collections::BTreeMap;
         self.live.with_publication_state(|registry, store, alloc| {
             // **A child named under two parents refuses**, across the window as it does within a
-            // batch: two entries naming different parents for one artifact are two hierarchies,
-            // and there is no correct output. Checked before anything is prepared, so a refusal
-            // spends nothing. Every kind whose list declares edges is a tree here — a `dag`
-            // layer's list is memberships and its parents travel on the artifact row (decision
-            // 0125) — so a child's parents are at most one key, held as a list because that is
-            // the record's shape. The cycle those edges could close is refused where the
-            // artifacts are created, in `prepare_publish`, which walks the batch's own edges — a
-            // growth never adds lineage, so the window's minted edges are every edge a cycle
-            // could run through.
-            let mut parents: BTreeMap<(String, u32, String), Vec<String>> = BTreeMap::new();
-            for edge in edges {
-                let at = (edge.layer.clone(), edge.level, edge.child.clone());
-                let named = parents.entry(at).or_default();
-                if named.contains(&edge.parent) {
-                    continue;
-                }
-                if !named.is_empty() {
-                    return Err(format!(
-                        "{} in level {} of {} is named as a child of both {} and {}. A list \
-                         column declares the edges, so two rows naming different parents for one \
-                         artifact are two hierarchies — and which of them was published would be \
-                         the order the batches arrived in rather than anything the caller wrote",
-                        edge.child, edge.level, edge.layer, named[0], edge.parent
-                    ));
-                }
-                named.push(edge.parent.clone());
-            }
+            // batch. Checked before anything is prepared, so a refusal spends nothing. The cycle
+            // those edges could close is refused where the artifacts are created, in
+            // `prepare_publish`, which walks the batch's own edges — a growth never adds lineage,
+            // so the window's minted edges are every edge a cycle could run through.
+            let parents = parent_of_each_child(edges)?;
             // Re-resolved here and not trusted from admission: a publication executes between an
             // admission and this close (it takes the work lane, and the window is open across it),
             // so a key that named nothing then may name an artifact now — and §5's second ruling is
@@ -12262,8 +12246,8 @@ impl Executor {
                         contents: Vec::new(),
                         attached_to: None,
                         parent_keys: parents
-                            .get(&((*layer).to_string(), *level, (*key).to_string()))
-                            .cloned()
+                            .get(&(*layer, *level, *key))
+                            .map(|parent| vec![(*parent).to_string()])
                             .unwrap_or_default(),
                         // A layer declaring a `shape` publishes boxes an author wrote, so a point
                         // naming a key on such a layer has nothing to mint one from — the layer is
