@@ -638,8 +638,8 @@ fn served_bundle(
         dead_incarnations: &dead_incarnations,
         scoped_columns: &scoped_columns,
     });
-    // Only the view lists move the per-view map, so a log that declared none keeps the bundle
-    // `open_bundle` built rather than rebuilding every partition's map to the same thing.
+    // A log that declared nothing, or vocabularies alone, keeps the bundle `open_bundle` built
+    // rather than rebuilding every partition's view map to the same thing.
     if created_views.is_empty()
         && dead_incarnations.is_empty()
         && scoped_columns.is_empty()
