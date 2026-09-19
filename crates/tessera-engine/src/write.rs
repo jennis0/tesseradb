@@ -11266,8 +11266,8 @@ fn held_scoped_value(
         })
 }
 
-/// Apply the fill rule to one values batch (`ingest.md` §1.1, §1.4), producing the cells nothing
-/// holds and refusing on the first cell that is held differently.
+/// Apply the fill rule to one values batch, producing the cells nothing holds and refusing on the
+/// first cell that is held differently.
 ///
 /// **Three sources, in the order a cell is claimed.** The entity's own buffered row, the cells an
 /// earlier values batch filled and no flush has written yet, and the flushed homes — the same
@@ -11276,7 +11276,7 @@ fn held_scoped_value(
 /// disjoint per column when the flush writes them.
 ///
 /// **A row index, a column name and a key reach the caller; nothing else does.** No entity id, no
-/// external id and no value on either side (**I10**, `ingest.md` §1.4).
+/// external id and no value on either side (**I10**).
 fn plan_fills(
     generation: &Generation,
     request: &tessera_lifecycle::ValuesRequest,
