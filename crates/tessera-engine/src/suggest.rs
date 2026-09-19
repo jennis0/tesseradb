@@ -1241,17 +1241,17 @@ impl WalkState<'_> {
     }
 }
 
-/// `match.len`: how many characters of `served`, from character `start`, fold to cover `q`.
+/// `match.len`: the number of characters of `served`, counted from character `start`, that the
+/// query matched. It is the length of the shortest prefix of that text whose entry string begins
+/// with `folded_q`. An empty query matches no characters.
 ///
-/// The index stores where an entry starts in the served string and no folded copy of it, so the
-/// length is found here, per emitted value, and is reported in characters of the string the client
-/// draws. An empty query highlights nothing.
-///
-/// The fold of a prefix is not a prefix of the fold, so each probe folds its prefix whole. The
-/// probes double and then bisect, which is a logarithm of the span in folds; a walk that folded
-/// every prefix cost 0.6 ms per value at a 250-character query (measured). Bisecting takes every
-/// prefix longer than a covering one to cover `q` too, which holds where the tail's fold starts
-/// with `q`.
+/// The index stores where an entry starts in `served` but not the folded text, so the length is
+/// computed for each value in a response. Folding a prefix does not give a prefix of the folded
+/// whole, so each candidate prefix is folded in full. The search doubles the prefix length until
+/// the prefix matches, then bisects. This takes a logarithmic number of folds. Testing every
+/// prefix in turn took 0.6 ms per value for a 250-character query (measured); this takes 0.03 ms.
+/// Bisection assumes that every prefix longer than a matching prefix also matches, which is true
+/// when the entry string for the whole text begins with `folded_q`.
 fn match_len(fold: &SuggestionFold, served: &str, start: u32, folded_q: &str) -> u32 {
     if folded_q.is_empty() {
         return 0;
@@ -1260,7 +1260,7 @@ fn match_len(fold: &SuggestionFold, served: &str, start: u32, folded_q: &str) ->
         return 0;
     };
     let tail = &served[at..];
-    // `ends[k - 1]` is the byte at which the tail's first `k` characters end.
+    // `ends[k - 1]` is the byte length of the first `k` characters of `tail`.
     let ends: Vec<usize> = tail
         .char_indices()
         .map(|(at, c)| at + c.len_utf8())
@@ -1273,11 +1273,10 @@ fn match_len(fold: &SuggestionFold, served: &str, start: u32, folded_q: &str) ->
         short = long;
         long = (long * 2).min(n);
     }
-    // The whole tail does not cover `q` where `start` does not name the word the entry came from:
-    // `SuggestionFold::entries_of` pairs folded and served word starts by position, and two
-    // boundary changes that cancel leave the pairing wrong. The entry string is the fold's own
-    // output, so the value still matches and is still gated correctly; only the span is wrong, and
-    // the tail's length keeps it inside the string.
+    // If even the whole text does not match, `start` is wrong: `SuggestionFold::entries_of` can
+    // pair a word start in the entry string with the wrong word start in `served`. The value was
+    // still matched and authorised correctly, because neither depends on `start`. Only the
+    // highlight is wrong, and returning the remaining length keeps it inside the string.
     if long == n && !covers(n) {
         return n as u32;
     }
@@ -1296,8 +1295,8 @@ fn match_len(fold: &SuggestionFold, served: &str, start: u32, folded_q: &str) ->
 mod tests {
     use super::*;
 
-    /// The span is the shortest run of served characters whose fold covers the query, which is
-    /// what folding one more character at a time finds.
+    /// `match_len` returns the same length as testing every prefix in turn, one character longer
+    /// each time.
     #[test]
     fn match_len_is_the_shortest_prefix_whose_fold_covers_the_query() {
         let fold = SuggestionFold::new();
