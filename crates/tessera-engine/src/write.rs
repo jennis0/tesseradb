@@ -2410,8 +2410,7 @@ impl WritePath {
         for record in &records {
             if let Some((kind, track)) = tessera_lifecycle::wal::unbuilt_track(record) {
                 return Err(EngineError::Malformed(format!(
-                    "the WAL carries a {kind} record, whose apply path is track {track}'s and is \
-                     not built (ingest.md §8); this node does not open"
+                    "the WAL carries a {kind} record, which this build cannot apply (track {track})"
                 )));
             }
         }
@@ -2460,9 +2459,8 @@ impl WritePath {
                         || minter.width() != compiled.width
                     {
                         return Err(EngineError::Malformed(format!(
-                            "the WAL declares vocabulary '{}' with an identity the manifests do \
-                             not carry for that name; every row holding one of its codes is of \
-                             unknowable colour, so this node does not open",
+                            "the WAL declares vocabulary '{}' with a kind, visibility or width the \
+                             manifests do not carry for that name",
                             compiled.name
                         )));
                     }
@@ -2519,8 +2517,7 @@ impl WritePath {
                 let minter = vocabularies.get_mut(vocabulary).ok_or_else(|| {
                     EngineError::Malformed(format!(
                         "the WAL mints into vocabulary '{vocabulary}', which this bundle does not \
-                         declare. Every row that carries one of its codes would be of unknowable \
-                         colour, so this node does not open"
+                         declare"
                     ))
                 })?;
                 minter
@@ -2602,8 +2599,7 @@ impl WritePath {
                         Ok(crate::view_declarations::Resolution::Existing) => {}
                         Err(e) => {
                             return Err(EngineError::Malformed(format!(
-                                "the WAL declares view group '{}', which this bundle refuses \
-                                 ({e}); this node does not open",
+                                "the WAL declares view group '{}', which this bundle refuses ({e})",
                                 declaration.name
                             )));
                         }
@@ -2619,8 +2615,7 @@ impl WritePath {
                         Ok(crate::view_declarations::Resolution::Existing) => {}
                         Err(e) => {
                             return Err(EngineError::Malformed(format!(
-                                "the WAL declares view '{}', which this bundle refuses ({e}); \
-                                 this node does not open",
+                                "the WAL declares view '{}', which this bundle refuses ({e})",
                                 declaration.name
                             )));
                         }
@@ -2645,7 +2640,7 @@ impl WritePath {
             let Some(compiled) = crate::attributes::compile_record(declaration) else {
                 return Err(EngineError::Malformed(format!(
                     "the WAL declares attribute '{}' with type '{}', which this build cannot \
-                     store; this node does not open",
+                     store",
                     declaration.name, declaration.ty
                 )));
             };
@@ -2653,9 +2648,8 @@ impl WritePath {
                 Some(held) if held == compiled => continue,
                 Some(_) => {
                     return Err(EngineError::Malformed(format!(
-                        "the WAL declares attribute '{}' with an identity the manifests do not \
-                         carry for that name; every row stored under it is of unknowable shape, \
-                         so this node does not open",
+                        "the WAL declares attribute '{}' with a type or scope the manifests do not \
+                         carry for that name",
                         declaration.name
                     )));
                 }
@@ -2911,8 +2905,7 @@ impl WritePath {
             // column.
             let Some(view) = view else {
                 return Err(EngineError::Malformed(
-                    "the WAL carries a values batch naming no view, which no writer produces; \
-                     this node does not open"
+                    "the WAL carries a values batch naming no view, which no writer produces"
                         .to_string(),
                 ));
             };
@@ -2948,7 +2941,7 @@ impl WritePath {
                     // open is refused rather than the cells dropped.
                     return Err(EngineError::Malformed(format!(
                         "the WAL carries a values batch naming column '{name}', which this \
-                         deployment's schema does not declare; this node does not open"
+                         deployment's schema does not declare"
                     )));
                 }
                 if any_entity {
