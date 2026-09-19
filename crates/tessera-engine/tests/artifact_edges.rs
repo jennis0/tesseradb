@@ -12,7 +12,7 @@
 mod common;
 
 use common::*;
-use tessera_engine::{ArtifactOut, Engine, ViewportRequest};
+use tessera_engine::{ArtifactOut, Engine};
 use tessera_lifecycle::membership::{IncomingAttachment, IncomingContent};
 use tessera_lifecycle::{wal::ChangeOp, IncomingArtifact};
 use tessera_types::layer::{
@@ -21,7 +21,6 @@ use tessera_types::layer::{
 };
 use tessera_types::{EntityId, TesseraId};
 
-const WHOLE_MAP: [f64; 4] = [0.0, 0.0, 1000.0, 1000.0];
 const CLUSTERS: &str = "clusters/a";
 const LABELS: &str = "topics/x";
 
@@ -135,24 +134,8 @@ fn publish_a_cluster_and_its_label(engine: &Engine, fx: &Fixture) {
         .unwrap();
 }
 
-fn artifacts_of(engine: &Engine, credential: &[u8]) -> Vec<ArtifactOut> {
-    let session = engine.authorise(credential).unwrap();
-    engine
-        .viewport(
-            &session,
-            ViewportRequest::new("s0", 0, WHOLE_MAP, N_ITEMS as usize),
-        )
-        .expect("a viewport over the whole map")
-        .artifacts
-}
-
 fn labels_in(served: &[ArtifactOut]) -> Vec<&ArtifactOut> {
     served.iter().filter(|a| a.layer == LABELS).collect()
-}
-
-fn artifact_entity(engine: &Engine, id: TesseraId) -> EntityId {
-    let idset = engine.generation().bundle.manifest.identity.idset;
-    engine.resolve_tessera_ids(&[id], idset).unwrap()[0].expect("it names what was issued")
 }
 
 /// Whether the identifier route still answers — the route that traverses no edge, and the one the

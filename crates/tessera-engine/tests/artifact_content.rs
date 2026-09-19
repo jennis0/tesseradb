@@ -15,7 +15,7 @@ mod ring;
 
 use common::*;
 use tessera_engine::derived::DerivedContent;
-use tessera_engine::{ArtifactOut, Engine, ViewportRequest};
+use tessera_engine::Engine;
 use tessera_lifecycle::membership::IncomingContent;
 use tessera_lifecycle::IncomingArtifact;
 use tessera_spatial::morton::fixed32;
@@ -24,8 +24,6 @@ use tessera_types::layer::{
     MembershipSource,
 };
 use tessera_types::EntityId;
-
-const WHOLE_MAP: [f64; 4] = [0.0, 0.0, 1000.0, 1000.0];
 
 fn declaration(name: &str, derived: &[&str]) -> LayerDeclaration {
     LayerDeclaration {
@@ -92,17 +90,6 @@ fn visible_to_subset(source_ids: impl Iterator<Item = u64>) -> Vec<u64> {
     source_ids
         .filter(|s| terms_of(*s).contains(&SUBSET_TERM))
         .collect()
-}
-
-fn artifacts_of(engine: &Engine, credential: &[u8]) -> Vec<ArtifactOut> {
-    let session = engine.authorise(credential).unwrap();
-    engine
-        .viewport(
-            &session,
-            ViewportRequest::new("s0", 0, WHOLE_MAP, N_ITEMS as usize),
-        )
-        .expect("a viewport over the whole map")
-        .artifacts
 }
 
 fn publish(engine: &Engine, layer: &str, fx: &Fixture, sources: impl Iterator<Item = u64>) {

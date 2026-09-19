@@ -13,7 +13,6 @@
 mod common;
 
 use common::*;
-use tessera_engine::viewport::ViewportRequest;
 use tessera_engine::{ArtifactOut, Engine};
 use tessera_lifecycle::membership::IncomingContent;
 use tessera_lifecycle::{IncomingArtifact, IncomingGrowth};
@@ -22,8 +21,6 @@ use tessera_types::layer::{
     SuppliedContent, SuppliedRequirement,
 };
 use tessera_types::EntityId;
-
-const WHOLE_MAP: [f64; 4] = [0.0, 0.0, 1000.0, 1000.0];
 
 /// **No existence criterion**, so a count that moved is a membership that moved and an artifact
 /// that vanished is one withheld — the two things these cases distinguish.
@@ -89,20 +86,9 @@ fn node(
     artifact
 }
 
-fn artifacts_of(engine: &Engine) -> Vec<ArtifactOut> {
-    let session = engine.authorise(&full_coverage_credential()).unwrap();
-    engine
-        .viewport(
-            &session,
-            ViewportRequest::new("s0", 0, WHOLE_MAP, N_ITEMS as usize),
-        )
-        .expect("a viewport over the whole map")
-        .artifacts
-}
-
 /// One layer's served keys with their masked counts, sorted.
 fn served(engine: &Engine, layer: &str) -> Vec<(String, u64)> {
-    let mut out: Vec<(String, u64)> = artifacts_of(engine)
+    let mut out: Vec<(String, u64)> = artifacts_of(engine, &full_coverage_credential())
         .into_iter()
         .filter(|a| a.layer == layer)
         .filter_map(|a| a.key.clone().map(|key| (key, a.masked_count)))
@@ -113,7 +99,7 @@ fn served(engine: &Engine, layer: &str) -> Vec<(String, u64)> {
 
 /// The served artifact under `key` on `layer`, if any.
 fn served_row(engine: &Engine, layer: &str, key: &str) -> Option<ArtifactOut> {
-    artifacts_of(engine)
+    artifacts_of(engine, &full_coverage_credential())
         .into_iter()
         .find(|a| a.layer == layer && a.key.as_deref() == Some(key))
 }
@@ -530,7 +516,7 @@ fn a_content_fill_reaches_an_artifact_published_bare_and_survives_a_fold() {
         )
         .unwrap();
     fold(&engine);
-    let mut rows: Vec<(String, Vec<String>, u64)> = artifacts_of(&engine)
+    let mut rows: Vec<(String, Vec<String>, u64)> = artifacts_of(&engine, &full_coverage_credential())
         .into_iter()
         .filter(|a| a.layer == "topics/a")
         .map(|a| (a.key.unwrap_or_default(), a.content, a.masked_count))

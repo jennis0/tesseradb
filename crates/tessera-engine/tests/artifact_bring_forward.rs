@@ -19,14 +19,13 @@ mod common;
 
 use common::*;
 use tessera_engine::viewport::ViewportRequest;
-use tessera_engine::{ArtifactOut, Engine};
+use tessera_engine::Engine;
 use tessera_lifecycle::{IncomingArtifact, IncomingGrowth};
 use tessera_types::layer::{
     ContentDeclaration, Hierarchy, HierarchyKind, LayerDeclaration, MembershipSource, ServingLayout,
 };
 use tessera_types::EntityId;
 
-const WHOLE_MAP: [f64; 4] = [0.0, 0.0, 1000.0, 1000.0];
 const LAYER: &str = "clusters/a";
 const LABELS: &str = "topics/a";
 
@@ -102,21 +101,10 @@ impl Fixture {
     }
 }
 
-fn artifacts_of(engine: &Engine) -> Vec<ArtifactOut> {
-    let session = engine.authorise(&full_coverage_credential()).unwrap();
-    engine
-        .viewport(
-            &session,
-            ViewportRequest::new("s0", 0, WHOLE_MAP, N_ITEMS as usize),
-        )
-        .expect("a viewport over the whole map")
-        .artifacts
-}
-
 /// Every served artifact's key and masked count, ascending by key — what a viewer is told, which
 /// is what every assertion here is finally about.
 fn served(engine: &Engine) -> Vec<(String, u64)> {
-    let mut out: Vec<(String, u64)> = artifacts_of(engine)
+    let mut out: Vec<(String, u64)> = artifacts_of(engine, &full_coverage_credential())
         .into_iter()
         .map(|a| (a.key.unwrap_or_default(), a.masked_count))
         .collect();

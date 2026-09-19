@@ -18,7 +18,6 @@ use std::time::Duration;
 use common::*;
 use tessera_engine::{Engine, EngineConfig};
 use tessera_lifecycle::wal::ChangeOp;
-use tessera_lifecycle::UnallocatedRow;
 use tessera_store::manifest::SegmentsManifest;
 use tessera_types::EntityId;
 
@@ -64,23 +63,6 @@ fn suppressed_in(manifest: &SegmentsManifest) -> Vec<u64> {
 
 fn entity_of_source(root: &Path, source_id: u64) -> EntityId {
     EntityId::new(source_to_new_map(root, "v00000")[&source_id])
-}
-
-fn ingest(engine: &Engine, external_id: &str) -> EntityId {
-    let row = UnallocatedRow {
-        external_id: Some(external_id.as_bytes().to_vec()),
-        view: "s0".to_string(),
-        join: None,
-        descriptors: vec![b"0".to_vec()],
-        x: 5.0,
-        y: 5.0,
-        scalars: Vec::new(),
-        terms: engine.resolve_terms(&[b"0".to_vec()]),
-        scoped: Vec::new(),
-    };
-    engine
-        .accept_ingest(vec![row], external_id.to_string(), [0u8; 32])
-        .expect("ingest is accepted")[0]
 }
 
 /// **Obligation 1.** A flush publishes the deny state of the generation it is published against —

@@ -29,7 +29,6 @@ use tessera_types::layer::{
 };
 use tessera_types::{EntityId, TesseraId};
 
-const WHOLE_MAP: [f64; 4] = [0.0, 0.0, 1000.0, 1000.0];
 const LAYER: &str = "clusters/a";
 /// The artifact's members: source ids `0..300`, which the broad credential sees whole and the
 /// narrow one sees every third of.
@@ -64,10 +63,6 @@ fn declaration(layout: Option<ServingLayout>, bar: u64) -> LayerDeclaration {
         layout,
         shape: None,
     }
-}
-
-fn subset_sees(e: u64) -> bool {
-    terms_of(e).contains(&SUBSET_TERM)
 }
 
 /// The oracle: how many of `members` this principal can see.

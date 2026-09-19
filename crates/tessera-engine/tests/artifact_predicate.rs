@@ -44,7 +44,6 @@ const SEED: u64 = 0x5EED;
 const BY_LIST: &str = "generator/partition-enumerated";
 const BY_RULE: &str = "generator/partition-attribute";
 
-const WHOLE_MAP: [f64; 4] = [0.0, 0.0, 1000.0, 1000.0];
 /// The tile depth the narrow viewports are asked at. **A request's tiles come from its own `zoom`**,
 /// so at zoom 0 a bbox resolves to the single tile covering the whole grid and narrows nothing — a
 /// viewport case asked there would be comparing the whole map with itself five times.
@@ -77,16 +76,6 @@ fn corpus() -> Corpus {
     Corpus::new(SEED, N, extent()).expect("the generator accepts the fixture's extent")
 }
 
-fn credential(grant: &str) -> Vec<u8> {
-    let terms: Vec<String> = Grant::parse(grant)
-        .expect("the grant is inside the generator's term space")
-        .terms()
-        .iter()
-        .map(|t| format!("\"{}\"", t.raw()))
-        .collect();
-    format!("{{\"terms\": [{}]}}", terms.join(", ")).into_bytes()
-}
-
 /// What one layer serves one principal at one viewport: every artifact's key against its masked
 /// count, plus whether it carried a parent — the whole of what a client can read off an artifact
 /// row that is not an identifier.
@@ -97,7 +86,7 @@ fn served(
     zoom: u8,
     bbox: [f64; 4],
 ) -> BTreeMap<String, u64> {
-    let session = engine.authorise(&credential(grant)).unwrap();
+    let session = engine.authorise(&grant_credential(grant)).unwrap();
     let names = [layer];
     let mut request = ViewportRequest::new("s0", zoom, bbox, N as usize);
     request.layers = tessera_engine::LayerSelection::Named(&names);
@@ -546,7 +535,7 @@ fn an_absolute_criterion_fires_on_an_attribute_predicate() {
 /// The entity behind a served artifact, through the admin plane's own resolver — the address a
 /// suppression names, and the one drill-down inverts.
 fn served_entity(engine: &Engine, grant: &str, layer: &str, key: &str) -> tessera_types::TesseraId {
-    let session = engine.authorise(&credential(grant)).unwrap();
+    let session = engine.authorise(&grant_credential(grant)).unwrap();
     let names = [layer];
     let mut request = ViewportRequest::new("s0", 0, WHOLE_MAP, N as usize);
     request.layers = tessera_engine::LayerSelection::Named(&names);
@@ -572,7 +561,7 @@ fn a_predicate_artifact_answers_by_identifier_as_it_does_by_viewport() {
     let id = served_entity(&fx.engine, grant, BANDS, key);
     let idset = fx.engine.generation().bundle.manifest.identity.idset;
 
-    let session = fx.engine.authorise(&credential(grant)).unwrap();
+    let session = fx.engine.authorise(&grant_credential(grant)).unwrap();
     let row = fx
         .engine
         .artifact(&session, id, Some(idset), "s0", None)

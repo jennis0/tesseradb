@@ -19,34 +19,8 @@ use std::time::Duration;
 
 use common::*;
 use tessera_engine::{Engine, EngineConfig, ViewportRequest};
-use tessera_lifecycle::UnallocatedRow;
-use tessera_types::EntityId;
 
 const WAIT: Duration = Duration::from_secs(20);
-
-fn engine_at(tmp: &std::path::Path, root: &std::path::Path, tick_secs: u64) -> Engine {
-    let mut engine = Engine::open(
-        root,
-        &tmp.join("cache"),
-        &tmp.join("wal.log"),
-        tessera_plugin::Passthrough::new(),
-        EngineConfig {
-            flush_max_age_secs: tick_secs,
-            // The shipped row trigger, four commit windows (`DEFAULT_FLUSH_MAX_ITEMS`):
-            // what bounds the window close's O(buffered) copy. Nothing here reaches it.
-            flush_max_items: 40_000,
-            max_merged_segment_bytes: None,
-            // Compaction §9's trigger is off unless a deployment configures one.
-            compaction: tessera_engine::CompactionSchedule::off(),
-            ..config()
-        },
-    )
-    .expect("engine opens");
-    engine
-        .start_write_executor(64)
-        .expect("the executor starts once");
-    engine
-}
 
 /// The same engine **without a write executor**: one executor owns a bundle root (write-path
 /// §1.2), and a reopen that runs beside a live publisher is a reader. What it proves is unchanged —
@@ -65,23 +39,6 @@ fn reader_at(tmp: &std::path::Path, root: &std::path::Path) -> Engine {
         },
     )
     .expect("engine opens")
-}
-
-fn ingest(engine: &Engine, external_id: &str) -> EntityId {
-    let row = UnallocatedRow {
-        external_id: Some(external_id.as_bytes().to_vec()),
-        view: "s0".to_string(),
-        join: None,
-        descriptors: vec![b"0".to_vec()],
-        x: 5.0,
-        y: 5.0,
-        scalars: Vec::new(),
-        terms: engine.resolve_terms(&[b"0".to_vec()]),
-        scoped: Vec::new(),
-    };
-    engine
-        .accept_ingest(vec![row], external_id.to_string(), [0u8; 32])
-        .expect("ingest is accepted")[0]
 }
 
 /// The tick plans what it would flush, and the gauge separates a stalled flush from healthy

@@ -31,11 +31,12 @@ use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
 
 use tessera_build::{build, BuildArgs};
-use tessera_engine::{default_compute_threads, Engine, EngineConfig};
+use tessera_engine::{default_compute_threads, ArtifactOut, Engine, EngineConfig, ViewportRequest};
+use tessera_lifecycle::UnallocatedRow;
 use tessera_plugin::Passthrough;
 use tessera_spatial::Bounds;
 use tessera_store::read::open_bundle;
-use tessera_types::IdentityKey;
+use tessera_types::{EntityId, IdentityKey, TesseraId};
 
 pub const N_ITEMS: u64 = 10_000;
 pub const ALL_TERM: u64 = 0;
@@ -525,6 +526,82 @@ pub fn open_engine_uncapped(bundle_root: &Path, cache_dir: &Path, wal_path: &Pat
         config_uncapped(),
     )
     .expect("engine should open against a freshly built bundle")
+}
+
+/// The fixture's whole extent, as a viewport request carries it.
+pub const WHOLE_MAP: [f64; 4] = [0.0, 0.0, 1000.0, 1000.0];
+
+/// The artifacts a principal is served over the whole map at depth 0.
+pub fn artifacts_of(engine: &Engine, credential: &[u8]) -> Vec<ArtifactOut> {
+    let session = engine.authorise(credential).unwrap();
+    engine
+        .viewport(
+            &session,
+            ViewportRequest::new("s0", 0, WHOLE_MAP, N_ITEMS as usize),
+        )
+        .expect("a viewport over the whole map")
+        .artifacts
+}
+
+/// The entity an artifact's served identifier names.
+pub fn artifact_entity(engine: &Engine, id: TesseraId) -> EntityId {
+    let idset = engine.generation().bundle.manifest.identity.idset;
+    engine.resolve_tessera_ids(&[id], idset).unwrap()[0].expect("it names what was issued")
+}
+
+/// A one-row ingest at the fixture's centre, carrying `ALL_TERM` — the batch id and the external
+/// id are the caller's string.
+pub fn ingest(engine: &Engine, external_id: &str) -> EntityId {
+    let row = UnallocatedRow {
+        external_id: Some(external_id.as_bytes().to_vec()),
+        view: "s0".to_string(),
+        join: None,
+        descriptors: vec![b"0".to_vec()],
+        x: 5.0,
+        y: 5.0,
+        scalars: Vec::new(),
+        terms: engine.resolve_terms(&[b"0".to_vec()]),
+        scoped: Vec::new(),
+    };
+    engine
+        .accept_ingest(vec![row], external_id.to_string(), [0u8; 32])
+        .expect("ingest is accepted")[0]
+}
+
+/// An engine over `root`, with its cache and log beside it under `tmp`, ticking every
+/// `tick_secs` and its write executor running.
+pub fn engine_at(tmp: &Path, root: &Path, tick_secs: u64) -> Engine {
+    let mut engine = Engine::open(
+        root,
+        &tmp.join("cache"),
+        &tmp.join("wal.log"),
+        Passthrough::new(),
+        EngineConfig {
+            flush_max_age_secs: tick_secs,
+            ..config()
+        },
+    )
+    .expect("engine opens");
+    engine
+        .start_write_executor(64)
+        .expect("the executor starts once");
+    engine
+}
+
+/// Whether the subset principal can see the item behind a source id.
+pub fn subset_sees(e: u64) -> bool {
+    terms_of(e).contains(&SUBSET_TERM)
+}
+
+/// A credential over the terms a generator grant names.
+pub fn grant_credential(grant: &str) -> Vec<u8> {
+    let terms: Vec<String> = tessera_corpus::Grant::parse(grant)
+        .expect("the grant is inside the generator's term space")
+        .terms()
+        .iter()
+        .map(|t| format!("\"{}\"", t.raw()))
+        .collect();
+    format!("{{\"terms\": [{}]}}", terms.join(", ")).into_bytes()
 }
 
 pub fn full_coverage_credential() -> Vec<u8> {

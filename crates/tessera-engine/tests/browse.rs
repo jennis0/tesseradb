@@ -88,10 +88,6 @@ fn score_of(e: u64) -> i32 {
     (e as i32 * 7 % 101) - 50
 }
 
-fn subset_sees(e: u64) -> bool {
-    terms_of(e).contains(&SUBSET_TERM)
-}
-
 fn write_points(path: &Path) {
     let schema = Arc::new(ArrowSchema::new(vec![
         Field::new("entity_id", DataType::UInt64, false),

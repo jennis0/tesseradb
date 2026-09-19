@@ -9,17 +9,13 @@
 mod common;
 
 use common::*;
-use tessera_engine::{ArtifactOut, Engine, LayerSelection, ViewportRequest};
+use tessera_engine::{Engine, LayerSelection, ViewportRequest};
 use tessera_lifecycle::{wal::ChangeOp, IncomingArtifact};
 use tessera_types::layer::{
     ContentDeclaration, ExistenceCriterion, Hierarchy, HierarchyKind, LayerDeclaration,
     MembershipSource,
 };
 use tessera_types::{EntityId, TesseraId};
-
-/// The whole extent at zoom 0 — one tile, every row a candidate. Candidacy is tested separately
-/// (`a_cluster_outside_the_viewport_is_not_a_candidate`); these assertions are about counts.
-const WHOLE_MAP: [f64; 4] = [0.0, 0.0, 1000.0, 1000.0];
 
 fn declaration(name: &str, criterion: Option<ExistenceCriterion>) -> LayerDeclaration {
     LayerDeclaration {
@@ -67,22 +63,6 @@ fn visible_to_subset(source_ids: impl Iterator<Item = u64>) -> u64 {
     source_ids
         .filter(|s| terms_of(*s).contains(&SUBSET_TERM))
         .count() as u64
-}
-
-fn artifacts_of(engine: &Engine, credential: &[u8]) -> Vec<ArtifactOut> {
-    let session = engine.authorise(credential).unwrap();
-    engine
-        .viewport(
-            &session,
-            ViewportRequest::new("s0", 0, WHOLE_MAP, N_ITEMS as usize),
-        )
-        .expect("a viewport over the whole map")
-        .artifacts
-}
-
-fn artifact_entity(engine: &Engine, id: TesseraId) -> EntityId {
-    let idset = engine.generation().bundle.manifest.identity.idset;
-    engine.resolve_tessera_ids(&[id], idset).unwrap()[0].expect("it names what was issued")
 }
 
 /// **The stage's headline.** One cluster, two principals, two counts — and the narrow one is the

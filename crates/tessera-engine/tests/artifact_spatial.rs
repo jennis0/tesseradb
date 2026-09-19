@@ -56,7 +56,7 @@ const POLYGONS: &str = "regions/polygons";
 const DIAMOND: &str = "POLYGON ((500 100, 900 500, 500 900, 100 500, 500 100))";
 const FRAME: &str =
     "POLYGON ((50 50, 350 50, 350 350, 50 350, 50 50), (150 150, 250 150, 250 250, 150 250, 150 150))";
-const WHOLE_MAP: [f64; 4] = [0.0, 0.0, 1000.0, 1000.0];
+
 /// A polygon smaller than one depth-16 cell, drawn around one generator point: the shape a
 /// neighbourhood-sized division is at a world extent, which has no interior tile and one
 /// boundary cell. Overture's part 0 has three whose one place the build found no row for
@@ -72,16 +72,6 @@ const VIEWPORT_ZOOM: u8 = 4;
 
 fn corpus() -> Corpus {
     Corpus::new(SEED, N, extent()).expect("the generator accepts the fixture's extent")
-}
-
-fn credential(grant: &str) -> Vec<u8> {
-    let terms: Vec<String> = Grant::parse(grant)
-        .expect("the grant is inside the generator's term space")
-        .terms()
-        .iter()
-        .map(|t| format!("\"{}\"", t.raw()))
-        .collect();
-    format!("{{\"terms\": [{}]}}", terms.join(", ")).into_bytes()
 }
 
 /// The depth-[`DEPTH`] tile one position lands in — **the generator's own quantisation**, which is
@@ -369,7 +359,7 @@ impl Fixture {
 /// narrows nothing. Every case below that is *about* the viewport therefore asks at a depth where
 /// the box means something.
 fn served(engine: &Engine, grant: &str, zoom: u8, bbox: [f64; 4]) -> BTreeMap<String, u64> {
-    let session = engine.authorise(&credential(grant)).unwrap();
+    let session = engine.authorise(&grant_credential(grant)).unwrap();
     let names = [LAYER, POLYGONS];
     let mut request = ViewportRequest::new("s0", zoom, bbox, N as usize);
     request.layers = tessera_engine::LayerSelection::Named(&names);
@@ -610,7 +600,7 @@ fn a_deny_reaches_a_boundary_and_its_members() {
 /// The entity behind a served artifact, found by asking the identifier route to resolve what the
 /// viewport handed out — the same address a suppression names.
 fn served_id(engine: &Engine, grant: &str, key: &str) -> EntityId {
-    let session = engine.authorise(&credential(grant)).unwrap();
+    let session = engine.authorise(&grant_credential(grant)).unwrap();
     let names = [LAYER, POLYGONS];
     let mut request = ViewportRequest::new("s0", 0, WHOLE_MAP, N as usize);
     request.layers = tessera_engine::LayerSelection::Named(&names);

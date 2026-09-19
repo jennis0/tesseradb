@@ -30,7 +30,6 @@ use tessera_types::layer::{
 };
 use tessera_types::EntityId;
 
-const WHOLE_MAP: [f64; 4] = [0.0, 0.0, 1000.0, 1000.0];
 const LAYER: &str = "clusters/scattered";
 
 /// Rows enough for eleven Roaring containers — a container is 65 536 ids, and the threshold the

@@ -37,7 +37,6 @@ use tessera_build::BuildArgs;
 use tessera_engine::{LayerSelection, ViewportRequest};
 use tessera_types::layer::ServingLayout;
 
-const WHOLE_MAP: [f64; 4] = [0.0, 0.0, 1000.0, 1000.0];
 const SPREAD: &str = "clusters/spread";
 const CLUMPED: &str = "clusters/clumped";
 const N: u64 = 12_000;

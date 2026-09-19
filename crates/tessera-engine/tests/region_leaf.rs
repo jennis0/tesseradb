@@ -32,8 +32,6 @@ use tessera_types::{EntityId, TesseraId};
 
 const WAIT: Duration = Duration::from_secs(30);
 
-const WHOLE_MAP: [f64; 4] = [0.0, 0.0, 1000.0, 1000.0];
-
 /// The fixture's positions — `write_points_n`'s own arithmetic, restated so the oracle reads
 /// the generator and not the bundle.
 fn position(e: u64) -> (f64, f64) {
@@ -60,10 +58,6 @@ fn canonical(shape: ShapeF64) -> Arc<Shape> {
 
 fn region(shape: &Arc<Shape>) -> FilterExpr {
     FilterExpr::Region(RegionLeaf::Shape(Arc::clone(shape)))
-}
-
-fn subset_sees(e: u64) -> bool {
-    terms_of(e).contains(&SUBSET_TERM)
 }
 
 /// The oracle: how many of the principal's visible items lie inside the shape.

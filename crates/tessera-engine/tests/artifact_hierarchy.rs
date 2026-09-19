@@ -23,8 +23,6 @@ use tessera_types::layer::{
 };
 use tessera_types::EntityId;
 
-const WHOLE_MAP: [f64; 4] = [0.0, 0.0, 1000.0, 1000.0];
-
 /// A treed layer: it declares no levels and its lineage is entirely in its edges
 /// (decision 0082).
 ///

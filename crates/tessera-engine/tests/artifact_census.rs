@@ -43,7 +43,6 @@ const SEED: u64 = 0x5EED;
 /// level, which is checked to publish nothing rather than skipped.
 const LAYER: u64 = 3;
 const LEVEL: u32 = 0;
-const WHOLE_MAP: [f64; 4] = [0.0, 0.0, 1000.0, 1000.0];
 
 /// The principal this census is taken by, in the generator's own term space.
 ///

@@ -37,8 +37,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use common::*;
-use tessera_engine::viewport::ViewportRequest;
-use tessera_engine::{ArtifactOut, Engine, EngineConfig};
+use tessera_engine::{Engine, EngineConfig};
 use tessera_lifecycle::faults::{FaultSwitchboard, PauseAction, PauseSite};
 use tessera_lifecycle::wal::ChangeOp;
 use tessera_lifecycle::{
@@ -49,7 +48,6 @@ use tessera_types::layer::{
 };
 use tessera_types::EntityId;
 
-const WHOLE_MAP: [f64; 4] = [0.0, 0.0, 1000.0, 1000.0];
 const LAYER: &str = "clusters/a";
 /// Generous on purpose: every wait here is on a counter the executor moves, so a timeout is a hang
 /// and never a slow machine — which makes a bound sized against a loaded box cost nothing.
@@ -245,29 +243,13 @@ fn ingest_naming(engine: &Engine, batch: &str, layer: &str, key: &str, x: f64, y
         .1
 }
 
-fn artifacts_of(engine: &Engine) -> Vec<ArtifactOut> {
-    let session = engine.authorise(&full_coverage_credential()).unwrap();
-    engine
-        .viewport(
-            &session,
-            ViewportRequest::new("s0", 0, WHOLE_MAP, N_ITEMS as usize),
-        )
-        .expect("a viewport over the whole map")
-        .artifacts
-}
-
 /// One artifact's masked count for a principal who can see everything, so the number is the
 /// membership's own size. `None` where the artifact is not served at all.
 fn count_of(engine: &Engine, key: &str) -> Option<u64> {
-    artifacts_of(engine)
+    artifacts_of(engine, &full_coverage_credential())
         .into_iter()
         .find(|a| a.key.as_deref() == Some(key))
         .map(|a| a.masked_count)
-}
-
-fn artifact_entity(engine: &Engine, id: tessera_types::TesseraId) -> EntityId {
-    let idset = engine.generation().bundle.manifest.identity.idset;
-    engine.resolve_tessera_ids(&[id], idset).unwrap()[0].expect("it names what was issued")
 }
 
 /// **Flush, then fold** — what an *ingested* point needs before it counts towards a membership it
@@ -802,19 +784,19 @@ fn a_layers_suppression_covers_a_publication_that_landed_beside_it() {
         "both artifacts are in the store"
     );
     assert!(
-        artifacts_of(&engine).is_empty(),
+        artifacts_of(&engine, &full_coverage_credential()).is_empty(),
         "and neither is served: the layer's suppression covers the publication beside it"
     );
     fold(&engine);
     assert!(
-        artifacts_of(&engine).is_empty(),
+        artifacts_of(&engine, &full_coverage_credential()).is_empty(),
         "a fold retires deletions, never suppressions"
     );
 
     engine
         .accept_change(layer_entity, ChangeOp::Unsuppress)
         .unwrap();
-    let keys: Vec<String> = artifacts_of(&engine)
+    let keys: Vec<String> = artifacts_of(&engine, &full_coverage_credential())
         .into_iter()
         .filter_map(|a| a.key)
         .collect();
@@ -998,7 +980,7 @@ fn a_reader_sees_the_membership_move_forward_through_whole_growths_only() {
             let deadline = Instant::now() + WAIT;
             let mut last = (0u64, 0usize);
             while !stop.load(Ordering::Relaxed) && Instant::now() < deadline {
-                let served = artifacts_of(&engine);
+                let served = artifacts_of(&engine, &full_coverage_credential());
                 let count = served
                     .iter()
                     .find(|a| a.key.as_deref() == Some("c0"))
@@ -1231,7 +1213,7 @@ fn built_fixture() -> Fixture {
 fn a_built_bundle_takes_the_mid_window_publication_without_reissuing_an_id() {
     let fx = built_fixture();
     let (engine, faults) = fx.open_with_faults();
-    let built: Vec<EntityId> = artifacts_of(&engine)
+    let built: Vec<EntityId> = artifacts_of(&engine, &full_coverage_credential())
         .iter()
         .map(|a| artifact_entity(&engine, a.tessera_id))
         .collect();
@@ -1280,7 +1262,7 @@ fn a_built_bundle_takes_the_mid_window_publication_without_reissuing_an_id() {
         "and the built artifact is untouched by any of it"
     );
 
-    let online = artifacts_of(&engine)
+    let online = artifacts_of(&engine, &full_coverage_credential())
         .iter()
         .find(|a| a.key.as_deref() == Some("k-online"))
         .map(|a| artifact_entity(&engine, a.tessera_id))

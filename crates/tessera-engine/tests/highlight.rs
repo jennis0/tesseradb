@@ -40,7 +40,6 @@ use tessera_engine::{Engine, PointRows, ViewportOut, ViewportRequest};
 /// Enough items that a depth-2 request splits into several non-empty tiles and the cap clause has
 /// something to cap, and small enough that the fixture builds in a moment.
 const N: u64 = 600;
-const WHOLE_MAP: [f64; 4] = [0.0, 0.0, 1000.0, 1000.0];
 
 /// Two public categories and one number. `topic` is **`index` only**, which is the shape that
 /// routes entity space whatever the request's span — so a clause over it is the one that exercises
@@ -87,10 +86,6 @@ fn archive_of(e: u64) -> &'static str {
 
 fn score_of(e: u64) -> i32 {
     (e as i32 * 7 % 101) - 50
-}
-
-fn subset_sees(e: u64) -> bool {
-    terms_of(e).contains(&SUBSET_TERM)
 }
 
 fn write_points(path: &Path) {

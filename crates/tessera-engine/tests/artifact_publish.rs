@@ -62,14 +62,6 @@ fn artifact(key: &str, members: Vec<EntityId>) -> IncomingArtifact {
     IncomingArtifact::from_entities(Some(key.into()), members)
 }
 
-/// Invert an artifact's `tessera_id` through the admin plane's own resolver, the way
-/// `/control/changes` does — so this exercises the misdirection guard rather than going round it.
-fn artifact_entity(engine: &Engine, id: tessera_types::TesseraId) -> EntityId {
-    let idset = engine.generation().bundle.manifest.identity.idset;
-    engine.resolve_tessera_ids(&[id], idset).unwrap()[0]
-        .expect("an artifact identifier names the entity this deployment issued for it")
-}
-
 /// The batch is the commit unit, and each artifact gets an entity of its own — the address by which
 /// it can later be suppressed, and the only one that crosses the wire.
 #[test]

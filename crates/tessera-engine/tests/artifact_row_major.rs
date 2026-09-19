@@ -36,7 +36,6 @@ use tessera_types::layer::{
 };
 use tessera_types::EntityId;
 
-const WHOLE_MAP: [f64; 4] = [0.0, 0.0, 1000.0, 1000.0];
 const FLAT: &str = "clusters/flat";
 const TREED: &str = "clusters/treed";
 

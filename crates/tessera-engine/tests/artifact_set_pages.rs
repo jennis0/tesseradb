@@ -26,7 +26,7 @@
 mod common;
 
 use common::*;
-use tessera_engine::{ArtifactOut, Engine, ViewportRequest};
+use tessera_engine::Engine;
 use tessera_lifecycle::membership::IncomingContent;
 use tessera_lifecycle::{IncomingArtifact, IncomingGrowth};
 use tessera_types::layer::{
@@ -35,7 +35,6 @@ use tessera_types::layer::{
 };
 use tessera_types::EntityId;
 
-const WHOLE_MAP: [f64; 4] = [0.0, 0.0, 1000.0, 1000.0];
 const LAYER: &str = "topics/a";
 
 /// A label layer whose content is served only to a viewer who can see every document it was
@@ -88,17 +87,6 @@ impl Fixture {
 /// [`SUBSET_TERM`] to every third source id (`common::terms_of`).
 fn seen_by_subset(source_id: u64) -> bool {
     terms_of(source_id).contains(&SUBSET_TERM)
-}
-
-fn artifacts_of(engine: &Engine, credential: &[u8]) -> Vec<ArtifactOut> {
-    let session = engine.authorise(credential).unwrap();
-    engine
-        .viewport(
-            &session,
-            ViewportRequest::new("s0", 0, WHOLE_MAP, N_ITEMS as usize),
-        )
-        .expect("a viewport over the whole map")
-        .artifacts
 }
 
 /// The content this principal is served for `t0`, or `None` where the artifact is withheld.

@@ -22,15 +22,13 @@ mod common;
 use common::*;
 use rustc_hash::FxHashSet;
 use tessera_engine::viewport::ViewportRequest;
-use tessera_engine::{ArtifactOut, Engine};
+use tessera_engine::Engine;
 use tessera_lifecycle::wal::ChangeOp;
 use tessera_lifecycle::{IncomingArtifact, IncomingGrowth};
 use tessera_types::layer::{
     ContentDeclaration, Hierarchy, HierarchyKind, LayerDeclaration, MembershipSource,
 };
 use tessera_types::EntityId;
-
-const WHOLE_MAP: [f64; 4] = [0.0, 0.0, 1000.0, 1000.0];
 
 /// **No existence criterion**, so a count that moved is a membership that moved rather than an
 /// artifact that appeared or vanished — the distinction these cases turn on.
@@ -106,21 +104,10 @@ fn publish(engine: &Engine, layer: &str, artifacts: Vec<IncomingArtifact>) {
     tick(engine);
 }
 
-fn artifacts_of(engine: &Engine) -> Vec<ArtifactOut> {
-    let session = engine.authorise(&full_coverage_credential()).unwrap();
-    engine
-        .viewport(
-            &session,
-            ViewportRequest::new("s0", 0, WHOLE_MAP, N_ITEMS as usize),
-        )
-        .expect("a viewport over the whole map")
-        .artifacts
-}
-
 /// One layer's served keys with their masked counts, sorted — what a request said about a layer,
 /// in the form a later request can be compared against.
 fn served(engine: &Engine, layer: &str) -> Vec<(String, u64)> {
-    let mut out: Vec<(String, u64)> = artifacts_of(engine)
+    let mut out: Vec<(String, u64)> = artifacts_of(engine, &full_coverage_credential())
         .into_iter()
         .filter(|a| a.layer == layer)
         .filter_map(|a| a.key.clone().map(|key| (key, a.masked_count)))
@@ -166,7 +153,7 @@ fn a_write_to_one_layer_leaves_another_layers_row_form_alone() {
     let warm = engine.artifact_cache_builds().0;
     assert!(warm > cold, "the first request has to derive something");
 
-    artifacts_of(&engine);
+    artifacts_of(&engine, &full_coverage_credential());
     assert_eq!(
         engine.artifact_cache_builds().0,
         warm,
@@ -221,7 +208,7 @@ fn a_publication_into_a_new_layer_rebuilds_only_its_own_level() {
             fx.members(0..100),
         )],
     );
-    artifacts_of(&engine);
+    artifacts_of(&engine, &full_coverage_credential());
     let warm = engine.artifact_cache_builds().0;
 
     engine.register_layer(flat("clusters/c")).unwrap();

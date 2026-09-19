@@ -30,8 +30,6 @@ use tessera_types::layer::{
 };
 use tessera_types::EntityId;
 
-const WHOLE_MAP: [f64; 4] = [0.0, 0.0, 1000.0, 1000.0];
-
 /// **No existence criterion**, deliberately, as in the fold's own cases: these assertions are about
 /// what a membership *is*, and a criterion would turn a wrong count into an absence — which is the
 /// weaker assertion of the two and the one this file exists to distinguish from a real absence.
@@ -110,21 +108,10 @@ impl Fixture {
     }
 }
 
-fn artifacts_of(engine: &Engine) -> Vec<ArtifactOut> {
-    let session = engine.authorise(&full_coverage_credential()).unwrap();
-    engine
-        .viewport(
-            &session,
-            ViewportRequest::new("s0", 0, WHOLE_MAP, N_ITEMS as usize),
-        )
-        .expect("a viewport over the whole map")
-        .artifacts
-}
-
 /// The one artifact's masked count, for a principal who can see everything — so the number is the
 /// membership's own size, and anything that moves it is the growth.
 fn count(engine: &Engine) -> u64 {
-    let artifacts = artifacts_of(engine);
+    let artifacts = artifacts_of(engine, &full_coverage_credential());
     assert_eq!(
         artifacts.len(),
         1,
@@ -232,11 +219,6 @@ fn resampled_gauge(engine: &Engine) -> tessera_engine::WalGauge {
         );
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
-}
-
-fn artifact_entity(engine: &Engine, id: tessera_types::TesseraId) -> EntityId {
-    let idset = engine.generation().bundle.manifest.identity.idset;
-    engine.resolve_tessera_ids(&[id], idset).unwrap()[0].expect("it names what was issued")
 }
 
 // ---- I8: what a growth may not touch ------------------------------------------------------------
@@ -443,7 +425,7 @@ fn a_later_publication_does_not_release_the_log_from_a_growth_below_it() {
     }
 
     let engine = fx.open();
-    let artifacts = artifacts_of(&engine);
+    let artifacts = artifacts_of(&engine, &full_coverage_credential());
     assert_eq!(artifacts.len(), 2, "both artifacts came back");
     let grown = artifacts
         .iter()
@@ -567,13 +549,13 @@ fn growing_a_suppressed_artifact_leaves_it_suppressed() {
 
     engine.accept_change(entity, ChangeOp::Suppress).unwrap();
     assert!(
-        artifacts_of(&engine).is_empty(),
+        artifacts_of(&engine, &full_coverage_credential()).is_empty(),
         "the suppression is in force at the ack"
     );
 
     grow(&fx, &engine, 300..310);
     assert!(
-        artifacts_of(&engine).is_empty(),
+        artifacts_of(&engine, &full_coverage_credential()).is_empty(),
         "and it is still in force: growth is not a route back into service"
     );
 
@@ -780,7 +762,7 @@ fn an_artifact_a_batch_minted_survives_a_restart() {
     // points have them — which is what makes this the assertion rather than the one above.
     flush(&engine);
     fold(&engine);
-    let artifacts = artifacts_of(&engine);
+    let artifacts = artifacts_of(&engine, &full_coverage_credential());
     assert_eq!(artifacts.len(), 1);
     assert_eq!(artifacts[0].key.as_deref(), Some("made-by-a-point"));
     assert_eq!(
@@ -809,7 +791,7 @@ fn a_minted_artifact_survives_the_fold_that_rewrites_its_level() {
     remove_the_whole_log(&fx.wal);
 
     let engine = fx.open();
-    let artifacts = artifacts_of(&engine);
+    let artifacts = artifacts_of(&engine, &full_coverage_credential());
     assert_eq!(
         artifacts.len(),
         1,
