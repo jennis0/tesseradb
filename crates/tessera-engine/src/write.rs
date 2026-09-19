@@ -1,64 +1,22 @@
-//! The write path: the single writer thread that owns the WAL, the two queues that feed it, and
-//! the live state a handler reads before submitting.
+//! The write path: one writer thread that owns the WAL, the two queues that feed it, and the live
+//! state a handler reads before submitting.
 //!
-//! ## "Executor" and "the lifecycle thread" are the same thing
+//! The `Wal` is moved by value onto one [`Executor`] thread, so append, fsync, apply and swap
+//! happen in that order because only that thread can do any of them, and two acceptances cannot
+//! lose each other's update. The generation swap in [`Executor::publish_arc`] is the only
+//! non-atomic `store` in the crate; `scripts/check-layers.sh` holds that. The thread is a plain
+//! `std::thread`, so `Engine::accept_ingest` blocks and a tokio handler wraps it in
+//! `spawn_blocking`.
 //!
-//! Lifecycle §1.3, §4 and §7 call this **the lifecycle thread**; the types below call it the
-//! executor. They denote one object — the OS thread
-//! is literally named `"tessera-lifecycle"` at [`WritePath::start_executor`]. In particular §7's
-//! "the engine's public API is sync and owns no executor" is about **async runtimes**: it forbids
-//! `tessera-engine` acquiring tokio and running futures (policed by `scripts/check-layers.sh`'s
-//! `deny tessera-engine tokio`), not owning a plain `std::thread`. A synchronous engine that owns
-//! one writer thread is what §1.3 asks for; `Engine::accept_ingest` blocking its caller is the
-//! visible consequence, and is why a tokio handler must wrap it in `spawn_blocking`.
+//! - [`LiveState`]: the maps a handler reads and the executor writes, each behind its own lock.
+//! - [`WritePath`]: the handler side, held by `Engine`. Owns the `Wal` until the executor starts.
+//! - [`Executor`]: the thread. Owns the [`ExecutorWal`] and the publishing capability.
 //!
-//! ## Why one thread owns the WAL, rather than a mutex guarding it
-//!
-//! The construction to argue against is serving `/control/ingest` and `/control/changes`
-//! **inline**, on whichever thread the request landed on, keeping `append → fsync → apply → swap`
-//! atomic by holding one `Mutex<Wal>` across all four steps. It works, and it is what a reader
-//! expects; what it costs is that the mutex is not obviously about ordering at all, so the
-//! discipline has to be explained rather than read.
-//!
-//! Here the `Wal` is **moved by value** onto one [`Executor`] thread per partition, and the
-//! ordering stops being a discipline: there is one thread that can reach the WAL, one thread that
-//! can publish a generation, and it does the four steps in that order because there is nowhere else
-//! for them to happen.
-//!
-//! Two lost-update races go with it. Two acceptances that both `load_full`, both clone, and whose
-//! later `store` silently discards the other's already-acked change cannot occur when only one
-//! thread stores. Nor can the worse variant, a lost *geometry* publication, which leaves the
-//! **live** generation on the pin drain list, where the cache's prune evicts projections still in
-//! use. The engine has exactly one non-atomic `.store(` — the swap below — and it runs on the
-//! executor thread. `scripts/check-layers.sh` polices that, because the property survives only
-//! while it stays true, and a flush would be precisely a second publisher.
-//!
-//! *Honest limit, so a reader does not over-read the claim:* `Engine::generation` is `pub(crate)`
-//! and `ArcSwap::store` is a public inherent method, so any module in this crate **could** publish.
-//! What is structural is that no part of the *write path* holds that capability any more — this
-//! type does not own the pointer, only the executor does. Narrowing `Engine::generation` itself
-//! needs `session.rs` and `viewport.rs` together and is a controller decision.
-//!
-//! ## Three types, split by who writes
-//!
-//! - [`LiveState`] — the maps and indices a handler **reads** and the executor **writes**.
-//!   `Arc`-shared; each field keeps the lock it had, because each is still read concurrently by a
-//!   request path that is not the executor.
-//! - [`WritePath`] — the handler side, held by `Engine`. Owns the not-yet-started `Wal`, the
-//!   [`LifecycleHandle`], and the thread's `JoinHandle`.
-//! - [`Executor`] — the thread. Owns the [`ExecutorWal`] and the only publishing capability.
-//!
-//! ## The lane asymmetry
-//!
-//! Work is bounded (`ingest_queue_bound`, full → 429); deny is unbounded and **can never be
-//! refused for load**. The loop drains deny to empty before touching work, so a deny's wait is
-//! bounded by the work item currently executing rather than by queue depth. Two consequences,
-//! chosen rather than discovered: **a sustained deny flood starves ingest completely**, and **the
-//! deny queue is unbounded in memory**.
-//!
-//! The lane is chosen by the **command**, not by which method a handler called — see
-//! [`LifecycleHandle::submit`]. That is not tidiness: `submit(Command::Change { .. })` putting a
-//! suppression on the bounded queue would 429 a security operation, which contracts §3.1 forbids.
+//! Work is bounded (a full queue answers 429). Deny is unbounded and is never refused for load, and
+//! the loop drains it to empty before taking work: a deny waits for at most the work item in
+//! flight, a sustained deny flood starves ingest, and the deny queue is unbounded in memory. The
+//! lane is chosen by the command ([`LifecycleHandle::enqueue`]), so a suppression can never be
+//! put on the bounded queue.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
@@ -99,23 +57,9 @@ use crate::{Generation, GenerationHandle};
 // Posture and counters
 // =================================================================================================
 
-/// What the write executor is able to do — **the signal `readyz` reads**.
-///
-/// Four states rather than a bool, because the operator response differs and a bool would collapse
-/// "nobody started a writer" into "the writer died", which are different bugs.
-///
-/// **Composed from two components, not latched as one value.** The thread's own state
-/// (`NotStarted` → `Running` → `Dead`) is monotone and latched: published with `fetch_max`, never
-/// `store`, so a thread that panics the instant it is spawned cannot have its `Dead` clobbered by
-/// the parent's `Running`, and `Dead` is absorbing. The WAL's state is **not** latched — it is
-/// mirrored live from the WAL in both directions, because a WAL that has discarded its undurable
-/// region is genuinely healthy again and a posture that could not say so would be reporting a
-/// condition that no longer exists. See [`ExecutorHealth::posture`] for how the two compose and why
-/// `Dead` still wins over everything.
-///
-/// A latched value was the original shape and it made this enum's own doc false: `fetch_max` over
-/// all four meant `WalPoisoned` could never be left, so the function whose stated purpose was to
-/// mirror the WAL rather than remember an error was the one that remembered.
+/// What the write executor is able to do; `readyz` reads it. Composed from the thread's own
+/// state, which latches, and the WAL's, which is mirrored and can recover
+/// ([`ExecutorHealth::posture`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(u8)]
 pub enum ExecutorPosture {
@@ -123,16 +67,9 @@ pub enum ExecutorPosture {
     NotStarted = 0,
     /// Executing normally.
     Running = 1,
-    /// The WAL refuses every further operation (lifecycle §4's fail-closed rule). **The executor
-    /// is still alive and still applying denies** — see [`Executor::run`] for why exiting here
-    /// would be the worse of two fail-closed answers.
-    ///
-    /// **Leavable, and only in one direction that matters.** A sync failure is repairable: the
-    /// executor discards the undurable region and the posture returns to `Running` without a
-    /// restart ([`Executor::recover_wal`]). A torn append is not repairable, so a handle that
-    /// reaches it stays here for the life of the process — not by a latch here, but because the
-    /// WAL itself never leaves that state. Terminality lives in the one place that knows whether it
-    /// is true.
+    /// The WAL refuses every further operation. The executor is alive and still applies denies.
+    /// A sync failure is repaired in process ([`Executor::recover_wal`]); a torn append is not, and
+    /// the WAL then stays poisoned for the life of the process.
     WalPoisoned = 2,
     /// The thread is gone: it panicked, or every handle was dropped and it shut down. Both mean
     /// the same thing to a caller — there is nothing left to apply a write to.
@@ -140,13 +77,8 @@ pub enum ExecutorPosture {
 }
 
 impl ExecutorPosture {
-    /// The stable wire spelling for `/control/status`.
-    ///
-    /// **Not `Debug`.** These strings are read by operators and by whatever scrapes the admin
-    /// plane, so a rename of a Rust variant must not silently change an operator-facing field;
-    /// `posture_spellings_are_stable` is what makes that a test rather than an intention. Kebab
-    /// case to match the error `code` vocabulary (`not-ready`, `fail-closed`, `bad-credential`)
-    /// that shares the same surfaces.
+    /// The wire spelling for `/control/status`. Not `Debug`: renaming a variant must not change
+    /// what operators read.
     pub fn as_str(self) -> &'static str {
         match self {
             ExecutorPosture::NotStarted => "not-started",
@@ -173,471 +105,175 @@ impl ExecutorPosture {
 /// owns no executor should not own the executor's liveness vocabulary.
 #[derive(Debug)]
 pub struct ExecutorHealth {
-    /// The **thread's** own state: `NotStarted` → `Running` → `Dead`, advanced with `fetch_max` and
-    /// never lowered. `Dead` is absorbing and is written by a drop guard on the executor's own
-    /// stack during unwind, so a panicked executor can never read as running again.
-    ///
-    /// The WAL's state is deliberately not folded in here — see [`Self::wal_poisoned`].
+    /// The thread's own state, `NotStarted` to `Running` to `Dead`. Advanced with `fetch_max`, so a
+    /// thread that panics as it is spawned is not overwritten by the parent's `Running`.
     lifecycle: AtomicU8,
-    /// Whether the WAL currently refuses operations, mirrored from the WAL on every observation and
-    /// **in both directions**.
-    ///
-    /// Separate from [`Self::lifecycle`] because the two have opposite temporal shapes and one
-    /// atomic cannot carry both. Thread death is permanent and must latch; WAL poisoning is a
-    /// condition that a discard can end. Folding them into one monotone value — which is what this
-    /// was — meant a node that recovered went on reporting a fault it no longer had, and left
-    /// `Executor::observe_wal`'s stated purpose ("mirror the WAL rather than remember an error")
-    /// describing something the code did not do.
-    ///
-    /// Written only by the executor thread, so a plain store is enough; read by `/readyz` and
-    /// `/control/status` from any thread.
+    /// Whether the WAL refuses operations now. Mirrored from the WAL in both directions, because a
+    /// discard of the undurable region ends the condition. Written only by the executor thread.
     wal_poisoned: AtomicBool,
-    /// Times the executor discarded an undurable WAL region and returned to service.
-    ///
-    /// **The incident survives the recovery.** Readiness coming back is the right operator-facing
-    /// answer — a node latched unready over a condition that cleared seconds ago is an outage the
-    /// storage never caused — but it would otherwise erase every trace that durability was once
-    /// lost. This counter is that trace, and it is the number to alarm on: a node that recovers
-    /// repeatedly is a node whose disk is failing slowly, which no single posture reading shows.
+    /// Times the executor discarded an undurable WAL region and returned to service. The posture
+    /// recovers, so this is the figure to alarm on: repeated recoveries are a failing disk.
     wal_recoveries: AtomicU64,
     work_submitted: AtomicU64,
     deny_submitted: AtomicU64,
-    /// Flush ticks fired since the executor started — the observable that makes "the tick runs"
-    /// a condition a test can wait on rather than a sleep it has to guess at.
+    /// Flush ticks fired since the executor started.
     pub(crate) ticks: AtomicU64,
-    /// A `POST /control/flush` awaiting the tick it pulls forward (contracts §3.4). A flag, not a
-    /// count: the endpoint's 202 means "accepted, not yet done", and two requests before one tick
-    /// are satisfied by that tick together.
-    ///
-    /// Written under [`Self::publication`] by [`ExecutorHealth::request_flush`] and read at the
-    /// tick, so a request and the publication number it is answered with cannot straddle a tick.
+    /// A `POST /control/flush` awaiting the tick it pulls forward. A flag: one tick answers every
+    /// request made before it. Written under [`Self::publication`] so a request and the publication
+    /// number it is answered with cannot straddle a tick.
     pub(crate) flush_requested: AtomicBool,
-    /// **The publication counter a client waits on** (contracts §3.4's `publication`).
-    ///
-    /// A cycle is one tick plus the flush it dispatched, and `completed` moves when that cycle
-    /// **published**: a segment, a values-only substitution, artifact row forms, or, on a tick
-    /// with nothing to publish, the empty publication that leaves nothing behind. It does not
-    /// move for a cycle whose gates were shut, whose flush failed on the pool, or whose
-    /// publication was discarded at its final check. Such a cycle stays open and its request
-    /// stays armed, so the number is reached by the retry that succeeds and never by the attempt
-    /// that did not. `segments_version` moves only where a segment was written, so a tick that
-    /// only filled values or only published artifacts is invisible on it; this is what a caller
-    /// that wrote either of those waits on instead.
-    ///
-    /// **The counter moves when the cycle's work is visible.** A fill and a row's geometry are
-    /// both published by the flush unit, which executes on the pool and is applied at a later
-    /// loop iteration. A counter incremented inside the tick would therefore name work that is
-    /// still being written.
+    /// The publication counter a client waits on. `completed` moves when a cycle (a tick and the
+    /// flush it dispatched) has published, including a tick with nothing to publish. A cycle whose
+    /// gates were shut or whose flush failed stays open, so the number is reached only by the retry
+    /// that succeeds.
     pub(crate) publication: Mutex<PublicationCycle>,
-    /// A tick dispatched one view's plan and left another view's rows buffered (§4.1's one plan
-    /// per dispatch).
-    ///
-    /// The cycle stays open over it. A client waiting on the publication number asked for its
-    /// buffered work to be published, and rows in a view whose plan was deferred are part of that
-    /// work, so a cycle that closed here would release the caller with a view still buffered.
-    /// Set before the spawn, cleared by the tick that dispatches with nothing left over.
+    /// A tick dispatched one view's plan and left another view's rows buffered. The cycle stays open
+    /// until a tick dispatches with nothing left over.
     pub(crate) deferred_plans: AtomicBool,
-    /// When the last cycle failed to publish, as an offset from [`Self::base`] plus one; `0`
-    /// where none has since the last success.
-    ///
-    /// A failed cycle re-arms its request, and `wait_for_work` polls while one is armed, so
-    /// without a floor a node whose gate is shut would re-plan fifty times a second. The floor is
-    /// [`FAILED_CYCLE_RETRY`]; a period or a row trip is never held back by it.
+    /// When the last cycle failed to publish, as a marker (see [`Self::set_marker`]); `0` if none has
+    /// since the last success. Floors the retry at [`FAILED_CYCLE_RETRY`].
     failed_cycle_nanos: AtomicU64,
-    /// The last publication refusal that was logged, on the same footing, so a held-open cycle's
-    /// retry does not turn one operator condition into a line a second.
+    /// When a publication refusal was last logged, so a held-open cycle logs once a period.
     refusal_logged_nanos: AtomicU64,
-    /// Whether a flush is executing on the pool. A tick arriving while it is set is skipped, never
-    /// queued: two concurrent flushes would double-consume the buffer range (§1.1). Set by the
-    /// executor before the spawn, cleared by the pool after its sends, and read by
-    /// `/control/status` so a reader can tell "no flush has landed yet" from "one is running".
+    /// Whether a flush is executing on the pool. A tick that finds it set is skipped, never queued:
+    /// two concurrent flushes would consume the same buffer range.
     pub(crate) flush_in_flight: AtomicBool,
-    /// A completed flush has been sent to `flush_done` and not yet drained.
-    ///
-    /// **The pool's half of the completion handshake** ([`FLUSH_COMPLETION_POLL`]): set
-    /// immediately *before* the send, cleared by `publish_completed_flushes` only after it drained
-    /// something. The ordering closes the race a bare `flush_in_flight` check leaves open — the
-    /// pool clearing `in_flight` after its send, between the executor's empty `try_recv` and its
-    /// wait computation, would put the executor to sleep for a full tick with a completed unit in
-    /// the channel. With set-before-send, at wait time either the send has not happened
-    /// (`in_flight` still true) or this flag is already visible; there is no gap.
+    /// A completed flush has been sent and not yet drained. Set before the send and cleared after
+    /// the drain, so the executor never sleeps a full tick with a completed unit in the channel.
     pub(crate) flush_completed_pending: AtomicBool,
-    /// **The in-memory overlay holds dispositions the durable WAL does not** (§7.2).
-    ///
-    /// Set when [`Executor::recover_wal`] discards an undurable region, and **cleared only by a
-    /// restart**. `Wal::discard_undurable` deliberately does not un-apply — "a restart will not
-    /// carry them" — so the node returns to `Running` holding denies no record backs, and the
-    /// poisoned posture no longer covers it. Publishing a manifest or rotating the WAL from that
-    /// overlay would make a 500'd, never-acked deny permanent.
-    ///
-    /// Distinct from [`Self::wal_poisoned`], which is mirrored from the WAL in both directions:
-    /// this one latches, because what diverged stays diverged until the process is replaced.
+    /// The overlay holds dispositions the durable WAL does not, after [`Executor::recover_wal`]
+    /// discarded an undurable region. Latches until restart: the node publishes no manifest and
+    /// rotates no WAL, because either would make a never-acked deny permanent.
     pub(crate) overlay_diverged: AtomicBool,
-    /// **`CURRENT` names a prefix this process is not serving** — the fold flipped the commit point
-    /// and then could not complete its swap.
-    ///
-    /// Latching, like [`Self::overlay_diverged`] and for a sharper version of its reason. After the
-    /// flip the durable bundle is the new prefix and the live generation is still the old one, so
-    /// every publication this executor performs writes into a tree no restart reads: a flush's
-    /// side-manifest and segment land under the superseded prefix, the rows are acked, and the WAL
-    /// rotation that follows reclaims the only other copy of them. That is **acked ingest lost at
-    /// the next restart**, behind no error at all — the failure a crash cannot cause, because a
-    /// crashed process stops writing.
-    ///
-    /// So the node keeps serving what it has and publishes nothing until it is restarted, at which
-    /// point it opens the prefix `CURRENT` names and is correct again. Cleared only by that
-    /// restart.
+    /// `CURRENT` names a prefix this process is not serving: a fold flipped it and could not swap.
+    /// Latches until restart. Publishing from here would write acked rows under a prefix no restart
+    /// reads, and the WAL rotation after it would reclaim the only other copy.
     pub(crate) prefix_diverged: AtomicBool,
-    /// Buffer occupancy as of the last apply — what `/control/ingest`'s occupancy bound is checked
+    /// Buffer occupancy as of the last apply. What `/control/ingest`'s occupancy bound is checked
     /// against.
-    ///
-    /// Published by the executor and read by handlers, so it lags by at most one apply. That is
-    /// the right shape for a backpressure signal: an exact figure would need the handler to hold
-    /// the generation, and the bound it feeds is a ceiling with an order of magnitude of headroom
-    /// (see `DEFAULT_INGEST_BUFFER_MAX_ITEMS`), not a precise quota.
     pub(crate) buffered_items: AtomicUsize,
-    /// Items that would acquire geometry at the last tick — the buffer minus what the three
-    /// dispositions exclude (§3.5).
-    ///
-    /// **The gauge for a stalled flush.** It stays at zero on a node whose gates are closed and
-    /// grows without bound on one whose flush keeps failing, which are the two states
-    /// `buffered_items` alone cannot tell apart from healthy backlog.
+    /// Items that would acquire geometry at the last tick. Zero on a gated node; growing without
+    /// bound on one whose flush keeps failing.
     pub(crate) flushable_items: AtomicUsize,
-    /// Durable buffered rows excluded from every flush because their coordinates fall outside the
-    /// bundle's declared extent (§6). They never leave this state on their own.
-    /// Flushes published since the executor started — what "an acked ingest became visible" is
-    /// observed on, rather than on a sleep.
+    /// Flushes published since the executor started.
     pub(crate) flushes: AtomicU64,
-    /// When the flush now on the pool was dispatched, as an offset from [`Self::base`] plus one;
-    /// `0` when none is. Read by [`Self::record_flush_published`] for the drain sample.
+    /// When the flush now on the pool was dispatched, as a marker; `0` when none is.
     flush_started_nanos: AtomicU64,
-    /// Wall nanoseconds per row drained, an EWMA over published flushes measured from dispatch to
-    /// publication. Always on, where `flush_stage_nanos` is written only under `bench-timing`: it
-    /// is the observed drain rate the buffer-occupancy 429 derives `Retry-After` from (ingest
-    /// §4.2; [`estimate_buffer_retry_after_s`]). `0` before the first publication.
+    /// Wall nanoseconds per row drained, an EWMA over published flushes from dispatch to
+    /// publication. The buffer-occupancy 429 derives `Retry-After` from it. `0` before the first.
     flush_nanos_per_row_ewma: AtomicU64,
-    /// The last tick, as an offset from [`Self::base`] plus one; `0` before the first.
+    /// The last tick, as a marker; `0` before the first.
     last_tick_nanos: AtomicU64,
-    /// The tick period, `flush_max_age_secs` in nanoseconds, so a snapshot can say how long until
-    /// the next tick without the executor's own clock.
+    /// The tick period, so a snapshot can say how long until the next tick.
     flush_period_nanos: AtomicU64,
-    /// Side-manifests written for deny state alone — the gauge that makes the restore path's
-    /// freshness observable, and what a test asserts a publication happened at all against.
+    /// Side-manifests written for deny state alone.
     pub(crate) overlay_publications: AtomicU64,
-    /// Ticks that found a flush already in flight and skipped rather than queued (§1.1).
-    ///
-    /// **Alarmed, because `flush_max_age_secs` would otherwise miss it**: a flush persistently
-    /// slower than the tick is a visibility-latency breach, and the period an operator configured
-    /// is not the period they are getting.
+    /// Ticks that found a flush in flight and skipped. A rising count means the publication period
+    /// is longer than the one configured.
     pub(crate) flush_skips: AtomicU64,
-    /// Flushes that failed and left the buffer intact for the next tick (§10).
+    /// Flushes that failed and left the buffer intact for the next tick.
     pub(crate) flush_failures: AtomicU64,
-    /// Allocations that found a `SEGMENTS-<n>.json` this executor did not write
-    /// ([`Executor::raise_manifest_floor`]).
-    ///
-    /// **Alarmed, because it is positive evidence of a second writer.** In single-writer operation
-    /// the highest number on disc is the last one this executor took, so the floor never rises
-    /// above the counter. A node that raises it has met a writer the bundle lock should have
-    /// refused, or a file placed by hand.
+    /// Allocations that found a `SEGMENTS-<n>.json` this executor did not write: evidence of a
+    /// second writer over the bundle root.
     pub(crate) foreign_side_manifests: AtomicU64,
-    /// Entity-space coalesce publications since the executor started (decision 0044's D2). A
-    /// separate counter from `flushes` because the two publish different things: a flush moves
-    /// geometry, a coalesce bounds the tier, run and dictionary-extent counts and moves none.
+    /// Entity-space coalesce publications since the executor started.
     pub(crate) coalesces: AtomicU64,
-    /// Coalesces that failed or no longer rebased, leaving every consumed entry standing.
+    /// Coalesces that failed or no longer rebased.
     pub(crate) coalesce_failures: AtomicU64,
-    /// Row-space merge publications, and the ones that produced nothing. Separate from
-    /// `coalesces` because the two publish different things: a merge bumps `segments_version` and
-    /// costs a refresh round, a coalesce does neither.
+    /// Row-space merge publications.
     pub(crate) merges: AtomicU64,
     pub(crate) merge_failures: AtomicU64,
-    /// Compaction folds published since the executor started, and the ones that produced nothing.
-    ///
-    /// A fold's own counter rather than a share of `merges`, because the two are different events:
-    /// a merge bounds an axis inside the live prefix, a fold replaces the prefix, retires
-    /// deletions and reclaims the superseded tree. The failure counter is what an operator watches
-    /// for a fold that keeps re-reading the corpus and discarding — every failure leaves orphans
-    /// under a prefix `CURRENT` never named, so the disc cost is visible before the cause is.
+    /// Compaction folds published.
     pub(crate) folds: AtomicU64,
+    /// Folds that failed or were discarded. Each leaves orphan files under a prefix `CURRENT` never
+    /// named.
     pub(crate) fold_failures: AtomicU64,
-    /// A `POST /control/compact` awaiting the tick that dispatches it. A flag rather than a count,
-    /// for `flush_requested`'s reason: at most one fold is in flight, so two requests before one
-    /// tick are satisfied by that tick together.
+    /// A `POST /control/compact` awaiting the tick that dispatches it.
     pub(crate) fold_requested: AtomicBool,
-    /// Folds the scheduler planned and `plan_fold` refused, and the last refusal in full.
-    ///
-    /// **A third counter beside `folds` and `fold_failures`, because a refusal is neither of
-    /// those.** Nothing was folded, so `folds` does not move; nothing was written to discard, so
-    /// `fold_failures` does not either. Without a counter of its own a refusal leaves no figure at
-    /// all, and the pair an operator watches sits still while the corpus stops shrinking. That
-    /// matters most for the refusal a deployment cannot leave: the fold demands 150% of the live
-    /// bytes free on a device already holding 1.3–2.6× live, and it is the only operation that
-    /// reclaims (compaction §8).
-    ///
-    /// `plan_fold` is called only for a fold the schedule or an operator asked for, so every
-    /// increment here answers a request rather than an idle tick. `nothing_to_fold` is among the
-    /// reasons and is not an alarm: it is what a `POST /control/compact` against an empty corpus
-    /// answers.
-    ///
-    /// **One counter per gate**, indexed by `NoFold::index`, because a single total answers "a
-    /// fold was refused" and not "which refusal is standing". The schedule re-evaluates at every
-    /// tick once the interval floor has passed, and a refusal stamps no `last_fold_start_unix`, so
-    /// a gate that stands increments on every tick from then on. `last_refusal` alone would be
-    /// whichever refusal happened last, which on a node refusing on disc every tick is whatever
-    /// else refused in between — the alarm fires and does not say why. Six counters cost six words
-    /// and make the standing gate the one with the large number.
+    /// Folds that were asked for and `plan_fold` refused, one counter per gate
+    /// ([`crate::compact::NoFold::index`]). A gate that stands is counted at every tick, so the
+    /// largest entry is the condition the deployment is in.
     pub(crate) fold_refusals: [AtomicU64; crate::compact::NoFold::GATES.len()],
-    /// The last refusal, or `None` before the first — see [`ExecutorHealth::fold_refusals`] and
-    /// [`FoldRefusal`]. A `Mutex` for [`ExecutorHealth::last_fold_passes`]' reason: written once
-    /// per refused fold, read only by `/control/status`. Kept beside the per-gate counters because
-    /// it is the only place the two figures of an `insufficient_disc` refusal appear.
+    /// The last refusal, with the two byte figures of an `insufficient_disc` one.
     pub(crate) last_fold_refusal: Mutex<Option<FoldRefusal>>,
-    /// The WAL as the last sample found it — see [`WalGauge`], which says what each figure means
-    /// and what the pin's span distinguishes.
-    ///
-    /// **Sampled on the executor thread rather than at the poll**, because the log lives on that
-    /// thread and a status request has no route to it, so a dashboard adds nothing to the node's
-    /// cost. The sample is taken at a tick, before that tick's own publication rotates anything,
-    /// and at most once per `flush_max_age_secs` — the walk is O(members) and the member count is
-    /// unbounded under a pin ([`Executor::sample_wal_gauge`]). The reading is therefore up to one
-    /// period old. Once more at [`Executor::run`]'s entry, so a node's first period does not
-    /// report an empty log.
+    /// The WAL as the last sample found it. Sampled on the executor thread at a tick, at most once a
+    /// period, so a status poll costs the node nothing.
     pub(crate) wal_gauge: Mutex<WalGauge>,
-    /// A completed fold has been sent to `fold_done` and not yet drained — the dedicated thread's
-    /// half of the same completion handshake a flush has, and set before the send for the same
-    /// reason.
+    /// See [`Self::flush_completed_pending`].
     pub(crate) fold_completed_pending: AtomicBool,
-    /// When the last fold **ended**, however it ended, as a unix second — 0 before the first one.
-    ///
-    /// **Written by the fold's own thread on both of its exits**, because the executor never sees
-    /// one of them: a failure inside `execute` reaches no `publish_fold` and would otherwise leave
-    /// the schedule believing the attempt was still the one that started. It exists for the
-    /// interval floor's second half — see [`Executor::fold_floor_from`], where the rule it serves
-    /// is stated.
+    /// When the last fold ended, however it ended, as a unix second. Written by the fold's thread
+    /// on both exits, because the executor never sees a failure inside `execute`.
     pub(crate) fold_ended_unix: AtomicU64,
-    /// The last fold's wall clock in seconds, and the highest resident set its own staircase saw
-    /// (`compact::PassCost`) — the two gauges `/control/status` publishes for the most expensive
-    /// operation in the system. Both are 0 before the first fold. Both cover the whole fold, from
-    /// the fold thread's entry to the superseded prefix's reclaim: the publication's phases are
-    /// rows of the same staircase (`compact::Staircase`).
-    ///
-    /// **The RSS figure is a staircase maximum, not a peak**, and the difference is not pedantry:
-    /// it is sampled at pass boundaries, so a spike inside a pass is invisible to it. It is
-    /// what a deployment has, and probe P1 is what says how far under the true peak it sits.
+    /// The last fold's wall clock in seconds.
     pub(crate) last_fold_secs: AtomicU64,
+    /// The highest resident set the last fold's pass staircase saw. Sampled at pass boundaries, so
+    /// a spike inside a pass is not in it.
     pub(crate) last_fold_rss: AtomicU64,
-    /// The last fold's attribute pass IO (`filter-index.md` §6.2's reported-never-triggered-on
-    /// ruling). The staircase says what pass 4a cost in time and residency; these say what it cost
-    /// in bytes, which is the axis its non-disruption argument is made on.
+    /// The last fold's attribute pass IO, in bytes.
     pub(crate) last_fold_attr_read: AtomicU64,
     pub(crate) last_fold_attr_written: AtomicU64,
-    /// The last fold's staircase, pass by pass — what the two gauges above are a reduction of.
-    ///
-    /// **The gauges alarm and this diagnoses**, which is why both exist: `last_fold_rss` says the
-    /// fold reached 9 GiB and this says which pass it reached it on, and only the second is
-    /// actionable. A `Mutex` rather than a fifth atomic because it is written once per fold, hours
-    /// apart, and read only by `/control/status`.
+    /// The last fold's staircase, pass by pass.
     pub(crate) last_fold_passes: Mutex<Vec<crate::compact::PassCost>>,
-    /// The last fold's degradation report — which artifacts its deletions took members from, and
-    /// which supplied content lost a source (write cycle §4.2).
-    ///
-    /// **The durable copy is the file in `reports/`**; this is the same content held for the
-    /// operator route, so a caller polling an endpoint does not have to read the bundle root. Empty
-    /// before the first fold and after one that degraded nothing — which the file distinguishes and
-    /// this does not, deliberately: an operator asking *what did the last fold degrade* wants the
-    /// list, and an operator asking *did it report* wants the directory.
+    /// The last fold's degradation report. The durable copy is the file in `reports/`.
     pub(crate) last_fold_report: Mutex<Vec<tessera_lifecycle::membership::Degradation>>,
-    /// A fold has finished its passes and is **holding** at the test hook
-    /// (`Engine::set_fold_paused_for_test`). Always `false` in a shipped build, where nothing ever
-    /// sets the flag it waits on; it exists so a test can wait on the hold as a condition rather
-    /// than guess at it with a sleep, which is what makes the mid-flight-flush cases deterministic.
+    /// A fold has finished its passes and is holding at the test hook. Always `false` outside tests.
     pub(crate) fold_holding: AtomicBool,
-    /// See [`Self::flush_completed_pending`], whose handshake this shares.
+    /// See [`Self::flush_completed_pending`].
     pub(crate) merge_completed_pending: AtomicBool,
-    /// Whether a completed coalesce is waiting to be published — see
-    /// [`Self::flush_completed_pending`], whose handshake and ordering this shares exactly.
+    /// See [`Self::flush_completed_pending`].
     pub(crate) coalesce_completed_pending: AtomicBool,
-    /// Total nanoseconds spent in **the whole apply step** — the `IngestBuffer`/`Overlay` clone,
-    /// the per-row inserts, the `Generation` construction and the swap.
-    ///
-    /// **Named for what it measures.** The timer starts at the top of the apply, so it is not the
-    /// clone alone. The clone dominates it — O(total buffered items) against O(batch) for the
-    /// inserts — which is why it is still the right operand for sizing a deny-ack floor; but a
-    /// figure something is sized from must not quietly be something else, so the name says what was
-    /// timed.
-    ///
-    /// **This bounds the deny-ack *wait*, not the deny's own cost**, and the distinction is
-    /// measured rather than argued (`docs/evidence/memos/2026-08-01-deny-ack-baseline.md`). A deny's
-    /// wait is bounded by "the work item currently executing", and *that* item's apply includes a
-    /// clone that is O(total buffered items) — modelled at 100–300 ms per clone at 1 M buffered
-    /// items and 1–3 s at 10 M, bounded now by what the flush leaves buffered rather than by the
-    /// whole corpus. Measured at 1 M buffered items: a deny under sustained ingest acks in
-    /// 165 ms p50 / 346 ms max, against a 3.2 ms quiescent floor. That much is confirmed.
-    ///
-    /// **What this counter is NOT is the deny's own floor**, and reading it as one is the available
-    /// mistake. [`Executor::apply_changes`] clones the **overlay**; only the ingest apply clones the
-    /// buffer. Measured, a deny's own
-    /// apply is **1.3 µs at 1,000,000 buffered items** and is flat in buffer depth — it is
-    /// O(overlay), rising to ~4.3 µs at overlay depth 2,000. This counter sums **both lanes**, so
-    /// its value is dominated by ingest applies and attributes none of itself to either.
-    ///
-    /// **And it is an estimator of the wait, not a bound on it**: measured, the worst deny ack
-    /// exceeds `apply_nanos_max` over the same phase by up to 1.53×, because a deny waits for the
-    /// whole in-flight item (append, fsync, apply, ack) and then pays its own append and fsync.
-    ///
-    /// Counted at all because lifecycle §1.3's "never queued behind work of unbounded duration" is
-    /// a claim this file makes in code, and a claim of that shape needs a measurement beside it.
+    /// Nanoseconds spent in the whole apply step (clone, inserts, generation, swap), summed over
+    /// both lanes. An ingest apply clones the buffer and dominates it; a deny apply clones only the
+    /// overlay. It estimates how long a deny waits behind the work item in flight.
     apply_nanos_total: AtomicU64,
-    /// **The window close, partitioned** — the write-path equivalent of [`crate::timing`]'s
-    /// viewport breakdown, and the instrumentation `arms::ingest` said would be needed to attribute
-    /// ingest cost ("StageTimings covers the viewport path only; there is no write-path equivalent
-    /// yet"). Six stages that together partition `close_window`; `apply_nanos_total` above stays as
-    /// the coarse figure `/control/status` already publishes, and stages 4–6 sum to it.
-    ///
-    /// **The clock reads are gated, the call sites are not.** `stage_nanos` is written by
-    /// [`ExecutorHealth::lap`], which is a no-op without `bench-timing` — so the instrumented and
-    /// uninstrumented builds take the same path, exactly as `timing.rs` argues for the read side.
-    /// Zeros in a release build mean "not measured", never "free".
+    /// The window close, partitioned by [`WriteStage`]. Written only under `bench-timing`; zeros
+    /// mean not measured.
     stage_nanos: [AtomicU64; WriteStage::COUNT],
-    /// **The flush, partitioned** ([`crate::flush::FlushStage`]), beside `stage_nanos` and never
-    /// added to it: the pool's stages are wall clock on another thread, and the ingest
-    /// attribution's partition of `stage_nanos` against `submit→receipt` holds only while those
-    /// laps stay this thread's own. The executor's stages are written as they happen
-    /// ([`Self::flush_lap`]); the pool's arrive once per `execute_flush` return
-    /// ([`Self::record_flush_execution`]), so a flush still running on the pool is in no total.
-    /// Zero without `bench-timing`, as `stage_nanos` is.
+    /// The flush, partitioned by [`crate::flush::FlushStage`]. Written only under `bench-timing`.
     flush_stage_nanos: [AtomicU64; crate::flush::FlushStage::COUNT],
-    /// `execute_flush` returns on the pool, whichever way. `flushes` counts publications; the two
-    /// differ by the executions the rebase discarded and by any completed unit still in the
-    /// channel.
+    /// `execute_flush` returns on the pool, `Ok` or `Err`.
     flush_executions: AtomicU64,
     /// Rows in every `execute_flush` that returned `Ok`.
     flush_rows_executed: AtomicU64,
     /// Rows a publication removed from the buffer, summed over every flush that swapped.
     flush_rows_published: AtomicU64,
     apply_nanos_max: AtomicU64,
-    /// Work-lane jobs whose `execute` has returned. **The other half of the queue-depth gauge**:
-    /// `work_submitted - work_completed` is what [`ExecutorStats::work_depth`] reports and what
-    /// the 429's `retry_after_s` is derived from. Deny-lane jobs are deliberately not counted here
-    /// — they ride an unbounded queue that has no depth to report and no 429 to derive.
+    /// Work-lane jobs finished. `work_submitted - work_completed` is the queue depth the 429's
+    /// `Retry-After` is derived from. Deny-lane jobs are not counted: their queue is unbounded.
     work_completed: AtomicU64,
-    /// An **exponentially-weighted** mean of one work-lane job's whole service time (append +
-    /// fsync + apply + swap + ack), in nanoseconds. Written only by the executor thread.
-    ///
-    /// **Why not a cumulative mean over `total / completed`.** It is wrong in the one case the
-    /// estimate exists for. Service time is dominated by an
-    /// `IngestBuffer` clone that is O(total buffered items) and grows monotonically while there is
-    /// no flush (`apply_nanos_total`'s doc has the measurements), so a server that ingested 10⁶ fast
-    /// batches and has since risen to seconds per batch still reports the fast mean — the old
-    /// samples swamp the recent ones — and a caller is told to come back in one second against a
-    /// queue that needs three minutes. An estimate that is wrong in the unsafe direction *and*
-    /// carries the authority of a derivation is worse than the hard-coded `1` it replaces.
-    ///
-    /// `x += (sample - x) / 8` — integer, one atomic, no allocation, O(1) on the 10⁹ write path.
-    ///
-    /// **It is written only when a job *finishes*, which makes it blind in exactly the state that
-    /// produces the 429** — see [`Self::work_started_nanos`], which is the correction.
+    /// An EWMA (weight 1/8) of one work-lane job's whole service time. A cumulative mean would keep
+    /// reporting an old fast regime after the buffer has grown. Written when a job finishes, so see
+    /// [`Self::work_started_nanos`].
     work_service_nanos_ewma: AtomicU64,
-    /// When the work item currently executing started, as nanoseconds since [`Self::base`], **plus
-    /// one**; `0` means no work item is in flight. Written only by the executor thread.
-    ///
-    /// # Why this exists
-    ///
-    /// [`Self::record_work_service`] runs *after* `execute` returns, so while one long job is in
-    /// flight the EWMA still reports the previous, faster regime. That is the 10⁹ shape: an
-    /// `IngestBuffer` clone is O(total buffered items), so the first job at a new buffer depth is
-    /// the slow one, and it is precisely while it runs that the
-    /// queue fills and callers are shed. Every one of them was told to come back in 1 s against a
-    /// drain measured in minutes, and an obedient caller then re-establishes a connection and
-    /// re-uploads up to `ingest_max_batch_bytes` per second, per client. **The estimator's error was
-    /// on the load-amplifying side**, which none of its three stated caveats covered.
-    ///
-    /// [`ExecutorStats::service_nanos_for_estimate`] takes `max(ewma, elapsed-of-current-job)`,
-    /// which is the cheapest correction that cannot under-report: whatever the recent regime was,
-    /// the job running *now* has already taken this long, and a caller behind it waits at least that.
-    ///
-    /// The `+1` is what distinguishes "started at zero nanoseconds" from "idle" without a second
-    /// atomic.
+    /// When the work item now executing started, as a marker; `0` when idle. The EWMA moves only
+    /// when a job finishes, so the estimate takes the larger of the two: a caller behind a long job
+    /// waits at least as long as it has already run.
     work_started_nanos: AtomicU64,
-    /// The origin [`Self::work_started_nanos`] is measured from. An `Instant` is not storable in an
-    /// atomic; a fixed origin plus an atomic offset is, and the executor's `Instant::now()` is
-    /// already taken for the service sample, so this costs no extra clock read on the write path.
+    /// The origin every marker is measured from.
     base: std::time::Instant,
-    /// The overlay depth at which [`Executor::apply_changes`] raises an alarm.
-    /// [`usize::MAX`] means **no limit configured**, which is what every embedder and every test
-    /// that never calls `Engine::set_overlay_soft_limit` gets.
-    ///
-    /// Deliberately not `0` for "unset": `tessera-server`'s config refuses `0` as degenerate for
-    /// this key, so one value would have to mean "off" on one side of the crate boundary and
-    /// "alarm on everything" on the other. That is how a knob comes to be silently inert.
+    /// The overlay depth at which [`Executor::apply_changes`] alarms. `usize::MAX` means no limit.
     overlay_soft_limit: AtomicUsize,
-    /// Times the overlay has **crossed** into being at or above [`Self::overlay_soft_limit`]. **It
-    /// alarms, and the schedule acts on a different number** — this counter and its log
-    /// line are the whole of the mechanism.
-    ///
-    /// **Crossings, not publications.** Counting every apply at or above the limit is
-    /// level-triggering on a quantity that falls only at a fold, and only for its deletion half:
-    /// `Overlay` entries survive `suppress → unsuppress`, and a suppression never retires at all.
-    /// A node that crossed 500 000 would
-    /// emit one four-line WARN **per deny, forever**, with no path back — flooding the log precisely
-    /// while the node is under deny pressure. `control.rs` states that exact standard itself ("an
-    /// ERROR per occurrence is an alarm flood rather than a signal") one file over.
-    /// [`Self::overlay_soft_limit_latched`] is the edge.
+    /// Times the overlay crossed to at or above the soft limit. Crossings, not applies above it:
+    /// the depth falls only at a fold, so a level trigger would log on every deny.
     overlay_soft_limit_alarms: AtomicU64,
-    /// Whether the overlay is currently *known* to be at or above the soft limit — the edge
-    /// trigger's memory. Set when [`Self::note_overlay_depth`] observes a crossing, cleared when it
-    /// observes a depth below the limit or when the limit itself is re-set.
+    /// Whether the overlay is known to be at or above the soft limit.
     overlay_soft_limit_latched: AtomicBool,
-    /// The row count at which a commit window closes — `ingest.commit_window_max_items`,
-    /// which counts **rows** (see that key's doc: its default is sized from `window rows ×
-    /// term_density`, and both the heap and the latency a window costs scale in rows).
-    ///
-    /// Reaches the executor by [`Engine::set_commit_window_max_rows`] rather than through
-    /// `start_write_executor`'s argument list, on `set_overlay_soft_limit`'s precedent: a knob every
-    /// embedder and every test would otherwise have to pass explicitly is a knob that gets passed
-    /// wrong.
-    ///
-    /// **Defaulted to a real number, not `usize::MAX`.** An embedder that sets nothing must still
-    /// get a bounded window: the drain that fills a window frees a queue slot per entry, which a
-    /// concurrent submitter immediately refills, so "close when the queue is empty" is not a bound
-    /// under sustained load — it is an invitation to hold the entire load in memory. See
-    /// [`DEFAULT_COMMIT_WINDOW_MAX_ROWS`].
+    /// The row count at which a commit window closes. Defaults to a real bound
+    /// ([`DEFAULT_COMMIT_WINDOW_MAX_ROWS`]): under sustained load the queue never empties, so closing
+    /// on an empty queue alone would hold the whole load in memory.
     commit_window_max_rows: AtomicUsize,
-    /// What every closed commit window's allocation collected, in entity space — the counters
-    /// behind `/control/status`'s `fragmentation` (contracts §3.4).
-    ///
-    /// Folded here rather than measured here, because the measurement needs the window's ids and
-    /// term lists together and that pairing exists only inside `CommitWindow::allocate`. See
-    /// [`tessera_lifecycle::window::FragmentationTally`] for what the numbers mean, what they
-    /// deliberately do not, and why the per-term state it needs is bounded by one window rather
-    /// than by the corpus.
-    ///
-    /// **The deny lane contributes nothing**, and not because deny windows are empty: the deny lane
-    /// never constructs a `CommitWindow` at all. `Executor::commit_denies` is a separate path over
-    /// `DenyEntry`, and denies assign no entity ids.
-    ///
-    /// Five counters under one mutex rather than five atomics, because they are only ever written
-    /// together (once per window close, by the executor thread) and only ever read together (one
-    /// `/control/status` snapshot). Five independent atomics would let a reader see a `runs` from
-    /// one window against a `baseline` from the next, and publish a ratio that never existed.
-    /// Read through [`lock_recover`] on the same argument every other lock in this module makes:
-    /// an operator gauge must not turn one writer fault into a panicking admin plane.
+    /// What every closed commit window's allocation collected, in entity space. One mutex so a
+    /// reader never sees one window's `runs` against another's `baseline`. The deny lane allocates
+    /// no ids and contributes nothing.
     fragmentation: Mutex<FragmentationTally>,
-    /// Delta tiers as encoded, cumulative over every published flush — the tier-scope half of
-    /// contracts §3.4's `fragmentation`, and the one at which between-window scatter is visible
-    /// ([`FragmentationTally::of_tier`]). Fed at publication, never at plan or execute: a
-    /// discarded flush's tier is an orphan and must not count.
+    /// Delta tiers as encoded, cumulative over published flushes. Fed at publication, so a
+    /// discarded flush's tier does not count.
     tier_fragmentation: Mutex<FragmentationTally>,
     /// Published tiers behind [`Self::tier_fragmentation`].
     fragmentation_tiers: AtomicU64,
-    /// Commit windows whose allocation has been tallied. The denominator an operator needs to read
-    /// the rest: the ratios are means over windows, and a mean over three windows is not a trend.
+    /// Commit windows behind [`Self::fragmentation`].
     fragmentation_windows: AtomicU64,
-    /// The executor's WAL counters. A **clone** of the meter the [`ExecutorWal`] holds, kept here
-    /// so the numbers have a reader: `/control/status`, and `one_fsync_per_window`, whose whole
-    /// subject is `wal_fsyncs` not rising with the number of
-    /// submissions in a window. Constructed here and cloned into the handle at
-    /// [`WritePath::start_executor`], never moved into it.
+    /// The executor's WAL counters: a clone of the meter the [`ExecutorWal`] holds.
     wal: Arc<WalMeter>,
 }
 
@@ -736,28 +372,33 @@ impl StageMark {
             StageMark()
         }
     }
+
+    /// Charges the time since this mark to `slot` and returns a fresh mark. Reads no clock
+    /// without `bench-timing`.
+    #[inline(always)]
+    #[allow(unused_variables)]
+    fn lap(self, slot: &AtomicU64) -> StageMark {
+        #[cfg(feature = "bench-timing")]
+        {
+            let now = std::time::Instant::now();
+            slot.fetch_add(now.duration_since(self.0).as_nanos() as u64, Ordering::Relaxed);
+            StageMark(now)
+        }
+        #[cfg(not(feature = "bench-timing"))]
+        {
+            self
+        }
+    }
 }
 
 /// The gates `plan_fold` can refuse on, in the order [`ExecutorStats::fold_refusals_by_gate`]
-/// counts them and [`FoldRefusal::gate`] names them.
-///
-/// **Literals from a closed list, never a formatted variant.** `crate::compact::NoFold::GATES`
-/// carries the argument: a `format!("{:?}", reason)` would put whatever a future arm holds onto a
-/// status response, and an arm naming a layer or a view would then publish corpus-derived text
-/// with nothing in the type system objecting.
+/// counts them. Literals from a closed list, so no corpus-derived text reaches a status response.
 pub const FOLD_GATES: [&str; crate::compact::NoFold::GATES.len()] = crate::compact::NoFold::GATES;
 
-/// A fold the scheduler asked for and `plan_fold` would not plan.
-///
-/// **What a reader should conclude from it**: a recent `at_unix` with `folds` not moving is a
-/// deployment that is asking for compaction and not getting it, and `gate` says which of the six
-/// conditions is holding. For `insufficient_disc` the two figures are the whole diagnosis —
-/// `need_bytes` is 150% of the live bytes the input manifests name and `had_bytes` is what
-/// `statvfs` answered, and the gap between them is what the device has to gain before a fold will
-/// start. Nothing else in the system reclaims, so that gap does not close on its own.
-///
-/// `gate` is [`crate::compact::NoFold`]'s variant name in snake case; the figures are `None` for
-/// the four conditions that carry none.
+/// A fold that was asked for and `plan_fold` would not plan. `gate` is the
+/// [`crate::compact::NoFold`] variant in snake case. For `insufficient_disc`, `need_bytes` is 150%
+/// of the live bytes and `had_bytes` is what `statvfs` answered; nothing but a fold reclaims, so
+/// that gap does not close on its own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FoldRefusal {
     pub gate: &'static str,
@@ -769,24 +410,11 @@ pub struct FoldRefusal {
 
 /// The write-ahead log's size and its rotation bound, sampled at the executor's tick.
 ///
-/// **What a reader should conclude from it.** `members` is the direct signal: steady-state
-/// retention is two, and a sequence that keeps growing is a rotation that is not reclaiming
-/// (`Wal::members`). `pin` is what separates the two ways a log gets large. `None` and a large
-/// `bytes` is a log that is large because ingest is fast, and the next publication rotates it.
-/// `Some` and a large `pin_span_bytes` is a log that cannot rotate below that position, and the
-/// name says what would release it: `publication` and `content` go at a tick, `growth` and `fill`
-/// only at the compaction fold's whole rewrite (`ArtifactStore::wal_pin`). Without the pin those
-/// two states read identically.
-///
-/// `position` counts record bytes across every member the sequence has ever held, so it rises
-/// through reclamation and is not a size; `bytes` is what the surviving members occupy now. The
-/// span is `position - pin`, the part of the log the pin is holding down.
-///
-/// Sampled at the executor's first loop iteration and at most once per `flush_max_age_secs`
-/// thereafter, so the figures are up to one period old and are never unsampled on a running node.
-/// The walk costs two `stat`s per member and the member count is unbounded under a pin, so the
-/// rate limit is what stops the gauge getting dearer as the condition it reports gets worse
-/// ([`Executor::sample_wal_gauge`]).
+/// `members` is the direct signal: steady state is two, and a growing count is a rotation that
+/// is not reclaiming. `pin` separates the two ways a log gets large: `None` with a large `bytes`
+/// is fast ingest that the next publication rotates; `Some` with a large `pin_span_bytes` is a
+/// log that cannot rotate below that position, and the name says what would release it.
+/// `position` counts record bytes across every member ever held, so it is not a size.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct WalGauge {
     pub members: u64,
@@ -807,7 +435,7 @@ pub struct ExecutorStats {
     pub posture: ExecutorPosture,
     pub work_submitted: u64,
     pub deny_submitted: u64,
-    /// See [`ExecutorHealth::apply_nanos_total`] — the whole apply step, not the clone alone.
+    /// See [`ExecutorHealth::apply_nanos_total`].
     pub apply_nanos_total: u64,
     /// Per-stage nanoseconds for the window close, indexed by [`WriteStage`]. **All zero without
     /// `bench-timing`** — see [`ExecutorHealth::stage_nanos`].
@@ -833,48 +461,33 @@ pub struct ExecutorStats {
     pub flushable_items: usize,
     /// Flushes published since the executor started.
     pub flushes: u64,
-    /// Side-manifests written for deny state alone (contracts §2.3's immediate-publication rule).
-    /// Advances without `flushes`, and without moving any geometry.
+    /// Side-manifests written for deny state alone.
     pub overlay_publications: u64,
-    /// Ticks skipped because a flush was already in flight (§1.1) — a rising count is a flush
-    /// persistently slower than the tick, i.e. a visibility-latency breach.
+    /// Ticks skipped because a flush was already in flight.
     pub flush_skips: u64,
     /// Flushes that failed and left the buffer intact for the next tick (§10).
     pub flush_failures: u64,
-    /// Side-manifest allocations that had to rise over a file this executor did not write — a
-    /// second writer over this bundle root, which the write lock exists to refuse (§1.2).
+    /// See [`ExecutorHealth::foreign_side_manifests`].
     pub foreign_side_manifests: u64,
-    /// Entity-space coalesce publications, and the ones that produced nothing — the observable
-    /// behind "the tier, run and dictionary-extent counts are bounded".
+    /// Entity-space coalesce publications, and the ones that produced nothing.
     pub coalesces: u64,
     pub coalesce_failures: u64,
-    /// Row-space merge publications, and the ones that produced nothing — the observable behind
-    /// "the segment count is bounded".
+    /// Row-space merge publications, and the ones that produced nothing.
     pub merges: u64,
     pub merge_failures: u64,
-    /// Compaction folds published, and the ones discarded — the observable behind "deletions
-    /// retire, orphans are reclaimed, and the bundle returns to one segment per partition-view".
+    /// Compaction folds published, and the ones discarded.
     pub folds: u64,
     pub fold_failures: u64,
     /// Whether a `POST /control/compact` is awaiting the next tick.
     pub fold_requested: bool,
-    /// Requested folds `plan_fold` would not plan, and the last of them — see
-    /// [`ExecutorHealth::fold_refusals`] for why a refusal advances neither counter above, and
-    /// [`FoldRefusal`] for what a reader concludes from the pair.
-    ///
-    /// The total is the sum of [`ExecutorStats::fold_refusals_by_gate`] rather than a counter of
-    /// its own, so the two cannot disagree.
+    /// The sum of [`Self::fold_refusals_by_gate`].
     pub fold_refusals: u64,
-    /// The same refusals split by gate, indexed as [`FOLD_GATES`] names them. A gate that stands
-    /// is counted at every tick the schedule re-evaluates on, so the largest entry is the
-    /// condition the deployment is actually in.
+    /// Refused folds by gate, indexed as [`FOLD_GATES`] names them.
     pub fold_refusals_by_gate: [u64; FOLD_GATES.len()],
     pub last_fold_refusal: Option<FoldRefusal>,
     /// The WAL as the last sample found it — see [`WalGauge`].
     pub wal: WalGauge,
-    /// The last fold's wall clock in seconds and the highest resident set its pass staircase saw,
-    /// in bytes — see [`ExecutorHealth::last_fold_secs`] for what the second number is and is not.
-    /// Both 0 before the first fold.
+    /// See [`ExecutorHealth::last_fold_secs`] and [`ExecutorHealth::last_fold_rss`].
     pub last_fold_secs: u64,
     pub last_fold_rss: u64,
     pub last_fold_attr_read: u64,
@@ -883,51 +496,22 @@ pub struct ExecutorStats {
     pub flush_requested: bool,
     /// Whether a flush unit is executing on the pool — see [`ExecutorHealth::flush_in_flight`].
     pub flush_in_flight: bool,
-    /// Whether this node's overlay has diverged from its durable WAL (§7.2). **Latching**: it
-    /// publishes no flush and rotates no WAL until restarted.
+    /// See [`ExecutorHealth::overlay_diverged`].
     pub overlay_diverged: bool,
-    /// Whether `CURRENT` names a prefix this process is not serving (see
-    /// [`ExecutorHealth::prefix_diverged`]). **Latching**: it publishes nothing and rotates no WAL
-    /// until restarted.
+    /// See [`ExecutorHealth::prefix_diverged`].
     pub prefix_diverged: bool,
     /// Successful WAL appends since the executor started.
     pub wal_appends: u64,
-    /// Successful WAL fsyncs since the executor started — the unit group commit is
-    /// defined in ("one fsync per window") and the one the ingest baseline memo's ~3.2 ms floor is
-    /// a cost per.
-    ///
-    /// **`wal_appends / wal_fsyncs` is the production measurement of group commit's amortisation**,
-    /// and the reason no window-size gauge was added: one append per entry and one fsync per window
-    /// make that ratio the mean entries per window, over the whole life of the executor. Both are
-    /// already on `/control/status`. It is a mean over **both** windows — the ingest one
-    /// ([`Executor::run_work_pass`]) and the deny one ([`Executor::commit_denies`]), which are
-    /// separate windows with separate close policies (`tessera_lifecycle::window` argues why they
-    /// are not one), so a ratio that mixes a deny-heavy and an ingest-heavy period says nothing
-    /// about either. Read it when diagnosing
-    /// ingest throughput — a ratio pinned at ~1.0 under
-    /// concurrent load means every window is closing with one entry in it, which is what a workload
-    /// that re-ingests the same `external_id`s does (`CommitWindow::holds_external_id_of` closes the window
-    /// on nearly every entry), and it is the difference between group commit working and group commit
-    /// running.
+    /// Successful WAL fsyncs. `wal_appends / wal_fsyncs` is the mean entries per commit window,
+    /// over the ingest and deny windows together; near 1.0 under concurrent load means group commit
+    /// is not amortising anything.
     pub wal_fsyncs: u64,
-    /// Times the executor discarded an undurable WAL region and returned to service — see
-    /// [`ExecutorHealth::wal_recoveries`].
-    ///
-    /// **The durability incident's only surviving trace.** The posture returns to `running` once the
-    /// condition clears, which is the right answer for routing and the wrong one for diagnosis; this
-    /// is what an operator alarms on. A node recovering repeatedly has a disk that is failing
-    /// slowly, and every deny answered 500 in between is one whose caller owes a retry
-    /// (contracts §3.1).
+    /// See [`ExecutorHealth::wal_recoveries`].
     pub wal_recoveries: u64,
     /// Work-lane jobs whose `execute` has returned.
     pub work_completed: u64,
-    /// `work_submitted - work_completed`, saturating.
-    ///
-    /// **A snapshot of two independently-advancing counters, not an instantaneous truth.** They are
-    /// read separately and `work_submitted` is bumped *after* the `try_send`
-    /// ([`LifecycleHandle::submit`]), so the executor can complete a job before its submitter has
-    /// recorded it and `completed > submitted` is transiently legal. `saturating_sub` is why that
-    /// is harmless rather than an underflow.
+    /// `work_submitted - work_completed`, saturating: the two are read separately, so completed
+    /// may briefly exceed submitted.
     pub work_depth: u64,
     /// The EWMA of one work-lane job's whole service time — see
     /// [`ExecutorHealth::work_service_nanos_ewma`]. `0` means nothing has completed yet.
@@ -940,48 +524,28 @@ pub struct ExecutorStats {
     pub flush_nanos_per_row_ewma: u64,
     /// Time until the next scheduled tick; `0` when one is due or overdue.
     pub next_tick_in_nanos: u64,
-    /// Times the overlay crossed to at or above the configured soft limit. **It alarms;
-    /// it does not act**, and it counts **crossings**, not publications above the limit — see
-    /// [`ExecutorHealth::overlay_soft_limit_alarms`].
+    /// See [`ExecutorHealth::overlay_soft_limit_alarms`].
     pub overlay_soft_limit_alarms: u64,
-    /// What every closed commit window's allocation collected (contracts §3.4's `fragmentation`).
-    /// See [`ExecutorHealth::fragmentation`] and, for the meaning of the numbers,
-    /// [`tessera_lifecycle::window::FragmentationTally`].
+    /// See [`ExecutorHealth::fragmentation`].
     pub fragmentation: FragmentationTally,
     /// Commit windows behind [`Self::fragmentation`].
     pub fragmentation_windows: u64,
-    /// Delta tiers as encoded, cumulative over published flushes — the scope at which
-    /// between-window scatter is visible (contracts §3.4; [`FragmentationTally::of_tier`]).
+    /// See [`ExecutorHealth::tier_fragmentation`].
     pub tier_fragmentation: FragmentationTally,
     /// Published tiers behind [`Self::tier_fragmentation`].
     pub fragmentation_tiers: u64,
 }
 
 impl ExecutorStats {
-    /// Total postings over containers touched (contracts §3.4). `None` before any window has closed
-    /// — a zero would read as a measurement rather than as an absence.
-    ///
-    /// **Reduces to mean postings per term per window at every reachable window size**, because a
-    /// window spans one 2¹⁶ container or two; [`tessera_lifecycle::window::FragmentationTally`] has
-    /// the arithmetic. Emitted because contracts §3.4 specifies it, not because a window collects
-    /// the container-count win — it collects none of it.
+    /// Total postings over containers touched. `None` before any window has closed.
     pub fn postings_per_container(&self) -> Option<f64> {
         let f = self.fragmentation;
         (f.containers > 0).then(|| f.postings as f64 / f.containers as f64)
     }
 
-    /// Measured mean posting run length over the random baseline at the same density (contracts
-    /// §3.4). `1.0` is fully scattered, larger is better; `None` before any window has closed.
-    ///
-    /// **Within-window sort quality, not stream-scope fragmentation.** Both the measurement and its
-    /// baseline are taken at window scope, so this reports what one allocation run collected
-    /// relative to a random assignment of that same window — at a one-row window it is identically
-    /// `1.0` for every corpus. Fragmentation *between* windows is invisible to it by construction,
-    /// which is the part design §11.1 records as permanent. The raw counters are published beside
-    /// it so `postings / runs` is available without the window-local normalisation.
-    ///
-    /// And it is the **entity**-space quantity — posting run length — never the row-space mask run
-    /// ratio, which normalises the same way over a different set and is not comparable.
+    /// Measured mean posting run length over the random baseline at the same density: `1.0` is
+    /// fully scattered, larger is better. Both are taken at window scope, so scatter between windows
+    /// is invisible to it. `None` before any window has closed.
     pub fn run_ratio(&self) -> Option<f64> {
         let f = self.fragmentation;
         (f.runs > 0).then(|| f.baseline_runs_milli as f64 / 1000.0 / f.runs as f64)
@@ -1004,17 +568,8 @@ impl ExecutorStats {
 }
 
 impl ExecutorStats {
-    /// The service figure a `retry_after_s` derivation must use: `max(ewma, in-flight elapsed)`.
-    ///
-    /// **Never the raw EWMA.** [`ExecutorHealth::work_started_nanos`] has the argument in full: the
-    /// EWMA is written only when a job finishes, so during the one long job that is filling the
-    /// queue it still reports the previous fast regime — and telling every shed caller to come back
-    /// in a second against a drain measured in minutes amplifies exactly the load the 429 exists to
-    /// shed.
-    ///
-    /// It remains an **estimator**, and this correction does not change that; it removes one
-    /// specific error whose direction was known and unsafe. `estimate_retry_after_s`'s own doc has
-    /// the three reasons that remain.
+    /// The service figure a `retry_after_s` derivation uses: the larger of the EWMA and the
+    /// in-flight job's elapsed time. See [`ExecutorHealth::work_started_nanos`].
     pub fn service_nanos_for_estimate(&self) -> u64 {
         self.work_service_nanos_ewma.max(self.work_in_flight_nanos)
     }
@@ -1120,17 +675,9 @@ impl ExecutorHealth {
         recovered
     }
 
-    /// The two components composed, in the order an operator needs them.
-    ///
-    /// **`Dead` wins over everything**, including a poisoned WAL: a thread that is gone cannot apply
-    /// a write whatever the log says, and the two faults call for different operator actions. It is
-    /// also the only arm that must survive a racing recovery — the drop guard runs during unwind,
-    /// after which no executor exists to mirror anything, so a `Dead` node stays `Dead` by the
-    /// latch rather than by anyone remembering to stop mirroring.
-    ///
-    /// **`NotStarted` is answered before the WAL is consulted**, because a WAL that no executor owns
-    /// has had no operation attempted on it and reporting it poisoned would describe a failure that
-    /// could not have happened. Both reduce to not-ready, so neither is the fail-open direction.
+    /// `Dead` wins over a poisoned WAL: a thread that is gone applies nothing whatever the log
+    /// says. `NotStarted` is answered before the WAL is consulted, because nothing has been
+    /// attempted on a WAL no executor owns.
     pub fn posture(&self) -> ExecutorPosture {
         match ExecutorPosture::from_u8(self.lifecycle.load(Ordering::SeqCst)) {
             ExecutorPosture::Dead => ExecutorPosture::Dead,
@@ -1145,30 +692,14 @@ impl ExecutorHealth {
         lock_recover(&self.publication).completed
     }
 
-    /// Record a `POST /control/flush` and answer the publication number the cycle that honours it
-    /// will carry.
+    /// Records a `POST /control/flush` and answers the publication number of the cycle that will
+    /// honour it.
     ///
-    /// # Why the answer is exact
-    ///
-    /// The request's rows, fills and artifact records are durable and buffered before this is
-    /// called, the route that wrote them having answered first. What has to be ruled out is a
-    /// cycle that publishes without having seen them. A cycle takes its plan from the buffer
-    /// after it opens, so the question is only whether a cycle was already open when the flag
-    /// went up, and the flag goes up under the lock that answers it:
-    ///
-    /// - **No cycle open.** The next cycle opens after this call, so it plans over a buffer that
-    ///   already holds this request's work and publishes it. That cycle is `completed + 1`.
-    /// - **A cycle open.** It may have planned before this request's work was buffered, so it is
-    ///   not promised anything; the cycle after it opens after this call and is `completed + 2`.
-    ///   The open cycle closes first, so nothing skips over the number.
-    ///
-    /// A tick that finds a flush already on the pool opens no cycle and consumes no flag: it
-    /// publishes its row forms into the cycle the running flush belongs to and returns, so no
-    /// number is spent on a tick that skipped this request's work. The count moves at the
-    /// publication and not at the tick, which is what makes "the number is reached" and "the work
-    /// is visible" one event; a cycle that deferred a second view's plan stays open until a tick
-    /// dispatches with nothing left over ([`Self::deferred_plans`]); and a cycle that failed
-    /// stays open until one succeeds ([`Self::fail_publication_cycle`]).
+    /// A cycle plans from the buffer after it opens, and the flag goes up under the lock that says
+    /// whether one is open. With no cycle open, the next cycle plans over this request's work and
+    /// is `completed + 1`. With one open, it may have planned already, so the answer is the cycle
+    /// after it, `completed + 2`. A tick that finds a flush on the pool opens no cycle and consumes
+    /// no flag.
     pub(crate) fn request_flush(&self) -> u64 {
         let cycle = lock_recover(&self.publication);
         self.flush_requested.store(true, Ordering::SeqCst);
@@ -1185,15 +716,8 @@ impl ExecutorHealth {
         lock_recover(&self.publication).target()
     }
 
-    /// Open a cycle and consume the flush request it honours, under one lock.
-    ///
-    /// Taking both together is what makes [`Self::request_flush`]'s two answers exhaustive. A
-    /// request either takes the lock first, in which case it reads a closed cycle, is answered
-    /// `completed + 1`, and is consumed by the cycle this opens, whose plan is taken afterwards;
-    /// or it takes the lock second, in which case it reads an open cycle, is answered
-    /// `completed + 2`, and its flag survives for the cycle after. There is no third order in
-    /// which a request is both answered against a cycle that will not carry it and stripped of
-    /// the flag that would have brought the next one forward.
+    /// Opens a cycle and consumes the flush request it honours, under one lock, so a request is
+    /// never both answered against this cycle and stripped of the flag that brings the next.
     pub(crate) fn open_publication_cycle(&self) {
         let mut cycle = lock_recover(&self.publication);
         self.flush_requested.store(false, Ordering::SeqCst);
@@ -1219,14 +743,9 @@ impl ExecutorHealth {
         self.refusal_logged_nanos.store(0, Ordering::Relaxed);
     }
 
-    /// The cycle published nothing it was asked to publish: hold it open and re-arm the request.
-    ///
-    /// The three ways this happens are a node whose gates are shut (a poisoned WAL, an overlay
-    /// diverged from it), a flush that failed on the pool, and a publication discarded at its
-    /// final check. Each leaves the inputs standing and the files orphaned, so the work is still
-    /// unpublished, and the number a caller is waiting on must not be reached. Re-arming is what
-    /// makes the next tick retry rather than the next period; [`Executor::tick_if_due`] floors
-    /// how fast that retry can come round.
+    /// The cycle published nothing it was asked to (gates shut, a failed flush, a discarded
+    /// publication): hold it open and re-arm the request, so the next tick retries.
+    /// [`Executor::tick_if_due`] floors how fast.
     pub(crate) fn fail_publication_cycle(&self) {
         self.set_marker(&self.failed_cycle_nanos, std::time::Instant::now());
         self.flush_requested.store(true, Ordering::SeqCst);
@@ -1419,14 +938,7 @@ impl ExecutorHealth {
         }
         let sample = elapsed / rows as u64;
         let prev = self.flush_nanos_per_row_ewma.load(Ordering::Relaxed);
-        // Seeded by the first observation, then the same eighth-weight decay as the work EWMA.
-        let next = if prev == 0 {
-            sample.max(1)
-        } else {
-            let p = prev as i128;
-            let s = sample as i128;
-            (p + (s - p) / 8).max(1) as u64
-        };
+        let next = ewma_eighth(prev, sample);
         self.flush_nanos_per_row_ewma.store(next, Ordering::Relaxed);
     }
 
@@ -1453,49 +965,21 @@ impl ExecutorHealth {
 
     /// Mark the work item that is about to run. Executor thread only.
     fn mark_work_started(&self, at: std::time::Instant) {
-        let offset = at.saturating_duration_since(self.base).as_nanos() as u64;
-        self.work_started_nanos
-            .store(offset.saturating_add(1), Ordering::Relaxed);
+        self.set_marker(&self.work_started_nanos, at);
     }
 
     /// Charge the time since `mark` to `stage`, and return a fresh mark. A no-op without
     /// `bench-timing`, where it returns `mark` unchanged and reads no clock.
     #[inline(always)]
-    #[allow(unused_variables)]
     fn lap(&self, stage: WriteStage, mark: StageMark) -> StageMark {
-        #[cfg(feature = "bench-timing")]
-        {
-            let now = std::time::Instant::now();
-            self.stage_nanos[stage as usize].fetch_add(
-                now.duration_since(mark.0).as_nanos() as u64,
-                Ordering::Relaxed,
-            );
-            StageMark(now)
-        }
-        #[cfg(not(feature = "bench-timing"))]
-        {
-            mark
-        }
+        mark.lap(&self.stage_nanos[stage as usize])
     }
 
     /// Charge the time since `mark` to a flush stage run on this thread, and return a fresh
     /// mark. A no-op without `bench-timing`, as [`Self::lap`] is.
     #[inline(always)]
-    #[allow(unused_variables)]
     pub(crate) fn flush_lap(&self, stage: crate::flush::FlushStage, mark: StageMark) -> StageMark {
-        #[cfg(feature = "bench-timing")]
-        {
-            let now = std::time::Instant::now();
-            self.flush_stage_nanos[stage as usize].fetch_add(
-                now.duration_since(mark.0).as_nanos() as u64,
-                Ordering::Relaxed,
-            );
-            StageMark(now)
-        }
-        #[cfg(not(feature = "bench-timing"))]
-        {
-            mark
-        }
+        mark.lap(&self.flush_stage_nanos[stage as usize])
     }
 
     /// One `execute_flush` returned on the pool: count it, count its rows if it succeeded, and
@@ -1526,20 +1010,10 @@ impl ExecutorHealth {
         self.apply_nanos_max.fetch_max(nanos, Ordering::Relaxed);
     }
 
-    /// One commit window finished: `entries` work-lane jobs completed, in `elapsed_nanos` between
-    /// them.
-    ///
-    /// **The EWMA sample is `elapsed / entries`, not the whole window**, because the estimator it
-    /// feeds multiplies it by [`ExecutorStats::work_depth`], which counts *commands*. A whole-window
-    /// sample would tell every shed caller to wait the window factor longer than the drain takes —
-    /// wrong in the same direction the cumulative-mean form was, just not as far.
-    ///
-    /// `entries` is never zero: an empty window is never opened (see [`Executor::run_work_pass`]).
-    ///
-    /// `elapsed_nanos` must be measured from the window's `opened_at`, which is stamped when the
-    /// window is *constructed* — so a replacement window is constructed only after the previous
-    /// one's `close_window` returns, or every window after the first in a pass charges its
-    /// predecessor's append, fsync, apply and swap to itself.
+    /// One commit window finished `entries` work-lane jobs in `elapsed_nanos`. The EWMA sample is
+    /// `elapsed / entries`, because the estimate multiplies it by a depth counted in commands.
+    /// `elapsed_nanos` is measured from the window's `opened_at`, so a replacement window must be
+    /// constructed only after the previous one has closed.
     fn record_window_service(&self, entries: u64, elapsed_nanos: u64) {
         debug_assert!(entries > 0, "an empty window is never closed");
         let entries = entries.max(1);
@@ -1572,15 +1046,7 @@ impl ExecutorHealth {
         self.work_started_nanos.store(0, Ordering::Relaxed);
         self.work_completed.fetch_add(1, Ordering::Relaxed);
         let prev = self.work_service_nanos_ewma.load(Ordering::Relaxed);
-        let next = if prev == 0 {
-            // First observation: seed rather than decay towards a fictitious zero, which would
-            // otherwise take eight jobs to reach the truth and under-report for all of them.
-            sample_nanos
-        } else {
-            let p = prev as i128;
-            let s = sample_nanos as i128;
-            (p + (s - p) / 8).max(1) as u64
-        };
+        let next = ewma_eighth(prev, sample_nanos);
         self.work_service_nanos_ewma.store(next, Ordering::Relaxed);
     }
 
@@ -1644,33 +1110,11 @@ impl ExecutorHealth {
     }
 }
 
-/// Contracts §3.1's 429 row and §0.3 **deviation 11** (r10): every 429 carries `Retry-After` and an
-/// agreeing body `retry_after_s`, and **the value is per-subject** — the fixed `1` belongs to the
-/// compute-admission gate alone. This is the ingest queue's own figure.
+/// The ingest queue's `Retry-After`: `depth` jobs ahead, each taking about `service_nanos`.
 ///
-/// `depth` jobs ahead of the caller, each taking about `service_nanos` to drain.
-///
-/// # This is an estimator, and here is exactly what makes it one
-///
-/// 1. **Service time is not stationary.** One work-lane job costs one fsync plus an `IngestBuffer`
-///    clone that is O(total buffered items), which the flush cadence bounds rather than removes.
-///    Measured (`docs/evidence/memos/2026-08-01-deny-ack-baseline.md`): ~3.0–3.5 ms
-///    quiescent even at 1 M buffered, but 67–167 ms p50 and up to 666 ms under six concurrent
-///    submitters. The EWMA tracks the recent regime; it does not predict the next one.
-/// 2. **The deny lane is in the real drain and not in this figure.** `Executor::run` drains the
-///    deny queue **to empty** before taking a single work item, so a burst of suppressions delays
-///    every queued ingest by time this estimate cannot see. Denies are never shed for load, so this
-///    is by design, and it means the answer is a floor on a busy node rather than a bound.
-/// 3. **`depth` is a snapshot of two independently-advancing counters** — see
-///    [`ExecutorStats::work_depth`].
-///
-/// No caller may treat the result as a bound. What it is good for is the thing a fixed `1` gets
-/// wrong: a caller retrying every second against a queue draining in thirty manufactures exactly the
-/// load the 429 exists to shed, which is deviation 11's own argument.
-///
-/// `service_nanos == 0` means **nothing has completed yet**, so there is no observation at all;
-/// the answer is [`RETRY_AFTER_MIN_SECS`], and that is a floor chosen for lack of evidence, never a
-/// measurement.
+/// An estimate and never a bound. Service time is not stationary, the deny lane drains first
+/// and is not in the figure, and `depth` is a snapshot of two counters. `service_nanos == 0`
+/// means nothing has completed yet, and answers [`RETRY_AFTER_MIN_SECS`].
 pub fn estimate_retry_after_s(depth: u64, service_nanos: u64) -> u64 {
     if service_nanos == 0 {
         return RETRY_AFTER_MIN_SECS;
@@ -1810,6 +1254,16 @@ impl PublicationCycle {
     fn target(&self) -> u64 {
         self.completed + if self.open { 2 } else { 1 }
     }
+}
+
+/// An exponentially weighted mean with weight 1/8. `0` means no observation, so the first sample
+/// seeds it and the result is never `0`.
+fn ewma_eighth(prev: u64, sample: u64) -> u64 {
+    if prev == 0 {
+        return sample.max(1);
+    }
+    let (p, s) = (prev as i128, sample as i128);
+    (p + (s - p) / 8).max(1) as u64
 }
 
 /// Take a lock, recovering rather than panicking if a previous holder panicked.
