@@ -1523,55 +1523,76 @@ fn write_filter_extents(
         let column = extent_values(spec, entity_scoped_rows(spec, plan)?)?;
         let column_rel = format!("partitions/{}/attrs/{}", ctx.partition, spec.name);
         let column_dir = ctx.prefix_dir.join(&column_rel);
-        let (values_path, presence_path, dict_path) = tessera_filter::write_extent(
+        out.push(write_value_extent(
+            ctx,
             &column_dir,
-            &ctx.seg_id,
-            &column.codes,
-            &column.presence,
-            column.dict_keys.as_deref(),
-        )
-        .map_err(|e| MaintenanceFailed(format!("filter extent for '{}': {e}", spec.name)))?;
-        // Derived from the paths just written rather than formatted a second time: the manifest
-        // names what is on disk, or it names nothing.
-        let rel = |path: &PathBuf| -> Result<String, MaintenanceFailed> {
-            path.strip_prefix(&ctx.prefix_dir)
-                .ok()
-                .and_then(|p| p.to_str())
-                .map(|p| p.to_string())
-                .ok_or_else(|| {
-                    MaintenanceFailed(format!(
-                        "filter extent path {} is not under the prefix",
-                        path.display()
-                    ))
-                })
-        };
-        let values = tessera_filter::open_extent(
-            &values_path,
-            &presence_path,
-            tessera_filter::Access::Mapped,
-        )
-        .map_err(|e| MaintenanceFailed(format!("filter extent for '{}': {e}", spec.name)))?;
-        let dict = dict_path
-            .as_ref()
-            .map(|path| {
-                tessera_filter::SortedDict::open(path, tessera_filter::Access::Mapped)
-                    .map(Arc::new)
-                    .map_err(|e| {
-                        MaintenanceFailed(format!("keyword dictionary for '{}': {e}", spec.name))
-                    })
-            })
-            .transpose()?;
-        out.push(FlushedExtent {
-            column: spec.name.clone(),
-            view: None,
-            values_rel: rel(&values_path)?,
-            presence_rel: rel(&presence_path)?,
-            dict_rel: dict_path.as_ref().map(rel).transpose()?,
-            values: Arc::new(values),
-            dict,
-        });
+            &spec.name,
+            None,
+            &column,
+        )?);
     }
     Ok(out)
+}
+
+/// Write one column's values, presence and keyword dictionary under `column_dir`, and reopen them
+/// as the extent publication composes.
+///
+/// `view` names the group-scoped family's view, or is `None` for an entity-scoped column; the two
+/// scopes differ in nothing here but the wording an operator reads.
+fn write_value_extent(
+    ctx: &FlushContext,
+    column_dir: &Path,
+    name: &str,
+    view: Option<String>,
+    column: &ExtentColumn<'_>,
+) -> Result<FlushedExtent, MaintenanceFailed> {
+    let scoped = view.is_some();
+    let what = if scoped { "scoped extent" } else { "filter extent" };
+    let (values_path, presence_path, dict_path) = tessera_filter::write_extent(
+        column_dir,
+        &ctx.seg_id,
+        &column.codes,
+        &column.presence,
+        column.dict_keys.as_deref(),
+    )
+    .map_err(|e| MaintenanceFailed(format!("{what} for '{name}': {e}")))?;
+    // Derived from the paths just written rather than formatted a second time: the manifest names
+    // what is on disk, or it names nothing.
+    let rel = |path: &Path| -> Result<String, MaintenanceFailed> {
+        path.strip_prefix(&ctx.prefix_dir)
+            .ok()
+            .and_then(|p| p.to_str())
+            .map(str::to_string)
+            .ok_or_else(|| {
+                MaintenanceFailed(format!("{what} path {} is not under the prefix", path.display()))
+            })
+    };
+    let values =
+        tessera_filter::open_extent(&values_path, &presence_path, tessera_filter::Access::Mapped)
+            .map_err(|e| MaintenanceFailed(format!("{what} for '{name}': {e}")))?;
+    let dict = dict_path
+        .as_ref()
+        .map(|path| {
+            tessera_filter::SortedDict::open(path, tessera_filter::Access::Mapped)
+                .map(Arc::new)
+                .map_err(|e| {
+                    MaintenanceFailed(if scoped {
+                        format!("scoped keyword dictionary '{name}': {e}")
+                    } else {
+                        format!("keyword dictionary for '{name}': {e}")
+                    })
+                })
+        })
+        .transpose()?;
+    Ok(FlushedExtent {
+        column: name.to_string(),
+        view,
+        values_rel: rel(&values_path)?,
+        presence_rel: rel(&presence_path)?,
+        dict_rel: dict_path.as_ref().map(|p| rel(p)).transpose()?,
+        values: Arc::new(values),
+        dict,
+    })
 }
 
 /// One column's values for this flush's entities, and the entities that carry one.
@@ -2163,18 +2184,6 @@ fn write_scoped_extents(
         let column_dir = ctx.prefix_dir.join(&column_rel);
         std::fs::create_dir_all(&column_dir)
             .map_err(|e| MaintenanceFailed(format!("scoped column dir '{column_rel}': {e}")))?;
-        let rel_of = |path: &std::path::Path| -> Result<String, MaintenanceFailed> {
-            path.strip_prefix(&ctx.prefix_dir)
-                .ok()
-                .and_then(|p| p.to_str())
-                .map(str::to_string)
-                .ok_or_else(|| {
-                    MaintenanceFailed(format!(
-                        "scoped extent path {} is not under the prefix",
-                        path.display()
-                    ))
-                })
-        };
 
         if !spec.has_base {
             write_empty_scoped_base(&column_dir, spec)?;
@@ -2208,39 +2217,13 @@ fn write_scoped_extents(
             },
             scoped_rows(spec, plan)?,
         )?;
-        let (values_path, presence_path, dict_path) = tessera_filter::write_extent(
+        extents.push(write_value_extent(
+            ctx,
             &column_dir,
-            &ctx.seg_id,
-            &column.codes,
-            &column.presence,
-            column.dict_keys.as_deref(),
-        )
-        .map_err(|e| MaintenanceFailed(format!("scoped extent for '{}': {e}", spec.name)))?;
-        let values = tessera_filter::open_extent(
-            &values_path,
-            &presence_path,
-            tessera_filter::Access::Mapped,
-        )
-        .map_err(|e| MaintenanceFailed(format!("scoped extent for '{}': {e}", spec.name)))?;
-        let dict = dict_path
-            .as_ref()
-            .map(|path| {
-                tessera_filter::SortedDict::open(path, tessera_filter::Access::Mapped)
-                    .map(Arc::new)
-                    .map_err(|e| {
-                        MaintenanceFailed(format!("scoped keyword dictionary '{}': {e}", spec.name))
-                    })
-            })
-            .transpose()?;
-        extents.push(FlushedExtent {
-            column: spec.name.clone(),
-            view: Some(ctx.scoped_view.clone()),
-            values_rel: rel_of(&values_path)?,
-            presence_rel: rel_of(&presence_path)?,
-            dict_rel: dict_path.as_ref().map(|p| rel_of(p)).transpose()?,
-            values: Arc::new(values),
-            dict,
-        });
+            &spec.name,
+            Some(ctx.scoped_view.clone()),
+            &column,
+        )?);
     }
     Ok(ScopedWrite {
         extents,
