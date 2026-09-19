@@ -404,22 +404,7 @@ pub(crate) fn plan_coalesce(
                     + extent.dict.as_deref().map_or(0, &size_of),
             )
         };
-        // **The width narrows to fit the input cap, and for no other reason.** The cap bounds the
-        // pass transient — the window's values and presence held during the merge — and it applies
-        // per column, so a text column whose values outgrow it stalls *itself* and never its
-        // neighbours. Below the policy's width nothing is selected at all, exactly as on every
-        // other axis: the narrowing answers "this column's extents are too big", never "this
-        // column has too few", which would coalesce pairs at every tick for ever.
-        let uncapped = CoalescePolicy {
-            max_input_bytes: u64::MAX,
-            ..policy
-        };
-        let selected = select_window(&extents, policy.width, uncapped, size).and_then(|_| {
-            (2..=policy.width)
-                .rev()
-                .find_map(|width| select_window(&extents, width, policy, size))
-        });
-        if let Some(window) = selected {
+        if let Some(window) = widest_window(&extents, policy, size) {
             plan.attrs.push(AttrWindow {
                 column: column.to_string(),
                 view: view.map(str::to_string),
@@ -433,23 +418,12 @@ pub(crate) fn plan_coalesce(
     //
     // records §7: the same per-column selection, `record_extents` already being a single column's
     // own subsequence. No build guard, for the attribute axis's reason — a built bundle's list is
-    // empty, the base blob living in `MANIFEST.files` — and the same cap-narrowing, so a blob
-    // window that outgrows the input cap stalls itself and nothing else.
+    // empty, the base blob living in `MANIFEST.files`.
     {
         let size = |extent: &RecordExtent| {
             Some(size_of(&extent.blocks) + size_of(&extent.hasrow) + size_of(&extent.directory))
         };
-        let uncapped = CoalescePolicy {
-            max_input_bytes: u64::MAX,
-            ..policy
-        };
-        let selected = select_window(&manifest.record_extents, policy.width, uncapped, size)
-            .and_then(|_| {
-                (2..=policy.width)
-                    .rev()
-                    .find_map(|width| select_window(&manifest.record_extents, width, policy, size))
-            });
-        if let Some(window) = selected {
+        if let Some(window) = widest_window(&manifest.record_extents, policy, size) {
             plan.records = manifest.record_extents[window].to_vec();
         }
     }
@@ -487,16 +461,7 @@ pub(crate) fn plan_coalesce(
             let size = |extent: &&TextExtent| {
                 Some(size_of(&extent.dict) + size_of(&extent.postings) + size_of(&extent.presence))
             };
-            let uncapped = CoalescePolicy {
-                max_input_bytes: u64::MAX,
-                ..policy
-            };
-            let selected = select_window(&extents, policy.width, uncapped, size).and_then(|_| {
-                (2..=policy.width)
-                    .rev()
-                    .find_map(|width| select_window(&extents, width, policy, size))
-            });
-            if let Some(window) = selected {
+            if let Some(window) = widest_window(&extents, policy, size) {
                 plan.texts.push(TextWindow {
                     column: column.to_string(),
                     view: view.map(str::to_string),
@@ -512,9 +477,7 @@ pub(crate) fn plan_coalesce(
     // `entity_terms_extents` is already one family's own subsequence, exactly as `record_extents`
     // is, so the selection is the record axis's verbatim. No build guard, for the attribute axis's
     // reason: a built bundle's list is empty, the base layer living under `entities/terms/` and
-    // named in `MANIFEST.files`. The same cap-narrowing too, so a window that outgrows the input
-    // cap stalls itself and nothing else — though at four small files per flush that is the
-    // unusual case rather than the expected one.
+    // named in `MANIFEST.files`.
     {
         let size = |extent: &EntityTermsExtent| {
             Some(
@@ -524,17 +487,7 @@ pub(crate) fn plan_coalesce(
                     + size_of(&extent.bases),
             )
         };
-        let uncapped = CoalescePolicy {
-            max_input_bytes: u64::MAX,
-            ..policy
-        };
-        let selected = select_window(&manifest.entity_terms_extents, policy.width, uncapped, size)
-            .and_then(|_| {
-                (2..=policy.width).rev().find_map(|width| {
-                    select_window(&manifest.entity_terms_extents, width, policy, size)
-                })
-            });
-        if let Some(window) = selected {
+        if let Some(window) = widest_window(&manifest.entity_terms_extents, policy, size) {
             plan.terms = manifest.entity_terms_extents[window].to_vec();
         }
     }
@@ -581,6 +534,29 @@ fn select_window<T>(
         return Some(start..start + width);
     }
     None
+}
+
+/// The widest window that fits the input cap.
+///
+/// A run of `policy.width` entries sharing one size tier must exist first, ignoring the cap; of the
+/// widths that run admits, the widest whose bytes fit the cap is taken. So the narrowing answers
+/// "these extents are too big", never "there are too few of them", which would coalesce pairs at
+/// every tick for ever — and the cap applies to the one list passed, so a column whose values
+/// outgrow it stalls itself and never its neighbours.
+fn widest_window<T>(
+    entries: &[T],
+    policy: CoalescePolicy,
+    size_of: impl Fn(&T) -> Option<u64>,
+) -> Option<std::ops::Range<usize>> {
+    let uncapped = CoalescePolicy {
+        max_input_bytes: u64::MAX,
+        ..policy
+    };
+    select_window(entries, policy.width, uncapped, &size_of).and_then(|_| {
+        (2..=policy.width)
+            .rev()
+            .find_map(|width| select_window(entries, width, policy, &size_of))
+    })
 }
 
 /// Everything [`execute_coalesce`] needs beyond its plan — taken from the generation on the
