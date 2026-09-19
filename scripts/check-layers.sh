@@ -135,10 +135,10 @@ fi
 #    were vacuous: `GenerationHandle::store` appears nowhere in the tree (both real sites are
 #    `self.generation.store(...)`), and `.store(Arc::new(` misses the equally valid
 #    `.store(std::sync::Arc::new(` -- verified by planting one and watching this rule stay green.
-#    So the rule flags EVERY publishing CALL FORM in the engine's sources outside `write.rs`,
-#    minus the atomic ones, which are told apart by the `Ordering::` argument that `Atomic*::store`
-#    requires and `ArcSwap::store` does not take. A rule that cannot go red is worse than no rule,
-#    because it is evidence.
+#    So the rule flags EVERY publishing CALL FORM in the engine's sources outside
+#    `write/executor/mod.rs`, minus the atomic ones, which are told apart by the `Ordering::`
+#    argument that `Atomic*::store` requires and `ArcSwap::store` does not take. A rule that
+#    cannot go red is worse than no rule, because it is evidence.
 #
 #    FOUR call forms, not one. `.store(` alone was vacuous against three of the four ways arc-swap
 #    publishes -- `.swap(` and `.rcu(` were both planted in `viewport.rs`, both compiled, and both
@@ -153,13 +153,13 @@ fi
 #    its own retirement condition -- lifecycle §1.3 requires a flush's swap-only publication step to
 #    run on the lifecycle thread -- and that is what happened: publication is an `ExecutorWork`
 #    variant the executor performs, `Engine::publish_geometry` is a blocking submission, and there
-#    is no publisher outside `write.rs` at all. The marker-counting rule went with the marker, per
-#    its own instruction. There is no supported way to publish from another thread, so a new marker
-#    is not an exemption to argue for -- it is the defect.
+#    is no publisher outside `write/executor/mod.rs` at all. The marker-counting rule went with
+#    the marker, per its own instruction. There is no supported way to publish from another
+#    thread, so a new marker is not an exemption to argue for -- it is the defect.
 if grep -rnE '\.(store|swap|rcu|compare_and_swap)\(' --include=*.rs crates/tessera-engine/src/ \
-     | grep -v '^crates/tessera-engine/src/write\.rs:' \
+     | grep -v '^crates/tessera-engine/src/write/executor/mod\.rs:' \
      | grep -v 'Ordering::'; then
-  echo "FAIL: a generation is published outside crates/tessera-engine/src/write.rs."
+  echo "FAIL: a generation is published outside crates/tessera-engine/src/write/executor/mod.rs."
   echo "      The executor thread is the sole publisher (lifecycle §1.3, #59); a second publisher"
   echo "      reintroduces the lost-update race, in which a lost publication strands the LIVE"
   echo "      generation on the pin drain list and a later prune evicts projections still in use."
