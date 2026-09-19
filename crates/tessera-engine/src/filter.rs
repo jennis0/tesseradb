@@ -745,6 +745,22 @@ pub fn extent_column_name(column: &str, view: Option<&str>) -> String {
     }
 }
 
+/// Is this extent's `(view, incarnation)` pair one the roster still declares?
+///
+/// `(None, None)` (entity-scoped) is always live. A half-stamped pair matches nothing and is
+/// omitted: fail-closed rather than served under a guessed incarnation.
+pub(crate) fn carries_live_view(
+    incarnation_of: &dyn Fn(&str) -> Option<tessera_types::view::ViewIncarnation>,
+    view: Option<&str>,
+    incarnation: Option<tessera_types::view::ViewIncarnation>,
+) -> bool {
+    match (view, incarnation) {
+        (None, None) => true,
+        (Some(view), Some(incarnation)) => incarnation_of(view) == Some(incarnation),
+        _ => false,
+    }
+}
+
 /// Is this group-scoped family on the filter surface — published by `/v1/meta`'s
 /// `filter_operands` and resolvable by a leaf (`views.md` §5)?
 ///
@@ -2030,6 +2046,11 @@ impl FilterColumns {
             entity_terms: Arc::new(entity_terms),
         };
         for extent in extents {
+            // A key created again shares `(column, view)` with its predecessor, whose extents
+            // stay listed until a fold.
+            if !carries_live_view(view_incarnation, extent.view.as_deref(), extent.incarnation) {
+                continue;
+            }
             let column = tessera_filter::open_extent(
                 &prefix_dir.join(&extent.values),
                 &prefix_dir.join(&extent.presence),
@@ -2316,6 +2337,26 @@ impl FilterColumns {
             next.columns.insert(name, layers);
         }
         Ok(next)
+    }
+
+    /// This generation's columns with every group-scoped column of `views` removed: the
+    /// successor generation's, after a drop. A column left standing is the one
+    /// [`FilterColumns::with_scoped_columns`] would find present when the key is created again.
+    pub(crate) fn without_scoped_columns(&self, views: &[String]) -> FilterColumns {
+        let dead = |name: &String| {
+            name.split_once(PIN)
+                .is_some_and(|(_, view)| views.iter().any(|dropped| dropped == view))
+        };
+        let mut next = FilterColumns {
+            columns: self.columns.clone(),
+            placements: self.placements.clone(),
+            access: self.access,
+            records: Arc::clone(&self.records),
+            entity_terms: Arc::clone(&self.entity_terms),
+        };
+        next.columns.retain(|name, _| !dead(name));
+        next.placements.retain(|name, _| !dead(name));
+        next
     }
 
     /// This generation's columns with one flush's extents added — the successor generation's.

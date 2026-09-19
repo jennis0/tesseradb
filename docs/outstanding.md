@@ -13,6 +13,8 @@ Things found during the cleanup that are not yet done. One line each; delete a l
 
 - View metadata: a build widens an integer where a float is declared; a running service refuses it.
 
+- Unverified, from reading: a flushed group-scoped text extent is not composed when a bundle is opened (`FilterColumns::open` composes text extents with no view only), so its `match` would answer short after a restart until a fold.
+- Unverified, from reading: a flush that publishes just after its view is dropped lists and composes its extents under the dropped view; they stay until a fold.
 - An entity-scoped fill whose view is dropped waits for a flush of some surviving view. If the drop leaves no view at all, it holds the log until one is created.
 - `DELETE /control/views/{group}/{key}` is in the HTTP API only: not in `docs/openapi/tessera.yaml`, the Python client, the TypeScript client or the CLI.
 
