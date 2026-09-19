@@ -1,9 +1,12 @@
 use super::*;
 
+mod background;
 mod commands;
 mod fold;
 mod publications;
 mod values;
+
+pub(super) use background::Background;
 
 pub use commands::*;
 pub(in crate::write) use fold::*;
@@ -617,8 +620,6 @@ pub(super) struct Executor {
     pub(super) flush_max_age_secs: u64,
     /// `flush_max_items`, buffered rows at which the tick comes due ahead of its period.
     pub(super) flush_max_items: usize,
-    /// Distinguishes two flush attempts at the same `segments_version`.
-    pub(super) flush_attempt: u64,
     /// The next `SEGMENTS-<n>.json` number, taken at the moment a writer writes rather than when a
     /// flush is planned. [`Executor::allocate_manifest_n`] also raises it over the files on disc.
     pub(super) next_manifest_n: u64,
@@ -635,16 +636,11 @@ pub(super) struct Executor {
     pub(super) pool: Arc<rayon::ThreadPool>,
     /// See [`MaintenanceDeps::max_distinct_terms`].
     pub(super) max_distinct_terms: u64,
-    /// Completed flushes arriving from the pool. Drained after the deny lane, so a suppression
-    /// never queues behind a flush's publication.
-    pub(super) flush_done: Receiver<crate::flush::CompletedFlush>,
     /// The entity-space coalesce's policy, in-flight flag, attempt counter and completion channel:
     /// separate from a flush so the cheap one does not wait on the expensive one.
     pub(super) coalesce_policy: crate::coalesce::CoalescePolicy,
-    pub(super) coalesce_in_flight: Arc<AtomicBool>,
-    pub(super) coalesce_attempt: u64,
-    pub(super) coalesce_done: Receiver<crate::coalesce::CompletedCoalesce>,
-    pub(super) coalesce_submit: Sender<crate::coalesce::CompletedCoalesce>,
+    /// The entity-space coalesce.
+    pub(super) coalesce: Background<crate::coalesce::CompletedCoalesce>,
     /// The background refresh's dependencies. See [`crate::refresh`].
     pub(super) refresh: crate::refresh::RefreshDeps,
     /// The row-space merge's policy, in-flight flag, attempt counter and completion channel:
@@ -652,23 +648,18 @@ pub(super) struct Executor {
     pub(super) coalesce_enabled: Arc<AtomicBool>,
     pub(super) merge_policy: MergePolicy,
     pub(super) merge_enabled: Arc<AtomicBool>,
-    pub(super) merge_in_flight: Arc<AtomicBool>,
-    pub(super) merge_attempt: u64,
-    pub(super) merge_done: Receiver<crate::merge::CompletedMerge>,
-    pub(super) merge_submit: Sender<crate::merge::CompletedMerge>,
-    /// The compaction fold's in-flight flag. A fold runs on its own thread, not the shared pool:
-    /// it takes minutes to hours and the pool serves viewports.
-    pub(super) fold_in_flight: Arc<AtomicBool>,
-    pub(super) fold_attempt: u64,
-    pub(super) fold_done: Receiver<crate::compact::CompletedFold>,
-    pub(super) fold_submit: Sender<crate::compact::CompletedFold>,
+    /// The row-space merge.
+    pub(super) merge: Background<crate::merge::CompletedMerge>,
+    /// The compaction fold. It runs on its own thread, not the shared pool: it takes minutes to
+    /// hours and the pool serves viewports.
+    pub(super) fold: Background<crate::compact::CompletedFold>,
     /// The suggestion index's rebuild. No plan, no gate, nothing to refuse: it reads a vocabulary
     /// out of the generation and writes files the manifest does not name.
     pub(super) suggest_dir: PathBuf,
-    pub(super) suggest_in_flight: Arc<AtomicBool>,
-    pub(super) suggest_build: u64,
-    pub(super) suggest_done: Receiver<crate::suggest::CompletedSuggest>,
-    pub(super) suggest_submit: Sender<crate::suggest::CompletedSuggest>,
+    /// The suggestion-index rebuild.
+    pub(super) suggest: Background<crate::suggest::CompletedSuggest>,
+    /// The flush. Its in-flight flag is [`ExecutorHealth::flush_in_flight`], which status reads.
+    pub(super) flush: Background<crate::flush::CompletedFlush>,
     /// See [`MaintenanceDeps::configured_merge_bytes`].
     pub(super) configured_merge_bytes: Option<u64>,
     /// See [`MaintenanceDeps::fold_paused`].
@@ -700,9 +691,6 @@ pub(super) struct Executor {
     /// prefix is deleted only once nothing else holds that generation or its external-id sidecar. A
     /// process that exits first leaves the tree for the startup sweep.
     pub(super) pending_reclaim: Vec<PendingReclaim>,
-    /// The sender pool tasks are given a clone of. Nothing rings the doorbell when a flush
-    /// completes: it is picked up at the next tick.
-    pub(super) flush_submit: Sender<crate::flush::CompletedFlush>,
     /// When the last tick fired. Started at construction, so the first tick is one period after
     /// the executor starts rather than immediately at startup.
     pub(super) last_tick: std::time::Instant,
@@ -804,7 +792,7 @@ impl Executor {
         if !due && self.health.failed_cycle_backoff().is_some() {
             return;
         }
-        let flush_in_flight = self.health.flush_in_flight.load(Ordering::SeqCst);
+        let flush_in_flight = self.flush.in_flight();
         if !flush_in_flight {
             self.health.open_publication_cycle();
         }
@@ -962,17 +950,14 @@ impl Executor {
         } else if let Some(backoff) = self.health.failed_cycle_backoff() {
             until_tick.min(backoff)
         } else if self.health.flush_requested.load(Ordering::SeqCst)
-            || outstanding(
-                &self.health.flush_in_flight,
-                &self.health.flush_completed_pending,
-            )
+            || self.flush.outstanding()
             || self.coalesce_outstanding()
             || self.merge_outstanding()
-            || self.health.fold_completed_pending.load(Ordering::SeqCst)
+            || self.fold.completed_pending()
         {
             // The pool cannot ring the doorbell (see `flush_submit`).
             until_tick.min(FLUSH_COMPLETION_POLL)
-        } else if self.fold_in_flight.load(Ordering::SeqCst) {
+        } else if self.fold.in_flight() {
             // Coarser, since a fold runs minutes to hours, not seconds.
             until_tick.min(FOLD_COMPLETION_POLL)
         } else {

@@ -120,12 +120,6 @@ pub(super) fn held_tier(tiers: &[Arc<DeltaTier>], rels: &[String], rel: &str) ->
         .map(|(tier, _)| Arc::clone(tier))
 }
 
-/// A background job is outstanding while it runs, and until its completed unit has been drained
-/// from its channel and published; see [`Executor::fold_outstanding`].
-pub(super) fn outstanding(in_flight: &AtomicBool, completed_pending: &AtomicBool) -> bool {
-    in_flight.load(Ordering::SeqCst) || completed_pending.load(Ordering::SeqCst)
-}
-
 /// Whether this layer's memberships are a **stored** set, the kind a record's delta describes.
 ///
 /// A `spatial` layer's membership is the rows inside its shapes and an `attribute` layer's is the
@@ -158,22 +152,19 @@ impl Executor {
     /// dispatcher runs, and [`Executor::wait_for_work`] treats a pending flag as a reason for the
     /// fast completion poll.
     pub(super) fn fold_outstanding(&self) -> bool {
-        outstanding(&self.fold_in_flight, &self.health.fold_completed_pending)
+        self.fold.outstanding()
     }
 
     /// Whether a merge is outstanding, on the boundary [`Executor::fold_outstanding`] uses,
     /// applied to the row-space merge.
     pub(super) fn merge_outstanding(&self) -> bool {
-        outstanding(&self.merge_in_flight, &self.health.merge_completed_pending)
+        self.merge.outstanding()
     }
 
     /// Whether a coalesce is outstanding, on the boundary [`Executor::fold_outstanding`] uses,
     /// applied to the entity-space coalesce.
     pub(super) fn coalesce_outstanding(&self) -> bool {
-        outstanding(
-            &self.coalesce_in_flight,
-            &self.health.coalesce_completed_pending,
-        )
+        self.coalesce.outstanding()
     }
 
     /// Select and dispatch an entity-space coalesce, if one qualifies and none is outstanding.
@@ -224,7 +215,7 @@ impl Executor {
             return;
         };
 
-        self.coalesce_attempt += 1;
+        let attempt = self.coalesce.next_attempt();
         let ctx = crate::coalesce::CoalesceContext {
             prefix_dir: self.prefix_dir(generation),
             prefix: generation.prefix.clone(),
@@ -233,24 +224,15 @@ impl Executor {
             // files the first has memory-mapped.
             out_rel: format!(
                 "partitions/{partition}/coalesced/coalesce-{}-{}",
-                partition_data.segments_n, self.coalesce_attempt
+                partition_data.segments_n, attempt
             ),
         };
 
-        self.coalesce_in_flight.store(true, Ordering::SeqCst);
-        let in_flight = Arc::clone(&self.coalesce_in_flight);
+        let unit = self.coalesce.start();
         let health = Arc::clone(&self.health);
-        let submit = self.coalesce_submit.clone();
         self.pool.spawn(move || {
             match crate::coalesce::execute_coalesce(plan, ctx) {
-                Ok(completed) => {
-                    // Set before the send, exactly as a flush's is; see
-                    // `ExecutorHealth::flush_completed_pending` for the handshake's ordering.
-                    health
-                        .coalesce_completed_pending
-                        .store(true, Ordering::SeqCst);
-                    let _ = submit.send(completed);
-                }
+                Ok(completed) => unit.complete(completed),
                 Err(e) => {
                     // Nothing happened, retry next tick: the manifest is the only commit point,
                     // so a failure before it leaves orphan files nothing references and every
@@ -263,7 +245,6 @@ impl Executor {
                     );
                 }
             }
-            in_flight.store(false, Ordering::SeqCst);
         });
     }
 
@@ -303,14 +284,14 @@ impl Executor {
             return;
         };
 
-        self.merge_attempt += 1;
+        let attempt = self.merge.next_attempt();
         let ctx = crate::merge::MergeContext {
             prefix_dir: self.prefix_dir(generation),
             prefix: generation.prefix.clone(),
             // The same never-reused shape a flush's `seg_id` has, and for the same reason: two
             // attempts at one `n` would otherwise write one path, and the second `File::create`
             // truncates files the first has memory-mapped.
-            seg_id: format!("merge-{}-{}", partition_data.segments_n, self.merge_attempt),
+            seg_id: format!("merge-{}-{attempt}", partition_data.segments_n),
             identity_key: self.identity_key,
             shard_id: manifest.identity.shard_id,
             scalar_schema,
@@ -319,16 +300,11 @@ impl Executor {
             entity_id_high_water: partition_data.manifest.entity_id_high_water,
         };
 
-        self.merge_in_flight.store(true, Ordering::SeqCst);
-        let in_flight = Arc::clone(&self.merge_in_flight);
+        let unit = self.merge.start();
         let health = Arc::clone(&self.health);
-        let submit = self.merge_submit.clone();
         self.pool.spawn(move || {
             match crate::merge::execute(plan, ctx) {
-                Ok(completed) => {
-                    health.merge_completed_pending.store(true, Ordering::SeqCst);
-                    let _ = submit.send(completed);
-                }
+                Ok(completed) => unit.complete(completed),
                 Err(e) => {
                     health.merge_failures.fetch_add(1, Ordering::Relaxed);
                     tracing::warn!(
@@ -338,7 +314,6 @@ impl Executor {
                     );
                 }
             }
-            in_flight.store(false, Ordering::SeqCst);
         });
     }
 
@@ -349,7 +324,7 @@ impl Executor {
     /// Nothing waits on the rebuild: a value in the side map is suggested exactly as one in the
     /// base is, so a rebuild that never finishes costs residency, not a missing answer.
     pub(super) fn dispatch_suggest_rebuild(&mut self) {
-        if self.suggest_in_flight.load(Ordering::SeqCst) {
+        if self.suggest.in_flight() {
             return;
         }
         let generation = self.generation.load_full();
@@ -363,23 +338,18 @@ impl Executor {
         // Snapshotted here rather than read on the pool: the minter lives on the generation and the
         // next window publishes a new one, so the build must own its input.
         let values = crate::suggest::values_of(minter);
-        self.suggest_build += 1;
-        let build = self.suggest_build;
+        let build = self.suggest.next_attempt();
         let dir = self.suggest_dir.join(&vocabulary);
 
-        self.suggest_in_flight.store(true, Ordering::SeqCst);
-        let in_flight = Arc::clone(&self.suggest_in_flight);
-        let submit = self.suggest_submit.clone();
+        let unit = self.suggest.start();
         let pool = Arc::clone(&self.pool);
         self.pool.spawn(move || {
             match crate::suggest::SuggestIndex::build(&dir, build, &values, &pool) {
-                Ok(index) => {
-                    let _ = submit.send(crate::suggest::CompletedSuggest {
-                        vocabulary,
-                        index: Arc::new(index),
-                        covered_through,
-                    });
-                }
+                Ok(index) => unit.complete(crate::suggest::CompletedSuggest {
+                    vocabulary,
+                    index: Arc::new(index),
+                    covered_through,
+                }),
                 Err(source) => {
                     // The live index is still complete, since the side map holds everything the
                     // base does not, so this costs residency and is retried at the next tick.
@@ -391,7 +361,6 @@ impl Executor {
                     );
                 }
             }
-            in_flight.store(false, Ordering::SeqCst);
         });
     }
 
@@ -435,14 +404,14 @@ impl Executor {
             return;
         };
         let values = crate::suggest::values_of(minter);
-        self.suggest_build += 1;
+        let build = self.suggest.next_attempt();
         let dir = self.suggest_dir.join(vocabulary);
         let Ok(index) =
-            crate::suggest::SuggestIndex::build(&dir, self.suggest_build, &values, &self.pool)
+            crate::suggest::SuggestIndex::build(&dir, build, &values, &self.pool)
         else {
             return;
         };
-        let _ = self.suggest_submit.send(crate::suggest::CompletedSuggest {
+        self.suggest.submit_now(crate::suggest::CompletedSuggest {
             vocabulary: vocabulary.to_string(),
             index: Arc::new(index),
             covered_through,
@@ -457,7 +426,7 @@ impl Executor {
     /// bumping either would invalidate every row projection for a change no request can observe.
     pub(super) fn publish_completed_suggests(&mut self) -> bool {
         let mut any = false;
-        while let Ok(completed) = self.suggest_done.try_recv() {
+        while let Some(completed) = self.suggest.next_completed() {
             let generation = self.generation.load_full();
             let superseded = generation
                 .suggest
@@ -493,14 +462,12 @@ impl Executor {
             return false;
         }
         let mut any = false;
-        while let Ok(completed) = self.merge_done.try_recv() {
+        while let Some(completed) = self.merge.next_completed() {
             self.publish_merge(completed);
             any = true;
         }
         if any {
-            self.health
-                .merge_completed_pending
-                .store(false, Ordering::SeqCst);
+            self.merge.drained();
         }
         any
     }
@@ -687,16 +654,12 @@ impl Executor {
     /// Apply every completed coalesce waiting from the pool, and report whether any did.
     pub(super) fn publish_completed_coalesces(&mut self) -> bool {
         let mut any = false;
-        while let Ok(completed) = self.coalesce_done.try_recv() {
+        while let Some(completed) = self.coalesce.next_completed() {
             self.publish_coalesce(completed);
             any = true;
         }
         if any {
-            // Cleared only after something was drained, never on an empty pass. This is the other
-            // half of the handshake; see `ExecutorHealth::flush_completed_pending`.
-            self.health
-                .coalesce_completed_pending
-                .store(false, Ordering::SeqCst);
+            self.coalesce.drained();
         }
         any
     }
@@ -1011,7 +974,7 @@ impl Executor {
     /// and never waits behind a commit window.
     pub(super) fn publish_completed_flushes(&mut self) -> bool {
         let mut any = false;
-        while let Ok(completed) = self.flush_done.try_recv() {
+        while let Some(completed) = self.flush.next_completed() {
             let mark = StageMark::now();
             self.publish_flush(completed);
             self.health
@@ -1019,12 +982,7 @@ impl Executor {
             any = true;
         }
         if any {
-            // Cleared only after something was drained (never on an empty pass), so a set-and-send
-            // landing between this loop's empty `try_recv` and a clear could not be erased. This is
-            // the handshake's other half; see `ExecutorHealth::flush_completed_pending`.
-            self.health
-                .flush_completed_pending
-                .store(false, Ordering::SeqCst);
+            self.flush.drained();
         }
         any
     }
@@ -1044,7 +1002,6 @@ impl Executor {
         plans: Vec<(String, crate::flush::FlushPlan)>,
     ) -> bool {
         let mark = StageMark::now();
-        let submit = self.flush_submit.clone();
         let Some((partition, partition_data)) = generation.bundle.partitions.iter().next() else {
             return false;
         };
@@ -1262,7 +1219,7 @@ impl Executor {
                 // attempt counter matters: `next_n` alone repeats when a flush is planned twice
                 // before it publishes, and a second attempt would then `File::create` over a
                 // memory-mapped file, truncating the mapping and SIGBUS on the next read.
-                seg_id: format!("flush-{planned_at_n}-{}", self.next_flush_attempt()),
+                seg_id: format!("flush-{planned_at_n}-{}", self.flush.next_attempt()),
                 row_base,
                 identity_key: self.identity_key,
                 shard_id: manifest.identity.shard_id,
@@ -1311,7 +1268,7 @@ impl Executor {
                  rebase, so one view publishes per tick; the rest re-plan at the next one"
             );
         }
-        self.health.flush_in_flight.store(true, Ordering::SeqCst);
+        let unit = self.flush.start();
         self.health.mark_flush_started(std::time::Instant::now());
         let health = Arc::clone(&self.health);
         self.pool.spawn(move || {
@@ -1319,12 +1276,7 @@ impl Executor {
             match crate::flush::execute_flush(plan, context, &mut laps) {
                 Ok(completed) => {
                     health.record_flush_execution(&laps, Some(completed.consumed.len()));
-                    // Pending is set before the send. This is the completion handshake's whole
-                    // ordering; see `ExecutorHealth::flush_completed_pending`.
-                    health.flush_completed_pending.store(true, Ordering::SeqCst);
-                    // A send failure means the executor is gone, which is a shutdown and not a
-                    // fault: the files are orphans nothing references, and replay re-flushes.
-                    let _ = submit.send(completed);
+                    unit.complete(completed);
                 }
                 Err(e) => {
                     health.record_flush_execution(&laps, None);
@@ -1342,14 +1294,8 @@ impl Executor {
                     );
                 }
             }
-            health.flush_in_flight.store(false, Ordering::SeqCst);
         });
         true
-    }
-
-    pub(super) fn next_flush_attempt(&mut self) -> u64 {
-        self.flush_attempt += 1;
-        self.flush_attempt
     }
 
     /// Publish every level's row forms from the deltas held since the last tick. This is the one

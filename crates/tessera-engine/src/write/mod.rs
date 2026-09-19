@@ -351,14 +351,6 @@ impl WritePath {
         // waiting, and a second token while one is pending adds nothing. The executor only blocks
         // on this after observing both queues empty: see [`Executor::run`].
         let (bell_tx, bell_rx) = std::sync::mpsc::sync_channel(1);
-        // Completed flushes have their own unbounded channel: see `Executor::flush_done`. A
-        // coalesce gets its own too: it must not be shed, and must not queue behind the deny lane
-        // or a commit window.
-        let (flush_tx, flush_rx) = std::sync::mpsc::channel();
-        let (coalesce_tx, coalesce_rx) = std::sync::mpsc::channel();
-        let (merge_tx, merge_rx) = std::sync::mpsc::channel();
-        let (fold_tx, fold_rx) = std::sync::mpsc::channel();
-        let (suggest_tx, suggest_rx) = std::sync::mpsc::channel();
 
         // A clone, not a move: `ExecutorHealth` keeps the other end, which is what gives the
         // counters a reader outside the executor thread (`ExecutorStats::wal_fsyncs`).
@@ -431,7 +423,6 @@ impl WritePath {
                     window_seq: 0,
                     flush_max_age_secs: flush.max_age_secs,
                     flush_max_items: flush.max_items,
-                    flush_attempt: 0,
                     next_manifest_n,
                     deny_dirty: false,
                     windows_since_publication: 0,
@@ -439,30 +430,26 @@ impl WritePath {
                     identity_key: flush.identity_key,
                     pool: flush.pool,
                     max_distinct_terms: flush.max_distinct_terms,
-                    flush_done: flush_rx,
-                    flush_submit: flush_tx,
                     coalesce_policy: flush.coalesce,
-                    coalesce_in_flight: Arc::new(AtomicBool::new(false)),
-                    coalesce_attempt: 0,
-                    coalesce_done: coalesce_rx,
-                    coalesce_submit: coalesce_tx,
+                    coalesce: executor::Background::new(),
                     refresh: flush.refresh,
                     merge_policy: flush.merge,
                     coalesce_enabled: flush.coalesce_enabled,
                     merge_enabled: flush.merge_enabled,
-                    merge_in_flight: Arc::new(AtomicBool::new(false)),
-                    merge_attempt: 0,
-                    merge_done: merge_rx,
-                    merge_submit: merge_tx,
-                    fold_in_flight: Arc::new(AtomicBool::new(false)),
-                    fold_attempt: 0,
-                    fold_done: fold_rx,
-                    fold_submit: fold_tx,
+                    merge: executor::Background::sharing(
+                        Default::default(),
+                        Arc::clone(&health.merge_completed_pending),
+                    ),
+                    fold: executor::Background::sharing(
+                        Default::default(),
+                        Arc::clone(&health.fold_completed_pending),
+                    ),
                     suggest_dir: flush.suggest_dir,
-                    suggest_in_flight: Arc::new(AtomicBool::new(false)),
-                    suggest_build: 0,
-                    suggest_done: suggest_rx,
-                    suggest_submit: suggest_tx,
+                    suggest: executor::Background::new(),
+                    flush: executor::Background::sharing(
+                        Arc::clone(&health.flush_in_flight),
+                        Default::default(),
+                    ),
                     configured_merge_bytes: flush.configured_merge_bytes,
                     fold_paused: flush.fold_paused,
                     fold_publication_paused: flush.fold_publication_paused,

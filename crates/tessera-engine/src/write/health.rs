@@ -84,10 +84,12 @@ pub struct ExecutorHealth {
     pub(in crate::write) refusal_logged_nanos: AtomicU64,
     /// Whether a flush is executing on the pool. A tick that finds it set is skipped, never queued:
     /// two concurrent flushes would consume the same buffer range.
-    pub(crate) flush_in_flight: AtomicBool,
-    /// A completed flush has been sent and not yet drained. Set before the send and cleared after
-    /// the drain, so the executor never sleeps a full tick with a completed unit in the channel.
-    pub(crate) flush_completed_pending: AtomicBool,
+    pub(crate) flush_in_flight: Arc<AtomicBool>,
+    /// A completed fold, or merge, has been handed back and not yet published. Shared with the
+    /// executor's [`Background`](super::executor::Background) so a test can wait on a held
+    /// publication.
+    pub(crate) fold_completed_pending: Arc<AtomicBool>,
+    pub(crate) merge_completed_pending: Arc<AtomicBool>,
     /// The overlay holds dispositions the durable WAL does not, after [`Executor::recover_wal`]
     /// discarded an undurable region. Latches until restart: the node publishes no manifest and
     /// rotates no WAL, because either would make a never-acked deny permanent.
@@ -146,8 +148,6 @@ pub struct ExecutorHealth {
     /// The WAL as the last sample found it. Sampled on the executor thread at a tick, at most once a
     /// period, so a status poll costs the node nothing.
     pub(crate) wal_gauge: Mutex<WalGauge>,
-    /// See [`Self::flush_completed_pending`].
-    pub(crate) fold_completed_pending: AtomicBool,
     /// When the last fold ended, however it ended, as a unix second. Written by the fold's thread
     /// on both exits, because the executor never sees a failure inside `execute`.
     pub(crate) fold_ended_unix: AtomicU64,
@@ -165,10 +165,6 @@ pub struct ExecutorHealth {
     pub(crate) last_fold_report: Mutex<Vec<tessera_lifecycle::membership::Degradation>>,
     /// A fold has finished its passes and is holding at the test hook. Always `false` outside tests.
     pub(crate) fold_holding: AtomicBool,
-    /// See [`Self::flush_completed_pending`].
-    pub(crate) merge_completed_pending: AtomicBool,
-    /// See [`Self::flush_completed_pending`].
-    pub(crate) coalesce_completed_pending: AtomicBool,
     /// Nanoseconds spent in the whole apply step (clone, inserts, generation, swap), summed over
     /// both lanes. An ingest apply clones the buffer and dominates it; a deny apply clones only the
     /// overlay. It estimates how long a deny waits behind the work item in flight.
@@ -536,8 +532,9 @@ impl ExecutorHealth {
             deferred_plans: AtomicBool::new(false),
             failed_cycle_nanos: AtomicU64::new(0),
             refusal_logged_nanos: AtomicU64::new(0),
-            flush_in_flight: AtomicBool::new(false),
-            flush_completed_pending: AtomicBool::new(false),
+            flush_in_flight: Arc::new(AtomicBool::new(false)),
+            fold_completed_pending: Arc::new(AtomicBool::new(false)),
+            merge_completed_pending: Arc::new(AtomicBool::new(false)),
             overlay_diverged: AtomicBool::new(false),
             prefix_diverged: AtomicBool::new(false),
             overlay_publications: AtomicU64::new(0),
@@ -553,17 +550,14 @@ impl ExecutorHealth {
             foreign_side_manifests: AtomicU64::new(0),
             coalesces: AtomicU64::new(0),
             coalesce_failures: AtomicU64::new(0),
-            coalesce_completed_pending: AtomicBool::new(false),
             merges: AtomicU64::new(0),
             merge_failures: AtomicU64::new(0),
-            merge_completed_pending: AtomicBool::new(false),
             folds: AtomicU64::new(0),
             fold_failures: AtomicU64::new(0),
             fold_requested: AtomicBool::new(false),
             fold_refusals: std::array::from_fn(|_| AtomicU64::new(0)),
             last_fold_refusal: Mutex::new(None),
             wal_gauge: Mutex::new(WalGauge::default()),
-            fold_completed_pending: AtomicBool::new(false),
             fold_ended_unix: AtomicU64::new(0),
             last_fold_secs: AtomicU64::new(0),
             last_fold_rss: AtomicU64::new(0),

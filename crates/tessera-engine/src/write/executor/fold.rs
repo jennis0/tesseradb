@@ -490,7 +490,7 @@ impl Executor {
         // that true: left armed, it is also a wake reason (`tick_if_due`), so every completion
         // poll for the running fold's remaining hours would take a full tick and plan a flush off
         // it, collapsing the publication cadence to the poll interval.
-        if self.fold_in_flight.load(Ordering::SeqCst) {
+        if self.fold.in_flight() {
             if self.health.fold_requested.swap(false, Ordering::SeqCst) {
                 tracing::warn!(
                     "a compaction fold was requested while one is already running; refused rather \
@@ -602,7 +602,7 @@ impl Executor {
             }
         };
 
-        self.fold_attempt += 1;
+        let attempt = self.fold.next_attempt();
         let ctx = crate::compact::FoldContext {
             from_prefix_dir: self.prefix_dir(generation),
             to_prefix_dir: self.bundle_root.join(&to_prefix),
@@ -615,7 +615,7 @@ impl Executor {
             runtime_scoped_attributes,
             // A `seg_id` must never be reused across the bundle's life, or a rebase's ABA check
             // would be meaningless.
-            seg_id: format!("fold-{}-{}", partition_data.segments_n, self.fold_attempt),
+            seg_id: format!("fold-{}-{attempt}", partition_data.segments_n),
             base_postings: Arc::clone(&generation.postings),
             tiers: generation.delta_postings.clone(),
             declared_scalars: manifest.declared_scalars.clone(),
@@ -644,10 +644,8 @@ impl Executor {
             );
         }
         self.health.fold_requested.store(false, Ordering::SeqCst);
-        self.fold_in_flight.store(true, Ordering::SeqCst);
-        let in_flight = Arc::clone(&self.fold_in_flight);
+        let unit = self.fold.start();
         let health = Arc::clone(&self.health);
-        let submit = self.fold_submit.clone();
         let paused = Arc::clone(&self.fold_paused);
         let spawned = std::thread::Builder::new()
             .name("tessera-fold".to_string())
@@ -661,8 +659,7 @@ impl Executor {
                         }
                         health.fold_holding.store(false, Ordering::SeqCst);
                         completed.finished = std::time::Instant::now();
-                        health.fold_completed_pending.store(true, Ordering::SeqCst);
-                        let _ = submit.send(completed);
+                        unit.complete(completed);
                     }
                     Err(e) => {
                         health.fold_failures.fetch_add(1, Ordering::Relaxed);
@@ -679,14 +676,13 @@ impl Executor {
                 health
                     .fold_ended_unix
                     .store(unix_now().unwrap_or(0), Ordering::SeqCst);
-                in_flight.store(false, Ordering::SeqCst);
+                drop(unit);
             });
         if spawned.is_ok() {
             self.last_fold_start_unix = unix_now();
         }
         if let Err(e) = spawned {
-            // The closure, and with it the in-flight clone, was dropped without running.
-            self.fold_in_flight.store(false, Ordering::SeqCst);
+            // The closure was dropped without running, which cleared the in-flight flag.
             self.health.fold_failures.fetch_add(1, Ordering::Relaxed);
             tracing::error!(error = %e, "the OS refused a thread for the compaction fold");
         }
@@ -699,14 +695,12 @@ impl Executor {
             return false;
         }
         let mut any = false;
-        while let Ok(completed) = self.fold_done.try_recv() {
+        while let Some(completed) = self.fold.next_completed() {
             self.publish_fold(completed);
             any = true;
         }
         if any {
-            self.health
-                .fold_completed_pending
-                .store(false, Ordering::SeqCst);
+            self.fold.drained();
         }
         any
     }
